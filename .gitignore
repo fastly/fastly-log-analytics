@@ -1,0 +1,41 @@
+.env
+setup-state.json
+*.duckdb
+*.duckdb.wal
+/configs/*
+/data/*
+/data/system/*
+__pycache__/
+*.pyc
+.venv/
+dist/
+*.egg-info/
+.DS_Store
+*.log
+*.cron.lock
+/cache/*
+.claude/*
+gemini.md
+SYSTEM.md
+docs/superpowers/
+docs/plans/
+node_modules/
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Root-level npm artifacts that don't belong here (the real frontend
+# project lives in frontend/). Block accidental re-creation.
+/package.json
+/package-lock.json
+
+# OSV Scanner
+.osv.json
+.osv-scanner.toml
+
+/.antigravitycli
+
+# Ad-hoc lint/test output dumps
+frontend/*_out.txt
+frontend/*_output.txt

@@ -1,0 +1,38 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Fastly-Key:
+      - test-token-not-real
+    method: GET
+    uri: https://api.fastly.com/account
+  response:
+    body:
+      string: '{"error": "Service Unavailable"}'
+    headers:
+      Content-Type:
+      - application/json
+    status:
+      code: 503
+      message: Service Unavailable
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Fastly-Key:
+      - test-token-not-real
+    method: GET
+    uri: https://api.fastly.com/account
+  response:
+    body:
+      string: '{"id": "acct-1", "name": "Test Account"}'
+    headers:
+      Content-Type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+version: 1

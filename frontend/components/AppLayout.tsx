@@ -1,0 +1,288 @@
+'use client'
+
+import * as React from 'react'
+import Link from 'next/link'
+import { usePathname } from 'next/navigation'
+import { 
+  LayoutDashboard, 
+  BarChart3, 
+  Network, 
+  Users, 
+  Settings, 
+  Database,
+  Search,
+  Activity,
+  Menu,
+  Sparkles,
+  Timer,
+  Shield,
+  Bell,
+  Server
+} from 'lucide-react'
+
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
+import { TimezoneSwitcher } from '@/components/TimezoneSwitcher/TimezoneSwitcher'
+import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle'
+import { FilterBar } from '@/components/FilterBar/FilterBar'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
+import { DebugPanel } from '@/components/DebugPanel'
+
+import { useUrlServiceSync } from '@/hooks/useUrlServiceSync'
+import { useBootstrap } from '@/hooks/useBootstrap'
+import { useServiceStore } from '@/stores/serviceStore'
+import { useRouter } from 'next/navigation'
+import packageJson from '../package.json'
+import { useShareStatusBanner } from '@/hooks/useShareStatusBanner'
+import { useAnalystHeartbeat } from '@/hooks/useAnalystHeartbeat'
+
+// `analystVisible` controls visibility for FOS-sharing analysts (those
+// running their own copy of the app locally against the admin's FOS
+// bucket). `shareAnalystVisible` overrides for SHARE-INVITED analysts
+// (those using a public URL via the share-login flow). When
+// shareAnalystVisible is unset it falls back to analystVisible.
+//
+// Data Management exposes ingestion logs / cron health — useful for an
+// analyst who runs their own ingestion, leak-y for an invited viewer.
+const SERVICE_NAVIGATION = [
+  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, analystVisible: true },
+  { name: 'Performance', href: '/performance', icon: Timer, analystVisible: true },
+  { name: 'Origin', href: '/origin', icon: Server, analystVisible: true },
+  { name: 'Security', href: '/security', icon: Shield, analystVisible: true },
+  { name: 'Charts', href: '/charts', icon: BarChart3, analystVisible: true },
+  { name: 'Insights', href: '/insights', icon: Sparkles, analystVisible: true },
+  { name: 'Network', href: '/network', icon: Network, analystVisible: true },
+  { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
+  { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
+  { name: 'Query', href: '/query', icon: Search, analystVisible: true },
+  { name: 'Alerts', href: '/alerts', icon: Bell, analystVisible: true },
+  { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: false },
+]
+
+const SYSTEM_NAVIGATION = [
+  { name: 'Admin', href: '/admin', icon: Settings },
+]
+
+function UrlServiceSync() {
+  useUrlServiceSync()
+  return null
+}
+
+interface NavLinkProps {
+  href: string
+  icon: React.ElementType
+  name: string
+  isActive: boolean
+  disabled?: boolean
+}
+
+function NavLink({ href, icon: Icon, name, isActive, disabled, activeServiceId }: NavLinkProps & { activeServiceId?: string | null }) {
+  if (disabled) {
+    return (
+      <div
+        className={cn(
+          "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground opacity-50 cursor-not-allowed"
+        )}
+      >
+        <Icon className="h-4 w-4" />
+        {name}
+      </div>
+    )
+  }
+
+  const finalHref = activeServiceId && !href.startsWith('/admin')
+    ? `${href}?service=${activeServiceId}`
+    : href
+
+  return (
+    <Link
+      href={finalHref}
+      className={cn(
+        "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
+        isActive ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground"
+      )}
+    >
+      <Icon className="h-4 w-4" />
+      {name}
+    </Link>
+  )
+}
+
+export function AppLayout({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname()
+  const router = useRouter()
+  const { data: bootstrapData, isSuccess, isLoading } = useBootstrap()
+
+  const activeServiceId = useServiceStore(state => state.activeServiceId)
+  const services = useServiceStore(state => state.services)
+  const activeService = services.find(s => s.id === activeServiceId)
+  const bootstrapSettings = bootstrapData?.settings as Record<string, unknown> | undefined
+  const isAnalyst =
+    activeService?.accessLevel === 'read_only' ||
+    bootstrapSettings?.is_remote_analyst === true
+  // Distinguish share-invited analysts (public URL, share-login flow)
+  // from FOS-sharing analysts (running their own copy locally). The
+  // former see a more restricted nav (no Data Management, no ops info).
+  const isShareAnalyst = bootstrapSettings?.is_remote_analyst === true
+  const analystEmail = (bootstrapSettings?.analyst_email as string | undefined) || undefined
+  const analystName = (bootstrapSettings?.analyst_name as string | undefined) || undefined
+
+  // Sticky banner + share dialog for local admin only. Gated on isSuccess so
+  // we don't poll the admin endpoint before bootstrap has classified us —
+  // otherwise anonymous remote visitors trigger a transient 401 in the console
+  // before the share-login redirect fires.
+  const shareBanner = useShareStatusBanner({ enabled: isSuccess && !isAnalyst })
+
+  // Idle-only heartbeat for remote analysts; redirects to /share-login on 401.
+  const { disconnected } = useAnalystHeartbeat({ enabled: isAnalyst })
+
+  const visibleNav = SERVICE_NAVIGATION.filter(item => {
+    if (isShareAnalyst) {
+      // share analysts see a tighter subset; default to analystVisible when
+      // an item doesn't have a share-specific override.
+      return item.shareAnalystVisible ?? item.analystVisible ?? false
+    }
+    if (isAnalyst) return item.analystVisible
+    return true
+  })
+  const visibleSystemNav = isAnalyst ? [] : SYSTEM_NAVIGATION
+
+  // Use bootstrap response as authoritative; fall back to persisted store while
+  // the fetch is in-flight or if it errors (e.g. backend down after crash).
+  // activeServiceId alone is enough to suppress the redirect — it persists
+  // from the wizard completion before bootstrap has had a chance to respond.
+  const hasServices = isSuccess
+    ? !!(bootstrapData?.services?.length)
+    : services.length > 0 || !!activeServiceId
+
+  const needsLogin = bootstrapSettings?.needs_login === true
+
+  React.useEffect(() => {
+    if (isLoading) return
+    // Anonymous remote visitors get redirected to /share-login before any
+    // other layout/redirect logic kicks in. Skip while already there.
+    if (needsLogin && !pathname.startsWith('/share-login')) {
+      router.replace('/share-login')
+      return
+    }
+    // Analysts can't access admin pages. The backend already returns 403
+    // on /api/admin/*, but the page shells are served by Next.js — bounce
+    // them away client-side so the URL isn't reachable.
+    if (isAnalyst && pathname.startsWith('/admin')) {
+      router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard')
+      return
+    }
+    // Share-invited analysts also can't see ingestion ops (Data Management
+    // = /logs). FOS-sharing analysts who run their own copy still can.
+    if (isShareAnalyst && pathname.startsWith('/logs')) {
+      router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard')
+      return
+    }
+    // Admin-side wizard redirect — only for local admins.
+    if (!isAnalyst && !hasServices && !pathname.startsWith('/admin')) {
+      router.replace('/admin')
+    }
+  }, [isLoading, hasServices, isAnalyst, isShareAnalyst, needsLogin, pathname, router, activeServiceId])
+
+  // Hide the global filter bar on pages where it does not apply
+  const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || pathname.startsWith('/query') || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || !hasServices
+
+  return (
+    <div className="flex flex-col h-screen overflow-hidden bg-background">
+      {shareBanner.node}
+      <div className="flex flex-1 overflow-hidden min-h-0">
+      {isAnalyst && disconnected && (
+        <div
+          data-testid="connection-interrupted-overlay"
+          className="fixed inset-0 z-[100] bg-background/90 backdrop-blur-sm flex items-center justify-center"
+        >
+          <div className="max-w-sm text-center space-y-3 p-6 rounded-lg border bg-card shadow-lg">
+            <h2 className="text-lg font-semibold">Connection interrupted</h2>
+            <p className="text-sm text-muted-foreground">
+              We can&apos;t reach the dashboard. We&apos;ll keep trying — your view will
+              resume automatically when the connection returns.
+            </p>
+          </div>
+        </div>
+      )}
+      <React.Suspense fallback={null}>
+        <UrlServiceSync />
+      </React.Suspense>
+      {/* Desktop Sidebar */}
+      <aside className="hidden md:flex w-64 flex-col border-r bg-muted/40">
+        <div className="flex h-14 items-center justify-center border-b px-4 py-2 shrink-0">
+          <Link 
+            href={hasServices ? (activeServiceId ? `/dashboard?service=${activeServiceId}` : "/dashboard") : "/admin"} 
+            className="flex flex-col items-center justify-center hover:opacity-80 transition-opacity mt-1"
+          >
+             <img src="/fastly.svg" alt="Fastly" className="h-5 dark:invert" />
+             <span className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground mt-0.5">Log Analytics</span>
+          </Link>
+        </div>
+        <ScrollArea className="flex-1">
+          <nav className="grid gap-1 p-2">
+            {visibleNav.map((item) => (
+              <NavLink
+                key={item.href}
+                {...item}
+                isActive={pathname === item.href}
+                disabled={!hasServices}
+                activeServiceId={activeServiceId}
+              />
+            ))}
+          </nav>
+        </ScrollArea>
+        <div className="mt-auto p-2 border-t bg-muted/20">
+          <nav className="grid gap-1">
+            {visibleSystemNav.map((item) => (
+              <NavLink
+                key={item.href}
+                {...item}
+                isActive={pathname === item.href}
+                activeServiceId={activeServiceId}
+              />
+            ))}
+          </nav>
+          <div className="mt-4 mb-1 text-[10px] text-muted-foreground/50 text-center font-mono select-all">
+            v{packageJson.version}
+          </div>
+          {isAnalyst && (analystEmail || analystName) && (
+            <div
+              data-testid="analyst-watermark"
+              data-analyst-email={analystEmail || ''}
+              className="text-[10px] text-muted-foreground/60 text-center mt-1"
+            >
+              Viewing as <span className="font-medium">{analystName || analystEmail}</span>
+            </div>
+          )}
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <header className="flex h-14 items-center gap-4 border-b bg-muted/40 px-4 shrink-0">
+          <ServiceSwitcher />
+          <div className="ml-auto flex items-center gap-2">
+            <SyncStatusBadge />
+            <TimezoneSwitcher />
+            <ThemeToggle />
+          </div>
+        </header>        
+        {!hideFilterBar && <FilterBar />}
+
+        <main className="flex-1 overflow-auto p-6">
+          {!hasServices && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login') ? null
+            : isLoading ? (
+              <div className="flex items-center justify-center h-full">
+                <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+              </div>
+            ) : children}
+          <DebugPanel />
+        </main>
+      </div>
+      </div>
+    </div>
+  )
+}

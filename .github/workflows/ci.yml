@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  backend:
+    name: Backend (Python)
+    runs-on: forge-amd64-medium
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Format check (ruff)
+        run: uv run ruff format --check .
+
+      - name: Type check (mypy)
+        run: uv run mypy backend/
+
+      - name: Install falco
+        run: |
+          sudo curl -sL https://github.com/ysugimoto/falco/releases/latest/download/falco-linux-amd64 -o /usr/local/bin/falco
+          sudo chmod +x /usr/local/bin/falco
+
+      - name: Install terraform
+        # Required by tests/utils/test_terraform_gen.py — runs `terraform fmt`
+        # against generator output and `validate` when TERRAFORM_VALIDATE=1.
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "~1.9"
+          terraform_wrapper: false
+
+      - name: Verify falco is required and runnable
+        env:
+          FALCO_REQUIRED: "1"
+        run: |
+          falco --version
+          # Collect (don't run) the falco-tagged tests; assert at least one was found.
+          # pytest 9 condenses `-q` output, so we use the verbose form and grep for the node ID.
+          count=$(uv run pytest tests/core/test_vcl_semantics.py --collect-only 2>&1 | grep -c 'test_falco_' || true)
+          echo "Discovered $count falco semantic test(s)"
+          if [ "$count" -lt 1 ]; then
+            echo "ERROR: expected at least one test_falco_* test to be collected" >&2
+            exit 1
+          fi
+
+      - name: Tests (pytest with coverage)
+        env:
+          FALCO_REQUIRED: "1"
+          TERRAFORM_VALIDATE: "1"
+        # Gate ratcheted as milestones land:
+        #   end Milestone A: 44% (baseline 46%, -2pp buffer)
+        #   end Milestone E: 47% (current 49% — keeps the 2pp buffer)
+        #   post-Milestone E coverage backfill: 55% (current 59% — 4pp buffer)
+        #   confidence-batch (insights+admin+services+dashboard+origin+
+        #   hypothesis+regression+E2E smoke): 78% (current 83% — 5pp buffer)
+        #
+        # `-n auto` parallelizes via pytest-xdist (TESTING_PLAN_3 item 21).
+        # Verified safe: per-service SQLite (`{id}.metadata.db`) + per-test
+        # tmp_path give file isolation; autouse `_reset_module_caches` resets
+        # the 8 module-level caches between tests; moto fixtures are per-test.
+        # Local run: 2268 passed in 58s under `-n auto` vs ~3min serial.
+        run: uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=78
+
+  frontend:
+    name: Frontend (Node)
+    runs-on: forge-amd64-medium
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install backend dependencies
+        run: uv sync
+        working-directory: .
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate API types
+        # `frontend/types/api.generated.ts` is gitignored — regenerated fresh
+        # on every CI run. The tsc step below is the drift guard: if a backend
+        # model changed in a way that breaks a frontend `components['schemas']`
+        # import, tsc fails here against the just-regenerated types.
+        run: npm run gen:types
+
+      - name: Type check (tsc)
+        run: npx tsc --noEmit
+
+      - name: Tests (vitest with coverage)
+        # Gate ratcheted as milestones land:
+        #   end Milestone A: 40% (baseline 42.7%, -2pp buffer)
+        #   end Milestone E: 44% (current 46.55% — keeps the 2pp buffer)
+        run: npx vitest run --coverage --coverage.thresholds.lines=44

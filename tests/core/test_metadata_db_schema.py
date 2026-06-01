@@ -1,0 +1,189 @@
+"""Schema-shape and migration-safety tests for backend.core.metadata_db.
+
+Covers:
+- All declared tables and indexes are present after ``_init_schema``.
+- ``_init_schema`` is idempotent — running it on an already-initialised
+  file is a no-op (no errors, no data loss).
+- The ``IF NOT EXISTS`` guards mean future schema additions just append
+  to ``_SCHEMA`` and run on next ``get_con``. This test verifies that
+  pattern: re-init after a row is seeded must preserve the row.
+
+These tests don't enforce a specific schema-version bump strategy because
+the codebase doesn't have one yet — when one is added, this file is the
+right place to tighten the migration assertions.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from backend.core import metadata_db
+
+_EXPECTED_TABLES = {
+    "sources",
+    "ingested_files",
+    "ingest_in_flight",
+    "cron_runs",
+    "asn_names",
+    "audit_logs",
+    "views",
+    "alerts",
+    "usage_log",
+}
+
+_EXPECTED_INDEXES = {
+    "idx_ingested_files_source",
+    "idx_in_flight_source",
+    "idx_cron_task_started",
+    "idx_audit_source",
+    "idx_usage_timestamp",
+}
+
+
+def _list_tables(con: sqlite3.Connection) -> set[str]:
+    return {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+
+
+def _list_indexes(con: sqlite3.Connection) -> set[str]:
+    return {
+        r[0]
+        for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    }
+
+
+def _columns(con: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+# ── Initial schema shape ──────────────────────────────────────────────────────
+
+
+def test_init_schema_creates_all_expected_tables():
+    sid = "svc-schema-shape"
+    con = metadata_db.get_con(sid)
+    found = _list_tables(con)
+    missing = _EXPECTED_TABLES - found
+    assert not missing, f"missing tables after _init_schema: {missing}"
+
+
+def test_init_schema_creates_all_expected_indexes():
+    sid = "svc-schema-indexes"
+    con = metadata_db.get_con(sid)
+    found = _list_indexes(con)
+    missing = _EXPECTED_INDEXES - found
+    assert not missing, f"missing indexes after _init_schema: {missing}"
+
+
+def test_alerts_table_has_evaluation_scope_column():
+    """Regression: alerts.evaluation_scope was added later. Make sure new
+    services get the full current shape."""
+    sid = "svc-schema-alerts"
+    con = metadata_db.get_con(sid)
+    cols = _columns(con, "alerts")
+    assert "evaluation_scope" in cols
+    assert "comparison_period_min" in cols  # also late-added
+
+
+def test_usage_log_has_operation_class_and_bytes():
+    sid = "svc-schema-usage"
+    con = metadata_db.get_con(sid)
+    cols = _columns(con, "usage_log")
+    assert "operation_class" in cols
+    assert "bytes" in cols
+    assert "service_id" in cols
+
+
+# ── Idempotency: re-running init must not lose data ──────────────────────────
+
+
+def test_init_schema_is_idempotent_no_data_loss():
+    """Re-applying ``_init_schema`` to an already-populated file must
+    preserve every row. This is the load-bearing property that lets future
+    schema additions just append to ``_SCHEMA``.
+    """
+    sid = "svc-schema-idem"
+    metadata_db.insert_ingested_files(sid, [("file-a.gz", 100, 4096), ("file-b.gz", 200, 8192)])
+
+    con = metadata_db.get_con(sid)
+    before = con.execute("SELECT count(*) FROM ingested_files WHERE source_name = ?", (sid,)).fetchone()[0]
+    assert before == 2
+
+    # Re-apply schema. With ``IF NOT EXISTS`` everywhere, this should be a no-op.
+    metadata_db._init_schema(con)
+
+    after = con.execute("SELECT count(*) FROM ingested_files WHERE source_name = ?", (sid,)).fetchone()[0]
+    assert after == 2, f"data lost after re-init: was 2 rows, now {after}"
+
+
+def test_init_schema_run_twice_is_safe_in_sequence():
+    """The autouse ``isolate_metadata_db`` fixture clears the
+    ``_initialized`` set between tests, so cold opens may legitimately
+    re-init. Verify back-to-back calls don't raise.
+    """
+    sid = "svc-schema-double"
+    metadata_db._init_schema(metadata_db.get_con(sid))
+    metadata_db._init_schema(metadata_db.get_con(sid))  # must not raise
+
+
+# ── Forward-compat: a future schema addition pattern ──────────────────────────
+
+
+def test_pre_existing_data_survives_added_table():
+    """Simulate a future migration: a new ``CREATE TABLE IF NOT EXISTS``
+    statement is added to ``_SCHEMA``. Existing data in other tables
+    must survive when ``_init_schema`` re-runs on the next process boot.
+    """
+    sid = "svc-schema-future"
+    metadata_db.insert_ingested_files(sid, [("survivor.gz", 1, 100)])
+
+    # Apply a hypothetical future migration (extra table)
+    con = metadata_db.get_con(sid)
+    con.execute("CREATE TABLE IF NOT EXISTS new_feature_table (id INTEGER PRIMARY KEY, payload TEXT)")
+    con.commit()
+
+    # Re-apply the standard schema — survivor row must remain
+    metadata_db._init_schema(con)
+
+    rows = con.execute("SELECT file_name FROM ingested_files WHERE source_name = ?", (sid,)).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "survivor.gz"
+
+    # And the new_feature_table is still there too
+    tables = _list_tables(con)
+    assert "new_feature_table" in tables
+
+
+# ── Boundary guard: service_id must be a string ────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "bad_sid",
+    [
+        None,
+        123,
+        object(),
+        {"name": "svc-a"},
+    ],
+    ids=["none", "int", "object", "dict"],
+)
+def test_db_path_rejects_non_string_service_id(bad_sid):
+    """``db_path`` builds the SQLite filename via ``f"{service_id}.metadata.db"``.
+    A non-string argument would silently produce a junk path containing the
+    object's repr (e.g. ``<...0x...>.metadata.db``), leaking files on disk
+    and corrupting per-service routing. The boundary must fail loud.
+    """
+    with pytest.raises(TypeError):
+        metadata_db.db_path(bad_sid)
+
+
+def test_get_con_rejects_non_string_service_id():
+    """Same boundary as ``db_path`` — ``get_con`` builds the path via
+    ``db_path``, and a non-string would create the file regardless. Pin
+    the rejection at the public entry point as well.
+    """
+    with pytest.raises(TypeError):
+        metadata_db.get_con(object())

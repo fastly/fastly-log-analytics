@@ -1,0 +1,632 @@
+"""Local-only parquet compaction.
+
+Unlike ``iceberg.optimize_table`` which routes through PyIceberg's
+``table.overwrite()`` (writes back to FOS, triggering the 30-day minimum
+billing penalty on rewritten files), this module operates *only* on the
+local cache. The Iceberg catalog on FOS is untouched.
+
+Why this works:
+
+* The dashboard's DuckDB view reads parquet files via a glob pattern
+  (``read_parquet('cache/.../data/**/*.parquet')``) that is re-evaluated
+  at every query — not from the Iceberg manifest. So merging files in
+  the cache directory is immediately visible to queries; no catalog
+  refresh required.
+* The hour-partition column is COMPUTED from the timestamp at query
+  time (``strftime(timestamp, '%Y-%m-%d-%H') as timestamp_hour``), not
+  extracted from the file path — so files can move to a different
+  directory layout (e.g., a single ``daily/`` dir holding cross-hour
+  merges) without breaking partition filtering.
+* FOS still holds the original raw 5-minute files, untouched. The next
+  ``sync_data`` from FOS pulls only files we haven't downloaded yet
+  (tracked by the local snapshot-files cache), so a compacted local
+  parquet doesn't get re-fetched as raw small files.
+
+Trade-offs:
+
+* The Iceberg catalog's per-file metadata becomes lightly stale (it
+  still references the small original files). This is fine for query
+  serving (we don't read the catalog) but means an Iceberg-native
+  consumer of the catalog would see "missing" files. Local cache only.
+* If the catalog cache is ever wiped and re-pulled from FOS, the
+  small-file metadata returns — but a subsequent local compaction
+  pass will re-merge them.
+
+Use this for hot-tier compaction every few minutes. Use the
+``optimize_table`` path when you want compaction reflected in FOS too
+(e.g., for an external Iceberg reader).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import time
+import uuid
+from collections import defaultdict
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import duckdb
+
+logger = logging.getLogger(__name__)
+
+# Don't merge a partition whose total parquet size already exceeds this — we'd
+# just produce one absurdly huge file that destroys query parallelism on the
+# next scan. Tune via env var if a hot site needs different ergonomics.
+_MAX_PARTITION_BYTES = int(os.environ.get("LOCAL_COMPACT_MAX_PARTITION_MB", "256")) * 1024 * 1024
+
+# Partitions older than this become eligible for cross-hour daily compaction.
+# Recent hours stay hourly so the dashboard's time-range pruning stays tight
+# at the file level (each scan opens one daily file vs 24 hourly files).
+_DAILY_TIER_AGE_DAYS = int(os.environ.get("LOCAL_COMPACT_DAILY_TIER_DAYS", "7"))
+
+# Daily files older than this become eligible for cross-day weekly compaction.
+# Only useful when log_retention_days > this; otherwise daily files just age
+# out of the cache before any weekly rollup could happen. Default 30 matches
+# the common retention window — a no-op for shorter retentions.
+_WEEKLY_TIER_AGE_DAYS = int(os.environ.get("LOCAL_COMPACT_WEEKLY_TIER_DAYS", "30"))
+
+# Directories under cache/<bucket>/data/ that hold cross-hour merged files.
+# The dashboard's view-glob is data/**/*.parquet so sibling dirs are fine.
+_DAILY_DIR = "daily"
+_WEEKLY_DIR = "weekly"
+
+_HOUR_PART_RE = re.compile(r"^timestamp_hour=(\d{4}-\d{2}-\d{2})-(\d{2})$")
+# Daily file naming from _compact_daily_tier: daily_YYYY-MM-DD_<hex>.parquet
+_DAILY_FILE_RE = re.compile(r"^daily_(\d{4}-\d{2}-\d{2})_[0-9a-f]+\.parquet$")
+
+
+def compact_local_partitions(source: dict, min_files_per_partition: int = 3, dry_run: bool = False) -> dict[str, Any]:
+    """Merge small parquet files within each hour-partition directory into
+    a single larger file. Additionally rolls partitions older than
+    ``_DAILY_TIER_AGE_DAYS`` into per-day merged files.
+
+    Args:
+        source: service source dict (used to resolve cache path)
+        min_files_per_partition: only partitions with strictly more than
+            this many files are touched. Default 3 = aggressive: any hour
+            with 4+ files gets merged.
+        dry_run: if True, report what would be done without writing.
+
+    Returns:
+        Result dict — see implementation for fields.
+    """
+    from backend.core.duckdb import _cache_dir
+
+    t0 = time.time()
+    cache_root = _cache_dir(source)
+    data_dir = os.path.join(cache_root, "data")
+    result: dict[str, Any] = {
+        "partitions_scanned": 0,
+        "partitions_compacted": 0,
+        "files_merged": 0,
+        "files_removed": 0,
+        "bytes_before": 0,
+        "bytes_after": 0,
+        "daily_rollups": 0,
+        "weekly_rollups": 0,
+        "active_hour_skipped": False,
+        "stale_tmp_removed": 0,
+        "errors": [],
+        "duration_ms": 0,
+        "dry_run": dry_run,
+    }
+
+    if not os.path.isdir(data_dir):
+        result["duration_ms"] = int((time.time() - t0) * 1000)
+        return result
+
+    # ── Cleanup pass: remove orphaned .tmp_ files from previous crashed
+    # runs. Safe because the publish step renames .tmp_<name> → <name>;
+    # any leftover .tmp_ is by definition incomplete. The dashboard glob
+    # matches *.parquet so leftovers don't pollute queries, but they
+    # do waste disk and confuse the file-count metric.
+    if not dry_run:
+        result["stale_tmp_removed"] = _cleanup_stale_tmp(data_dir)
+
+    # ── Active-hour guard: do NOT compact the current UTC hour. The sync
+    # cron may be flushing buffer files into this partition mid-pass; our
+    # delete-then-rename is atomic per-file but a half-second window after
+    # we listdir() and before we delete is enough for a freshly-arrived
+    # file to be in the listing of one operation and gone from the other.
+    # Skipping the active hour is cheap and removes the race entirely.
+    active_hour = datetime.now(UTC).strftime("timestamp_hour=%Y-%m-%d-%H")
+    result["active_hour_skipped"] = os.path.isdir(os.path.join(data_dir, active_hour))
+
+    # Accumulate every basename we delete across all three tiers so we
+    # can register them in one SQLite write at the end (vs N small writes).
+    removed_basenames: list[str] = []
+
+    # Acquire the per-service RLock around the file-system mutation
+    # phase so concurrent dashboard queries via the view-build path
+    # don't race with our delete-then-rename and hit FileNotFoundError /
+    # IO Error mid-glob. Architecture-review Finding #3.
+    from backend.core.iceberg import _get_service_lock
+
+    service_key = source.get("name", "default")
+    publish_lock = _get_service_lock(service_key)
+
+    # ── Hourly tier: walk each partition dir, merge if multi-file.
+    for entry in sorted(os.listdir(data_dir)):
+        if entry == active_hour:
+            continue
+        if entry in (_DAILY_DIR, _WEEKLY_DIR):
+            continue  # daily/weekly rollup dirs handled in subsequent passes
+        part_dir = os.path.join(data_dir, entry)
+        if not os.path.isdir(part_dir):
+            continue
+        parquets = [f for f in os.listdir(part_dir) if f.endswith(".parquet")]
+        if len(parquets) <= min_files_per_partition:
+            continue
+        # Size ceiling — if the partition is already big, don't double its
+        # peak file size by merging into one giant file.
+        total_bytes = sum(os.path.getsize(os.path.join(part_dir, p)) for p in parquets)
+        if total_bytes > _MAX_PARTITION_BYTES:
+            continue
+        result["partitions_scanned"] += 1
+        try:
+            # Lock held only during the actual file-system mutation (delete +
+            # rename) inside _compact_single_partition; the parquet COPY
+            # write happens before that on an in-memory DuckDB connection and
+            # doesn't need the lock. Holding the lock during the COPY would
+            # block dashboard reads for ~1s per partition.
+            with publish_lock:
+                r = _compact_single_partition(part_dir, parquets, dry_run=dry_run)
+            result["partitions_compacted"] += 1
+            result["files_merged"] += r["files_merged"]
+            result["files_removed"] += r["files_removed"]
+            result["bytes_before"] += r["bytes_before"]
+            result["bytes_after"] += r["bytes_after"]
+            removed_basenames.extend(r.get("removed_basenames", []))
+        except Exception as e:
+            msg = f"{part_dir}: {type(e).__name__}: {e}"
+            logger.warning("[local-compact] %s", msg)
+            result["errors"].append(msg)
+
+    # ── Daily tier: roll up hour-partitions older than threshold into one
+    # daily file. After this, the partition's hour dirs are removed.
+    try:
+        # Same RLock as the hourly path — file-system mutation phase only.
+        with publish_lock:
+            r = _compact_daily_tier(data_dir, dry_run=dry_run)
+        result["daily_rollups"] = r["daily_rollups"]
+        result["files_merged"] += r["files_merged"]
+        result["files_removed"] += r["files_removed"]
+        result["bytes_before"] += r["bytes_before"]
+        result["bytes_after"] += r["bytes_after"]
+        removed_basenames.extend(r.get("removed_basenames", []))
+    except Exception as e:
+        msg = f"daily-tier: {type(e).__name__}: {e}"
+        logger.warning("[local-compact] %s", msg)
+        result["errors"].append(msg)
+
+    # ── Weekly tier: roll up daily files older than threshold into one
+    # weekly file. Only does work when local retention extends past
+    # _WEEKLY_TIER_AGE_DAYS (default 30); for shorter retentions the
+    # daily files age out before becoming weekly-eligible.
+    try:
+        with publish_lock:
+            r = _compact_weekly_tier(data_dir, dry_run=dry_run)
+        result["weekly_rollups"] = r["weekly_rollups"]
+        result["files_merged"] += r["files_merged"]
+        result["files_removed"] += r["files_removed"]
+        result["bytes_before"] += r["bytes_before"]
+        result["bytes_after"] += r["bytes_after"]
+        removed_basenames.extend(r.get("removed_basenames", []))
+    except Exception as e:
+        msg = f"weekly-tier: {type(e).__name__}: {e}"
+        logger.warning("[local-compact] %s", msg)
+        result["errors"].append(msg)
+
+    # ── Register deletions so sync_data won't re-fetch them. Without this,
+    # every local_compact pass invalidates sync_data's fast path and forces
+    # a full re-download of every file we just deleted.
+    service_id = source.get("service_id") or source.get("name")
+    if removed_basenames and service_id and not dry_run:
+        try:
+            from backend.core import metadata_db as _meta
+
+            _meta.register_locally_compacted(service_id, removed_basenames)
+        except Exception as e:
+            logger.warning("[local-compact] failed to register compacted basenames: %s", e)
+
+    result["duration_ms"] = int((time.time() - t0) * 1000)
+    logger.info(
+        "🧹 [local-compact] %s: hourly=%d/%d merged=%d removed=%d daily=%d weekly=%d tmp_cleaned=%d in %dms",
+        source.get("name"),
+        result["partitions_compacted"],
+        result["partitions_scanned"],
+        result["files_merged"],
+        result["files_removed"],
+        result["daily_rollups"],
+        result["weekly_rollups"],
+        result["stale_tmp_removed"],
+        result["duration_ms"],
+    )
+    return result
+
+
+def _cleanup_stale_tmp(data_dir: str) -> int:
+    """Walk data_dir and rm any *.parquet.tmp left over from crashed runs.
+
+    Also cleans up the OLD naming convention (.tmp_*.parquet) from the
+    earlier version of this module so a deploy doesn't leave orphans
+    that the parquet glob picks up (causing view-build errors).
+    """
+    n = 0
+    for root, _, files in os.walk(data_dir):
+        for f in files:
+            if f.endswith(".parquet.tmp") or (f.startswith(".tmp_") and f.endswith(".parquet")):
+                try:
+                    os.remove(os.path.join(root, f))
+                    n += 1
+                except OSError:
+                    pass
+    return n
+
+
+def _compact_daily_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]:
+    """Group hour-partitions older than _DAILY_TIER_AGE_DAYS by day, merge
+    each day's parquets into one file under data/daily/, and remove the
+    now-empty hour partition dirs.
+
+    Returns {daily_rollups, files_merged, files_removed, bytes_before, bytes_after}.
+    """
+    cutoff = (datetime.now(UTC) - timedelta(days=_DAILY_TIER_AGE_DAYS)).date()
+    daily_root = os.path.join(data_dir, _DAILY_DIR)
+
+    # day_str -> [(hour_part_dir, [parquet_paths])]
+    by_day: dict[str, list[tuple[str, list[str]]]] = defaultdict(list)
+    for entry in os.listdir(data_dir):
+        m = _HOUR_PART_RE.match(entry)
+        if not m:
+            continue
+        day_str = m.group(1)
+        try:
+            day = datetime.strptime(day_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if day >= cutoff:
+            continue
+        part_dir = os.path.join(data_dir, entry)
+        parquets = [
+            os.path.join(part_dir, f)
+            for f in os.listdir(part_dir)
+            if f.endswith(".parquet") and not f.startswith(".tmp_")
+        ]
+        if not parquets:
+            continue
+        by_day[day_str].append((part_dir, parquets))
+
+    result: dict[str, Any] = {
+        "daily_rollups": 0,
+        "files_merged": 0,
+        "files_removed": 0,
+        "bytes_before": 0,
+        "bytes_after": 0,
+        "removed_basenames": [],
+    }
+    if not by_day:
+        return result
+
+    if not dry_run:
+        os.makedirs(daily_root, exist_ok=True)
+
+    for day_str, parts in by_day.items():
+        # Skip if the day is already a single daily file (already rolled up).
+        if len(parts) == 1 and len(parts[0][1]) == 1:
+            continue
+        all_paths: list[str] = []
+        for _, paths in parts:
+            all_paths.extend(paths)
+        bytes_before = sum(os.path.getsize(p) for p in all_paths)
+        if dry_run:
+            result["daily_rollups"] += 1
+            result["files_merged"] += len(all_paths)
+            result["bytes_before"] += bytes_before
+            continue
+
+        # Write the day's merged file under data/daily/.
+        out_name = f"daily_{day_str}_{uuid.uuid4().hex[:8]}.parquet"
+        tmp_path = os.path.join(daily_root, f"{out_name}.tmp")
+        out_path = os.path.join(daily_root, out_name)
+        try:
+            con = duckdb.connect(":memory:")
+            try:
+                paths_sql = ", ".join(f"'{_sql_escape(p)}'" for p in all_paths)
+                # Same EXCLUDE-on-probe defense as the hourly path —
+                # avoid baking timestamp_hour/dt into the daily merged
+                # file (the view re-computes them at query time).
+                probe = (
+                    con.execute(f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0").description
+                    or []
+                )
+                cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if any(d[0] == c for d in probe))
+                exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
+                con.execute(
+                    f"COPY (SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)) "
+                    f"TO '{_sql_escape(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                )
+            finally:
+                con.close()
+            # Delete originals, then rename — same crash-safe order as the
+            # hourly path.
+            for p in all_paths:
+                try:
+                    os.remove(p)
+                    result["files_removed"] += 1
+                    result.setdefault("removed_basenames", []).append(os.path.basename(p))
+                except OSError as e:
+                    logger.warning("[local-compact] failed to remove %s: %s", p, e)
+            os.rename(tmp_path, out_path)
+            bytes_after = os.path.getsize(out_path)
+            # Try to rmdir the now-empty hour partition dirs.
+            for part_dir, _ in parts:
+                try:
+                    os.rmdir(part_dir)
+                except OSError:
+                    pass  # dir not empty (concurrent write) — leave it
+            result["daily_rollups"] += 1
+            result["files_merged"] += len(all_paths)
+            result["bytes_before"] += bytes_before
+            result["bytes_after"] += bytes_after
+            logger.info(
+                "📦 [local-compact] daily rollup %s: %d files → 1 (saved %d hour-partition dirs)",
+                day_str,
+                len(all_paths),
+                len(parts),
+            )
+        except Exception as e:
+            # Clean the tmp on failure so we don't leak.
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            logger.warning("[local-compact] daily rollup %s failed: %s", day_str, e)
+
+    return result
+
+
+def _compact_weekly_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]:
+    """Group daily files older than _WEEKLY_TIER_AGE_DAYS by ISO week, merge
+    each week's parquets into one file under data/weekly/, delete originals.
+
+    Operates on files in data/daily/ produced by _compact_daily_tier. The
+    daily filenames embed YYYY-MM-DD (the rollup date), which we parse with
+    _DAILY_FILE_RE to derive ISO week → group.
+
+    Returns {weekly_rollups, files_merged, files_removed, bytes_before, bytes_after}.
+    """
+    daily_root = os.path.join(data_dir, _DAILY_DIR)
+    weekly_root = os.path.join(data_dir, _WEEKLY_DIR)
+    result: dict[str, Any] = {
+        "weekly_rollups": 0,
+        "files_merged": 0,
+        "files_removed": 0,
+        "bytes_before": 0,
+        "bytes_after": 0,
+        "removed_basenames": [],
+    }
+    if not os.path.isdir(daily_root):
+        return result
+
+    from datetime import date as _date
+
+    cutoff = (datetime.now(UTC) - timedelta(days=_WEEKLY_TIER_AGE_DAYS)).date()
+    # week_key → [(path, date)]
+    by_week: dict[str, list[tuple[str, _date]]] = defaultdict(list)
+    for fname in os.listdir(daily_root):
+        if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
+            continue
+        m = _DAILY_FILE_RE.match(fname)
+        if not m:
+            continue
+        try:
+            day = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if day >= cutoff:
+            continue
+        # ISO week key like "2026-W22". Days in the same calendar week
+        # share the key; year-week handles year boundaries (W52→W01).
+        iso = day.isocalendar()
+        week_key = f"{iso[0]:04d}-W{iso[1]:02d}"
+        by_week[week_key].append((os.path.join(daily_root, fname), day))
+
+    if not by_week:
+        return result
+
+    if not dry_run:
+        os.makedirs(weekly_root, exist_ok=True)
+
+    for week_key, items in by_week.items():
+        if len(items) < 2:
+            continue  # nothing to merge for a single-day week
+        all_paths = [p for p, _ in items]
+        bytes_before = sum(os.path.getsize(p) for p in all_paths)
+        if dry_run:
+            result["weekly_rollups"] += 1
+            result["files_merged"] += len(all_paths)
+            result["bytes_before"] += bytes_before
+            continue
+
+        out_name = f"weekly_{week_key}_{uuid.uuid4().hex[:8]}.parquet"
+        tmp_path = os.path.join(weekly_root, f"{out_name}.tmp")
+        out_path = os.path.join(weekly_root, out_name)
+        try:
+            con = duckdb.connect(":memory:")
+            try:
+                paths_sql = ", ".join(f"'{_sql_escape(p)}'" for p in all_paths)
+                probe = (
+                    con.execute(f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0").description
+                    or []
+                )
+                cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if any(d[0] == c for d in probe))
+                exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
+                con.execute(
+                    f"COPY (SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)) "
+                    f"TO '{_sql_escape(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                )
+            finally:
+                con.close()
+            for p in all_paths:
+                try:
+                    os.remove(p)
+                    result["files_removed"] += 1
+                    result.setdefault("removed_basenames", []).append(os.path.basename(p))
+                except OSError as e:
+                    logger.warning("[local-compact] failed to remove %s: %s", p, e)
+            os.rename(tmp_path, out_path)
+            bytes_after = os.path.getsize(out_path)
+            result["weekly_rollups"] += 1
+            result["files_merged"] += len(all_paths)
+            result["bytes_before"] += bytes_before
+            result["bytes_after"] += bytes_after
+            logger.info(
+                "🗓️  [local-compact] weekly rollup %s: %d daily file(s) → 1",
+                week_key,
+                len(all_paths),
+            )
+        except Exception as e:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            logger.warning("[local-compact] weekly rollup %s failed: %s", week_key, e)
+
+    return result
+
+
+def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool = False) -> dict[str, Any]:
+    """Merge `parquets` (relative names) in `part_dir` into one new parquet.
+
+    Uses DuckDB COPY to read+write since it's already in the dep tree and
+    handles the union-by-name semantics the view uses.
+    """
+    paths = [os.path.join(part_dir, p) for p in parquets]
+    bytes_before = sum(os.path.getsize(p) for p in paths)
+
+    if dry_run:
+        return {
+            "files_merged": len(parquets),
+            "files_removed": 0,
+            "bytes_before": bytes_before,
+            "bytes_after": 0,
+        }
+
+    # Write to a temp file in the same directory so the atomic rename
+    # below stays within one filesystem (rename across filesystems is
+    # NOT atomic on POSIX).
+    out_name = f"compacted_{uuid.uuid4().hex[:12]}.parquet"
+    tmp_name = f"{out_name}.tmp"
+    tmp_path = os.path.join(part_dir, tmp_name)
+    out_path = os.path.join(part_dir, out_name)
+
+    # Use in-memory DuckDB so we don't contend with the per-service writer
+    # lock. read_parquet with explicit list + union_by_name matches the
+    # view's semantics so the resulting file is query-compatible.
+    con = duckdb.connect(":memory:")
+    try:
+        paths_sql = ", ".join(f"'{_sql_escape(p)}'" for p in paths)
+        # Strip the computed `timestamp_hour` / `dt` columns from output
+        # if they exist in input files. Iceberg's view-build re-adds them
+        # via `SELECT *, strftime(...) AS timestamp_hour` and would error
+        # with a duplicate-column UNION ALL BY NAME on a merged file
+        # that already contained them.
+        probe = con.execute(f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0").description or []
+        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if any(d[0] == c for d in probe))
+        exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
+        # zstd compression matches Fastly's parquet output and the
+        # buffer-commit writer; keeps decompression cost stable.
+        con.execute(
+            f"COPY (SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)) "
+            f"TO '{_sql_escape(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+    finally:
+        con.close()
+
+    # Atomic publish: delete originals BEFORE rename so a crash leaves
+    # only the tmp (which the dashboard glob ignores via the .parquet.tmp
+    # suffix). Worst case: cleanup pass next run removes the orphaned tmp.
+    files_removed = 0
+    removed_basenames: list[str] = []
+    for p in paths:
+        try:
+            os.remove(p)
+            files_removed += 1
+            removed_basenames.append(os.path.basename(p))
+        except OSError as e:
+            logger.warning("[local-compact] failed to remove %s: %s", p, e)
+    os.rename(tmp_path, out_path)
+    bytes_after = os.path.getsize(out_path)
+
+    return {
+        "files_merged": len(parquets),
+        "files_removed": files_removed,
+        "removed_basenames": removed_basenames,
+        "bytes_before": bytes_before,
+        "bytes_after": bytes_after,
+    }
+
+
+def compaction_stats(source: dict) -> dict[str, Any]:
+    """Snapshot of file-count distribution across local cache partitions.
+
+    Returns counts that downstream metrics / health endpoints can graph
+    to spot small-file regressions (e.g., if the cron stops running and
+    files start accumulating, ``partitions_above_threshold`` climbs).
+    """
+    from backend.core.duckdb import _cache_dir
+
+    cache_root = _cache_dir(source)
+    data_dir = os.path.join(cache_root, "data")
+    total_files = 0
+    partitions = 0
+    above_3 = 0
+    above_10 = 0
+    daily_files = 0
+    weekly_files = 0
+    if not os.path.isdir(data_dir):
+        return {
+            "total_files": 0,
+            "partitions": 0,
+            "partitions_above_3": 0,
+            "partitions_above_10": 0,
+            "daily_files": 0,
+            "weekly_files": 0,
+            "avg_files_per_partition": 0.0,
+        }
+    for entry in os.listdir(data_dir):
+        full = os.path.join(data_dir, entry)
+        if not os.path.isdir(full):
+            continue
+        n = sum(1 for f in os.listdir(full) if f.endswith(".parquet") and not f.startswith(".tmp_"))
+        if entry == _DAILY_DIR:
+            daily_files += n
+        elif entry == _WEEKLY_DIR:
+            weekly_files += n
+        else:
+            partitions += 1
+            total_files += n
+            if n > 3:
+                above_3 += 1
+            if n > 10:
+                above_10 += 1
+    return {
+        "total_files": total_files + daily_files + weekly_files,
+        "partitions": partitions,
+        "partitions_above_3": above_3,
+        "partitions_above_10": above_10,
+        "daily_files": daily_files,
+        "weekly_files": weekly_files,
+        "avg_files_per_partition": (total_files / partitions) if partitions else 0.0,
+    }
+
+
+def _sql_escape(path: str) -> str:
+    """Escape single quotes in a path for safe inlining into DuckDB SQL."""
+    return path.replace("'", "''")

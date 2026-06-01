@@ -1,0 +1,88 @@
+# Caddyfile — plain HTTP origin behind Fastly, hardened.
+#
+# Fastly terminates TLS at the edge and proxies to this VM on port 80.
+# GCP firewall locks port 80 to Fastly's IP ranges. Backend and frontend
+# bind to 127.0.0.1 only (host network mode) — Caddy reaches them on
+# loopback, nothing else can.
+#
+# Routing:
+#   /api/*  → backend directly (preserves Host header so the backend's
+#             DNS-rebinding gate matches the registered public_endpoint;
+#             peer = 127.0.0.1 from Caddy in host net mode).
+#   else    → Next.js frontend.
+
+{
+	# No auto-HTTPS — Fastly handles TLS termination at the edge.
+	auto_https off
+
+	# Rate limit module (provided by custom Caddy image, see caddy/Dockerfile).
+	# 5 share-login attempts / minute per Fastly client IP.
+	order rate_limit before reverse_proxy
+}
+
+(security_headers) {
+	header {
+		-Server
+		# HSTS: tells browsers to always use HTTPS for this domain for 1 year.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# Clickjacking protection.
+		X-Frame-Options "DENY"
+		# MIME-sniffing protection.
+		X-Content-Type-Options "nosniff"
+		# Don't leak full URL in Referer to other origins.
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Disable browser features we don't use.
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+		# Conservative CSP. Next.js needs inline styles for hydration; loosen if
+		# you see CSP violations in DevTools after deploy.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+	}
+}
+
+:80 {
+	encode zstd gzip
+	request_body {
+		max_size 25MB
+	}
+
+	import security_headers
+
+	# Rate-limit share-login attempts. Tunables:
+	#   key: per-client IP (the Fastly-Client-IP header set by Fastly's edge)
+	#   window: 1 minute sliding window
+	#   max_events: 5 per window — generous for typos, harsh for brute force
+	@share_login path /api/share/login
+	rate_limit @share_login {
+		zone share_login {
+			key {http.request.header.Fastly-Client-IP}
+			window 1m
+			events 5
+		}
+	}
+
+	# API → backend (preserve Host so backend's DNS-rebinding gate matches the
+	# registered public_endpoint).
+	@api path /api/*
+	reverse_proxy @api 127.0.0.1:8000 {
+		flush_interval -1
+		# Replace X-Forwarded-For with Fastly's authoritative client-IP header.
+		header_up X-Forwarded-For {http.request.header.Fastly-Client-IP}
+	}
+
+	# Everything else → Next.js frontend.
+	reverse_proxy 127.0.0.1:3000 {
+		flush_interval -1
+		header_up X-Forwarded-For {http.request.header.Fastly-Client-IP}
+	}
+
+	# Detailed access log: JSON format with every request's client IP, host,
+	# URL, status, latency, and user-agent. Tail with:
+	#   docker compose -f ... logs -f caddy
+	# Filter to errors:
+	#   docker compose -f ... logs caddy | jq 'select(.status >= 400)'
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}

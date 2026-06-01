@@ -1,0 +1,44 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.pyo
+logs.duckdb
+cache/
+data/
+configs/
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/types/api.generated.ts
+frontend/openapi.json
+.env
+.DS_Store
+*.duckdb*
+.claude/
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.log
+
+# Test artifacts
+tests/
+frontend/__tests__/
+frontend/e2e/
+frontend/playwright-report/
+frontend/test-results/
+frontend/coverage/
+frontend/vitest.config.*
+
+# Local docs / planning
+TESTING_PLAN*.md
+docs/
+
+# IDE
+.vscode/
+.idea/

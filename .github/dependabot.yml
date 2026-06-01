@@ -1,0 +1,40 @@
+# Dependabot configuration.
+#
+# Reference: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Notes on pinning interaction:
+# - `pip` ecosystem reads pyproject.toml + uv.lock. Range constraints like
+#   `apscheduler>=3.10,<4` are respected; Dependabot will not propose v4.
+# - `npm` ecosystem reads frontend/package.json + package-lock.json. Caret
+#   ranges (`^X.Y.Z`) follow SemVer compatible-update rules. The explicit
+#   `overrides` block (ip-address, postcss) is treated as a pin; Dependabot
+#   only proposes bumps for security advisories on those.
+# - `github-actions` keeps action SHAs / version tags fresh in workflows/.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3

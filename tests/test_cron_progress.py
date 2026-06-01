@@ -1,0 +1,266 @@
+"""Tests for ``backend.cron_progress`` — in-memory cron run progress tracker.
+
+The frontend's sync-status badge polls this via SSE to render "Ingesting
+file X of Y…" progress. It's an in-memory module (lost on restart) and
+the orphan-reaping logic in ``metadata_db.reap_running_cron_runs`` was
+the production fix for the "Loading logs..." stuck-sync bug. This file
+pins the in-memory side of that flow.
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from backend import cron_progress
+
+
+@pytest.fixture(autouse=True)
+def _reset_progress_state():
+    """Clear the module-level dicts between tests — they're process-global."""
+    cron_progress._progress.clear()
+    cron_progress._last_update.clear()
+    cron_progress._run_metadata.clear()
+    yield
+    cron_progress._progress.clear()
+    cron_progress._last_update.clear()
+    cron_progress._run_metadata.clear()
+
+
+# ── start_progress + add_progress ────────────────────────────────────────────
+
+
+def test_start_progress_initialises_empty_event_list():
+    cron_progress.start_progress(1, service_id="svc-a", task="sync")
+    assert cron_progress._progress[1] == []
+    assert cron_progress._run_metadata[1] == {"service_id": "svc-a", "task": "sync"}
+
+
+def test_start_progress_is_idempotent():
+    """A duplicate ``start_progress(1, ...)`` must NOT clobber existing
+    events or metadata — the cron scheduler may call start more than
+    once for the same run during retries."""
+    cron_progress.start_progress(1, service_id="svc-a", task="sync")
+    cron_progress.add_progress(1, {"type": "step", "msg": "one"})
+    cron_progress.start_progress(1, service_id="other", task="other")
+
+    assert len(cron_progress._progress[1]) == 1  # Existing event preserved
+    assert cron_progress._run_metadata[1]["service_id"] == "svc-a"  # Original metadata preserved
+
+
+def test_add_progress_appends_event():
+    cron_progress.start_progress(1)
+    cron_progress.add_progress(1, {"type": "step", "i": 1})
+    cron_progress.add_progress(1, {"type": "step", "i": 2})
+
+    assert cron_progress._progress[1] == [{"type": "step", "i": 1}, {"type": "step", "i": 2}]
+
+
+def test_add_progress_silently_drops_unknown_run():
+    """``add_progress`` for an unstarted run is a no-op (no KeyError) —
+    pinned because callers don't always check the run started first."""
+    cron_progress.add_progress(999, {"type": "step"})  # must not raise
+    assert 999 not in cron_progress._progress
+
+
+def test_add_progress_advances_last_update_timestamp():
+    """The TTL-based ``cleanup_progress`` keys on ``_last_update``, so
+    every event must refresh the timestamp — otherwise an active run
+    that's been emitting events for >1h would still get reaped."""
+    cron_progress.start_progress(1)
+    initial_ts = cron_progress._last_update[1]
+    time.sleep(0.01)  # ensure measurable diff
+    cron_progress.add_progress(1, {"type": "step"})
+    assert cron_progress._last_update[1] > initial_ts
+
+
+# ── get_progress ─────────────────────────────────────────────────────────────
+
+
+def test_get_progress_returns_full_list_when_start_idx_zero():
+    cron_progress.start_progress(1)
+    cron_progress.add_progress(1, {"i": 1})
+    cron_progress.add_progress(1, {"i": 2})
+
+    assert cron_progress.get_progress(1) == [{"i": 1}, {"i": 2}]
+
+
+def test_get_progress_returns_slice_from_start_idx():
+    """The SSE endpoint polls with the last-seen index so it doesn't
+    re-send events the client already has."""
+    cron_progress.start_progress(1)
+    for i in range(5):
+        cron_progress.add_progress(1, {"i": i})
+
+    assert cron_progress.get_progress(1, start_idx=3) == [{"i": 3}, {"i": 4}]
+
+
+def test_get_progress_returns_none_for_unknown_run():
+    """Distinct from ``[]`` (which means "no new events yet"); ``None``
+    tells the SSE handler to emit a terminal 'run not found' message."""
+    assert cron_progress.get_progress(999) is None
+
+
+def test_get_progress_returns_copy_not_live_reference():
+    """The caller iterates the result outside the lock; if we returned
+    the live list, a concurrent ``add_progress`` would mutate it
+    mid-iteration and crash with RuntimeError."""
+    cron_progress.start_progress(1)
+    cron_progress.add_progress(1, {"i": 1})
+
+    out = cron_progress.get_progress(1)
+    cron_progress.add_progress(1, {"i": 2})
+    # The earlier slice must not have grown
+    assert out == [{"i": 1}]
+
+
+# ── get_latest_progress_for_service ──────────────────────────────────────────
+
+
+def test_latest_progress_returns_last_event_with_task_attached():
+    cron_progress.start_progress(1, service_id="svc-a", task="sync_logs")
+    cron_progress.add_progress(1, {"type": "step", "msg": "downloading"})
+
+    out = cron_progress.get_latest_progress_for_service("svc-a")
+    assert out["type"] == "step"
+    assert out["msg"] == "downloading"
+    assert out["task"] == "sync_logs"
+
+
+def test_latest_progress_returns_none_for_service_with_no_runs():
+    """Used by the UI on first load — must not crash on an empty store."""
+    assert cron_progress.get_latest_progress_for_service("svc-nothing") is None
+
+
+def test_latest_progress_skips_completed_runs():
+    """A run whose last event is ``done`` or ``error`` is finished; the
+    UI should poll the cron_runs table for the final outcome, not show
+    a stale step message as if the run were still active."""
+    cron_progress.start_progress(1, service_id="svc-a", task="sync")
+    cron_progress.add_progress(1, {"type": "done", "rows": 100})
+
+    assert cron_progress.get_latest_progress_for_service("svc-a") is None
+
+
+def test_latest_progress_skips_errored_runs():
+    cron_progress.start_progress(1, service_id="svc-a", task="sync")
+    cron_progress.add_progress(1, {"type": "error", "msg": "S3 down"})
+
+    assert cron_progress.get_latest_progress_for_service("svc-a") is None
+
+
+def test_latest_progress_picks_newest_run_when_multiple_active():
+    """If two runs for the same service are both active, the higher
+    run_id (= newer in our autoincrement scheme) wins. Pinned because
+    a regression would let the UI show an old run's step messages."""
+    cron_progress.start_progress(1, service_id="svc-a", task="sync")
+    cron_progress.add_progress(1, {"type": "step", "i": "old"})
+    cron_progress.start_progress(2, service_id="svc-a", task="sync")
+    cron_progress.add_progress(2, {"type": "step", "i": "new"})
+
+    out = cron_progress.get_latest_progress_for_service("svc-a")
+    assert out["i"] == "new"
+
+
+def test_latest_progress_returns_task_only_when_run_has_no_events_yet():
+    """A run that just started but hasn't emitted any events yet → return
+    ``{"task": ...}`` so the UI shows a "starting" placeholder instead
+    of a blank badge."""
+    cron_progress.start_progress(7, service_id="svc-a", task="sync_logs")
+
+    out = cron_progress.get_latest_progress_for_service("svc-a")
+    assert out == {"task": "sync_logs"}
+
+
+def test_latest_progress_ignores_runs_belonging_to_other_services():
+    """A run for ``svc-b`` must NOT surface in ``svc-a``'s status badge."""
+    cron_progress.start_progress(1, service_id="svc-b", task="sync")
+    cron_progress.add_progress(1, {"type": "step"})
+
+    assert cron_progress.get_latest_progress_for_service("svc-a") is None
+
+
+# ── end_progress ─────────────────────────────────────────────────────────────
+
+
+def test_end_progress_appends_final_event_when_provided():
+    cron_progress.start_progress(1)
+    cron_progress.add_progress(1, {"type": "step"})
+    cron_progress.end_progress(1, {"type": "done", "rows": 42})
+
+    events = cron_progress._progress[1]
+    assert events[-1] == {"type": "done", "rows": 42}
+
+
+def test_end_progress_without_final_event_just_updates_timestamp():
+    cron_progress.start_progress(1)
+    initial_count = len(cron_progress._progress[1])
+    cron_progress.end_progress(1)
+
+    assert len(cron_progress._progress[1]) == initial_count  # No event appended
+
+
+def test_end_progress_silently_drops_unknown_run():
+    cron_progress.end_progress(999, {"type": "done"})  # must not raise
+    assert 999 not in cron_progress._progress
+
+
+# ── cleanup_progress: TTL eviction ───────────────────────────────────────────
+
+
+def test_cleanup_progress_removes_entries_older_than_one_hour():
+    """The TTL is 3600s; anything older gets dropped. Pinned because a
+    leak here would slowly accumulate run state for every cron that
+    fires, eventually OOMing the dev server."""
+    cron_progress.start_progress(1)
+    cron_progress.start_progress(2)
+
+    # Backdate run 1 past the TTL
+    cron_progress._last_update[1] = time.time() - 3700
+
+    cron_progress.cleanup_progress()
+
+    assert 1 not in cron_progress._progress
+    assert 1 not in cron_progress._last_update
+    assert 1 not in cron_progress._run_metadata
+    assert 2 in cron_progress._progress  # Recent one survives
+
+
+def test_cleanup_progress_keeps_entries_at_boundary():
+    """An entry exactly at the boundary (3600s ago) should still be kept
+    — the check is ``> 3600``, not ``>=``. Pinned so a future > → >=
+    refactor is forced through this test."""
+    cron_progress.start_progress(1)
+    cron_progress._last_update[1] = time.time() - 3500  # well under TTL
+
+    cron_progress.cleanup_progress()
+    assert 1 in cron_progress._progress
+
+
+def test_cleanup_progress_is_safe_on_empty_state():
+    cron_progress.cleanup_progress()  # must not raise
+
+
+# ── Concurrency: lock acquisition under racing writers ──────────────────────
+
+
+def test_concurrent_add_progress_does_not_lose_events():
+    """The shared lock must serialise writers. Two threads each
+    appending 100 events → final list has all 200, no torn writes."""
+    import threading
+
+    cron_progress.start_progress(1)
+
+    def writer(prefix: str):
+        for i in range(100):
+            cron_progress.add_progress(1, {"thread": prefix, "i": i})
+
+    t1 = threading.Thread(target=writer, args=("A",))
+    t2 = threading.Thread(target=writer, args=("B",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert len(cron_progress._progress[1]) == 200

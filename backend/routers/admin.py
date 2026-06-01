@@ -1,0 +1,1351 @@
+"""Admin router — ingest, sync status, raw file tree, download."""
+
+from __future__ import annotations
+
+import os
+import queue
+import zipfile
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import RedirectResponse, StreamingResponse
+
+from backend.deps import get_service_id, get_source
+from backend.models.admin import (
+    BotSourcesResponse,
+    IcebergTableInfoResponse,
+    IngestedFilesResponse,
+    LogAccountingBucket,
+    LogAccountingResponse,
+    LogAccountingTotals,
+    PopLocationsResponse,
+    SustainedLossAlert,
+    SyncStatusResponse,
+    SystemJobsResponse,
+    TreeResponse,
+    UsageLogAggregate,
+    UsageLogEntry,
+    UsageLogResponse,
+)
+from backend.utils.router_utils import query_errors
+
+router = APIRouter(prefix="/api", tags=["admin"])
+
+
+class _QueueFile:
+    """File-like wrapper around a queue.Queue for streaming ZIP generation."""
+
+    def __init__(self, q: queue.Queue):
+        self.q = q
+        self.offset = 0
+
+    def write(self, b: bytes) -> int:
+        self.q.put(b)
+        n = len(b)
+        self.offset += n
+        return n
+
+    def flush(self):
+        pass
+
+    def tell(self):
+        return self.offset
+
+
+def _stream_from_worker(worker):
+    """Run *worker(q)* in a daemon thread and yield the bytes it puts into the queue."""
+    import contextvars
+    import threading
+
+    q: queue.Queue = queue.Queue(maxsize=10)
+    # Copy the request's context (process_context, _CALLS list) so any
+    # record_call() inside the worker thread lands in the same _usage_log batch.
+    ctx = contextvars.copy_context()
+    thread = threading.Thread(target=lambda: ctx.run(worker, q), daemon=True)
+    thread.start()
+    while True:
+        chunk = q.get()
+        if chunk is None:
+            break
+        yield chunk
+
+
+def _fetch_file_to_zip(
+    source: dict,
+    fos_client,
+    cdn: str,
+    key: str,
+    arcname: str,
+    zf: zipfile.ZipFile,
+    caller: str,
+) -> bool:
+    """Fetch a single S3 key into the zip via CDN with fallback to direct FOS.
+
+    Returns True on success. Failures are printed and return False so the
+    caller can decide whether to abort or continue with the next file.
+    """
+    import time as _t
+    import urllib.parse
+    import urllib.request
+
+    from backend.utils.telemetry import record_cdn_call as _rcdn
+
+    if cdn:
+        url = f"{cdn}/{urllib.parse.quote(key)}"
+        try:
+            req = urllib.request.Request(url)
+            if source.get("cdn_secret"):
+                req.add_header("x-fastly-key", source["cdn_secret"])
+            t0 = _t.time()
+            bytes_read = 0
+            cdn_headers = None
+            with urllib.request.urlopen(req, timeout=30) as response:
+                cdn_headers = response.headers
+                with zf.open(arcname, "w", force_zip64=True) as dest:
+                    while True:
+                        chunk = response.read(65536)
+                        if not chunk:
+                            break
+                        bytes_read += len(chunk)
+                        dest.write(chunk)
+            _rcdn(
+                "GET",
+                key,
+                round((_t.time() - t0) * 1000, 2),
+                headers=cdn_headers,
+                bytes_count=bytes_read,
+                caller=caller,
+            )
+            return True
+        except Exception as cdn_err:
+            print(f"CDN fetch failed for {key}, falling back to FOS: {cdn_err}")
+
+    try:
+        # fos_client MUST be from _get_fos_client() so the telemetry proxy
+        # captures this read. Don't swap in a raw boto3.client(...) — that
+        # silently drops the usage_log row.
+        resp = fos_client.get_object(Bucket=source["bucket"], Key=key)
+        with zf.open(arcname, "w", force_zip64=True) as dest:
+            body = resp["Body"]
+            while True:
+                chunk = body.read(65536)
+                if not chunk:
+                    break
+                dest.write(chunk)
+        return True
+    except Exception as fos_err:
+        print(f"Error fetching {key} from FOS: {fos_err}")
+        return False
+
+
+@router.get("/admin/pop-locations", response_model=PopLocationsResponse)
+def get_pop_locations():
+    """Return the cached POP locations (code, name, coordinates)."""
+    from backend.utils.pop_utils import get_pop_locations
+
+    return PopLocationsResponse.with_telemetry(pops=get_pop_locations())
+
+
+@router.post("/admin/pop-locations/refresh", response_model=PopLocationsResponse)
+def refresh_pop_locations(token: str = Query(...)):
+    """Refresh the POP locations cache from the Fastly API."""
+    api_key = token.strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail={"error": "api_key is required"})
+    from backend.utils.pop_utils import fetch_pop_locations, get_pop_locations
+
+    ok = fetch_pop_locations(api_key)
+    if not ok:
+        raise HTTPException(
+            status_code=502, detail={"error": "Failed to fetch POP data from Fastly API. Check your API key."}
+        )
+    return PopLocationsResponse.with_telemetry(pops=get_pop_locations())
+
+
+def _resolve_source(source_name: str) -> dict:
+    from backend import config as svcconfig
+    from backend.core.duckdb import _DEFAULT_SOURCE
+
+    if source_name == "default":
+        return _DEFAULT_SOURCE
+    cfg = svcconfig.load_config(source_name)
+    if cfg:
+        from backend import config as _sc
+
+        return {**_DEFAULT_SOURCE, **_sc.config_to_source(cfg)}
+    return _DEFAULT_SOURCE
+
+
+@router.post("/admin/ingest-logs")
+def ingest_endpoint(
+    start_time: str | None = Query(default=None),
+    end_time: str | None = Query(default=None),
+    source: dict = Depends(get_source),
+):
+    import threading
+
+    from fastapi import HTTPException
+
+    from backend.core.duckdb import start_cron_run
+    from backend.cron_progress import _run_metadata, start_progress
+    from backend.repositories.dashboard import _dashboard_cache
+    from backend.scheduler import _run_metadata_sync, _run_service_cron
+
+    src = source
+    _dashboard_cache.pop(src["name"], None)
+    is_readonly = source.get("access_level") == "read_only"
+
+    if is_readonly:
+        try:
+            run_id = start_cron_run(source, "metadata_sync")
+            start_progress(run_id, service_id=source["name"], task="metadata_sync")
+            t = threading.Thread(
+                target=_run_metadata_sync,
+                args=(source["name"],),
+                kwargs={"run_id": run_id, "start_time": start_time, "end_time": end_time},
+                daemon=True,
+            )
+            t.start()
+        except RuntimeError as e:
+            run_id = None
+            for rid, meta in _run_metadata.items():
+                if meta.get("service_id") == source["name"] and meta.get("task") == "metadata_sync":
+                    run_id = rid
+                    break
+            if run_id is None:
+                raise HTTPException(status_code=503, detail={"error": str(e), "busy": True})
+            return {"ok": True, "message": "Metadata sync already running.", "run_id": run_id}
+
+        return {"ok": True, "message": "Metadata sync started.", "run_id": run_id}
+
+    else:
+        try:
+            run_id = start_cron_run(src, "sync")
+            start_progress(run_id, service_id=src["name"], task="sync")
+            t = threading.Thread(
+                target=_run_service_cron,
+                args=(src["name"],),
+                kwargs={
+                    "force": True,
+                    "run_id": run_id,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                },
+                daemon=True,
+            )
+            t.start()
+        except RuntimeError as e:
+            run_id = None
+            for rid, meta in _run_metadata.items():
+                if meta.get("service_id") == src["name"] and meta.get("task") == "sync":
+                    run_id = rid
+                    break
+            if run_id is None:
+                raise HTTPException(status_code=503, detail={"error": str(e), "busy": True})
+            return {"ok": True, "message": "Ingestion already running.", "run_id": run_id}
+
+        return {"ok": True, "message": "Ingestion started.", "run_id": run_id}
+
+
+@router.get("/download-folder")
+def download_folder(
+    source: dict = Depends(get_source),
+    prefix: str = Query(default=""),
+    root: str = Query(default="raw"),
+):
+    from backend.core import duckdb as _db
+
+    prefix = prefix.strip("/")
+    base_prefix = source.get("prefix", "").strip().rstrip("/")
+    if base_prefix:
+        target_prefix = f"{base_prefix}/{root}/{prefix}" if prefix else f"{base_prefix}/{root}/"
+    else:
+        target_prefix = f"{root}/{prefix}" if prefix else f"{root}/"
+
+    if not target_prefix.endswith("/"):
+        target_prefix += "/"
+
+    def zip_worker(q: queue.Queue):
+        # Independent call-tracking scope: we run on a thread after the API
+        # middleware has already flushed, so we own a fresh _CALLS list and
+        # flush it ourselves when done. process_context_scope (not
+        # set_process_context) so the fsspec iothread fallback isn't wiped
+        # out by a concurrent scope exit on another thread.
+        from backend.utils.telemetry import (
+            process_context_scope as _pcs,
+        )
+        from backend.utils.telemetry import (
+            start_call_tracking as _sct,
+        )
+        from backend.utils.usage_logger import flush_usage_log as _flush
+
+        _sct()
+        with _pcs(f"api:GET /admin/download-zip:{root}"):
+            try:
+                with zipfile.ZipFile(_QueueFile(q), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    cdn = source.get("cdn_url", "").rstrip("/")
+                    fos_client = _db._get_fos_client(source)
+                    paginator = fos_client.get_paginator("list_objects_v2", caller_hint="download_zip")
+                    pages = paginator.paginate(Bucket=source["bucket"], Prefix=target_prefix)
+
+                    for page in pages:
+                        if "Contents" not in page:
+                            continue
+                        for obj in page["Contents"]:
+                            key = obj["Key"]
+                            if key.endswith("/"):  # Skip directory markers
+                                continue
+
+                            top_folder = os.path.basename(prefix) if prefix else root
+                            rel_path = key[len(target_prefix) :]
+                            arcname = f"{top_folder}/{rel_path}" if rel_path else os.path.basename(key)
+
+                            _fetch_file_to_zip(source, fos_client, cdn, key, arcname, zf, "download_zip")
+            except Exception as e:
+                print(f"Error in ZIP generation: {e}")
+            finally:
+                try:
+                    _flush(source.get("name", ""))
+                except Exception:
+                    pass
+                q.put(None)
+
+    safe_name = prefix.replace("/", "_") or root
+    headers = {
+        "Content-Disposition": f'attachment; filename="{safe_name}.zip"',
+    }
+
+    return StreamingResponse(_stream_from_worker(zip_worker), media_type="application/zip", headers=headers)
+
+
+@router.get("/admin/raw-tree", response_model=TreeResponse)
+def raw_tree_endpoint(
+    source: dict = Depends(get_source),
+    prefix: str = Query(default=""),
+):
+    from backend.core.duckdb import get_raw_tree_node
+
+    result = get_raw_tree_node(source, prefix, root="raw")
+    return TreeResponse.with_telemetry(nodes=result.get("children", []))
+
+
+@router.get("/admin/iceberg-tree", response_model=TreeResponse)
+def iceberg_tree_endpoint(
+    source: dict = Depends(get_source),
+    prefix: str = Query(default=""),
+):
+    from backend.core.duckdb import get_raw_tree_node
+
+    result = get_raw_tree_node(source, prefix, root="iceberg")
+    return TreeResponse.with_telemetry(nodes=result.get("children", []))
+
+
+@router.get("/download")
+@query_errors(status_code=500)
+def download_file(
+    source: dict = Depends(get_source),
+    key: str = Query(default=""),
+):
+    import urllib.parse
+
+    from fastapi.responses import FileResponse
+
+    from backend.core.duckdb import _cache_dir, _get_fos_client
+
+    if not key:
+        raise HTTPException(status_code=400, detail={"error": "Missing key parameter"})
+
+    local_path = os.path.abspath(os.path.join(_cache_dir(source), key))
+    if os.path.exists(local_path):
+        return FileResponse(local_path, filename=os.path.basename(local_path))
+
+    # Record the user-initiated download as a synthetic CDN/FOS GET. The
+    # actual transfer happens browser→edge so we never see the response, but
+    # we know we *issued* one billable redirect — count it.
+    from backend.utils.telemetry import record_call as _record_call
+
+    cdn = source.get("cdn_url", "").rstrip("/")
+    if cdn:
+        url = f"{cdn}/{urllib.parse.quote(key)}"
+        if source.get("cdn_secret"):
+            url += f"?key={urllib.parse.quote(source['cdn_secret'])}"
+        _record_call(
+            "GET",
+            key,
+            0.0,
+            status="REDIRECT",
+            service="CDN",
+            details="user-initiated redirect (bytes unknown)",
+            caller="api:/download",
+        )
+        return RedirectResponse(url=url)
+
+    fos_client = _get_fos_client(source)
+    url = fos_client.generate_presigned_url(
+        ClientMethod="get_object",
+        Params={"Bucket": source["bucket"], "Key": key},
+        ExpiresIn=3600,
+    )
+    _record_call(
+        "GET_OBJECT",
+        f"{source['bucket']}/{key}",
+        0.0,
+        status="REDIRECT",
+        service="FOS",
+        details="presigned URL · Class B · bytes unknown",
+        caller="api:/download",
+    )
+    return RedirectResponse(url=url)
+
+
+@router.get("/download-all")
+def download_all_files(
+    service_id: str = Query(default=""),
+    include: str = Query(default="all"),
+):
+
+    from backend.core import duckdb as _db
+
+    if not service_id:
+        raise HTTPException(status_code=400, detail={"error": "service_id required"})
+
+    src = _db.get_source_for_service(service_id)
+    if not src:
+        raise HTTPException(status_code=404, detail={"error": "service not found"})
+
+    def zip_worker(q: queue.Queue):
+        # process_context_scope (not set_process_context) so the fsspec
+        # iothread fallback isn't wiped out by a concurrent scope exit
+        # on another thread — see _initialize_service for context.
+        from backend.utils.telemetry import (
+            process_context_scope as _pcs,
+        )
+        from backend.utils.telemetry import (
+            start_call_tracking as _sct,
+        )
+        from backend.utils.usage_logger import flush_usage_log as _flush
+
+        _sct()
+        with _pcs(f"api:GET /download-all:{include}"):
+            try:
+                with zipfile.ZipFile(_QueueFile(q), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    if include == "local":
+                        db_path = src.get("duckdb_path")
+                        if not db_path:
+                            from backend import config as svcconfig
+
+                            db_path = svcconfig.duckdb_path(service_id)
+                        if db_path and os.path.exists(db_path):
+                            zf.write(db_path, os.path.basename(db_path))
+
+                        cache_dir = _db._cache_dir(src)
+                        if os.path.exists(cache_dir):
+                            for root, _, files in os.walk(cache_dir):
+                                for file in files:
+                                    file_path = os.path.join(root, file)
+                                    arcname = os.path.relpath(file_path, cache_dir)
+                                    zf.write(file_path, arcname)
+                    else:
+                        cdn = src.get("cdn_url", "").rstrip("/")
+                        fos_client = _db._get_fos_client(src)
+                        paginator = fos_client.get_paginator("list_objects_v2", caller_hint="download_all")
+                        pages = paginator.paginate(Bucket=src["bucket"])
+
+                        for page in pages:
+                            if "Contents" not in page:
+                                continue
+                            for obj in page["Contents"]:
+                                key = obj["Key"]
+                                _fetch_file_to_zip(src, fos_client, cdn, key, key, zf, "download_all")
+            except Exception as e:
+                print(f"Error in ZIP generation: {e}")
+            finally:
+                try:
+                    _flush(service_id)
+                except Exception:
+                    pass
+                q.put(None)
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="fastly_logs_{service_id}.zip"',
+    }
+
+    return StreamingResponse(_stream_from_worker(zip_worker), media_type="application/zip", headers=headers)
+
+
+def _get_dir_size(path: str) -> int:
+    total = 0
+    if not os.path.exists(path):
+        return 0
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                if entry.is_file():
+                    total += entry.stat().st_size
+                elif entry.is_dir():
+                    total += _get_dir_size(entry.path)
+    except Exception:
+        pass
+    return total
+
+
+# Moved out of /admin/ so analysts can also see sync status / time bounds
+# for their scoped service. The endpoint returns per-service timestamps and
+# row counts — no admin-specific info. Service-scope is still enforced by
+# RemoteAccessMiddleware via the x-service-id check on the request.
+@router.get("/sync-status", response_model=SyncStatusResponse)
+def sync_status(
+    service_id: str | None = Depends(get_service_id),
+    skip_fos: bool = Query(default=False),
+    force: bool = Query(default=False),
+):
+    from backend import config as svcconfig
+    from backend.core import duckdb as _db
+    from backend.core.duckdb import get_sync_status
+    from backend.utils.telemetry import clear_queries
+
+    clear_queries()
+
+    src: dict | None = None
+    if service_id:
+        src = _db.get_source_for_service(service_id)
+    if not src:
+        return SyncStatusResponse.with_telemetry(configured=False)
+
+    try:
+        from backend.core.duckdb import get_connection
+
+        _con = get_connection(source=src, max_wait=5, skip_view_update=True)
+        try:
+            status = get_sync_status(_con, src, skip_fos=skip_fos, force=force)
+        finally:
+            _con.close()
+
+        db_path = src.get("duckdb_path") or svcconfig.duckdb_path(service_id)
+        db_exists = os.path.exists(db_path)
+        db_size = os.path.getsize(db_path) if db_exists else 0
+
+        cache_size = _get_dir_size(_db._cache_dir(src))
+
+        status["duckdb_size_bytes"] = db_size + cache_size
+        status["duckdb_exists"] = db_exists
+
+        from backend.cron_progress import get_latest_progress_for_service
+
+        active_run = get_latest_progress_for_service(service_id)
+        if active_run:
+            status["active_run"] = active_run
+            status["busy"] = True
+
+        cfg = svcconfig.load_config(service_id) or {}
+        status["ngwaf_workspace_id"] = cfg.get("ngwaf_workspace_id")
+
+        return SyncStatusResponse.with_telemetry(**status)
+    except _db.DBBusyError as e:
+        raise HTTPException(status_code=503, detail={"error": str(e), "busy": True})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.get("/admin/ingested-files", response_model=IngestedFilesResponse)
+@query_errors(status_code=500)
+def ingested_files(source: dict = Depends(get_source)):
+    from backend.core.duckdb import get_ingested_files
+
+    res = get_ingested_files(None, source)
+    return IngestedFilesResponse.with_telemetry(files=res)
+
+
+@router.post("/admin/optimize-now")
+def optimize_now(
+    source: dict = Depends(get_source),
+    min_files: int | None = Query(
+        default=None, description="Override auto-derived threshold. Pass 1 for max-aggressive cleanup."
+    ),
+):
+    """Trigger an immediate Iceberg table optimize (compaction) pass.
+    Bypasses the nightly cron schedule for ad-hoc cleanup. Returns the
+    optimize_table result dict (files_rewritten / files_added / etc).
+    Writes through to FOS — use ``/admin/local-compact-now`` for the
+    free local-only equivalent.
+    """
+    from backend.core import iceberg as _ice
+
+    return _ice.optimize_table(source, min_files_per_partition=min_files)
+
+
+@router.post("/admin/local-compact-now")
+def local_compact_now(
+    source: dict = Depends(get_source),
+    min_files: int = Query(default=3, ge=1, description="Compact partitions with strictly more files than this."),
+    dry_run: bool = Query(default=False, description="Report what would happen without writing."),
+):
+    """Trigger an immediate local-only parquet compaction pass.
+
+    Does NOT touch FOS — only rewrites files inside the local cache, so
+    no 30-day-minimum billing penalty. Safe to call as often as needed.
+    The 2-minute cron does this automatically; this endpoint is for
+    ad-hoc cleanup.
+    """
+    from backend.core import local_compaction as _lc
+
+    return _lc.compact_local_partitions(source, min_files_per_partition=min_files, dry_run=dry_run)
+
+
+@router.get("/admin/compaction-stats")
+def compaction_stats(source: dict = Depends(get_source)):
+    """Snapshot of file-count distribution across local cache partitions.
+
+    Useful for monitoring: rising partitions_above_3 means the local
+    compaction cron has stopped keeping up; rising avg_files_per_partition
+    correlates with slow dashboard scans.
+    """
+    from backend.core import local_compaction as _lc
+
+    return _lc.compaction_stats(source)
+
+
+@router.get("/admin/health-snapshot")
+def health_snapshot():
+    """One-shot health snapshot for the admin page system health card.
+
+    Returns CPU load averages, memory, disk usage of the data mount,
+    docker container CPU/memory (if reachable), and the count of
+    in-flight cron runs. Uses only stdlib (no psutil dep).
+    """
+    import shutil
+
+    out: dict = {}
+
+    # ── Load + uptime ─────────────────────────────────────────────────
+    try:
+        load1, load5, load15 = os.getloadavg()
+        out["load"] = {"avg_1m": round(load1, 2), "avg_5m": round(load5, 2), "avg_15m": round(load15, 2)}
+    except Exception:
+        out["load"] = None
+
+    # vCPU count to interpret load (load > vCPU = backlog).
+    try:
+        import multiprocessing as _mp
+
+        out["vcpus"] = _mp.cpu_count()
+    except Exception:
+        out["vcpus"] = None
+
+    # ── Memory (Linux /proc/meminfo) ─────────────────────────────────
+    try:
+        meminfo: dict[str, int] = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, _, rest = line.partition(":")
+                v = rest.strip().split()
+                if v and v[0].isdigit():
+                    meminfo[k.strip()] = int(v[0]) * 1024  # kB → bytes
+        total = meminfo.get("MemTotal", 0)
+        avail = meminfo.get("MemAvailable", 0)
+        out["memory"] = {
+            "total_mb": round(total / 1024 / 1024),
+            "available_mb": round(avail / 1024 / 1024),
+            "used_pct": round((1 - avail / total) * 100, 1) if total else None,
+        }
+    except Exception:
+        out["memory"] = None
+
+    # ── Data-mount disk usage ────────────────────────────────────────
+    for path, label in (("/app/data", "data_mount"), ("/", "root_disk")):
+        try:
+            d = shutil.disk_usage(path)
+            out[label] = {
+                "total_gb": round(d.total / 1024 / 1024 / 1024, 1),
+                "used_gb": round(d.used / 1024 / 1024 / 1024, 1),
+                "free_gb": round(d.free / 1024 / 1024 / 1024, 1),
+                "used_pct": round(d.used / d.total * 100, 1) if d.total else None,
+            }
+        except Exception:
+            out[label] = None
+
+    # ── In-flight cron runs ──────────────────────────────────────────
+    try:
+        from backend.cron_progress import _run_metadata
+
+        in_flight = []
+        for run_id, meta in list(_run_metadata.items()):
+            in_flight.append(
+                {
+                    "run_id": run_id,
+                    "service_id": meta.get("service_id"),
+                    "task": meta.get("task"),
+                    "started_at": meta.get("started_at"),
+                }
+            )
+        out["in_flight_runs"] = in_flight
+    except Exception:
+        out["in_flight_runs"] = []
+
+    # ── Per-service compaction stats ─────────────────────────────────
+    try:
+        from backend import config as _svcconfig
+        from backend.core import local_compaction as _lc
+
+        stats_by_svc: dict = {}
+        for cfg in _svcconfig.list_configs():
+            sid = cfg.get("service_id") or cfg.get("name")
+            try:
+                src = _svcconfig.config_to_source(cfg)
+                stats_by_svc[sid] = _lc.compaction_stats(src)
+            except Exception:
+                stats_by_svc[sid] = None
+        out["compaction"] = stats_by_svc
+    except Exception:
+        out["compaction"] = {}
+
+    return out
+
+
+@router.post("/admin/backfill-window")
+def backfill_window(
+    start_time: str = Query(..., description="ISO 8601 UTC start, e.g. '2026-05-31T23:00:00Z'"),
+    end_time: str = Query(..., description="ISO 8601 UTC end, e.g. '2026-06-01T01:00:00Z'"),
+    source: dict = Depends(get_source),
+):
+    """Force-sync a specific time window from FOS into local cache.
+
+    Use to fill gaps left by ingestion outages (the normal cron pulls
+    'since last sync' and won't reach back past its pointer once recovered).
+    Idempotent — files already present in the local cache are skipped.
+    """
+    from backend.core import iceberg as _ice
+
+    return _ice.sync_data(source, start_time=start_time, end_time=end_time)
+
+
+from backend.core.fastly.utils import FASTLY_LOG_FIELDS as _FASTLY_LOG_FIELDS
+
+
+def _fetch_fastly_log_counts(
+    logging_svc_id: str, api_key: str, from_ts: int, to_ts: int, by: str
+) -> tuple[dict[str, int], str | None]:
+    """Return (bucket_iso → log_count, field_name_used or None).
+
+    Bucket key is the UTC ISO string at the same width the local SQL bucket
+    uses (`YYYY-MM-DDTHH` for hour, `YYYY-MM-DD` for day) so the outer-join
+    in api_log_accounting can key on string equality directly.
+    """
+    import json
+    import logging
+    import urllib.request
+    from datetime import UTC, datetime
+
+    url = f"https://api.fastly.com/stats/service/{logging_svc_id}?by={by}&from={from_ts}&to={to_ts}"
+    req = urllib.request.Request(url, headers={"Fastly-Key": api_key, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read().decode())
+
+    width = 13 if by == "hour" else 10
+    records = payload.get("data", []) or []
+    out: dict[str, int] = {}
+    field_used: str | None = None
+    missing_logged = False
+    for r in records:
+        ts = r.get("start_time")
+        if ts is None:
+            continue
+        bucket = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")[:width]
+        chosen = 0
+        for fname in _FASTLY_LOG_FIELDS:
+            v = r.get(fname)
+            if v:
+                chosen = int(v)
+                field_used = fname
+                break
+        if chosen == 0 and field_used is None and not missing_logged:
+            logging.getLogger("admin.log_accounting").warning(
+                "Fastly /stats/service response has no log-count field; keys present=%s",
+                sorted(r.keys()),
+            )
+            missing_logged = True
+        out[bucket] = out.get(bucket, 0) + chosen
+    return out, field_used
+
+
+# Sustained-loss thresholds — referenced by both api_log_accounting (so the
+# UI callout matches the heal trigger) and the gap-heal cron in scheduler.py.
+LOG_ACCOUNTING_LOSS_THRESHOLD = 0.05
+LOG_ACCOUNTING_MIN_RUN = 2
+
+
+def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> dict:
+    """Pure compute path for log-line accounting.
+
+    Returns a dict with all the fields api_log_accounting surfaces:
+    ``buckets``, ``totals``, ``sustained_loss``, ``fastly_field_used``,
+    ``from_ts``, ``to_ts``. Raises HTTPException on configuration error
+    (no logging_service_id / no api_key) or on Fastly Stats API failure.
+
+    Extracted so the gap-heal cron can reuse the same Fastly fetch + SQL +
+    sustained-loss detection without duplicating the math — drift between
+    the two would mean the heal trigger and the UI callout disagree.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from backend import config as svcconfig
+    from backend.core import metadata_db
+
+    service_id = source.get("name", "")
+    logging_svc_id = source.get("logging_service_id") or svcconfig.get_fastly_logging_service_id(service_id)
+    if not logging_svc_id:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "no logging_service_id configured for this service"},
+        )
+    api_key = svcconfig.get_fastly_api_key(service_id)
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "no fastly_api_key configured for this service"},
+        )
+
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    if by == "day":
+        now = now.replace(hour=0)
+    start = now - timedelta(hours=hours)
+    from_ts = int(start.timestamp())
+    to_ts = int((now + timedelta(hours=1 if by == "hour" else 24)).timestamp())
+
+    try:
+        fastly_counts, field_used = _fetch_fastly_log_counts(logging_svc_id, api_key, from_ts, to_ts, by)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"error": f"Fastly Stats API call failed: {e}"})
+
+    width = 13 if by == "hour" else 10
+    start_iso = start.strftime("%Y-%m-%dT%H:%M:%S")
+    # Upper bound spans the END of the current (in-flight) bucket so newly
+    # ingested files in that bucket are included — same span as the Fastly
+    # request. Without this, an hour-aligned clamp drops every file ingested
+    # after :00 and the latest bucket shows our_rows=0.
+    end_clamp = now + timedelta(hours=1 if by == "hour" else 24)
+    end_iso = end_clamp.strftime("%Y-%m-%dT%H:%M:%S")
+    # We bucket by emission time (from the filename) but the SQL window is on
+    # ingested_at, so widen it ±2h to catch files emitted near the window
+    # boundary but ingested outside it. Python-side filter trims to the
+    # requested emission window afterwards.
+    sql_window_pad = timedelta(hours=2)
+    sql_start_iso = (start - sql_window_pad).strftime("%Y-%m-%dT%H:%M:%S")
+    sql_end_iso = (end_clamp + sql_window_pad).strftime("%Y-%m-%dT%H:%M:%S")
+    # ingested_at is stored with a space separator (datetime('now')) while
+    # start/end are ISO-T strings, so a raw string comparison silently
+    # filters out everything — wrap both sides with datetime() to compare
+    # as actual timestamps. See memory: usage_log timestamp formats.
+    # Bucket by emission time parsed from the filename (falls back to
+    # ingested_at for legacy/test files without an ISO prefix).
+    start_bucket = start_iso[:width]
+    end_bucket = end_iso[:width]
+    local_counts = metadata_db.get_log_accounting_counts(
+        service_id, sql_start_iso, sql_end_iso, width, start_bucket, end_bucket
+    )
+
+    all_buckets = sorted(set(fastly_counts.keys()) | set(local_counts.keys()))
+    buckets: list[LogAccountingBucket] = []
+    total_fastly = 0
+    total_ours = 0
+    worst_ts: str | None = None
+    worst_gap_pct: float | None = None
+    for b in all_buckets:
+        fastly = int(fastly_counts.get(b, 0))
+        ours, fcount = local_counts.get(b, (0, 0))
+        gap = fastly - ours
+        denom = fastly if fastly > 0 else ours
+        gap_pct = (gap / denom) if denom > 0 else 0.0
+        ts_iso = f"{b}:00:00Z" if by == "hour" else f"{b}T00:00:00Z"
+        buckets.append(
+            LogAccountingBucket(
+                ts=ts_iso,
+                fastly_logs=fastly,
+                our_rows=ours,
+                file_count=fcount,
+                gap=gap,
+                gap_pct=round(gap_pct, 6),
+            )
+        )
+        total_fastly += fastly
+        total_ours += ours
+        # Rank by positive gap only — negative gaps are bucket-edge drift
+        # where one side's emission/ingest straddled the boundary. The user
+        # cares about "Fastly emitted more than we ingested" (real loss),
+        # not "we ingested more than Fastly reports yet" (timing artifact).
+        if gap_pct > (worst_gap_pct or 0.0):
+            worst_ts = ts_iso
+            worst_gap_pct = gap_pct
+
+    total_gap = total_fastly - total_ours
+    total_denom = total_fastly if total_fastly > 0 else total_ours
+    total_pct = round((total_gap / total_denom), 6) if total_denom > 0 else 0.0
+    totals = LogAccountingTotals(
+        fastly_logs=total_fastly,
+        our_rows=total_ours,
+        gap=total_gap,
+        gap_pct=total_pct,
+        worst_bucket_ts=worst_ts,
+        worst_bucket_gap_pct=(round(worst_gap_pct, 6) if worst_gap_pct is not None else None),
+    )
+
+    # Sustained-loss detection: only flag runs of ≥MIN_RUN consecutive completed
+    # buckets with one-sided positive gap ≥LOSS_THRESHOLD (Fastly emitted more
+    # than we ingested). Bucket-edge drift is bidirectional and stays under
+    # 2.5%; the in-flight bucket is noisy because Fastly Stats lags our ingest,
+    # so we exclude it from the scan. Returns the longest qualifying run.
+    in_flight_bucket = now.strftime("%Y-%m-%dT%H") if by == "hour" else now.strftime("%Y-%m-%d")
+    in_flight_ts = f"{in_flight_bucket}:00:00Z" if by == "hour" else f"{in_flight_bucket}T00:00:00Z"
+    completed = [b for b in buckets if b.ts != in_flight_ts]
+    sustained: SustainedLossAlert | None = None
+    run_start = None
+    for i, b in enumerate(completed + [None]):
+        is_loss = b is not None and b.gap_pct >= LOG_ACCOUNTING_LOSS_THRESHOLD
+        if is_loss and run_start is None:
+            run_start = i
+        elif not is_loss and run_start is not None:
+            run = completed[run_start:i]
+            if len(run) >= LOG_ACCOUNTING_MIN_RUN and (sustained is None or len(run) > sustained.n_buckets):
+                sustained = SustainedLossAlert(
+                    started_at=run[0].ts,
+                    n_buckets=len(run),
+                    max_gap_pct=round(max(rb.gap_pct for rb in run), 6),
+                    total_lost_lines=sum(rb.gap for rb in run if rb.gap > 0),
+                )
+            run_start = None
+
+    # Catch-up indicator: derived from the most recent successful ingest
+    # (max(ingested_at) on ingested_files). Lag = now - that. The status
+    # thresholds match the Fastly delivery promise — typical drop interval
+    # is 60s, so >300s lag means we're at least 5 cycles behind. Stalled
+    # means >1h (the operator should look at it).
+    con = metadata_db.get_con(service_id)
+    catchup_row = con.execute(
+        """
+        SELECT max(datetime(ingested_at)) AS latest
+        FROM ingested_files
+        WHERE source_name = ? AND file_name != '__seeding_attempted__'
+        """,
+        (service_id,),
+    ).fetchone()
+    catchup: dict | None
+    if catchup_row and catchup_row["latest"]:
+        latest_dt = datetime.fromisoformat(catchup_row["latest"].replace(" ", "T")).replace(tzinfo=UTC)
+        lag_seconds = max(0, int((datetime.now(UTC) - latest_dt).total_seconds()))
+        if lag_seconds <= 300:
+            status_str = "caught_up"
+        elif lag_seconds <= 3600:
+            status_str = "backfilling"
+        else:
+            status_str = "stalled"
+        catchup = {
+            "latest_ingest_ts": latest_dt.isoformat().replace("+00:00", "Z"),
+            "lag_seconds": lag_seconds,
+            "status": status_str,
+        }
+    else:
+        catchup = {"latest_ingest_ts": None, "lag_seconds": None, "status": "no_data"}
+
+    return {
+        "by": by,
+        "from_ts": start_iso + "Z",
+        "to_ts": end_iso + "Z",
+        "fastly_field_used": field_used,
+        "buckets": buckets,
+        "totals": totals,
+        "sustained_loss": sustained,
+        "catchup": catchup,
+    }
+
+
+@router.get("/admin/log-accounting", response_model=LogAccountingResponse)
+def api_log_accounting(
+    source: dict = Depends(get_source),
+    hours: int = Query(24, ge=1, le=720),
+    by: str = Query("hour", pattern="^(hour|day)$"),
+) -> LogAccountingResponse:
+    """Reconcile Fastly's authoritative log-line emission count against our
+    locally-ingested row counts to surface any gap between emission and ingest.
+
+    Per-bucket gap is the actionable signal — totals smooth over burst losses.
+    """
+    result = compute_log_accounting(source, hours=hours, by=by)
+    return LogAccountingResponse.with_telemetry(**result)
+
+
+@router.get("/admin/iceberg-info", response_model=IcebergTableInfoResponse)
+@query_errors(status_code=500)
+def iceberg_info_endpoint(source: dict = Depends(get_source)):
+    """Return Iceberg table metadata: snapshots, data files, size, buffer status."""
+    from backend.core import iceberg as db_iceberg
+
+    result = db_iceberg.get_table_info(source)
+    return IcebergTableInfoResponse.with_telemetry(**result)
+
+
+@router.get("/admin/iceberg-calendar")
+@query_errors(status_code=500)
+def iceberg_calendar_endpoint(source: dict = Depends(get_source)):
+    """Return per-date data file counts from Iceberg partition metadata."""
+    from backend.core import iceberg as db_iceberg
+    from backend.utils.telemetry import get_tracked_calls
+
+    result = db_iceberg.get_snapshot_calendar(source)
+    return {**result, "_debug_calls": get_tracked_calls()}
+
+
+@router.post("/admin/commit-iceberg")
+def iceberg_commit_endpoint(source: dict = Depends(get_source)):
+    """Manually flush the local buffer to the Iceberg table."""
+    import threading
+
+    from backend.core.duckdb import start_cron_run
+    from backend.scheduler import _run_commit
+
+    try:
+        run_id = start_cron_run(source, "commit")
+        from backend.cron_progress import start_progress
+
+        start_progress(run_id, service_id=source["name"], task="commit")
+        t = threading.Thread(
+            target=_run_commit, args=(source["name"],), kwargs={"force": True, "run_id": run_id}, daemon=True
+        )
+        t.start()
+        return {"ok": True, "message": "Commit started.", "run_id": run_id}
+
+    except RuntimeError as e:
+        from backend.cron_progress import _run_metadata
+
+        run_id = None
+        for rid, meta in _run_metadata.items():
+            if meta.get("service_id") == source["name"] and meta.get("task") == "commit":
+                run_id = rid
+                break
+        if run_id is None:
+            raise HTTPException(status_code=503, detail={"error": str(e), "busy": True})
+        return {"ok": True, "message": "Commit already running.", "run_id": run_id}
+
+
+@router.post("/admin/rebuild-local-view")
+def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
+    """One-button "fix it" for a stuck or stale local DuckDB view.
+
+    Clears the in-memory + on-disk caches that drive view SQL generation,
+    then triggers a metadata_sync that re-pulls the catalog from the cloud
+    and rebuilds the view. The local raw buffer is NOT touched —
+    un-committed data is safe.
+
+    When to use: after manually editing parquet files, after a catalog
+    schema-mapping desync, or when "Sync All" already ran and the view
+    still looks wrong. This is the nuclear-option version of refresh.
+    """
+    import threading
+
+    from backend.core import iceberg as db_iceberg
+    from backend.core.duckdb import _cache_dir, start_cron_run
+    from backend.cron_progress import start_progress
+    from backend.scheduler import _run_metadata_sync
+
+    service_id = source["name"]
+
+    db_iceberg.clear_source_caches(service_id)
+    # The persistent cache file lives at cache/{bucket}/snapshot_files_cache.json
+    # — deleting it forces sync_data to call tbl.scan().plan_files() against
+    # the freshly-loaded catalog instead of trusting the previous snapshot's
+    # cached file list.
+    persistent_cache = os.path.join(_cache_dir(source), "snapshot_files_cache.json")
+    if os.path.exists(persistent_cache):
+        try:
+            os.remove(persistent_cache)
+        except OSError as e:
+            raise HTTPException(status_code=500, detail={"error": f"failed to remove snapshot cache: {e}"}) from e
+
+    try:
+        run_id = start_cron_run(source, "metadata_sync")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail={"error": str(e), "busy": True}) from e
+
+    start_progress(run_id, service_id=service_id, task="metadata_sync")
+    t = threading.Thread(target=_run_metadata_sync, args=(service_id,), kwargs={"run_id": run_id}, daemon=True)
+    t.start()
+    return {"ok": True, "message": "Local view rebuild started.", "run_id": run_id}
+
+
+@router.get("/admin/bot-sources", response_model=BotSourcesResponse)
+def get_bot_sources_endpoint():
+    """Return metadata for all bot sources plus rDNS cache stats."""
+    from backend.utils.bot_sources import get_all_sources_meta
+    from backend.utils.rdns_cache import get_stats as rdns_stats
+
+    return BotSourcesResponse.with_telemetry(sources=get_all_sources_meta(), rdns=rdns_stats())
+
+
+@router.post("/admin/bot-sources/{source_id}/refresh")
+def refresh_bot_source_endpoint(source_id: str):
+    """Fetch and re-cache a single bot source."""
+    from backend.utils.bot_sources import fetch_and_cache_source
+
+    try:
+        meta = fetch_and_cache_source(source_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch bot source: {e}")
+    return {"ok": True, "source": meta}
+
+
+@router.get("/admin/usage-logging")
+def get_usage_logging_settings():
+    """Return the usage logging config (global defaults)."""
+    from backend import config as svcconfig
+
+    return svcconfig.load_usage_logging_config()
+
+
+@router.post("/admin/usage-logging")
+@router.patch("/admin/usage-logging")
+def update_usage_logging_settings(body: dict):
+    """Update the global usage logging config."""
+    from backend import config as svcconfig
+
+    allowed = [
+        "enabled",
+        "retention_days",
+        "class_a_rate_per_1k",
+        "class_b_rate_per_10k",
+        "cdn_egress_rate_per_gb",
+        "storage_rate_per_gb_month",
+        "min_billed_days",
+    ]
+    updates = {k: body[k] for k in allowed if k in body}
+
+    current = svcconfig.load_usage_logging_config()
+    current.update(updates)
+    svcconfig.save_usage_logging_config(current)
+    return current
+
+
+@router.get("/admin/usage-log", response_model=UsageLogResponse)
+def usage_log_endpoint(
+    source: dict = Depends(get_source),
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    usage_type: str = Query(default=""),
+    process_context: str = Query(default=""),
+    operation_type: str = Query(default=""),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=1000),
+):
+    """Return paginated _usage_log entries with aggregates for cost analysis from metadata_db (SQLite)."""
+    from backend import config as svcconfig
+    from backend.core import metadata_db
+    from backend.utils.date_utils import parse_date_window
+
+    ul_cfg = svcconfig.load_usage_logging_config()
+    rate_a = float(ul_cfg.get("class_a_rate_per_1k", 0.005))
+    rate_b = float(ul_cfg.get("class_b_rate_per_10k", 0.01))
+    rate_cdn = float(ul_cfg.get("cdn_egress_rate_per_gb", 0.12))
+
+    start_str, end_str = parse_date_window(start, end)
+    service_id = source.get("name") or source.get("service_id", "")
+
+    rows, total, agg_data = metadata_db.get_usage_logs(
+        service_id=service_id,
+        start=start_str,
+        end=end_str,
+        usage_type=usage_type,
+        process_context=process_context,
+        operation_type=operation_type,
+        page=page,
+        page_size=page_size,
+    )
+
+    total_a = agg_data["total_class_a"]
+    total_b = agg_data["total_class_b"]
+    total_cdn = agg_data["total_cdn_downloads"]
+    cdn_bytes = agg_data["total_cdn_bytes"]
+    fos_bytes = agg_data["total_fos_bytes"]
+
+    cost_a = (total_a / 1000) * rate_a
+    cost_b = (total_b / 10000) * rate_b
+    cost_cdn = (cdn_bytes / (1024**3)) * rate_cdn
+
+    entries = []
+    for r in rows:
+        op_class = r["operation_class"]
+        # `count` is 1 for observed proxy rows and N for reconciliation rows
+        # written by fastly.reconciliation (one compact row per (hour, class)
+        # gap vs Fastly's /stats/aggregate). The displayed estimated_cost has
+        # to scale with N so the per-row cost matches the aggregate totals.
+        op_count = int(r["count"] or 1) if "count" in r.keys() else 1
+        b = r["bytes"]
+        if op_class == "A":
+            ec = (op_count / 1000) * rate_a
+        elif op_class == "B":
+            ec = (op_count / 10000) * rate_b
+        elif op_class == "CDN":
+            ec = ((b or 0) / (1024**3)) * rate_cdn
+        else:
+            ec = None
+
+        entries.append(
+            UsageLogEntry(
+                id=r.get("id"),
+                timestamp=str(r["timestamp"]),
+                service_id=r["service_id"],
+                operation_class=r["operation_class"],
+                operation_type=r["operation_type"],
+                url=r["url"],
+                bytes=r["bytes"],
+                duration_ms=r["duration_ms"],
+                function_name=r["function_name"],
+                process_context=r["process_context"],
+                status=r["status"],
+                estimated_cost=round(ec, 8) if ec is not None else None,
+                count=op_count,
+            )
+        )
+
+    aggregate = UsageLogAggregate(
+        total_class_a=total_a,
+        total_class_b=total_b,
+        total_cdn_downloads=total_cdn,
+        total_cdn_bytes=cdn_bytes,
+        total_fos_bytes=fos_bytes,
+        estimated_cost_class_a=round(cost_a, 6),
+        estimated_cost_class_b=round(cost_b, 6),
+        estimated_cost_cdn=round(cost_cdn, 6),
+        estimated_cost_total=round(cost_a + cost_b + cost_cdn, 6),
+        class_a_breakdown=agg_data["class_a_breakdown"],
+        class_b_breakdown=agg_data["class_b_breakdown"],
+    )
+
+    return UsageLogResponse.with_telemetry(entries=entries, total=total, aggregate=aggregate)
+
+
+@router.get("/admin/usage-log/export")
+def usage_log_export(
+    source: dict = Depends(get_source),
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    usage_type: str = Query(default=""),
+    process_context: str = Query(default=""),
+    operation_type: str = Query(default=""),
+):
+    """Export _usage_log as CSV from metadata_db (SQLite)."""
+    import csv
+    import io
+
+    from fastapi.responses import StreamingResponse as _StreamingResponse
+
+    from backend.core import metadata_db
+    from backend.utils.date_utils import parse_date_window
+
+    start_str, end_str = parse_date_window(start, end)
+    service_id = source.get("name") or source.get("service_id", "")
+
+    rows, _, _ = metadata_db.get_usage_logs(
+        service_id=service_id,
+        start=start_str,
+        end=end_str,
+        usage_type=usage_type,
+        process_context=process_context,
+        operation_type=operation_type,
+        page=1,
+        page_size=100000,
+    )
+
+    def generate():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(
+            [
+                "timestamp",
+                "service_id",
+                "operation_class",
+                "operation_type",
+                "url",
+                "bytes",
+                "duration_ms",
+                "function_name",
+                "process_context",
+                "status",
+                "count",
+            ]
+        )
+        # Flush the header before iterating rows so an empty result-set
+        # still produces a valid header-only CSV (rather than an empty body).
+        buf.seek(0)
+        yield buf.read()
+        buf.seek(0)
+        buf.truncate(0)
+        for row in rows:
+            writer.writerow(
+                [
+                    row["timestamp"],
+                    row["service_id"],
+                    row["operation_class"],
+                    row["operation_type"],
+                    row["url"],
+                    row["bytes"],
+                    row["duration_ms"],
+                    row["function_name"],
+                    row["process_context"],
+                    row["status"],
+                    row["count"] if "count" in row.keys() else 1,
+                ]
+            )
+            buf.seek(0)
+            yield buf.read()
+            buf.seek(0)
+            buf.truncate(0)
+
+    headers = {"Content-Disposition": "attachment; filename=usage_log.csv"}
+    return _StreamingResponse(generate(), media_type="text/csv", headers=headers)
+
+
+@router.delete("/admin/usage-log")
+def purge_usage_log_endpoint(source: dict = Depends(get_source)):
+    """Delete all _usage_log entries for this service from metadata_db (SQLite)."""
+    from backend.core import metadata_db
+
+    service_id = source.get("name") or source.get("service_id", "")
+    metadata_db.clear_usage_log(service_id)
+    return {"ok": True}
+
+
+@router.get("/admin/system-jobs", response_model=SystemJobsResponse)
+def get_system_jobs_endpoint():
+    """Return status and schedule info for global background jobs."""
+    from backend.scheduler import get_scheduler
+    from backend.utils.system_jobs import get_system_job_status
+
+    statuses = get_system_job_status()
+    result = []
+    job_labels = {
+        "bot_data_refresh": "Bot Data Refresh",
+        "rdns_enrichment": "rDNS Enrichment",
+        "share_audit_purge": "Share Audit Purge",
+    }
+    sched = get_scheduler()
+    for job_id, label in job_labels.items():
+        entry = {
+            "id": job_id,
+            "name": label,
+            "next_run_at": None,
+            **statuses.get(job_id, {"last_run_at": None, "status": None, "duration_s": None, "detail": ""}),
+        }
+        if sched is not None:
+            try:
+                job = sched.get_job(job_id)
+            except Exception:
+                job = None
+            # ``next_run_time`` is only set when the scheduler is running
+            # AND the job has a future fire time. After ``scheduler.shutdown()``
+            # (or when the job is paused) the attribute is absent or None,
+            # so use getattr() to fail-soft rather than 500 the admin panel.
+            next_run = getattr(job, "next_run_time", None) if job else None
+            if next_run:
+                entry["next_run_at"] = next_run.strftime("%Y-%m-%dT%H:%M:%SZ")
+        result.append(entry)
+
+    return SystemJobsResponse.with_telemetry(jobs=result)

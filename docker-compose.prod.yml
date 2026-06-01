@@ -1,0 +1,79 @@
+# Production overlay for GCE deployment behind Caddy.
+#
+# Usage on the VM:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Local dev is unaffected: `docker compose up -d` uses only the base file.
+#
+# Network model (hardened):
+#   All three services run on the host network. Backend and frontend bind to
+#   127.0.0.1 ONLY — nothing on the public interface, nothing reachable from
+#   neighboring tenants or scanners. Caddy listens on 0.0.0.0:80 (the only
+#   externally-facing socket) and proxies to 127.0.0.1:8000 (backend) and
+#   127.0.0.1:3000 (frontend) on the same network namespace.
+#
+#   Why all-loopback for app services:
+#     - Eliminates the "listening on 0.0.0.0" surface even if a firewall rule
+#       were ever misconfigured.
+#     - Backend's RemoteAccessMiddleware uses socket peer to distinguish admin
+#       (peer=127.0.0.1) from analyst (anything else). Caddy in host mode also
+#       hits backend on 127.0.0.1 — so backend can't distinguish admin from
+#       analyst-via-Caddy by peer alone. The DNS-rebinding gate (Host header
+#       check against registered public_endpoint) is what separates them now.
+#
+# Public exposure:
+#   Only port 80 is open on the VM's public interface, and the GCP firewall
+#   restricts it to Fastly's published origin IP ranges.
+
+services:
+  backend:
+    network_mode: host
+    ports: !reset []
+    networks: !reset null
+    # Override the default '--host 0.0.0.0' → bind to loopback only.
+    command: ["uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000"]
+    environment:
+      # Bump DuckDB memory from 4GB (base) to 8GB. The VM has 16GB, frontend +
+      # caddy + OS use ~3GB, leaving plenty of headroom. Helps sort spills and
+      # aggregation working sets on heavy dashboard queries.
+      - DUCKDB_MEMORY_LIMIT=8GB
+      # Hard-fail at startup if /app/data isn't a real mount point. Guards
+      # against the broken-fstab failure mode (data accidentally written to
+      # an ephemeral boot-disk stub). See _enforce_data_dir_mounted in main.py.
+      - STRICT_DATA_DIR_CHECK=1
+    volumes: !override
+      - /mnt/app-data/configs:/app/configs
+      - /mnt/app-data/data:/app/data
+      - /mnt/app-data/cache:/app/cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/health"]
+
+  frontend:
+    network_mode: host
+    ports: !reset []
+    networks: !reset null
+    environment:
+      # Bind Next.js standalone server to loopback only (overrides Dockerfile's
+      # HOSTNAME=0.0.0.0).
+      - HOSTNAME=127.0.0.1
+      - API_PROXY_URL=http://127.0.0.1:8000
+
+  caddy:
+    # Custom build with the caddy-ratelimit plugin (see caddy/Dockerfile).
+    build:
+      context: .
+      dockerfile: caddy/Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    ports: !reset []
+    networks: !reset []
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+
+volumes:
+  caddy_data:
+  caddy_config:

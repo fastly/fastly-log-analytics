@@ -1,0 +1,113 @@
+import { render, screen, act } from '@testing-library/react'
+import { expect, test, vi, beforeEach } from 'vitest'
+import { AppLayout } from '@/components/AppLayout'
+import { useServiceStore } from '@/stores/serviceStore'
+import { useBootstrap } from '@/hooks/useBootstrap'
+import React from 'react'
+
+// Mock next/navigation
+vi.mock('next/navigation', () => ({
+  usePathname: vi.fn(() => '/dashboard'),
+  useRouter: vi.fn(() => ({
+    replace: vi.fn(),
+    push: vi.fn(),
+  })),
+}))
+
+// Mock custom hooks
+vi.mock('@/hooks/useBootstrap', () => ({
+  useBootstrap: vi.fn(),
+}))
+
+vi.mock('@/hooks/useUrlServiceSync', () => ({
+  useUrlServiceSync: vi.fn(),
+}))
+
+// Mock components
+vi.mock('@/components/ServiceSwitcher/ServiceSwitcher', () => ({ ServiceSwitcher: () => <div>ServiceSwitcher</div> }))
+vi.mock('@/components/TimezoneSwitcher/TimezoneSwitcher', () => ({ TimezoneSwitcher: () => <div>TimezoneSwitcher</div> }))
+vi.mock('@/components/ThemeToggle/ThemeToggle', () => ({ ThemeToggle: () => <div>ThemeToggle</div> }))
+vi.mock('@/components/FilterBar/FilterBar', () => ({ FilterBar: () => <div>FilterBar</div> }))
+vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', () => ({ SyncStatusBadge: () => <div>SyncStatusBadge</div> }))
+vi.mock('@/components/DebugPanel', () => ({ DebugPanel: () => <div>DebugPanel</div> }))
+
+// ScrollArea (base-ui) sets up internal layout via ResizeObserver and
+// schedules a state update after mount; in jsdom that fires outside the
+// test's render and triggers a React 19 act() warning. Stub it to a bare
+// div — the navigation assertions don't care about scroll behaviour.
+vi.mock('@/components/ui/scroll-area', () => ({
+  ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+}))
+
+// Real store for the test
+beforeEach(() => {
+  vi.clearAllMocks()
+
+  vi.mocked(useBootstrap).mockReturnValue({
+    data: { services: [{ id: 'test-svc', name: 'Test Service' }] },
+    isSuccess: true,
+    isLoading: false,
+  } as any)
+
+  // Wrap in act() — the previous test's component may still have a live
+  // store subscription mid-cleanup, and React 19 warns when a subscriber
+  // is notified outside act().
+  act(() => {
+    useServiceStore.setState({
+      activeServiceId: 'test-svc',
+      services: [{ id: 'test-svc', name: 'Test Service', accessLevel: 'read_write' }],
+      isInitialized: true
+    })
+  })
+})
+
+test('renders AppLayout with standard navigation', () => {
+  render(<AppLayout><div>Content</div></AppLayout>)
+
+  expect(screen.getAllByText('Dashboard').length).toBeGreaterThan(0)
+  expect(screen.getByText('Usage & Cost')).toBeInTheDocument()
+})
+
+test('hides restricted items for analysts', () => {
+  // Wrap the store mutation in act() — subscribers (the live AppLayout
+  // component the next render mounts) are notified synchronously, and
+  // React 19 warns when that happens outside act().
+  act(() => {
+    useServiceStore.setState({
+      activeServiceId: 'analyst-svc',
+      services: [{ id: 'analyst-svc', name: 'Analyst Service', accessLevel: 'read_only' }],
+    })
+  })
+
+  render(<AppLayout><div>Content</div></AppLayout>)
+
+  expect(screen.getAllByText('Dashboard').length).toBeGreaterThan(0)
+  expect(screen.queryByText('Usage & Cost')).not.toBeInTheDocument()
+})
+
+test('renders analyst watermark when bootstrap reports remote analyst', () => {
+  vi.mocked(useBootstrap).mockReturnValue({
+    data: {
+      services: [{ id: 'test-svc', name: 'Test Service' }],
+      settings: {
+        is_remote_analyst: true,
+        analyst_email: 'jane@example.com',
+        analyst_name: 'Jane Doe',
+      },
+    },
+    isSuccess: true,
+    isLoading: false,
+  } as any)
+
+  render(<AppLayout><div>Content</div></AppLayout>)
+
+  const watermark = screen.getByTestId('analyst-watermark')
+  expect(watermark).toBeInTheDocument()
+  expect(watermark.getAttribute('data-analyst-email')).toBe('jane@example.com')
+  expect(watermark).toHaveTextContent('Jane Doe')
+})
+
+test('does not render watermark for non-analyst users', () => {
+  render(<AppLayout><div>Content</div></AppLayout>)
+  expect(screen.queryByTestId('analyst-watermark')).not.toBeInTheDocument()
+})

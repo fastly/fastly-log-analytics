@@ -1,0 +1,42 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.15.0
+    hooks:
+      - id: mypy
+        additional_dependencies:
+          - types-boto3
+          - types-pytz
+          - fastapi
+          - pydantic
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: debug-statements
+
+  # Regenerate the committed OpenAPI snapshot + typed frontend client
+  # whenever the FastAPI surface or the generator script changes. If the
+  # regenerated files differ from the staged version, pre-commit fails
+  # the commit and leaves the updated files in the working tree — re-stage
+  # them (`git add frontend/openapi.json frontend/types/api.generated.ts`)
+  # and re-commit. Requires `uv` and `npm` on PATH.
+  - repo: local
+    hooks:
+      - id: regen-openapi
+        name: Regenerate frontend/openapi.json + types
+        files: ^(backend/.*\.py|scripts/generate_openapi\.py)$
+        language: system
+        pass_filenames: false
+        entry: bash -c 'cd frontend && npm run --silent gen:types'

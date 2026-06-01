@@ -1,0 +1,470 @@
+'use client'
+
+import React from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { client } from '@/lib/api'
+import { useIsDataReady } from '@/hooks/useIsDataReady'
+import { StatCard } from '@/components/ui/stat-card'
+import { Button } from '@/components/ui/button'
+import { ButtonGroup } from '@/components/ui/button-group'
+import { Skeleton } from '@/components/ui/skeleton'
+import { SkeletonGrid } from '@/components/ui/skeleton-grid'
+import { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
+import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
+import { Database, HardDrive, Zap, DollarSign, Activity as ActivityIcon } from 'lucide-react'
+import { useTheme } from 'next-themes'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import { formatBytes, cn } from '@/lib/utils'
+import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { ReportLayout } from '@/components/ReportLayout'
+import { UpdatingBadge } from '@/components/UpdatingBadge'
+
+function fmtN(n: number): string {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B'
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
+  return n.toLocaleString()
+}
+
+
+const FosOperationsHelp = ({ note }: { note?: string }) => (
+  <div className="space-y-4">
+    <p>Fastly Object Storage (FOS) bills operations in two classes:</p>
+    <ul className="space-y-3 list-none pl-0">
+      <li className="flex gap-3">
+        <Zap className="h-5 w-5 shrink-0 text-blue-500 mt-0.5" />
+        <span><strong>Class A Operations:</strong> Includes state-changing operations like uploads (writes), list bucket requests, and deletes. Fastly's edge writes your raw logs here, and the backend lists the bucket to find them.</span>
+      </li>
+      <li className="flex gap-3">
+        <Database className="h-5 w-5 shrink-0 text-green-500 mt-0.5" />
+        <span><strong>Class B Operations:</strong> Includes reads (downloads) and metadata checks. The backend downloads the raw log files to process them into Parquet format.</span>
+      </li>
+    </ul>
+    {note && (
+      <div className="mt-4 p-3 bg-muted/50 border rounded-md text-xs">
+        {note}
+      </div>
+    )}
+  </div>
+)
+
+import { useServiceStore } from '@/stores/serviceStore'
+
+export default function UsagePage() {
+  const { theme } = useTheme()
+  const isDark = theme === 'dark'
+
+  return (
+    <ReportLayout
+      title="System Usage"
+      description="Estimate Fastly Object Storage and CDN logging costs."
+      icon={ActivityIcon}
+      defaultInterval="1 hour"
+    >
+      {({
+        startTime,
+        endTime,
+        activeServiceId,
+        config,
+        setChartInterval,
+        intervalButtons,
+      }) => {
+        const { services } = useServiceStore();
+        const isAnalyst = services.find((s: any) => s.id === activeServiceId)?.accessLevel === 'read_only'
+        const isReady = useIsDataReady()
+        const activityBy = config.effectiveInterval.split(' ')[1] || 'hour' // fallback
+
+        // FOS Operations uses Fastly's /stats/aggregate which only supports
+        // hour/day granularity. Render a custom button group with just those
+        // two so the user sees no misleading 1s/1m buttons on this chart.
+        const fosOpsIntervalButtons = (
+          <ButtonGroup>
+            {[
+              { label: '1h', value: '1 hour' as const },
+              { label: '1d', value: '1 day' as const },
+            ].map(i => {
+              const isActive = config.effectiveInterval === i.value
+              return (
+                <Button
+                  key={i.value}
+                  variant={isActive ? 'default' : 'ghost'}
+                  size="sm"
+                  onClick={() => React.startTransition(() => setChartInterval(i.value))}
+                  className={cn(
+                    'h-6 text-[10px] px-2 shadow-none transition-colors',
+                    isActive
+                      ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                      : 'hover:text-primary hover:bg-muted',
+                  )}
+                >
+                  {i.label}
+                </Button>
+              )
+            })}
+          </ButtonGroup>
+        )
+
+        const { data: storage, isLoading: loadingStorage, isFetching: fetchingStorage } = useQuery({
+    queryKey: ['usage', 'storage', activeServiceId, startTime, endTime],
+    queryFn: async () => {
+      const { data } = await client.GET("/api/usage/current-storage", {
+        params: { query: { start: startTime ?? undefined, end: endTime ?? undefined } }
+      })
+      return data
+    },
+    enabled: isReady,
+    staleTime: 60_000,
+  })
+
+  const { data: ops, isLoading: loadingOps, isFetching: fetchingOps } = useQuery({
+    queryKey: ['usage', 'operations', activeServiceId, startTime, endTime, activityBy],
+    queryFn: async () => {
+      const { data } = await client.GET("/api/usage/operations", {
+        params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
+      })
+      return data
+    },
+    enabled: isReady,
+    staleTime: 60_000,
+  })
+
+  const { data: bw, isLoading: loadingBw, isFetching: fetchingBw } = useQuery({
+    queryKey: ['usage', 'bandwidth', activeServiceId, startTime, endTime, activityBy],
+    queryFn: async () => {
+      const { data } = await client.GET("/api/usage/bandwidth", {
+        params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
+      })
+      return data
+    },
+    enabled: isReady,
+    staleTime: 60_000,
+  })
+
+  const { data: logActivity, isLoading: loadingActivity, isFetching: fetchingActivity } = useQuery({
+    queryKey: ['usage', 'log-activity', activeServiceId, startTime, endTime, activityBy],
+    queryFn: async () => {
+      const { data } = await client.GET("/api/usage/log-activity", {
+        params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
+      })
+      return data
+    },
+    enabled: isReady,
+    staleTime: 60_000,
+  })
+
+  const { data: prefill, isLoading: loadingPrefill } = useQuery({
+    queryKey: ['usage', 'prefill', activeServiceId],
+    queryFn: async () => {
+      const { data } = await client.GET("/api/usage/prefill")
+      return data as any
+    },
+    enabled: isReady,
+    staleTime: 5 * 60_000,
+  })
+
+  const isFetchingAny = fetchingStorage || fetchingOps || fetchingBw || fetchingActivity
+  const isLoadingInitial = loadingStorage || loadingOps || loadingBw || loadingActivity
+
+  // ── Chart colours ──────────────────────────────────────────────────────────
+  const accent = isDark ? '#60a5fa' : '#3b82f6'
+  const accentB = isDark ? '#34d399' : '#10b981'
+  const gridColor = isDark ? '#27272a' : '#e4e4e7'
+
+  const baseLayout = {}
+
+  // ── Ops chart ──────────────────────────────────────────────────────────────
+  const opsDates = ops?.data.map((d: any) => d.date) ?? []
+  const opsClassA = ops?.data.map((d: any) => d.class_a) ?? []
+  const opsClassB = ops?.data.map((d: any) => d.class_b) ?? []
+
+  const opsData = [
+    { type: 'bar', name: 'Class A', x: opsDates, y: opsClassA, marker: { color: accent }, hovertemplate: 'Class A: %{y:,}<extra></extra>' },
+    { type: 'bar', name: 'Class B', x: opsDates, y: opsClassB, marker: { color: accentB }, hovertemplate: 'Class B: %{y:,}<extra></extra>' },
+  ]
+  const opsLayout = { ...baseLayout, barmode: 'stack' as const }
+
+  // ── Bandwidth chart ────────────────────────────────────────────────────────
+  const bwTimes = bw?.data.map((p: any) => p.time) ?? []
+  const bwBytes = bw?.data.map((p: any) => p.bandwidth_bytes ?? 0) ?? []
+  const maxBw = bwBytes.length > 0 ? Math.max(...bwBytes) : 0
+  
+  let bwDiv = 1
+  let bwUnit = 'B'
+  if (maxBw >= 1e9) { bwDiv = 1e9; bwUnit = 'GB' }
+  else if (maxBw >= 1e6) { bwDiv = 1e6; bwUnit = 'MB' }
+  else if (maxBw >= 1e3) { bwDiv = 1e3; bwUnit = 'KB' }
+
+  const bwY = bwBytes.map((b: number) => b / bwDiv)
+
+  const bwData = [
+    { type: 'bar', name: `Bandwidth (${bwUnit})`, x: bwTimes, y: bwY, marker: { color: '#8b5cf6', opacity: 0.8 }, hovertemplate: `CDN: %{y:.2f} ${bwUnit}<extra></extra>` },
+  ]
+  const bwLayout = { ...baseLayout, yaxis: { title: bwUnit, gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }
+
+  // ── Log generation chart ───────────────────────────────────────────────────
+  const genTimes = (logActivity as any)?.data.map((p: any) => p.time) ?? []
+  const ingestCounts = (logActivity as any)?.data.map((p: any) => p.row_count) ?? []
+  const apiCounts = (logActivity as any)?.data.map((p: any) => p.api_requests) ?? []
+  // Fastly's authoritative "log records emitted to FOS" count — same field
+  // backing /api/admin/log-accounting. Overlay on Processed so the user can
+  // eyeball emitted-vs-ingested without bouncing to the admin panel.
+  const fastlyLogCounts = (logActivity as any)?.data.map((p: any) => p.fastly_log_records) ?? []
+
+  const hasApiCounts = apiCounts.some((v: any) => v != null && v > 0)
+  const hasFastlyLogCounts = fastlyLogCounts.some((v: any) => v != null && v > 0)
+
+  const logGenData: any[] = []
+
+  if (hasApiCounts) {
+    logGenData.push({ type: 'bar', name: 'Logs Generated (API)', x: genTimes, y: apiCounts, marker: { color: accentB }, hovertemplate: '%{y:,}<extra></extra>' })
+  }
+
+  const logProcData: any[] = [
+    { type: 'bar', name: 'Logs Processed', x: genTimes, y: ingestCounts, marker: { color: accent }, hovertemplate: '%{y:,}<extra></extra>' }
+  ]
+  if (hasFastlyLogCounts) {
+    logProcData.push({
+      type: 'scatter',
+      mode: 'lines+markers',
+      name: 'Fastly Emitted (Stats API)',
+      x: genTimes,
+      y: fastlyLogCounts,
+      line: { color: '#f59e0b', width: 2 },
+      marker: { color: '#f59e0b', size: 6 },
+      hovertemplate: 'Emitted: %{y:,}<extra></extra>',
+    })
+  }
+
+  // ── Totals for stat cards ──────────────────────────────────────────────────
+  const totalClassA = ops?.total_class_a ?? 0
+  const totalClassB = ops?.total_class_b ?? 0
+  const totalBwGB = (bw?.total_bytes ?? 0) / 1e9
+
+  // Effective rates from prefill API (falls back to global defaults)
+  const rateA = prefill?.class_a_rate_per_1k ?? 0.005
+  const rateB = (prefill?.class_b_rate_per_10k ?? 0.01) / 10 // Convert 10k rate to 1k for rough estimate
+  const rateEgress = prefill?.cdn_egress_rate_per_gb ?? 0.12
+  const rateStorage = prefill?.storage_rate_per_gb_month ?? 0.02
+
+  // Rough cost estimate for the stat card
+  const roughCostA = (totalClassA / 1000) * rateA
+  const roughCostB = (totalClassB / 1000) * rateB
+  const roughStorage = ((storage?.total_billed_gb_hours ?? 0) / 720) * rateStorage
+  const roughBandwidth = totalBwGB * rateEgress
+  const roughTotal = roughCostA + roughCostB + roughStorage + roughBandwidth
+  const fmtUSD = (n: number) => n >= 1000 ? '$' + n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',') : '$' + n.toFixed(2)
+
+  const prefillNote = prefill && !loadingPrefill
+    ? 'Calculator pre-filled from your current service configuration.'
+    : undefined
+
+
+
+  return (
+    <>
+      {/* ── Stat cards ─────────────────────────────────────────────────────── */}
+      <div className={cn("grid grid-cols-2 lg:grid-cols-4 gap-4 transition-opacity duration-100", isFetchingAny && !isLoadingInitial && "opacity-40 pointer-events-none")}>
+        <StatCard
+          title="Storage Impact (Period)"
+          value={<span className="text-green-600">{(storage?.total_billed_gb_hours ?? 0).toFixed(2)} GB-hrs</span>}
+          sub={
+            loadingStorage ? (
+              <div className="flex flex-col gap-1.5 mt-2">
+                <Skeleton className="h-3 w-full" />
+                <Skeleton className="h-3 w-full" />
+              </div>
+            ) : (
+              <div className="flex flex-col gap-0.5 mt-1 text-[11px]">
+                <div className="flex justify-between">
+                  <span>Live Storage:</span>
+                  <strong className="text-foreground">{formatBytes(storage?.live_bytes ?? 0)}</strong>
+                </div>
+                <div className="flex justify-between text-amber-600 dark:text-amber-500">
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <span className=" underline underline-offset-2 decoration-dotted">Deleted (Still Billed):</span>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="max-w-[200px] text-xs">
+                        Objects created in this period but deleted early. Billed for minimum 30 days.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                  <strong>{formatBytes(storage?.deleted_bytes ?? 0)}</strong>
+                </div>
+              </div>
+            )
+          }
+          icon={HardDrive}
+          loading={loadingStorage}
+          tooltip="Estimated minimum billed storage hours for objects created in this period."
+        />
+        <StatCard
+          title="Class A Ops (period)"
+          value={fmtN(totalClassA)}
+          sub={
+            <div className="space-y-1">
+              <div>Writes, lists, deletes</div>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] opacity-70 uppercase tracking-wider">Rate: ${rateA}/1k</span>
+                <Button variant="link" size="sm" className="h-auto p-0 text-[10px] font-bold text-primary" onClick={() => window.location.href = '/admin'}>Edit</Button>
+              </div>
+            </div>
+          }
+          icon={Zap}
+          loading={loadingOps}
+          tooltip="Writes (log uploads) and lists (checking for new logs). Note: This is an account-wide total."
+        />
+        <StatCard
+          title="Class B Ops (period)"
+          value={fmtN(totalClassB)}
+          sub={
+            <div className="space-y-1">
+              <div>Reads / downloads</div>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] opacity-70 uppercase tracking-wider">Rate: ${prefill?.class_b_rate_per_10k ?? 0.01}/10k</span>
+                <Button variant="link" size="sm" className="h-auto p-0 text-[10px] font-bold text-primary" onClick={() => window.location.href = '/admin'}>Edit</Button>
+              </div>
+            </div>
+          }
+          icon={Database}
+          loading={loadingOps}
+          tooltip="Reads (downloading logs for processing). Note: This is an account-wide total."
+        />
+        <StatCard
+          title="Estimated Incurred Cost"
+          value={fmtUSD(roughTotal)}
+          sub={
+            (loadingOps || loadingStorage || loadingBw) ? (
+              <div className="flex flex-col gap-1.5 mt-2">
+                <Skeleton className="h-3 w-full" />
+                <Skeleton className="h-3 w-full" />
+                <Skeleton className="h-3 w-full" />
+              </div>
+            ) : (
+              <div className="flex flex-col gap-0.5 mt-1 text-[11px] font-normal">
+                <div className="flex justify-between">
+                  <span>Storage:</span>
+                  <div className="flex flex-col items-end">
+                    <strong className="text-foreground">{fmtUSD(roughStorage)}</strong>
+                    <span className="text-[9px] opacity-60 uppercase tracking-tighter">Rate: ${rateStorage}/GB</span>
+                  </div>
+                </div>
+                <div className="flex justify-between">
+                  <span>Operations:</span>
+                  <strong className="text-foreground">{fmtUSD(roughCostA + roughCostB)}</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span>CDN Egress:</span>
+                  <div className="flex flex-col items-end">
+                    <strong className="text-foreground">{fmtUSD(roughBandwidth)}</strong>
+                    <span className="text-[9px] opacity-60 uppercase tracking-tighter">Rate: ${rateEgress}/GB</span>
+                  </div>
+                </div>
+              </div>
+            )
+          }
+          icon={DollarSign}
+          loading={loadingOps || loadingStorage || loadingBw}
+          tooltip="Total estimated cost incurred for the selected period (Storage, Ops, Egress). Note: Operations are account-wide totals."
+        />
+      </div>
+
+      {/* ── Charts ─────────────────────────────────────────────────────────── */}
+      <div className={cn("grid grid-cols-1 lg:grid-cols-2 gap-6 transition-opacity duration-100", isFetchingAny && !isLoadingInitial && "opacity-40 pointer-events-none")}>
+        <AnalyticsCard
+          title="FOS Operations"
+          description="Class A and Class B operations from the Historical Stats API"
+          headerAction={fosOpsIntervalButtons}
+          isLoading={loadingOps}
+          isFetching={fetchingOps}
+          className="h-[360px]"
+          contentClassName="p-2"
+          helpContent={<FosOperationsHelp note={ops?.note} />}
+        >
+          {opsDates.length === 0 && !loadingOps ? (
+            <div className="flex items-center justify-center h-full text-muted-foreground text-sm">No data available</div>
+          ) : (
+            <PlotlyChart data={opsData as any[]} layout={opsLayout} height="100%" />
+          )}
+        </AnalyticsCard>
+
+        <AnalyticsCard
+          title="CDN Bandwidth"
+          description="Egress bandwidth delivered by the CDN service fronting FOS"
+          headerAction={intervalButtons}
+          isLoading={loadingBw}
+          isFetching={fetchingBw}
+          className="h-[360px]"
+          contentClassName="p-2"
+        >
+          {bwTimes.length === 0 && !loadingBw ? (
+            <div className="flex items-center justify-center h-full text-muted-foreground text-sm">No data available</div>
+          ) : (
+            <PlotlyChart data={bwData as any[]} layout={bwLayout} height="100%" />
+          )}
+        </AnalyticsCard>
+
+        <AnalyticsCard
+          title="Log Activity (Generated)"
+          description="API requests logged by Fastly"
+          headerAction={intervalButtons}
+          isLoading={loadingActivity}
+          isFetching={fetchingActivity}
+          className="h-[360px]"
+          contentClassName="p-2"
+          helpContent={<p>Number of requests generated by your Fastly service.</p>}
+        >
+          {(!hasApiCounts || genTimes.length === 0) && !loadingActivity ? (
+            <div className="flex items-center justify-center h-full text-muted-foreground text-sm">No Fastly API stats available</div>
+          ) : (
+            <PlotlyChart data={logGenData as any[]} layout={baseLayout} height="100%" />
+          )}
+        </AnalyticsCard>
+
+        <AnalyticsCard
+          title="Log Activity (Processed)"
+          description="Log rows ingested and processed (with Fastly emission overlay)"
+          headerAction={intervalButtons}
+          isLoading={loadingActivity}
+          isFetching={fetchingActivity}
+          className="h-[360px]"
+          contentClassName="p-2"
+        >
+          {genTimes.length === 0 && !loadingActivity ? (
+            <div className="flex items-center justify-center h-full text-muted-foreground text-sm">No data available</div>
+          ) : (
+            <PlotlyChart data={logProcData as any[]} layout={baseLayout} height="100%" />
+          )}
+        </AnalyticsCard>
+        </div>
+
+      {/* ── Cost Estimator ─────────────────────────────────────────────────── */}
+      {!isAnalyst && (
+        <AnalyticsCard
+          title="Cost Estimator"
+          description="Estimate your monthly FOS cost based on your configuration and contract rates. Pre-filled from your active service and rate settings."
+        >
+          {loadingPrefill ? (
+            <div className="space-y-3">
+              <SkeletonGrid count={4} height="36px" className="rounded-md" />
+            </div>
+          ) : (
+            <CostCalculator
+              prefillData={prefill ?? undefined}
+              prefillNote={prefillNote}
+            />
+          )}
+        </AnalyticsCard>
+      )}
+      </>
+    )
+  }}
+  </ReportLayout>
+)
+}

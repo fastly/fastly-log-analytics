@@ -1,0 +1,120 @@
+[project]
+name = "fastly-log-analytics"
+version = "1.0.0"
+description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB"
+requires-python = ">=3.10"
+dependencies = [
+    "duckdb>=1.2",
+    "python-dotenv>=1.0",
+    "boto3>=1.34",
+    "cymruwhois>=1.6",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "apscheduler>=3.10,<4",
+    "pyiceberg[s3fs,pyarrow,sql-sqlite]>=0.8",
+    "pyarrow>=17.0",
+    "pandas>=2.3.3",
+    "httpx>=0.28.1",
+    "pytz>=2026.1.post1",
+    "dateparser>=1.4.0",
+    "aiohttp>=3.9",
+    "cryptography>=42",
+    "python-multipart>=0.0.9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "httpx>=0.28",
+    "mypy>=1.15",
+    "ruff>=0.11",
+    "pre-commit>=4.0",
+    "moto[s3,server]>=5.0",
+    "pytest-randomly>=3.15",
+    "hypothesis>=6.100",
+    "pytest-asyncio>=0.23",
+    "pytest-xdist>=3.6",
+    # vcrpy hooks the socket layer so it captures the production
+    # urllib.request transport without us rewriting clients to httpx.
+    # TESTING_PLAN_3 item 8.
+    "vcrpy>=6.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["backend"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+# Test-only suppression: FastAPI's TestClient runs requests in worker
+# threads that open metadata_db SQLite connections. Most of them are
+# closed by close_all_connections() in tests/conftest.py, but a handful
+# slip past — typically because the request raises mid-flight and the
+# thread dies with a still-pooled connection. SQLite tolerates this
+# (no transactions are lost; WAL handles unclean shutdown) and the
+# production code holds its connections for the process lifetime, so
+# this is a test-fixture artefact, not a production resource leak.
+filterwarnings = [
+    "ignore::ResourceWarning:.*sqlite3.*",
+    "ignore:unclosed database:ResourceWarning",
+]
+
+[tool.mypy]
+python_version = "3.13"
+strict = false
+warn_return_any = false
+warn_unused_ignores = false
+disallow_untyped_defs = false
+check_untyped_defs = false
+ignore_missing_imports = true
+implicit_optional = true
+exclude = ["frontend/", "docs/", "scripts/"]
+
+# Ignore pre-existing errors in large files not yet annotated
+[[tool.mypy.overrides]]
+module = [
+    "backend.core.duckdb",
+    "backend.core.iceberg",
+    "backend.core.ingest",
+    "backend.scheduler",
+    "backend.routers.*",
+    "backend.repositories.*",
+    "backend.cron_progress",
+    "backend.utils.*",
+    "backend.models.*",
+    "backend.deps",
+    "backend.provision",
+    "backend.provision.*",
+    "backend.core.log_fields",
+    "backend.config",
+]
+ignore_errors = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+exclude = [
+    "frontend/",
+    "docs/",
+    ".venv/",
+    # Throwaway diagnostic / repro scripts — these intentionally exercise
+    # imports or run inline checks that ruff would flag (F401 etc.).
+    "repro_*.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = [
+    "E501",   # line too long — not enforced
+    "E701",   # multiple statements on one line — existing codebase style
+    "E702",   # statement ends with semicolon — existing codebase style
+    "E402",   # module import not at top — scripts need sys.path setup first
+    "F841",   # local variable assigned but never used — often intentional guards
+]
