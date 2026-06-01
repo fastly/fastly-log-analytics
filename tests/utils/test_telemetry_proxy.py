@@ -493,9 +493,12 @@ async def test_proxy_handles_50_concurrent_requests_without_head_of_line_blockin
             elapsed = asyncio.get_event_loop().time() - t0
 
     assert all(s == 200 for s in results)
-    # Sanity bound — 50 mocked requests should not take more than 2s in
-    # aggregate even on a loaded CI runner. Real value should be < 300ms.
-    assert elapsed < 2.0, f"50 concurrent requests took {elapsed:.2f}s — likely serialized"
+    # Sanity bound — guards against head-of-line blocking, NOT a perf budget.
+    # Real value is < 300ms locally; observed 2.15s on a slow CI runner. A
+    # genuinely serialized handler would push this to ~25s+ (50× single-
+    # request latency), so 5s is still a comfortable canary while
+    # absorbing CI variance.
+    assert elapsed < 5.0, f"50 concurrent requests took {elapsed:.2f}s — likely serialized"
 
 
 async def test_proxy_logs_warning_when_dashboard_context_hits_fos(proxy_server, caplog):
