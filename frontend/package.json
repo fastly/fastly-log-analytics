@@ -67,7 +67,7 @@
     "msw": "^2.14.6",
     "openapi-typescript": "^7",
     "tailwindcss": "^4.2.4",
-    "typescript": "^5.9",
+    "typescript": "^6.0",
     "vitest": "^4.0.0",
     "vitest-axe": "^0.1.0"
   }
