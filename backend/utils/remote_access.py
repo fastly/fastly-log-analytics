@@ -83,7 +83,31 @@ _ANALYST_SSE_ALLOWLIST: set[str] = set()
 
 # Local "is this a real LAN hostname" allowlist; admins can extend via env.
 # ``testserver`` is starlette.testclient.TestClient's default Host header.
-_LOCAL_HOST_ALLOWLIST = {"localhost", "127.0.0.1", "[::1]", "0.0.0.0", "testserver"}
+_LOCAL_HOST_ALLOWLIST = {"localhost", "127.0.0.1", "[::1]", "0.0.0.0", "testserver", "backend", "frontend", "caddy", "web"}
+
+import os
+
+# Admins can extend the local host allowlist via comma-separated hostnames in env:
+# e.g., LOCAL_HOSTS=backend,frontend,my-custom-service
+_env_hosts = os.getenv("LOCAL_HOSTS") or os.getenv("LOCAL_HOST_ALLOWLIST") or os.getenv("ALLOWED_HOSTS")
+if _env_hosts:
+    for _h in _env_hosts.split(","):
+        _clean_h = _h.strip().lower()
+        if _clean_h:
+            _LOCAL_HOST_ALLOWLIST.add(_clean_h)
+
+
+import ipaddress
+
+
+def _is_private_or_loopback(ip_str: str) -> bool:
+    """Check if the provided IP or hostname is loopback, local, or private subnet."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        # Hostnames or test client stub names (e.g. "testclient", "localhost")
+        return ip_str in ("testclient", "localhost")
 
 
 def _host_matches_public_endpoint(request: Request) -> bool:
@@ -119,41 +143,36 @@ def is_request_remote(request: Request) -> bool:
     ``Host`` or ``X-Forwarded-Host`` header for this — those are
     sender-supplied. Two rules:
 
-      1. If the connection came from 127.0.0.1 / [::1], it's local. Period.
+      1. If the connection came from loopback or a private local subnet
+         (e.g., container-to-container Docker traffic), it's local by default.
          (The Next.js rewrite proxy at localhost:3000 → localhost:8000 means
-         every analyst request ALSO arrives at FastAPI from 127.0.0.1 — but
-         we set ``is_remote`` via Next.js sending an ``X-Remote-Analyst: 1``
-         header that the middleware trusts ONLY when the underlying connection
-         is from a remote source OR when the tunnel manager reports an active
-         tunnel.)
+         every analyst request ALSO arrives at FastAPI from 127.0.0.1 or a private
+         network peer — but we set ``is_remote`` via Next.js sending an
+         ``X-Remote-Analyst: 1`` header that the middleware trusts ONLY when
+         the tunnel manager reports an active tunnel.)
       2. Otherwise, the connection is genuinely remote (direct-expose mode,
          or the tunnel is forwarding 0.0.0.0).
-
-    The Next.js proxy case is signalled by the proxy explicitly setting
-    ``X-Remote-Analyst: 1`` — we treat that header as authoritative only when
-    the tunnel manager reports sharing is active AND the request has the
-    analyst cookie. That way a local attacker who guesses the header can't
-    flip the branch (they have no valid session).
     """
     host = request.client.host if request.client else "127.0.0.1"
-    # ``testclient`` is starlette.testclient.TestClient's stub peer; treat it
-    # as local so the test harness doesn't have to override the peer host on
-    # every call.
-    if host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+    
+    # If the connection came from an external public IP, it's genuinely remote.
+    if not _is_private_or_loopback(host):
         return True
-    # Loopback peer — disambiguate by Host header in deployments where Caddy
-    # also runs on the host network (then all peers look like 127.0.0.1).
-    # Only Caddy proxying a real Fastly visitor can present the registered
-    # public_endpoint hostname; local admin traffic uses localhost/127.0.0.1.
-    # Safe because backend binds to 127.0.0.1 — anyone on the VM with shell
-    # could spoof the Host but they already have full access.
+
+    # Loopback or private subnet peer — disambiguate by Host header in deployments
+    # where Caddy also runs on the host network or in container networks (then all
+    # peers look like loopback or private IPs). Only Caddy proxying a real Fastly
+    # visitor can present the registered public_endpoint hostname; local admin
+    # traffic uses localhost/127.0.0.1/private network names.
     if _host_matches_public_endpoint(request):
         return True
+
     # Proxied case: the Next.js rewrite layer marks remote requests.
     if request.headers.get("x-remote-analyst") == "1":
         mgr = get_tunnel_manager()
         if mgr.is_sharing_active():
             return True
+            
     return False
 
 
@@ -176,6 +195,8 @@ def _local_host_allowed(host_header: str) -> bool:
     if not host_header:
         return False
     base = host_header.split(":")[0].lower()
+    if _is_private_or_loopback(base):
+        return True
     return base in _LOCAL_HOST_ALLOWLIST
 
 
