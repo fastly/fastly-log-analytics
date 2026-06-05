@@ -160,7 +160,7 @@ The **Fields** button on each service card opens the log field configurator — 
 To route FOS reads through a Fastly CDN service (for free egress and edge caching) the wizard creates this for you. If you're configuring manually:
 
 1. Create a Fastly Delivery service with your FOS bucket as the backend origin
-2. Use the included [`sample-vcl.vcl`](sample-vcl.vcl) — it handles AWS4 signing and shared-secret query-param authentication
+2. Configure the VCL to handle AWS4 signing on the request to FOS and shared-secret query-param authentication (`?key=…`) from the backend. The provisioning wizard generates this VCL automatically — if you've already enabled a service through the wizard, you can copy the active VCL from the Fastly UI or API as a starting point for a hand-managed service.
 3. Set `cdn_url` and `cdn_secret` in your service config
 
 ---

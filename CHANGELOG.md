@@ -35,6 +35,14 @@ Edge session scoring. Every request is classified in real-time at the edge by a 
 
 ### Performance
 
+Structural:
+
+- **DuckDB connection pool** (`backend/core/duckdb_pool.py`) replaces per-request connection setup; eliminates the per-request DuckDB initialisation cost on hot paths.
+- **Hourly Top-N rollup pipeline** (`backend/core/rollups.py` + `scripts/backfill_rollups.py`) precomputes the dashboard's most-asked aggregates; cold-load dashboard scans drop from seconds to tens of ms.
+- **Bounded cache primitive** (`backend/utils/bounded_cache.py`, 13-test `tests/utils/test_bounded_cache.py`) replaces several previously-unbounded dict caches across the request path (also referenced under Security → `_StaticAssetLimiter` and the analytics cache in `session_scoring._cached`).
+
+Tuning:
+
 - `security/top-bots` consolidated UA + NGWAF onto one temp table (was 2 independent Iceberg scans per dashboard mount).
 - `dashboard/raw` uses `get_source_extent` for cached steady-state extent.
 - `usage/prefill` cached-status fast path skips DuckDB hop when the sync cron has populated it.
@@ -104,7 +112,7 @@ Capability-focused hardening across the FastAPI backend, Fastly VCL, Next.js fro
 - **CDN cache-key hardening** — `backend/core/fastly/utils.py` `vcl_recv` now runs `querystring.filter_except` to drop all non-S3-API query parameters (caller-injected tracking params, marketing UTMs, session IDs) BEFORE the cache lookup, followed by `querystring.sort` to canonicalise the remaining param order. Composes with the `vcl_hash` fix: untrusted params can no longer fracture the cache OR leak the auth `key` into the cache key.
 - Dependency freshness sweep on all four ecosystems:
   - **Python:** `aiohttp 3.13.5 → 3.14.0`, `cfn-lint 1.51.2 → 1.51.4`, `distlib 0.4.0 → 0.4.1`, `filelock 3.29.0 → 3.29.1`, `idna 3.17 → 3.18`, `joserfc 1.6.8 → 1.7.0`.
-  - **Frontend:** `@tanstack/react-query 5.100.14 → 5.101.0` (+ devtools), `@types/react 19.2.15 → 19.2.16`, `eslint-config-next 16.2.6 → 16.2.7`, `next 16.2.6 → 16.2.7`, `react/react-dom 19.2.6 → 19.2.7`.
+  - **Frontend:** `@tanstack/react-query 5.100.14 → 5.101.0` (+ devtools), `@types/react 19.2.15 → 19.2.16`, `react/react-dom` resolved to `19.2.7` via the existing `^19.2.5` range. `next` + `eslint-config-next` stay pinned at `16.2.6`.
   - **Rust:** `bitflags 2.11.1 → 2.12.1`.
   - **Deferred (major bumps reserved for 1.2):** TypeScript 5.9 → 6.0 (compiler-API breaking changes); Fastly Rust SDK 0.11 → 0.12 (Compute@Edge API changes); jsdom / eslint / vitest where we're already ahead of the npm "latest" tag.
 
