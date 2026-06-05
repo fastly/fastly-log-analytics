@@ -9,22 +9,14 @@ from typing import Any
 
 import duckdb
 
-from backend.repositories._base import _get_schema, _safe_table
-from backend.utils.telemetry import get_tracked_calls
-
-_BLOCKED_KEYWORDS = (
-    "DROP",
-    "DELETE",
-    "UPDATE",
-    "INSERT",
-    "ALTER",
-    "TRUNCATE",
-    "CREATE",
-    "ATTACH",
-    "COPY",
-    "EXPORT",
-    "IMPORT",
+from backend.repositories._base import _compact_sql_for_debug, _get_schema, _safe_table
+from backend.utils.sql_validator import (
+    SQLValidationError,
+    apply_user_query_limits,
+    has_limit_clause,
+    validate_user_sql,
 )
+from backend.utils.telemetry import get_tracked_calls
 
 
 def execute_query(
@@ -33,16 +25,41 @@ def execute_query(
     sql: str,
     max_rows: int,
     want_explain: bool,
+    *,
+    session_id: str | None = None,
+    service_id: str | None = None,
 ) -> dict:
     if src:
         table_name = _safe_table(src["name"])
         if table_name != "logs":
             sql = re.sub(r"\blogs\b", table_name, sql, flags=re.IGNORECASE)
 
-    sql_upper = sql.upper()
-    for kw in _BLOCKED_KEYWORDS:
-        if re.search(rf"\b{kw}\b", sql_upper):
-            raise PermissionError(f"Only read-only queries are allowed (blocked keyword: {kw})")
+    # Security (Decision B): run the user SQL through the
+    # parse-tree validator. The previous regex-based ``_BLOCKED_KEYWORDS``
+    # check missed:
+    #   - read_csv_auto / read_parquet / iceberg_scan family (arbitrary
+    #     file/S3 read via table functions)
+    #   - getenv / current_setting / duckdb_secrets (env/secret exfil)
+    #   - information_schema.* (introspection bypass via non-prefix name)
+    #   - INSTALL / LOAD (which don't contain any blocked keyword)
+    # The validator runs ``json_serialize_sql`` and walks the resulting
+    # parse tree so every nested subquery / CTE / table-function is
+    # inspected. See backend/utils/sql_validator.py for the policy.
+    try:
+        validate_user_sql(
+            sql,
+            parser_con=con,
+            session_id=session_id,
+            service_id=service_id,
+        )
+    except SQLValidationError as exc:
+        # PermissionError is what the route handler maps to HTTP 403.
+        raise PermissionError(exc.message) from exc
+
+    # Execution-side defense-in-depth: cap memory and timeout on the
+    # connection before running the user query. Independent of parse
+    # validation — a legal query can still scan 100M rows.
+    apply_user_query_limits(con)
 
     _debug_queries: list[dict] = []
     if src:
@@ -55,7 +72,9 @@ def execute_query(
         t_exp = time.monotonic()
         plan_rows = con.execute(f"EXPLAIN {sql}").fetchall()
         explain_plan = "\n".join(r[1] for r in plan_rows if r[1])
-        _debug_queries.append({"sql": f"EXPLAIN {sql}", "time_ms": round((time.monotonic() - t_exp) * 1000, 2)})
+        _debug_queries.append(
+            {"sql": _compact_sql_for_debug(f"EXPLAIN {sql}"), "time_ms": round((time.monotonic() - t_exp) * 1000, 2)}
+        )
 
     # Auto-apply LIMIT max_rows+1 when the query doesn't already have one.
     # Without this, `SELECT * FROM logs ORDER BY timestamp DESC` materializes
@@ -67,9 +86,15 @@ def execute_query(
     # result sets where the LIMIT semantics differ or aren't supported.
     exec_sql = sql
     sql_stripped_upper = sql.strip().upper().lstrip("(")
-    is_simple_select = sql_stripped_upper.startswith(("SELECT", "WITH", "FROM", "VALUES", "TABLE")) and not re.search(
-        r"\bLIMIT\b", sql_upper
-    )
+    # 026: ``re.search(r"\bLIMIT\b", sql)`` matches inside string
+    # literals (``WHERE name = 'WITHOUT LIMIT'``) and inside SQL
+    # comments — both false positives that cause the auto-wrap to
+    # SKIP wrapping, leaving the query unbounded. The AST-aware
+    # check inspects the parse tree so strings/comments are out of
+    # scope.
+    is_simple_select = sql_stripped_upper.startswith(
+        ("SELECT", "WITH", "FROM", "VALUES", "TABLE")
+    ) and not has_limit_clause(sql, parser_con=con)
     if is_simple_select:
         # Strip trailing semicolon so the wrapper LIMIT lands in the same statement.
         inner = sql.rstrip().rstrip(";")
@@ -79,7 +104,7 @@ def execute_query(
     result = con.execute(exec_sql)
     df = result.fetchdf()
     elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
-    _debug_queries.append({"sql": exec_sql.strip(), "time_ms": elapsed_ms})
+    _debug_queries.append({"sql": _compact_sql_for_debug(exec_sql.strip()), "time_ms": elapsed_ms})
 
     fetched_rows = len(df)
     if is_simple_select:

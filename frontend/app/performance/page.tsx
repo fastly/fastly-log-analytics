@@ -40,8 +40,8 @@ export default function PerformancePage() {
       }) => {
         const { data, isLoading, isFetching } = useServiceQuery(
     ['performance', 'aggregates', activeServiceId, startTime, endTime, filterPayload, 'p99'],
-    async () => {
-      const { data } = await client.POST("/api/performance/aggregates", {
+    async ({ signal }) => {
+      const { data } = await client.POST("/api/performance/aggregates", { signal, 
         body: {
           start_time: startTime!,
           end_time: endTime!,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,12 +25,13 @@ router = APIRouter(prefix="/api/usage", tags=["usage"])
 
 
 def _fastly_api(path: str, api_key: str) -> dict:
-    req = urllib.request.Request(
-        f"https://api.fastly.com{path}",
-        headers={"Fastly-Key": api_key, "Accept": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode())
+    """Thin wrapper delegating to the central Fastly client. Kept as a
+    function so the existing 3 call sites in this module read the same;
+    the central wrapper adds retry-on-429/5xx + telemetry tracking that
+    used to live in each caller."""
+    from backend.core.fastly.client import fastly
+
+    return fastly("GET", path, token=api_key)
 
 
 def _extract_fos_ops(record: dict) -> tuple[int, int]:
@@ -184,10 +184,10 @@ def prefill(source: dict = Depends(get_source)):
                                     result["edge_only"] = True
                 except Exception:
                     pass
-                from backend.utils.telemetry import tracked_call as _tc
-
-                with _tc("GET", f"/stats/service/{svc_id}?by={by}", service="Fastly API"):
-                    payload = _fastly_api(f"/stats/service/{svc_id}?by={by}&from={from_ts}&to={to_ts}", api_key)
+                # tracked_call wrapper removed — _fastly_api → fastly()
+                # already does telemetry internally; the double-wrap was
+                # producing duplicate entries in /api/admin/usage-logging.
+                payload = _fastly_api(f"/stats/service/{svc_id}?by={by}&from={from_ts}&to={to_ts}", api_key)
                 for rec in payload.get("data", []):
                     ts = rec.get("start_time")
                     if ts is None:
@@ -196,10 +196,8 @@ def prefill(source: dict = Depends(get_source)):
                     daily_reqs[day] = daily_reqs.get(day, 0) + int(rec.get("requests") or 0)
                     daily_edge[day] = daily_edge.get(day, 0) + int(rec.get("edge_requests") or 0)
             else:
-                from backend.utils.telemetry import tracked_call as _tc
-
-                with _tc("GET", f"/stats/aggregate?by={by}", service="Fastly API"):
-                    payload = _fastly_api(f"/stats/aggregate?by={by}&from={from_ts}&to={to_ts}", api_key)
+                # See note above — fastly() does its own tracking.
+                payload = _fastly_api(f"/stats/aggregate?by={by}&from={from_ts}&to={to_ts}", api_key)
                 for rec in payload.get("data", []):
                     ts = rec.get("start_time")
                     if ts is None:
@@ -216,29 +214,37 @@ def prefill(source: dict = Depends(get_source)):
         except Exception:
             pass
 
+    # Skip the DuckDB hop entirely when the cached config status already
+    # carries edge_ratio (steady state — the sync cron keeps it fresh).
+    # Saves a connection-open + view-resolve on the hot path. Falls back
+    # to a live get_con read only on the cold path.
     debug_queries: list = []
-    try:
-        from backend.core.duckdb import get_connection
-
-        # read_only: get_edge_ratio is a SELECT against the view.
-        con = get_connection(source=source, max_wait=5, read_only=True)
+    cached_status = svcconfig.get_status(source["name"]) or {}
+    cached_edge_ratio = cached_status.get("edge_ratio")
+    if cached_edge_ratio is not None:
+        result["edge_ratio"] = cached_edge_ratio
+    else:
         try:
-            edge_ratio, debug_queries = repo.get_edge_ratio(con, source)
-            if edge_ratio is not None:
-                result["edge_ratio"] = edge_ratio
+            from backend.core.duckdb import get_connection
 
-            # Empirical node count analysis for prefill — derive from per-service
-            # ingested_files SQLite metadata.
+            # read_only: get_edge_ratio is a SELECT against the view.
+            con = get_connection(source=source, max_wait=5, read_only=True)
             try:
-                from backend.core import metadata_db
+                edge_ratio, debug_queries = repo.get_edge_ratio(con, source)
+                if edge_ratio is not None:
+                    result["edge_ratio"] = edge_ratio
+            finally:
+                con.close()
+        except Exception:
+            pass
 
-                avg = metadata_db.get_node_count_avg(source["name"])
-                if avg:
-                    result["avg_nodes_per_flush"] = round(float(avg))
-            except Exception:
-                pass
-        finally:
-            con.close()
+    # Empirical node count analysis — SQLite-only, doesn't need a DuckDB hop.
+    try:
+        from backend.core import metadata_db
+
+        avg = metadata_db.get_node_count_avg(source["name"])
+        if avg:
+            result["avg_nodes_per_flush"] = round(float(avg))
     except Exception:
         pass
 
@@ -307,6 +313,7 @@ def usage_current_storage(
         # covers the cold-start case where get_table_info errors out.
         iceberg_bytes = 0
         iceberg_files = 0
+        iceberg_info_success = False
         try:
             from backend.core import iceberg as db_iceberg
 
@@ -314,10 +321,11 @@ def usage_current_storage(
             if not iceberg_info.get("error"):
                 iceberg_bytes = iceberg_info.get("size_bytes", 0)
                 iceberg_files = iceberg_info.get("data_files", 0)
+                iceberg_info_success = True
         except Exception:
             pass
 
-        if iceberg_bytes == 0:
+        if not iceberg_info_success:
             try:
                 s3 = _get_fos_client(src)
                 bucket = src["bucket"]
@@ -432,15 +440,15 @@ def usage_operations(
             agg[date_str]["class_a"] += class_a
             agg[date_str]["class_b"] += class_b
 
-    from backend.utils.telemetry import tracked_call
-
     try:
-        with tracked_call("GET", f"/stats/aggregate?by={by}", service="Fastly API"):
-            payload = _fastly_api(f"/stats/aggregate?by={by}&from={from_ts}&to={to_ts}", api_key)
+        # fastly() does telemetry tracking internally; the prior
+        # explicit tracked_call wrapper was duplicating the entry.
+        payload = _fastly_api(f"/stats/aggregate?by={by}&from={from_ts}&to={to_ts}", api_key)
         _accumulate(payload.get("data", []))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")
-        raise HTTPException(status_code=502, detail={"error": f"Fastly Stats API {e.code}: {body}"})
+    except RuntimeError as e:
+        # fastly() raises RuntimeError("HTTP 502 GET /stats/aggregate ...")
+        # on non-2xx, with the upstream body included. Surface as 502.
+        raise HTTPException(status_code=502, detail={"error": f"Fastly Stats API: {e}"})
     except Exception as e:
         raise HTTPException(status_code=502, detail={"error": str(e)})
 

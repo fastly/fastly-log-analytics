@@ -1,9 +1,12 @@
 import json
+import logging
 import os
 import queue
 import shutil
 import threading
 import time
+
+logger = logging.getLogger(__name__)
 
 from backend.core import log_fields as lf
 from backend.core.fastly.client import fastly
@@ -37,17 +40,57 @@ def _sync_crontab():
 
 
 def write_service_config(state: dict):
-    """Write a service config JSON file to configs/{service_id}.json."""
+    """Write a service config JSON file to configs/{service_id}.json.
+
+    PRESERVE-ON-RE-RUN: this function is called from /api/provision/ingest
+    (analyst-join, wizard re-run, key rotation). The ``state`` dict is the
+    request body — it has no awareness of code-managed keys that
+    ``enable_scoring`` / ``ngwaf_workspace_id`` PATCH / log_fields PATCH
+    may have injected into the existing config. Without preserving those
+    keys, re-running the wizard silently strips ``cfg["scoring"]``,
+    ``cfg["log_fields"]["custom_fields"]``, and ``cfg["ngwaf_workspace_id"]``
+    — same bug class as the 2026-06-02 state_sync incident, just with the
+    request body as the stale-overwriter instead of FOS admin_state.json.
+    """
     from backend import config as svcconfig
 
     service_id = state.get("logging_service_id") or state.get("service_id")
     db_path = svcconfig.duckdb_path(service_id)
+
+    # Snapshot the existing on-disk cfg so we can preserve code-managed
+    # keys that the request body doesn't carry. None on first-ever ingest
+    # (which is fine — there's nothing to preserve).
+    existing_cfg = svcconfig.load_config(service_id) or {}
 
     fos_key = state.get("fos_access_key_id") or state.get("fos_access_key", "")
     fos_secret = state.get("fos_secret_access_key") or state.get("fos_secret_key", "")
     bucket = state.get("fos_bucket") or state.get("fos_bucket_name", "")
     region = state.get("fos_region", "us-east-1")
     cdn_url = state.get("cdn_url", "")
+
+    # Build log_fields: prefer the request body, but if the request body
+    # omits custom_fields (or sends an empty list) AND we have existing
+    # custom_fields on disk, preserve them. Then if scoring is enabled,
+    # re-inject the canonical _SCORING_CUSTOM_FIELDS from code.
+    incoming_lf = dict(state.get("log_fields") or {})
+    incoming_custom = incoming_lf.get("custom_fields")
+    existing_custom = list((existing_cfg.get("log_fields") or {}).get("custom_fields") or [])
+    if not incoming_custom and existing_custom:
+        incoming_lf["custom_fields"] = existing_custom
+    # Re-inject scoring fields from code when scoring is enabled in either
+    # the incoming state OR the existing cfg (the wizard re-run rarely
+    # carries scoring in the body).
+    scoring_block = state.get("scoring") or existing_cfg.get("scoring") or {}
+    if scoring_block.get("enabled"):
+        from backend.provision.session_scoring_orchestrator import (
+            _SCORING_CUSTOM_FIELDS,
+            _SCORING_FIELD_NAMES,
+        )
+
+        current_custom = list(incoming_lf.get("custom_fields") or [])
+        current_custom = [cf for cf in current_custom if cf.get("name") not in _SCORING_FIELD_NAMES]
+        current_custom.extend(dict(cf) for cf in _SCORING_CUSTOM_FIELDS)
+        incoming_lf["custom_fields"] = current_custom
 
     cfg = {
         "service_id": service_id,
@@ -66,8 +109,18 @@ def write_service_config(state: dict):
         "fastly_api_key": state.get("fastly_api_key") or state.get("admin_token", ""),
         "log_retention_days": int(state.get("log_retention_days", 30)),
         "duckdb_path": db_path,
-        "log_fields": state.get("log_fields", {}),
+        "log_fields": incoming_lf,
     }
+
+    # Preserve code-managed top-level keys that the request body doesn't
+    # carry — primarily ``scoring`` (set by enable_scoring) and
+    # ``ngwaf_workspace_id`` (set by the NGWAF-config PATCH). Anything else
+    # the existing cfg has that the wizard body lacks survives the rewrite.
+    for preserved_key in ("scoring", "ngwaf_workspace_id"):
+        if preserved_key not in state and preserved_key in existing_cfg:
+            cfg[preserved_key] = existing_cfg[preserved_key]
+        elif preserved_key in state:
+            cfg[preserved_key] = state[preserved_key]
 
     if "log_period" in state:
         cfg["log_period"] = state["log_period"]
@@ -457,12 +510,38 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
                 pass
 
         if bucket:
-            # Look for cache dir in both common locations
-            for base in [os.getcwd(), os.path.join(os.path.dirname(__file__), "..", "..")]:
-                svc_cache_dir = os.path.join(base, "cache", bucket)
-                if os.path.exists(svc_cache_dir):
-                    shutil.rmtree(svc_cache_dir)
-                    ok(f"Removed local cache: {svc_cache_dir}")
+            # Security: ``bucket`` is supplied via the provisioning
+            # API and historically had no path-shape validation. A payload
+            # like ``../../../tmp/anything`` would compose with
+            # os.path.join to produce a path outside the cache root and
+            # shutil.rmtree would happily wipe whatever lived there.
+            # Reject any separator/traversal token up front, then
+            # additionally verify the resolved path stays under the
+            # resolved cache root (defense in depth — catches edge cases
+            # like symlink escapes from inside an attacker-writable
+            # parent dir).
+            if any(c in bucket for c in ("/", "\\", "..", "\x00")):
+                logger.warning("[teardown] refusing to remove cache for bucket=%r with path-shape characters", bucket)
+            else:
+                for base in [os.getcwd(), os.path.join(os.path.dirname(__file__), "..", "..")]:
+                    cache_root = os.path.realpath(os.path.join(base, "cache"))
+                    svc_cache_dir = os.path.realpath(os.path.join(cache_root, bucket))
+                    # Reject anything that resolved outside the cache root —
+                    # belt-and-suspenders for symlinks pointing elsewhere.
+                    try:
+                        common = os.path.commonpath([cache_root, svc_cache_dir])
+                    except ValueError:
+                        continue
+                    if common != cache_root:
+                        logger.warning(
+                            "[teardown] refusing to remove cache: resolved path %s escapes %s",
+                            svc_cache_dir,
+                            cache_root,
+                        )
+                        continue
+                    if os.path.exists(svc_cache_dir):
+                        shutil.rmtree(svc_cache_dir)
+                        ok(f"Removed local cache: {svc_cache_dir}")
 
     _sync_crontab()
 
@@ -476,6 +555,15 @@ def generate_analyst_invite(service_id: str) -> dict:
     if cfg.get("access_level") != "read_write":
         raise RuntimeError("Invite generation requires a read_write service configuration")
     api_token = cfg.get("fastly_api_key", "").strip()
+    # Fail fast when the stored token is missing. Without this, the Fastly
+    # API call below would go out with token="" and either time out or
+    # return an error envelope; either way the downstream key["access_key"]
+    # would raise an unhelpful KeyError instead of a clean 400-style message.
+    # Caller (route handler) wraps RuntimeError → HTTPException(400).
+    if not api_token:
+        raise RuntimeError(
+            f"Service {service_id} has no stored fastly_api_key. Rotate the credential before generating a viewer key."
+        )
     bucket = cfg.get("fos_bucket", "")
     region = cfg.get("fos_region", "us-east-1")
     key = fastly(
@@ -488,6 +576,13 @@ def generate_analyst_invite(service_id: str) -> dict:
         },
         token=api_token,
     )
+    # Defensive: a malformed Fastly response shouldn't bubble up as a raw
+    # KeyError on access_key / secret_key — surface a clear error instead.
+    if not isinstance(key, dict) or "access_key" not in key or "secret_key" not in key:
+        raise RuntimeError(
+            f"Fastly access-key API returned unexpected shape (keys={list(key.keys()) if isinstance(key, dict) else type(key).__name__}); "
+            "cannot generate analyst invite."
+        )
 
     iceberg_metadata_location = None
     try:

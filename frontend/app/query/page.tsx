@@ -57,8 +57,8 @@ export default function QueryPage() {
 
   const { data: schemaData } = useQuery({
     queryKey: ['admin', 'schema', activeServiceId],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/schema")
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/schema", { signal })
       return data as any
     },
     enabled: !!activeServiceId
@@ -66,8 +66,8 @@ export default function QueryPage() {
 
   const { data: presets } = useQuery({
     queryKey: ['query', 'presets', activeServiceId],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/presets")
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/presets", { signal })
       return data as any
     },
     enabled: !!activeServiceId
@@ -75,7 +75,7 @@ export default function QueryPage() {
 
   const queryMutation = useMutation({
     mutationFn: async (params: { sql: string, max_rows: number, explain: boolean }) => {
-      const { data } = await client.POST("/api/query", {
+      const { data } = await client.POST("/api/query", { 
         body: params
       })
       return data as any

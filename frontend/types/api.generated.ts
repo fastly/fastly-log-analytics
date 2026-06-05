@@ -266,7 +266,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Views */
+        /**
+         * List Views
+         * @description Security: analyst can only list views for services in their
+         *     scope. Without this gate an analyst scoped to ``svc-A`` could enumerate
+         *     saved views for ``svc-B`` by typing /api/views/svc-B in their browser.
+         */
         get: operations["list_views_api_views__service_id__get"];
         put?: never;
         post?: never;
@@ -285,7 +290,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Create View */
+        /**
+         * Create View
+         * @description Security: analyst can only create views for services in
+         *     their scope. Middleware already blocks POST on /api/views for
+         *     analysts; this is defense-in-depth.
+         */
         post: operations["create_view_api_views__post"];
         delete?: never;
         options?: never;
@@ -317,10 +327,23 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List All Alerts */
+        /**
+         * List All Alerts
+         * @description Return alerts visible to the caller.
+         *
+         *     Admin: every alert across every service. Analyst: only alerts for
+         *     services in their invite's scope (security).
+         */
         get: operations["list_all_alerts_api_alerts__get"];
         put?: never;
-        /** Create Alert */
+        /**
+         * Create Alert
+         * @description Create an alert. Analyst can only create alerts for services in
+         *     their invite scope (security). The Phase-1 analyst middleware
+         *     also blocks POSTs on /api/alerts for analysts entirely (not in the
+         *     _ANALYST_ALLOWED_WRITE_PREFIXES list), so this is defense-in-depth
+         *     for the admin-impersonating-analyst case.
+         */
         post: operations["create_alert_api_alerts__post"];
         delete?: never;
         options?: never;
@@ -335,7 +358,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Service Alerts */
+        /**
+         * List Service Alerts
+         * @description Return alerts for one service. Analyst gets 403 if the service
+         *     isn't in their invite (security).
+         */
         get: operations["list_service_alerts_api_alerts__service_id__get"];
         put?: never;
         post?: never;
@@ -556,7 +583,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Sources Endpoint */
+        /**
+         * Sources Endpoint
+         * @description Return storage metadata (endpoint / bucket / prefix / region) for the
+         *     configured sources the caller is authorized to see.
+         *
+         *     Security: filter by analyst session scope. Without this, an
+         *     authenticated analyst can enumerate every service's S3 bucket / endpoint
+         *     / prefix configuration, including ones not in their invite. Admin
+         *     requests (no analyst_session on request.state) see the full list.
+         */
         get: operations["sources_endpoint_api_sources_get"];
         put?: never;
         post?: never;
@@ -590,7 +626,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Log Fields Catalog */
+        /**
+         * Log Fields Catalog
+         * @description Return the log-fields catalog for the requested service.
+         *
+         *     Security: enforce analyst session scope on the requested
+         *     ``service_id``. Without this, an analyst scoped to ``svc-A`` can pass
+         *     ``?service_id=svc-B`` and read svc-B's custom field configuration
+         *     (including PII-related field configs).
+         */
         get: operations["log_fields_catalog_api_log_fields_catalog_get"];
         put?: never;
         post?: never;
@@ -832,14 +876,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Service Update Logging Settings */
-        get: operations["api_service_update_logging_settings_api_services__service_id__logging_settings_update_get"];
+        get?: never;
         put?: never;
-        post?: never;
+        /** Api Service Update Logging Settings */
+        post: operations["api_service_update_logging_settings_api_services__service_id__logging_settings_update_post"];
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /** Api Service Update Logging Settings */
+        patch: operations["api_service_update_logging_settings_api_services__service_id__logging_settings_update_patch"];
         trace?: never;
     };
     "/api/services/{service_id}/generate-viewer-key": {
@@ -1352,6 +1397,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/metadata-retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Metadata Retention
+         * @description Update the per-service ``metadata_retention`` config block.
+         *
+         *     Body shape: any subset of ``{usage_log_days, ingested_files_days,
+         *     cron_runs_days}``. Each value is coerced to int; negative / non-numeric
+         *     inputs are clamped to 0 (which disables cleanup for that table per
+         *     cleanup_metadata's semantics). Missing keys preserve their current
+         *     value. Returns the resolved retention (defaults merged with cfg) so the
+         *     UI can confirm what was saved.
+         */
+        patch: operations["update_metadata_retention_api_admin_metadata_retention_patch"];
+        trace?: never;
+    };
+    "/api/admin/metadata-storage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Metadata Storage
+         * @description Per-table row count + estimated bytes for this service's metadata.db.
+         *
+         *     Includes the resolved retention policy (per-service cfg merged with
+         *     defaults). The UI uses this to render the Metadata Storage card on
+         *     the admin page — table sizes, bytes, and a Cleanup-now button.
+         */
+        get: operations["metadata_storage_api_admin_metadata_storage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/metadata-cleanup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Metadata Cleanup Now
+         * @description Trigger an immediate metadata cleanup, streaming progress as SSE.
+         *
+         *     Equivalent to the daily ``metadata_cleanup`` cron at 03:15 UTC but
+         *     on-demand. The DELETE phase is fast; VACUUM rewrites the whole file
+         *     and on a multi-GB metadata.db can take minutes. Streaming gives the
+         *     operator real-time feedback instead of a 5-minute hang behind a
+         *     spinning button.
+         *
+         *     Event shapes (between SSE ``data:`` lines):
+         *
+         *         {"type": "status",   "message": str}
+         *         {"type": "progress", "current": int, "total": int, "message": str}
+         *         {"type": "done",     "message": str, "result": {...}}
+         *         {"type": "error",    "message": str}
+         *
+         *     Writes a row to ``cron_runs`` with task=``metadata_cleanup`` so the
+         *     manual run shows up on the Data Management schedule + history grid
+         *     alongside the scheduled cron's runs.
+         */
+        post: operations["metadata_cleanup_now_api_admin_metadata_cleanup_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/health-snapshot": {
         parameters: {
             query?: never;
@@ -1722,10 +1855,26 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Provision Teardown */
-        get: operations["provision_teardown_api_provision_teardown_get"];
+        get?: never;
         put?: never;
-        post?: never;
+        /**
+         * Provision Teardown
+         * @description Destructive service teardown over SSE.
+         *
+         *     Switched from ``GET`` to ``POST`` to defend against CSRF: a GET
+         *     endpoint with side effects can be triggered by any cross-origin
+         *     ``<img src="…">``, ``<link>``, or ``<form method=get>``. POST routes
+         *     require the caller to send a request that browsers do not emit
+         *     cross-origin without the user explicitly submitting a form, and
+         *     ``Content-Type: application/json`` (sent by the dashboard's fetch
+         *     client) puts the request in the CORS-preflighted bucket so the
+         *     browser will block silent invocation entirely.
+         *
+         *     Body shape:
+         *         {token, service_id, remove_logging, remove_cdn,
+         *          remove_bucket, remove_cache, remove_cron}
+         */
+        post: operations["provision_teardown_api_provision_teardown_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1849,7 +1998,20 @@ export interface paths {
         };
         /**
          * Provision Ngwaf Workspaces
-         * @description List NGWAF workspaces using the provided token or the stored API key.
+         * @description List NGWAF workspaces for a service.
+         *
+         *     Security: previously the endpoint would silently fall back to
+         *     the server-stored ``fastly_api_key`` if the caller didn't pass a
+         *     token, letting any local-loopback caller enumerate NGWAF workspaces
+         *     for any service using the stored credential. Now the caller MUST
+         *     present a token, and we accept either:
+         *       - the stored ``fastly_api_key`` for this service (constant-time
+         *         match — preserves the existing admin UX where the frontend
+         *         passes the stored key it just used to fetch workspaces), OR
+         *       - a token whose /tokens/self response shows access to this service
+         *         (the strict validation path used for the destructive op).
+         *     Either way an unauthenticated caller can't enumerate workspaces
+         *     even if they reach the loopback admin surface.
          */
         get: operations["provision_ngwaf_workspaces_api_provision_ngwaf_workspaces_get"];
         put?: never;
@@ -1876,8 +2038,790 @@ export interface paths {
         /**
          * Provision Set Ngwaf Workspace
          * @description Persist the NGWAF workspace ID for a service and reload the scheduler.
+         *
+         *     Security: require the caller to present a Fastly token bound to
+         *     this service. Two paths are accepted:
+         *
+         *       1. The caller passes a token that ``/tokens/self`` confirms has the
+         *          ``global`` scope and access to ``service_id`` (preferred — admin
+         *          can rotate without re-entering the stored key).
+         *       2. The caller passes a token that constant-time-matches the
+         *          service's stored ``fastly_api_key`` (the existing admin flow).
+         *
+         *     Either way an unauthenticated attacker who can reach the endpoint can't
+         *     rebind the workspace because they don't know the token. The middleware
+         *     /api/provision/ block also gates this for analysts.
          */
         patch: operations["provision_set_ngwaf_workspace_api_provision_services__service_id__ngwaf_workspace_patch"];
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Scoring Enable
+         * @description Enable session scoring for the given logging service.
+         *
+         *     Streams SSE status events while the orchestrator runs through:
+         *     Compute service provisioning → Wasm deploy → VCL clone → backend +
+         *     snippets + custom fields + format update → validate → activate.
+         */
+        post: operations["scoring_enable_api_services__service_id__scoring_enable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Scoring Disable
+         * @description Disable session scoring. Reverse of enable_scoring.
+         */
+        post: operations["scoring_disable_api_services__service_id__scoring_disable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Status
+         * @description Return the scoring block from the service's config, or
+         *     {"enabled": false} if scoring was never enabled.
+         */
+        get: operations["scoring_status_api_services__service_id__scoring_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/labels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Labels List
+         * @description Return all session labels for a service, most recent first.
+         */
+        get: operations["scoring_labels_list_api_services__service_id__scoring_labels_get"];
+        put?: never;
+        /**
+         * Scoring Labels Create
+         * @description Create or update a label. Upserts on (service_id, sid).
+         */
+        post: operations["scoring_labels_create_api_services__service_id__scoring_labels_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/labels/{label_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Scoring Labels Delete */
+        delete: operations["scoring_labels_delete_api_services__service_id__scoring_labels__label_id__delete"];
+        options?: never;
+        head?: never;
+        /** Scoring Labels Update */
+        patch: operations["scoring_labels_update_api_services__service_id__scoring_labels__label_id__patch"];
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/top-flagged": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Top Flagged
+         * @description Recent rows with non-null edge_score, sorted by score DESC. Feeds
+         *     the admin page's "Top flagged sessions" table.
+         *
+         *     Returns up to ``limit`` rows. Each row carries enough context for the
+         *     admin to label it: sid, ip, ua, url, the three score fields, and
+         *     cookie_compliance. Joining against the labels table is left to the
+         *     UI (so it can show "currently labeled X" badges without paying the
+         *     JOIN cost server-side).
+         */
+        get: operations["scoring_top_flagged_api_services__service_id__scoring_top_flagged_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/score-distribution": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Score Distribution
+         * @description Hourly buckets × score buckets (0, 25, 50, 75, 100). Returns a flat
+         *     list of {hour, bucket, count} rows; the frontend pivots for the
+         *     histogram.
+         */
+        get: operations["scoring_score_distribution_api_services__service_id__scoring_score_distribution_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/compliance-breakdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Compliance Breakdown
+         * @description Hourly count grouped by edge_cookie_compliance (ok / missing /
+         *     tampered / expired / unknown).
+         */
+        get: operations["scoring_compliance_breakdown_api_services__service_id__scoring_compliance_breakdown_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Health
+         * @description High-level scoring health snapshot for the admin dashboard.
+         *
+         *     Returns a single object with the metrics the operator wants at a
+         *     glance: how often scoring fires vs how much edge traffic flows, what
+         *     the score distribution looks like as summary stats (mean / p50 / p95),
+         *     a top-N breakdown of the comma-separated edge_score_reason values
+         *     (so 'cookie-missing' vs 'impossibly-fast' vs 'rare-transition' is
+         *     visible without opening the Raw Logs table), and a fail-open error
+         *     count (rows where the scorer's deliver-stage subfields didn't land —
+         *     typically a Compute timeout or auth mismatch).
+         */
+        get: operations["scoring_health_api_services__service_id__scoring_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/evaluation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Evaluation
+         * @description Compute the live matrix's ROC-AUC against the operator's accumulated
+         *     good/bad labels and return the result for the StatusPanel.
+         *
+         *     Below the per-class minimum (3 each) the endpoint reports
+         *     ``has_min_samples: false`` and the StatusPanel renders a CTA pushing
+         *     the operator to label a few more sessions — sub-3 AUC bounces between
+         *     0 and 1 on a single label flip and would erode trust in the metric.
+         *
+         *     Wiring:
+         *       1. Pull all labels for the service from SQLite (cheap; <10k rows).
+         *       2. Reconstruct each labeled sid's event sequence from DuckDB.
+         *       3. Load the trained matrix JSON.
+         *       4. Run evaluate() — AUC via Mann-Whitney U, no scipy dependency.
+         *
+         *     Cached for 20s under the existing _cached pattern; the key includes
+         *     the label count so a fresh label naturally invalidates the cache
+         *     (also, _bust_analytics_cache fires on label POST/PATCH/DELETE).
+         */
+        get: operations["scoring_evaluation_api_services__service_id__scoring_evaluation_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/curves": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Curves
+         * @description ROC + PR curve points for the operator's labeled sessions.
+         *
+         *     Walks every integer threshold 0..100 and computes:
+         *       ROC: (false_positive_rate, true_positive_rate) at that cutoff
+         *       PR:  (recall, precision) at that cutoff
+         *
+         *     Plus the scalar summaries (AUC = area under ROC; AP = average
+         *     precision = area under PR). Both areas use the trapezoidal rule
+         *     on the sorted threshold sweep.
+         *
+         *     Returns has_min_samples=false when either class has <3 labels —
+         *     same gate as /scoring/evaluation — so the UI renders the "label
+         *     more sessions" CTA instead of a noisy curve.
+         */
+        get: operations["scoring_curves_api_services__service_id__scoring_curves_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/threshold-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Threshold Preview
+         * @description Preview what happens at a given enforcement threshold.
+         *
+         *     For the last ``since_hours`` of edge traffic, count:
+         *       - total scored requests
+         *       - how many would be flagged (edge_score >= threshold)
+         *       - of those, how many are labeled good / bad / unlabeled
+         *       - same breakdown for the un-flagged tail
+         *
+         *     This is the underlying data for the operator-facing slider: drag
+         *     threshold up → fewer flags but you start missing labeled-bad
+         *     sessions; drag down → catches more bad but also flags some labeled-
+         *     good (false positives). The 2x2 confusion matrix readout is enough
+         *     to eyeball the right cutoff.
+         *
+         *     Cached 30s under the existing ``_cached`` pattern; the cache key
+         *     includes the threshold so dragging the slider re-fetches.
+         */
+        get: operations["scoring_threshold_preview_api_services__service_id__scoring_threshold_preview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/retrain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Scoring Retrain
+         * @description Build a fresh transition matrix from the last N days of DuckDB
+         *     traffic, save it to ``compute/scorer/matrix.json``, publish to FOS,
+         *     and evaluate AUC against the operator's accumulated labels.
+         *
+         *     Synchronous — for a 7-day window with ~10k sessions the whole pipeline
+         *     runs in <30s. The endpoint returns the new matrix metadata + AUC so
+         *     the UI can show "matrix moved from 0.62 → 0.91 after retrain". The
+         *     Wasm build + Compute deploy is a separate step (requires Fastly CLI
+         *     + Rust toolchain on the operator's box — not Docker-friendly): the
+         *     response includes a hint pointing at ``scripts/scoring/deploy_wasm.sh``.
+         *
+         *     Pipeline:
+         *       1. extract_traces from DuckDB → in-memory sessions
+         *       2. build_matrix → TransitionMatrix
+         *       3. evaluate AUC against labels (if >=3 each class)
+         *       4. Save matrix.json to disk + publish to FOS
+         *       5. Bust the /scoring/evaluation cache
+         */
+        post: operations["scoring_retrain_api_services__service_id__scoring_retrain_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/sessions/{sid}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Session Events
+         * @description Return the event timeline for a single session — the URLs the
+         *     session hit, in order, with per-request status/score/compliance/reason
+         *     so the UI can render a 'view this labeled session' popover.
+         *
+         *     The data is the same shape ``evaluate()`` consumes for AUC; this
+         *     endpoint just exposes it through a public route keyed on the sid the
+         *     operator clicked. Cap is 500 events per sid (any realistic browsing
+         *     session well under that; the cap is a runaway-loop safety bound).
+         */
+        get: operations["scoring_session_events_api_services__service_id__scoring_sessions__sid__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/enforce-threshold": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Enforce Threshold Get
+         * @description Read the live enforce_threshold value from the scoring_config
+         *     Compute ConfigStore. None = no enforcement.
+         *
+         *     The Rust scorer reads this on every request — when set AND the
+         *     request's score >= threshold, it emits X-Edge-Score-Enforce: 1,
+         *     which the SCORING_ENFORCE_NAME VCL snippet turns into a 429.
+         */
+        get: operations["scoring_enforce_threshold_get_api_services__service_id__scoring_enforce_threshold_get"];
+        /**
+         * Scoring Enforce Threshold Put
+         * @description Write the live enforce_threshold to the scoring_config ConfigStore.
+         *     Pass ``{"threshold": null}`` to clear (disable enforcement).
+         *
+         *     Effective at the edge within seconds (next Compute invocation
+         *     re-reads the ConfigStore). Audited to scoring_audit so the operator
+         *     can review when enforcement was flipped on/off.
+         *
+         *     Gated by ``?confirm=true`` (matches the matrix-restore pattern) so
+         *     an accidental click can't silently flip enforcement at the edge.
+         */
+        put: operations["scoring_enforce_threshold_put_api_services__service_id__scoring_enforce_threshold_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/exclude-regex": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Exclude Regex Get
+         * @description Return the operator-configured URL-exclusion regex for the recv snippet.
+         *
+         *     URLs that match this regex are NOT routed to the Compute scorer
+         *     (saves cost on static assets / health checks / etc.). The default
+         *     matches common static-asset file extensions; the operator can
+         *     override it via the PUT endpoint below.
+         *
+         *     Response shape:
+         *       {
+         *         "current":      str,    # the stored value (literal default after
+         *                                 # first enable_scoring; or operator override)
+         *         "is_default":   bool,   # true when current is empty OR equals the
+         *                                 # built-in default literal
+         *         "default":      str,    # the built-in default regex
+         *         "effective":    str,    # what's actually interpolated into VCL
+         *       }
+         */
+        get: operations["scoring_exclude_regex_get_api_services__service_id__scoring_exclude_regex_get"];
+        /**
+         * Scoring Exclude Regex Put
+         * @description Update the URL-exclusion regex for the scoring recv snippet.
+         *
+         *     Validation pipeline (must pass all four to land):
+         *       1. Input policy (length cap, no quote / control chars, valid regex).
+         *       2. Falco static analysis on the assembled recv-snippet body.
+         *       3. Fastly's VCL ``validate`` endpoint on the cloned version.
+         *       4. ``activate_version`` (Fastly's compiler runs again).
+         *
+         *     Re-deploys ONLY the recv snippet — Compute service, Wasm, log
+         *     format, and the other 5 scoring snippets stay untouched. Takes
+         *     ~5-10s end-to-end.
+         *
+         *     Pass ``{"regex": ""}`` to reset to the built-in default. Body shape:
+         *         { "regex": str }
+         *
+         *     Gated by ``?confirm=true`` because a typo here can disable scoring
+         *     entirely (regex matches everything) or DoS Compute (regex matches
+         *     nothing → every request scored). The confirm flag matches the
+         *     enforce-threshold + matrix-restore precedent.
+         */
+        put: operations["scoring_exclude_regex_put_api_services__service_id__scoring_exclude_regex_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/exclude-regex/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Scoring Exclude Regex Validate
+         * @description Run the 2-layer pre-publish validator on a candidate regex WITHOUT
+         *     persisting it or touching Fastly.
+         *
+         *     Drives the admin UI's on-blur lint check: the operator types a regex,
+         *     tabs out of the textarea, and gets immediate feedback on whether the
+         *     value would pass input policy (length / quote / control-char / Python
+         *     re.compile) AND falco's static analysis on the assembled snippet,
+         *     BEFORE they commit to a publish flow.
+         *
+         *     Response shape:
+         *       Success:  {"ok": true,  "lint_warnings": [...]}
+         *       Failure:  {"ok": false, "error": "...", "reason": "..."}
+         *
+         *     The third layer (Fastly's own VCL compiler during version activate)
+         *     only runs on real publish — we don't burn a clone/activate round-trip
+         *     for a preview. False-positives between falco and Fastly's compiler are
+         *     rare; the publish flow still catches them.
+         */
+        post: operations["scoring_exclude_regex_validate_api_services__service_id__scoring_exclude_regex_validate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/enforce-status-code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Enforce Status Code Get
+         * @description Return the operator-configured HTTP status code that the enforce
+         *     snippet returns when the scorer flags a request.
+         *
+         *     Defaults to 429 (Too Many Requests). Operators can pick any 4xx/5xx
+         *     code via the PUT endpoint below.
+         *
+         *     Response shape:
+         *       {
+         *         "current":     int,    # operator's override, or null when default
+         *         "default":     int,    # built-in default (429)
+         *         "effective":   int,    # what's actually baked into the VCL
+         *         "min":         int,    # min allowed value (400)
+         *         "max":         int,    # max allowed value (599)
+         *         "is_default":  bool,
+         *       }
+         */
+        get: operations["scoring_enforce_status_code_get_api_services__service_id__scoring_enforce_status_code_get"];
+        /**
+         * Scoring Enforce Status Code Put
+         * @description Update the HTTP status code returned by the enforce snippet.
+         *
+         *     Body shape: ``{"status_code": int | null}``. Pass ``null`` (or omit)
+         *     to reset to the default 429.
+         *
+         *     Validation:
+         *       - Must be int in 400-599 (4xx/5xx HTTP error range).
+         *       - Anything else → 400 with explanation.
+         *
+         *     Re-deploys ONLY the enforce snippet — Compute service, Wasm, log
+         *     format, and the other 5 scoring snippets stay untouched. Takes
+         *     ~5-10s end-to-end.
+         *
+         *     Gated by ``?confirm=true`` because the change affects live edge
+         *     response codes seen by real users — same precedent as
+         *     enforce-threshold and exclude-regex.
+         */
+        put: operations["scoring_enforce_status_code_put_api_services__service_id__scoring_enforce_status_code_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/matrix-versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Matrix Versions List
+         * @description List historical scoring matrices archived in FOS.
+         *
+         *     publish_matrix_to_fos snapshots the prior current matrix to
+         *     ``iceberg/meta/scoring_matrix_history/{version}.json`` before
+         *     overwriting, so the operator can roll back to any prior trained
+         *     matrix. Returns most-recent first.
+         */
+        get: operations["scoring_matrix_versions_list_api_services__service_id__scoring_matrix_versions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/matrix-versions/{version}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Scoring Matrix Versions Restore
+         * @description Restore a historical matrix to the current scoring_matrix.json
+         *     key in FOS. Also deletes the local matrix.json so the next
+         *     /scoring/evaluation call sees the FOS-restored matrix.
+         *
+         *     Live edge scorer (Wasm) keeps using its previously-embedded matrix
+         *     until the operator re-runs deploy_wasm.sh. The /scoring/evaluation
+         *     AUC will reflect the restored matrix immediately.
+         *
+         *     Gated by ``?confirm=true`` so an accidental click can't silently
+         *     rewind the live AUC numbers.
+         */
+        post: operations["scoring_matrix_versions_restore_api_services__service_id__scoring_matrix_versions__version__restore_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/rotate-key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Scoring Rotate Key
+         * @description Rotate the AES-GCM cookie-state encryption key.
+         *
+         *     Moves the current key to ``previous_key_hex`` (grace window for
+         *     in-flight cookies still using the old key) and writes a fresh
+         *     32-byte key as the new ``current_key_hex``. The Rust scorer's
+         *     cookie codec already tries previous as a fallback so existing
+         *     sessions keep decoding for one rotation cycle.
+         *
+         *     Returns rotation metadata — the new key itself is NOT returned in
+         *     the response (only stored in the Fastly ConfigStore + audit log).
+         */
+        post: operations["scoring_rotate_key_api_services__service_id__scoring_rotate_key_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Audit List
+         * @description List recent operator actions on this service's scoring config.
+         *
+         *     Tracks: scoring_enabled, scoring_disabled, threshold_committed,
+         *     threshold_cleared, threshold_enforced, threshold_enforce_disabled,
+         *     matrix_retrained, matrix_restored, key_rotated. Each row has
+         *     timestamp, action, actor, details (JSON). Used for compliance review
+         *     + "who broke prod last Tuesday?" triage.
+         *
+         *     ``since`` (optional ISO timestamp) filters to rows at or after that
+         *     instant — handy for the admin UI to poll for new events without
+         *     re-rendering the entire history.
+         */
+        get: operations["scoring_audit_list_api_services__service_id__scoring_audit_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/threshold": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Threshold Get
+         * @description Return the operator's chosen score threshold.
+         *
+         *     NOT enforced — the live scorer doesn't read this. It's a persisted
+         *     operator preference so the threshold slider can remember the
+         *     'committed' value across sessions, and the StatusPanel can show
+         *     'committed threshold: X' as a stable reference. Actual enforcement
+         *     requires a Rust scorer change + Wasm redeploy and is deferred to
+         *     a future release once the operator is confident in the value.
+         */
+        get: operations["scoring_threshold_get_api_services__service_id__scoring_threshold_get"];
+        /**
+         * Scoring Threshold Put
+         * @description Persist the operator's chosen threshold (0-100) into the per-service
+         *     config. Pass ``{"threshold": null}`` to clear. Always returns the
+         *     new state. Does NOT push to Compute — preview-only.
+         */
+        put: operations["scoring_threshold_put_api_services__service_id__scoring_threshold_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/evaluation/per-reason": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Evaluation Per Reason
+         * @description AUC broken down by L1/L2 rule (cookie-missing, impossibly-fast,
+         *     robotic-consistency, rare-transition, low-transition-prob).
+         *
+         *     Same min-samples gate as /scoring/evaluation but applied per-bucket
+         *     (so a reason with <3 labels in either class shows a 'need more
+         *     labels with reason=X' CTA instead of a noisy AUC). The headline
+         *     /scoring/evaluation gives the combined AUC; this answers 'which
+         *     rule contributed most to AUC' once enough per-reason labels exist.
+         */
+        get: operations["scoring_evaluation_per_reason_api_services__service_id__scoring_evaluation_per_reason_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/dashboard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Dashboard
+         * @description One-shot dashboard payload. Returns:
+         *
+         *     ```
+         *     {
+         *         since_hours, threshold,
+         *         status: {...},                                  # /scoring/status
+         *         evaluation: {...},                              # /scoring/evaluation
+         *         health: {...},                                  # /scoring/health
+         *         top_flagged: {rows: [...], since_hours},        # /scoring/top-flagged
+         *         score_distribution: {rows: [...]},              # /scoring/score-distribution
+         *         compliance_breakdown: {rows: [...]},            # /scoring/compliance-breakdown
+         *         curves: {...},                                  # /scoring/curves
+         *         threshold_preview: {...},                       # /scoring/threshold-preview
+         *     }
+         *     ```
+         *
+         *     Each sub-object is byte-identical to the corresponding individual
+         *     endpoint's response — the frontend can swap to
+         *     ``dashboard.top_flagged`` without changing card-level contracts.
+         *
+         *     Cache key includes ``since_hours``, ``threshold``, and the per-class
+         *     label counts so label mutations + slider drags invalidate naturally.
+         */
+        get: operations["scoring_dashboard_api_services__service_id__scoring_dashboard_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/debug/recent-sqlite": {
@@ -1915,6 +2859,34 @@ export interface paths {
          * @description Drain the SQLite ring buffer. Manual reset for the Debug Panel.
          */
         post: operations["clear_sqlite_api_debug_clear_sqlite_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/debug/state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Debug State
+         * @description Report whether the backend will include ``_debug_queries`` /
+         *     ``_debug_calls`` arrays in API responses.
+         *
+         *     Controlled by the process-level ``DEBUG_RESPONSES`` env var (defaults
+         *     OFF in production for security; ON in local-dev ``.env``). The admin
+         *     page calls this to dim the "Query debugging panel" + "API call panel"
+         *     toggles when the backend won't populate them — so the operator gets
+         *     a clear tooltip explaining why their toggle has no effect, instead of
+         *     silently flipping a switch that does nothing.
+         */
+        get: operations["debug_state_api_debug_state_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2718,7 +3690,7 @@ export interface components {
              * @default edge
              * @enum {string}
              */
-            collection_stage: "edge" | "origin";
+            collection_stage: "edge" | "origin" | "deliver";
             /**
              * Origin Log Frequency
              * @default all
@@ -2786,7 +3758,7 @@ export interface components {
              * @default edge
              * @enum {string}
              */
-            collection_stage: "edge" | "origin";
+            collection_stage: "edge" | "origin" | "deliver";
             /**
              * Origin Log Frequency
              * @default all
@@ -2866,7 +3838,7 @@ export interface components {
             /** Vcl Log Expression */
             vcl_log_expression?: string | null;
             /** Collection Stage */
-            collection_stage?: ("edge" | "origin") | null;
+            collection_stage?: ("edge" | "origin" | "deliver") | null;
             /** Origin Log Frequency */
             origin_log_frequency?: ("all" | "miss_pass") | null;
             /** Duckdb Type */
@@ -5237,7 +6209,7 @@ export interface components {
              * @default edge
              * @enum {string}
              */
-            collection_stage: "edge" | "origin";
+            collection_stage: "edge" | "origin" | "deliver";
             /** Log Fields Config */
             log_fields_config?: {
                 [key: string]: unknown;
@@ -5278,7 +6250,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5318,7 +6289,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5358,7 +6328,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5398,7 +6367,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5438,7 +6406,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5478,7 +6445,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5518,7 +6484,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5558,7 +6523,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5633,7 +6597,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5673,7 +6636,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5713,7 +6675,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5753,7 +6714,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5793,7 +6753,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -5833,7 +6792,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -6057,7 +7015,6 @@ export interface operations {
         parameters: {
             query?: {
                 lookback_hours?: number;
-                read_only?: boolean;
                 service?: string | null;
                 service_id?: string | null;
             };
@@ -6177,7 +7134,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -6217,7 +7173,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -6257,7 +7212,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -6297,7 +7251,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -6337,7 +7290,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -6377,7 +7329,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -6417,7 +7368,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -6457,7 +7407,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -6552,7 +7501,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -6623,7 +7571,6 @@ export interface operations {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -7092,7 +8039,45 @@ export interface operations {
             };
         };
     };
-    api_service_update_logging_settings_api_services__service_id__logging_settings_update_get: {
+    api_service_update_logging_settings_api_services__service_id__logging_settings_update_post: {
+        parameters: {
+            query?: {
+                period?: number | null;
+                sample_rate?: number | null;
+                prefix?: string | null;
+                edge_only?: boolean | null;
+                custom_condition?: string | null;
+                update_format?: boolean;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_service_update_logging_settings_api_services__service_id__logging_settings_update_patch: {
         parameters: {
             query?: {
                 period?: number | null;
@@ -7740,7 +8725,6 @@ export interface operations {
                 by?: string;
                 service?: string | null;
                 service_id?: string | null;
-                read_only?: boolean;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -8185,6 +9169,117 @@ export interface operations {
         };
     };
     compaction_stats_api_admin_compaction_stats_get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_metadata_retention_api_admin_metadata_retention_patch: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    metadata_storage_api_admin_metadata_storage_get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    metadata_cleanup_now_api_admin_metadata_cleanup_post: {
         parameters: {
             query?: {
                 service?: string | null;
@@ -8864,22 +9959,20 @@ export interface operations {
             };
         };
     };
-    provision_teardown_api_provision_teardown_get: {
+    provision_teardown_api_provision_teardown_post: {
         parameters: {
-            query?: {
-                token?: string;
-                service_id?: string | null;
-                remove_logging?: boolean;
-                remove_cdn?: boolean;
-                remove_bucket?: boolean;
-                remove_cache?: boolean;
-                remove_cron?: boolean;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                } | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -9161,7 +10254,9 @@ export interface operations {
     };
     provision_set_ngwaf_workspace_api_provision_services__service_id__ngwaf_workspace_patch: {
         parameters: {
-            query?: never;
+            query?: {
+                token?: string;
+            };
             header?: never;
             path: {
                 service_id: string;
@@ -9183,6 +10278,1130 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_enable_api_services__service_id__scoring_enable_post: {
+        parameters: {
+            query?: {
+                token?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Logging service ID to enable scoring on */
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_disable_api_services__service_id__scoring_disable_post: {
+        parameters: {
+            query?: {
+                token?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Logging service ID to disable scoring on */
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_status_api_services__service_id__scoring_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Logging service ID */
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_labels_list_api_services__service_id__scoring_labels_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Logging service ID */
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_labels_create_api_services__service_id__scoring_labels_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Logging service ID */
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_labels_delete_api_services__service_id__scoring_labels__label_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+                label_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_labels_update_api_services__service_id__scoring_labels__label_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+                label_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_top_flagged_api_services__service_id__scoring_top_flagged_get: {
+        parameters: {
+            query?: {
+                since_hours?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_score_distribution_api_services__service_id__scoring_score_distribution_get: {
+        parameters: {
+            query?: {
+                since_hours?: number;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_compliance_breakdown_api_services__service_id__scoring_compliance_breakdown_get: {
+        parameters: {
+            query?: {
+                since_hours?: number;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_health_api_services__service_id__scoring_health_get: {
+        parameters: {
+            query?: {
+                since_hours?: number;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_evaluation_api_services__service_id__scoring_evaluation_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_curves_api_services__service_id__scoring_curves_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_threshold_preview_api_services__service_id__scoring_threshold_preview_get: {
+        parameters: {
+            query?: {
+                threshold?: number;
+                since_hours?: number;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_retrain_api_services__service_id__scoring_retrain_post: {
+        parameters: {
+            query?: {
+                /** @description Window of DuckDB traffic to train on */
+                since_days?: number;
+                /** @description Override matrix version label; defaults to today's date */
+                version?: string | null;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_session_events_api_services__service_id__scoring_sessions__sid__events_get: {
+        parameters: {
+            query?: {
+                since_days?: number;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+                /** @description Edge session id (12-hex chars) */
+                sid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_enforce_threshold_get_api_services__service_id__scoring_enforce_threshold_get: {
+        parameters: {
+            query?: {
+                token?: string;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_enforce_threshold_put_api_services__service_id__scoring_enforce_threshold_put: {
+        parameters: {
+            query?: {
+                token?: string;
+                /** @description Set true to actually apply the enforcement change */
+                confirm?: boolean;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_exclude_regex_get_api_services__service_id__scoring_exclude_regex_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_exclude_regex_put_api_services__service_id__scoring_exclude_regex_put: {
+        parameters: {
+            query?: {
+                token?: string;
+                /** @description Set true to actually apply the change */
+                confirm?: boolean;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_exclude_regex_validate_api_services__service_id__scoring_exclude_regex_validate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_enforce_status_code_get_api_services__service_id__scoring_enforce_status_code_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_enforce_status_code_put_api_services__service_id__scoring_enforce_status_code_put: {
+        parameters: {
+            query?: {
+                token?: string;
+                /** @description Set true to actually apply the change */
+                confirm?: boolean;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_matrix_versions_list_api_services__service_id__scoring_matrix_versions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_matrix_versions_restore_api_services__service_id__scoring_matrix_versions__version__restore_post: {
+        parameters: {
+            query?: {
+                /** @description Set true to actually perform the restore */
+                confirm?: boolean;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+                /** @description Matrix version string to restore */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_rotate_key_api_services__service_id__scoring_rotate_key_post: {
+        parameters: {
+            query?: {
+                token?: string;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_audit_list_api_services__service_id__scoring_audit_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                /** @description ISO timestamp lower bound (inclusive) */
+                since?: string | null;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_threshold_get_api_services__service_id__scoring_threshold_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_threshold_put_api_services__service_id__scoring_threshold_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_evaluation_per_reason_api_services__service_id__scoring_evaluation_per_reason_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_dashboard_api_services__service_id__scoring_dashboard_get: {
+        parameters: {
+            query?: {
+                since_hours?: number;
+                /** @description Preview cutoff for threshold-preview block */
+                threshold?: number;
+            };
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */
@@ -9244,6 +11463,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ClearSqliteResponse"];
+                };
+            };
+        };
+    };
+    debug_state_api_debug_state_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
         };

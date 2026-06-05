@@ -22,6 +22,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 
 from backend.utils.date_utils import iso_z, iso_z_now
@@ -228,7 +229,23 @@ _SCHEMA = [
         error_count INTEGER DEFAULT 0,
         PRIMARY KEY (file_name, source_name)
     )""",
-    "CREATE INDEX IF NOT EXISTS idx_ingested_files_source ON ingested_files(source_name)",
+    # Covers `/usage/prefill`'s source+range narrowing
+    # (`WHERE source_name = ? AND ingested_at BETWEEN ? AND ?`) and the
+    # bounded `list_unbackfilled_fastly_edge_files` scan (see :1128). The
+    # previous `idx_ingested_files_source` indexed source_name alone — SQLite
+    # had to walk every row for the matching source and filter ingested_at
+    # in memory (~250ms per query on populated services). The composite
+    # satisfies the range scan directly and is a strict superset for
+    # source_name-only lookups (SQLite uses leading-column prefixes), so the
+    # old index is redundant and dropped here. Index name matches the
+    # by-name reference in `list_unbackfilled_fastly_edge_files`'s docstring.
+    "CREATE INDEX IF NOT EXISTS idx_ingested_files_source_ingested_at ON ingested_files(source_name, ingested_at)",
+    "DROP INDEX IF EXISTS idx_ingested_files_source",
+    # Earlier in this branch a redundant `idx_ingested_files_source_ts` was
+    # added under a different name before discovering the existing
+    # by-name reference above; clean it up so no service ends up with two
+    # functionally identical composites.
+    "DROP INDEX IF EXISTS idx_ingested_files_source_ts",
     # Single-row-per-service rollup maintained by ``insert_ingested_files``.
     # Without it, ``get_ingested_files_status_summary`` had to SUM(row_count)
     # + SUM(file_size_bytes) across the whole table on every cron tick —
@@ -278,6 +295,13 @@ _SCHEMA = [
         log_output TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS idx_cron_task_started ON cron_runs(task, started_at)",
+    # Covers `/logs`'s unfiltered pagination
+    # (`ORDER BY started_at DESC LIMIT ? OFFSET ?` with no `WHERE task`) and
+    # `main.py`'s sync-status probe (`WHERE task='sync' AND status != 'running'
+    # ORDER BY started_at DESC LIMIT 1`). Without it, SQLite falls back to a
+    # TEMP B-TREE sort over the full table because `idx_cron_task_started`
+    # requires a leading-`task` predicate to satisfy the ORDER BY.
+    "CREATE INDEX IF NOT EXISTS idx_cron_started ON cron_runs(started_at DESC)",
     """CREATE TABLE IF NOT EXISTS asn_names (
         asn INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
@@ -321,6 +345,44 @@ _SCHEMA = [
         last_triggered_at TEXT,
         created_at TEXT DEFAULT (datetime('now'))
     )""",
+    # Admin-flagged sessions for the edge session-scoring system. Each row
+    # is one (service, sid) tuple labeled good/bad/neutral by the admin.
+    # Feeds backend.scoring.evaluate.evaluate() for matrix ROC-AUC; the
+    # neutral label is captured for UI completeness but excluded from the
+    # AUC computation (intentionally uncertain).
+    """CREATE TABLE IF NOT EXISTS scoring_labels (
+        id TEXT PRIMARY KEY,
+        service_id TEXT NOT NULL,
+        sid TEXT NOT NULL,
+        label TEXT NOT NULL CHECK (label IN ('good', 'bad', 'neutral')),
+        notes TEXT DEFAULT '',
+        flagged_by TEXT,
+        sample_ip TEXT,
+        sample_ua TEXT,
+        sample_url TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+    )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_scoring_labels_svc_sid ON scoring_labels(service_id, sid)",
+    "CREATE INDEX IF NOT EXISTS idx_scoring_labels_svc_label ON scoring_labels(service_id, label)",
+    # Operator audit log specifically for scoring-config mutations.
+    # Separate from audit_logs (which gets state_sync'd) because scoring-
+    # audit is per-host operator-attribution data that should NOT mirror
+    # to read_only analyst replicas.
+    """CREATE TABLE IF NOT EXISTS scoring_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+        service_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        details TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_scoring_audit_svc_ts ON scoring_audit(service_id, timestamp DESC)",
+    # Plain timestamp index for the list_scoring_audit ORDER BY timestamp DESC
+    # path when the service_id predicate is already satisfied — keeps the sort
+    # itself indexed instead of falling back to a TEMP B-TREE on large audit
+    # tables.
+    "CREATE INDEX IF NOT EXISTS idx_scoring_audit_ts ON scoring_audit(timestamp DESC)",
     """CREATE TABLE IF NOT EXISTS usage_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT,
@@ -372,6 +434,44 @@ _SCHEMA = [
     # 500-row page. Including (operation_class, count, bytes) makes the
     # aggregate covering too (5× faster than non-covering on the same query).
     "CREATE INDEX IF NOT EXISTS idx_usage_service_ts ON usage_log(service_id, timestamp, operation_class, count, bytes)",
+    # Hourly rollup of usage_log keyed by (service, hour-prefix of timestamp,
+    # operation_class, operation_type). Powers the /admin/usage-log aggregate
+    # GROUP BY which used to scan millions of usage_log rows (~600 ms steady
+    # state). With the rollup the aggregate becomes a small indexed sum over
+    # at most 24 hours × a few op-class/type pairs. Maintained by the
+    # AFTER INSERT trigger below (incremental, always-consistent) plus a
+    # backfill helper for services upgrading from a pre-rollup install.
+    """CREATE TABLE IF NOT EXISTS usage_log_hourly_summary (
+        service_id TEXT NOT NULL,
+        hour TEXT NOT NULL,
+        operation_class TEXT NOT NULL DEFAULT '',
+        operation_type TEXT NOT NULL DEFAULT '',
+        count INTEGER NOT NULL DEFAULT 0,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        last_updated TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (service_id, hour, operation_class, operation_type)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_usage_hourly_svc_hour ON usage_log_hourly_summary(service_id, hour)",
+    # AFTER INSERT trigger: every row added to usage_log bumps its hour bucket
+    # in the summary. Hour key = first 13 chars of timestamp ("YYYY-MM-DDTHH").
+    # Coalesce on empty operation_class/operation_type because rows can have
+    # NULLs; the rollup uses '' as a normalised sentinel. ON CONFLICT path
+    # supports the reconcile_fastly_stats compaction pattern where multiple
+    # rows for the same (hour, class, type) accumulate.
+    """CREATE TRIGGER IF NOT EXISTS trg_usage_log_summary_insert
+    AFTER INSERT ON usage_log
+    WHEN NEW.timestamp IS NOT NULL AND length(NEW.timestamp) >= 13 AND NEW.service_id IS NOT NULL
+    BEGIN
+        INSERT INTO usage_log_hourly_summary
+            (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+        VALUES (NEW.service_id, substr(NEW.timestamp, 1, 13),
+                COALESCE(NEW.operation_class, ''), COALESCE(NEW.operation_type, ''),
+                COALESCE(NEW.count, 1), COALESCE(NEW.bytes, 0), datetime('now'))
+        ON CONFLICT(service_id, hour, operation_class, operation_type)
+        DO UPDATE SET count = count + excluded.count,
+                      bytes = bytes + excluded.bytes,
+                      last_updated = excluded.last_updated;
+    END""",
     # Tracks Iceberg parquet basenames that local_compaction merged into a
     # bigger local file and then deleted from disk. WITHOUT this table the
     # sync_data fast-path check sees the deletions as "missing local files"
@@ -383,28 +483,31 @@ _SCHEMA = [
         file_name TEXT PRIMARY KEY,
         compacted_at TEXT DEFAULT (datetime('now'))
     )""",
+    # Tracking table for the data-migration framework
+    # (``backend.core.data_migrations``). Each row records one applied
+    # data-migration: long-running, one-time data setup tasks (e.g. the
+    # rollups initial backfill) that are NOT schema DDL changes. Schema
+    # migrations use ``PRAGMA user_version`` via ``sqlite_migrations.py``
+    # — these two systems are intentionally separate because schema
+    # changes must block startup, while data migrations run async on a
+    # daemon thread so a multi-hour backfill can't wedge the boot loop.
+    """CREATE TABLE IF NOT EXISTS applied_data_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+        duration_s REAL,
+        status TEXT NOT NULL DEFAULT 'success',
+        notes TEXT
+    )""",
 ]
 
 
 def _init_schema(con: sqlite3.Connection) -> None:
+    from backend.core import sqlite_migrations
+
     for stmt in _SCHEMA:
         con.execute(stmt)
     con.commit()
-    # Bring pre-migration-framework service DBs up to current. Migrations
-    # are idempotent (each checks before mutating) so this is also safe to
-    # call on fresh DBs that already have everything from ``_SCHEMA``.
-    # On a healthy fresh install the loop exits on the first version check.
-    from backend.core import sqlite_migrations
-
-    applied = sqlite_migrations.apply_pending(con)
-    if applied:
-        logger.info("[metadata_db] applied %d pending migration(s)", applied)
-    # New DBs leap straight to LATEST so the migration loop doesn't waste
-    # a check on every open. Idempotency means doing the work first is
-    # harmless, but skipping the inspection is cheaper at scale.
-    if sqlite_migrations.get_current_version(con) < sqlite_migrations.LATEST_VERSION:
-        con.execute(f"PRAGMA user_version = {sqlite_migrations.LATEST_VERSION}")
-        con.commit()
+    sqlite_migrations.apply_pending(con)
 
 
 # ── alerts ────────────────────────────────────────────────────────────────────
@@ -627,6 +730,44 @@ def replace_views_for_service(service_id: str, views: list[dict]) -> None:
     con.commit()
 
 
+def upsert_views_for_service(service_id: str, views: list[dict]) -> None:
+    """Upsert saved views by id WITHOUT deleting local-only rows.
+
+    Used by state_sync.import_admin_state on read_only analyst hosts so
+    locally-created views (which the analyst created on their own pod) are
+    preserved through every metadata_sync cron tick. Without this, the
+    cron's wholesale DELETE+INSERT silently wiped any analyst-side view
+    that hadn't been mirrored back to FOS — and ``export_admin_state``
+    refuses to push from read_only hosts, so the loss was permanent.
+    """
+    if not views:
+        return
+    con = get_con(service_id)
+    con.executemany(
+        "INSERT INTO views (id, service_id, name, filters_json, time_range_type, start_time, end_time, page, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "name=excluded.name, filters_json=excluded.filters_json, "
+        "time_range_type=excluded.time_range_type, start_time=excluded.start_time, "
+        "end_time=excluded.end_time, page=excluded.page, created_at=excluded.created_at",
+        [
+            (
+                v.get("id"),
+                v.get("service_id"),
+                v.get("name"),
+                v.get("filters_json"),
+                v.get("time_range_type"),
+                v.get("start_time"),
+                v.get("end_time"),
+                v.get("page"),
+                v.get("created_at"),
+            )
+            for v in views
+        ],
+    )
+    con.commit()
+
+
 # ── audit_logs ────────────────────────────────────────────────────────────────
 
 
@@ -737,6 +878,37 @@ def replace_audit_for_service(service_id: str, rows: list[dict]) -> None:
                 )
                 for r in rows
             ],
+        )
+    con.commit()
+
+
+def merge_audit_for_service(service_id: str, rows: list[dict]) -> None:
+    """Insert audit log entries from remote without deleting local ones.
+
+    Used by state_sync.import_admin_state on read_only analyst hosts to
+    preserve local audit entries created by the analyst's own actions
+    (which the wholesale ``replace_audit_for_service`` would have wiped on
+    every cron tick).
+
+    Dedup key: (timestamp, source_name, event_type, actor) — a row with
+    those four fields equal to an existing row is considered the same
+    event and skipped. ``timestamp`` has second precision so collisions
+    between distinct events are improbable, and even if they happen the
+    audit log tolerates the missed insert.
+    """
+    if not rows:
+        return
+    con = get_con(service_id)
+    for r in rows:
+        existing = con.execute(
+            "SELECT 1 FROM audit_logs WHERE source_name = ? AND timestamp = ? AND event_type = ? AND actor = ? LIMIT 1",
+            (r.get("source_name"), r.get("timestamp"), r.get("event_type"), r.get("actor")),
+        ).fetchone()
+        if existing:
+            continue
+        con.execute(
+            "INSERT INTO audit_logs (timestamp, source_name, event_type, details, actor) VALUES (?, ?, ?, ?, ?)",
+            (r.get("timestamp"), r.get("source_name"), r.get("event_type"), r.get("details"), r.get("actor")),
         )
     con.commit()
 
@@ -1503,6 +1675,114 @@ def purge_cron_runs(
     con.commit()
 
 
+def record_scoring_audit(
+    service_id: str,
+    action: str,
+    *,
+    actor: str = "operator",
+    details: dict | None = None,
+) -> None:
+    """Append an operator-attribution row to the scoring_audit log.
+
+    Called from every scoring-config-mutating endpoint (enable, disable,
+    threshold commit + enforce, retrain, rotate-key, matrix-rollback).
+    Best-effort: any SQLite failure is logged at DEBUG and swallowed so
+    a busy WAL doesn't block the actual operator action.
+    """
+    try:
+        con = get_con(service_id)
+        con.execute(
+            "INSERT INTO scoring_audit (service_id, action, actor, details) VALUES (?, ?, ?, ?)",
+            (service_id, action, actor, json.dumps(details) if details else None),
+        )
+        con.commit()
+    except sqlite3.Error as e:
+        logger.debug("[metadata_db] record_scoring_audit(%s, %s) failed: %s", service_id, action, e)
+
+
+def list_scoring_audit(
+    service_id: str,
+    *,
+    limit: int = 100,
+    since: str | None = None,
+) -> list[dict]:
+    """Most-recent first. Optional ISO ``since`` timestamp lower bound."""
+    try:
+        con = get_con(service_id)
+        if since:
+            rows = con.execute(
+                "SELECT id, timestamp, action, actor, details FROM scoring_audit "
+                "WHERE service_id = ? AND timestamp >= ? ORDER BY id DESC LIMIT ?",
+                (service_id, since, limit),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT id, timestamp, action, actor, details FROM scoring_audit "
+                "WHERE service_id = ? ORDER BY id DESC LIMIT ?",
+                (service_id, limit),
+            ).fetchall()
+        out = []
+        for r in rows:
+            row = dict(r)
+            if row.get("details"):
+                try:
+                    row["details"] = json.loads(row["details"])
+                except (ValueError, TypeError):
+                    pass
+            out.append(row)
+        return out
+    except sqlite3.Error as e:
+        logger.debug("[metadata_db] list_scoring_audit(%s) failed: %s", service_id, e)
+        return []
+
+
+def prune_scoring_audit(service_id: str, *, keep_last: int = 10000) -> None:
+    """Trim scoring_audit to the most recent ``keep_last`` rows per service.
+
+    Cheap unbounded growth guard — every scoring-config mutation appends
+    one row, and the table is only ever read by the admin UI / state_sync
+    export which already caps its own page size. Best-effort: any SQLite
+    failure is logged at DEBUG and swallowed so trimming never blocks the
+    caller (typically a maintenance cron, not the operator hot path).
+    """
+    try:
+        con = get_con(service_id)
+        # Tiebreak on id DESC so concurrent inserts that landed in the same
+        # `datetime('now')` second are deterministically ordered (otherwise
+        # SQLite is free to pick any row from the tied group, which makes
+        # prune flaky under burst workloads and breaks reproducibility tests).
+        con.execute(
+            "DELETE FROM scoring_audit WHERE service_id = ? AND id NOT IN ("
+            "SELECT id FROM scoring_audit WHERE service_id = ? ORDER BY timestamp DESC, id DESC LIMIT ?)",
+            (service_id, service_id, keep_last),
+        )
+        con.commit()
+    except sqlite3.Error as e:
+        logger.debug("[metadata_db] prune_scoring_audit(%s) failed: %s", service_id, e)
+
+
+def get_cron_run_status(service_id: str, run_id: int) -> str | None:
+    """Return the status string for a single cron_runs row, or None if
+    the row doesn't exist. Used by cron_progress.list_active_runs to
+    cross-check the in-memory state against the DB-of-truth (catches
+    abandoned-worker-thread zombies that completed log_cron_run but
+    never fired end_progress).
+
+    Narrowed exception scope: catches sqlite3.Error (DB unreachable,
+    table missing, locked) and logs at DEBUG so the next 'why isn't
+    the cross-check firing?' triage isn't flying blind. Returns None
+    on any DB failure so list_active_runs falls back to the in-memory
+    signal (we'd rather show a false in-flight than miss a real one).
+    """
+    try:
+        con = get_con(service_id)
+        row = con.execute("SELECT status FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
+        return row["status"] if row else None
+    except sqlite3.Error as e:
+        logger.debug("[metadata_db] get_cron_run_status(%s, %s) failed: %s", service_id, run_id, e)
+        return None
+
+
 def get_cron_runs(
     service_id: str,
     *,
@@ -2019,6 +2299,180 @@ def clear_usage_log(service_id: str) -> None:
     con.commit()
 
 
+USAGE_LOG_HOURLY_BACKFILL_NAME = "2026-06-04_usage_log_hourly_summary_backfill"
+
+# Per-process guard so the in-process check doesn't hit SQLite on every read.
+# The DB-level marker (applied_data_migrations) is the source of truth across
+# restarts; this cache just trims redundant lookups within one process.
+_usage_log_backfilled: set[str] = set()
+_usage_log_backfill_lock = threading.Lock()
+
+
+def _ensure_usage_log_hourly_backfilled(con: sqlite3.Connection, service_id: str) -> None:
+    """Populate usage_log_hourly_summary for services upgrading from a
+    pre-trigger install. Idempotent; runs at most once per service.
+
+    Detection: presence of the named row in ``applied_data_migrations``. The
+    trigger handles all NEW inserts; this backfill catches the rows that
+    existed before the trigger was added. Synchronous so /admin/usage-log
+    returns correct data on first access (typically <1 s for ~1 M rows).
+    """
+    if service_id in _usage_log_backfilled:
+        return
+    with _usage_log_backfill_lock:
+        if service_id in _usage_log_backfilled:
+            return
+        try:
+            applied = con.execute(
+                "SELECT 1 FROM applied_data_migrations WHERE name = ?",
+                (USAGE_LOG_HOURLY_BACKFILL_NAME,),
+            ).fetchone()
+            if applied is None:
+                t0 = time.time()
+                logger.info("[usage_log] backfilling hourly summary for %s", service_id)
+                # Wipe any partial summary rows the trigger may have written
+                # for this service since boot — we're rebuilding from raw so
+                # the GROUP BY sum is exact, not double-counted on top of
+                # trigger-written rows.
+                con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (service_id,))
+                con.execute(
+                    """
+                    INSERT INTO usage_log_hourly_summary
+                        (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+                    SELECT service_id,
+                           substr(timestamp, 1, 13),
+                           COALESCE(operation_class, ''),
+                           COALESCE(operation_type, ''),
+                           SUM(COALESCE(count, 1)),
+                           SUM(COALESCE(bytes, 0)),
+                           datetime('now')
+                    FROM usage_log
+                    WHERE service_id = ?
+                      AND timestamp IS NOT NULL
+                      AND length(timestamp) >= 13
+                    GROUP BY 1, 2, 3, 4
+                    """,
+                    (service_id,),
+                )
+                con.execute(
+                    "INSERT OR REPLACE INTO applied_data_migrations "
+                    "(name, applied_at, duration_s, status, notes) VALUES (?, ?, ?, ?, ?)",
+                    (USAGE_LOG_HOURLY_BACKFILL_NAME, iso_z_now(), time.time() - t0, "success",
+                     "rebuilt usage_log_hourly_summary from raw"),
+                )
+                con.commit()
+                logger.info("[usage_log] hourly backfill complete for %s in %.2fs", service_id, time.time() - t0)
+        except Exception as e:
+            logger.warning("[usage_log] hourly summary backfill failed for %s: %s", service_id, e)
+        _usage_log_backfilled.add(service_id)
+
+
+def _query_usage_log_aggregate_rollup(
+    con: sqlite3.Connection,
+    service_id: str,
+    start: str,
+    end: str,
+    usage_type: str,
+) -> list[sqlite3.Row]:
+    """Compute the (operation_class, operation_type) totals exactly using the
+    hourly rollup for fully-contained hours plus raw usage_log for the two
+    boundary hours (which usually aren't hour-aligned).
+
+    The rollup PK lookup is sub-millisecond; the boundary raw scans cover at
+    most 2 hours of data (~80 k rows in a busy service) and ride the
+    idx_usage_service_ts index. Combined cost is typically ~1-2 ms vs the
+    600 ms full-window GROUP BY this replaces.
+    """
+    # Hour bucket prefix is "YYYY-MM-DDTHH" (13 chars). Timestamps in
+    # usage_log are stored as ISO strings, so prefix comparison is correct.
+    start_hour = (start or "")[:13]
+    end_hour = (end or "")[:13]
+
+    class_filter = ""
+    class_params: list = []
+    if usage_type:
+        if usage_type == "CDN":
+            class_filter = "AND operation_class = 'CDN'"
+        elif usage_type == "FOS-A":
+            class_filter = "AND operation_class = 'A'"
+        elif usage_type == "FOS-B":
+            class_filter = "AND operation_class = 'B'"
+        elif usage_type == "FOS":
+            class_filter = "AND operation_class IN ('A', 'B')"
+        else:
+            class_filter = "AND operation_class = ?"
+            class_params = [usage_type]
+
+    # Sub-hour range collapses to a single raw scan — no hour bucket fully
+    # contained, both boundary parts would target the same hour anyway.
+    if start_hour == end_hour:
+        rows = con.execute(
+            f"""
+            SELECT operation_class, operation_type,
+                   SUM(count) AS c, SUM(COALESCE(bytes, 0)) AS b
+            FROM usage_log
+            WHERE service_id = ? AND timestamp >= ? AND timestamp <= ? {class_filter}
+            GROUP BY operation_class, operation_type
+            """,
+            [service_id, start, end] + class_params,
+        ).fetchall()
+        return rows
+
+    # Boundary range comparisons keyed on timestamp directly (not
+    # `substr(timestamp, 1, 13)`) so SQLite can ride idx_usage_service_ts
+    # as a pure range scan — substr() forces per-row evaluation, ~5x slower
+    # on the end-of-day boundary (18k rows: 90ms with substr vs ~15ms with
+    # pure range). The hour boundary is the start of the FOLLOWING hour, so
+    # we strip any " " or "T" between date/time and use the ISO Z form to
+    # match what writers store.
+    def _next_hour_start(hour_prefix: str) -> str:
+        # "2026-06-04T23" → "2026-06-05T00:00:00.000Z"
+        try:
+            dt = datetime.strptime(hour_prefix, "%Y-%m-%dT%H").replace(tzinfo=UTC)
+        except ValueError:
+            return hour_prefix + ":59:59.999Z"
+        nxt = dt + timedelta(hours=1)
+        return nxt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def _hour_start(hour_prefix: str) -> str:
+        return hour_prefix + ":00:00.000Z"
+
+    start_hour_end = _next_hour_start(start_hour)
+    end_hour_start = _hour_start(end_hour)
+
+    # Three-part UNION ALL: interior hours from rollup, boundary hours from
+    # raw usage_log. SUM(SUM(...)) collapses the two sources into a single
+    # (op_class, op_type) tuple per group.
+    rollup_class_filter = class_filter  # same syntax works against the rollup
+    rows = con.execute(
+        f"""
+        SELECT operation_class, operation_type,
+               SUM(c) AS c, SUM(b) AS b
+        FROM (
+            SELECT operation_class, operation_type, count AS c, bytes AS b
+            FROM usage_log_hourly_summary
+            WHERE service_id = ? AND hour > ? AND hour < ? {rollup_class_filter}
+            UNION ALL
+            SELECT operation_class, operation_type, count AS c, COALESCE(bytes, 0) AS b
+            FROM usage_log
+            WHERE service_id = ? AND timestamp >= ? AND timestamp < ? {class_filter}
+            UNION ALL
+            SELECT operation_class, operation_type, count AS c, COALESCE(bytes, 0) AS b
+            FROM usage_log
+            WHERE service_id = ? AND timestamp >= ? AND timestamp <= ? {class_filter}
+        )
+        GROUP BY operation_class, operation_type
+        """,
+        # Interior rollup params
+        [service_id, start_hour, end_hour] + class_params
+        # Start-boundary raw params: [start, next_hour_after_start_hour)
+        + [service_id, start, start_hour_end] + class_params
+        # End-boundary raw params: [start_of_end_hour, end]
+        + [service_id, end_hour_start, end] + class_params,
+    ).fetchall()
+    return rows
+
+
 def get_usage_logs(
     service_id: str,
     start: str,
@@ -2065,20 +2519,33 @@ def get_usage_logs(
     )
     entries = [dict(r) for r in cur.fetchall()]
 
-    # One GROUP BY (operation_class, operation_type) does the work of both the
-    # 5-CASE-WHEN totals query AND the per-class breakdown — they're the same
-    # 800K-row scan over usage_log, just shaped differently. Doing both in
-    # one query saves a full pass per Usage Log page load (~1s on prod).
-    grouped = con.execute(
-        f"""
-        SELECT operation_class, operation_type,
-               sum(count) AS c, sum(coalesce(bytes, 0)) AS b
-        FROM usage_log
-        WHERE {where}
-        GROUP BY 1, 2
-        """,
-        params,
-    ).fetchall()
+    # Aggregate path: prefer the usage_log_hourly_summary rollup when only the
+    # service+timestamp predicates are active (the common admin-page case). The
+    # rollup is maintained incrementally by trg_usage_log_summary_insert, so
+    # it's always consistent — no scheduler needed. We can only use it when no
+    # process_context / operation_type LIKE filters are present (the rollup
+    # doesn't carry those columns); the operation_class filter IS supported
+    # because the rollup stores it as a normalised key. Backfill of any
+    # service that predates the trigger happens lazily on first read.
+    rollup_eligible = not process_context and not operation_type
+    if rollup_eligible:
+        _ensure_usage_log_hourly_backfilled(con, service_id)
+        grouped = _query_usage_log_aggregate_rollup(con, service_id, start, end, usage_type)
+    else:
+        # One GROUP BY (operation_class, operation_type) does the work of both the
+        # 5-CASE-WHEN totals query AND the per-class breakdown — they're the same
+        # 800K-row scan over usage_log, just shaped differently. Doing both in
+        # one query saves a full pass per Usage Log page load (~1s on prod).
+        grouped = con.execute(
+            f"""
+            SELECT operation_class, operation_type,
+                   sum(count) AS c, sum(coalesce(bytes, 0)) AS b
+            FROM usage_log
+            WHERE {where}
+            GROUP BY 1, 2
+            """,
+            params,
+        ).fetchall()
 
     totals = {"A": 0, "B": 0, "CDN": 0}
     bytes_by_class = {"A": 0, "B": 0, "CDN": 0}
@@ -2105,3 +2572,369 @@ def get_usage_logs(
     }
 
     return entries, total, res_agg
+
+
+# ── Metadata retention / cleanup ──────────────────────────────────────────────
+# usage_log and ingested_files are append-only and unbounded by default.
+# On a long-running deploy they grow without limit (witnessed: 5.7 GB
+# metadata.db with 8.25M usage_log rows + 2.35M ingested_files rows). The
+# UI doesn't need that history beyond a short window — Usage & Cost pages
+# query a configurable window; Data Management shows recent files; cron_runs
+# is a short audit trail. Trim by age; keep VACUUM gated to actual deletions
+# because a no-op VACUUM still rewrites the whole file.
+
+# Per-table retention windows (days). Override via cfg["metadata_retention"]
+# per service. 0 (or negative) disables cleanup for that table / artefact.
+#
+# rollups_days is not a SQLite table but a per-hour parquet tree under
+# ``<cache>/rollups/hour/field=X/hour=Y/``. The cleanup helper deletes
+# hour-dirs older than this window. Default 90d gives broad dashboard
+# query coverage while bounding disk; set to 0 to keep all history.
+DEFAULT_METADATA_RETENTION = {
+    "usage_log_days": 1,
+    "ingested_files_days": 1,
+    "cron_runs_days": 7,
+    "rollups_days": 90,
+}
+
+# Tables surfaced in the storage stats endpoint. Order matters for the UI.
+_STATS_TABLES = (
+    "usage_log",
+    "ingested_files",
+    "cron_runs",
+    "alerts",
+    "saved_views",
+    "audit_log",
+    "in_flight_buffers",
+    "locally_compacted_files",
+)
+
+# (table, retention_key, timestamp_column) for each trimmable table.
+_CLEANUP_TABLES = (
+    ("usage_log", "usage_log_days", "timestamp"),
+    ("ingested_files", "ingested_files_days", "ingested_at"),
+    ("cron_runs", "cron_runs_days", "started_at"),
+)
+
+
+def get_metadata_storage_stats(service_id: str) -> dict:
+    """Per-table row count + estimated bytes for this service's metadata.db.
+
+    Bytes come from SQLite's ``dbstat`` virtual table (compiled into stock
+    Python sqlite3 ≥3.31). If a table doesn't exist (older schema), it's
+    omitted rather than erroring. Total ``db_bytes`` is the sum across the
+    whole file — including indexes, free pages, and tables not in
+    ``_STATS_TABLES``, so it won't equal sum-of-per-table-bytes.
+    """
+    con = get_con(service_id)
+    out: dict[str, dict] = {}
+    for t in _STATS_TABLES:
+        try:
+            rows = con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+        except sqlite3.OperationalError:
+            continue
+        try:
+            row = con.execute("SELECT sum(pgsize) FROM dbstat WHERE name = ?", (t,)).fetchone()
+            bytes_ = int(row[0]) if row and row[0] is not None else 0
+        except sqlite3.OperationalError:
+            bytes_ = None
+        out[t] = {"rows": int(rows or 0), "bytes": bytes_}
+
+    db_bytes: int | None
+    try:
+        row = con.execute("SELECT sum(pgsize) FROM dbstat").fetchone()
+        db_bytes = int(row[0]) if row and row[0] is not None else 0
+    except sqlite3.OperationalError:
+        db_bytes = None
+
+    return {
+        "tables": out,
+        "db_bytes": db_bytes,
+        "db_path": db_path(service_id),
+    }
+
+
+def is_ingested_files_dedup_active(service_id: str) -> bool:
+    """Return True when the ``ingested_files`` table is the active dedup gate.
+
+    The sync's ``delete_after`` flag (default True) makes ingest a destructive
+    op: a successfully-ingested .gz is DELETEd from FOS, so a future LIST
+    can never re-discover it — the ``ingested_files`` row is vestigial
+    after that point. When ``delete_after`` is set to False, the raw files
+    stay in FOS forever and the daily ``full_sync`` (cron) does a complete
+    LIST; the only thing stopping it from re-ingesting every prior file is
+    a matching entry in ``ingested_files``. In that mode the table CANNOT
+    be trimmed without causing re-ingestion storms.
+    """
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id) or {}
+    delete_after = cfg.get("provisioning", {}).get("cron_sync", {}).get("delete_after", True)
+    # Treat anything other than an explicit False as safe-to-trim. None,
+    # missing, truthy strings — all default to the safe path.
+    return delete_after is not False
+
+
+def cleanup_metadata(
+    service_id: str,
+    retention: dict | None = None,
+    on_event=None,
+) -> dict:
+    """Delete rows older than the per-table retention window. VACUUM if any were deleted.
+
+    retention shape: ``{"usage_log_days": int, "ingested_files_days": int,
+    "cron_runs_days": int}``. Missing keys fall back to
+    ``DEFAULT_METADATA_RETENTION``. A value of 0 (or negative) disables
+    cleanup for that table — useful for an analyst-only service that wants
+    to retain the full audit trail.
+
+    ``ingested_files_days`` is **force-overridden to 0** when
+    ``cron_sync.delete_after`` is False on this service — see
+    ``is_ingested_files_dedup_active``. The override is announced via an
+    ``on_event`` status message so the operator knows the configured
+    retention is being ignored.
+
+    ``on_event``: optional callable receiving event dicts at each milestone
+    (status messages, per-table delete results, VACUUM start/end). The
+    callback is invoked synchronously from the worker — the manual-cleanup
+    endpoint uses a thread-safe queue to bridge to SSE. Event shapes:
+
+        {"type": "status", "message": str}
+        {"type": "progress", "current": int, "total": int, "message": str}
+
+    The scheduled cron passes ``on_event=None`` and gets silent operation
+    (events still arrive in the function's return dict for logging).
+
+    Returns ``{"deleted": {table: count}, "before": {table: rows},
+    "after": {table: rows}, "vacuumed": bool, "duration_s": float}``.
+    """
+    import time as _t
+
+    def _emit(event: dict) -> None:
+        if on_event is None:
+            return
+        try:
+            on_event(event)
+        except Exception:
+            # Never let an event-sink failure abort the cleanup itself.
+            pass
+
+    cfg = {**DEFAULT_METADATA_RETENTION, **(retention or {})}
+
+    # Safety override: when cron_sync.delete_after is False, ingested_files
+    # is the dedup gate against re-LIST → re-ingest by the daily full_sync.
+    # Trimming it would re-ingest every aged-out file. Force-disable the
+    # ingested_files retention regardless of what cfg / caller passed,
+    # and surface the override so the operator sees why it didn't apply.
+    if not is_ingested_files_dedup_active(service_id):
+        configured = int(cfg.get("ingested_files_days") or 0)
+        if configured > 0:
+            _emit(
+                {
+                    "type": "status",
+                    "message": (
+                        f"ingested_files retention ({configured}d) ignored — "
+                        "cron_sync.delete_after=false makes this table the dedup gate. "
+                        "Trimming would cause full_sync to re-ingest aged-out files."
+                    ),
+                }
+            )
+        cfg["ingested_files_days"] = 0
+
+    con = get_con(service_id)
+    t0 = _t.time()
+
+    # Steps: 3 deletes + 1 vacuum + 1 post-count = 5. Set up the progress
+    # framing so the modal can render a determinate bar.
+    total_steps = len(_CLEANUP_TABLES) + 2
+
+    _emit({"type": "status", "message": "Reading current row counts…"})
+    before: dict[str, int] = {}
+    for table, _, _ in _CLEANUP_TABLES:
+        try:
+            before[table] = int(con.execute(f"SELECT count(*) FROM {table}").fetchone()[0] or 0)
+        except sqlite3.OperationalError:
+            before[table] = 0
+
+    deleted: dict[str, int] = {}
+    for idx, (table, key, ts_col) in enumerate(_CLEANUP_TABLES, start=1):
+        days = cfg.get(key)
+        try:
+            days_int = int(days) if days is not None else 0
+        except (TypeError, ValueError):
+            days_int = 0
+        if days_int <= 0:
+            deleted[table] = 0
+            _emit(
+                {
+                    "type": "progress",
+                    "current": idx,
+                    "total": total_steps,
+                    "message": f"{table}: retention disabled (0 days) — skipped",
+                }
+            )
+            continue
+        _emit({"type": "status", "message": f"Trimming {table} (older than {days_int}d)…"})
+        try:
+            cur = con.execute(
+                f"DELETE FROM {table} WHERE {ts_col} < datetime('now', ?)",
+                (f"-{days_int} days",),
+            )
+            deleted[table] = int(cur.rowcount or 0)
+            con.commit()
+            _emit(
+                {
+                    "type": "progress",
+                    "current": idx,
+                    "total": total_steps,
+                    "message": f"{table}: deleted {deleted[table]:,} rows (kept rows ≤{days_int}d old)",
+                }
+            )
+        except sqlite3.OperationalError as e:
+            logger.warning("[metadata_cleanup] %s: skip %s — %s", service_id, table, e)
+            deleted[table] = 0
+            _emit(
+                {
+                    "type": "progress",
+                    "current": idx,
+                    "total": total_steps,
+                    "message": f"{table}: skipped ({e})",
+                }
+            )
+
+    vacuumed = False
+    if any(deleted.values()):
+        # VACUUM cannot run inside an open transaction. Commit + drop the
+        # Python wrapper's auto-BEGIN so the next execute() autocommits.
+        _emit(
+            {
+                "type": "status",
+                "message": "VACUUMing — rewrites the whole file, may take minutes on large DBs…",
+            }
+        )
+        con.commit()
+        old_iso = con.isolation_level
+        con.isolation_level = None
+        try:
+            con.execute("VACUUM")
+            vacuumed = True
+            _emit(
+                {
+                    "type": "progress",
+                    "current": len(_CLEANUP_TABLES) + 1,
+                    "total": total_steps,
+                    "message": "VACUUM complete — file shrunk to reflect deletions",
+                }
+            )
+        except sqlite3.OperationalError as e:
+            # Locked / busy — not fatal, the delete already shrank the row count.
+            logger.warning("[metadata_cleanup] %s: VACUUM skipped — %s", service_id, e)
+            _emit(
+                {
+                    "type": "progress",
+                    "current": len(_CLEANUP_TABLES) + 1,
+                    "total": total_steps,
+                    "message": f"VACUUM skipped ({e}) — row counts already reduced",
+                }
+            )
+        finally:
+            con.isolation_level = old_iso
+    else:
+        _emit(
+            {
+                "type": "progress",
+                "current": len(_CLEANUP_TABLES) + 1,
+                "total": total_steps,
+                "message": "Nothing deleted — VACUUM skipped (no-op rewrite would waste cycles)",
+            }
+        )
+
+    after: dict[str, int] = {}
+    for table, _, _ in _CLEANUP_TABLES:
+        try:
+            after[table] = int(con.execute(f"SELECT count(*) FROM {table}").fetchone()[0] or 0)
+        except sqlite3.OperationalError:
+            after[table] = 0
+    _emit(
+        {
+            "type": "progress",
+            "current": total_steps,
+            "total": total_steps,
+            "message": f"Final counts: {', '.join(f'{t}={n:,}' for t, n in after.items())}",
+        }
+    )
+
+    # Rollup parquet tree cleanup — independent of the SQLite tables. Skip
+    # silently when the rollups module / source aren't available; rollups
+    # are an optimisation, never a correctness dependency.
+    rollups_deleted = 0
+    try:
+        rollups_days = int(cfg.get("rollups_days") or 0)
+    except (TypeError, ValueError):
+        rollups_days = 0
+    if rollups_days > 0:
+        try:
+            from backend.core import rollups as _rollups
+            from backend.core.duckdb import get_source_for_service
+
+            src = get_source_for_service(service_id)
+            if src is not None:
+                rollups_deleted = _rollups.cleanup_old_rollups(service_id, src, rollups_days)
+                if rollups_deleted:
+                    _emit(
+                        {
+                            "type": "status",
+                            "message": f"Rollups: dropped {rollups_deleted} hour-dir(s) older than {rollups_days}d",
+                        }
+                    )
+        except Exception as e:
+            logger.warning("[metadata_cleanup] %s: rollups cleanup skipped — %s", service_id, e)
+
+    return {
+        "deleted": deleted,
+        "before": before,
+        "after": after,
+        "vacuumed": vacuumed,
+        "rollups_deleted": rollups_deleted,
+        "duration_s": round(_t.time() - t0, 3),
+    }
+
+
+# ── Data-migration tracking ───────────────────────────────────────────────────
+# See backend/core/data_migrations.py for the runner. These helpers exist here
+# (not in the runner module) so the runner can stay free of sqlite imports —
+# the per-service connection lifecycle lives entirely in this module.
+
+
+def list_applied_data_migrations(service_id: str) -> set[str]:
+    """Return the set of applied data-migration names for a service.
+
+    Used by the runner to diff against the registered MIGRATIONS list and
+    determine which still need to run. Returns an empty set for a fresh DB.
+    """
+    con = get_con(service_id)
+    try:
+        rows = con.execute("SELECT name FROM applied_data_migrations").fetchall()
+        return {r["name"] for r in rows}
+    except sqlite3.OperationalError:
+        # Schema not yet initialised — caller will hit this on its first
+        # successful query path; treat as "nothing applied yet".
+        return set()
+
+
+def record_applied_data_migration(
+    service_id: str,
+    name: str,
+    *,
+    duration_s: float,
+    status: str = "success",
+    notes: str | None = None,
+) -> None:
+    """Persist a successful (or failed) migration completion."""
+    con = get_con(service_id)
+    con.execute(
+        "INSERT OR REPLACE INTO applied_data_migrations (name, applied_at, duration_s, status, notes) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (name, iso_z_now(), float(duration_s), status, notes),
+    )
+    con.commit()

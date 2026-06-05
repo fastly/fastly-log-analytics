@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useNowMs } from '@/hooks/useNowSeconds'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
@@ -22,11 +23,12 @@ import {
   TableRow 
 } from "@/components/ui/table"
 import { Skeleton } from '@/components/ui/skeleton'
-import { 
-  Database, 
-  RefreshCw, 
-  History, 
-  FileCode, 
+import {
+  Database,
+  HardDrive,
+  RefreshCw,
+  History,
+  FileCode,
   Archive,
   CheckCircle2,
   Trash2,
@@ -49,6 +51,7 @@ import { IcebergStatus } from '@/components/IcebergStatus/IcebergStatus'
 import { IcebergCalendar } from '@/components/IcebergStatus/IcebergCalendar'
 import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { CronLiveLog } from '@/components/CronLiveLog'
+import { MetadataStorageCard } from '@/components/MetadataStorageCard'
 import { formatBytes } from '@/lib/utils'
 import { formatCompactDuration, toUTCDate } from '@/lib/date'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -108,6 +111,7 @@ const CRON_EXPLANATIONS: Record<string, string> = {
   expire: 'Removes old snapshots and orphaned files to reclaim storage.',
   metadata_sync: 'Downloads the latest Iceberg metadata to sync with the remote data source.',
   ngwaf_sync: 'Fetches verified bot records from Fastly NGWAF and caches them locally for enriched bot detection.',
+  metadata_cleanup: 'Daily 03:15 UTC. Trims usage_log + ingested_files + cron_runs in the per-service metadata.db per the retention policy (defaults 1d/1d/7d). VACUUMs the file only when something was actually deleted.',
 }
 
 function CronJobBox({ job, onRemove }: { job: any, onRemove: (id: number) => void }) {
@@ -165,19 +169,17 @@ function CronScheduleBox({
   onOpenConsole?: (jobId: number | string) => void 
 }) {
   const { relative, timeAgo, full, abbr } = useDateFormat()
-  const [nextRunText, setNextRunText] = useState('Disabled')
+  const nowMs = useNowMs()
 
-  useEffect(() => {
-    function compute() {
-      if (!schedule.next_run_time) { setNextRunText('Disabled'); return }
-      const d = toUTCDate(schedule.next_run_time)
-      const secs = Math.floor((d.getTime() - Date.now()) / 1000)
-      setNextRunText(formatCompactDuration(secs))
-    }
-    compute()
-    const id = setInterval(compute, 1000)
-    return () => clearInterval(id)
-  }, [schedule.next_run_time])
+  // Pre-fix this had a per-instance setInterval(compute, 1000) that
+  // re-rendered every CronScheduleBox every second. On /logs that
+  // typically meant 5+ independent 1s tickers firing on the same
+  // boundary, each forcing a setState. Now we derive nextRunText
+  // on-render from useNowMs() — a single shared global ticker —
+  // same UX but one timer for the whole tree.
+  const nextRunText = schedule.next_run_time
+    ? formatCompactDuration(Math.floor((toUTCDate(schedule.next_run_time).getTime() - nowMs) / 1000))
+    : 'Disabled'
 
   if (schedule.disabled_reason === 'no_alerts_configured') {
     return (
@@ -307,8 +309,8 @@ export default function LogsPage() {
 
   const { data: status, isLoading: isLoadingStatus } = useQuery({
     queryKey: ['admin', 'status', activeServiceId],
-    queryFn: async () => {
-      const { data, error } = await client.GET("/api/sync-status", {
+    queryFn: async ({ signal }) => {
+      const { data, error } = await client.GET("/api/sync-status", { signal, 
         params: { query: { skip_fos: true } },
       })
       if (error) throw error
@@ -321,8 +323,8 @@ export default function LogsPage() {
 
   const { data: cronLogs, isLoading: isLoadingCron, isFetching: isFetchingCron } = useQuery({
     queryKey: ['admin', 'cron-logs', activeServiceId, taskFilter, statusFilter],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/cron-runs", {
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/cron-runs", { signal, 
         params: {
           query: {
             page: 1,
@@ -342,8 +344,8 @@ export default function LogsPage() {
   // Separate query specifically for checking recent crons (including running) without reloading the entire 500-row table
   const { data: recentCrons, isFetching: isFetchingRecent } = useQuery({
     queryKey: ['admin', 'cron-logs-recent', activeServiceId],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/cron-runs", {
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/cron-runs", { signal, 
         params: {
           query: {
             page: 1,
@@ -532,8 +534,8 @@ export default function LogsPage() {
 
   const { data: cronSchedule } = useQuery({
     queryKey: ['admin', 'cron-schedule', activeServiceId],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/cron-schedule")
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/cron-schedule", { signal })
       return data as any
     },
     enabled: !!activeServiceId && activeTab === 'cron',
@@ -542,18 +544,48 @@ export default function LogsPage() {
   })
 
   const orderedSchedules = React.useMemo(() => {
-    let order = ['sync', 'alerts', 'commit', 'optimize', 'local_compact', 'expire', 'full_sync', 'gap_heal', 'ngwaf_sync']
-    if (isAnalyst) order = ['metadata_sync', 'alerts']
-    
-    return order.map(task => {
-      const activeJob = displayedJobs.find(j => j.task === task && j.status === 'running')
-      const schedule = cronSchedule?.schedules?.find((s: any) => s.task === task)
-      return {
-        task,
-        activeJob,
-        schedule
-      }
-    }).filter(item => item.schedule || item.activeJob)
+    // Display priority for known tasks. Backend (/api/cron-schedule) is
+    // the source of truth for WHICH tasks exist — anything not in this
+    // map is still rendered, just appended after the prioritised tiles
+    // in API order. That means a freshly-registered backend cron shows
+    // up on the grid automatically; only its position needs curating.
+    const TASK_PRIORITY: Record<string, number> = {
+      sync: 1,
+      alerts: 2,
+      commit: 3,
+      optimize: 4,
+      local_compact: 5,
+      metadata_cleanup: 6,
+      expire: 7,
+      full_sync: 8,
+      gap_heal: 9,
+      ngwaf_sync: 10,
+      metadata_sync: 11,
+    }
+    // Analysts only see the read-only subset; nothing else is even
+    // exposed via the analyst-facing /api/cron-schedule path.
+    const analystAllowed = new Set(['metadata_sync', 'alerts'])
+    // For admin views, hide `metadata_sync` — it's the analyst-only
+    // read-only counterpart of `sync` and only shows up here as a
+    // historical-run entry (next_run_time=null). Worse, CronScheduleBox
+    // renders metadata_sync with the LABEL "sync" by design (so the
+    // analyst tile reads naturally), which created a confusing duplicate
+    // tile both labelled "sync" once the whitelist was lifted.
+    const adminExcluded = new Set(['metadata_sync'])
+    const source = (cronSchedule?.schedules ?? []) as Array<{ task: string }>
+    const filtered = isAnalyst
+      ? source.filter((s) => analystAllowed.has(s.task))
+      : source.filter((s) => !adminExcluded.has(s.task))
+    const sorted = [...filtered].sort((a, b) => {
+      const pa = TASK_PRIORITY[a.task] ?? 999
+      const pb = TASK_PRIORITY[b.task] ?? 999
+      return pa - pb || a.task.localeCompare(b.task)
+    })
+    return sorted.map((schedule) => ({
+      task: schedule.task,
+      activeJob: displayedJobs.find((j) => j.task === schedule.task && j.status === 'running'),
+      schedule,
+    }))
   }, [cronSchedule?.schedules, displayedJobs, isAnalyst])
 
   const { data: catalog } = useLogFieldsCatalog()
@@ -573,8 +605,8 @@ export default function LogsPage() {
 
   const { data: auditLogs, isLoading: isLoadingAudit, isFetching: isFetchingAudit } = useQuery({
     queryKey: ['admin', 'audit-logs', activeServiceId, eventFilter],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/audit-logs", {
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/audit-logs", { signal, 
         params: {
           query: {
             page: 1,
@@ -591,8 +623,8 @@ export default function LogsPage() {
 
   const { data: ingestedFiles, isLoading: isLoadingIngested } = useQuery({
     queryKey: ['admin', 'ingested-files', activeServiceId],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/admin/ingested-files")
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/admin/ingested-files", { signal })
       return data as any
     },
     enabled: !!activeServiceId && activeTab === 'ingestion',
@@ -603,8 +635,8 @@ export default function LogsPage() {
 
   const { data: schemaData, isLoading: isLoadingSchema } = useQuery({
     queryKey: ['admin', 'schema', activeServiceId],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/schema")
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/schema", { signal })
       return data as any
     },
     enabled: !!activeServiceId && activeTab === 'schema',
@@ -613,7 +645,7 @@ export default function LogsPage() {
 
   const purgeMutation = useMutation({
     mutationFn: async () => {
-      await client.DELETE("/api/cron-runs")
+      await client.DELETE("/api/cron-runs", {})
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs', activeServiceId] })
@@ -1319,7 +1351,7 @@ export default function LogsPage() {
               disabled={status?.access_level === 'read_only'}
               onClick={async () => {
                 try {
-                  const { data } = await client.POST("/api/admin/ingest-logs")
+                  const { data } = await client.POST("/api/admin/ingest-logs", {})
                   setSseTitle('Importing Logs')
                   setSseDescription('Downloading new raw logs from Fastly Object Storage and processing them...')
                   setIsSSEModalOpen(true)
@@ -1342,7 +1374,7 @@ export default function LogsPage() {
               disabled={status?.access_level === 'read_only'}
               onClick={async () => {
                 try {
-                  const { data } = await client.POST("/api/admin/commit-iceberg")
+                  const { data } = await client.POST("/api/admin/commit-iceberg", {})
                   setSseTitle('Committing Buffer')
                   setSseDescription('Flushing local Parquet buffer to the shared Iceberg table in Object Storage...')
                   setIsSSEModalOpen(true)
@@ -1425,6 +1457,11 @@ export default function LogsPage() {
               <Archive className="h-4 w-4" /> Iceberg Storage
             </TabsTrigger>
             {!isAnalyst && (
+              <TabsTrigger value="metadata_storage" className="flex-1 flex items-center justify-center gap-2 text-xs">
+                <HardDrive className="h-4 w-4" /> Metadata Storage
+              </TabsTrigger>
+            )}
+            {!isAnalyst && (
               <TabsTrigger value="raw" className="flex-1 flex items-center justify-center gap-2 text-xs">
                 <FileCode className="h-4 w-4" /> Available Logs
               </TabsTrigger>
@@ -1489,6 +1526,7 @@ export default function LogsPage() {
                             {!isAnalyst && <SelectItem value="local_compact">Local Compact</SelectItem>}
                             {!isAnalyst && <SelectItem value="expire">Expire</SelectItem>}
                             {!isAnalyst && <SelectItem value="ngwaf_sync">NGWAF Sync</SelectItem>}
+                            {!isAnalyst && <SelectItem value="metadata_cleanup">Metadata Cleanup</SelectItem>}
                           </SelectContent>
                         </Select>
                         <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v || 'all')}>
@@ -1691,7 +1729,7 @@ export default function LogsPage() {
         <TabsContent value="iceberg" className="mt-4 space-y-4">
           <IcebergStatus accessLevel={status?.access_level ?? undefined} />
           <IcebergCalendar />
-          
+
           <div className="border rounded-lg overflow-hidden bg-card">
             <div className="p-4 border-b">
               <h3 className="text-sm font-medium">Iceberg Data Lake Layout</h3>
@@ -1701,6 +1739,10 @@ export default function LogsPage() {
               <FileBrowser type="iceberg" />
             </div>
           </div>
+        </TabsContent>
+
+        <TabsContent value="metadata_storage" className="mt-4 space-y-4">
+          <MetadataStorageCard />
         </TabsContent>
 
         <TabsContent value="raw" className="mt-4 border rounded-lg overflow-hidden bg-card">

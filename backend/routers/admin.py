@@ -186,7 +186,7 @@ def ingest_endpoint(
     from fastapi import HTTPException
 
     from backend.core.duckdb import start_cron_run
-    from backend.cron_progress import _run_metadata, start_progress
+    from backend.cron_progress import list_active_runs, start_progress
     from backend.repositories.dashboard import _dashboard_cache
     from backend.scheduler import _run_metadata_sync, _run_service_cron
 
@@ -207,9 +207,9 @@ def ingest_endpoint(
             t.start()
         except RuntimeError as e:
             run_id = None
-            for rid, meta in _run_metadata.items():
-                if meta.get("service_id") == source["name"] and meta.get("task") == "metadata_sync":
-                    run_id = rid
+            for entry in list_active_runs():
+                if entry.get("service_id") == source["name"] and entry.get("task") == "metadata_sync":
+                    run_id = entry["run_id"]
                     break
             if run_id is None:
                 raise HTTPException(status_code=503, detail={"error": str(e), "busy": True})
@@ -235,9 +235,9 @@ def ingest_endpoint(
             t.start()
         except RuntimeError as e:
             run_id = None
-            for rid, meta in _run_metadata.items():
-                if meta.get("service_id") == src["name"] and meta.get("task") == "sync":
-                    run_id = rid
+            for entry in list_active_runs():
+                if entry.get("service_id") == src["name"] and entry.get("task") == "sync":
+                    run_id = entry["run_id"]
                     break
             if run_id is None:
                 raise HTTPException(status_code=503, detail={"error": str(e), "busy": True})
@@ -354,7 +354,32 @@ def download_file(
     if not key:
         raise HTTPException(status_code=400, detail={"error": "Missing key parameter"})
 
-    local_path = os.path.abspath(os.path.join(_cache_dir(source), key))
+    # Cross-tenant guard: a single FOS bucket can host multiple services
+    # separated by per-source prefixes. The path-traversal cage below
+    # bounds local cache reads, but a sibling-tenant key like
+    # ``other_tenant/file.log`` would still mint a presigned URL or CDN
+    # redirect for that object. Require the key to live under this
+    # service's prefix before any FOS / CDN URL minting.
+    src_prefix = source.get("prefix", "")
+    if src_prefix and not key.startswith(src_prefix):
+        raise HTTPException(status_code=400, detail={"error": "invalid_key"})
+
+    # Security: ``os.path.join(base, key)`` returns ``key`` when
+    # ``key`` is absolute, which a malicious caller exploits by passing
+    # ``key=/etc/passwd``. Resolve both paths and require commonpath ==
+    # cache_dir so a path-traversal payload (absolute path or
+    # ``../../../etc/passwd``) is rejected at the boundary.
+    cache_dir = os.path.realpath(_cache_dir(source))
+    candidate = os.path.realpath(os.path.join(cache_dir, key))
+    try:
+        common = os.path.commonpath([cache_dir, candidate])
+    except ValueError:
+        # commonpath raises ValueError when paths have different drives /
+        # mixed absolute/relative. Treat as path-escape and reject.
+        raise HTTPException(status_code=400, detail={"error": "invalid_key"})
+    if common != cache_dir:
+        raise HTTPException(status_code=400, detail={"error": "invalid_key"})
+    local_path = candidate
     if os.path.exists(local_path):
         return FileResponse(local_path, filename=os.path.basename(local_path))
 
@@ -448,7 +473,10 @@ def download_all_files(
                         cdn = src.get("cdn_url", "").rstrip("/")
                         fos_client = _db._get_fos_client(src)
                         paginator = fos_client.get_paginator("list_objects_v2", caller_hint="download_all")
-                        pages = paginator.paginate(Bucket=src["bucket"])
+                        # Cross-tenant guard: scope to this service's prefix
+                        # so a shared bucket with multiple services doesn't
+                        # leak sibling data into the zip.
+                        pages = paginator.paginate(Bucket=src["bucket"], Prefix=src.get("prefix", ""))
 
                         for page in pages:
                             if "Contents" not in page:
@@ -472,7 +500,33 @@ def download_all_files(
     return StreamingResponse(_stream_from_worker(zip_worker), media_type="application/zip", headers=headers)
 
 
+_DIR_SIZE_CACHE: dict[str, tuple[float, int]] = {}
+_DIR_SIZE_TTL_S = 30.0
+
+
 def _get_dir_size(path: str) -> int:
+    # Cache results per-path with a 30s TTL. The cache walk is O(files-in-tree)
+    # and the per-service cache grew from ~300 files to ~19k after the rollups
+    # backfill (one parquet per field × hour). At ~700ms per uncached walk,
+    # SyncStatusBadge's 15s poll was paying that cost on every refresh; the
+    # cache turns it into a single getsize_sum sweep per minute.
+    #
+    # Files only grow incrementally (ingest + rollup-recompute) so a 30s
+    # staleness window means the dashboard's reported disk usage can lag by
+    # at most that window. Worth it for the perf vs measuring exact-to-the-
+    # millisecond size on a poll endpoint.
+    import time as _t
+
+    now = _t.monotonic()
+    cached = _DIR_SIZE_CACHE.get(path)
+    if cached is not None and (now - cached[0]) < _DIR_SIZE_TTL_S:
+        return cached[1]
+    total = _scan_dir_size(path)
+    _DIR_SIZE_CACHE[path] = (now, total)
+    return total
+
+
+def _scan_dir_size(path: str) -> int:
     total = 0
     if not os.path.exists(path):
         return 0
@@ -482,7 +536,7 @@ def _get_dir_size(path: str) -> int:
                 if entry.is_file():
                     total += entry.stat().st_size
                 elif entry.is_dir():
-                    total += _get_dir_size(entry.path)
+                    total += _scan_dir_size(entry.path)
     except Exception:
         pass
     return total
@@ -512,13 +566,28 @@ def sync_status(
         return SyncStatusResponse.with_telemetry(configured=False)
 
     try:
-        from backend.core.duckdb import get_connection
+        # Fast path: skip_fos=true callers (FilterBar polling, badge in
+        # the page header, etc.) only need the cached snapshot that the
+        # sync cron refreshes every minute. Return it without grabbing a
+        # DuckDB connection, so that a busy dashboard load — agg/raw/
+        # bots all racing for connections — doesn't starve sync-status
+        # and trigger 503s when its max_wait expires.
+        cached_status = svcconfig.get_status(src["name"]) if skip_fos and not force else None
+        # get_status returns {} (not None) when no status has been
+        # persisted yet — fall through to the DB path in that case.
+        if cached_status:
+            cached_status["access_level"] = src.get("access_level", "read_write")
+            cached_status["storage_mode"] = _db.STORAGE_MODE
+            cached_status["configured"] = True
+            status = cached_status
+        else:
+            from backend.core.duckdb import get_connection
 
-        _con = get_connection(source=src, max_wait=5, skip_view_update=True)
-        try:
-            status = get_sync_status(_con, src, skip_fos=skip_fos, force=force)
-        finally:
-            _con.close()
+            _con = get_connection(source=src, max_wait=5, skip_view_update=True)
+            try:
+                status = get_sync_status(_con, src, skip_fos=skip_fos, force=force)
+            finally:
+                _con.close()
 
         db_path = src.get("duckdb_path") or svcconfig.duckdb_path(service_id)
         db_exists = os.path.exists(db_path)
@@ -604,6 +673,195 @@ def compaction_stats(source: dict = Depends(get_source)):
     return _lc.compaction_stats(source)
 
 
+@router.patch("/admin/metadata-retention")
+def update_metadata_retention(body: dict, source: dict = Depends(get_source)):
+    """Update the per-service ``metadata_retention`` config block.
+
+    Body shape: any subset of ``{usage_log_days, ingested_files_days,
+    cron_runs_days}``. Each value is coerced to int; negative / non-numeric
+    inputs are clamped to 0 (which disables cleanup for that table per
+    cleanup_metadata's semantics). Missing keys preserve their current
+    value. Returns the resolved retention (defaults merged with cfg) so the
+    UI can confirm what was saved.
+    """
+    from backend import config as svcconfig
+    from backend.core import metadata_db as _mdb
+    from backend.core.metadata_db import DEFAULT_METADATA_RETENTION
+
+    service_id = source["name"]
+    cfg = svcconfig.load_config(service_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+
+    from backend.core.metadata_db import is_ingested_files_dedup_active
+
+    current = dict(cfg.get("metadata_retention") or {})
+    for key in ("usage_log_days", "ingested_files_days", "cron_runs_days"):
+        if key in body:
+            try:
+                v = int(body[key])
+            except (TypeError, ValueError):
+                v = 0
+            current[key] = max(0, v)
+
+    # Mirror the cleanup helper's safety override at the write layer:
+    # if delete_after=false on this service, refuse to persist a non-zero
+    # ingested_files_days. Storing it would mislead the operator into
+    # thinking the value will be honored when the cleanup ignores it.
+    if not is_ingested_files_dedup_active(service_id) and int(current.get("ingested_files_days") or 0) > 0:
+        current["ingested_files_days"] = 0
+
+    cfg["metadata_retention"] = current
+    svcconfig.save_config(service_id, cfg)
+    try:
+        _mdb.record_audit(
+            service_id=service_id,
+            event_type="metadata_retention_update",
+            details=current,
+        )
+    except Exception:
+        pass
+
+    return {"retention": {**DEFAULT_METADATA_RETENTION, **current}}
+
+
+@router.get("/admin/metadata-storage")
+def metadata_storage(source: dict = Depends(get_source)):
+    """Per-table row count + estimated bytes for this service's metadata.db.
+
+    Includes the resolved retention policy (per-service cfg merged with
+    defaults). The UI uses this to render the Metadata Storage card on
+    the admin page — table sizes, bytes, and a Cleanup-now button.
+    """
+    from backend import config as svcconfig
+    from backend.core.metadata_db import (
+        DEFAULT_METADATA_RETENTION,
+        get_metadata_storage_stats,
+        is_ingested_files_dedup_active,
+    )
+
+    service_id = source["name"]
+    stats = get_metadata_storage_stats(service_id)
+    cfg = svcconfig.load_config(service_id) or {}
+    retention = {**DEFAULT_METADATA_RETENTION, **(cfg.get("metadata_retention") or {})}
+    # ingested_files_locked surfaces the safety override: when
+    # cron_sync.delete_after=False the ingested_files table is the
+    # dedup gate, so the cleanup helper force-disables its trimming
+    # regardless of the configured retention. UI uses this to disable
+    # the input + show a tooltip explaining the override.
+    ingested_files_locked = not is_ingested_files_dedup_active(service_id)
+    return {**stats, "retention": retention, "ingested_files_locked": ingested_files_locked}
+
+
+@router.post("/admin/metadata-cleanup")
+def metadata_cleanup_now(source: dict = Depends(get_source)):
+    """Trigger an immediate metadata cleanup, streaming progress as SSE.
+
+    Equivalent to the daily ``metadata_cleanup`` cron at 03:15 UTC but
+    on-demand. The DELETE phase is fast; VACUUM rewrites the whole file
+    and on a multi-GB metadata.db can take minutes. Streaming gives the
+    operator real-time feedback instead of a 5-minute hang behind a
+    spinning button.
+
+    Event shapes (between SSE ``data:`` lines):
+
+        {"type": "status",   "message": str}
+        {"type": "progress", "current": int, "total": int, "message": str}
+        {"type": "done",     "message": str, "result": {...}}
+        {"type": "error",    "message": str}
+
+    Writes a row to ``cron_runs`` with task=``metadata_cleanup`` so the
+    manual run shows up on the Data Management schedule + history grid
+    alongside the scheduled cron's runs.
+    """
+    import json as _json
+    import queue as _queue
+    import threading
+    import time as _t
+
+    from backend import config as svcconfig
+    from backend.core.duckdb import log_cron_run, start_cron_run
+    from backend.core.metadata_db import cleanup_metadata
+
+    service_id = source["name"]
+    cfg = svcconfig.load_config(service_id) or {}
+    retention = cfg.get("metadata_retention") or {}
+
+    # Bridge cleanup_metadata's on_event callback to the SSE generator via
+    # a thread-safe queue. The worker thread runs the cleanup synchronously
+    # (DELETE then VACUUM — both block the SQLite writer) and pushes events
+    # as they happen; the streaming generator consumes them and yields SSE
+    # frames. Sentinel ``None`` marks end-of-stream.
+    events: _queue.Queue = _queue.Queue()
+
+    def worker():
+        started = _t.time()
+        run_id = start_cron_run(source, "metadata_cleanup")
+        try:
+            result = cleanup_metadata(service_id, retention, on_event=events.put)
+        except Exception as e:
+            err = str(e)
+            events.put({"type": "error", "message": f"Cleanup failed: {err}"})
+            try:
+                log_cron_run(
+                    source,
+                    "metadata_cleanup",
+                    _t.time() - started,
+                    "error",
+                    error_message=err,
+                    summary=f"cleanup failed: {err}",
+                    run_id=run_id,
+                )
+            finally:
+                events.put(None)
+            return
+
+        total_deleted = sum(result["deleted"].values())
+        if total_deleted:
+            parts = [f"{t}={n}" for t, n in result["deleted"].items() if n]
+            summary = (
+                f"Trimmed {total_deleted:,} rows ({', '.join(parts)}). "
+                f"VACUUM={'yes' if result['vacuumed'] else 'skipped'}."
+            )
+        else:
+            summary = "No rows older than retention windows."
+        try:
+            log_cron_run(
+                source,
+                "metadata_cleanup",
+                _t.time() - started,
+                "success",
+                summary=summary,
+                rows_ingested=total_deleted,
+                run_id=run_id,
+            )
+        finally:
+            events.put({"type": "done", "message": summary, "result": result})
+            events.put(None)
+
+    threading.Thread(target=worker, daemon=True, name=f"metadata-cleanup-{service_id}").start()
+
+    def stream():
+        # Pre-pad to defeat any reverse-proxy / browser buffering; SSE
+        # clients flush on the first blank-line delimiter.
+        yield ":" + " " * 2048 + "\n\n"
+        while True:
+            event = events.get()
+            if event is None:
+                break
+            yield f"data: {_json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @router.get("/admin/health-snapshot")
 def health_snapshot():
     """One-shot health snapshot for the admin page system health card.
@@ -664,17 +922,22 @@ def health_snapshot():
             out[label] = None
 
     # ── In-flight cron runs ──────────────────────────────────────────
+    # Use list_active_runs() (which filters out runs whose last event is
+    # done/error) instead of iterating _run_metadata directly. The dict
+    # holds entries for an hour after completion (the cleanup TTL), so the
+    # raw iteration was showing dozens of stale "sync" entries in the
+    # System Health card.
     try:
-        from backend.cron_progress import _run_metadata
+        from backend.cron_progress import list_active_runs
 
         in_flight = []
-        for run_id, meta in list(_run_metadata.items()):
+        for entry in list_active_runs():
             in_flight.append(
                 {
-                    "run_id": run_id,
-                    "service_id": meta.get("service_id"),
-                    "task": meta.get("task"),
-                    "started_at": meta.get("started_at"),
+                    "run_id": entry["run_id"],
+                    "service_id": entry.get("service_id"),
+                    "task": entry.get("task"),
+                    "started_at": entry.get("started_at"),
                 }
             )
         out["in_flight_runs"] = in_flight
@@ -730,15 +993,16 @@ def _fetch_fastly_log_counts(
     uses (`YYYY-MM-DDTHH` for hour, `YYYY-MM-DD` for day) so the outer-join
     in api_log_accounting can key on string equality directly.
     """
-    import json
     import logging
-    import urllib.request
     from datetime import UTC, datetime
 
-    url = f"https://api.fastly.com/stats/service/{logging_svc_id}?by={by}&from={from_ts}&to={to_ts}"
-    req = urllib.request.Request(url, headers={"Fastly-Key": api_key, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        payload = json.loads(resp.read().decode())
+    from backend.core.fastly.client import fastly
+
+    payload = fastly(
+        "GET",
+        f"/stats/service/{logging_svc_id}?by={by}&from={from_ts}&to={to_ts}",
+        token=api_key,
+    )
 
     width = 13 if by == "hour" else 10
     records = payload.get("data", []) or []
@@ -1013,12 +1277,12 @@ def iceberg_commit_endpoint(source: dict = Depends(get_source)):
         return {"ok": True, "message": "Commit started.", "run_id": run_id}
 
     except RuntimeError as e:
-        from backend.cron_progress import _run_metadata
+        from backend.cron_progress import list_active_runs
 
         run_id = None
-        for rid, meta in _run_metadata.items():
-            if meta.get("service_id") == source["name"] and meta.get("task") == "commit":
-                run_id = rid
+        for entry in list_active_runs():
+            if entry.get("service_id") == source["name"] and entry.get("task") == "commit":
+                run_id = entry["run_id"]
                 break
         if run_id is None:
             raise HTTPException(status_code=503, detail={"error": str(e), "busy": True})

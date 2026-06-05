@@ -38,12 +38,23 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     # Escape every user-supplied string used inside HCL string literals.
     # The raw values are kept around for non-HCL contexts (e.g. comments,
     # path construction, derived domain names) where they're safe.
-    service_id = cfg.get("logging_service_id", "YOUR_SERVICE_ID")
+    # 023: service_id ends up inside HCL comments verbatim. A newline or
+    # carriage return would terminate the comment early and let attacker-
+    # supplied text inject arbitrary HCL. Strip both before any use.
+    service_id = str(cfg.get("logging_service_id", "YOUR_SERVICE_ID")).replace("\r", "").replace("\n", "")
     endpoint_name = cfg.get("endpoint_name", "fastly_log_analysis")
     region = cfg.get("fos_region", "us-east-1")
     bucket = cfg.get("fos_bucket_name", "your-bucket-name")
     prefix = cfg.get("fos_prefix", "").strip("/")
-    period = cfg.get("log_period", 3600)
+    # 022: log_period flows into the HCL ``period = {period}`` numeric
+    # literal. An attacker who sets ``log_period = "1; resource ..."``
+    # would otherwise break out of the literal and inject HCL. Cast to
+    # int (with a safe fallback) so the rendered value is always a
+    # numeric token regardless of what was on the wire.
+    try:
+        period = int(cfg.get("log_period", 3600))
+    except (TypeError, ValueError):
+        period = 3600
     cdn_service_name = cfg.get("cdn_service_name", "Fastly Log Analysis CDN Proxy")
     cdn_prefix = cfg.get("cdn_prefix", bucket)
     cdn_domain = f"{cdn_prefix}.global.ssl.fastly.net"

@@ -448,7 +448,7 @@ def test_update_logging_settings_404s_when_service_missing(client, tmp_path, mon
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
 
-    resp = client.get(f"/api/services/{MOCK_SERVICE_ID}/logging-settings/update")
+    resp = client.post(f"/api/services/{MOCK_SERVICE_ID}/logging-settings/update")
     assert resp.status_code == 404
 
 
@@ -462,7 +462,7 @@ def test_update_logging_settings_400s_on_out_of_range_period(client, tmp_path, m
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID, "fastly_api_key": "tok"})
 
-    resp = client.get(
+    resp = client.post(
         f"/api/services/{MOCK_SERVICE_ID}/logging-settings/update",
         params={"period": 0},  # below 1s floor
     )
@@ -479,7 +479,7 @@ def test_update_logging_settings_400s_on_out_of_range_sample_rate(client, tmp_pa
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID, "fastly_api_key": "tok"})
 
-    resp = client.get(
+    resp = client.post(
         f"/api/services/{MOCK_SERVICE_ID}/logging-settings/update",
         params={"sample_rate": 0},
     )
@@ -512,7 +512,7 @@ def test_update_logging_settings_streams_done_event_and_persists_config(client, 
         patch("backend.provision.update_logging_endpoint", return_value=iter(fake_events)),
         patch("backend.provision._sync_crontab"),
     ):
-        resp = client.get(
+        resp = client.post(
             f"/api/services/{MOCK_SERVICE_ID}/logging-settings/update",
             params={"period": 120, "sample_rate": 50, "prefix": "new-prefix", "edge_only": True},
         )
@@ -552,7 +552,7 @@ def test_update_logging_settings_sub_minute_period_uses_interval_seconds(client,
         patch("backend.provision.update_logging_endpoint", return_value=iter(fake_events)),
         patch("backend.provision._sync_crontab"),
     ):
-        client.get(
+        client.post(
             f"/api/services/{MOCK_SERVICE_ID}/logging-settings/update",
             params={"period": 30},  # below 60s
         )
@@ -574,7 +574,7 @@ def test_update_logging_settings_emits_error_event_on_orchestrator_exception(cli
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID, "fastly_api_key": "tok"})
 
     with patch("backend.provision.update_logging_endpoint", side_effect=RuntimeError("API down")):
-        resp = client.get(f"/api/services/{MOCK_SERVICE_ID}/logging-settings/update")
+        resp = client.post(f"/api/services/{MOCK_SERVICE_ID}/logging-settings/update")
 
     assert resp.status_code == 200
     assert "API down" in resp.text
@@ -825,7 +825,13 @@ def test_import_custom_fields_400s_when_payload_not_a_list(client, tmp_path, mon
 def test_import_custom_fields_merges_new_into_existing(client, tmp_path, monkeypatch):
     """Imported fields merge with existing (upsert by name). Pinned
     because admins import a partial set expecting to keep their other
-    custom fields — full-replace would silently delete the rest."""
+    custom fields — full-replace would silently delete the rest.
+
+    019: imported fields now run through ``validate_custom_field``, so
+    the JSON body must include every required key. The fixture below is
+    a fully-populated valid field — testing the merge contract, not
+    validator leniency.
+    """
     from backend import config
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
@@ -837,7 +843,15 @@ def test_import_custom_fields_merges_new_into_existing(client, tmp_path, monkeyp
                 "groups": ["A"],
                 "field_overrides": {},
                 "custom_fields": [
-                    {"name": "keep_me", "label": "Existing", "enabled": True},
+                    {
+                        "name": "keep_me",
+                        "label": "Existing",
+                        "enabled": True,
+                        "vcl_log_expression": "req.http.x-keep-me",
+                        "duckdb_type": "VARCHAR",
+                        "value_type": "string",
+                        "bytes_estimate": 20,
+                    },
                 ],
             },
         },
@@ -858,12 +872,14 @@ def test_import_custom_fields_merges_new_into_existing(client, tmp_path, monkeyp
                         "enabled": True,
                         "duckdb_type": "VARCHAR",
                         "value_type": "string",
+                        "vcl_log_expression": "req.http.x-new-one",
+                        "bytes_estimate": 20,
                     }
                 ]
             },
         )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     assert resp.json()["imported_count"] == 1
 
     fresh = config.load_config(MOCK_SERVICE_ID)
@@ -927,7 +943,12 @@ def test_import_custom_fields_422s_when_log_format_would_exceed_limit(client, tm
     """If the merged custom fields would push the log format over
     8000 chars (Fastly's limit), refuse with 422. Pinned because
     importing oversize is the most common failure mode for admins
-    migrating from another tool."""
+    migrating from another tool.
+
+    019: the imported field must be valid in isolation (vcl expr,
+    types, etc.) so we hit the format-too-long branch instead of
+    the per-field validator's 422.
+    """
     from backend import config
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
@@ -943,7 +964,18 @@ def test_import_custom_fields_422s_when_log_format_would_exceed_limit(client, tm
         resp = client.post(
             f"/api/services/{MOCK_SERVICE_ID}/custom-fields/import",
             headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"custom_fields": [{"name": "x", "label": "x"}]},
+            json={
+                "custom_fields": [
+                    {
+                        "name": "x",
+                        "label": "x",
+                        "vcl_log_expression": "req.http.x",
+                        "duckdb_type": "VARCHAR",
+                        "value_type": "string",
+                        "bytes_estimate": 20,
+                    }
+                ]
+            },
         )
 
     assert resp.status_code == 422

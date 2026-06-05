@@ -34,66 +34,90 @@ def get_top_bots(
 
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
 
-    # ── Arcjet UA-matched bots ────────────────────────────────────────────────
     arcjet_bots: list[dict] = []
+    # ── Single filtered TEMP TABLE shared across arcjet UA + NGWAF JOIN ─────
+    # Previously the function ran TWO independent scans over the same
+    # filtered window: a UA TopN (LIMIT 2000) for arcjet classification
+    # then a SECOND scan with an NGWAF JOIN for waf bot names. With the
+    # dashboard's security panel mounted, both ran on every request.
+    # Materializing one filtered temp table with the columns BOTH passes
+    # need (ua + waf_req_id) collapses the scan to one Iceberg manifest
+    # walk and keeps both downstream queries reading from memory.
+    cols_needed: list[str] = []
     if "ua" in actual_cols:
-        try:
-            from backend.utils.bot_sources import build_matcher, get_bot_regex_pattern
+        cols_needed.append("ua")
+    if "waf_req_id" in actual_cols:
+        cols_needed.append("waf_req_id")
+    # If the schema has neither (very minimal log_fields preset), skip
+    # both passes — there's nothing to classify.
+    if not cols_needed:
+        return {"bots": [], "ngwaf_bots": []}
 
-            pattern = get_bot_regex_pattern(200)
-            ua_filter = f"AND regexp_matches(ua, '{pattern.replace(chr(39), chr(39) * 2)}')" if pattern else ""
-
-            q = f"""
-                SELECT ua, count(*) AS cnt
-                FROM {table_name}
-                WHERE {where_clause} AND ua IS NOT NULL {ua_filter}
-                GROUP BY ua
-                ORDER BY cnt DESC
-                LIMIT 2000
-            """
-            rows = runner.execute(q).fetchall()
-
-            match_ua = build_matcher()
-            bot_counts: dict[str, dict] = {}
-            for ua_val, cnt in rows:
-                for entry in match_ua(ua_val):
-                    bot_id = entry.get("id", "unknown")
-                    if bot_id not in bot_counts:
-                        cats = entry.get("categories", [])
-                        bot_counts[bot_id] = {
-                            "id": bot_id,
-                            "name": bot_id.replace("-", " ").title(),
-                            "category": cats[0] if cats else "unknown",
-                            "request_count": 0,
-                        }
-                    bot_counts[bot_id]["request_count"] += cnt
-
-            arcjet_bots = sorted(bot_counts.values(), key=lambda x: x["request_count"], reverse=True)[:n]
-        except Exception as e:
-            logging.getLogger(__name__).error("[security] arcjet top bots failed: %s", e)
-
-    # ── NGWAF cache bot names ─────────────────────────────────────────────────
-    ngwaf_bots: list[dict] = []
-    from backend.repositories._base import attach_ngwaf_cache
-
-    with attach_ngwaf_cache(con, actual_cols, alias="ngwaf_top") as attached:
-        if attached:
+    # Use QueryRunner.temp_table context manager so the DROP runs even
+    # if an intermediate query raises (was a manual try/finally before).
+    with runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params) as temp_table:
+        if temp_table is None:
+            return {"bots": [], "ngwaf_bots": []}
+        if "ua" in actual_cols:
             try:
-                q = f"""
-                    SELECT nb.bot_name, nb.category, count(*) AS cnt
-                    FROM {table_name}
-                    INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id)
-                    WHERE {where_clause} AND nb.bot_name IS NOT NULL
-                    GROUP BY 1, 2
-                    ORDER BY 3 DESC
-                    LIMIT {n}
-                """
-                res = runner.execute(q).fetchall()
-                ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
-            except Exception as e:
-                logging.getLogger(__name__).error("[security] NGWAF top bots failed: %s", e)
+                from backend.utils.bot_sources import build_matcher, get_bot_regex_pattern
 
-    return {"bots": arcjet_bots, "ngwaf_bots": ngwaf_bots}
+                pattern = get_bot_regex_pattern(200)
+                ua_filter = f"AND regexp_matches(ua, '{pattern.replace(chr(39), chr(39) * 2)}')" if pattern else ""
+
+                q = f"""
+                    SELECT ua, count(*) AS cnt
+                    FROM {temp_table}
+                    WHERE ua IS NOT NULL {ua_filter}
+                    GROUP BY ua
+                    ORDER BY cnt DESC
+                    LIMIT 2000
+                """
+                rows = runner.execute(q).fetchall()
+
+                match_ua = build_matcher()
+                bot_counts: dict[str, dict] = {}
+                for ua_val, cnt in rows:
+                    for entry in match_ua(ua_val):
+                        bot_id = entry.get("id", "unknown")
+                        if bot_id not in bot_counts:
+                            cats = entry.get("categories", [])
+                            bot_counts[bot_id] = {
+                                "id": bot_id,
+                                "name": bot_id.replace("-", " ").title(),
+                                "category": cats[0] if cats else "unknown",
+                                "request_count": 0,
+                            }
+                        bot_counts[bot_id]["request_count"] += cnt
+
+                arcjet_bots = sorted(bot_counts.values(), key=lambda x: x["request_count"], reverse=True)[:n]
+            except Exception as e:
+                logging.getLogger(__name__).error("[security] arcjet top bots failed: %s", e)
+
+        # ── NGWAF cache bot names ─────────────────────────────────────────────
+        ngwaf_bots: list[dict] = []
+        from backend.repositories._base import attach_ngwaf_cache
+
+        with attach_ngwaf_cache(con, actual_cols, alias="ngwaf_top") as attached:
+            if attached:
+                try:
+                    # Join against the temp table instead of re-scanning the
+                    # source view — same filter window, no second manifest walk.
+                    q = f"""
+                        SELECT nb.bot_name, nb.category, count(*) AS cnt
+                        FROM {temp_table} t
+                        INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id)
+                        WHERE nb.bot_name IS NOT NULL
+                        GROUP BY 1, 2
+                        ORDER BY 3 DESC
+                        LIMIT {n}
+                    """
+                    res = runner.execute(q).fetchall()
+                    ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
+                except Exception as e:
+                    logging.getLogger(__name__).error("[security] NGWAF top bots failed: %s", e)
+
+    return {"bots": arcjet_bots, "ngwaf_bots": ngwaf_bots, **runner.telemetry()}
 
 
 def get_security_aggregates(

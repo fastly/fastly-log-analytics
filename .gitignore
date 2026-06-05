@@ -3,6 +3,10 @@ setup-state.json
 *.duckdb
 *.duckdb.wal
 /configs/*
+# Security: the SSH known_hosts pin IS source-controlled — it's the
+# trust anchor for the reverse-tunnel host-key check. Override the
+# blanket configs/* ignore.
+!/configs/ssh_known_hosts
 /data/*
 /data/system/*
 __pycache__/
@@ -36,6 +40,43 @@ node_modules/
 
 /.antigravitycli
 
+# Local Swival tool state (REPL history, per-session audit dirs). Per-user.
+.swival/
+/audit-findings/
+
+# Ad-hoc debug screenshots dropped at the repo root by browser-driven
+# verification sessions. Intentional docs/assets/*.png are tracked; these
+# root-level ones are throwaway.
+/test_*.png
+
 # Ad-hoc lint/test output dumps
 frontend/*_out.txt
 frontend/*_output.txt
+
+# Session-scoring fixture extracts contain real prod IPs / UAs / payloads.
+# Reproducible via scripts/scoring/extract_traces.py against local data.
+tests/fixtures/scoring/
+
+# Trained matrix.json carries real customer route names. Regenerable via
+# scripts/scoring/train.py against a fresh trace extract.
+compute/scorer/matrix.json
+
+# Rust build artifacts.
+compute/scorer/target/
+compute/scorer/bin/
+compute/scorer/pkg/
+
+# Per-deployment secrets: AES cookie keys, deploy-time IDs the service files
+# might reference. NEVER commit.
+.scoring/
+.aider*
+
+# Ad-hoc working directory for local profiling — HAR captures, per-page JSON
+# summaries, query trace dumps. The reusable harness scripts (profile.js,
+# split_per_page.py) live here for now; treat the whole tree as throwaway.
+/scratch/
+
+# Local-only VS Code config (file-watcher / Pylance excludes for the
+# regenerating .next + cache trees). Personal to each contributor's editor
+# setup — not promoted to the repo by default.
+.vscode/

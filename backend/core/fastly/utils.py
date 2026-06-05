@@ -1,5 +1,6 @@
 import argparse
 import re
+import secrets
 
 # Candidate field names on Fastly's /stats/service response that carry the
 # "log lines emitted" counter. Ordered: most-likely first. If all four miss
@@ -148,8 +149,25 @@ sub vcl_recv {
     set req.http.Fastly-Client-IP = client.ip;
   }
 
-  # Block requests that do not provide the correct secret key (purges are exempt)
-  if (req.method != "FASTLYPURGE" && req.restarts == 0 && fastly.ff.visits_this_service == 0 && subfield(req.url.qs, "key", "&") != table.lookup(cdn_auth, "secret", "") && req.http.x-fastly-key != table.lookup(cdn_auth, "secret", "")) {
+  # Handle FASTLYPURGE natively. Without this, an unsigned purge on a
+  # cache miss is forwarded to the FOS origin, which returns 403 — and
+  # Fastly caches that 403 for the object's TTL. An attacker can poison
+  # the cache for legitimate clients by issuing purges against arbitrary
+  # keys. ``return(purge)`` short-circuits the pipeline before any
+  # backend fetch happens.
+  if (req.method == "FASTLYPURGE") {
+    return(purge);
+  }
+
+  # Block requests that do not provide the correct secret key.
+  # NOTE on the auth fallback: the third argument to ``table.lookup`` is
+  # returned when ``cdn_auth.secret`` is absent from the edge dictionary.
+  # Defaulting to ``""`` is fail-open — an attacker who sends an empty
+  # ``key`` query param trivially matches. ``__FALLBACK_SECRET__`` is
+  # substituted in load_vcl() with ``secrets.token_hex(32)``, which is
+  # never knowable to an attacker and therefore fails closed when the
+  # dictionary is unprovisioned.
+  if (req.restarts == 0 && fastly.ff.visits_this_service == 0 && subfield(req.url.qs, "key", "&") != table.lookup(cdn_auth, "secret", "__FALLBACK_SECRET__") && req.http.x-fastly-key != table.lookup(cdn_auth, "secret", "__FALLBACK_SECRET__")) {
 #RATELIMIT_BEGIN
     declare local var.last_minute INTEGER;
     set var.last_minute = ratelimit.ratecounter_increment(auth_fail_rc, req.http.Fastly-Client-IP, 1);
@@ -171,8 +189,26 @@ sub vcl_recv {
   set req.enable_segmented_caching = true;
   set segmented_caching.block_size = 20971520; # 20 MB, the maximum
 
-  # Strip only the key from the URL before forwarding to Fastly Object Storage
-  set req.url = querystring.filter(req.url, "key");
+  # Cache-key hardening (post-auth — auth check above still reads the
+  # `key` qs param from the original req.url):
+  #   1. querystring.filter_except keeps ONLY the S3-API parameters the
+  #      FOS origin actually understands and strips everything else
+  #      (including our auth `key` secret, any caller-injected tracking
+  #      params, marketing UTM params, session IDs, etc.). Unexpected
+  #      params no longer fracture the cache or leak into req.hash.
+  #   2. querystring.sort canonicalises the remaining param order so
+  #      `?prefix=foo&max-keys=10` and `?max-keys=10&prefix=foo` resolve
+  #      to one cache entry instead of two.
+  # Allow-list rationale (S3 API surface FOS exposes):
+  #   - List objects v2: list-type, prefix, delimiter, continuation-token,
+  #                       start-after, max-keys, encoding-type, fetch-owner
+  #   - List objects v1: marker
+  #   - Get object:      versionId, partNumber, response-content-type,
+  #                       response-content-disposition, response-cache-control
+  # Anything else is silently dropped. If a legitimate S3 param needs to
+  # pass through later, add it to this list and re-deploy.
+  set req.url = querystring.filter_except(req.url, "list-type,prefix,delimiter,continuation-token,start-after,max-keys,encoding-type,fetch-owner,marker,versionId,partNumber,response-content-type,response-content-disposition,response-cache-control");
+  set req.url = querystring.sort(req.url);
 
   # Never cache admin_state.json — it changes on every mutation
   if (req.url ~ "/iceberg/meta/admin_state\\.json$") {
@@ -195,7 +231,19 @@ sub vcl_recv {
   return(lookup);
 }
 sub vcl_hash {
-  set req.hash += req.url.path;
+  # Security: hash on the full URL (path + query string), not just
+  # req.url.path. Before this fix, two requests that differed only in
+  # query parameters (e.g. ListObjectsV2 with different ?prefix= values,
+  # or ?versionId= variants) shared a single cache entry — the second
+  # caller would receive the first caller's object listing. The CDN
+  # auth `key` querystring has already been stripped from req.url by
+  # the querystring.filter_except in vcl_recv, AND remaining params are
+  # sorted by querystring.sort, so the cache key (a) does NOT include
+  # the secret and (b) is normalised across param-order variants.
+  # Expect a one-time cache-hit-rate dip + origin egress spike on
+  # rollout while prior entries are stranded; the canary monitors
+  # those signals and auto-rolls back if they exceed v6 §6 thresholds.
+  set req.hash += req.url;
   set req.hash += req.http.host;
 #FASTLY hash
   return(hash);
@@ -271,4 +319,12 @@ sub vcl_log {
 }"""
     if not rate_limiting:
         vcl = re.sub(r"\s*#RATELIMIT_BEGIN.*?#RATELIMIT_END", "", vcl, flags=re.DOTALL)
+    # Substitute the placeholder with a fresh random fallback secret so
+    # that when ``cdn_auth.secret`` is missing from the edge dictionary,
+    # the lookup returns an unguessable value and the auth check fails
+    # closed instead of allowing empty-key requests through. A new secret
+    # per load_vcl() call is fine: real auth uses the dictionary value
+    # (this fallback is never matched in steady state).
+    fallback_secret = secrets.token_hex(32)
+    vcl = vcl.replace("__FALLBACK_SECRET__", fallback_secret)
     return vcl

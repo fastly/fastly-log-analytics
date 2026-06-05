@@ -18,6 +18,7 @@ You'll need:
 - **Docker** (recommended) — or Python 3.10+ and Node.js 24+ for a manual install
 - *Optional:* a Fastly API token with the **Billing** permission to power the [Usage & Cost page](docs/features.md#usage--cost-page)
 - *Optional:* [`falco`](https://github.com/ysugimoto/falco) to validate VCL during provisioning (highly recommended; the app degrades gracefully without it)
+- *Optional:* **Rust 1.90+** with the `wasm32-wasip1` target (`rustup target add wasm32-wasip1`) — only needed if you plan to rebuild the [Session Scoring](docs/session_scoring_runbook.md) Compute Wasm scorer from source
 
 ---
 
@@ -94,6 +95,7 @@ You run the application as a central web-accessible server (either on a dedicate
 - **Log field configuration** — built-in field groups (HTTP, network, geo, TLS, NGWAF) plus custom VCL expressions
 - **Alerts** — threshold-based, webhook-delivered
 - **Live dashboard sharing** — three modes (SSH tunnel, your own hostname, your own IP) with per-analyst passcode invites, IP allowlisting, and instant revoke
+- **Session scoring** — edge-computed 0-100 risk score per request combining cookie/timing signals with a PageRank transition matrix, with live threshold enforcement, audit logging, key rotation, and matrix version history. See the [runbook](docs/session_scoring_runbook.md) and [feature reference](docs/features.md)
 
 See [docs/features.md](docs/features.md) for the full feature reference.
 

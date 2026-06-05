@@ -111,8 +111,8 @@ export default function UsagePage() {
 
         const { data: storage, isLoading: loadingStorage, isFetching: fetchingStorage } = useQuery({
     queryKey: ['usage', 'storage', activeServiceId, startTime, endTime],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/usage/current-storage", {
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/usage/current-storage", { signal, 
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined } }
       })
       return data
@@ -123,8 +123,8 @@ export default function UsagePage() {
 
   const { data: ops, isLoading: loadingOps, isFetching: fetchingOps } = useQuery({
     queryKey: ['usage', 'operations', activeServiceId, startTime, endTime, activityBy],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/usage/operations", {
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/usage/operations", { signal, 
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
       })
       return data
@@ -135,8 +135,8 @@ export default function UsagePage() {
 
   const { data: bw, isLoading: loadingBw, isFetching: fetchingBw } = useQuery({
     queryKey: ['usage', 'bandwidth', activeServiceId, startTime, endTime, activityBy],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/usage/bandwidth", {
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/usage/bandwidth", { signal, 
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
       })
       return data
@@ -147,8 +147,8 @@ export default function UsagePage() {
 
   const { data: logActivity, isLoading: loadingActivity, isFetching: fetchingActivity } = useQuery({
     queryKey: ['usage', 'log-activity', activeServiceId, startTime, endTime, activityBy],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/usage/log-activity", {
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/usage/log-activity", { signal, 
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
       })
       return data
@@ -159,8 +159,8 @@ export default function UsagePage() {
 
   const { data: prefill, isLoading: loadingPrefill } = useQuery({
     queryKey: ['usage', 'prefill', activeServiceId],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/usage/prefill")
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/usage/prefill", { signal })
       return data as any
     },
     enabled: isReady,

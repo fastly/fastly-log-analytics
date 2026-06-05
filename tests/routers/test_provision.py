@@ -114,15 +114,70 @@ _FAKE_CFG = {
 
 
 def test_set_ngwaf_workspace_saves_body_field():
-    """PATCH /ngwaf-workspace reads ngwaf_workspace_id from the request body, not query params."""
+    """PATCH /ngwaf-workspace reads ngwaf_workspace_id from the request body, not query params.
+
+    Security: requires a token. Cfg.fastly_api_key is the canonical
+    accepted token (constant-time stored-key match), so the test passes
+    that as the ``?token=`` query param.
+    """
     saved = {}
 
     def fake_save(sid, cfg):
         saved.update(cfg)
 
+    cfg_with_key = dict(_FAKE_CFG, fastly_api_key="test-stored-key")
+    with (
+        patch("backend.config.load_config", return_value=cfg_with_key),
+        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.provision._sync_crontab"),
+    ):
+        client = TestClient(app)
+        response = client.patch(
+            "/api/provision/services/svc123/ngwaf-workspace?token=test-stored-key",
+            json={"ngwaf_workspace_id": "workspace-abc"},
+        )
+
+    assert response.status_code == 200, response.text[:500]
+    data = response.json()
+    assert data["ngwaf_workspace_id"] == "workspace-abc"
+    assert saved.get("ngwaf_workspace_id") == "workspace-abc"
+
+
+def test_set_ngwaf_workspace_query_param_is_ignored():
+    """Query-param-only call (the old broken admin UI) must NOT save the
+    workspace value from a query param — body is required.
+
+    Security: token also required; same accept-stored-key shape as
+    above.
+    """
+    saved = {}
+
+    def fake_save(sid, cfg):
+        saved.update(cfg)
+
+    cfg_with_key = dict(_FAKE_CFG, fastly_api_key="test-stored-key")
+    with (
+        patch("backend.config.load_config", return_value=cfg_with_key),
+        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.provision._sync_crontab"),
+    ):
+        client = TestClient(app)
+        # Send workspace_id as query param (wrong) with empty body
+        response = client.patch(
+            "/api/provision/services/svc123/ngwaf-workspace?workspace_id=workspace-abc&token=test-stored-key",
+            json={},
+        )
+
+    assert response.status_code == 200, response.text[:500]
+    # Body was empty so ngwaf_workspace_id should be None/cleared, not "workspace-abc"
+    assert saved.get("ngwaf_workspace_id") is None
+
+
+def test_set_ngwaf_workspace_without_token_rejected_401():
+    """Security: no token → 401."""
     with (
         patch("backend.config.load_config", return_value=dict(_FAKE_CFG)),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.save_config"),
         patch("backend.provision._sync_crontab"),
     ):
         client = TestClient(app)
@@ -130,35 +185,27 @@ def test_set_ngwaf_workspace_saves_body_field():
             "/api/provision/services/svc123/ngwaf-workspace",
             json={"ngwaf_workspace_id": "workspace-abc"},
         )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["ngwaf_workspace_id"] == "workspace-abc"
-    assert saved.get("ngwaf_workspace_id") == "workspace-abc"
+    assert response.status_code == 401
+    assert response.json()["detail"]["error"] == "token_required"
 
 
-def test_set_ngwaf_workspace_query_param_is_ignored():
-    """Query-param-only call (the old broken admin UI) must NOT save anything — body is required."""
-    saved = {}
-
-    def fake_save(sid, cfg):
-        saved.update(cfg)
-
+def test_set_ngwaf_workspace_with_wrong_token_rejected_401():
+    """Security: token doesn't match stored key AND fails /tokens/self
+    validation → 401."""
+    cfg_with_key = dict(_FAKE_CFG, fastly_api_key="legit-stored-key")
     with (
-        patch("backend.config.load_config", return_value=dict(_FAKE_CFG)),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.load_config", return_value=cfg_with_key),
+        patch("backend.config.save_config"),
         patch("backend.provision._sync_crontab"),
+        # Fastly /tokens/self also rejects this fake token
+        patch("backend.utils.fastly_auth.fastly", side_effect=RuntimeError("HTTP 401")),
     ):
         client = TestClient(app)
-        # Send workspace_id as query param (wrong) with empty body
         response = client.patch(
-            "/api/provision/services/svc123/ngwaf-workspace?workspace_id=workspace-abc",
-            json={},
+            "/api/provision/services/svc123/ngwaf-workspace?token=attacker-supplied-wrong-token",
+            json={"ngwaf_workspace_id": "workspace-abc"},
         )
-
-    assert response.status_code == 200
-    # Body was empty so ngwaf_workspace_id should be None/cleared, not "workspace-abc"
-    assert saved.get("ngwaf_workspace_id") is None
+    assert response.status_code == 401
 
 
 # ── /api/provision/services ────────────────────────────────────────────────
@@ -602,10 +649,19 @@ def test_ingest_400s_on_bad_log_period():
         TestClient(app) as c,
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.provision.parse_period", side_effect=ValueError("unknown period: fortnight")),
+        # Security: stub token validation (auth gate exercised separately).
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
+                if path == "/tokens/self"
+                else {"id": "svc", "customer_id": "cust-T"}
+            ),
+        ),
     ):
         resp = c.post(
             "/api/provision/ingest",
-            json={"token": "t", "log_period": "1 fortnight"},
+            json={"token": "t", "service_id": "svc", "log_period": "1 fortnight"},
         )
     assert resp.status_code == 400
     assert "fortnight" in resp.json()["detail"]["error"]
@@ -630,6 +686,14 @@ def test_ingest_creates_new_fos_key_when_none_provided(tmp_path, monkeypatch):
         patch("backend.provision.ensure_fos_access_key", return_value=new_key) as mock_ensure,
         patch("backend.provision.write_service_config") as mock_write,
         patch("backend.provision._sync_crontab"),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
+                if path == "/tokens/self"
+                else {"id": "svc-1", "customer_id": "cust-T"}
+            ),
+        ),
     ):
         resp = c.post(
             "/api/provision/ingest",
@@ -660,6 +724,14 @@ def test_ingest_400s_when_ensure_access_key_raises():
         patch("backend.provision.parse_period", side_effect=lambda x: 60),
         patch("backend.provision.find_fos_key", return_value=None),
         patch("backend.provision.ensure_fos_access_key", side_effect=RuntimeError("rate limited")),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
+                if path == "/tokens/self"
+                else {"id": "svc-1", "customer_id": "cust-T"}
+            ),
+        ),
     ):
         resp = c.post(
             "/api/provision/ingest",
@@ -690,6 +762,14 @@ def test_ingest_uses_provided_keys_without_calling_fastly_api(tmp_path, monkeypa
         patch("backend.provision.ensure_fos_access_key") as mock_ensure,
         patch("backend.provision.write_service_config"),
         patch("backend.provision._sync_crontab"),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
+                if path == "/tokens/self"
+                else {"id": "svc-1", "customer_id": "cust-T"}
+            ),
+        ),
     ):
         resp = c.post(
             "/api/provision/ingest",
@@ -711,23 +791,30 @@ def test_ingest_uses_provided_keys_without_calling_fastly_api(tmp_path, monkeypa
 # ── /api/provision/ngwaf-workspaces ────────────────────────────────────────
 
 
-def test_ngwaf_workspaces_400s_when_no_token_and_no_stored_key():
-    """No ``token=`` query param and no API key saved for the service
-    → 400 with friendly error. Pinned because the FE distinguishes
-    400 (config missing) from 502 (NGWAF down) when retrying."""
+def test_ngwaf_workspaces_401s_when_no_token():
+    """Security: no ``token=`` query param → 401 (the route now
+    REQUIRES the caller to present a token; the silent stored-key
+    fallback was the unauth-disclosure vector). Pinned because the FE
+    distinguishes 401 (no token) from 400 (bad token) when prompting
+    the user."""
     with (
         TestClient(app) as c,
         patch("backend.config.get_fastly_api_key", return_value=""),
     ):
         resp = c.get("/api/provision/ngwaf-workspaces", params={"service_id": "svc"})
-    assert resp.status_code == 400
-    assert "api key" in resp.json()["detail"]["error"].lower()
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "token_required"
 
 
 def test_ngwaf_workspaces_returns_data_shape_workspaces():
     """NGWAF API returns ``{"data": [...]}`` shape. The route
     normalises each workspace to ``{id, name}``. Pinned because
-    the FE keys on these two fields."""
+    the FE keys on these two fields.
+
+    Security: caller must pass ``token=tok`` matching the stored
+    key (constant-time compare). The mock returns "tok" for the stored
+    key so the match succeeds without hitting Fastly's /tokens/self.
+    """
     fake_body = b'{"data": [{"id": "ws-1", "name": "Prod"}, {"id": "ws-2", "name": "Staging"}]}'
     fake_resp = MagicMock()
     fake_resp.read.return_value = fake_body
@@ -740,9 +827,12 @@ def test_ngwaf_workspaces_returns_data_shape_workspaces():
         patch("backend.config.get_fastly_api_key", return_value="tok"),
         patch("urllib.request.urlopen", return_value=fake_resp),
     ):
-        resp = c.get("/api/provision/ngwaf-workspaces", params={"service_id": "svc"})
+        resp = c.get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc", "token": "tok"},
+        )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text[:500]
     body = resp.json()
     workspaces = body["workspaces"]
     assert len(workspaces) == 2
@@ -767,7 +857,10 @@ def test_ngwaf_workspaces_returns_workspaces_shape():
         patch("backend.config.get_fastly_api_key", return_value="tok"),
         patch("urllib.request.urlopen", return_value=fake_resp),
     ):
-        resp = c.get("/api/provision/ngwaf-workspaces", params={"service_id": "svc"})
+        resp = c.get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc", "token": "tok"},
+        )
 
     body = resp.json()
     # The route falls back to attributes.name when top-level name is absent
@@ -795,7 +888,10 @@ def test_ngwaf_workspaces_maps_401_to_400_with_permissions_hint():
         patch("backend.config.get_fastly_api_key", return_value="bad-tok"),
         patch("urllib.request.urlopen", side_effect=err),
     ):
-        resp = c.get("/api/provision/ngwaf-workspaces", params={"service_id": "svc"})
+        resp = c.get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc", "token": "bad-tok"},
+        )
 
     assert resp.status_code == 400
     assert "permissions" in resp.json()["detail"]["error"].lower()
@@ -977,7 +1073,10 @@ def test_ngwaf_workspaces_empty_list_with_automation_token_returns_hint():
         patch("urllib.request.urlopen", return_value=fake_resp),
         patch("backend.provision.fastly", return_value=fake_token_info),
     ):
-        resp = c.get("/api/provision/ngwaf-workspaces", params={"service_id": "svc"})
+        resp = c.get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc", "token": "tok"},
+        )
 
     body = resp.json()
     assert body["workspaces"] == []
@@ -1307,7 +1406,7 @@ def test_teardown_404s_when_no_service_config_loaded():
         patch("backend.config.load_config", return_value=None),
     ):
         # No service_id provided → state stays None → 404
-        resp = c.get("/api/provision/teardown")
+        resp = c.post("/api/provision/teardown", json={})
 
     assert resp.status_code == 404
     body = resp.json()
@@ -1341,10 +1440,20 @@ def test_teardown_streams_done_event_on_success():
             return_value=iter([{"type": "status", "message": "removed s3 bucket"}]),
         ),
         patch("backend.core.duckdb.reload_default_source"),
+        # Security: stub token validation for the destructive teardown
+        # path. The auth gate itself is exercised in test_provision_teardown_auth.py.
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-X"}
+                if path == "/tokens/self"
+                else {"id": "svc", "customer_id": "cust-X"}
+            ),
+        ),
     ):
-        resp = c.get(
+        resp = c.post(
             "/api/provision/teardown",
-            params={"service_id": "svc", "remove_cache": False, "remove_cron": False},
+            json={"service_id": "svc", "token": "test-tok", "remove_cache": False, "remove_cron": False},
         )
         body = resp.text
 
@@ -1384,10 +1493,18 @@ def test_teardown_streams_error_event_when_perform_teardown_raises():
         patch("backend.core.iceberg.clear_source_caches"),
         patch("backend.provision.perform_teardown", side_effect=boom),
         patch("backend.core.duckdb.reload_default_source"),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-X"}
+                if path == "/tokens/self"
+                else {"id": "svc", "customer_id": "cust-X"}
+            ),
+        ),
     ):
-        resp = c.get(
+        resp = c.post(
             "/api/provision/teardown",
-            params={"service_id": "svc", "remove_cache": False, "remove_cron": False},
+            json={"service_id": "svc", "token": "test-tok", "remove_cache": False, "remove_cron": False},
         )
         body = resp.text
 
@@ -1422,10 +1539,18 @@ def test_teardown_announces_cron_update_when_remove_cron_true():
         patch("backend.core.iceberg.clear_source_caches"),
         patch("backend.provision.perform_teardown", return_value=iter([])),
         patch("backend.core.duckdb.reload_default_source"),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-X"}
+                if path == "/tokens/self"
+                else {"id": "svc", "customer_id": "cust-X"}
+            ),
+        ),
     ):
-        resp = c.get(
+        resp = c.post(
             "/api/provision/teardown",
-            params={"service_id": "svc", "remove_cache": False, "remove_cron": True},
+            json={"service_id": "svc", "token": "test-tok", "remove_cache": False, "remove_cron": True},
         )
         body = resp.text
 

@@ -251,6 +251,7 @@ def api_cron_schedule(source: dict = Depends(get_source)):
         "expire": "expire",
         "alerts_evaluation": "alerts",
         "ngwaf_sync": "ngwaf_sync",
+        "metadata_cleanup": "metadata_cleanup",
     }
     schedules = []
     for job in sched._sched.get_jobs():
@@ -566,8 +567,26 @@ def api_service_log_fields_set(service_id: str, body: LogFieldsUpdateRequest):
     if not new_lf:
         raise HTTPException(status_code=400, detail={"error": "log_fields is required"})
     old_lf = cfg.get("log_fields", {})
-    if "custom_fields" not in new_lf and "custom_fields" in old_lf:
+    # MERGE GUARD (sibling of 2026-06-02 state_sync fix): preserve
+    # existing custom_fields unless the caller explicitly provided a
+    # non-empty replacement. The pre-existing guard only triggered when
+    # the key was absent — an empty list "custom_fields":[] still
+    # stripped scoring fields. Treat "absent OR empty" as "no change",
+    # then if scoring is enabled re-inject the canonical entries from
+    # code so the routing-table for ingest stays correct.
+    incoming_custom = new_lf.get("custom_fields")
+    if not incoming_custom and old_lf.get("custom_fields"):
         new_lf["custom_fields"] = old_lf["custom_fields"]
+    if cfg.get("scoring", {}).get("enabled"):
+        from backend.provision.session_scoring_orchestrator import (
+            _SCORING_CUSTOM_FIELDS,
+            _SCORING_FIELD_NAMES,
+        )
+
+        merged = list(new_lf.get("custom_fields") or [])
+        merged = [cf for cf in merged if cf.get("name") not in _SCORING_FIELD_NAMES]
+        merged.extend(dict(cf) for cf in _SCORING_CUSTOM_FIELDS)
+        new_lf["custom_fields"] = merged
     new_lf["schema_version"] = 2
     old_groups = set(old_lf.get("groups", []))
     new_groups = set(new_lf.get("groups", []))
@@ -596,7 +615,12 @@ def api_service_log_fields_set(service_id: str, body: LogFieldsUpdateRequest):
     }
 
 
-@router.get("/services/{service_id}/logging-settings/update")
+# Security: was @router.get — moved to POST/PATCH so a cross-origin
+# `<img src=...>` or `<link rel=preload>` can no longer trigger a
+# state-changing Fastly logging-settings update. The frontend's useSSE
+# helper handles POST-with-streaming-response transparently.
+@router.post("/services/{service_id}/logging-settings/update")
+@router.patch("/services/{service_id}/logging-settings/update")
 def api_service_update_logging_settings(
     service_id: str,
     period: int | None = Query(default=None),
@@ -1130,6 +1154,7 @@ def api_import_custom_fields(service_id: str, body: dict):
     new_custom_map = {**existing_map}
     now = datetime.now(UTC).isoformat()
     type_lock_errors: list[str] = []
+    validation_errors: list[str] = []
     for field_dict in fields_to_import:
         if "name" not in field_dict:
             continue
@@ -1146,6 +1171,15 @@ def api_import_custom_fields(service_id: str, body: dict):
                     f"Cannot change 'value_type' of '{fname}': field is already committed to the database."
                 )
                 continue
+        # 019: Run the same validator the single-field add/update endpoints
+        # use, so importing a custom-fields JSON cannot smuggle in a
+        # field that the interactive editor would have rejected (bad
+        # name, dangerous VCL expression, oversized byte limit, etc.).
+        # WARN-level lines are advisory and don't block the write.
+        other_names = [n for n in new_custom_map if n != fname]
+        for err in lf_module.validate_custom_field(field_dict, other_names):
+            if not err.startswith("WARN:"):
+                validation_errors.append(f"{fname}: {err}")
         field_dict.pop("created_at", None)
         field_dict.pop("updated_at", None)
         field_dict["created_at"] = existing_field.get("created_at", now)
@@ -1153,6 +1187,8 @@ def api_import_custom_fields(service_id: str, body: dict):
         new_custom_map[fname] = field_dict
     if type_lock_errors:
         raise HTTPException(status_code=422, detail={"errors": type_lock_errors})
+    if validation_errors:
+        raise HTTPException(status_code=422, detail={"errors": validation_errors})
     new_custom = list(new_custom_map.values())
     candidate_lf = {**lf, "custom_fields": new_custom}
     fmt_errors = provision.validate_log_format(candidate_lf)

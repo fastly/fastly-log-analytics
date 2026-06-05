@@ -46,6 +46,14 @@ from functools import wraps
 # (SQLite timeouts are 30s) and flush its own usage log on exit.
 _CRON_HARD_CAP_S = 300
 
+
+def _display_name(src: dict, fallback: str) -> str:
+    """Return src['service_name'] or src['name'], falling back to ``fallback``.
+    Used by every cron-log site that wants the human-friendly name with
+    the service id as fallback when the friendly name isn't populated."""
+    return src.get("service_name") or src.get("name", fallback)
+
+
 # Per-service throttle for the heavy post-ingest refresh work — specifically
 # update_top_values (100k reservoir sample + 24 GROUP BYs that back the filter-
 # picker autocomplete cache) and reconcile_fastly_stats (Fastly /stats/aggregate
@@ -567,6 +575,33 @@ class Scheduler:
                         ngwaf_interval_mins,
                     )
 
+            # ── Metadata retention cleanup (per service) ──────────────────────
+            # Daily 03:15 UTC. Slots between optimize (03:00) and full_sweep
+            # (03:30) so the daily admin cron window stays single-threaded
+            # across heavy phases. Trims usage_log + ingested_files
+            # + cron_runs per cfg["metadata_retention"]; defaults to 1d for
+            # the first two and 7d for cron_runs. See
+            # backend.core.metadata_db.cleanup_metadata.
+            cleanup_job_id = f"metadata_cleanup_{service_id}"
+            seen_ids.add(cleanup_job_id)
+            if cleanup_job_id not in self._job_ids:
+                self._sched.add_job(
+                    _run_metadata_cleanup,
+                    "cron",
+                    hour=3,
+                    minute=15,
+                    args=[service_id],
+                    id=cleanup_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=3600,
+                )
+                self._job_ids[cleanup_job_id] = cleanup_job_id
+                logger.info(
+                    "🧹 \x1b[35m[metadata_cleanup]\x1b[0m Registered metadata cleanup job %s (daily 03:15 UTC).",
+                    cleanup_job_id,
+                )
+
         # ── Bot data refresh job ──────────────────────────────────────────────
         bot_refresh_id = "bot_data_refresh"
         seen_ids.add(bot_refresh_id)
@@ -656,6 +691,7 @@ JOB_COLORS = {
     "sync": "\x1b[94m",  # Bright Blue
     "commit": "\x1b[95m",  # Bright Magenta
     "metadata_sync": "\x1b[96m",  # Bright Cyan
+    "metadata_cleanup": "\x1b[35m",  # Magenta
     "alerts": "\x1b[93m",  # Bright Yellow
     "optimize": "\x1b[92m",  # Bright Green
     "expire": "\x1b[90m",  # Gray
@@ -745,7 +781,7 @@ def _run_metadata_sync(
         refresh_config_status,
         start_cron_run,
     )
-    from backend.cron_progress import cleanup_progress, end_progress, start_progress
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -762,8 +798,7 @@ def _run_metadata_sync(
             logger.info("[scheduler] %s: skipping metadata_sync — %s", service_id, str(e))
             return
 
-    cleanup_progress()
-
+    cleanup_progress_and_reap()
     try:
         pass
     except Exception:
@@ -1065,9 +1100,9 @@ def _run_service_cron(
             )
             return
 
-        from backend.cron_progress import cleanup_progress, end_progress, start_progress
+        from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
-        cleanup_progress()
+        cleanup_progress_and_reap()
         start_progress(run_id, service_id=service_id, task="sync")
         logger.info("▶️  \x1b[94m[sync]\x1b[0m %s: Sync job started.", _display)
 
@@ -1210,6 +1245,29 @@ def _run_service_cron(
                                     "message": f"{elapsed()} View refresh: {int((time.time() - _t0) * 1000)}ms",
                                 },
                             )
+
+                        touched_hours = done_event.get("touched_hours", [])
+                        if touched_hours:
+                            _t_roll = time.time()
+                            try:
+                                from backend.core.rollups import recompute_touched_hours
+
+                                recompute_touched_hours(service_id, src, set(touched_hours))
+                                _log_and_add_progress(
+                                    run_id,
+                                    service_id,
+                                    job_name="sync",
+                                    event={
+                                        "type": "status",
+                                        "message": f"{elapsed()} Rollups computed: {int((time.time() - _t_roll) * 1000)}ms",
+                                    },
+                                )
+                            except Exception as _re:
+                                logger.warning(
+                                    "[scheduler] %s: post-sync rollup recompute failed: %s",
+                                    service_id,
+                                    _re,
+                                )
 
         except Exception as e:
             log_text = _extract_log_text(run_id)
@@ -1361,20 +1419,27 @@ def _run_service_cron(
 
         run_usage_log_cleanup(service_id)
 
-    _usage_log_ex = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"usage-log-{service_id}")
-    _usage_log_shutdown_wait = True
+    # Run _usage_log_phase inline. Pre-fix this was wrapped in a NESTED
+    # ThreadPoolExecutor — but ``_run_service_cron`` is itself already
+    # running inside the ``@cron_task`` executor (one layer up). On the
+    # 30s timeout path the old code called ``shutdown(wait=False)``,
+    # which abandons the worker thread + everything it pinned (DuckDB
+    # connections, aiohttp sessions, Fastly API state). On a 50-service
+    # deployment with reconcile_fastly_stats hitting the API in lockstep,
+    # the inner timeout fired routinely and each leak orphaned an 8-12MB
+    # stack plus whatever Python state was live. Over hours: multi-GB
+    # unbounded growth — a confirmed contributor to the recurring host
+    # OOM-kills.
+    #
+    # Running inline drops the leak and matches every other phase in
+    # this cron body. If a per-phase timeout is needed in the future,
+    # use a cooperative cancel token through the I/O layer rather than
+    # abandoning a thread.
     _t0 = time.time()
     try:
-        _usage_log_fut = _usage_log_ex.submit(_usage_log_phase)
-        try:
-            _usage_log_fut.result(timeout=30)
-        except concurrent.futures.TimeoutError:
-            logger.warning("[scheduler] %s: usage_log phase exceeded 30s — skipping", service_id)
-            _usage_log_shutdown_wait = False
-        except Exception as e:
-            logger.warning("[scheduler] %s: usage_log phase failed: %s", service_id, e)
-    finally:
-        _usage_log_ex.shutdown(wait=_usage_log_shutdown_wait)
+        _usage_log_phase()
+    except Exception as e:
+        logger.warning("[scheduler] %s: usage_log phase failed: %s", service_id, e)
     if run_id is not None:
         _log_and_add_progress(
             run_id,
@@ -1430,11 +1495,11 @@ def _run_full_sweep(service_id: str) -> None:
         logger.info("⏭️  \x1b[95m[full_sync]\x1b[0m %s: skipping — %s", service_id, e)
         return
 
-    from backend.cron_progress import cleanup_progress, end_progress, start_progress
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
-    cleanup_progress()
+    cleanup_progress_and_reap()
     start_progress(run_id, service_id=service_id, task="full_sync")
-    _svc_name = src.get("service_name") or src.get("name", service_id)
+    _svc_name = _display_name(src, service_id)
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
     logger.info("▶️  \x1b[95m[full_sync]\x1b[0m %s: Daily full-LIST sweep started.", _display)
 
@@ -1549,11 +1614,11 @@ def _run_gap_heal(service_id: str) -> None:
         logger.info("⏭️  \x1b[95m[gap_heal]\x1b[0m %s: skipping — %s", service_id, e)
         return
 
-    from backend.cron_progress import cleanup_progress, end_progress, start_progress
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
-    cleanup_progress()
+    cleanup_progress_and_reap()
     start_progress(run_id, service_id=service_id, task="gap_heal")
-    _svc_name = src.get("service_name") or src.get("name", service_id)
+    _svc_name = _display_name(src, service_id)
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
 
     start_time_exec = time.time()
@@ -1800,9 +1865,9 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
         )
         return
 
-    from backend.cron_progress import cleanup_progress, end_progress, start_progress
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
-    cleanup_progress()
+    cleanup_progress_and_reap()
     start_progress(run_id, service_id=service_id, task="commit")
     _svc_name = cfg.get("name", service_id) if cfg else service_id
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
@@ -1947,11 +2012,11 @@ def _run_local_compact(service_id: str) -> None:
         logger.info("⏭️  \x1b[96m[local-compact]\x1b[0m %s: skipping — %s", service_id, str(e))
         return
 
-    from backend.cron_progress import cleanup_progress, end_progress, start_progress
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
-    cleanup_progress()
+    cleanup_progress_and_reap()
     start_progress(run_id, service_id=service_id, task="local_compact")
-    _svc_name = src.get("service_name") or src.get("name", service_id)
+    _svc_name = _display_name(src, service_id)
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
     logger.info("▶️  \x1b[96m[local-compact]\x1b[0m %s: Local compaction started.", _display)
     _log_and_add_progress(
@@ -2040,11 +2105,11 @@ def _run_optimize(service_id: str) -> None:
         logger.info("⏭️  \x1b[92m[optimize]\x1b[0m %s: skipping — %s", service_id, str(e))
         return
 
-    from backend.cron_progress import cleanup_progress, end_progress, start_progress
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
-    cleanup_progress()
+    cleanup_progress_and_reap()
     start_progress(run_id, service_id=service_id, task="optimize")
-    _svc_name = src.get("service_name") or src.get("name", service_id)
+    _svc_name = _display_name(src, service_id)
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
     logger.info("▶️  \x1b[92m[optimize]\x1b[0m %s: Optimize job started.", _display)
     _log_and_add_progress(
@@ -2153,7 +2218,7 @@ def _run_expire_snapshots(service_id: str) -> None:
         return
 
     svc_id = src.get("service_id", "unknown")
-    svc_name = src.get("service_name") or src.get("name", svc_id)
+    svc_name = _display_name(src, svc_id)
     display_name = f"{svc_name} ({svc_id})" if svc_name != svc_id else svc_id
     logger.info("▶️  \x1b[90m[expire]\x1b[0m %s: Maintenance job started.", display_name)
 
@@ -2415,7 +2480,7 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
         return
 
     task_name = "alerts"
-    _svc_name = src.get("service_name") or src.get("name", service_id)
+    _svc_name = _display_name(src, service_id)
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
     logger.info("▶️  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job started.", _display)
 
@@ -2447,7 +2512,7 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
         return
 
     try:
-        s_name = src.get("service_name") or src.get("name", service_id)
+        s_name = _display_name(src, service_id)
         display_name = f"{s_name} ({service_id})" if s_name != service_id else service_id
 
         # (alert_id, webhook_url, payload, max_ts) for each alert that should fire
@@ -2549,4 +2614,98 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
             except Exception:
                 pass
 
-    logger.info("⏹️  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job finished.", _display)
+
+@cron_task("metadata_cleanup")
+def _run_metadata_cleanup(service_id: str) -> None:
+    """Daily: trim usage_log + ingested_files + cron_runs per service retention cfg.
+
+    Retention defaults to 1 day for usage_log/ingested_files, 7 days for
+    cron_runs (see ``metadata_db.DEFAULT_METADATA_RETENTION``). Override
+    per service via cfg["metadata_retention"]:
+
+        {"metadata_retention": {"usage_log_days": 7, "ingested_files_days": 30,
+                                "cron_runs_days": 30}}
+
+    A value of 0 (or negative) disables cleanup for that table — useful for
+    a long-retention analyst service that wants the full audit trail.
+
+    VACUUM only runs when something was actually deleted. On a healthy
+    daily cadence this means: first run trims everything older than
+    retention, subsequent runs are mostly no-ops (only that day's
+    just-aged rows to trim), and VACUUM happens cheaply on small deltas.
+
+    Writes a row to the cron_runs audit table on completion so the run
+    shows up on the Data Management cron schedule + history grid alongside
+    the other tasks. The cron_runs row itself becomes part of the next
+    cleanup's trimming target (capped at cron_runs_days retention).
+    """
+    from backend import config as svcconfig
+    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.metadata_db import cleanup_metadata
+
+    src = get_source_for_service(service_id)
+    if src is None:
+        return
+
+    cfg = svcconfig.load_config(service_id) or {}
+    retention = cfg.get("metadata_retention") or {}
+
+    _svc_name = _display_name(src, service_id)
+    _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
+    color = JOB_COLORS.get("metadata_cleanup", "")
+    label = f"{color}[metadata_cleanup]{RESET_COLOR}"
+    logger.info("▶️  %s %s: Starting metadata cleanup.", label, _display)
+
+    start_ts = time.time()
+    run_id = start_cron_run(src, "metadata_cleanup")
+    try:
+        result = cleanup_metadata(service_id, retention)
+    except Exception as e:
+        logger.exception("%s %s: cleanup failed: %s", label, _display, e)
+        log_cron_run(
+            src,
+            "metadata_cleanup",
+            time.time() - start_ts,
+            "error",
+            error_message=str(e),
+            summary=f"cleanup failed: {e}",
+            run_id=run_id,
+        )
+        return
+
+    total_deleted = sum(result["deleted"].values())
+    summary_parts = [f"{t}={n}" for t, n in result["deleted"].items() if n]
+    summary = (
+        (
+            f"Trimmed {total_deleted:,} rows ({', '.join(summary_parts)}). "
+            f"VACUUM={'yes' if result['vacuumed'] else 'skipped (no deletions)'}."
+        )
+        if total_deleted
+        else "No rows older than retention windows."
+    )
+
+    if total_deleted:
+        logger.info(
+            "🧹 %s %s: deleted %d rows (%s) vacuumed=%s in %.2fs",
+            label,
+            _display,
+            total_deleted,
+            ", ".join(summary_parts),
+            result["vacuumed"],
+            result["duration_s"],
+        )
+    else:
+        logger.info("⏹️  %s %s: no rows to trim (took %.2fs)", label, _display, result["duration_s"])
+
+    log_cron_run(
+        src,
+        "metadata_cleanup",
+        time.time() - start_ts,
+        "success",
+        summary=summary,
+        # Repurpose the rows_ingested column for the count of rows trimmed —
+        # the schema is shared across all cron tasks, and "rows_ingested" is
+        # the closest semantic fit (each task interprets it by context).
+        rows_ingested=total_deleted,
+        run_id=run_id,
+    )

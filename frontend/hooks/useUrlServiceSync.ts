@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { startTransition, useEffect, useRef } from 'react'
 import { useSearchParams, useRouter, usePathname } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
 
@@ -34,7 +34,15 @@ export function useUrlServiceSync() {
 
     if (targetServiceId !== currentServiceId) {
       const newUrl = targetServiceId ? `${pathname}?service=${targetServiceId}` : pathname
-      router.replace(newUrl)
+      // Mark the URL-sync as a non-urgent transition so React paints
+      // the current render (often a loading.tsx skeleton triggered by
+      // the nav click) BEFORE processing the replace's re-render
+      // cascade. Without startTransition every service-id change in
+      // the store causes a synchronous router update that competes
+      // with the page's own mount work for the main thread.
+      startTransition(() => {
+        router.replace(newUrl)
+      })
     }
   }, [activeServiceId, services, isInitialized, pathname, router, searchParams])
 }

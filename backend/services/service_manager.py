@@ -1,10 +1,22 @@
 """Service management layer for consistent configuration listing and enrichment."""
 
 import os
+import threading
+import time
 from typing import Any
 
 from backend import config as svcconfig
 from backend.core import duckdb as _db
+
+# Cache dirs hold thousands of small parquet files; recursively stat'ing
+# them on every /api/bootstrap, /api/services, and admin tile render was a
+# big chunk of the page-navigation lag (200-1500ms per call). The dir
+# contents change on cron tick (every 2 min for most services), so a 60s
+# TTL is comfortably below the freshness floor users notice in the
+# "Local Cache" column while eliminating the per-request walk.
+_DIR_STATS_TTL_SEC = 60.0
+_dir_stats_cache: dict[str, tuple[float, int, int]] = {}
+_dir_stats_lock = threading.Lock()
 
 
 def _get_dir_stats(path: str) -> tuple[int, int]:
@@ -15,7 +27,14 @@ def _get_dir_stats(path: str) -> tuple[int, int]:
     thousands of small parquet files were the main motivator.
     Symlinks are skipped (preserves the prior os.walk behavior).
     """
+    now = time.monotonic()
+    with _dir_stats_lock:
+        entry = _dir_stats_cache.get(path)
+        if entry and (now - entry[0]) < _DIR_STATS_TTL_SEC:
+            return (entry[1], entry[2])
     if not os.path.exists(path):
+        with _dir_stats_lock:
+            _dir_stats_cache[path] = (now, 0, 0)
         return (0, 0)
     total_size = 0
     file_count = 0
@@ -24,20 +43,33 @@ def _get_dir_stats(path: str) -> tuple[int, int]:
         d = stack.pop()
         try:
             with os.scandir(d) as it:
-                for entry in it:
+                for entry_de in it:
                     try:
-                        if entry.is_symlink():
+                        if entry_de.is_symlink():
                             continue
-                        if entry.is_dir(follow_symlinks=False):
-                            stack.append(entry.path)
-                        elif entry.is_file(follow_symlinks=False):
-                            total_size += entry.stat(follow_symlinks=False).st_size
+                        if entry_de.is_dir(follow_symlinks=False):
+                            stack.append(entry_de.path)
+                        elif entry_de.is_file(follow_symlinks=False):
+                            total_size += entry_de.stat(follow_symlinks=False).st_size
                             file_count += 1
                     except OSError:
                         continue
         except OSError:
             continue
+    with _dir_stats_lock:
+        _dir_stats_cache[path] = (now, total_size, file_count)
     return (total_size, file_count)
+
+
+def _bust_dir_stats_cache(path: str | None = None) -> None:
+    """Invalidate a cached dir-stat entry. Called after operations that
+    materially change the cache contents (rebuild, teardown, ingest)
+    so the dashboard's Local Cache column updates immediately."""
+    with _dir_stats_lock:
+        if path is None:
+            _dir_stats_cache.clear()
+            return
+        _dir_stats_cache.pop(path, None)
 
 
 def get_enriched_services(active_service_id: str | None = None) -> list[dict[str, Any]]:

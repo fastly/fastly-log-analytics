@@ -1,6 +1,6 @@
 # --- OpenAPI Schema Generation Stage ---
 # Needs the Python backend to introspect FastAPI routes and emit openapi.json.
-FROM python:3.12-slim-bullseye AS api-schema
+FROM python:3.12-slim-bookworm AS api-schema
 
 COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
 

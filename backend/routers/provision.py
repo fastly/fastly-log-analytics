@@ -178,25 +178,45 @@ def provision_check_fos(
         return {"ok": False, "error": err_msg, "_debug_calls": get_tracked_calls()}
 
 
-@router.get("/teardown")
-def provision_teardown(
-    token: str = Query(default=""),
-    service_id: str | None = Query(default=None),
-    remove_logging: bool = Query(default=True),
-    remove_cdn: bool = Query(default=True),
-    remove_bucket: bool = Query(default=True),
-    remove_cache: bool = Query(default=True),
-    remove_cron: bool = Query(default=False),
-):
+@router.post("/teardown")
+def provision_teardown(body: dict | None = None):
+    """Destructive service teardown over SSE.
+
+    Switched from ``GET`` to ``POST`` to defend against CSRF: a GET
+    endpoint with side effects can be triggered by any cross-origin
+    ``<img src="…">``, ``<link>``, or ``<form method=get>``. POST routes
+    require the caller to send a request that browsers do not emit
+    cross-origin without the user explicitly submitting a form, and
+    ``Content-Type: application/json`` (sent by the dashboard's fetch
+    client) puts the request in the CORS-preflighted bucket so the
+    browser will block silent invocation entirely.
+
+    Body shape:
+        {token, service_id, remove_logging, remove_cdn,
+         remove_bucket, remove_cache, remove_cron}
+    """
+    body = body or {}
+    token: str = str(body.get("token") or "")
+    service_id: str | None = body.get("service_id")
+    remove_logging: bool = bool(body.get("remove_logging", True))
+    remove_cdn: bool = bool(body.get("remove_cdn", True))
+    remove_bucket: bool = bool(body.get("remove_bucket", True))
+    remove_cache: bool = bool(body.get("remove_cache", True))
+    remove_cron: bool = bool(body.get("remove_cron", False))
     from backend import config as svcconfig
     from backend.core import duckdb as _db
     from backend.provision import _sync_crontab, perform_teardown
+    from backend.utils.fastly_auth import validate_destructive_token
 
     state = None
     if service_id:
         svc_cfg = svcconfig.load_config(service_id)
         if svc_cfg:
-            token = token or svc_cfg.get("fastly_api_key", "")
+            # Security: do NOT fall back to the server-stored
+            # ``fastly_api_key``. Destructive operations require the caller to
+            # supply a token that we then validate against Fastly's
+            # /tokens/self endpoint. The stored key is only used for
+            # scheduled, non-destructive background sync.
             prov = svc_cfg.get("provisioning", {})
             state = {
                 "logging_service_id": service_id,
@@ -215,6 +235,16 @@ def provision_teardown(
     if not state:
         raise HTTPException(status_code=404, detail={"error": "No service config found."})
 
+    # Security: destructive teardown (logging / CDN / bucket) requires a
+    # caller-supplied Fastly token with the ``global`` scope and access to
+    # this service. Cache-only teardown (all three destructive flags false)
+    # is a local-cleanup operation and does not touch Fastly, so it does not
+    # require token validation. The /api/provision/ middleware gate ensures
+    # only local admin requests reach this endpoint regardless.
+    has_destructive = bool(remove_logging or remove_cdn or remove_bucket)
+    if has_destructive:
+        validate_destructive_token(token, service_id=service_id or "")
+
     opts = {
         "remove_logging": remove_logging,
         "remove_cdn": remove_cdn,
@@ -222,9 +252,7 @@ def provision_teardown(
     }
 
     def stream():
-        def yj(data):
-            yield f"data: {json.dumps(data)}\n\n"
-            yield f": {' ' * 256}\n\n"
+        from backend.utils.router_utils import sse_event as yj  # local alias preserves the line-level diff
 
         # Initial padding to force flush
         yield from _sse_flush()
@@ -556,11 +584,21 @@ def provision_ingest(body: dict):
     import secrets
 
     from backend.provision import ensure_fos_access_key, find_fos_key, parse_period, write_service_config
+    from backend.utils.fastly_auth import validate_destructive_token
     from backend.utils.pop_utils import fetch_pop_locations
 
     token = body.get("token")
     if not token:
         raise HTTPException(status_code=400, detail={"error": "Token is required"})
+
+    # Provisioning writes a service config that the scheduler immediately
+    # picks up and starts ingesting from. Without a token validation pass
+    # here the route would mint configs for any service_id reachable by
+    # the caller's network position, even though the caller may not
+    # legitimately own that service. ``validate_destructive_token``
+    # rejects when scope, bound-services, or tenant don't match.
+    logging_service_id = body.get("service_id") or body.get("logging_service_id") or ""
+    validate_destructive_token(token, service_id=logging_service_id)
 
     fetch_pop_locations(token)
 
@@ -776,17 +814,43 @@ def provision_check_config(
 
 @router.get("/ngwaf-workspaces")
 def provision_ngwaf_workspaces(service_id: str = Query(...), token: str = Query(default="")):
-    """List NGWAF workspaces using the provided token or the stored API key."""
+    """List NGWAF workspaces for a service.
+
+    Security: previously the endpoint would silently fall back to
+    the server-stored ``fastly_api_key`` if the caller didn't pass a
+    token, letting any local-loopback caller enumerate NGWAF workspaces
+    for any service using the stored credential. Now the caller MUST
+    present a token, and we accept either:
+      - the stored ``fastly_api_key`` for this service (constant-time
+        match — preserves the existing admin UX where the frontend
+        passes the stored key it just used to fetch workspaces), OR
+      - a token whose /tokens/self response shows access to this service
+        (the strict validation path used for the destructive op).
+    Either way an unauthenticated caller can't enumerate workspaces
+    even if they reach the loopback admin surface.
+    """
+    import hmac
     import urllib.error
 
     from backend import config as svcconfig
     from backend.provision import fastly
+    from backend.utils.fastly_auth import validate_destructive_token
 
     token = token.strip()
     if not token:
-        token = svcconfig.get_fastly_api_key(service_id)
-    if not token:
-        raise HTTPException(status_code=400, detail={"error": "No API key stored for this service."})
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "token_required",
+                "message": "A Fastly API token is required to list NGWAF workspaces.",
+            },
+        )
+    stored = (svcconfig.get_fastly_api_key(service_id) or "").strip()
+    matches_stored = bool(stored) and hmac.compare_digest(token, stored)
+    if not matches_stored:
+        # The validator raises HTTPException(401) on scope / service /
+        # network failures, which is the right user-visible behavior.
+        validate_destructive_token(token, service_id=service_id)
 
     from backend.utils.router_utils import format_debug_request
 
@@ -850,13 +914,47 @@ def provision_ngwaf_workspaces(service_id: str = Query(...), token: str = Query(
 
 
 @router.patch("/services/{service_id}/ngwaf-workspace")
-def provision_set_ngwaf_workspace(service_id: str, body: dict):
-    """Persist the NGWAF workspace ID for a service and reload the scheduler."""
+def provision_set_ngwaf_workspace(service_id: str, body: dict, token: str = Query(default="")):
+    """Persist the NGWAF workspace ID for a service and reload the scheduler.
+
+    Security: require the caller to present a Fastly token bound to
+    this service. Two paths are accepted:
+
+      1. The caller passes a token that ``/tokens/self`` confirms has the
+         ``global`` scope and access to ``service_id`` (preferred — admin
+         can rotate without re-entering the stored key).
+      2. The caller passes a token that constant-time-matches the
+         service's stored ``fastly_api_key`` (the existing admin flow).
+
+    Either way an unauthenticated attacker who can reach the endpoint can't
+    rebind the workspace because they don't know the token. The middleware
+    /api/provision/ block also gates this for analysts.
+    """
+    import hmac
+
     from backend import config as svcconfig
+    from backend.utils.fastly_auth import validate_destructive_token
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         raise HTTPException(status_code=404, detail={"error": "Service not found"})
+
+    token = (token or "").strip()
+    stored = (cfg.get("fastly_api_key") or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "token_required", "message": "A Fastly API token is required."},
+        )
+
+    # Fast path: caller presented the stored key. Constant-time compare so
+    # we don't leak the stored value via timing.
+    matches_stored = bool(stored) and hmac.compare_digest(token, stored)
+    if not matches_stored:
+        # Fall back to the strict scope-validation path. validate_destructive_token
+        # raises HTTPException(401) on any failure (missing/insufficient scope,
+        # service mismatch, Fastly unreachable).
+        validate_destructive_token(token, service_id=service_id)
 
     workspace_id = (body.get("ngwaf_workspace_id") or "").strip() or None
     cfg["ngwaf_workspace_id"] = workspace_id

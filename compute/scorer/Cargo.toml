@@ -1,0 +1,52 @@
+[package]
+name = "session-scorer"
+version = "0.1.0"
+edition = "2021"
+authors = ["drew.michael"]
+description = "Edge session-anomaly scoring service for Fastly Compute"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "session-scorer"
+path = "src/main.rs"
+
+[dependencies]
+# Compute SDK — Wasm runtime + req/resp helpers.
+fastly = "0.11"
+# Authenticated encryption. aes-gcm = pure-Rust, audited; ships in Wasm cleanly.
+aes-gcm = "0.10"
+# Matrix.json deserialization.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Cookie wire format.
+base64 = "0.22"
+# For HashMap with deterministic iteration (used for scoring).
+# (Pulled transitively by serde_json; declared explicitly for clarity.)
+# Hex-encode the raw session id bytes for the X-Edge-Sid response header.
+# Promoted from dev-deps once main.rs needed it for live emission.
+hex = "0.4"
+# Real entropy for SID generation. Without this the placeholder loop in
+# getrandom_fallback produces the same 6-byte sid for every cookieless
+# visitor (07 26 45 64 83 a2), which collapses every uncookied request
+# to one "session" in the labels table. getrandom 0.2 auto-selects the
+# WASI random_get import on wasm32-wasip1 — no extra features needed.
+getrandom = "0.2"
+
+[dev-dependencies]
+# Cross-language fixture byte-exact tests use the same dependency that
+# the runtime uses, so listing it again here is redundant; kept for
+# explicit readability if dev-only test helpers ever need it.
+
+[profile.release]
+# Optimize for size + execution speed. Wasm runtimes pay for both.
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.dev]
+# Faster local builds — we test logic at native speed and only build Wasm
+# for the actual deploy.
+opt-level = 0

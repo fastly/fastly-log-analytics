@@ -895,6 +895,76 @@ def test_perform_teardown_swallows_remove_logging_exception_with_warning():
     assert delete_bucket_called == [True]
 
 
+# ── write_service_config: preserve code-managed keys on re-ingest ────────────
+
+
+def test_write_service_config_preserves_scoring_block_when_state_omits_it(tmp_path):
+    """REGRESSION: re-running /api/provision/ingest (wizard re-run,
+    Terraform import, key rotation) used to wholesale-overwrite the cfg
+    with the request body, silently dropping cfg['scoring'] +
+    cfg['log_fields']['custom_fields'] + cfg['ngwaf_workspace_id'].
+    write_service_config must now LOAD the existing cfg and preserve
+    those code-managed keys when the request body lacks them."""
+    saved_cfgs = []
+    existing_cfg = {
+        "service_id": "svc-test",
+        "scoring": {
+            "enabled": True,
+            "scoring_service_id": "scorer-svc",
+            "enabled_at": "2026-06-02T13:59:02+00:00",
+        },
+        "ngwaf_workspace_id": "ngwaf-abc",
+        "log_fields": {
+            "groups": ["A"],
+            "custom_fields": [
+                {"name": "edge_score", "duckdb_type": "INTEGER", "enabled": True},
+                {"name": "my_field", "duckdb_type": "VARCHAR", "enabled": True},
+            ],
+        },
+    }
+
+    with (
+        patch("backend.config.load_config", return_value=existing_cfg),
+        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
+    ):
+        # Re-ingest with a body that has no awareness of scoring or ngwaf
+        orchestrator.write_service_config(_make_state())
+
+    _, cfg = saved_cfgs[0]
+    # Scoring block survived
+    assert cfg.get("scoring", {}).get("enabled") is True
+    assert cfg["scoring"]["scoring_service_id"] == "scorer-svc"
+    # NGWAF workspace id survived
+    assert cfg.get("ngwaf_workspace_id") == "ngwaf-abc"
+    # User's custom_field survived
+    custom_names = {cf["name"] for cf in cfg["log_fields"]["custom_fields"]}
+    assert "my_field" in custom_names
+    # All 6 scoring fields re-injected from code (canonical source of truth)
+    from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
+
+    for name in _SCORING_FIELD_NAMES:
+        assert name in custom_names, f"scoring field {name!r} dropped on re-ingest"
+
+
+def test_write_service_config_first_ever_ingest_has_no_existing_cfg(tmp_path):
+    """First-time ingest: load_config returns None. Must not raise and
+    must skip the preserve step gracefully — the request body IS the
+    full state on first run."""
+    saved_cfgs = []
+    with (
+        patch("backend.config.load_config", return_value=None),
+        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
+    ):
+        orchestrator.write_service_config(_make_state())
+
+    _, cfg = saved_cfgs[0]
+    # No scoring / ngwaf in body or existing → none in cfg
+    assert "scoring" not in cfg
+    assert "ngwaf_workspace_id" not in cfg
+
+
 def test_perform_teardown_filters_fastly_keys_by_managed_description_prefix():
     """When listing FOS access keys, only delete keys whose description
     matches ``fos-log-analysis-{service_id}`` / temp-admin /

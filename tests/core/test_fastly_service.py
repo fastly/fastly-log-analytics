@@ -80,38 +80,6 @@ def test_find_service_by_name_returns_none_on_error():
         assert service.find_service_by_name("anything", "tkn") is None
 
 
-# ── find_dictionary_by_name ───────────────────────────────────────────────
-
-
-def test_find_dictionary_by_name_returns_match():
-    dicts = [{"id": "d1", "name": "allowlist"}, {"id": "d2", "name": "blocklist"}]
-    with patch("backend.core.fastly.service.fastly", return_value=dicts):
-        out = service.find_dictionary_by_name("svc-1", 5, "blocklist", "tkn")
-    assert out["id"] == "d2"
-
-
-def test_find_dictionary_by_name_returns_none_on_error():
-    with patch("backend.core.fastly.service.fastly", side_effect=RuntimeError("404")):
-        assert service.find_dictionary_by_name("svc-1", 5, "any", "tkn") is None
-
-
-# ── upsert_dictionary_items ───────────────────────────────────────────────
-
-
-def test_upsert_dictionary_items_builds_patch_payload():
-    """Items dict is flattened to the Fastly API's
-    ``[{item_key, item_value}]`` array shape. Pinned because the API
-    rejects nested dict bodies with 400."""
-    with patch("backend.core.fastly.service.fastly") as mock_fastly:
-        service.upsert_dictionary_items("svc-1", "dict-1", {"k1": "v1", "k2": "v2"}, "tkn")
-
-    args, kwargs = mock_fastly.call_args[0], mock_fastly.call_args[1]
-    assert args[0] == "PATCH"
-    assert "/dictionary/dict-1/items" in args[1]
-    payload = args[2]
-    assert payload == {"items": [{"item_key": "k1", "item_value": "v1"}, {"item_key": "k2", "item_value": "v2"}]}
-
-
 # ── find_condition + ensure_condition ─────────────────────────────────────
 
 

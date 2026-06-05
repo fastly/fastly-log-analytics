@@ -99,8 +99,8 @@ function LogAccountingPanel() {
   const preset = LOG_ACCOUNTING_PRESETS[presetIdx]
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['log-accounting', preset.hours, preset.by],
-    queryFn: async () => {
-      const { data, error } = await client.GET('/api/admin/log-accounting', {
+    queryFn: async ({ signal }) => {
+      const { data, error } = await client.GET('/api/admin/log-accounting', { signal, 
         params: { query: { hours: preset.hours, by: preset.by } },
       })
       if (error) throw new Error(extractApiError(error))
@@ -283,8 +283,8 @@ export default function UsageLogPage() {
 
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['usage-log', activeServiceId, startTime, endTime, usageType, processFilter, operationFilter],
-    queryFn: async () => {
-      const { data, error } = await client.GET('/api/admin/usage-log', {
+    queryFn: async ({ signal }) => {
+      const { data, error } = await client.GET('/api/admin/usage-log', { signal, 
         params: {
           query: {
             service_id: activeServiceId || '',

@@ -1,9 +1,20 @@
 import { render, screen, act } from '@testing-library/react'
 import { expect, test, vi, beforeEach } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AppLayout } from '@/components/AppLayout'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import React from 'react'
+
+// AppLayout now calls useQueryClient() to implement the navigation-cancel
+// pattern (cancel in-flight queries on route change). Tests need a real
+// QueryClientProvider in the tree or useQueryClient throws.
+function renderWithQueryClient(ui: React.ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
+}
 
 // Mock next/navigation
 vi.mock('next/navigation', () => ({
@@ -62,7 +73,7 @@ beforeEach(() => {
 })
 
 test('renders AppLayout with standard navigation', () => {
-  render(<AppLayout><div>Content</div></AppLayout>)
+  renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
 
   expect(screen.getAllByText('Dashboard').length).toBeGreaterThan(0)
   expect(screen.getByText('Usage & Cost')).toBeInTheDocument()
@@ -79,7 +90,7 @@ test('hides restricted items for analysts', () => {
     })
   })
 
-  render(<AppLayout><div>Content</div></AppLayout>)
+  renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
 
   expect(screen.getAllByText('Dashboard').length).toBeGreaterThan(0)
   expect(screen.queryByText('Usage & Cost')).not.toBeInTheDocument()
@@ -99,7 +110,7 @@ test('renders analyst watermark when bootstrap reports remote analyst', () => {
     isLoading: false,
   } as any)
 
-  render(<AppLayout><div>Content</div></AppLayout>)
+  renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
 
   const watermark = screen.getByTestId('analyst-watermark')
   expect(watermark).toBeInTheDocument()
@@ -108,6 +119,6 @@ test('renders analyst watermark when bootstrap reports remote analyst', () => {
 })
 
 test('does not render watermark for non-analyst users', () => {
-  render(<AppLayout><div>Content</div></AppLayout>)
+  renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
   expect(screen.queryByTestId('analyst-watermark')).not.toBeInTheDocument()
 })

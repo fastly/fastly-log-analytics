@@ -120,7 +120,9 @@ class DebugCall(BaseModel):
     caller: str | None = None
 
 
-from pydantic import Field
+import os as _os
+
+from pydantic import Field, model_serializer
 
 
 class HasDataMixin(BaseModel):
@@ -130,12 +132,39 @@ class HasDataMixin(BaseModel):
     total: int = 0
 
 
+# 038: telemetry payloads (raw SQL + outbound API URL/timing) are useful
+# during development and incident response but they're an information-leak
+# surface in normal operation — every analyst dashboard fetch echoes the
+# server's internal SQL and the FOS object keys it touched. Gate inclusion
+# on a process-level ``DEBUG_RESPONSES`` env var so production
+# deployments default to "telemetry excluded from API responses" and an
+# operator who needs the debug panel during triage can flip the flag and
+# restart the process. The frontend DebugPanel reads ``_debug_queries`` /
+# ``_debug_calls`` via optional-chain access so a missing field renders
+# as an empty panel rather than throwing.
+#
+# Implementation uses ``model_serializer`` (not ``Field(exclude=...)``)
+# so the OpenAPI schema continues to describe the fields — keeps the
+# committed snapshot stable regardless of which mode the deployment
+# is running in, and avoids per-deployment frontend type drift.
+def _debug_responses_enabled() -> bool:
+    return _os.getenv("DEBUG_RESPONSES", "").lower() in ("1", "true", "yes")
+
+
 class BaseResponse(BaseModel):
     """Base response that automatically includes telemetry if present."""
 
     debug_queries: list[DebugQuery] = Field(default_factory=list, serialization_alias="_debug_queries")
     debug_calls: list[DebugCall] = Field(default_factory=list, serialization_alias="_debug_calls")
     is_cached: bool = Field(default=False, serialization_alias="_is_cached")
+
+    @model_serializer(mode="wrap")
+    def _strip_debug_when_disabled(self, handler):
+        data = handler(self)
+        if not _debug_responses_enabled():
+            data.pop("_debug_queries", None)
+            data.pop("_debug_calls", None)
+        return data
 
     @classmethod
     def with_telemetry(cls, **data):

@@ -34,7 +34,14 @@ def _reset_progress_state():
 def test_start_progress_initialises_empty_event_list():
     cron_progress.start_progress(1, service_id="svc-a", task="sync")
     assert cron_progress._progress[1] == []
-    assert cron_progress._run_metadata[1] == {"service_id": "svc-a", "task": "sync"}
+    meta = cron_progress._run_metadata[1]
+    assert meta["service_id"] == "svc-a"
+    assert meta["task"] == "sync"
+    # started_at must be populated so the System Health card can sort by age
+    # and surface "running for 3m". Previously the field was missing and
+    # always rendered as null.
+    assert isinstance(meta["started_at"], float)
+    assert meta["started_at"] <= time.time()
 
 
 def test_start_progress_is_idempotent():
@@ -193,12 +200,70 @@ def test_end_progress_appends_final_event_when_provided():
     assert events[-1] == {"type": "done", "rows": 42}
 
 
-def test_end_progress_without_final_event_just_updates_timestamp():
+def test_end_progress_without_final_event_auto_emits_done_when_last_was_status():
+    """REGRESSION: the sync cron path emits status messages (e.g.
+    "view refresh: 12ms") as its LAST event before falling through to
+    `finally: end_progress(run_id)` with no explicit final event. The
+    prior end_progress just updated the timestamp, so list_active_runs'
+    `events[-1].type in (done,error)` filter never matched → the run
+    showed as in-flight forever (TTL was 1 hour). Production
+    accumulated 382 stale entries on the System Health card.
+
+    The fix: when no final_event is given AND the last event isn't
+    already terminal, auto-append `{type:"done"}` so list_active_runs
+    correctly filters."""
     cron_progress.start_progress(1)
-    initial_count = len(cron_progress._progress[1])
+    cron_progress.add_progress(1, {"type": "status", "message": "view refresh: 12ms"})
+
     cron_progress.end_progress(1)
 
-    assert len(cron_progress._progress[1]) == initial_count  # No event appended
+    events = cron_progress._progress[1]
+    assert events[-1].get("type") == "done", "end_progress must auto-emit done after a status final"
+    # And list_active_runs now filters it out
+    assert cron_progress.list_active_runs() == []
+
+
+def test_end_progress_does_not_double_emit_when_last_was_done():
+    """If the caller already added a done event via _log_and_add_progress
+    + then called end_progress(run_id), don't append a second done."""
+    cron_progress.start_progress(1)
+    cron_progress.add_progress(1, {"type": "done", "rows": 100})
+
+    cron_progress.end_progress(1)
+
+    events = cron_progress._progress[1]
+    done_events = [e for e in events if e.get("type") == "done"]
+    assert len(done_events) == 1, "end_progress must not double-emit done"
+
+
+def test_end_progress_does_not_double_emit_when_last_was_error():
+    """Same as above for error — runs that ended in an error shouldn't
+    have a misleading 'done' tacked on by the auto-emit path."""
+    cron_progress.start_progress(1)
+    cron_progress.add_progress(1, {"type": "error", "message": "S3 timeout"})
+
+    cron_progress.end_progress(1)
+
+    events = cron_progress._progress[1]
+    error_events = [e for e in events if e.get("type") == "error"]
+    done_events = [e for e in events if e.get("type") == "done"]
+    assert len(error_events) == 1
+    assert len(done_events) == 0
+
+
+def test_end_progress_with_explicit_final_event_does_not_auto_emit():
+    """Caller passing an explicit final_event always wins — the
+    auto-emit is only for callers that forgot."""
+    cron_progress.start_progress(1)
+    cron_progress.add_progress(1, {"type": "status", "message": "x"})
+
+    cron_progress.end_progress(1, final_event={"type": "done", "rows": 42})
+
+    events = cron_progress._progress[1]
+    assert events[-1] == {"type": "done", "rows": 42}
+    # Exactly one done — the explicit one. No auto-emit on top.
+    done_events = [e for e in events if e.get("type") == "done"]
+    assert len(done_events) == 1
 
 
 def test_end_progress_silently_drops_unknown_run():
@@ -243,6 +308,138 @@ def test_cleanup_progress_is_safe_on_empty_state():
 
 
 # ── Concurrency: lock acquisition under racing writers ──────────────────────
+
+
+# ── list_active_runs ─────────────────────────────────────────────────────────
+
+
+def test_list_active_runs_returns_only_runs_without_terminal_event():
+    """REGRESSION: the admin health-snapshot endpoint was iterating
+    ``_run_metadata`` directly, which kept completed runs visible for an
+    hour (the cleanup TTL). The System Health card rendered dozens of
+    duplicated "sync · KLJPUtJk" boxes. ``list_active_runs`` filters out
+    runs whose last event is ``done``/``error`` so only actually-active
+    runs are returned."""
+    # Active: started, no terminal event.
+    cron_progress.start_progress(1, service_id="svc-a", task="sync")
+    cron_progress.add_progress(1, {"type": "step", "i": 1})
+    # Completed: started, last event is done.
+    cron_progress.start_progress(2, service_id="svc-a", task="sync")
+    cron_progress.add_progress(2, {"type": "done", "rows": 100})
+    # Errored: started, last event is error.
+    cron_progress.start_progress(3, service_id="svc-b", task="metadata_sync")
+    cron_progress.add_progress(3, {"type": "error", "msg": "S3 timeout"})
+    # Active second service.
+    cron_progress.start_progress(4, service_id="svc-b", task="commit")
+
+    out = cron_progress.list_active_runs()
+    out_by_id = {entry["run_id"]: entry for entry in out}
+
+    assert 1 in out_by_id
+    assert 4 in out_by_id
+    assert 2 not in out_by_id, "completed run must be filtered out"
+    assert 3 not in out_by_id, "errored run must be filtered out"
+
+
+def test_list_active_runs_includes_metadata_fields():
+    """The admin endpoint needs service_id + task + started_at to render
+    the in-flight badge. Pin the shape so a future metadata field rename
+    doesn't break the wire format."""
+    cron_progress.start_progress(7, service_id="svc-a", task="sync")
+    out = cron_progress.list_active_runs()
+    assert len(out) == 1
+    entry = out[0]
+    assert entry["run_id"] == 7
+    assert entry["service_id"] == "svc-a"
+    assert entry["task"] == "sync"
+    assert isinstance(entry["started_at"], float)
+
+
+def test_list_active_runs_returns_empty_when_no_runs():
+    assert cron_progress.list_active_runs() == []
+
+
+def test_list_active_runs_filters_zombie_runs_older_than_5min():
+    """REGRESSION: APScheduler can recycle worker threads mid-cron
+    (interpreter shutdown, OOM kill, executor restart) without giving
+    the try/finally `end_progress` block a chance to fire. The result
+    was 32 stale 'sync' entries on the System Health card from a
+    single executor incident on 2026-06-03.
+
+    list_active_runs now treats any run whose _last_update is >5 min
+    old as a zombie and filters it out — covers all the paths where
+    end_progress never ran."""
+    cron_progress.start_progress(1, service_id="svc-a", task="sync")
+    cron_progress.add_progress(1, {"type": "status", "msg": "x"})
+    # Backdate the last update past the staleness band
+    cron_progress._last_update[1] = time.time() - 400
+
+    out = cron_progress.list_active_runs()
+    assert out == [], "zombie run must be filtered out"
+
+
+def test_list_active_runs_filters_runs_db_marked_success():
+    """REGRESSION (2026-06-03): production saw 13 in-flight 'sync'
+    entries in _run_metadata where the corresponding cron_runs row
+    was already DB-marked status='success' (dur 2-6s). The watchdog
+    thread that runs each cron occasionally abandons the worker on
+    timeout-edge or interpreter shutdown without firing the
+    try/finally end_progress block. DB log_cron_run writes still land
+    (they happen INSIDE the cron function), but the in-memory dict
+    is left stale.
+
+    Fix: list_active_runs cross-checks each candidate against
+    metadata_db.get_cron_run_status() — if the persisted status is
+    terminal, the in-memory ghost is filtered out regardless of its
+    event tail."""
+    from unittest.mock import patch
+
+    cron_progress.start_progress(1, service_id="svc-a", task="sync")
+    cron_progress.add_progress(1, {"type": "status", "msg": "ingesting"})
+    # _last_update is fresh (just added an event) so the staleness
+    # filter does NOT kick in — this run looks "active" by the in-memory
+    # signal but the DB has already marked it success.
+
+    with patch("backend.core.metadata_db.get_cron_run_status", return_value="success"):
+        out = cron_progress.list_active_runs()
+    assert out == [], "DB-success run must be filtered even when in-memory says active"
+
+
+def test_list_active_runs_does_not_filter_db_missing_or_running():
+    """If the DB row is missing (transient) or still 'running', trust
+    the in-memory signal. The cross-check is a backstop, not a gate —
+    we'd rather show a false in-flight than miss a real one."""
+    from unittest.mock import patch
+
+    cron_progress.start_progress(1, service_id="svc-a", task="sync")
+    cron_progress.add_progress(1, {"type": "status"})
+
+    with patch("backend.core.metadata_db.get_cron_run_status", return_value=None):
+        out = cron_progress.list_active_runs()
+    assert len(out) == 1
+    with patch("backend.core.metadata_db.get_cron_run_status", return_value="running"):
+        out = cron_progress.list_active_runs()
+    assert len(out) == 1
+
+
+def test_reap_zombie_runs_evicts_stale_entries_and_returns_count():
+    """reap_zombie_runs actively prunes _run_metadata so callers that
+    walk the dict directly (admin.py:210/238/1022 — there's a precedent
+    for regressions here) also see the cleaned state."""
+    cron_progress.start_progress(1, service_id="svc-a", task="sync")
+    cron_progress.add_progress(1, {"type": "status"})
+    cron_progress._last_update[1] = time.time() - 400  # zombie
+
+    cron_progress.start_progress(2, service_id="svc-a", task="sync")  # active
+
+    n = cron_progress.reap_zombie_runs()
+    assert n == 1
+    assert 1 not in cron_progress._run_metadata
+    assert 2 in cron_progress._run_metadata
+    # Zombie got a synthetic error event so SSE subscribers see termination
+    last_event = cron_progress._progress[1][-1]
+    assert last_event.get("type") == "error"
+    assert "zombie" in last_event.get("message", "").lower()
 
 
 def test_concurrent_add_progress_does_not_lose_events():

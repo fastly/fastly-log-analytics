@@ -117,17 +117,22 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
           {sharingActive ? (
             <>
               <Button size="sm" variant="outline" onClick={handleStop} disabled={busy}>
-                Stop
+                {busy ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+                {busy ? 'Stopping…' : 'Stop'}
               </Button>
               <Button size="sm" variant="destructive" onClick={handlePanic} disabled={busy}>
-                <X className="h-4 w-4 mr-1" />
-                Sever All Access
+                {busy ? (
+                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                ) : (
+                  <X className="h-4 w-4 mr-1" />
+                )}
+                {busy ? 'Severing…' : 'Sever All Access'}
               </Button>
             </>
           ) : (
             <Button size="sm" onClick={handleStart} disabled={busy}>
               {busy && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
-              Start
+              {busy ? 'Starting…' : 'Start'}
             </Button>
           )}
         </div>

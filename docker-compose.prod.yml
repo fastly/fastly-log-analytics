@@ -15,32 +15,102 @@
 #   Why all-loopback for app services:
 #     - Eliminates the "listening on 0.0.0.0" surface even if a firewall rule
 #       were ever misconfigured.
-#     - Backend's RemoteAccessMiddleware uses socket peer to distinguish admin
-#       (peer=127.0.0.1) from analyst (anything else). Caddy in host mode also
-#       hits backend on 127.0.0.1 — so backend can't distinguish admin from
-#       analyst-via-Caddy by peer alone. The DNS-rebinding gate (Host header
-#       check against registered public_endpoint) is what separates them now.
+#     - Backend reads request.client.host as the trust signal. uvicorn runs
+#       with --proxy-headers --forwarded-allow-ips=127.0.0.1 so it populates
+#       request.client.host from X-Forwarded-For ONLY when the TCP peer is
+#       loopback (i.e. only Caddy on this host can set it). Caddy rewrites
+#       XFF to the authoritative Fastly-Client-IP value before forwarding,
+#       so request.client.host is the real client IP for Caddy-proxied
+#       traffic and 127.0.0.1 for direct SSH-tunnel admin access.
 #
 # Public exposure:
 #   Only port 80 is open on the VM's public interface, and the GCP firewall
-#   restricts it to Fastly's published origin IP ranges.
+#   restricts it to Fastly's published origin IP ranges. Caddy additionally
+#   refuses to trust the Fastly-Client-IP header unless the TCP peer is in
+#   Fastly's published edge range (defense-in-depth against any firewall
+#   misconfiguration).
+
+x-prod-logging: &prod-logging
+  # Extra E2 (security remediation v6): the default Docker json-file driver
+  # has no size cap and no rotation. A container that's been up for months
+  # can either run the host disk to zero or, conversely, lose months of
+  # access-log history every time the container is restarted (which kills
+  # any retroactive incident-response investigation). Cap each file at
+  # 50 MB and keep 10 rotated files — gives us ~500 MB / container with a
+  # multi-week retention window even on chatty endpoints. Adjust if disk
+  # pressure ever becomes a concern.
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "10"
+    compress: "true"
 
 services:
   backend:
     network_mode: host
     ports: !reset []
     networks: !reset null
+    logging: *prod-logging
     # Override the default '--host 0.0.0.0' → bind to loopback only.
-    command: ["uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000"]
+    #
+    # --proxy-headers + --forwarded-allow-ips=127.0.0.1 (security):
+    # tells uvicorn to populate request.client.host from X-Forwarded-For ONLY
+    # when the TCP peer is loopback (i.e., only Caddy on this same host can
+    # set it). Caddy rewrites XFF to the authoritative Fastly-Client-IP value
+    # before forwarding, so request.client.host is the real client IP for
+    # remote traffic and 127.0.0.1 for direct SSH-tunnel admin access. Without
+    # both flags, leftmost-XFF spoofing becomes exploitable AND
+    # the admin Host-spoof bypass returns. Do not remove without first
+    # rewriting backend/utils/remote_access.py:is_request_remote — the startup
+    # assertion in backend/main.py will FATAL-exit otherwise.
+    command:
+      [
+        "uvicorn",
+        "backend.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--proxy-headers",
+        "--forwarded-allow-ips=127.0.0.1",
+      ]
+    # Container-level memory cap. Pre-2026-06-04 this was unset (Memory: 0
+     # = unlimited) — the backend was free to grow until the kernel OOM-
+    # killer fired on the WHOLE host. That took out sshd + caddy on each
+    # OOM event (witnessed 2026-06-01 + multiple times on 2026-06-03/04).
+    # 12g leaves ~3GB host headroom; when the backend genuinely runs
+    # away docker SIGKILLs only the backend (clean restart-unless-stopped
+    # recovery) instead of wedging the whole VM.
+    mem_limit: 12g
+    memswap_limit: 12g
     environment:
-      # Bump DuckDB memory from 4GB (base) to 8GB. The VM has 16GB, frontend +
-      # caddy + OS use ~3GB, leaving plenty of headroom. Helps sort spills and
-      # aggregation working sets on heavy dashboard queries.
-      - DUCKDB_MEMORY_LIMIT=8GB
+      # DuckDB sees this via os.getenv at connection-open. backend/core/
+      # duckdb.py:760-768 issues ``SET max_memory = <env>`` per-session;
+      # the auto-calc fallback at ~line 803 is now gated on this env
+      # being UNSET (pre-fix it silently overrode this value with
+      # ``int(physical_ram * 0.6)`` ≈ 9-10GB on the 16GB VM, which left
+      # too little headroom and caused recurring host OOM-kills).
+      # 6GB chosen so: DuckDB 6 + Python/pyiceberg/aiohttp working set
+      # ~3 + scoring/cache working set ~2 = ~11GB < 12GB container cap
+      # < 16GB host. Bump only after confirming RSS plateaus below 9GB.
+      - DUCKDB_MEMORY_LIMIT=6GB
       # Hard-fail at startup if /app/data isn't a real mount point. Guards
       # against the broken-fstab failure mode (data accidentally written to
       # an ephemeral boot-disk stub). See _enforce_data_dir_mounted in main.py.
       - STRICT_DATA_DIR_CHECK=1
+      # Companion to the uvicorn command flags above: the startup assertion in
+      # backend/main.py reads this and refuses to boot if it is unset or empty.
+      # Prevents silent regression to leftmost-XFF spoofing if a
+      # future config refactor drops the --proxy-headers flag.
+      - TRUSTED_PROXY_IPS=127.0.0.1
+      # Pass through DEBUG_RESPONSES from the host environment (typically
+      # set via the .env file next to this compose file, which Compose
+      # auto-loads for variable substitution). When unset it expands to
+      # the literal empty string and the gate in backend/models/common.py
+      # (`_debug_responses_enabled`) returns False — same as if the var
+      # were never set. Plain `- DEBUG_RESPONSES` (no value) would also
+      # work but the explicit substitution makes the source obvious.
+      - DEBUG_RESPONSES=${DEBUG_RESPONSES:-}
     volumes: !override
       - /mnt/app-data/configs:/app/configs
       - /mnt/app-data/data:/app/data
@@ -52,6 +122,7 @@ services:
     network_mode: host
     ports: !reset []
     networks: !reset null
+    logging: *prod-logging
     environment:
       # Bind Next.js standalone server to loopback only (overrides Dockerfile's
       # HOSTNAME=0.0.0.0).
@@ -67,6 +138,7 @@ services:
     network_mode: host
     ports: !reset []
     networks: !reset []
+    logging: *prod-logging
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

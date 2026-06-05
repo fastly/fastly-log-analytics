@@ -524,12 +524,13 @@ def test_operations_accumulates_class_a_and_class_b_per_day(client, tmp_path, mo
 
 
 def test_operations_maps_http_error_to_502(client, tmp_path, monkeypatch):
-    """``urllib.error.HTTPError`` from Fastly Stats → 502 with the
-    upstream status + body. Pinned because the FE distinguishes 502
-    (transient upstream) from 4xx (config issue) when retrying."""
-    import urllib.error
-    from io import BytesIO
+    """Fastly Stats upstream failure → 502 with the upstream status +
+    body. Pinned because the FE distinguishes 502 (transient upstream)
+    from 4xx (config issue) when retrying.
 
+    `_fastly_api` now delegates to `backend.core.fastly.client.fastly`
+    which raises `RuntimeError("HTTP 503 GET /stats/aggregate ...\\n   body")`
+    on non-2xx. The router catches RuntimeError → 502."""
     from backend import config
     from backend.deps import get_source
     from backend.main import app
@@ -537,9 +538,7 @@ def test_operations_maps_http_error_to_502(client, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID, "fastly_api_key": "tok"})
 
-    err = urllib.error.HTTPError(
-        url="https://api.fastly.com", code=503, msg="upstream", hdrs={}, fp=BytesIO(b"service unavailable")
-    )
+    err = RuntimeError("HTTP 503 GET /stats/aggregate\n    service unavailable")
 
     app.dependency_overrides[get_source] = lambda: _complete_src()
     with patch("backend.routers.usage._fastly_api", side_effect=err):

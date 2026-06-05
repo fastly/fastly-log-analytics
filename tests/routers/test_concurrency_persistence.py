@@ -54,8 +54,8 @@ def test_long_running_endpoint_preserves_background_changes(
 
     mock_update.side_effect = fake_generator
 
-    # Call the endpoint
-    response = client.get(
+    # Call the endpoint (security: GET → POST)
+    response = client.post(
         "/api/services/test-service/logging-settings/update",
         params={"period": 3600, "sample_rate": 50, "edge_only": True},
     )

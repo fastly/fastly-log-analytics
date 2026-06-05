@@ -221,7 +221,7 @@ LOG_FIELD_CATALOG = [
         "group": "A",
         "label": "Host",
         "description": "HTTP Host header (domain name) captured at the true client edge before any rewrites.",
-        "vcl": '"host":"%{json.escape(if(req.http.x-fos-edge-data:host != "", req.http.x-fos-edge-data:host, req.http.Host))}V"',
+        "vcl": '"host":"%{json.escape(substr(if(req.http.x-fos-edge-data:host != "", req.http.x-fos-edge-data:host, req.http.Host), 0, 512))}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 22,
         "required_by": ["new_probe_urls"],
@@ -829,6 +829,17 @@ LOG_FIELD_CATALOG = [
         "required_by": [],
     },
     # ── Group L — Origin Metrics ───────────────────────────────────────────
+    # Security: each origin-metric field interpolates the value of a
+    # client-spoofable internal header (``x-of-ttfb`` etc.). Without a
+    # regex guard on the value, an attacker who reached vcl_recv with a
+    # crafted header like ``x-of-ttfb: 0, "waf": 1`` would break out of
+    # the unquoted numeric slot and inject arbitrary JSON keys into the
+    # log line. The ``~ "^[0-9]+$"`` test gates each numeric field to
+    # digit-only values; ``x-of-oip`` (the only string field) gets
+    # ``json.escape(...)`` so quotes / backslashes / control bytes
+    # serialize as their JSON-escape equivalents instead of breaking
+    # out of the string literal. the earlier fix also unsets all
+    # these headers on inbound req, so this is belt-and-suspenders.
     {
         "id": "ottfb",
         "group": "L",
@@ -836,7 +847,7 @@ LOG_FIELD_CATALOG = [
         "description": "µs from fetch start to first byte of origin/shield response headers. Null on HITs.",
         "formatter": "number",
         "unit": "µs",
-        "vcl": '"ottfb":%{if(req.http.x-of-ttfb, req.http.x-of-ttfb, "null")}V',
+        "vcl": '"ottfb":%{if(req.http.x-of-ttfb ~ "^[0-9]+$", req.http.x-of-ttfb, "null")}V',
         "duckdb_type": "UBIGINT",
         "typical_bytes": 16,
         "required_by": ["origin_latency_spike", "region_latency"],
@@ -848,7 +859,7 @@ LOG_FIELD_CATALOG = [
         "description": "µs from fetch start to full response body received. Null on HITs.",
         "formatter": "number",
         "unit": "µs",
-        "vcl": '"ottlb":%{if(req.http.x-of-ttlb, req.http.x-of-ttlb, "null")}V',
+        "vcl": '"ottlb":%{if(req.http.x-of-ttlb ~ "^[0-9]+$", req.http.x-of-ttlb, "null")}V',
         "duckdb_type": "UBIGINT",
         "typical_bytes": 16,
         "required_by": ["origin_latency_spike"],
@@ -859,7 +870,7 @@ LOG_FIELD_CATALOG = [
         "label": "Origin Status",
         "description": "HTTP status returned by origin or shield. Null on HITs.",
         "formatter": "status",
-        "vcl": '"ost":%{if(req.http.x-of-status, req.http.x-of-status, "null")}V',
+        "vcl": '"ost":%{if(req.http.x-of-status ~ "^[0-9]+$", req.http.x-of-status, "null")}V',
         "duckdb_type": "USMALLINT",
         "typical_bytes": 10,
         "required_by": ["origin_error_rate", "origin_ip_failure"],
@@ -869,7 +880,9 @@ LOG_FIELD_CATALOG = [
         "group": "L",
         "label": "Origin Bytes",
         "description": "Bytes written in the response (resp.bytes_written). Null on HITs. Same variable as resp_bytes but null-on-HIT makes it queryable as 'total bytes fetched from origin'.",
-        "vcl": '"obytes":%{if(req.http.x-of-start, "" + resp.bytes_written, "null")}V',
+        # resp.bytes_written is a Fastly-internal counter (not from a header),
+        # so no JSON-injection risk; the x-of-start guard is preserved as-is.
+        "vcl": '"obytes":%{if(req.http.x-of-start ~ "^[0-9]+$", "" + resp.bytes_written, "null")}V',
         "duckdb_type": "UBIGINT",
         "typical_bytes": 15,
         "required_by": [],
@@ -879,7 +892,10 @@ LOG_FIELD_CATALOG = [
         "group": "L",
         "label": "Origin IP",
         "description": "IP address of the backend server that handled the fetch. Null on HITs.",
-        "vcl": '"oip":"%{if(req.http.x-of-oip, req.http.x-of-oip, "")}V"',
+        # json.escape converts the value to JSON-string-safe form so
+        # quotes / backslashes / control bytes get their \\uXXXX escapes
+        # instead of terminating the literal early.
+        "vcl": '"oip":"%{json.escape(if(req.http.x-of-oip, req.http.x-of-oip, ""))}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 15,
         "required_by": ["origin_ip_failure"],
@@ -890,7 +906,7 @@ LOG_FIELD_CATALOG = [
         "label": "Origin Retries",
         "description": "Backend connection retry count before success or failure. Null on HITs.",
         "formatter": "number",
-        "vcl": '"oretries":%{if(req.http.x-of-oretries, req.http.x-of-oretries, "null")}V',
+        "vcl": '"oretries":%{if(req.http.x-of-oretries ~ "^[0-9]+$", req.http.x-of-oretries, "null")}V',
         "duckdb_type": "UTINYINT",
         "typical_bytes": 13,
         "required_by": ["origin_retries"],
@@ -1061,6 +1077,22 @@ LOG_FIELD_CATALOG = [
         "group": "VIRTUAL",
         "label": "NGWAF Signals",
         "description": "Individual NGWAF signals extracted from the waf_sig list.",
+        "vcl": None,
+        "duckdb_type": "VARCHAR",
+        "typical_bytes": 0,
+        "required_by": [],
+    },
+    {
+        "id": "edge_score_reason_ind",
+        "group": "VIRTUAL",
+        "label": "Score Reasons",
+        "description": (
+            "Individual scoring reasons extracted from the comma-separated "
+            "edge_score_reason field (e.g. 'cookie-missing', 'impossibly-fast', "
+            "'robotic-consistency', 'rare-transition'). Lets the dashboard "
+            "show top-N reason breakdowns and filter by a single reason "
+            "even when one request triggers multiple."
+        ),
         "vcl": None,
         "duckdb_type": "VARCHAR",
         "typical_bytes": 0,
@@ -1442,11 +1474,26 @@ def generate_log_format(log_fields_config: dict) -> str:
                 # Overwrite the static substr limit in the built-in VCL
                 vcl = vcl.replace("substr(req.url, 0, 2000)", f"substr(req.url, 0, {limit})")
             elif field["id"] == "ua":
-                # Strip the hardcoded substr since we now do it at the edge (in vcl_recv)
-                vcl = '"ua":"%{json.escape(if(req.http.x-fos-edge-data:ua != "", req.http.x-fos-edge-data:ua, req.http.User-Agent))}V"'
+                # Security: keep the substr cap even when generating the
+                # alternative VCL variant. The edge-side substr (in vcl_recv)
+                # is a *first* truncation — but we never want a 100 KB header
+                # to slip through if the edge snippet is missing or fails to
+                # run (e.g., on a request that bypasses our snippet stack).
+                # An unbounded UA can truncate the entire JSON log line at
+                # the 16 KB Fastly limit, dropping the request from the audit
+                # trail entirely (repudiation attack).
+                ua_limit = limits.get("ua", 1000)
+                vcl = (
+                    f'"ua":"%{{json.escape(substr(if(req.http.x-fos-edge-data:ua != "",'
+                    f' req.http.x-fos-edge-data:ua, req.http.User-Agent), 0, {ua_limit}))}}V"'
+                )
             elif field["id"] == "referer":
-                # Strip the hardcoded substr since we now do it at the edge (in vcl_recv)
-                vcl = '"referer":"%{json.escape(if(req.http.x-fos-edge-data:referer != "", req.http.x-fos-edge-data:referer, req.http.Referer))}V"'
+                # Same reasoning as above — keep the substr cap.
+                ref_limit = limits.get("referer", 1000)
+                vcl = (
+                    f'"referer":"%{{json.escape(substr(if(req.http.x-fos-edge-data:referer != "",'
+                    f' req.http.x-fos-edge-data:referer, req.http.Referer), 0, {ref_limit}))}}V"'
+                )
 
             parts.append(vcl)
 
@@ -1459,6 +1506,44 @@ def generate_log_format(log_fields_config: dict) -> str:
         stage = cf.get("collection_stage", "edge")
         value_type = cf.get("value_type", "string")
 
+        if stage == "deliver":
+            # Deliver-stage fields (session-scoring) need TWO gates:
+            #   1. edge-only (fastly.ff.visits_this_service == 0) — the
+            #      shield POP never ran our scoring snippets, so the
+            #      req.http subfields don't exist there.
+            #   2. non-empty value — avoid breaking JSON.
+            # Combined into ONE if() with compound AND so we don't end up
+            # with nested if(if(...) != "", ...) which Fastly's parser
+            # rejects ("if() condition must be a simple expression, not a
+            # function call").
+            raw_expr = cf.get("vcl_log_expression") or f"req.http.x-fos-edge-data:{name}"
+            if value_type in ("numeric", "boolean"):
+                # 014: ``!= ""`` only rejects empty strings — any other
+                # text (`"true"`, ``"abc"``, ``"]"``) flows straight into
+                # the JSON log line unquoted and breaks the JSON
+                # structure, dropping the line from ingestion (log
+                # injection / repudiation). Match a strict numeric form
+                # so non-digit values fall through to ``"null"``.
+                vcl_macro = (
+                    f"if(fastly.ff.visits_this_service == 0 && "
+                    f'{raw_expr} ~ "^-?[0-9]+(\\.[0-9]+)?$", {raw_expr}, "null")'
+                )
+                entry = f'"{name}":%{{{vcl_macro}}}V'
+            else:
+                # 016: clamp the string-field value to a sane length
+                # (default 2000) BEFORE json.escape so a multi-megabyte
+                # attacker-controlled custom field cannot push the log
+                # line past Fastly's 16 KB limit and silently drop the
+                # whole entry. The substr is INSIDE json.escape so the
+                # encoded length stays bounded.
+                cf_limit = int(cf.get("byte_limit") or limits.get(name) or 2000)
+                vcl_macro = (
+                    f'json.escape(if(fastly.ff.visits_this_service == 0, substr({raw_expr}, 0, {cf_limit}), ""))'
+                )
+                entry = f'"{name}":"%{{{vcl_macro}}}V"'
+            parts.append(entry)
+            continue
+
         if stage == "edge":
             expr = f"req.http.x-fos-edge-data:{name}"
         elif stage == "origin":
@@ -1468,11 +1553,17 @@ def generate_log_format(log_fields_config: dict) -> str:
             expr = f"req.http.x-fos-edge-data:{name}"
 
         if value_type in ("numeric", "boolean"):
-            # Avoid empty strings breaking JSON numbers
-            vcl_macro = f'if({expr} != "", {expr}, "null")'
+            # 014: see deliver-stage comment above — strict numeric
+            # regex instead of ``!= ""`` so a custom-field header value
+            # like ``"]"`` cannot break out of the JSON log line.
+            vcl_macro = f'if({expr} ~ "^-?[0-9]+(\\.[0-9]+)?$", {expr}, "null")'
             entry = f'"{name}":%{{{vcl_macro}}}V'
         else:
-            vcl_macro = f"json.escape({expr})"
+            # 016: substr-clamp the value before json.escape so an
+            # oversized custom string field cannot push the line past
+            # Fastly's 16 KB log-line limit.
+            cf_limit = int(cf.get("byte_limit") or limits.get(name) or 2000)
+            vcl_macro = f"json.escape(substr({expr}, 0, {cf_limit}))"
             entry = f'"{name}":"%{{{vcl_macro}}}V"'
 
         parts.append(entry)

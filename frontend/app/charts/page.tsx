@@ -7,6 +7,7 @@ import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterPayload } from '@/hooks/useFilterPayload'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
+import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates } from '@/lib/staleViewRetry'
 import { formatValue } from '@/lib/format'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
@@ -56,8 +57,8 @@ export default function ChartsPage() {
 
   const { data: aggregates, isLoading, isFetching } = useServiceQuery(
     ['charts', 'aggregates', activeServiceId, startTime, endTime, filterPayload],
-    async () => {
-      const { data } = await client.POST("/api/dashboard/aggregates", {
+    async ({ signal }) => {
+      const { data } = await client.POST("/api/dashboard/aggregates", { signal,
         body: {
           start_time: startTime,
           end_time: endTime,
@@ -66,8 +67,9 @@ export default function ChartsPage() {
           chart_metric: 'requests'
         }
       })
-      return data
-    }
+      return throwIfStaleAggregates(data)
+    },
+    STALE_VIEW_RETRY_OPTIONS,
   )
 
   const chartLayout = {

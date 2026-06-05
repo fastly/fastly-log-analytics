@@ -1,10 +1,31 @@
 'use client'
 
-import React, { useRef, useEffect } from 'react'
+import React, { useRef, useEffect, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { useTheme } from 'next-themes'
 
-const Plot = dynamic(() => import('react-plotly.js'), { ssr: false })
+// Use the cartesian-only Plotly distribution via react-plotly.js's factory
+// API. The default `import 'react-plotly.js'` pulls full plotly.js (~4.7 MB
+// minified) — we only render scatter / line / bar / pie / heatmap (see the
+// dashboard repository), all of which are covered by the cartesian build
+// (~1.4 MB minified, ~3.4× smaller). Initial dashboard render felt the
+// difference: full-Plotly chunk fetch + parse on every fresh dashboard
+// hit was visibly delaying the time-series chart's first paint behind the
+// rest of the page. The factory pattern lets us load the leaner Plotly
+// without touching every PlotlyChart caller.
+const Plot = dynamic(
+  async () => {
+    const [{ default: createPlotlyComponent }, plotlyModule] = await Promise.all([
+      import('react-plotly.js/factory'),
+      // No types ship with the cartesian-dist-min package — the runtime
+      // shape (`{Plot, plot, react, ...}` plus trace-type registrations)
+      // matches the full plotly.js for everything the factory needs.
+      import('plotly.js-cartesian-dist-min' as any) as any,
+    ])
+    return createPlotlyComponent(plotlyModule.default || plotlyModule)
+  },
+  { ssr: false },
+)
 
 interface PlotlyChartProps {
   data: any[]
@@ -94,18 +115,46 @@ export const PlotlyChart = React.memo(function PlotlyChart({
     ...config
   }
 
+  // Viewport gate: don't trigger the dynamic-import of the 1.4MB
+  // plotly.js-cartesian-dist chunk until this chart is within 600px of
+  // the viewport. `dynamic(...)` only starts fetching when <Plot/> is
+  // actually rendered, so withholding the render = withholding the
+  // chunk fetch. Charts already above the fold mount immediately
+  // (the initial visible=undefined falls through to true when no
+  // IntersectionObserver exists, e.g. SSR or older browsers).
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(() => typeof IntersectionObserver === 'undefined')
+
+  useEffect(() => {
+    if (visible || !containerRef.current || typeof IntersectionObserver === 'undefined') return
+    const node = containerRef.current
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setVisible(true)
+          observer.disconnect()
+        }
+      },
+      { rootMargin: '600px' },
+    )
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [visible])
+
   return (
-    <div className={className} style={{ height }}>
-      <Plot
-        data={data}
-        layout={defaultLayout}
-        config={defaultConfig}
-        style={{ width: '100%', height: '100%' }}
-        useResizeHandler
-        onInitialized={handleInitialized}
-        onUpdate={onUpdate}
-        onSelected={handleSelected}
-      />
+    <div ref={containerRef} className={className} style={{ height }}>
+      {visible ? (
+        <Plot
+          data={data}
+          layout={defaultLayout}
+          config={defaultConfig}
+          style={{ width: '100%', height: '100%' }}
+          useResizeHandler
+          onInitialized={handleInitialized}
+          onUpdate={onUpdate}
+          onSelected={handleSelected}
+        />
+      ) : null}
     </div>
   )
 })

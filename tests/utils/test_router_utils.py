@@ -187,20 +187,26 @@ def test_query_errors_maps_lookup_error_to_404():
     assert exc.value.status_code == 404
 
 
-def test_query_errors_maps_unknown_exception_to_configured_status_with_trace():
-    """Generic exceptions surface with a full traceback in the detail
-    — the debug panel renders this. Pinned because removing the
-    traceback would make production debugging much harder."""
+def test_query_errors_maps_unknown_exception_to_configured_status_without_trace(caplog):
+    """Security: generic exceptions surface ONLY the error message
+    to the client. The full traceback is logged server-side via
+    ``logger.exception`` but MUST NOT appear in the response body. Pinned
+    because re-introducing the ``trace`` key in HTTPException.detail would
+    leak internal file paths / module structure / and any secret values
+    that landed in the exception message."""
+    import logging
 
     @router_utils.query_errors(status_code=500)
     def handler():
         raise RuntimeError("downstream blew up")
 
-    with pytest.raises(HTTPException) as exc:
+    with caplog.at_level(logging.ERROR), pytest.raises(HTTPException) as exc:
         handler()
     assert exc.value.status_code == 500
-    assert exc.value.detail["error"] == "downstream blew up"
-    assert "Traceback" in exc.value.detail["trace"]
+    assert exc.value.detail == {"error": "downstream blew up"}
+    assert "trace" not in exc.value.detail, (
+        "stack-trace leakage regression — query_errors must not put a 'trace' key in the response detail (security)"
+    )
 
 
 def test_query_errors_default_status_code_is_400():

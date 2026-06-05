@@ -171,8 +171,7 @@ def get_sessions(
 
     data_sql = f"""
         {sessions_cte}
-        SELECT *, ({flag_expr}) AS flagged,
-               COUNT(*) OVER () AS _total_count
+        SELECT *, ({flag_expr}) AS flagged
         FROM sessions_agg
         {flagged_filter}
         ORDER BY {sort_by} {sort_dir}
@@ -181,16 +180,14 @@ def get_sessions(
     rows = runner.execute(data_sql, params).fetchall()
     col_names = [desc[0] for desc in con.description]
 
-    total = 0
     sessions: list[dict] = []
     for row in rows:
         d = dict(zip(col_names, row))
-        total = int(d.pop("_total_count", 0))
         for k in ("session_start", "session_end"):
             if d.get(k) is not None:
                 d[k] = str(d[k])
-        # Ensure we have ua and ja4 if requested in group_cols
         sessions.append(d)
+    total = len(sessions)
 
     if not rows and offset > 0:
         count_sql = f"""

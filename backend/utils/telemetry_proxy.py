@@ -611,11 +611,17 @@ def _run_server() -> None:
 
     _SESSION = _LOOP.run_until_complete(_create_session())
 
-    # client_max_size=0 disables aiohttp's 1MB default request-body cap.
-    # Multipart upload parts can be up to 5GB per S3 spec, and ingest
-    # commits routinely push multi-MB parquet writes through this proxy.
-    # Rejecting them with 413 would be a regression vs. direct boto3.
-    app = web.Application(client_max_size=0)
+    # Cap request bodies at 4GB. aiohttp's default 1MB cap is too small
+    # for our use case (Iceberg commit multiparts), but the previous
+    # ``client_max_size=0`` (unlimited) made the proxy a credible OOM
+    # vector: ``await request.read()`` buffers the whole body, so two
+    # concurrent multi-GB PUTs through the proxy could blow past the
+    # 12GB container limit by themselves. 4GB covers any realistic
+    # single multipart upload part (S3 individual part max is 5GB but
+    # we never write parts that big) while bounding worst-case buffer
+    # bloat. A 413 above 4GB is the right failure mode — callers can
+    # split into smaller parts.
+    app = web.Application(client_max_size=4 * 1024 * 1024 * 1024)
     app.router.add_get("/healthz", handle_healthz)
     app.router.add_route("*", "/{path_info:.*}", handle_request)
 
