@@ -1,0 +1,61 @@
+# gitleaks configuration — extends the built-in detector set with this
+# repo's allowlist for tracked test fixtures, Rust lockfile checksums,
+# and the public SSH host key.
+#
+# Run locally:           make secret-scan
+# Pre-commit:            installed via .pre-commit-config.yaml
+# CI:                    invoked by .github/workflows/ci.yml
+#
+# Suppression mechanisms in increasing scope:
+#   - inline `#gitleaks:allow` on the offending line
+#   - .gitleaksignore — fingerprint list for one-off historical findings
+#   - this file's [allowlist] paths — for whole files / directories
+
+[extend]
+# Inherit gitleaks' built-in ruleset (~100 detectors: AWS, GCP, Azure,
+# GitHub, GitLab, Slack, Stripe, Twilio, Mailgun, Square, PyPI, npm,
+# generic-api-key, private-key, etc.). The default config also
+# allowlists npm/yarn/pnpm/poetry/go.mod/go.sum/node_modules/venv —
+# we add the gaps below.
+useDefault = true
+
+[allowlist]
+description = "fastly-log-analytics — tracked test fixtures, Rust lockfile, public keys"
+
+# Path-based allowlist. Regex matched against the file's path relative
+# to the repo root. Only entries for TRACKED files matter for the
+# default git-history scan; the .next/configs/data entries below also
+# keep ad-hoc `gitleaks detect --no-git` working-tree runs clean.
+paths = [
+    # Rust dependency lockfile — sha256 checksums look like generic
+    # API keys to gitleaks. Not covered by the built-in lockfile allowlist.
+    '''^compute/scorer/Cargo\.lock$''',
+
+    # Tracked, intentional test fixtures
+    '''^compute/scorer/fixtures/local-dictionary\.json$''',      # placeholder AES key = 0x00..0x1f
+    '''^compute/scorer/src/cookie\.rs$''',                       # test-mode constants
+    '''^tests/scoring/.*\.py$''',                                # cookie/scoring test fixtures
+    '''^tests/repositories/test_alerts\.py$''',                  # zeros Slack webhook fixture
+    '''^tests/utils/test_sql_validator\.py$''',                  # blocked-function NAMES (e.g. "AWS_SECRET_ACCESS_KEY")
+
+    # Public SSH host key for localhost.run — sharing is the entire point
+    # (trust anchor for the reverse-tunnel host-key check).
+    '''^configs/ssh_known_hosts$''',
+
+    # Documentation: release notes and runbooks may reference example
+    # tokens / credentials in prose.
+    '''^docs/''',
+    '''^CHANGELOG\.md$''',
+    '''^AGENTS\.md$''',
+
+    # Working-tree-only artifacts (all gitignored; matter only for
+    # ad-hoc `--no-git` runs). gitleaks uses Go's RE2 engine, which
+    # doesn't support negative lookahead, so we list the per-service
+    # config filename pattern explicitly rather than "everything under
+    # configs/ except ssh_known_hosts".
+    '''^frontend/\.next/''',                                  # Next.js build cache
+    '''^configs/.*\.json(\.bak.*)?$''',                       # real per-service Fastly configs (gitignored)
+    '''^data/''',                                             # real SSH share key, share DB, runtime data
+    '''.*/__pycache__/''',                                    # Python bytecode
+    '''\.pyc$''',
+]

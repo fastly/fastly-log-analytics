@@ -232,10 +232,15 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['services'] })
-      // Trigger Fastly deployment with all settings
+      // Trigger Fastly deployment with all settings.
+      // Security: endpoint was previously a state-changing GET (CSRF
+      // surface). Now POST — useSSE's `start(url, body)` overload sends a
+      // POST and streams the response body via ReadableStream, preserving
+      // the SSE-style UX without the CSRF risk. Query params stay where
+      // they are because the backend reads them via Query(...).
       const encodedCond = encodeURIComponent(customCondition)
       const endpoint = `/api/services/${service!.service_id}/logging-settings/update?update_format=true&period=${period}&sample_rate=${sampleRate}&edge_only=${edgeOnly}&custom_condition=${encodedCond}`
-      start(endpoint)
+      start(endpoint, {})
     }
   })
 

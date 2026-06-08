@@ -1,0 +1,147 @@
+'use client'
+
+import * as React from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { ListChecks } from 'lucide-react'
+
+import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { PerReasonAucHelp } from '@/components/SessionScoring/help-content'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
+import { client } from '@/lib/api'
+import { Info } from 'lucide-react'
+
+interface ReasonBucket {
+  reason: string
+  n_good: number
+  n_bad: number
+  min_per_class: number
+  has_min_samples: boolean
+  auc?: number
+  passed?: boolean
+  threshold?: number
+}
+
+interface PerReasonResponse {
+  has_min_samples_overall: boolean
+  min_per_class: number
+  n_good: number
+  n_bad: number
+  buckets: ReasonBucket[]
+  known_reasons?: string[]
+}
+
+interface PerReasonAucCardProps {
+  serviceId: string
+}
+
+/**
+ * Per-rule AUC breakdown. Shows the matrix's separation power for each
+ * L1/L2 atom (cookie-missing, impossibly-fast, etc.) so the operator
+ * can see which rule is doing the work and which is noise.
+ *
+ * Sub-min-samples bucket shows a CTA pushing the operator to label more
+ * sessions with that reason instead of a noisy AUC. When the overall
+ * label population is under-min, renders one empty state instead of
+ * five empty buckets.
+ */
+export function PerReasonAucCard({ serviceId }: PerReasonAucCardProps) {
+  const { data, isLoading, isError, error, refetch } = useQuery({
+    queryKey: ['scoring-evaluation-per-reason', serviceId],
+    queryFn: async () => {
+      const { data, response } = await client.GET(
+        '/api/services/{service_id}/scoring/evaluation/per-reason' as any,
+        { params: { path: { service_id: serviceId } } } as any,
+      )
+      if (!response.ok) throw new Error(`status ${response.status}`)
+      return data as PerReasonResponse
+    },
+    staleTime: 30_000,
+  })
+
+  return (
+    <AnalyticsCard
+      title="AUC by rule"
+      description="Which scoring rule contributes most to matrix-vs-labels separation. Each bucket shows AUC against sessions where that rule fired."
+      icon={<ListChecks className="h-4 w-4" />}
+      helpContent={<PerReasonAucHelp />}
+      helpTitle="About AUC by Rule"
+    >
+      {isError ? (
+        <div className="rounded-md border border-destructive/20 bg-destructive/5 p-4">
+          <div className="flex items-center gap-2 text-destructive">
+            <Info className="h-4 w-4" />
+            <span className="text-sm font-medium">Failed to load per-rule AUC</span>
+          </div>
+          <p className="text-xs text-muted-foreground mt-1">
+            {(error as any)?.message || 'Unknown error'}
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-3"
+            onClick={() => refetch()}
+          >
+            Retry
+          </Button>
+        </div>
+      ) : isLoading || !data ? (
+        <div className="space-y-2">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <Skeleton key={i} className="h-10 w-full" />
+          ))}
+        </div>
+      ) : !data.has_min_samples_overall ? (
+        <div className="p-4 border border-dashed rounded-md text-center text-sm text-muted-foreground">
+          Per-rule breakdown unlocks once headline AUC is computable —
+          <span className="ml-1 text-foreground font-mono">
+            need {data.min_per_class}+ good / {data.min_per_class}+ bad labels (have{' '}
+            {data.n_good}/{data.n_bad})
+          </span>
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {data.buckets.map((b) => (
+            <BucketRow key={b.reason} bucket={b} />
+          ))}
+        </div>
+      )}
+    </AnalyticsCard>
+  )
+}
+
+function BucketRow({ bucket }: { bucket: ReasonBucket }) {
+  if (!bucket.has_min_samples) {
+    return (
+      <div className="flex items-center justify-between gap-3 p-2 rounded-md border bg-muted/20 text-xs">
+        <span className="font-mono">{bucket.reason}</span>
+        <span className="text-muted-foreground">
+          need {bucket.min_per_class}+ good / {bucket.min_per_class}+ bad with this reason
+          <span className="ml-1 text-foreground tabular-nums">
+            (have {bucket.n_good}/{bucket.n_bad})
+          </span>
+        </span>
+      </div>
+    )
+  }
+
+  const passed = !!bucket.passed
+  const aucClass = passed ? 'text-emerald-600' : 'text-amber-600'
+  return (
+    <div className="flex items-center justify-between gap-3 p-2 rounded-md border text-xs">
+      <span className="font-mono">{bucket.reason}</span>
+      <div className="flex items-center gap-2">
+        <span className={`font-mono font-semibold tabular-nums ${aucClass}`}>
+          {(bucket.auc ?? 0).toFixed(3)}
+        </span>
+        <Badge variant={passed ? 'success' : 'secondary'} className="text-[10px]">
+          {passed ? 'PASS' : 'BELOW'}
+        </Badge>
+        <span className="text-muted-foreground text-[10px] tabular-nums">
+          n={bucket.n_good}g / {bucket.n_bad}b
+        </span>
+      </div>
+    </div>
+  )
+}

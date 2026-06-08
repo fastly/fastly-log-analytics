@@ -21,6 +21,7 @@ from backend.core.duckdb import (
 )
 from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.utils import field_codes as fc
+from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
 
@@ -463,6 +464,7 @@ def ingest(
     processed_count = 0
     deleted = 0
     successfully_processed_files = []
+    touched_hours: set[str] = set()
 
     mem_con = None
     # Increase parallelism for S3 deletions
@@ -546,7 +548,12 @@ def ingest(
                 read_paths = [s3_to_local[p] for p in read_paths_s3]
 
                 mem_con.execute("DROP TABLE IF EXISTS _ingest_staging")
-                paths_sql = ", ".join(f"'{p}'" for p in read_paths)
+                # Security: escape single quotes in each local path before
+                # interpolating into the SQL literal. The local paths inherit
+                # their basename from the attacker-controllable S3 object key,
+                # so a key like ``raw/'); ATTACH '...; --`` would otherwise
+                # break out of the literal and execute arbitrary DuckDB SQL.
+                paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in read_paths)
 
                 try:
                     _execute_query_with_retry(
@@ -563,13 +570,14 @@ def ingest(
                     valid_paths = []
                     for i, read_path in enumerate(read_paths):
                         try:
-                            # Quick accessibility test: read 1 row without loading the whole file.
+                            # Security: per-file isolation read also needs escaping.
+                            safe_read_path = escape_sql_literal(read_path)
                             _execute_query_with_retry(
                                 mem_con,
-                                f"SELECT 1 FROM read_json_auto('{read_path}', sample_size=1) LIMIT 1",
+                                f"SELECT 1 FROM read_json_auto('{safe_read_path}', sample_size=1) LIMIT 1",
                                 max_retries=2,
                             )
-                            valid_paths.append(f"'{read_path}'")
+                            valid_paths.append(f"'{safe_read_path}'")
                         except Exception as file_err:
                             f_name = read_paths_s3[i].split("/")[-1]
                             err_msg = str(file_err)
@@ -601,7 +609,13 @@ def ingest(
                 # Translate filename column from local→s3 so downstream
                 # count_map / _source_file / file_sizes all key on s3://.
                 if local_to_s3:
-                    path_map_rows = ", ".join(f"('{local}', '{s3}')" for local, s3 in local_to_s3.items())
+                    # Security: same escaping treatment for the
+                    # local→s3 mapping table — both halves originate from
+                    # attacker-controllable object keys.
+                    path_map_rows = ", ".join(
+                        f"('{escape_sql_literal(local)}', '{escape_sql_literal(s3)}')"
+                        for local, s3 in local_to_s3.items()
+                    )
                     mem_con.execute("DROP TABLE IF EXISTS _ingest_path_map")
                     mem_con.execute(
                         f"CREATE TEMP TABLE _ingest_path_map AS SELECT * FROM (VALUES {path_map_rows}) AS t(local, s3)"
@@ -626,7 +640,12 @@ def ingest(
                 filename_expr = '"filename"'
 
                 if svc_id:
-                    escaped = svc_id.replace("'", "''")
+                    # Security: consistent escape helper across the
+                    # ingest path. Functionally identical to the inline
+                    # .replace but routes through escape_sql_literal so
+                    # any future hardening on the canonical helper
+                    # (e.g., extra char classes) flows here.
+                    escaped = escape_sql_literal(svc_id)
                     backend_expr = f"regexp_replace(\"backend\", '^{escaped}--', '') AS \"backend\""
                 else:
                     backend_expr = '"backend"'
@@ -671,6 +690,16 @@ def ingest(
                 arrow_table = _fetched.read_all() if hasattr(_fetched, "read_all") else _fetched
                 valid_rows = len(arrow_table)
 
+                if valid_rows > 0:
+                    chunk_hours = {
+                        r[0]
+                        for r in mem_con.execute(
+                            "SELECT DISTINCT strftime(timestamp, '%Y-%m-%d-%H') FROM _ingest_staging WHERE timestamp IS NOT NULL"
+                        ).fetchall()
+                        if r[0] is not None
+                    }
+                    touched_hours.update(chunk_hours)
+
                 total_rows_batch = mem_con.execute("SELECT count(*) FROM _ingest_staging").fetchone()[0]
                 corrupt_in_batch = total_rows_batch - valid_rows
 
@@ -692,7 +721,9 @@ def ingest(
                                 corrupt_s3_paths.append(s3_path)
 
                         if corrupt_read_paths:
-                            paths_sql_str = ", ".join(f"'{p}'" for p in corrupt_read_paths)
+                            # Security: corrupt-file diagnostic path
+                            # also needs escaping. Same vector as above.
+                            paths_sql_str = ", ".join(f"'{escape_sql_literal(p)}'" for p in corrupt_read_paths)
                             q = f"""
                                 SELECT filename, column0 FROM read_csv([{paths_sql_str}], header=false, sep='', quote='', escape='', columns={{'column0': 'VARCHAR'}}, filename=true)
                                 WHERE NOT json_valid(column0) OR json_extract(column0, '$.timestamp') IS NULL
@@ -731,8 +762,9 @@ def ingest(
 
                                         # Apply the same transformation (decoding, filename
                                         # normalization) and inject the original s3:// fname
-                                        # so attribution stays consistent.
-                                        safe_fname = fname.replace("'", "''")
+                                        # so attribution stays consistent. Security:
+                                        # escape via the shared helper.
+                                        safe_fname = escape_sql_literal(fname)
                                         mem_con.execute(
                                             f"""
                                             INSERT INTO _ingest_staging BY NAME
@@ -903,4 +935,5 @@ def ingest(
         "corrupt_details": total_corrupt_details,
         "deleted_files": deleted,
         "message": f"Successfully ingested {processed_count} new files ({total_inserted} rows) and deleted {deleted} raw files.",
+        "touched_hours": list(touched_hours),
     }

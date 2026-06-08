@@ -1,8 +1,6 @@
 import json
 import os
 import threading
-import urllib.error
-import urllib.request
 
 CACHE_FILE = "cache/pop_locations.json"
 
@@ -21,31 +19,21 @@ def fetch_pop_locations(api_key: str) -> bool:
     if not api_key:
         return False
 
+    # /datacenters endpoint requires auth but provides the exact flat
+    # list of coordinates we need. fastly() handles auth + retry +
+    # telemetry internally — replaces the old urllib.request flow plus
+    # the redundant outer tracked_call wrapper.
     try:
-        from backend.utils.telemetry import tracked_call
-    except ImportError:
-        tracked_call = None
+        from backend.core.fastly.client import fastly
 
-    def _do_fetch():
-        try:
-            headers = {"User-Agent": "FastlyLogAnalysis/1.0", "Accept": "application/json", "Fastly-Key": api_key}
-            # /datacenters endpoint requires auth but provides the exact flat list of coordinates we need
-            req = urllib.request.Request("https://api.fastly.com/datacenters", headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                pops = json.loads(resp.read().decode("utf-8"))
-
-            os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-            with open(CACHE_FILE, "w") as f:
-                json.dump(pops, f)
-            return True
-        except Exception as e:
-            print(f"Warning: POP fetch failed: {e}")
-            return False
-
-    if tracked_call:
-        with tracked_call("GET", "/datacenters", service="Fastly API"):
-            return _do_fetch()
-    return _do_fetch()
+        pops = fastly("GET", "/datacenters", token=api_key)
+        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        with open(CACHE_FILE, "w") as f:
+            json.dump(pops, f)
+        return True
+    except Exception as e:
+        print(f"Warning: POP fetch failed: {e}")
+        return False
 
 
 def get_pop_locations():

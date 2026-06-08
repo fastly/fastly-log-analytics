@@ -42,6 +42,23 @@ def parse_date_window(start: str, end: str, default_days: int = 7) -> tuple[str,
     return iso_z(start_dt), iso_z(end_dt)
 
 
+def safe_iso(dt) -> str | None:
+    """Normalise a datetime or string to an ISO-8601 string ending in Z.
+
+    DuckDB TIMESTAMP is timezone-naive but always represents UTC; appending
+    Z ensures JavaScript parses it as UTC instead of local time. Used by
+    both the duckdb core layer and the repositories layer.
+    """
+    if dt is None:
+        return None
+    if hasattr(dt, "isoformat"):
+        s = dt.isoformat()
+        if not s.endswith("Z") and "+" not in s and s.count("-") <= 2:
+            s += "Z"
+        return s
+    return str(dt)
+
+
 def parse_window_str_to_dt(s: str) -> datetime:
     """Parse a string returned by ``parse_date_window`` back into a UTC datetime.
 

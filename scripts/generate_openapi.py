@@ -11,6 +11,18 @@ from backend.main import app
 def generate_openapi(output_path: str | None = None) -> None:
     schema = json.dumps(app.openapi(), indent=2)
     if output_path:
+        # Skip the write (and preserve mtime) when the schema is byte-identical
+        # to what's already on disk. Downstream tooling (openapi-typescript)
+        # can then mtime-compare against its generated artifact and skip its
+        # own regen. The freshness guarantee is unchanged: we still introspect
+        # the live FastAPI app on every invocation; we just don't churn the
+        # file when there's nothing to write.
+        try:
+            with open(output_path) as f:
+                if f.read() == schema:
+                    return
+        except FileNotFoundError:
+            pass
         with open(output_path, "w") as f:
             f.write(schema)
     else:

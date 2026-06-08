@@ -8,9 +8,38 @@ Import from here instead of redefining in each file:
 from __future__ import annotations
 
 import contextlib
+import re
 import time
+from typing import Any
 
 import duckdb
+
+# Pre-compile once; called per ``runner.execute`` invocation.
+_PARQUET_LIST_RE = re.compile(r"read_parquet\(\[\s*('[^']+'\s*(?:,\s*'[^']+'\s*)*)\]")
+
+
+def _compact_sql_for_debug(sql: str) -> str:
+    """Replace explicit ``read_parquet([...long file list...])`` literals
+    with ``read_parquet([N files])`` for transport in the debug-panel
+    payload.
+
+    The dashboard's per-request SQL embeds hundreds of buffer/rollup
+    parquet paths in a single ``read_parquet`` call. Shipping those
+    verbatim made ``_debug_queries`` ~220 KB of the response (60% of
+    total) — pure network + JSON-parse cost on every dashboard refresh
+    when the operator has ``DEBUG_RESPONSES=true`` set. The path list
+    isn't useful to a human reading the debug panel; the count is.
+
+    Compacting cuts the field to ~tens of bytes per query without
+    losing the SQL shape an operator cares about for tuning.
+    """
+
+    def _replace(m: re.Match) -> str:
+        # Count items by quote pairs — cheap and exact.
+        count = m.group(1).count("'") // 2
+        return f"read_parquet([{count} files]"
+
+    return _PARQUET_LIST_RE.sub(_replace, sql)
 
 
 @contextlib.contextmanager
@@ -81,17 +110,7 @@ def _get_schema(con: duckdb.DuckDBPyConnection, src: dict) -> list[dict]:
     return get_schema(con, src)
 
 
-def safe_iso(dt) -> str | None:
-    """Normalise a datetime or string to an ISO-8601 string ending in Z."""
-    if dt is None:
-        return None
-    if hasattr(dt, "isoformat"):
-        s = dt.isoformat()
-        # Append Z for naive UTC datetimes that lack a tz suffix
-        if not s.endswith("Z") and "+" not in s and s.count("-") <= 2:
-            s += "Z"
-        return s
-    return str(dt)
+from backend.utils.date_utils import safe_iso  # noqa: E402, F401 — re-export
 
 
 def _is_stale_view_error(e: Exception) -> bool:
@@ -236,10 +255,45 @@ class QueryRunner:
             return []
 
     def execute(self, q: str, p: list | None = None):
-        """Execute a query and track its execution time."""
+        """Execute a query and track its execution time.
+
+        Self-heals on stale-view errors: if the connection's bound view
+        references a buffer parquet file that no longer exists (the sync
+        cron deleted it between the view bind and this query), refresh
+        the view once and retry. Belt-and-suspenders alongside the pool's
+        checkout fingerprint — that catches the common case, this catches
+        the race where a commit lands while a query is in flight.
+
+        ``execute_with_retry`` below also does this, but most callers use
+        plain ``execute()``, so the retry needs to live here too. The
+        cost when nothing's stale is a single Python try/except — no SQL,
+        no extra round-trip.
+        """
         t0 = time.time()
-        res = self.con.execute(q, p if p is not None else [])
-        self.debug_queries.append({"sql": q.strip(), "time_ms": round((time.time() - t0) * 1000, 2)})
+        try:
+            res = self.con.execute(q, p if p is not None else [])
+        except Exception as e:
+            if not _is_stale_view_error(e):
+                raise
+            try:
+                from backend.core import iceberg as db_iceberg
+
+                # force=True skips the fast path. We're already in an
+                # error state because the view's cached SQL referenced a
+                # file that no longer exists on disk; the fast path
+                # would re-execute that same cached SQL (binding it,
+                # which succeeds — but the next query against the view
+                # would re-raise the same IOException). Force-rebuild
+                # reads disk under the lock and regenerates the SQL.
+                db_iceberg.update_iceberg_view(self.con, self.src, force=True)
+            except Exception:
+                # Refresh itself failed — surface the ORIGINAL error so
+                # callers see the real symptom, not the rebind side-effect.
+                raise e
+            res = self.con.execute(q, p if p is not None else [])
+        self.debug_queries.append(
+            {"sql": _compact_sql_for_debug(q.strip()), "time_ms": round((time.time() - t0) * 1000, 2)}
+        )
         return res
 
     def get_schema_cols(self) -> list[str]:
@@ -355,6 +409,185 @@ class QueryRunner:
                     self.execute(f"DROP TABLE IF EXISTS {name}")
                 except Exception:
                     pass
+
+    def execute_top_n_rollups(
+        self,
+        fields: list[str],
+        start_time: str | None,
+        end_time: str | None,
+        limit: int = 10,
+    ) -> tuple[list[tuple[str, Any, int]], list[str]]:
+        import os
+        from datetime import UTC, datetime, timedelta
+
+        from backend.core.duckdb import _cache_dir
+        from backend.core.rollups import _is_safe_ident, _safe_table_for
+        from backend.utils.date_utils import parse_iso_utc
+
+        cache_dir = _cache_dir(self.src)
+        rollup_dir = os.path.join(cache_dir, "rollups", "hour")
+        if not os.path.exists(rollup_dir):
+            return [], fields
+
+        # Defense-in-depth: field names land in a SQL IN-list as quoted
+        # literals AND the service name lands in the base-table identifier.
+        # Both should already be safe (FIELDS + validate_custom_field
+        # constrain custom names; service IDs are Fastly-format slugs), but
+        # we re-validate here so a future caller can't pierce the boundary.
+        safe_fields = [f for f in fields if _is_safe_ident(f)]
+        if not safe_fields:
+            return [], fields
+        base_table = _safe_table_for(self.src)
+        if not base_table:
+            # Service name failed the identifier safelist; refuse to query.
+            return [], fields
+
+        # Parse bounds
+        st_dt = parse_iso_utc(start_time) if start_time else None
+        et_dt = parse_iso_utc(end_time) if end_time else None
+
+        hour_cond = ""
+        if st_dt:
+            st_str = st_dt.strftime("%Y-%m-%d-%H")
+            hour_cond += f" AND hour >= '{st_str}'"
+        if et_dt:
+            # Half-open semantics: a request ending exactly on an hour
+            # boundary (e.g. ``end_time=2026-06-04T15:00:00``) should
+            # EXCLUDE the 15:00 hour rollup (which covers [15:00, 16:00)).
+            # Subtracting 1 microsecond before strftime keeps mid-hour
+            # ends inclusive of the surrounding hour while making exact
+            # boundaries exclusive — matching how the live-hour query
+            # below uses ``timestamp < et_dt``.
+            et_inclusive = (et_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d-%H")
+            hour_cond += f" AND hour <= '{et_inclusive}'"
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        active_dt_end = active_dt + timedelta(hours=1)
+        active_str = active_dt.strftime("%Y-%m-%d-%H")
+
+        # Glob `rollups/hour/**/*.parquet` was the obvious shape but it has
+        # DuckDB enumerate every file under the tree before the WHERE clause
+        # can prune ANYTHING. On a service with N fields × H hours of rollups
+        # that's N*H file stats up front, dominating wall time (witnessed
+        # 2026-06-04: ~2.8s on 18,648 files for a 24h query that should be
+        # reading ~1,700). Hive-partition pruning kicks in AFTER the glob
+        # expands, not before.
+        #
+        # Instead: enumerate the exact (field, hour) combinations we want in
+        # Python (cheap directory listdir per field, bounded by safe_fields ×
+        # hours-in-window), then pass DuckDB an explicit file list. Skips
+        # the glob, hands DuckDB only the files it needs.
+        st_str_floor = st_dt.strftime("%Y-%m-%d-%H") if st_dt else None
+        # End cutoff for the directory-list filter — `et_inclusive` was
+        # already computed above for the SQL fallback path. Use the same
+        # bounds here so the half-open semantics match.
+        if et_dt:
+            et_str_floor = (et_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d-%H")
+        else:
+            et_str_floor = None
+
+        target_paths: list[str] = []
+        for field in safe_fields:
+            field_dir = os.path.join(rollup_dir, f"field={field}")
+            if not os.path.isdir(field_dir):
+                continue
+            try:
+                hour_entries = os.listdir(field_dir)
+            except OSError:
+                continue
+            for hour_entry in hour_entries:
+                if not hour_entry.startswith("hour="):
+                    continue
+                hour = hour_entry[len("hour=") :]
+                # Lexicographic string compare is correct here because the
+                # YYYY-MM-DD-HH format is fixed-width.
+                if st_str_floor and hour < st_str_floor:
+                    continue
+                if et_str_floor and hour > et_str_floor:
+                    continue
+                if hour >= active_str:
+                    # Active hour is served live, not from rollups.
+                    continue
+                hour_dir = os.path.join(field_dir, hour_entry)
+                try:
+                    for fname in os.listdir(hour_dir):
+                        if fname.endswith(".parquet"):
+                            target_paths.append(os.path.join(hour_dir, fname))
+                except OSError:
+                    continue
+
+        if not target_paths:
+            rolled_res: list = []
+        else:
+            # Inline the explicit path list as a SQL array literal. DuckDB
+            # handles thousands of paths fine in a single statement; the
+            # SQL string size is ~80 bytes/path × few-thousand = a few MB
+            # at worst, well within parser limits. hive_partitioning=1
+            # still lets DuckDB read `field` from the path so the SELECT's
+            # `field` column resolves; `value`/`count` come from parquet
+            # content.
+            paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in target_paths)
+            q = f"""
+                SELECT field, value, SUM(count) AS c
+                FROM read_parquet([{paths_sql}], hive_partitioning=1)
+                GROUP BY field, value
+            """
+            try:
+                rolled_res = self.execute(q).fetchall()
+            except Exception:
+                rolled_res = []
+
+        # We also need to get the live active hour stats from the base table
+        live_res = []
+
+        live_where = f"timestamp >= '{active_dt.isoformat()}' AND timestamp < '{active_dt_end.isoformat()}'"
+        # We only query the active hour if it overlaps with the requested time window
+        should_query_live = True
+        if et_dt and et_dt <= active_dt:
+            should_query_live = False
+        if st_dt and st_dt >= active_dt_end:
+            should_query_live = False
+
+        if should_query_live:
+            # We run a standard execute_top_n_batch query on the base table for just the active hour
+            try:
+                actual_cols = self.get_schema_cols()
+                from backend.core.duckdb import _get_schema
+
+                schema_types = {col["name"]: col["type"] for col in _get_schema(self.con, self.src)}
+
+                # To prevent creating a massive UNION, we'll create a temp table for just the live hour
+                tmp_name = self.create_filtered_temp_table(fields, actual_cols, base_table, live_where)
+                if tmp_name:
+                    try:
+                        live_res, _ = self.execute_top_n_batch(fields, tmp_name, actual_cols, schema_types, limit=limit)
+                    finally:
+                        try:
+                            self.execute(f"DROP TABLE IF EXISTS {tmp_name}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # Combine rolled and live
+        combined = {}
+        for field, value, count in rolled_res:
+            key = (field, value)
+            combined[key] = combined.get(key, 0) + count
+
+        for field, value, count in live_res:
+            key = (field, value)
+            combined[key] = combined.get(key, 0) + count
+
+        # Sort and limit
+        top_results = []
+        for field in fields:
+            field_items = [(k[1], v) for k, v in combined.items() if k[0] == field]
+            field_items.sort(key=lambda x: x[1], reverse=True)
+            for val, count in field_items[:limit]:
+                top_results.append((field, val, count))
+
+        return top_results, fields
 
     def execute_top_n_batch(
         self, fields: list[str], table_name: str, actual_cols: list[str], schema_types: dict[str, str], limit: int = 10

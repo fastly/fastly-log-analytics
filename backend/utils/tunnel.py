@@ -465,6 +465,22 @@ class TunnelManager:
             if invite.get("expires_at") and invite["expires_at"] < share_db.iso_z_now():
                 self._evict(session, reason="invite expired", event="SESSION_TIMEOUT")
                 return None
+
+            # Security: re-sync the mutable permission fields from the
+            # current invite state. Without this, an admin who tightens an
+            # analyst's pii_policy / query_window_hours / query_start_time /
+            # query_end_time / service_ids cannot enforce those tightened
+            # bounds until the analyst's session naturally times out. Copy
+            # the latest invite-side values onto the cached AnalystSession
+            # before returning, so every downstream request sees fresh
+            # permissions on the next call.
+            session.pii_policy = invite.get("pii_policy") or session.pii_policy
+            session.query_window_hours = invite.get("query_window_hours")
+            session.query_start_time = invite.get("query_start_time")
+            session.query_end_time = invite.get("query_end_time")
+            fresh_service_ids = invite.get("service_ids")
+            if fresh_service_ids is not None:
+                session.service_ids = list(fresh_service_ids)
             return session
 
     def boot_session(self, session_id: str, *, reason: str = "admin boot") -> bool:
@@ -605,6 +621,17 @@ class TunnelManager:
 
                 # Spawn SSH. We do NOT use any user keys — explicitly pass our own.
                 key_path = _ensure_share_key()
+                # Security: pin the localhost.run host key. Without
+                # this, the previous StrictHostKeyChecking=no +
+                # UserKnownHostsFile=/dev/null combo trusts whatever key
+                # the server presents on first connection — a MitM on the
+                # outbound path can hijack the tunnel and decrypt analyst
+                # traffic. _ensure_known_hosts() materializes the pinned
+                # known_hosts from configs/ssh_known_hosts; if that file
+                # is missing or empty we REFUSE to start the tunnel
+                # (fail-safe — better to deny sharing than to fall back
+                # to TOFU).
+                known_hosts_path = _ensure_known_hosts()
                 cmd = [
                     ssh_bin,
                     "-i",
@@ -612,9 +639,13 @@ class TunnelManager:
                     "-o",
                     "IdentitiesOnly=yes",
                     "-o",
-                    "StrictHostKeyChecking=no",
+                    "StrictHostKeyChecking=yes",
                     "-o",
-                    "UserKnownHostsFile=/dev/null",
+                    f"UserKnownHostsFile={known_hosts_path}",
+                    "-o",
+                    # The pinned known_hosts is the only source of trust;
+                    # never write new entries from the system files.
+                    "GlobalKnownHostsFile=/dev/null",
                     "-o",
                     "ServerAliveInterval=10",
                     "-o",
@@ -858,6 +889,67 @@ def _port_in_use(host: str, port: int) -> bool:
             return s.connect_ex((host, port)) == 0
     except OSError:
         return False
+
+
+def _ensure_known_hosts() -> str:
+    """Locate the pinned ``configs/ssh_known_hosts`` file used to verify
+    the localhost.run SSH host key.
+
+    Security: this is the *only* trust anchor for the outbound SSH
+    tunnel. If the file is missing or empty we refuse to start the
+    tunnel (fail-safe), so a deployment that lost the volume mount can't
+    silently fall back to TOFU host-key acceptance.
+
+    Resolution order:
+      1. ``$SSH_KNOWN_HOSTS_FILE`` — explicit override for tests / unusual
+         deployments.
+      2. ``${CONFIGS_DIR}/ssh_known_hosts`` where CONFIGS_DIR is the
+         backend's resolved config dir (defaults to ``/app/configs`` in
+         the container, which is bind-mounted from
+         ``/mnt/app-data/configs`` per docker-compose.prod.yml).
+      3. ``<repo root>/configs/ssh_known_hosts`` for local development.
+
+    Returns the absolute path to the file.
+    Raises RuntimeError if the file is missing, unreadable, or empty.
+    """
+    override = os.environ.get("SSH_KNOWN_HOSTS_FILE", "").strip()
+    candidates: list[str] = []
+    if override:
+        candidates.append(override)
+    # Prefer the in-container path (production); fall back to the repo
+    # path (dev). Both should contain the same pinned content.
+    from backend import config as svcconfig
+
+    try:
+        candidates.append(str(svcconfig.CONFIGS_DIR / "ssh_known_hosts"))
+    except Exception:
+        pass
+    candidates.append(os.path.join(os.path.dirname(__file__), "..", "..", "configs", "ssh_known_hosts"))
+
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        # File must contain at least one non-comment, non-blank line
+        # (i.e., a real key entry) — an empty file would otherwise
+        # silently disable host-key checking with StrictHostKeyChecking=yes
+        # being functionally TOFU because OpenSSH treats an empty
+        # known_hosts as "no known keys".
+        for line in data.decode("utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                return os.path.abspath(path)
+
+    raise RuntimeError(
+        "Pinned SSH known_hosts file is missing or empty (security). "
+        "Looked at: " + ", ".join(candidates) + ". Refusing to start the tunnel — this would otherwise fall back to "
+        "TOFU host-key trust. Restore configs/ssh_known_hosts or set "
+        "SSH_KNOWN_HOSTS_FILE to a valid path."
+    )
 
 
 def _ensure_share_key() -> str:

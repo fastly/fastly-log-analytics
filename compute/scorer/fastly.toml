@@ -1,0 +1,26 @@
+# Fastly Compute package manifest.
+# https://www.fastly.com/documentation/reference/compute/fastly-toml/
+
+manifest_version = 3
+name = "session-scorer"
+description = "Edge session-anomaly scoring service. Decrypts an inbound X-Session-State cookie, scores the session via Layer 1 (universal behavioral) + Layer 2 (route transition), and returns X-Edge-* headers for VCL policy consumption."
+authors = ["drew.michael"]
+language = "rust"
+
+# DO NOT set service_id here. The session-scorer Wasm is shared across all
+# per-customer scoring services (each named "Session Scoring Service for
+# {logging_service_id}"), so the deploy target MUST come from --service-id on
+# the `fastly compute deploy` command line, never from this file. Committing
+# a service_id here would couple the source to one customer's service and
+# block multi-tenant rollout.
+
+[scripts]
+build = "cargo build --bin session-scorer --release --target wasm32-wasip1 --color always"
+
+# Local-dev fixtures consumed by Viceroy (`fastly compute serve`).
+# Backend rewrites these per-customer before deploy.
+[local_server]
+  [local_server.dictionaries]
+    [local_server.dictionaries.scoring_keys]
+      file = "fixtures/local-dictionary.json"
+      format = "json"

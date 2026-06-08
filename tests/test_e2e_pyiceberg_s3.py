@@ -10,9 +10,11 @@ of the async loop, so the collision never happens.
 
 What this catches that the file:// E2E misses:
   - Real s3fs.S3FileSystem code paths during PyIceberg.commit (the same
-    paths that produced [s3fs_max_concurrency_probe_get](../.claude/projects/-Users-drew-michael-Projects-fastly-log-analytics/memory/s3fs_max_concurrency_probe_get.md)).
+    paths that produced past s3fs max-concurrency / probe-GET incidents).
   - The PUT-then-CAS commit shape that PyIceberg uses for snapshot
-    promotion, which is the source of [fastly_negative_cache_cas_trap](../.claude/projects/-Users-drew-michael-Projects-fastly-log-analytics/memory/fastly_negative_cache_cas_trap.md).
+    promotion, which is the source of the Fastly negative-cache CAS trap
+    (a 404 on the probe GET gets cached, then a successful PUT lands but
+    the next CAS still sees the cached 404 and corrupts the commit).
   - DuckDB ``httpfs`` reading the very parquet files PyIceberg wrote,
     against the same S3-protocol endpoint, in a single process.
 

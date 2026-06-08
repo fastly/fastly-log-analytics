@@ -56,6 +56,8 @@ import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import { VisibilityState } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
 import { ButtonGroup } from '@/components/ui/button-group'
+import { useTimeLayout } from '@/lib/chart-helpers'
+import { useTimezoneStore } from '@/stores/timezoneStore'
 
 type Alert = components["schemas"]["Alert"]
 
@@ -72,9 +74,10 @@ export default function AlertsPage() {
 
   const { data: loggingSettings } = useQuery({
     queryKey: ['loggingSettings', activeServiceId],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!activeServiceId) return null
       const { data } = await client.GET("/api/services/{service_id}/logging-settings", {
+        signal,
         params: { path: { service_id: activeServiceId } }
       })
       return data as any
@@ -86,14 +89,15 @@ export default function AlertsPage() {
 
   const { data: alertsRes, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['alerts', activeServiceId],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (activeServiceId) {
         const { data } = await client.GET("/api/alerts/{service_id}", {
+          signal,
           params: { path: { service_id: activeServiceId } }
         })
         return data
       } else {
-        const { data } = await client.GET("/api/alerts/")
+        const { data } = await client.GET("/api/alerts/", { signal })
         return data
       }
     },
@@ -534,6 +538,11 @@ function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Alert | n
 
   const metricField = React.useMemo(() => catalog?.fields?.find(f => f.id === metric), [catalog, metric])
 
+  const { timezone } = useTimezoneStore()
+  const startTime = React.useMemo(() => previewData?.times?.[0], [previewData])
+  const endTime = React.useMemo(() => previewData?.times?.[previewData?.times?.length - 1], [previewData])
+  const timeLayout = useTimeLayout(startTime, endTime, timezone)
+
   const getHoverTemplate = React.useCallback((m: string, label?: string) => {
     const pre = label ? `${label}: ` : ''
     const field = m === metric ? metricField : catalog?.fields?.find(f => f.id === m)
@@ -898,20 +907,14 @@ function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Alert | n
                      }] : [])
                     ]}
                     layout={{
-                      hovermode: 'x unified',
+                      ...timeLayout,
                       margin: { t: 10, r: 10, l: 40, b: 30 },
-                      showlegend: true,
-                      legend: { orientation: 'h', y: 1.15, x: 1, xanchor: 'right', yanchor: 'bottom' },
                       paper_bgcolor: 'transparent',
                       plot_bgcolor: 'transparent',
                       xaxis: { 
+                         ...timeLayout.xaxis,
                          showgrid: false,
-                         type: 'date',
-                         zeroline: false,
-                         nticks: 8,
-                         tickangle: -45,
-                         automargin: true,
-                         tickformatstops: CHART_LAYOUT_DEFAULTS.tickformatstops
+                         zeroline: false
                       },
                       yaxis: { 
                          title: metricField?.unit || (metric === 'requests' ? 'reqs' : ''),

@@ -225,6 +225,19 @@ Removes the FOS logging endpoint from the Fastly service, the CDN VCL service, t
 
 ## Frontend Patterns
 
+> **REQUIRED READING before any frontend work:**
+> [`frontend/node_modules/next/dist/docs/`](frontend/node_modules/next/dist/docs/)
+> — the Next.js 16 App Router docs are vendored locally. Read the relevant
+> sections (loading.tsx, prefetching, streaming, instant-navigation, caching,
+> linking-and-navigating) BEFORE proposing or implementing changes to
+> components / pages / hooks. **Click-feel bugs are almost always a Next
+> conventions violation that the docs would have flagged.** Past failures
+> from skipping this: shipping pages without `loading.tsx`, blocking
+> layouts on uncached data, per-instance `setInterval` storms, missing
+> `signal` cancellation, polling intervals tuned for "live feel" not
+> backend cost. The conventions section below distills the rules but
+> defer to the docs for any pattern not listed.
+
 **Stack:** Next.js 16 app router, React 19, TanStack Query v5, Zustand, shadcn/ui, Recharts, openapi-fetch.
 
 **Type-safe client:**
@@ -253,6 +266,100 @@ A global middleware in [frontend/lib/api.ts](frontend/lib/api.ts) checks `respon
 8. **`@cron_task` decorator** in [backend/scheduler.py](backend/scheduler.py) — handles `start_call_tracking`, `set_process_context`, `flush_usage_log` finally-block.
 9. **`empty_schema_response(runner)`** in [_base.py](backend/repositories/_base.py) — return this when a repo function hits a service with no logs.
 10. **`origin_latency_us_expr(actual_cols)`** in `_base.py` — don't hand-roll the `COALESCE("ottfb", "ttfb" * 1000000.0)` fragment.
+
+### Next.js navigation + loading conventions (READ BEFORE TOUCHING FRONTEND)
+
+Distilled from `frontend/node_modules/next/dist/docs/` — these are the
+rules to follow so click-to-render feels instant. Failure modes I've shipped
+before and you should not repeat:
+
+**1. Every navigable route MUST have a `loading.tsx`.** Without it, dynamic
+routes (all our `'use client'` pages) get NO prefetched fallback — the
+browser sits on the previous page until the destination's JS is ready and
+its useQueries have settled. With it, Next.js renders the skeleton the
+instant the user clicks. Use a variant from
+[components/skeletons/PageSkeleton.tsx](frontend/components/skeletons/PageSkeleton.tsx)
+— don't hand-roll Array.from + Skeleton inline.
+
+**2. Layouts MUST NOT block on uncached data.** If `app/layout.tsx` or any
+shared layout awaits a fetch / accesses cookies / etc. before rendering
+children, **`loading.tsx` will not show a fallback at all** — Next.js waits
+for the layout to settle first. The previous fix to `AppLayout` removed an
+`isLoading ? <Spinner /> : children` gate that was doing exactly this; any
+new layout-level data must use `useQuery` with `staleTime` so re-renders
+are cheap, and the layout must never short-circuit children behind a
+loading boolean.
+
+**3. Cancel in-flight queries on every route change.** AppLayout's
+`useEffect([pathname])` calls `queryClient.cancelQueries({ type: 'active' })`
+so the old page's leftover polls (e.g. SystemHealthCard's 10s health-snapshot
+poll) don't compete with the new page's mount work. **Always thread `signal`
+through queryFns** so cancellation actually aborts the network request —
+this hasn't been done universally yet, but new queryFns should follow:
+```typescript
+queryFn: async ({ signal }) => {
+  const { data } = await client.GET(..., { signal })
+  return data
+}
+```
+
+**4. Poll intervals must respect backend cost.** Default is 10s+. The
+SystemHealthCard fix bumped a 2s poll to 10s because the endpoint took 1-1.7s
+under load — at 2s polling that was constant backend pressure. If real-time
+updates matter, add a manual Refresh button, don't poll faster than 5s.
+Always set `refetchIntervalInBackground: false` so background tabs don't
+keep hammering.
+
+**5. NEVER spawn per-instance `setInterval` for visible-tick state.** If
+multiple components need a 1Hz "now" value (countdowns, "X seconds ago"
+displays), they share the single
+[useNowMs](frontend/hooks/useNowSeconds.ts) hook — one `setInterval` for
+the whole tree. Past offenders: SystemJobBox (10 instances × 1s tick on
+/admin), CronScheduleBox (5+ on /logs), useElapsedTime (per-consumer
+ticker). All now consume `useNowMs`. If a new component needs a ticker,
+use this hook; do not roll your own.
+
+**6. Async buttons need IMMEDIATE feedback.** Every button whose `onClick`
+does async work must render `<Loader2 className="h-3 w-3 mr-1 animate-spin" />`
++ a pending label (`Stopping…`, `Saving…`, `Severing…`) while pending.
+`disabled={busy}` ALONE looks dead. Pattern lives in
+[ExcludeRegexCard](frontend/components/SessionScoring/ExcludeRegexCard.tsx);
+share-dashboard buttons follow the same shape after the recent fix.
+
+**7. Prefetch behavior:**
+   - Static routes → full route prefetched on Link viewport entry
+   - Dynamic routes (all our `'use client'` pages) → **partially prefetched
+     only if `loading.tsx` exists** (covers the shell to the loading
+     boundary). Without loading.tsx, NO prefetch happens.
+   - `<Link prefetch={true}>` is the default; use `prefetch={false}` only
+     in dense lists (infinite-scroll tables) where the link cardinality
+     would balloon the prefetch traffic.
+   - **Hover-prefetch data, not just bundle:** when a Link target needs an
+     API call to render meaningfully, add `onMouseEnter` that calls
+     `queryClient.prefetchQuery(...)`. Example: the Admin → Share Dashboard
+     link in [admin/page.tsx](frontend/app/admin/page.tsx#L791) warms the
+     share-status query so the destination renders real content
+     immediately instead of skeleton-then-swap.
+
+**8. Wrap `router.replace()` inside effects in `startTransition`.** A
+synchronous `router.replace()` inside `useEffect` causes a render cascade
+that blocks paint. Examples:
+[useUrlServiceSync](frontend/hooks/useUrlServiceSync.ts),
+[AppLayout redirect block](frontend/components/AppLayout.tsx#L163). All
+existing call sites are wrapped; new ones must follow.
+
+**9. React Query defaults are set in
+[QueryProvider](frontend/components/QueryProvider.tsx):** `staleTime: 30s`,
+`gcTime: 5min`, `refetchOnWindowFocus: false`. Don't override per-query
+unless you need to — and when you do, document why.
+
+**10. When a click feels slow, MEASURE before guessing.** I have a working
+playwright reproducer at `/tmp/nav-perf-test2.mjs` that times each phase
+of a click (URL change, DOM ready, network idle, individual API requests).
+Run it against the live tunnel (`localhost:3001`) BEFORE proposing a fix.
+Click-feedback bugs are almost always about: (a) polls running while
+navigation is in flight, (b) heavy useQuery fan-out on mount, (c) layout
+re-renders triggered by store subscriptions. The trace shows which.
 
 ### Removed modules — don't recreate
 
@@ -361,8 +468,8 @@ The tunnel exposes the same FastAPI app to the public internet. Middleware class
 ### 21. `sync_data` orphan-cleanup vs local-compaction outputs
 Local compaction writes merged rollups to three places: `<cache>/data/daily/`, `<cache>/data/weekly/`, and `<cache>/data/timestamp_hour=*/compacted_*.parquet`. None of these are tracked by the iceberg snapshot, so they are NOT in `cloud_files`/`active_paths`. The orphan-cleanup loop in [backend/core/iceberg.py](backend/core/iceberg.py) `sync_data()` walks the cache and deletes anything not in `active_paths`; without explicit allow-rules it nukes every compacted output, and the [`local_compacted_files` registry](backend/core/metadata_db.py) then blocks re-download of the source files — silently dropping rows from the view (production: 1.65M → 302K on 2026-05-31, then 1.66M → 1.62M on 2026-06-01 from the per-partition `compacted_*` variant). The fix is two-pronged: orphan-cleanup restricts its walk to `timestamp_hour=*` dirs AND skips `compacted_*.parquet` filenames. **If you add a new local-only output pattern, add it to both the dir skip and the file skip.** Integration coverage in [tests/core/test_local_compaction.py](tests/core/test_local_compaction.py)::`test_compaction_outputs_survive_iceberg_sync_orphan_cleanup` exercises the round-trip with real `compact_local_partitions` + real `sync_data`.
 
-### 22. `unattended-upgrades` OOMs the production VM
-The single-tenant 16 GB e2-standard-4 deploy runs backend + frontend + caddy at a steady-state working set around 10-13 GB. The Debian/Ubuntu nightly `apt-daily-upgrade.timer` forks a transient 1-2 GB downloader on top of that, and on 2026-06-01 it triggered an OOM kill that wedged the kernel (sshd died; needed `gcloud compute instances reset`). `~/restart.sh` on the VM re-asserts `systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service` on every restart so a re-image / apt-reinstall can't silently re-enable them. Trade-off: no automatic security patching — patch manually on a planned maintenance window with the backend container stopped. **If you bump the VM to a class with more RAM (e.g. `e2-custom-4-32768`), you may safely re-enable upgrades.** See `restart.sh` for the canonical incantation.
+### 22. `unattended-upgrades` can OOM a memory-tight VM
+A 16 GB Linux VM running backend + frontend + caddy holds a steady-state working set in the 10-13 GB range. The Debian/Ubuntu nightly `apt-daily-upgrade.timer` forks a transient 1-2 GB downloader on top of that, which can trip an OOM kill that wedges the kernel (sshd dies; needs a VM reset). The mitigation is to `systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service` on the host and re-assert it on every restart so a re-image / apt-reinstall can't silently re-enable them. Trade-off: no automatic security patching — patch manually on a planned maintenance window with the backend container stopped. **If you provision a VM with more RAM, you may safely re-enable upgrades.**
 
 ## AI Agent Directives
 
@@ -384,6 +491,18 @@ These apply to every change, regardless of scope.
 9. **Handle `openapi-fetch` errors explicitly.** Never `.then((r) => r.data?.x || fallback)` without checking `r.error`.
 10. **Keep Python imports at module level.** Conditional mid-function imports trigger `UnboundLocalError` (Trap #2).
 11. **Run `ruff format` before committing** (or rely on `make ci`).
+
+### Secrets & sensitive data
+
+12. **Scan for committed secrets BEFORE every commit.** The repo has a `secret-scan` Makefile target (gitleaks) that's wired into both `make ci` and the pre-commit hook (`.pre-commit-config.yaml`). Either run pre-commit (`uv run pre-commit run --all-files`) or `make secret-scan` before pushing. CI also runs it (`.github/workflows/ci.yml`) and will fail the build, but catching it locally is faster.
+13. **Allowlist suppression order** when a legitimate placeholder trips the scanner:
+    - **Inline** (single line): append `# gitleaks:allow` to the offending line. Cheapest for a one-off test fixture.
+    - **Fingerprint** (one-off historical): add the finding's `{file}:{rule-id}:{commit}:{secret-hash}` line to `.gitleaksignore` at repo root.
+    - **Path** (entire file or directory): add a regex to the `[allowlist] paths` array in `.gitleaks.toml`. Use this when adding a new directory of test fixtures.
+14. **Never commit a real credential to suppress the scanner.** The point of the gate is exactly this. If a legitimate secret needs to live in the tree (e.g. an SSH public key used as a trust anchor), document why in a comment adjacent to the allowlist entry and explain why exposure is intentional.
+15. **Never put real customer values in code, scripts, tests, or docs.** This includes Fastly service IDs (use `<service-id>` or `${FASTLY_SERVICE_ID:?}` env vars in scripts), bucket names, real domains, real IPs (Fastly edge ranges are fine — they're published), real email addresses (use `you@example.com`), or screenshots that show the above. Test fixtures use placeholders (`TestLogSvcABC123`, `FAKE_TOKEN`, `"FROM_CONFIG"`). Real deployment values come from env vars / per-host config that's gitignored.
+16. **Files that must never be committed** (covered by `.gitignore` — verify before any new directory of generated content lands):
+    - `.env` (real env), `configs/*.json` except `configs/ssh_known_hosts`, `data/system/` (real SSH key + share DB), `.scoring/` (per-deployment AES keys), `tests/fixtures/scoring/` (real prod traces). The `.gitleaks.toml` allowlist also covers these so a working-tree (`--no-git`) scan stays clean for ad-hoc local runs.
 
 ### Provisioning Wizard
 

@@ -11,7 +11,7 @@ distance calculations. Three thin functions to cover:
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -37,12 +37,8 @@ def test_fetch_returns_false_for_empty_api_key(isolated_cache):
 
 def test_fetch_writes_cache_on_success(isolated_cache):
     sample = [{"code": "JFK", "coordinates": {"latitude": 40.6, "longitude": -73.8}}]
-    resp = MagicMock()
-    resp.read.return_value = json.dumps(sample).encode()
-    resp.__enter__ = lambda s: s
-    resp.__exit__ = MagicMock(return_value=False)
 
-    with patch("backend.utils.pop_utils.urllib.request.urlopen", return_value=resp):
+    with patch("backend.core.fastly.client.fastly", return_value=sample):
         ok = pop_utils.fetch_pop_locations("api-key")
 
     assert ok is True
@@ -51,32 +47,22 @@ def test_fetch_writes_cache_on_success(isolated_cache):
 
 
 def test_fetch_returns_false_on_network_error(isolated_cache):
-    with patch("backend.utils.pop_utils.urllib.request.urlopen", side_effect=ConnectionError("boom")):
+    with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("boom")):
         ok = pop_utils.fetch_pop_locations("api-key")
     assert ok is False
     assert not isolated_cache.exists()
 
 
-def test_fetch_passes_api_key_in_header(isolated_cache):
-    """The Fastly-Key header is what the API authenticates on. Verify it's
-    set — a missing key returns the API's public dataset (different shape)
-    and silently breaks the cache.
+def test_fetch_passes_api_key_to_fastly_client(isolated_cache):
+    """The Fastly-Key header is what the API authenticates on; fastly()
+    sets it from the token kwarg. Verify the kwarg is threaded through —
+    a missing/wrong token returns the API's public dataset (different
+    shape) and silently breaks the cache.
     """
-    captured: dict = {}
-
-    def _capture(req, *args, **kwargs):
-        captured["headers"] = dict(req.header_items())
-        resp = MagicMock()
-        resp.read.return_value = b"[]"
-        resp.__enter__ = lambda s: s
-        resp.__exit__ = MagicMock(return_value=False)
-        return resp
-
-    with patch("backend.utils.pop_utils.urllib.request.urlopen", side_effect=_capture):
+    with patch("backend.core.fastly.client.fastly", return_value=[]) as mock_fastly:
         pop_utils.fetch_pop_locations("my-secret-token")
 
-    header_values = {k.lower(): v for k, v in captured["headers"].items()}
-    assert header_values.get("fastly-key") == "my-secret-token"
+    mock_fastly.assert_called_once_with("GET", "/datacenters", token="my-secret-token")
 
 
 # ── get_pop_locations ────────────────────────────────────────────────────────

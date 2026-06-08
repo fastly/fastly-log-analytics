@@ -26,6 +26,20 @@ repos:
       - id: check-merge-conflict
       - id: debug-statements
 
+  # Secret scanner. Blocks commits that introduce credentials / API keys /
+  # private keys / tokens. Configured via .gitleaks.toml at repo root
+  # (extends gitleaks' default ruleset with this repo's allowlist for
+  # tracked test fixtures and Rust lockfile checksums). Re-run with
+  # `make secret-scan` locally; CI runs the same invocation.
+  #
+  # If a legitimate placeholder trips the scanner, suppress with:
+  #   - inline `#gitleaks:allow` on the line, OR
+  #   - add the file/path glob to .gitleaks.toml [allowlist] paths
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
   # Regenerate the committed OpenAPI snapshot + typed frontend client
   # whenever the FastAPI surface or the generator script changes. If the
   # regenerated files differ from the staged version, pre-commit fails
@@ -40,3 +54,9 @@ repos:
         language: system
         pass_filenames: false
         entry: bash -c 'cd frontend && npm run --silent gen:types'
+      - id: typecheck-frontend
+        name: Typecheck frontend
+        files: ^frontend/.*\.(ts|tsx)$
+        language: system
+        pass_filenames: false
+        entry: bash -c 'cd frontend && npx tsc --noEmit'

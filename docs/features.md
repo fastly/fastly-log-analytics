@@ -125,3 +125,42 @@ If a Next-Gen WAF workspace is linked during provisioning, the app syncs verifie
 
 ### Bring your own bucket (manual config)
 If you already have a bucket, you can configure the app by writing a JSON file in `configs/` instead of running the provisioning wizard. See `config.example.json` for the schema. Manual configuration supports the same `read_write` / `read_only` access levels as the wizard.
+
+## Session Scoring
+
+### What it does
+Real-time edge scoring of every request as it transits Fastly. A two-layer scorer (L1 cookie+timing heuristics, L2 PageRank transition matrix over URL paths) produces a 0–100 score per request along with a reason code. Scores are logged alongside every line and land in DuckDB as ordinary columns, queryable from the dashboard, raw logs viewer, and SQL pad.
+
+### Custom log fields
+Enabling scoring on a service appends six custom fields to the log format:
+
+- `sid` — rotating AES-encrypted session identifier carried in a first-party cookie (30 min idle / 24 h hard cap)
+- `edge_score` — final 0–100 score for the request
+- `edge_score_reason` — short reason code explaining the score (e.g. `tampered_cookie`, `path_anomaly`)
+- `edge_cookie_compliance` — whether the request presented a valid, untampered session cookie
+- `edge_l1_score` — L1 contribution (cookie integrity + inter-request timing)
+- `edge_l2_score` — L2 contribution (PageRank transition probability for the current path given prior paths in the session)
+
+### VCL pattern
+Scoring is wired into the request lifecycle through six VCL snippets that share state via a single restart. The order is `recv → pass → fetch → deliver → miss → enforce`, with the `enforce` snippet only firing on `req.restarts == 1` after the scorer has annotated the request. `recv` also unsets six client-controllable `X-Edge-*` headers to prevent score injection from the wire.
+
+### Admin UI
+The `/admin/session-scoring` page is the operator console:
+
+- **StatusPanel** — per-service enable/disable, current threshold, enforcement state
+- **ScoringHealthCard** — scorer counters (requests, tampered cookies, enforcement blocks, matrix load failures)
+- **ThresholdSlider** — preview score distribution at a candidate threshold, then commit; toggles live enforcement
+- **ROC + PR curves, per-reason AUC** — evaluation against the labeled set
+- **Top-flagged, labels** — review the highest-scoring requests and assign ground-truth labels for retraining
+- **Matrix history** — list past PageRank matrix versions and restore any of them (pre-restore snapshot is taken automatically)
+- **Audit log** — every mutation (enable, threshold change, key rotation, matrix restore, etc.) is recorded per-service
+- **Retrain, key rotation** — rebuild the L2 matrix from labeled data; rotate the AES sid key (current → previous slot)
+
+### Key endpoints
+`/scoring/enable`, `/scoring/disable`, `/scoring/status`, `/scoring/labels`, `/scoring/top-flagged`, `/scoring/score-distribution`, `/scoring/compliance-breakdown`, `/scoring/threshold`, `/scoring/threshold-preview`, `/scoring/enforce-threshold`, `/scoring/retrain`, `/scoring/dashboard`, `/scoring/evaluation/per-reason`, `/scoring/audit`, `/scoring/rotate-key`, `/scoring/matrix-versions`, `/scoring/matrix-versions/{v}/restore`.
+
+### DDoS gate
+The Compute scorer is bypassed when `fastly.ddos_detected` fires. Volumetric defense is Fastly's job; rate limiting is explicitly out of scope for session scoring. The score column on requests served during a DDoS event will be absent rather than synthesized.
+
+### Operations
+See [session_scoring_runbook.md](session_scoring_runbook.md) for enable/disable procedures, threshold tuning, key rotation, matrix restore, and incident response.

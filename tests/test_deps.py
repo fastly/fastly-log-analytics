@@ -139,9 +139,23 @@ def test_get_source_raises_400_when_lookup_returns_none():
 
 
 # ── _ConnectionHolder: enter / DBBusyError / exit ────────────────────────────
+#
+# The pool path (``backend.core.duckdb_pool``) keeps connections alive across
+# requests and ultimately calls ``backend.core.duckdb.get_connection`` rather
+# than ``backend.deps.get_connection`` — so a mock at the deps-level reference
+# doesn't intercept. Tests below that pin the always-fresh open/close
+# lifecycle disable the pool via ``DUCKDB_CONNECTION_POOL=0``; this preserves
+# the legacy contract assertions while keeping pool-specific behaviour in
+# its own targeted tests further down.
 
 
-def test_connection_holder_opens_and_closes():
+@pytest.fixture
+def disable_pool(monkeypatch):
+    monkeypatch.setenv("DUCKDB_CONNECTION_POOL", "0")
+    yield
+
+
+def test_connection_holder_opens_and_closes(disable_pool):
     """Happy path: enter opens a connection via ``get_connection``,
     exit closes it cleanly."""
     fake_con = MagicMock()
@@ -167,7 +181,7 @@ def test_connection_holder_skip_view_update_forwarded():
         assert mock_get.call_args.kwargs["skip_view_update"] is True
 
 
-def test_connection_holder_db_busy_maps_to_503():
+def test_connection_holder_db_busy_maps_to_503(disable_pool):
     """``DBBusyError`` from get_connection → 503 with ``busy: true``.
     The 503 (rather than 500/400) is what makes the frontend's React
     Query layer keep its cached data instead of clearing the UI."""
@@ -179,7 +193,7 @@ def test_connection_holder_db_busy_maps_to_503():
     assert exc.value.detail["busy"] is True
 
 
-def test_connection_holder_exit_tolerates_close_failure():
+def test_connection_holder_exit_tolerates_close_failure(disable_pool):
     """If ``close()`` raises (locked DB, double-close), the dependency
     must still tear down cleanly — otherwise the request fails AFTER
     the response was already sent."""
@@ -203,7 +217,7 @@ def test_connection_holder_exit_with_no_open_connection_is_noop():
 # ── get_con / get_meta_con: generator-style dependencies ─────────────────────
 
 
-def test_get_con_yields_connection_and_closes_after():
+def test_get_con_yields_connection_and_closes_after(disable_pool):
     """``get_con`` is a generator dep — FastAPI calls .send(None), gets
     the connection, then calls .close() after the response. The con
     must be closed at that point."""
@@ -230,7 +244,7 @@ def test_get_meta_con_passes_skip_view_update_true():
         assert mock_get.call_args.kwargs["skip_view_update"] is True
 
 
-def test_get_con_default_is_read_only():
+def test_get_con_default_is_read_only(disable_pool):
     """Dashboard queries default to read_only=True — otherwise long-running
     cron writes would block them. Pinning this default so a future
     refactor doesn't silently flip it."""
@@ -239,6 +253,72 @@ def test_get_con_default_is_read_only():
         gen = deps.get_con(source={"name": "x"})
         next(gen)
         assert mock_get.call_args.kwargs["read_only"] is True
+
+
+# ── _ConnectionHolder: pool path ─────────────────────────────────────────────
+
+
+def test_connection_holder_pool_path_checks_out_and_returns():
+    """When the pool is enabled (default), read_only requests route through
+    ``duckdb_pool.checkout_connection`` instead of calling get_connection
+    directly. The holder must still expose the connection on ``self.con``
+    and let the pool reclaim it on exit (not call ``close`` on the
+    connection itself — that would defeat reuse)."""
+    from backend.core import duckdb_pool
+
+    fake_con = MagicMock()
+
+    # Build a context manager stub the holder's __enter__ will drive.
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=fake_con)
+    cm.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(duckdb_pool, "checkout_connection", return_value=cm) as mock_checkout:
+        holder = deps._ConnectionHolder({"name": "x"}, read_only=True)
+        con = holder.__enter__()
+        assert con is fake_con
+        mock_checkout.assert_called_once()
+        # Exit must forward to the pool context manager (which knows whether
+        # to return-vs-discard); the holder itself MUST NOT call con.close.
+        holder.__exit__(None, None, None)
+        cm.__exit__.assert_called_once()
+        fake_con.close.assert_not_called()
+
+
+def test_connection_holder_pool_path_skipped_when_skip_view_update():
+    """``skip_view_update`` paths can't pool — they need a fresh, un-bound
+    connection. Verify the holder falls through to the legacy code path
+    for that case even when the pool is enabled."""
+    from backend.core import duckdb_pool
+
+    fake_con = MagicMock()
+    with patch.object(duckdb_pool, "checkout_connection") as mock_checkout, \
+         patch("backend.deps.get_connection", return_value=fake_con) as mock_get:
+        holder = deps._ConnectionHolder({"name": "x"}, skip_view_update=True)
+        holder.__enter__()
+        mock_checkout.assert_not_called()
+        mock_get.assert_called_once()
+
+
+def test_connection_holder_pool_path_discards_on_error():
+    """If the request raised mid-query, the pool must mark the connection
+    errored on exit so a poisoned connection doesn't get reused. We rely
+    on passing the original exc_type to the pool's __exit__."""
+    from backend.core import duckdb_pool
+
+    fake_con = MagicMock()
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=fake_con)
+    cm.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(duckdb_pool, "checkout_connection", return_value=cm):
+        holder = deps._ConnectionHolder({"name": "x"}, read_only=True)
+        holder.__enter__()
+        # Simulate request error
+        holder.__exit__(RuntimeError, RuntimeError("boom"), None)
+        # Pool CM sees the exc_type — its release() uses that to discard
+        called_exc_type = cm.__exit__.call_args[0][0]
+        assert called_exc_type is RuntimeError
 
 
 # ── AnalyticsDeps: bundled source + connection ───────────────────────────────

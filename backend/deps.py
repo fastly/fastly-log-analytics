@@ -69,8 +69,16 @@ def get_source(service_id: str | None = Depends(get_service_id)) -> dict:
 class _ConnectionHolder:
     """Holds a single DuckDB connection for the lifetime of one request.
 
-    Used as a context-manager-style dependency so FastAPI closes the
-    connection when the request finishes.
+    Read-only requests check out a pooled, pre-warmed connection via
+    ``duckdb_pool.checkout_connection`` (saves ~50ms per request of
+    pragma / S3 / iceberg-view setup). Write-mode connections still take
+    the always-fresh ``get_connection`` path because ingest holds the
+    write lock and pooling would defeat its lifecycle.
+
+    Used as a context-manager-style dependency so FastAPI returns the
+    connection to the pool (or closes the fresh one) when the request
+    finishes. On any exception the connection is discarded rather than
+    pooled so a poisoned connection doesn't get reused.
     """
 
     def __init__(self, source: dict, skip_view_update: bool = False, read_only: bool = True):
@@ -78,37 +86,91 @@ class _ConnectionHolder:
         self._skip_view_update = skip_view_update
         self._read_only = read_only
         self.con: duckdb.DuckDBPyConnection | None = None
+        # Set when we exit cleanly so __exit__ knows to return-vs-discard.
+        self._errored = False
+        # Used only on the pooled path so __exit__ can release.
+        self._pool_cm = None
 
     def __enter__(self) -> duckdb.DuckDBPyConnection:
+        # Write mode + skip_view_update fall back to the fresh-connection
+        # path: the pool exists for the dominant read-only HTTP request
+        # workload, not for ingest's exclusive writer or for callers that
+        # explicitly opt out of view binding. The pool itself can also be
+        # disabled globally via DUCKDB_CONNECTION_POOL=0 (tests + emergency
+        # rollback); when disabled we go straight through ``get_connection``
+        # so behaviour matches the pre-pool design exactly.
+        from backend.core import duckdb_pool
+
+        use_pool = (
+            self._read_only
+            and not self._skip_view_update
+            and duckdb_pool._pool_enabled()
+        )
         try:
-            self.con = get_connection(
-                source=self._source,
-                max_wait=10,  # Increased wait slightly for safety
-                skip_view_update=self._skip_view_update,
-                read_only=self._read_only,
-            )
+            if use_pool:
+                self._pool_cm = duckdb_pool.checkout_connection(self._source, max_wait=10.0)
+                self.con = self._pool_cm.__enter__()
+            else:
+                self.con = get_connection(
+                    source=self._source,
+                    max_wait=10,
+                    skip_view_update=self._skip_view_update,
+                    read_only=self._read_only,
+                )
         except DBBusyError as e:
             raise HTTPException(
                 status_code=503,  # 503 Service Unavailable so frontend fetch throws and React Query keeps cached data
                 detail={"error": str(e), "busy": True},
             )
+        except Exception as e:
+            # Pool exhaustion (after wait timeout) surfaces as _PoolBusy.
+            # Translate to 503 so the frontend handles it the same as
+            # DBBusyError instead of throwing an opaque 500.
+            from backend.core.duckdb_pool import _PoolBusy
+
+            if isinstance(e, _PoolBusy):
+                raise HTTPException(
+                    status_code=503,
+                    detail={"error": str(e), "busy": True},
+                )
+            raise
         return self.con
 
-    def __exit__(self, *_):
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._errored = exc_type is not None
+        if self._pool_cm is not None:
+            # Forward the exception to the pool context manager so it can
+            # mark the connection errored and discard.
+            try:
+                self._pool_cm.__exit__(exc_type, exc_val, exc_tb)
+            except Exception:
+                pass
+            self._pool_cm = None
+            self.con = None
+            return False
         if self.con:
             try:
                 self.con.close()
             except Exception:
                 pass
             self.con = None
+        return False
 
 
-def get_con(source: dict = Depends(get_source), read_only: bool = True) -> duckdb.DuckDBPyConnection:
+def get_con(source: dict = Depends(get_source)) -> duckdb.DuckDBPyConnection:
     """Dependency that yields a DuckDB connection and closes it after the request.
 
-    Defaults to read_only=True for dashboard queries to prevent blocking on crons.
+    Always opens in read-only mode for HTTP request handlers — write-mode
+    connections are used only by the scheduler/cron pipeline, never by
+    user-facing routes.
+
+    Security: do NOT take ``read_only`` as a parameter. FastAPI converts
+    primitive-typed dependency parameters into query parameters, so any
+    request to a route using this dep could send ``?read_only=false`` and
+    force an exclusive write-lock acquisition that blocks readers and the
+    sync cron (503 DoS). The flag is hardcoded inside the holder instead.
     """
-    holder = _ConnectionHolder(source, read_only=read_only)
+    holder = _ConnectionHolder(source, read_only=True)
     with holder as con:
         yield con
 
@@ -136,12 +198,51 @@ class AnalyticsDeps:
         self.con = con
 
 
-def get_meta_con(source: dict = Depends(get_source), read_only: bool = True) -> duckdb.DuckDBPyConnection:
+# ── Tenant-scope enforcement (security) ─────────────
+
+
+def require_service_access(
+    request,
+    service_id: str | None = Depends(get_service_id),
+) -> str | None:
+    """Reject the request with 403 if the caller (analyst session) does not
+    have access to the requested ``service_id``.
+
+    Local admin requests (analyst_session is None) bypass this check entirely
+    — admins have access to every configured service. Analysts must have the
+    target ``service_id`` in their invite's ``service_ids`` list.
+
+    Use as a dependency on any route that returns or mutates per-service
+    data. Routes that take no ``service_id`` parameter and that expose a
+    list of services across the whole tenant must filter the list manually
+    using ``request.state.analyst_session.service_ids`` — this helper only
+    enforces the single-service case.
+    """
+    analyst_session = getattr(request.state, "analyst_session", None)
+    if analyst_session is None:
+        return service_id  # admin / local — unrestricted
+    allowed = set(analyst_session.service_ids or [])
+    if service_id is None:
+        # Analyst calls with no explicit service must default to one of their
+        # scoped services. Return the first one (or None if invite is empty).
+        return next(iter(allowed), None)
+    if service_id not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "service_not_authorized", "service": service_id},
+        )
+    return service_id
+
+
+def get_meta_con(source: dict = Depends(get_source)) -> duckdb.DuckDBPyConnection:
     """Dependency that yields a DuckDB connection, skipping the Iceberg view update.
 
     Use this for metadata routes (e.g. cron logs, admin settings) that don't
     need to query the main logs table, to avoid blocking on S3 manifest reads.
+
+    Security: ``read_only`` is hardcoded True for the same reason as
+    ``get_con`` above.
     """
-    holder = _ConnectionHolder(source, skip_view_update=True, read_only=read_only)
+    holder = _ConnectionHolder(source, skip_view_update=True, read_only=True)
     with holder as con:
         yield con

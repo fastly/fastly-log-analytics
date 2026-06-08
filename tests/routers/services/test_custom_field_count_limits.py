@@ -96,15 +96,24 @@ def _post_payload(field_name: str) -> dict:
     return {**_BASE_PAYLOAD, "name": field_name}
 
 
-def test_no_numeric_cap_101st_field_still_accepted(tmp_path, monkeypatch):
-    """The 101st field is accepted because the gate is log_format size,
-    not count. Pre-seeded 100 short-named fields keep log_format ≈ 6900
-    chars (well under the 8000 safe max); the new field's name adds ~50
-    chars more — still under. A refactor that adds a numeric ceiling
-    would break this test loudly."""
+def test_no_numeric_cap_field_count_still_accepted(tmp_path, monkeypatch):
+    """The Nth field is accepted because the gate is log_format size,
+    not count. Pre-seeded ``n_existing`` short-named fields keep log_format
+    well under the 8000 safe max; the new field's name adds ~75 chars
+    more — still under. A refactor that adds a numeric ceiling would
+    break this test loudly.
+
+    The exact threshold drops as VCL helpers get longer (016 wrapped
+    each string field in ``substr(..., 0, 2000)``, adding ~15 chars per
+    field). Pick ``n_existing`` well below the new ceiling so this test
+    stays as a "no numeric cap" assertion rather than a tipping-point
+    measurement.
+    """
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
     svc_id = "test_svc_count_cap"
-    config.save_config(svc_id, _make_cfg(svc_id, n_existing=100))
+    # 80 seeded + 1 new = 81 → log_format ≈ 7900 chars, comfortably
+    # under the 8000-char safe max even with the new substr wrappers.
+    config.save_config(svc_id, _make_cfg(svc_id, n_existing=80))
 
     client = TestClient(app)
     # Patch shutil.which on the module that imports it so the Falco
@@ -113,29 +122,32 @@ def test_no_numeric_cap_101st_field_still_accepted(tmp_path, monkeypatch):
     with patch("backend.provision.fastly_api.shutil.which", return_value=None):
         resp = client.post(
             f"/api/services/{svc_id}/custom-fields",
-            json=_post_payload("cf100"),
+            json=_post_payload("cf080"),
         )
     assert resp.status_code == 200, (
-        f"101st field should be accepted (no numeric cap exists); got {resp.status_code} body={resp.text}"
+        f"81st field should be accepted (no numeric cap exists); got {resp.status_code} body={resp.text}"
     )
     body = resp.json()
     # Response wraps the saved field as ``body['field']`` — peer tests
     # (test_custom_fields_validation.py) rely on the 200 status alone;
     # we additionally assert the saved name to catch a routing bug
     # where the 200 came from a different handler.
-    assert body["field"]["name"] == "cf100"
+    assert body["field"]["name"] == "cf080"
 
-    # And the saved config now holds 101 fields.
+    # And the saved config now holds 81 fields.
     saved = config.load_config(svc_id)
-    assert len(saved["log_fields"]["custom_fields"]) == 101
+    assert len(saved["log_fields"]["custom_fields"]) == 81
 
 
 def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypatch):
     """When the *next* field would push log_format past
     ``FASTLY_LOG_FORMAT_SAFE_MAX`` (8000), the route returns 422 with
-    ``LOG_FORMAT_TOO_LONG`` in the errors list. Pre-seeded 118 fields
-    keep us at log_format ≈ 7943 chars (still under); the 119th field
-    pushes over to ~8001.
+    ``LOG_FORMAT_TOO_LONG`` in the errors list.
+
+    The seeded count is calibrated to land just under the safe max so
+    a single additional field tips it over. 016 wrapped each string
+    field in ``substr(..., 0, 2000)`` (adding ~15 chars per field), so
+    the tipping point shifts from ~118 to ~95.
 
     Pins TWO things at once:
       a) The exact 422 status code (not 400, not silent acceptance).
@@ -145,15 +157,17 @@ def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypa
     """
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
     svc_id = "test_svc_logfmt_overflow"
-    config.save_config(svc_id, _make_cfg(svc_id, n_existing=118))
+    # 94 seeded fields → log_format ≈ 7899 chars (just under safe max);
+    # adding cf094 tips the new format past 8000.
+    config.save_config(svc_id, _make_cfg(svc_id, n_existing=94))
 
     client = TestClient(app)
     # No shutil.which patch needed — the length check at
-    # backend/provision/fastly_api.py:281 fires BEFORE Falco would be
+    # backend/provision/fastly_api.py fires BEFORE Falco would be
     # invoked, so this branch is binary-independent.
     resp = client.post(
         f"/api/services/{svc_id}/custom-fields",
-        json=_post_payload("cf118"),
+        json=_post_payload("cf094"),
     )
     assert resp.status_code == 422, (
         f"field that overflows log_format should 422; got {resp.status_code} body={resp.text}"
@@ -163,9 +177,9 @@ def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypa
     errors: list[str] = body["detail"]["errors"]
     assert any("LOG_FORMAT_TOO_LONG" in e for e in errors), f"expected LOG_FORMAT_TOO_LONG in errors, got: {errors}"
 
-    # The blocked field is NOT persisted — saved cfg still has 118.
+    # The blocked field is NOT persisted — saved cfg still has 94.
     saved = config.load_config(svc_id)
-    assert len(saved["log_fields"]["custom_fields"]) == 118
+    assert len(saved["log_fields"]["custom_fields"]) == 94
 
 
 def test_log_format_overflow_error_reports_chars_and_safe_max(tmp_path, monkeypatch):

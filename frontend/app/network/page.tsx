@@ -62,8 +62,8 @@ export default function NetworkPage() {
 
   const { data, isLoading, isFetching } = useServiceQuery(
     ['network', 'health', activeServiceId, startTime, endTime, filterPayload, animBucketSeconds, mapAsn],
-    async () => {
-      const { data } = await client.POST("/api/network-health", {
+    async ({ signal }) => {
+      const { data } = await client.POST("/api/network-health", { signal, 
         body: {
           start_time: startTime!,
           end_time: endTime!,
@@ -82,8 +82,8 @@ export default function NetworkPage() {
 
   const { data: shieldingData, isLoading: shieldingLoading } = useServiceQuery(
     ['network', 'shielding', activeServiceId, startTime, endTime, filterPayload],
-    async () => {
-      const { data } = await client.POST("/api/origin/shielding-analysis", {
+    async ({ signal }) => {
+      const { data } = await client.POST("/api/origin/shielding-analysis", { signal, 
         body: {
           start_time: startTime!,
           end_time: endTime!,

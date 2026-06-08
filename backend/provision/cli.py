@@ -266,6 +266,27 @@ def handle_update_logs(args):
         else (cfg.get("log_fields") or _build_log_fields_config(args))
     )
 
+    # MERGE GUARD (sibling of state_sync.import_admin_state fix from
+    # 2026-06-02 incident): _build_log_fields_config(args) returns
+    # {schema_version, preset, groups, field_overrides} — it has NO
+    # custom_fields key. Assigning the result wholesale to
+    # cfg["log_fields"] would strip the 6 scoring custom_fields the
+    # orchestrator injected, the user's own custom_fields, and any
+    # format_hash/updated_at metadata. Preserve custom_fields from the
+    # on-disk cfg, then if scoring is enabled re-inject the canonical
+    # _SCORING_CUSTOM_FIELDS from code as the source of truth.
+    existing_lf = cfg.get("log_fields") or {}
+    existing_custom = list(existing_lf.get("custom_fields") or [])
+    if cfg.get("scoring", {}).get("enabled"):
+        from backend.provision.session_scoring_orchestrator import (
+            _SCORING_CUSTOM_FIELDS,
+            _SCORING_FIELD_NAMES,
+        )
+
+        existing_custom = [cf for cf in existing_custom if cf.get("name") not in _SCORING_FIELD_NAMES]
+        existing_custom.extend(dict(cf) for cf in _SCORING_CUSTOM_FIELDS)
+    new_lf_config["custom_fields"] = existing_custom
+
     if getattr(args, "dry_run", False):
         print(lf.generate_log_format(new_lf_config))
         return

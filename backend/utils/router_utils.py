@@ -9,10 +9,12 @@
 
 from __future__ import annotations
 
-import traceback
+import logging
 from functools import wraps
 
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
 
 # ── Debug request formatting ──────────────────────────────────────────────────
 
@@ -61,6 +63,21 @@ def sse_flush_preamble(count: int = 8):
         yield f": {' ' * 1024}\n\n"
 
 
+def sse_event(payload: dict, pad: int = 256):
+    """Yield one SSE event followed by a padding comment that prevents
+    proxy buffering of trailing events.
+
+    Used by the SSE routers (provision, session_scoring) which all
+    previously defined an identical ``def yj`` locally. ``pad=0`` disables
+    the padding comment for callers that don't need it (e.g. the heartbeat
+    sites in services/core.py)."""
+    import json as _json
+
+    yield f"data: {_json.dumps(payload)}\n\n"
+    if pad:
+        yield f": {' ' * pad}\n\n"
+
+
 # ── State sync ────────────────────────────────────────────────────────────────
 
 
@@ -92,7 +109,14 @@ def sync_admin_state(service_id: str | None) -> None:
 
 def query_errors(status_code: int = 400):
     """Decorator that catches exceptions from a route handler and raises a
-    standard HTTPException with ``{"error": ..., "trace": ...}``.
+    standard ``HTTPException`` with ``{"error": str(e)}``.
+
+    Security: the previous implementation embedded the full
+    Python traceback under a ``trace`` key in the response body. Public
+    callers could read internal file paths, module structure, and even
+    secret values that leaked into exception messages. The fix is to log
+    the traceback server-side (where operators can read it during triage)
+    and return only the exception message to the client.
 
     Optionally catches ``ValueError`` / ``LookupError`` as 400/404 before
     the generic fallback.
@@ -117,9 +141,14 @@ def query_errors(status_code: int = 400):
             except LookupError as e:
                 raise HTTPException(status_code=404, detail={"error": str(e)})
             except Exception as e:
+                # logger.exception records the traceback to server logs
+                # WITHOUT putting it on the wire. Triage requires opening
+                # the backend log; that's an acceptable cost for the
+                # security gain.
+                logger.exception("[query_errors] unhandled exception in %s", fn.__qualname__)
                 raise HTTPException(
                     status_code=status_code,
-                    detail={"error": str(e), "trace": traceback.format_exc()},
+                    detail={"error": str(e)},
                 )
 
         return wrapper

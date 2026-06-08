@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 
 # run.sh - Starts the FastAPI backend and Next.js frontend.
-# Usage: ./run.sh [--dev] [--kill] [--frontend-port PORT] [--backend-port PORT]
+# Usage: ./run.sh [--dev] [--no-reload] [--kill] [--refresh] [--no-refresh]
+#                 [--frontend-port PORT] [--backend-port PORT]
 
-# If the user has a virtualenv activated in their shell, it might point to a 
-# different path (e.g. if the directory was renamed). We unset it here so that 
+# If the user has a virtualenv activated in their shell, it might point to a
+# different path (e.g. if the directory was renamed). We unset it here so that
 # uv can correctly discover the project-local .venv without warnings.
 unset VIRTUAL_ENV
 
@@ -16,19 +17,44 @@ if [ -f ".env" ]; then
 fi
 
 DEV_MODE=false
+NO_RELOAD=false
 KILL_EXISTING=false
+FORCE_REFRESH=false
+SKIP_REFRESH=false
 FRONTEND_PORT=${FRONTEND_PORT:-3000}
 BACKEND_PORT=${BACKEND_PORT:-8000}
+LOCAL_REFRESH_MAX_AGE_HOURS=${LOCAL_REFRESH_MAX_AGE_HOURS:-24}
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --dev) DEV_MODE=true ;;
+        --no-reload) NO_RELOAD=true ;;
         --kill) KILL_EXISTING=true ;;
+        --refresh) FORCE_REFRESH=true ;;
+        --no-refresh) SKIP_REFRESH=true ;;
         --frontend-port) FRONTEND_PORT="$2"; shift ;;
         --backend-port) BACKEND_PORT="$2"; shift ;;
     esac
     shift
 done
+
+# Refuse to take ports that are commonly used by an SSH tunnel forwarding
+# a remote backend/frontend (8000 backend, 3001 frontend). Trampling these
+# silently routes local requests to the wrong backend and looks like a
+# perfectly normal-running app.
+for RESERVED in 8000 3001; do
+    if [ "$BACKEND_PORT" = "$RESERVED" ] || [ "$FRONTEND_PORT" = "$RESERVED" ]; then
+        echo "[!] Refusing to bind port $RESERVED — commonly used by an SSH tunnel to a remote backend/frontend."
+        echo "    Override --backend-port / --frontend-port, or set BACKEND_PORT / FRONTEND_PORT in .env."
+        exit 1
+    fi
+done
+
+# Compose NODE_OPTIONS: keep --dns-result-order=ipv4first (required by next
+# dev to avoid IPv6 ::1 binding) and append whatever the env adds. Allows a
+# .env --max-old-space-size cap to actually reach node, instead of being
+# clobbered by the hardcoded NODE_OPTIONS in the npm invocations below.
+COMPOSED_NODE_OPTIONS="--dns-result-order=ipv4first ${NODE_OPTIONS_EXTRA:-} ${NODE_OPTIONS:-}"
 
 # Function to safely kill existing processes on the specific ports we use
 cleanup_existing() {
@@ -99,9 +125,9 @@ fi
 echo "=================================================="
 
 set -m
-if [ "$DEV_MODE" = true ]; then
-    # In dev mode, we explicitly exclude large directories to prevent the 
-    # watcher from hanging or causing reload loops.
+if [ "$DEV_MODE" = true ] && [ "$NO_RELOAD" = false ]; then
+    # In dev mode with reload, we explicitly exclude large directories to
+    # prevent the watcher from hanging or causing reload loops.
     uv run uvicorn backend.main:app --host 127.0.0.1 --port $BACKEND_PORT --reload \
         --reload-exclude "cache" \
         --reload-exclude "data" \
@@ -111,6 +137,9 @@ if [ "$DEV_MODE" = true ]; then
         --reload-exclude ".git" \
         --reload-exclude "*.duckdb*" &
 else
+    # --no-reload (or non-dev) skips uvicorn's --reload flag entirely. Avoids
+    # the watchfiles thrashing seen when sqlite WAL pulses or other
+    # frequently-touched files leak past the reload-exclude patterns.
     uv run uvicorn backend.main:app --host 127.0.0.1 --port $BACKEND_PORT &
 fi
 BACKEND_PID=$!
@@ -165,27 +194,27 @@ fi
 
 set -m
 if [ "$DEV_MODE" = true ]; then
-    NEXT_PUBLIC_BACKEND_PORT=$BACKEND_PORT API_PROXY_URL=http://127.0.0.1:$BACKEND_PORT PORT=$FRONTEND_PORT NODE_OPTIONS="--dns-result-order=ipv4first" npm run dev &
+    NEXT_PUBLIC_BACKEND_PORT=$BACKEND_PORT API_PROXY_URL=http://127.0.0.1:$BACKEND_PORT PORT=$FRONTEND_PORT NODE_OPTIONS="$COMPOSED_NODE_OPTIONS" npm run dev &
 else
     echo "Building production frontend (this takes a few seconds)..."
-    if ! NEXT_PUBLIC_BACKEND_PORT=$BACKEND_PORT API_PROXY_URL=http://127.0.0.1:$BACKEND_PORT NODE_OPTIONS="--dns-result-order=ipv4first" npm run build; then
+    if ! NEXT_PUBLIC_BACKEND_PORT=$BACKEND_PORT API_PROXY_URL=http://127.0.0.1:$BACKEND_PORT NODE_OPTIONS="$COMPOSED_NODE_OPTIONS" npm run build; then
         echo -e "\n[!] Error: Frontend build failed. Exiting run script."
         if [ -n "$BACKEND_PGID" ]; then kill -TERM -$BACKEND_PGID 2>/dev/null; fi
         exit 1
     fi
-    
+
     # Standalone mode does not copy static assets by default. We must copy them manually.
     # Next.js workspace detection might place the output inside a "frontend" subfolder.
     if [ -f ".next/standalone/frontend/server.js" ]; then
         cp -r public .next/standalone/frontend/
         mkdir -p .next/standalone/frontend/.next
         cp -r .next/static .next/standalone/frontend/.next/
-        API_PROXY_URL=http://127.0.0.1:$BACKEND_PORT PORT=$FRONTEND_PORT NODE_OPTIONS="--dns-result-order=ipv4first" node .next/standalone/frontend/server.js &
+        API_PROXY_URL=http://127.0.0.1:$BACKEND_PORT PORT=$FRONTEND_PORT NODE_OPTIONS="$COMPOSED_NODE_OPTIONS" node .next/standalone/frontend/server.js &
     else
         cp -r public .next/standalone/
         mkdir -p .next/standalone/.next
         cp -r .next/static .next/standalone/.next/
-        API_PROXY_URL=http://127.0.0.1:$BACKEND_PORT PORT=$FRONTEND_PORT NODE_OPTIONS="--dns-result-order=ipv4first" node .next/standalone/server.js &
+        API_PROXY_URL=http://127.0.0.1:$BACKEND_PORT PORT=$FRONTEND_PORT NODE_OPTIONS="$COMPOSED_NODE_OPTIONS" node .next/standalone/server.js &
     fi
 fi
 FRONTEND_PID=$!

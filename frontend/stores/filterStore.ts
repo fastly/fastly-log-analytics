@@ -26,8 +26,13 @@ interface FilterState {
 }
 
 export const useFilterStore = create<FilterState>((set) => ({
-  // Default to last 7 days to match V1
-  startTime: formatISO(subDays(new Date(), 7)),
+  // Default to last 24h. FilterBar.autoSetRange will snap this to the
+  // real latest-log-extent once /api/sync-status returns; when data is
+  // fresh (latest_log_at ~ now) the snapped range matches the default,
+  // so the dashboard query doesn't refire — no flicker on the common
+  // path. Was 7 days, which guaranteed a refire to 24h after
+  // sync-status returned (the auto-snap target).
+  startTime: formatISO(subDays(new Date(), 1)),
   endTime: formatISO(new Date()),
   filters: [],
   edgeOnly: false,

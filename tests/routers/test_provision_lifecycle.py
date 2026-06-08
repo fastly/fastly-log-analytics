@@ -60,7 +60,7 @@ def isolated_configs_dir(tmp_path, monkeypatch):
 def test_teardown_no_service_id_returns_404(isolated_configs_dir):
     """Calling teardown with a service_id that has no config → 404."""
     with TestClient(app) as client:
-        r = client.get("/api/provision/teardown", params={"service_id": "nope-not-a-real-svc"})
+        r = client.post("/api/provision/teardown", json={"service_id": "nope-not-a-real-svc"})
     assert r.status_code == 404
 
 
@@ -101,17 +101,28 @@ def test_teardown_emits_done_and_removes_config(isolated_configs_dir, tmp_path, 
         patch("backend.provision.perform_teardown", side_effect=fake_perform_teardown),
         patch("backend.provision._sync_crontab"),
         patch("backend.scheduler.get_scheduler"),
+        # Security: stub token validation. The auth gate itself is
+        # exercised in test_provision_teardown_auth.py.
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-LF"}
+                if path == "/tokens/self"
+                else {"id": sid, "customer_id": "cust-LF"}
+            ),
+        ),
     ):
         with TestClient(app) as client:
-            r = client.get(
+            r = client.post(
                 "/api/provision/teardown",
-                params={
+                json={
                     "service_id": sid,
-                    "remove_logging": "true",
-                    "remove_cdn": "true",
-                    "remove_bucket": "true",
-                    "remove_cache": "false",  # keep so we don't try to delete real DBs
-                    "remove_cron": "false",
+                    "token": "test-tok",
+                    "remove_logging": True,
+                    "remove_cdn": True,
+                    "remove_bucket": True,
+                    "remove_cache": False,  # keep so we don't try to delete real DBs
+                    "remove_cron": False,
                 },
             )
 
@@ -138,11 +149,19 @@ def test_teardown_skips_perform_teardown_when_no_logging_service(isolated_config
         patch("backend.provision.perform_teardown", side_effect=fake_perform_teardown),
         patch("backend.provision._sync_crontab"),
         patch("backend.scheduler.get_scheduler"),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-MIN"}
+                if path == "/tokens/self"
+                else {"id": sid, "customer_id": "cust-MIN"}
+            ),
+        ),
     ):
         with TestClient(app) as client:
-            r = client.get(
+            r = client.post(
                 "/api/provision/teardown",
-                params={"service_id": sid, "remove_cache": "false"},
+                json={"service_id": sid, "token": "test-tok", "remove_cache": False},
             )
     assert r.status_code == 200
     assert not os.path.exists(svcconfig.config_path(sid))

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.deps import AnalyticsDeps, get_service_id
 from backend.models.dashboard import QueryRequest
@@ -12,10 +12,21 @@ router = APIRouter(prefix="/api", tags=["query"])
 
 
 @router.post("/query")
-def query_endpoint(req: QueryRequest, deps: AnalyticsDeps = Depends()):
+def query_endpoint(
+    req: QueryRequest,
+    request: Request,
+    deps: AnalyticsDeps = Depends(),
+    service_id: str | None = Depends(get_service_id),
+):
     sql = req.sql.strip()
     if not sql:
         raise HTTPException(status_code=400, detail={"error": "No SQL provided"})
+
+    # Stamp session + service onto the validator audit log line so a
+    # rejection-rate spike from one analyst (attack-shaped probing) is
+    # observable without grepping correlated logs.
+    analyst_session = getattr(request.state, "analyst_session", None)
+    audit_session_id = analyst_session.session_id if analyst_session else "admin"
 
     # Single retry on "Cannot open file" — the local_compaction cron can
     # delete the file the read_parquet glob just enumerated. The race
@@ -24,9 +35,17 @@ def query_endpoint(req: QueryRequest, deps: AnalyticsDeps = Depends()):
     for attempt in (1, 2):
         try:
             return repo.execute_query(
-                con=deps.con, src=deps.source, sql=sql, max_rows=req.max_rows, want_explain=req.explain
+                con=deps.con,
+                src=deps.source,
+                sql=sql,
+                max_rows=req.max_rows,
+                want_explain=req.explain,
+                session_id=audit_session_id,
+                service_id=service_id,
             )
         except PermissionError as e:
+            # Validator rejections (security) and the legacy
+            # block both surface as PermissionError → HTTP 403.
             raise HTTPException(status_code=403, detail={"error": str(e)})
         except Exception as e:
             msg = str(e)

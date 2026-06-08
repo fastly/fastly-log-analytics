@@ -20,16 +20,20 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useBootstrap } from '@/hooks/useBootstrap'
 
 import { buttonVariants } from '@/components/ui/button'
 
+// Pre-fix this component also called useBootstrap() to "ensure services are
+// loaded". AppLayout (which wraps this) already calls useBootstrap and
+// populates useServiceStore as a side effect — having ServiceSwitcher call
+// it too added a second hook subscription that triggered extra renders on
+// every bootstrap settle, even though React Query deduped the network
+// request itself. The store is the right read source.
 export function ServiceSwitcher() {
   const [open, setOpen] = React.useState(false)
   const { services, activeServiceId, setActiveServiceId } = useServiceStore()
   const router = useRouter()
   const pathname = usePathname()
-  useBootstrap() // Ensure services are loaded and first service is auto-selected
 
   const activeService = services.find((s) => s.id === activeServiceId)
 

@@ -39,6 +39,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.utils.date_utils import iso_z, iso_z_now
+
 logger = logging.getLogger(__name__)
 
 # ── Locations ────────────────────────────────────────────────────────────────
@@ -90,11 +92,50 @@ def get_safe_share_db_connection(path: str) -> sqlite3.Connection:
         con.execute("SELECT 1").fetchone()
         return con
     except sqlite3.DatabaseError as exc:
+        # Security: ``DatabaseError`` is the parent of
+        # ``OperationalError``, which fires for transient conditions like
+        # "database is locked" / "disk I/O error" / FD exhaustion. The
+        # quarantine path renames the DB out from under any other open
+        # connections AND wipes all share state — running it on a transient
+        # error means a single lock-timeout under load can permanently
+        # delete every invite, session, and audit row in the share DB.
+        #
+        # Restrict the quarantine to actual file-corruption signatures from
+        # SQLite: "file is not a database" / "database disk image is malformed"
+        # / "unsupported file format". Anything else (lock timeout, I/O error,
+        # full disk, missing parent dir) is re-raised so the caller sees the
+        # real error instead of silently nuking the DB.
+        msg = str(exc).lower()
+        is_corruption = (
+            "malformed" in msg
+            or "not a database" in msg
+            or "unsupported file format" in msg
+            or "image is malformed" in msg
+        )
+        if not is_corruption:
+            # ERROR (not WARNING) so this near-miss is alertable from the
+            # existing log-error monitoring without needing a new metric
+            # plumbing — quarantine-skipped events should be rare; if we
+            # start seeing them at volume it's a signal that the
+            # is_corruption substrings need updating.
+            logger.error(
+                "[share_db] DatabaseError on open of %s NOT classified as corruption (err_type=%s); re-raising: %s",
+                path,
+                type(exc).__name__,
+                exc,
+            )
+            raise
+
         epoch = int(time.time())
         corrupt_path = f"{path}.corrupt-{epoch}"
         try:
             os.replace(path, corrupt_path)
-            logger.error("[share_db] corrupt DB at %s quarantined to %s (%s)", path, corrupt_path, exc)
+            logger.error(
+                "[share_db] corrupt DB at %s quarantined to %s (reason=corruption, %s)",
+                path,
+                corrupt_path,
+                exc,
+            )
         except OSError:
             logger.exception("[share_db] failed to quarantine corrupt DB at %s", path)
             raise
@@ -344,16 +385,7 @@ def apply_pending(con: sqlite3.Connection) -> int:
 
 
 # ── Time helpers ─────────────────────────────────────────────────────────────
-
-
-def iso_z_now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def iso_z(dt: datetime) -> str:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+# Handled via backend.utils.date_utils imports above to avoid duplication.
 
 
 # ── Passcode hashing (constant-time scrypt) ─────────────────────────────────
@@ -773,7 +805,15 @@ def get_remote_invites(*, con: sqlite3.Connection | None = None) -> list[dict]:
 def get_remote_invite_by_email_passcode(
     email: str, passcode: str, *, con: sqlite3.Connection | None = None
 ) -> dict | None:
-    """Constant-time lookup. Returns the invite dict on success, else None."""
+    """Constant-time lookup. Returns the invite dict on success, else None.
+
+    Security: when no invite exists for ``email`` (e.g., email
+    enumeration attack), still run one scrypt verification against a dummy
+    hash with the same parameters so the response time matches the
+    invite-exists branch (~30 ms). Without this, an attacker measuring the
+    response latency can distinguish "email is registered, passcode wrong"
+    (slow) from "email never invited" (fast) and enumerate emails.
+    """
     con = con or get_global_share_con()
     norm_email = (email or "").strip().lower()
     rows = con.execute(
@@ -790,10 +830,38 @@ def get_remote_invite_by_email_passcode(
             if match is None:
                 match = dict(row)
     if match is None:
+        # Equalize timing ONLY when the email has no invite at all. If
+        # rows existed (email present, passcode wrong) we already paid one
+        # scrypt per row inside the loop — running the dummy verification
+        # again would push the wrong-passcode branch to ``(N+1)×scrypt``
+        # while the no-email branch stays at ``1×scrypt``, recreating
+        # the 2× timing side-channel this function is meant to close.
+        if not rows:
+            _equalize_passcode_timing(passcode)
         return None
     match["pii_policy"] = json.loads(match.get("pii_policy") or '{"mask_ips": false}')
     match["service_ids"] = get_remote_invite_services(match["id"], con=con)
     return match
+
+
+_dummy_hash: str | None = None
+
+
+def _equalize_passcode_timing(passcode: str) -> None:
+    """Run one scrypt verification against a fixed dummy hash so the timing
+    of the "no email match" branch matches the "email match, wrong passcode"
+    branch.
+
+    The dummy hash uses the same _SCRYPT_N/_R/_P/_DKLEN parameters as
+    ``hash_passcode`` so verification cost is identical. Generated once per
+    process and reused — generating per-call would add measurable extra cost
+    to the miss branch."""
+    global _dummy_hash
+    if _dummy_hash is None:
+        # Synthesize via the real hash function so any future parameter
+        # change in ``hash_passcode`` is automatically reflected here.
+        _dummy_hash = hash_passcode("__dummy_for_timing_equalization__")
+    verify_passcode(passcode, _dummy_hash)
 
 
 def update_remote_invite_services(
@@ -1028,21 +1096,37 @@ def claim_token(token: str, ip: str, *, con: sqlite3.Connection | None = None) -
 
     Returns the row dict on success; ``None`` if the token does not exist, is
     expired, or was already claimed.
+
+    Security (TOCTOU): use a single atomic UPDATE with the
+    ``claimed_at IS NULL`` predicate baked into the WHERE clause. Earlier
+    versions ran SELECT-then-check-then-UPDATE under the same transaction,
+    but two concurrent claims could both pass the SELECT before either
+    UPDATE landed and end up double-redeeming. Now whichever transaction's
+    UPDATE commits first wins (rowcount == 1); the loser sees rowcount == 0
+    and returns None.
+
+    The SELECT after UPDATE re-reads the just-claimed row so we can return
+    the invite_id to the caller. Doing it inside the same ``with con:``
+    block keeps it in the same write transaction.
     """
     con = con or get_global_share_con()
     now = iso_z_now()
     with con:
+        cur = con.execute(
+            """
+            UPDATE remote_invite_claim_tokens
+               SET claimed_at = ?, claimed_from_ip = ?
+             WHERE token = ?
+               AND claimed_at IS NULL
+               AND expires_at >= ?
+            """,
+            (now, ip, token, now),
+        )
+        if cur.rowcount != 1:
+            return None
         row = con.execute("SELECT * FROM remote_invite_claim_tokens WHERE token=?", (token,)).fetchone()
         if row is None:
             return None
-        if row["claimed_at"] is not None:
-            return None
-        if row["expires_at"] < now:
-            return None
-        con.execute(
-            "UPDATE remote_invite_claim_tokens SET claimed_at=?, claimed_from_ip=? WHERE token=?",
-            (now, ip, token),
-        )
     return dict(row)
 
 
@@ -1277,11 +1361,22 @@ def apply_pii_policy(obj, policy: dict):
         return obj
     masked_keys = {"ip", "ip_address", "client_ip", "remote_addr"}
 
-    def _walk(node):
+    def _walk(node, parent_key=None):
         if isinstance(node, dict):
-            return {k: (mask_ip(v) if isinstance(v, str) and k in masked_keys else _walk(v)) for k, v in node.items()}
+            return {
+                k: (mask_ip(v) if isinstance(v, str) and k in masked_keys else _walk(v, parent_key=k))
+                for k, v in node.items()
+            }
         if isinstance(node, list):
-            return [_walk(x) for x in node]
+            # Array fields inherit the parent dict key for masking — e.g.
+            # ``{"client_ip": ["1.2.3.4", "5.6.7.8"]}`` must mask each string
+            # the same way the scalar form would. Without threading the
+            # parent key through, list-of-string IP fields slipped past the
+            # masker entirely.
+            return [
+                (mask_ip(x) if isinstance(x, str) and parent_key in masked_keys else _walk(x, parent_key=parent_key))
+                for x in node
+            ]
         return node
 
     return _walk(obj)

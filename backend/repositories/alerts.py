@@ -45,6 +45,25 @@ def _find_alert_service(alert_id: str) -> str | None:
     return None
 
 
+def get_alert_by_id(alert_id: str) -> dict | None:
+    """Return the alert row whose id matches ``alert_id`` (or None).
+
+    Security (defense-in-depth): the cross-tenant scope check in
+    ``backend/routers/alerts.py:delete_alert`` calls this to look up
+    ``service_id`` BEFORE mutating, so an analyst attempting a
+    cross-tenant delete gets 403 and the underlying row stays untouched.
+    Without this helper that check is dead code and the gate falls
+    through to the middleware (which already blocks DELETE on
+    /api/alerts for analysts, but the router-level gate is the
+    secondary belt-and-suspenders).
+    """
+    for sid in _all_service_ids():
+        for a in metadata_db.list_alerts(sid, filter_service_id=sid):
+            if a.get("id") == alert_id:
+                return a
+    return None
+
+
 def toggle_alert(alert_id: str, enabled: bool, service_id_hint: str | None = None) -> dict:
     """Toggle an alert. ``service_id_hint`` (from request context) avoids the
     cross-service scan when known; falls back to scan when not provided."""

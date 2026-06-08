@@ -79,29 +79,36 @@ interface NavLinkProps {
 }
 
 function NavLink({ href, icon: Icon, name, isActive, disabled, activeServiceId }: NavLinkProps & { activeServiceId?: string | null }) {
-  if (disabled) {
-    return (
-      <div
-        className={cn(
-          "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground opacity-50 cursor-not-allowed"
-        )}
-      >
-        <Icon className="h-4 w-4" />
-        {name}
-      </div>
-    )
-  }
-
   const finalHref = activeServiceId && !href.startsWith('/admin')
     ? `${href}?service=${activeServiceId}`
     : href
 
+  // Disabled state (no services yet — onboarding) still renders a real
+  // <Link> with pointer-events disabled + aria-disabled. Pre-fix this
+  // returned a plain <div>, which made the entire sidebar inert during
+  // cold-start: an admin who had a services list but bootstrap hadn't
+  // returned yet couldn't click ANY nav item to bounce out of the
+  // /admin onboarding flow. Keeping it a Link is sufficient for that;
+  // the moment the disabled state flips off, clicks just work.
+  //
+  // Prefetch is disabled. Next.js auto-prefetches every visible <Link>
+  // on viewport entry — with ~12 sidebar items rendered on every page,
+  // that fires 30-60 RSC requests in the background of every page load
+  // (37-66 observed across page HARs, ~2s of bandwidth competition
+  // against the real data calls). Click-time fetch is ~100ms slower
+  // per navigation but the page-load cost it removes is much larger.
   return (
     <Link
       href={finalHref}
+      prefetch={false}
+      aria-disabled={disabled || undefined}
+      tabIndex={disabled ? -1 : undefined}
       className={cn(
-        "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
-        isActive ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground"
+        "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+        disabled
+          ? "text-muted-foreground opacity-50 cursor-not-allowed pointer-events-none"
+          : "hover:bg-accent hover:text-accent-foreground",
+        !disabled && isActive ? "bg-primary text-primary-foreground shadow-sm" : !disabled ? "text-muted-foreground" : ""
       )}
     >
       <Icon className="h-4 w-4" />
@@ -114,6 +121,16 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
   const { data: bootstrapData, isSuccess, isLoading } = useBootstrap()
+
+  // (Removed) Navigation cancel pattern was here. The intent was to
+  // abort the previous route's in-flight polls on route change, but
+  // ``cancelQueries({ type: 'active' })`` fires AFTER React mounts the
+  // new page and starts ITS queries — so it cancelled the new page's
+  // queries too, leaving every page except dashboard with no data.
+  // The right way to do this needs per-route query namespacing or a
+  // pre-navigation hook. Until then, accept the small in-flight
+  // overlap. The 2s → 10s health-snapshot polling rate change is the
+  // real lever for backend pressure.
 
   const activeServiceId = useServiceStore(state => state.activeServiceId)
   const services = useServiceStore(state => state.services)
@@ -161,28 +178,35 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
   React.useEffect(() => {
     if (isLoading) return
+    // All router.replace() calls in this redirect block are wrapped in
+    // startTransition so React paints the current loading.tsx skeleton
+    // first instead of stalling on the synchronous URL change.
     // Anonymous remote visitors get redirected to /share-login before any
     // other layout/redirect logic kicks in. Skip while already there.
     if (needsLogin && !pathname.startsWith('/share-login')) {
-      router.replace('/share-login')
+      React.startTransition(() => router.replace('/share-login'))
       return
     }
     // Analysts can't access admin pages. The backend already returns 403
     // on /api/admin/*, but the page shells are served by Next.js — bounce
     // them away client-side so the URL isn't reachable.
     if (isAnalyst && pathname.startsWith('/admin')) {
-      router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard')
+      React.startTransition(() =>
+        router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'),
+      )
       return
     }
     // Share-invited analysts also can't see ingestion ops (Data Management
     // = /logs). FOS-sharing analysts who run their own copy still can.
     if (isShareAnalyst && pathname.startsWith('/logs')) {
-      router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard')
+      React.startTransition(() =>
+        router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'),
+      )
       return
     }
     // Admin-side wizard redirect — only for local admins.
     if (!isAnalyst && !hasServices && !pathname.startsWith('/admin')) {
-      router.replace('/admin')
+      React.startTransition(() => router.replace('/admin'))
     }
   }, [isLoading, hasServices, isAnalyst, isShareAnalyst, needsLogin, pathname, router, activeServiceId])
 
@@ -273,12 +297,18 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         {!hideFilterBar && <FilterBar />}
 
         <main className="flex-1 overflow-auto p-6">
-          {!hasServices && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login') ? null
-            : isLoading ? (
-              <div className="flex items-center justify-center h-full">
-                <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-              </div>
-            ) : children}
+          {/* Render children IMMEDIATELY on navigation. The previous
+              ``isLoading ? <Spinner /> : children`` gate held every
+              route hostage to /api/bootstrap, which has no staleTime —
+              meaning every click → blank spinner until the bootstrap
+              fetch returned (~1s of lag, observed 2026-06-04). With
+              the gate removed, Next.js can render each route's
+              loading.tsx skeleton immediately on click, then swap in
+              the real page when its React Query data lands. The
+              !hasServices short-circuit stays so the onboarding
+              redirect at lines 163-188 has time to fire without
+              flashing a half-loaded page. */}
+          {!hasServices && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login') ? null : children}
           <DebugPanel />
         </main>
       </div>

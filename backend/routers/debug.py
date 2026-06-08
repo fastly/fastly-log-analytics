@@ -33,3 +33,20 @@ def clear_sqlite():
     """Drain the SQLite ring buffer. Manual reset for the Debug Panel."""
     sqlite_profiler.clear()
     return {"ok": True, **sqlite_profiler.buffer_stats()}
+
+
+@router.get("/state")
+def debug_state():
+    """Report whether the backend will include ``_debug_queries`` /
+    ``_debug_calls`` arrays in API responses.
+
+    Controlled by the process-level ``DEBUG_RESPONSES`` env var (defaults
+    OFF in production for security; ON in local-dev ``.env``). The admin
+    page calls this to dim the "Query debugging panel" + "API call panel"
+    toggles when the backend won't populate them — so the operator gets
+    a clear tooltip explaining why their toggle has no effect, instead of
+    silently flipping a switch that does nothing.
+    """
+    from backend.models.common import _debug_responses_enabled
+
+    return {"debug_responses_enabled": _debug_responses_enabled()}

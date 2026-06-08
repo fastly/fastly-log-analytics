@@ -86,6 +86,29 @@ def _fake_perform_teardown(state, token, opts=None):
     yield {"type": "done", "message": "teardown complete (mock)"}
 
 
+# Security: destructive teardown requires a caller-supplied Fastly token
+# validated via /tokens/self. These operational tests bypass the real Fastly
+# call by stubbing the validator — the auth gate itself is exercised in
+# tests/routers/test_provision_teardown_auth.py.
+_VALID_TOKEN = "test-admin-token"
+_VALID_TOKEN_SHAPE = {
+    "id": "tok_test",
+    "user_id": "user_test",
+    "scope": "global",
+    "services": [],
+    "customer_id": "cust-IDEM",
+}
+
+
+def _fake_fastly_dual(method, path, *, token, **kw):
+    """Dispatcher that returns ``/tokens/self`` or ``/service/{id}`` payloads
+    for the two-shot pattern introduced by the 035 tenant cross-check."""
+    if path == "/tokens/self":
+        return _VALID_TOKEN_SHAPE
+    # /service/{sid} — must match the token's customer_id
+    return {"id": path.rsplit("/", 1)[-1], "customer_id": _VALID_TOKEN_SHAPE["customer_id"]}
+
+
 def test_teardown_is_idempotent_second_call_is_404(isolated_configs_dir):
     """Two back-to-back teardown calls: first 200 + cleans up, second 404."""
     sid = "svc-idem-1"
@@ -95,17 +118,19 @@ def test_teardown_is_idempotent_second_call_is_404(isolated_configs_dir):
         patch("backend.provision.perform_teardown", side_effect=_fake_perform_teardown),
         patch("backend.provision._sync_crontab"),
         patch("backend.scheduler.get_scheduler"),
+        patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly_dual),
     ):
         with TestClient(app) as client:
-            r1 = client.get(
+            r1 = client.post(
                 "/api/provision/teardown",
-                params={
+                json={
                     "service_id": sid,
-                    "remove_logging": "true",
-                    "remove_cdn": "true",
-                    "remove_bucket": "true",
-                    "remove_cache": "false",
-                    "remove_cron": "false",
+                    "token": _VALID_TOKEN,
+                    "remove_logging": True,
+                    "remove_cdn": True,
+                    "remove_bucket": True,
+                    "remove_cache": False,
+                    "remove_cron": False,
                 },
             )
             assert r1.status_code == 200
@@ -117,9 +142,9 @@ def test_teardown_is_idempotent_second_call_is_404(isolated_configs_dir):
 
             # Second call: config is gone, route should reject with 404 cleanly.
             # No 500, no stack trace, no partial SSE stream.
-            r2 = client.get(
+            r2 = client.post(
                 "/api/provision/teardown",
-                params={"service_id": sid, "remove_cache": "false"},
+                json={"service_id": sid, "token": _VALID_TOKEN, "remove_cache": False},
             )
 
     assert r2.status_code == 404, (
@@ -130,11 +155,15 @@ def test_teardown_is_idempotent_second_call_is_404(isolated_configs_dir):
 
 
 def test_teardown_unknown_service_id_never_provisioned_is_404(isolated_configs_dir):
-    """Teardown on a service that never existed (typo / wrong env) — 404, no crash."""
+    """Teardown on a service that never existed (typo / wrong env) — 404, no crash.
+
+    No token needed because we return 404 before reaching the auth gate (state
+    is None → 404 first). The auth gate only fires once state is loaded.
+    """
     with TestClient(app) as client:
-        r = client.get(
+        r = client.post(
             "/api/provision/teardown",
-            params={"service_id": "never-existed-svc", "remove_cache": "false"},
+            json={"service_id": "never-existed-svc", "remove_cache": False},
         )
     assert r.status_code == 404
 
@@ -161,14 +190,16 @@ def test_teardown_preserves_duckdb_when_remove_cache_false(isolated_configs_dir,
         patch("backend.provision.perform_teardown", side_effect=_fake_perform_teardown),
         patch("backend.provision._sync_crontab"),
         patch("backend.scheduler.get_scheduler"),
+        patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly_dual),
     ):
         with TestClient(app) as client:
-            r = client.get(
+            r = client.post(
                 "/api/provision/teardown",
-                params={
+                json={
                     "service_id": sid,
-                    "remove_cache": "false",
-                    "remove_cron": "false",
+                    "token": _VALID_TOKEN,
+                    "remove_cache": False,
+                    "remove_cron": False,
                 },
             )
 
@@ -200,11 +231,12 @@ def test_teardown_partial_failure_in_perform_teardown_still_succeeds(isolated_co
         patch("backend.provision.perform_teardown", side_effect=_boom_teardown),
         patch("backend.provision._sync_crontab"),
         patch("backend.scheduler.get_scheduler"),
+        patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly_dual),
     ):
         with TestClient(app) as client:
-            r = client.get(
+            r = client.post(
                 "/api/provision/teardown",
-                params={"service_id": sid, "remove_cache": "false"},
+                json={"service_id": sid, "token": _VALID_TOKEN, "remove_cache": False},
             )
 
     assert r.status_code == 200, r.text[:500]
@@ -220,8 +252,8 @@ def test_teardown_partial_failure_in_perform_teardown_still_succeeds(isolated_co
         "config should have been removed before perform_teardown raised"
     )
     with TestClient(app) as client:
-        r2 = client.get(
+        r2 = client.post(
             "/api/provision/teardown",
-            params={"service_id": sid, "remove_cache": "false"},
+            json={"service_id": sid, "token": _VALID_TOKEN, "remove_cache": False},
         )
     assert r2.status_code == 404, f"second teardown should be 404, got {r2.status_code}"

@@ -3,6 +3,41 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
+
+# Hostname suffixes allowed for ``cdn_url`` when the SSRF check below
+# decides whether to issue an outbound HTTP request. Any other hostname
+# (including bare IPs, ``localhost``, link-local addresses, or
+# attacker-supplied internal hostnames) is rejected — the field is
+# user-controlled at provision time and an attacker who can inject
+# ``http://169.254.169.254`` would otherwise turn fetch_lake_info into
+# an SSRF probe of the GCE metadata service.
+_CDN_URL_ALLOWED_HOST_SUFFIXES = (
+    ".fastly.net",
+    ".fastlystorage.app",
+)
+
+
+def _safe_cdn_url(cdn_url: str) -> str | None:
+    """Return ``cdn_url`` only if it's an https:// URL on an allowlisted
+    Fastly hostname, else None. Caller treats None as "skip the CDN
+    fast path and fall through to the SDK".
+    """
+    if not cdn_url:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(cdn_url)
+    except ValueError:
+        return None
+    if parsed.scheme != "https":
+        return None
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return None
+    for suffix in _CDN_URL_ALLOWED_HOST_SUFFIXES:
+        if hostname.endswith(suffix):
+            return cdn_url
+    return None
 
 
 def fetch_lake_info(source: dict, use_temp_cache: bool = False) -> dict:
@@ -29,9 +64,8 @@ def fetch_lake_info(source: dict, use_temp_cache: bool = False) -> dict:
         namespace, table_name = db_iceberg._table_identifier(source)
         summary_key = f"{iceberg_root}/{namespace}/{table_name}/table_summary.json"
 
-        cdn_url = (source.get("cdn_url") or "").rstrip("/")
+        cdn_url = _safe_cdn_url((source.get("cdn_url") or "").rstrip("/"))
         if cdn_url:
-            import urllib.parse
             import urllib.request
 
             from backend.utils.telemetry import record_cdn_call
