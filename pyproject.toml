@@ -1,6 +1,6 @@
 [project]
 name = "fastly-log-analytics"
-version = "1.0.0"
+version = "1.1.0"
 description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,8 +16,13 @@ dependencies = [
     "pyarrow>=17.0",
     "pandas>=2.3.3",
     "httpx>=0.28.1",
+    # pytz is loaded at RUNTIME by DuckDB's icu_collations / TIMESTAMP WITH
+    # TIME ZONE handling. An earlier dedup pass dropped this thinking it
+    # was unused (no direct `import pytz` in Python sources) — that broke
+    # every scoring analytics endpoint with "Required module 'pytz' failed
+    # to import" the moment they ran `WHERE timestamp >= now() - INTERVAL`.
+    # Don't drop again without confirming DuckDB no longer needs it.
     "pytz>=2026.1.post1",
-    "dateparser>=1.4.0",
     "aiohttp>=3.9",
     "cryptography>=42",
     "python-multipart>=0.0.9",
@@ -51,7 +56,12 @@ packages = ["backend"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# Worker cap: -n auto spawns cpu_count() workers, and each worker re-imports
+# the full backend (DuckDB, pyiceberg, boto3, fastapi) at ~500 MB resident.
+# On an 8-10 core Mac that's 4-5 GB just for pytest workers, which combined
+# with `make ci -j2` running vitest in parallel was pushing 16 GB Macs into
+# swap. -n 4 caps the worker pool at 4 regardless of CPU count.
+addopts = "-q -n 4"
 asyncio_mode = "auto"
 # Test-only suppression: FastAPI's TestClient runs requests in worker
 # threads that open metadata_db SQLite connections. Most of them are
@@ -64,6 +74,19 @@ asyncio_mode = "auto"
 filterwarnings = [
     "ignore::ResourceWarning:.*sqlite3.*",
     "ignore:unclosed database:ResourceWarning",
+    # Third-party deprecations we can't fix in our own code:
+    #
+    # starlette 1.0+ removed ``StarletteDeprecationWarning`` (the httpx2
+    # nudge) — keep the suppression keyed by message so it works on both
+    # legacy <1.0 (UserWarning) and modern installs where the class no
+    # longer exists. Filtering on the type at module-level would crash
+    # pytest config parsing during ``getattr(starlette.exceptions, …)``.
+    "ignore:.*httpx.*:UserWarning",
+    # aiohttp prints "enable_cleanup_closed ignored because <python bug
+    # fixed in 3.13.3>" on every ClientSession import. The fix the
+    # warning references is already in our Python, so the message is
+    # noise — there's nothing to act on.
+    "ignore:enable_cleanup_closed ignored:DeprecationWarning",
 ]
 
 [tool.mypy]

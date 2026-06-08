@@ -28,16 +28,12 @@ COOKIE_NAME = "analyst_session_id"
 def _client_ip(request: Request) -> str:
     """Extract the real client IP.
 
-    The middleware that wraps remote requests sets ``request.state.is_remote``;
-    when true we honor ``X-Forwarded-For`` (the Next.js proxy injects it).
-    On local-listener traffic we ignore the header to prevent IP spoofing
-    (Section #5).
+    With uvicorn running ``--proxy-headers --forwarded-allow-ips=127.0.0.1``
+    (see docker-compose.prod.yml), ``request.client.host`` is already the
+    real client IP for Caddy-proxied traffic and the loopback address for
+    direct admin connections. We never re-parse X-Forwarded-For ourselves —
+    that was the leftmost-XFF spoofing vector.
     """
-    is_remote = getattr(request.state, "is_remote", False)
-    if is_remote:
-        fwd = request.headers.get("x-forwarded-for")
-        if fwd:
-            return fwd.split(",")[0].strip()
     if request.client and request.client.host:
         return request.client.host
     return "0.0.0.0"

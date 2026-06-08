@@ -28,6 +28,7 @@ Config file schema:
 
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -76,11 +77,46 @@ def _ensure_dirs():
         _ensured_dirs.add(d)
 
 
+_SERVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_SERVICE_ID_MAX_LEN = 64
+
+
+def _validate_service_id(service_id: str) -> str:
+    """Security: defense in depth against path traversal in any helper
+    that builds a path from ``service_id``.
+
+    Real Fastly service IDs are opaque 22-char alphanumeric strings, but the
+    test suite and a handful of legacy provisioning paths use hyphenated
+    IDs like ``svc-1`` / ``test-service-id``. The regex therefore accepts
+    ``[A-Za-z0-9_-]+`` — every character allowed is safe inside a filename
+    and contains no path-separator / dot / null-byte. Without this,
+    ``service_id="/etc/passwd"`` or ``service_id="../../tmp/x"`` would
+    compose with ``pathlib`` semantics — absolute paths discard the base
+    entirely, relative ``..`` traverses out, and ``\\x00`` truncates on
+    some kernels.
+
+    Length cap (64) is well above the longest legitimate Fastly ID (22)
+    and bounds memory in error-logging paths.
+    """
+    if not isinstance(service_id, str):
+        raise ValueError(f"invalid service_id type {type(service_id).__name__}: must be str (security)")
+    if not service_id or len(service_id) > _SERVICE_ID_MAX_LEN:
+        raise ValueError(
+            f"invalid service_id length {len(service_id) if service_id else 0}: "
+            f"1..{_SERVICE_ID_MAX_LEN} characters required (security)"
+        )
+    if not _SERVICE_ID_RE.match(service_id):
+        raise ValueError(f"invalid service_id {service_id!r}: must be alphanumeric / dash / underscore (security)")
+    return service_id
+
+
 def config_path(service_id: str) -> Path:
+    _validate_service_id(service_id)
     return CONFIGS_DIR / f"{service_id}.json"
 
 
 def duckdb_path(service_id: str) -> str:
+    _validate_service_id(service_id)
     return str(SERVICES_DATA_DIR / f"{service_id}.duckdb")
 
 
@@ -91,8 +127,18 @@ def load_config(service_id: str) -> dict | None:
     result (e.g. update_status) won't poison the cache. The on-disk file is
     revalidated via st_mtime_ns, so external edits and save_config writes
     are picked up on the next call without explicit invalidation.
+
+    Returns ``None`` (not a raised exception) for invalid service IDs —
+    several call sites pass unsanitized input (e.g., a stale URL param,
+    an iteration over a stale config list) and rely on the None response
+    to mean "no config". Security's validation in ``config_path`` is
+    still what blocks the actual path-traversal attack; this just makes
+    the helper friendlier at call sites that don't pre-validate.
     """
-    path = config_path(service_id)
+    try:
+        path = config_path(service_id)
+    except ValueError:
+        return None
     try:
         mtime_ns = path.stat().st_mtime_ns
     except FileNotFoundError:

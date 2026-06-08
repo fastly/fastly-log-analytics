@@ -1,7 +1,15 @@
-import boto3
+import os as _os
+
+# 038: enable the telemetry overlay in API responses for the test
+# environment so existing assertions on ``_debug_queries`` /
+# ``_debug_calls`` keep passing. Production reads the env at
+# backend.models.common import time and defaults to "excluded".
+# Set it BEFORE the backend imports below so the module-level read
+# in backend.models.common picks it up.
+_os.environ.setdefault("DEBUG_RESPONSES", "true")
+
 import duckdb
 import pytest
-from moto import mock_aws
 
 from backend.deps import get_con
 
@@ -189,6 +197,12 @@ def s3_mock(monkeypatch):
     routes boto3 through the proxy (which would forward to the real FOS host
     moto can't intercept here), so we short-circuit at the factory.
     """
+    # Deferred imports — boto3+moto pull ~1.2s of cold start each. With xdist
+    # spawning 10 workers, that's ~12s of CPU paid up front even on test runs
+    # that never touch S3. Most of the suite doesn't use this fixture.
+    import boto3
+    from moto import mock_aws
+
     monkeypatch.setenv("MOTO_S3_CUSTOM_ENDPOINTS", "https://us-east-1.object.fastlystorage.app")
     with mock_aws():
         client = boto3.client(

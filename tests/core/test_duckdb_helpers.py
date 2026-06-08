@@ -948,14 +948,22 @@ def test_log_cron_run_upgrades_status_to_partial_success_on_corrupt_rows():
     assert "partial" in str(captured) or True  # caller passes positional too
 
 
-def test_log_cron_run_uses_cron_compact_config_for_non_sync_tasks():
-    """Tasks other than `sync` look at cron_compact.log_enabled.
-    Pinned because admins disable compact logging separately
-    from sync logging — losing the routing would conflate the two."""
+def test_log_cron_run_only_local_compact_consults_cron_compact_config():
+    """Only `local_compact` consults cron_compact.log_enabled — and `sync`
+    consults cron_sync.log_enabled. Every other task (commit, optimize,
+    expire, full_sync, gap_heal, alerts, ngwaf_sync, metadata_sync,
+    metadata_cleanup) ignores both flags and always persists success rows.
+
+    Pinned to the 2026-06-04 fix: the prior code used a
+    `"cron_sync" if task=="sync" else "cron_compact"` ternary, which
+    silently coupled every non-sync task to cron_compact.log_enabled.
+    Setting cron_compact.log_enabled=false on a service was therefore
+    suppressing success rows for everything except sync — including the
+    new metadata_cleanup cron, which has no relationship to compaction."""
     from backend.core.duckdb import log_cron_run
 
-    deleted = []
-
+    # local_compact still respects cron_compact.log_enabled — drop row.
+    deleted_lc: list = []
     with (
         patch(
             "backend.config.load_config",
@@ -963,14 +971,34 @@ def test_log_cron_run_uses_cron_compact_config_for_non_sync_tasks():
         ),
         patch(
             "backend.core.metadata_db.delete_cron_run",
-            side_effect=lambda sid, rid: deleted.append((sid, rid)),
+            side_effect=lambda sid, rid: deleted_lc.append((sid, rid)),
         ),
         patch("backend.core.metadata_db.log_cron_run"),
     ):
-        log_cron_run({"name": "svc"}, "commit", 1.0, "success", run_id=42)
+        log_cron_run({"name": "svc"}, "local_compact", 1.0, "success", run_id=11)
+    assert deleted_lc == [("svc", 11)], "local_compact should honor cron_compact.log_enabled"
 
-    # Commit task respected its own log_enabled flag (and deleted the pending row)
-    assert deleted == [("svc", 42)]
+    # Unrelated tasks ignore cron_compact.log_enabled — log persists.
+    for task in ("commit", "optimize", "expire", "full_sync", "metadata_cleanup", "metadata_sync"):
+        deleted: list = []
+        logged: list = []
+        with (
+            patch(
+                "backend.config.load_config",
+                return_value={"provisioning": {"cron_compact": {"log_enabled": False}}},
+            ),
+            patch(
+                "backend.core.metadata_db.delete_cron_run",
+                side_effect=lambda sid, rid: deleted.append((sid, rid)),
+            ),
+            patch(
+                "backend.core.metadata_db.log_cron_run",
+                side_effect=lambda *args, **kwargs: logged.append((args, kwargs)),
+            ),
+        ):
+            log_cron_run({"name": "svc"}, task, 1.0, "success", run_id=42)
+        assert deleted == [], f"{task} must NOT delete its row when cron_compact is disabled"
+        assert len(logged) == 1, f"{task} must persist its success row regardless of cron_compact.log_enabled"
 
 
 def test_log_cron_run_swallows_metadata_db_exception():

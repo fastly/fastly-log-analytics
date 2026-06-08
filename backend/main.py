@@ -43,6 +43,8 @@ logging.basicConfig(
 logging.getLogger("pyiceberg.io").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
+logger = logging.getLogger("backend.main")
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -98,6 +100,17 @@ def _initialize_service(cfg: dict):
             if src:
                 _db.refresh_config_status(sid)
                 _ensure_persistent_view(sid, src)
+                # Data migrations: queues any pending one-time setup work
+                # (e.g. the initial rollups backfill) onto a daemon thread
+                # per service. Returns immediately so startup isn't gated
+                # on a potentially multi-minute backfill. See
+                # backend/core/data_migrations.py for the framework.
+                try:
+                    from backend.core import data_migrations
+
+                    data_migrations.run_pending(sid, src)
+                except Exception as e:
+                    logging.warning("[fastapi] Service %s: could not queue data migrations: %s", sid, e)
                 logging.info("[fastapi] Service %s initialised.", sid)
         except Exception as e:
             logging.warning("[fastapi] Could not initialise service %s: %s", sid, e)
@@ -161,6 +174,50 @@ def _ensure_pop_cache():
         logging.warning("[fastapi] Could not prefetch POP locations: %s", e)
 
 
+def _ensure_scoring_matrix():
+    """Pull the trained scoring matrix from FOS at startup for any
+    service that has scoring enabled.
+
+    Without this, the /scoring/evaluation endpoint falls back to the
+    bundled matrix.default.json (empty transitions → AUC ≈ 0.5) until
+    an operator manually drops compute/scorer/matrix.json into the
+    container. The fetch is best-effort: missing FOS object, no scoring
+    enabled, S3 timeout — all silently no-op so a slow FOS doesn't
+    block startup.
+    """
+    try:
+        from backend.provision.session_scoring_orchestrator import _MATRIX_PATH
+        from backend.state_sync import fetch_matrix_from_fos
+
+        for cfg in svcconfig.list_configs():
+            if not (cfg.get("scoring") or {}).get("enabled"):
+                continue
+            sid = cfg.get("service_id") or cfg.get("name")
+            try:
+                matrix = fetch_matrix_from_fos(sid)
+                if not matrix:
+                    continue
+                _MATRIX_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with _MATRIX_PATH.open("w") as f:
+                    import json as _json
+
+                    _json.dump(matrix, f)
+                logging.info(
+                    "[fastapi] Pulled scoring matrix from FOS for %s (version=%s)",
+                    sid,
+                    matrix.get("version", "?"),
+                )
+                # First-write-wins: with multiple scoring-enabled services,
+                # the matrix file is global. They SHOULD all be the same
+                # matrix (one trainer, one deploy), but if they differ
+                # we use whichever loaded first and log a warning above.
+                break
+            except Exception as e:
+                logging.warning("[fastapi] Could not pull scoring matrix for %s: %s", sid, e)
+    except Exception as e:
+        logging.warning("[fastapi] _ensure_scoring_matrix failed: %s", e)
+
+
 def _background_startup():
     """Run initialisation tasks that should not block the web server startup."""
     # Tag everything done here so the s3fs/boto3 hooks attribute their
@@ -181,6 +238,7 @@ def _background_startup():
             logging.warning("[fastapi] reload_default_source failed: %s", e)
 
         _ensure_pop_cache()
+        _ensure_scoring_matrix()
 
         try:
             from backend.scheduler import get_scheduler
@@ -223,6 +281,56 @@ def _enforce_data_dir_mounted() -> None:
         raise RuntimeError(msg)
 
 
+def _enforce_proxy_headers_configured() -> None:
+    """Security regression guard for.
+
+    The remote-access middleware reads ``request.client.host`` and trusts it as
+    the client's real IP. That only works if uvicorn is launched with
+    ``--proxy-headers --forwarded-allow-ips=<comma-separated-trusted-IPs>`` —
+    without those flags the framework returns the loopback peer address for
+    every Caddy-proxied request and every IP-based gate (rate-limiting, admin
+    detection, whitelist) becomes ineffective.
+
+    Production sets ``TRUSTED_PROXY_IPS=127.0.0.1`` in docker-compose.prod.yml
+    alongside the uvicorn flags. If that env var is missing or empty at boot,
+    refuse to start (or, for local dev where the var is unset, emit a loud
+    WARNING) so a future config refactor cannot silently re-introduce the
+    pre-patch vulnerability.
+
+    Set ``REQUIRE_PROXY_HEADERS=1`` in production to make this a hard FATAL.
+    Local dev / tests leave both env vars unset and the function is a no-op.
+
+    Defense in depth: even when our own ``TRUSTED_PROXY_IPS`` env is set, we
+    also probe uvicorn's own ``UVICORN_FORWARDED_ALLOW_IPS`` env var (the
+    env-equivalent of the ``--forwarded-allow-ips`` CLI flag). If a future
+    refactor passes the CLI flag without exporting our companion env var,
+    uvicorn's variable lets us detect it.
+    """
+    trusted = (os.environ.get("TRUSTED_PROXY_IPS") or "").strip()
+    uvicorn_trusted = (os.environ.get("UVICORN_FORWARDED_ALLOW_IPS") or "").strip()
+    require_strict = os.environ.get("REQUIRE_PROXY_HEADERS") == "1" or os.environ.get("STRICT_DATA_DIR_CHECK") == "1"
+    effective = trusted or uvicorn_trusted
+    if effective:
+        logging.info(
+            "[fastapi] proxy-headers trust set: TRUSTED_PROXY_IPS=%s UVICORN_FORWARDED_ALLOW_IPS=%s",
+            trusted or "(unset)",
+            uvicorn_trusted or "(unset)",
+        )
+        return
+    msg = (
+        "TRUSTED_PROXY_IPS is unset. uvicorn must be launched with "
+        "`--proxy-headers --forwarded-allow-ips=127.0.0.1` AND have "
+        "TRUSTED_PROXY_IPS=127.0.0.1 in its environment so the remote-access "
+        "middleware can read request.client.host as the real client IP. "
+        "Without this, leftmost-XFF spoofing becomes exploitable "
+        "and the admin Host-spoof bypass returns. See docker-compose.prod.yml."
+    )
+    if require_strict:
+        logging.critical("FATAL: %s", msg)
+        raise RuntimeError(msg)
+    logging.warning("[fastapi] %s", msg)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
@@ -231,6 +339,12 @@ async def lifespan(app: FastAPI):
     # Data-volume sanity check FIRST — before any dependency / scheduler /
     # ingestion logic that would otherwise blindly write to the wrong path.
     _enforce_data_dir_mounted()
+
+    # Proxy-headers regression guard (security). Production
+    # must have TRUSTED_PROXY_IPS set in env (mirrors the uvicorn
+    # --forwarded-allow-ips flag). Without it, IP-based gates become
+    # ineffective and the Host-spoof admin bypass returns.
+    _enforce_proxy_headers_configured()
 
     # Verify dependencies
     try:
@@ -289,7 +403,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Fastly Log Analytics API",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "FastAPI backend for the Fastly Log Analytics tool. "
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."
@@ -380,13 +494,24 @@ app.include_router(views.router)
 app.include_router(alerts.router)
 app.include_router(origin.router)
 
-from backend.routers import admin, bootstrap, debug, provision, services, share_admin, share_auth, usage
+from backend.routers import (
+    admin,
+    bootstrap,
+    debug,
+    provision,
+    services,
+    session_scoring,
+    share_admin,
+    share_auth,
+    usage,
+)
 
 app.include_router(bootstrap.router)
 app.include_router(services.router)
 app.include_router(usage.router)
 app.include_router(admin.router)
 app.include_router(provision.router)
+app.include_router(session_scoring.router)
 app.include_router(debug.router)
 app.include_router(share_auth.router)
 app.include_router(share_admin.router)

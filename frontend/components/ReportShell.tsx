@@ -9,6 +9,7 @@ import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { PageHeader } from '@/components/ui/page-header'
 import { Loader2, LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { DashboardSkeleton } from '@/components/skeletons/PageSkeleton'
 
 interface ReportShellProps {
   title: string
@@ -57,14 +58,13 @@ export function ReportShell({
       </PageHeader>
 
       {!isReady ? (
-        <div className="flex flex-col items-center justify-center min-h-[400px] bg-muted/10 border border-dashed rounded-lg">
-          <div className="flex flex-col items-center gap-3">
-            <Loader2 className="h-8 w-8 animate-spin text-primary/60" />
-            <p className="text-sm font-medium text-muted-foreground animate-pulse">
-              Initializing analysis...
-            </p>
-          </div>
-        </div>
+        // Content-shaped skeleton instead of a centered spinner. The
+        // prior "Initializing analysis…" loader was small and centered
+        // in 400px of empty space — users perceived it as "the page
+        // isn't loading" because it didn't look like real content
+        // taking shape. The skeleton mirrors the dashboard layout so
+        // the swap to real content doesn't reflow the page.
+        <DashboardSkeleton />
       ) : (
         children
       )}

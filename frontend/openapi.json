@@ -3,7 +3,7 @@
   "info": {
     "title": "Fastly Log Analytics API",
     "description": "FastAPI backend for the Fastly Log Analytics tool. Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json.",
-    "version": "1.0.0"
+    "version": "1.1.0"
   },
   "paths": {
     "/api/dashboard/aggregates": {
@@ -44,16 +44,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -164,16 +154,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -281,16 +261,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -393,16 +363,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -513,16 +473,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -627,16 +577,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -747,16 +687,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -861,16 +791,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -1074,16 +994,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -1188,16 +1098,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -1308,16 +1208,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -1422,16 +1312,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -1542,16 +1422,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -1659,16 +1529,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -1741,6 +1601,7 @@
           "views"
         ],
         "summary": "List Views",
+        "description": "Security: analyst can only list views for services in their\nscope. Without this gate an analyst scoped to ``svc-A`` could enumerate\nsaved views for ``svc-B`` by typing /api/views/svc-B in their browser.",
         "operationId": "list_views_api_views__service_id__get",
         "parameters": [
           {
@@ -1781,6 +1642,7 @@
           "views"
         ],
         "summary": "Create View",
+        "description": "Security: analyst can only create views for services in\ntheir scope. Middleware already blocks POST on /api/views for\nanalysts; this is defense-in-depth.",
         "operationId": "create_view_api_views__post",
         "requestBody": {
           "content": {
@@ -1924,6 +1786,7 @@
           "alerts"
         ],
         "summary": "List All Alerts",
+        "description": "Return alerts visible to the caller.\n\nAdmin: every alert across every service. Analyst: only alerts for\nservices in their invite's scope (security).",
         "operationId": "list_all_alerts_api_alerts__get",
         "responses": {
           "200": {
@@ -1943,6 +1806,7 @@
           "alerts"
         ],
         "summary": "Create Alert",
+        "description": "Create an alert. Analyst can only create alerts for services in\ntheir invite scope (security). The Phase-1 analyst middleware\nalso blocks POSTs on /api/alerts for analysts entirely (not in the\n_ANALYST_ALLOWED_WRITE_PREFIXES list), so this is defense-in-depth\nfor the admin-impersonating-analyst case.",
         "operationId": "create_alert_api_alerts__post",
         "requestBody": {
           "content": {
@@ -1984,6 +1848,7 @@
           "alerts"
         ],
         "summary": "List Service Alerts",
+        "description": "Return alerts for one service. Analyst gets 403 if the service\nisn't in their invite (security).",
         "operationId": "list_service_alerts_api_alerts__service_id__get",
         "parameters": [
           {
@@ -2036,16 +1901,6 @@
               "type": "integer",
               "default": 24,
               "title": "Lookback Hours"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -2410,16 +2265,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -2524,16 +2369,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -2644,16 +2479,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -2758,16 +2583,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -2878,16 +2693,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -2992,16 +2797,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -3112,16 +2907,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -3226,16 +3011,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -3408,6 +3183,7 @@
           "bootstrap"
         ],
         "summary": "Sources Endpoint",
+        "description": "Return storage metadata (endpoint / bucket / prefix / region) for the\nconfigured sources the caller is authorized to see.\n\nSecurity: filter by analyst session scope. Without this, an\nauthenticated analyst can enumerate every service's S3 bucket / endpoint\n/ prefix configuration, including ones not in their invite. Admin\nrequests (no analyst_session on request.state) see the full list.",
         "operationId": "sources_endpoint_api_sources_get",
         "responses": {
           "200": {
@@ -3459,16 +3235,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -3532,6 +3298,7 @@
           "bootstrap"
         ],
         "summary": "Log Fields Catalog",
+        "description": "Return the log-fields catalog for the requested service.\n\nSecurity: enforce analyst session scope on the requested\n``service_id``. Without this, an analyst scoped to ``svc-A`` can pass\n``?service_id=svc-B`` and read svc-B's custom field configuration\n(including PII-related field configs).",
         "operationId": "log_fields_catalog_api_log_fields_catalog_get",
         "parameters": [
           {
@@ -3659,16 +3426,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
             }
           },
           {
@@ -4520,12 +4277,140 @@
       }
     },
     "/api/services/{service_id}/logging-settings/update": {
-      "get": {
+      "patch": {
         "tags": [
           "services"
         ],
         "summary": "Api Service Update Logging Settings",
-        "operationId": "api_service_update_logging_settings_api_services__service_id__logging_settings_update_get",
+        "operationId": "api_service_update_logging_settings_api_services__service_id__logging_settings_update_patch",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "period",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Period"
+            }
+          },
+          {
+            "name": "sample_rate",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sample Rate"
+            }
+          },
+          {
+            "name": "prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Prefix"
+            }
+          },
+          {
+            "name": "edge_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Edge Only"
+            }
+          },
+          {
+            "name": "custom_condition",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Custom Condition"
+            }
+          },
+          {
+            "name": "update_format",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Update Format"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Api Service Update Logging Settings",
+        "operationId": "api_service_update_logging_settings_api_services__service_id__logging_settings_update_post",
         "parameters": [
           {
             "name": "service_id",
@@ -6168,16 +6053,6 @@
             }
           },
           {
-            "name": "read_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Read Only"
-            }
-          },
-          {
             "name": "x-fastly-service-id",
             "in": "header",
             "required": false,
@@ -7368,6 +7243,306 @@
         "summary": "Compaction Stats",
         "description": "Snapshot of file-count distribution across local cache partitions.\n\nUseful for monitoring: rising partitions_above_3 means the local\ncompaction cron has stopped keeping up; rising avg_files_per_partition\ncorrelates with slow dashboard scans.",
         "operationId": "compaction_stats_api_admin_compaction_stats_get",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/metadata-retention": {
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Update Metadata Retention",
+        "description": "Update the per-service ``metadata_retention`` config block.\n\nBody shape: any subset of ``{usage_log_days, ingested_files_days,\ncron_runs_days}``. Each value is coerced to int; negative / non-numeric\ninputs are clamped to 0 (which disables cleanup for that table per\ncleanup_metadata's semantics). Missing keys preserve their current\nvalue. Returns the resolved retention (defaults merged with cfg) so the\nUI can confirm what was saved.",
+        "operationId": "update_metadata_retention_api_admin_metadata_retention_patch",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/metadata-storage": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Metadata Storage",
+        "description": "Per-table row count + estimated bytes for this service's metadata.db.\n\nIncludes the resolved retention policy (per-service cfg merged with\ndefaults). The UI uses this to render the Metadata Storage card on\nthe admin page \u2014 table sizes, bytes, and a Cleanup-now button.",
+        "operationId": "metadata_storage_api_admin_metadata_storage_get",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/metadata-cleanup": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Metadata Cleanup Now",
+        "description": "Trigger an immediate metadata cleanup, streaming progress as SSE.\n\nEquivalent to the daily ``metadata_cleanup`` cron at 03:15 UTC but\non-demand. The DELETE phase is fast; VACUUM rewrites the whole file\nand on a multi-GB metadata.db can take minutes. Streaming gives the\noperator real-time feedback instead of a 5-minute hang behind a\nspinning button.\n\nEvent shapes (between SSE ``data:`` lines):\n\n    {\"type\": \"status\",   \"message\": str}\n    {\"type\": \"progress\", \"current\": int, \"total\": int, \"message\": str}\n    {\"type\": \"done\",     \"message\": str, \"result\": {...}}\n    {\"type\": \"error\",    \"message\": str}\n\nWrites a row to ``cron_runs`` with task=``metadata_cleanup`` so the\nmanual run shows up on the Data Management schedule + history grid\nalongside the scheduled cron's runs.",
+        "operationId": "metadata_cleanup_now_api_admin_metadata_cleanup_post",
         "parameters": [
           {
             "name": "service",
@@ -8893,90 +9068,31 @@
       }
     },
     "/api/provision/teardown": {
-      "get": {
+      "post": {
         "tags": [
           "provision"
         ],
         "summary": "Provision Teardown",
-        "operationId": "provision_teardown_api_provision_teardown_get",
-        "parameters": [
-          {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "remove_logging",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Remove Logging"
-            }
-          },
-          {
-            "name": "remove_cdn",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Remove Cdn"
-            }
-          },
-          {
-            "name": "remove_bucket",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Remove Bucket"
-            }
-          },
-          {
-            "name": "remove_cache",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Remove Cache"
-            }
-          },
-          {
-            "name": "remove_cron",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false,
-              "title": "Remove Cron"
+        "description": "Destructive service teardown over SSE.\n\nSwitched from ``GET`` to ``POST`` to defend against CSRF: a GET\nendpoint with side effects can be triggered by any cross-origin\n``<img src=\"\u2026\">``, ``<link>``, or ``<form method=get>``. POST routes\nrequire the caller to send a request that browsers do not emit\ncross-origin without the user explicitly submitting a form, and\n``Content-Type: application/json`` (sent by the dashboard's fetch\nclient) puts the request in the CORS-preflighted bucket so the\nbrowser will block silent invocation entirely.\n\nBody shape:\n    {token, service_id, remove_logging, remove_cdn,\n     remove_bucket, remove_cache, remove_cron}",
+        "operationId": "provision_teardown_api_provision_teardown_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
             }
           }
-        ],
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -9564,7 +9680,7 @@
           "provision"
         ],
         "summary": "Provision Ngwaf Workspaces",
-        "description": "List NGWAF workspaces using the provided token or the stored API key.",
+        "description": "List NGWAF workspaces for a service.\n\nSecurity: previously the endpoint would silently fall back to\nthe server-stored ``fastly_api_key`` if the caller didn't pass a\ntoken, letting any local-loopback caller enumerate NGWAF workspaces\nfor any service using the stored credential. Now the caller MUST\npresent a token, and we accept either:\n  - the stored ``fastly_api_key`` for this service (constant-time\n    match \u2014 preserves the existing admin UX where the frontend\n    passes the stored key it just used to fetch workspaces), OR\n  - a token whose /tokens/self response shows access to this service\n    (the strict validation path used for the destructive op).\nEither way an unauthenticated caller can't enumerate workspaces\neven if they reach the loopback admin surface.",
         "operationId": "provision_ngwaf_workspaces_api_provision_ngwaf_workspaces_get",
         "parameters": [
           {
@@ -9615,8 +9731,1254 @@
           "provision"
         ],
         "summary": "Provision Set Ngwaf Workspace",
-        "description": "Persist the NGWAF workspace ID for a service and reload the scheduler.",
+        "description": "Persist the NGWAF workspace ID for a service and reload the scheduler.\n\nSecurity: require the caller to present a Fastly token bound to\nthis service. Two paths are accepted:\n\n  1. The caller passes a token that ``/tokens/self`` confirms has the\n     ``global`` scope and access to ``service_id`` (preferred \u2014 admin\n     can rotate without re-entering the stored key).\n  2. The caller passes a token that constant-time-matches the\n     service's stored ``fastly_api_key`` (the existing admin flow).\n\nEither way an unauthenticated attacker who can reach the endpoint can't\nrebind the workspace because they don't know the token. The middleware\n/api/provision/ block also gates this for analysts.",
         "operationId": "provision_set_ngwaf_workspace_api_provision_services__service_id__ngwaf_workspace_patch",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/enable": {
+      "post": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Enable",
+        "description": "Enable session scoring for the given logging service.\n\nStreams SSE status events while the orchestrator runs through:\nCompute service provisioning \u2192 Wasm deploy \u2192 VCL clone \u2192 backend +\nsnippets + custom fields + format update \u2192 validate \u2192 activate.",
+        "operationId": "scoring_enable_api_services__service_id__scoring_enable_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Logging service ID to enable scoring on",
+              "title": "Service Id"
+            },
+            "description": "Logging service ID to enable scoring on"
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/disable": {
+      "post": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Disable",
+        "description": "Disable session scoring. Reverse of enable_scoring.",
+        "operationId": "scoring_disable_api_services__service_id__scoring_disable_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Logging service ID to disable scoring on",
+              "title": "Service Id"
+            },
+            "description": "Logging service ID to disable scoring on"
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/status": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Status",
+        "description": "Return the scoring block from the service's config, or\n{\"enabled\": false} if scoring was never enabled.",
+        "operationId": "scoring_status_api_services__service_id__scoring_status_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Logging service ID",
+              "title": "Service Id"
+            },
+            "description": "Logging service ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Status Api Services  Service Id  Scoring Status Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/labels": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Labels List",
+        "description": "Return all session labels for a service, most recent first.",
+        "operationId": "scoring_labels_list_api_services__service_id__scoring_labels_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Logging service ID",
+              "title": "Service Id"
+            },
+            "description": "Logging service ID"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10000,
+              "minimum": 1,
+              "default": 500,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Labels List Api Services  Service Id  Scoring Labels Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Labels Create",
+        "description": "Create or update a label. Upserts on (service_id, sid).",
+        "operationId": "scoring_labels_create_api_services__service_id__scoring_labels_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Logging service ID",
+              "title": "Service Id"
+            },
+            "description": "Logging service ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Labels Create Api Services  Service Id  Scoring Labels Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/labels/{label_id}": {
+      "patch": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Labels Update",
+        "operationId": "scoring_labels_update_api_services__service_id__scoring_labels__label_id__patch",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "label_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Label Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Labels Update Api Services  Service Id  Scoring Labels  Label Id  Patch"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Labels Delete",
+        "operationId": "scoring_labels_delete_api_services__service_id__scoring_labels__label_id__delete",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "label_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Label Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Labels Delete Api Services  Service Id  Scoring Labels  Label Id  Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/top-flagged": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Top Flagged",
+        "description": "Recent rows with non-null edge_score, sorted by score DESC. Feeds\nthe admin page's \"Top flagged sessions\" table.\n\nReturns up to ``limit`` rows. Each row carries enough context for the\nadmin to label it: sid, ip, ua, url, the three score fields, and\ncookie_compliance. Joining against the labels table is left to the\nUI (so it can show \"currently labeled X\" badges without paying the\nJOIN cost server-side).",
+        "operationId": "scoring_top_flagged_api_services__service_id__scoring_top_flagged_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "since_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 168,
+              "minimum": 1,
+              "default": 24,
+              "title": "Since Hours"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Top Flagged Api Services  Service Id  Scoring Top Flagged Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/score-distribution": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Score Distribution",
+        "description": "Hourly buckets \u00d7 score buckets (0, 25, 50, 75, 100). Returns a flat\nlist of {hour, bucket, count} rows; the frontend pivots for the\nhistogram.",
+        "operationId": "scoring_score_distribution_api_services__service_id__scoring_score_distribution_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "since_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 168,
+              "minimum": 1,
+              "default": 24,
+              "title": "Since Hours"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Score Distribution Api Services  Service Id  Scoring Score Distribution Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/compliance-breakdown": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Compliance Breakdown",
+        "description": "Hourly count grouped by edge_cookie_compliance (ok / missing /\ntampered / expired / unknown).",
+        "operationId": "scoring_compliance_breakdown_api_services__service_id__scoring_compliance_breakdown_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "since_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 168,
+              "minimum": 1,
+              "default": 24,
+              "title": "Since Hours"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Compliance Breakdown Api Services  Service Id  Scoring Compliance Breakdown Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/health": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Health",
+        "description": "High-level scoring health snapshot for the admin dashboard.\n\nReturns a single object with the metrics the operator wants at a\nglance: how often scoring fires vs how much edge traffic flows, what\nthe score distribution looks like as summary stats (mean / p50 / p95),\na top-N breakdown of the comma-separated edge_score_reason values\n(so 'cookie-missing' vs 'impossibly-fast' vs 'rare-transition' is\nvisible without opening the Raw Logs table), and a fail-open error\ncount (rows where the scorer's deliver-stage subfields didn't land \u2014\ntypically a Compute timeout or auth mismatch).",
+        "operationId": "scoring_health_api_services__service_id__scoring_health_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "since_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 168,
+              "minimum": 1,
+              "default": 24,
+              "title": "Since Hours"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Health Api Services  Service Id  Scoring Health Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/evaluation": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Evaluation",
+        "description": "Compute the live matrix's ROC-AUC against the operator's accumulated\ngood/bad labels and return the result for the StatusPanel.\n\nBelow the per-class minimum (3 each) the endpoint reports\n``has_min_samples: false`` and the StatusPanel renders a CTA pushing\nthe operator to label a few more sessions \u2014 sub-3 AUC bounces between\n0 and 1 on a single label flip and would erode trust in the metric.\n\nWiring:\n  1. Pull all labels for the service from SQLite (cheap; <10k rows).\n  2. Reconstruct each labeled sid's event sequence from DuckDB.\n  3. Load the trained matrix JSON.\n  4. Run evaluate() \u2014 AUC via Mann-Whitney U, no scipy dependency.\n\nCached for 20s under the existing _cached pattern; the key includes\nthe label count so a fresh label naturally invalidates the cache\n(also, _bust_analytics_cache fires on label POST/PATCH/DELETE).",
+        "operationId": "scoring_evaluation_api_services__service_id__scoring_evaluation_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Evaluation Api Services  Service Id  Scoring Evaluation Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/curves": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Curves",
+        "description": "ROC + PR curve points for the operator's labeled sessions.\n\nWalks every integer threshold 0..100 and computes:\n  ROC: (false_positive_rate, true_positive_rate) at that cutoff\n  PR:  (recall, precision) at that cutoff\n\nPlus the scalar summaries (AUC = area under ROC; AP = average\nprecision = area under PR). Both areas use the trapezoidal rule\non the sorted threshold sweep.\n\nReturns has_min_samples=false when either class has <3 labels \u2014\nsame gate as /scoring/evaluation \u2014 so the UI renders the \"label\nmore sessions\" CTA instead of a noisy curve.",
+        "operationId": "scoring_curves_api_services__service_id__scoring_curves_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Curves Api Services  Service Id  Scoring Curves Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/threshold-preview": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Threshold Preview",
+        "description": "Preview what happens at a given enforcement threshold.\n\nFor the last ``since_hours`` of edge traffic, count:\n  - total scored requests\n  - how many would be flagged (edge_score >= threshold)\n  - of those, how many are labeled good / bad / unlabeled\n  - same breakdown for the un-flagged tail\n\nThis is the underlying data for the operator-facing slider: drag\nthreshold up \u2192 fewer flags but you start missing labeled-bad\nsessions; drag down \u2192 catches more bad but also flags some labeled-\ngood (false positives). The 2x2 confusion matrix readout is enough\nto eyeball the right cutoff.\n\nCached 30s under the existing ``_cached`` pattern; the cache key\nincludes the threshold so dragging the slider re-fetches.",
+        "operationId": "scoring_threshold_preview_api_services__service_id__scoring_threshold_preview_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "threshold",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 0,
+              "default": 75,
+              "title": "Threshold"
+            }
+          },
+          {
+            "name": "since_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 168,
+              "minimum": 1,
+              "default": 24,
+              "title": "Since Hours"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Threshold Preview Api Services  Service Id  Scoring Threshold Preview Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/retrain": {
+      "post": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Retrain",
+        "description": "Build a fresh transition matrix from the last N days of DuckDB\ntraffic, save it to ``compute/scorer/matrix.json``, publish to FOS,\nand evaluate AUC against the operator's accumulated labels.\n\nSynchronous \u2014 for a 7-day window with ~10k sessions the whole pipeline\nruns in <30s. The endpoint returns the new matrix metadata + AUC so\nthe UI can show \"matrix moved from 0.62 \u2192 0.91 after retrain\". The\nWasm build + Compute deploy is a separate step (requires Fastly CLI\n+ Rust toolchain on the operator's box \u2014 not Docker-friendly): the\nresponse includes a hint pointing at ``scripts/scoring/deploy_wasm.sh``.\n\nPipeline:\n  1. extract_traces from DuckDB \u2192 in-memory sessions\n  2. build_matrix \u2192 TransitionMatrix\n  3. evaluate AUC against labels (if >=3 each class)\n  4. Save matrix.json to disk + publish to FOS\n  5. Bust the /scoring/evaluation cache",
+        "operationId": "scoring_retrain_api_services__service_id__scoring_retrain_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "since_days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 90,
+              "minimum": 1,
+              "description": "Window of DuckDB traffic to train on",
+              "default": 7,
+              "title": "Since Days"
+            },
+            "description": "Window of DuckDB traffic to train on"
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Override matrix version label; defaults to today's date",
+              "title": "Version"
+            },
+            "description": "Override matrix version label; defaults to today's date"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Retrain Api Services  Service Id  Scoring Retrain Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/sessions/{sid}/events": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Session Events",
+        "description": "Return the event timeline for a single session \u2014 the URLs the\nsession hit, in order, with per-request status/score/compliance/reason\nso the UI can render a 'view this labeled session' popover.\n\nThe data is the same shape ``evaluate()`` consumes for AUC; this\nendpoint just exposes it through a public route keyed on the sid the\noperator clicked. Cap is 500 events per sid (any realistic browsing\nsession well under that; the cap is a runaway-loop safety bound).",
+        "operationId": "scoring_session_events_api_services__service_id__scoring_sessions__sid__events_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Edge session id (12-hex chars)",
+              "title": "Sid"
+            },
+            "description": "Edge session id (12-hex chars)"
+          },
+          {
+            "name": "since_days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 90,
+              "minimum": 1,
+              "default": 30,
+              "title": "Since Days"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Session Events Api Services  Service Id  Scoring Sessions  Sid  Events Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/enforce-threshold": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Enforce Threshold Get",
+        "description": "Read the live enforce_threshold value from the scoring_config\nCompute ConfigStore. None = no enforcement.\n\nThe Rust scorer reads this on every request \u2014 when set AND the\nrequest's score >= threshold, it emits X-Edge-Score-Enforce: 1,\nwhich the SCORING_ENFORCE_NAME VCL snippet turns into a 429.",
+        "operationId": "scoring_enforce_threshold_get_api_services__service_id__scoring_enforce_threshold_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Enforce Threshold Get Api Services  Service Id  Scoring Enforce Threshold Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Enforce Threshold Put",
+        "description": "Write the live enforce_threshold to the scoring_config ConfigStore.\nPass ``{\"threshold\": null}`` to clear (disable enforcement).\n\nEffective at the edge within seconds (next Compute invocation\nre-reads the ConfigStore). Audited to scoring_audit so the operator\ncan review when enforcement was flipped on/off.\n\nGated by ``?confirm=true`` (matches the matrix-restore pattern) so\nan accidental click can't silently flip enforcement at the edge.",
+        "operationId": "scoring_enforce_threshold_put_api_services__service_id__scoring_enforce_threshold_put",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
+          },
+          {
+            "name": "confirm",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Set true to actually apply the enforcement change",
+              "default": false,
+              "title": "Confirm"
+            },
+            "description": "Set true to actually apply the enforcement change"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Enforce Threshold Put Api Services  Service Id  Scoring Enforce Threshold Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/exclude-regex": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Exclude Regex Get",
+        "description": "Return the operator-configured URL-exclusion regex for the recv snippet.\n\nURLs that match this regex are NOT routed to the Compute scorer\n(saves cost on static assets / health checks / etc.). The default\nmatches common static-asset file extensions; the operator can\noverride it via the PUT endpoint below.\n\nResponse shape:\n  {\n    \"current\":      str,    # the stored value (literal default after\n                            # first enable_scoring; or operator override)\n    \"is_default\":   bool,   # true when current is empty OR equals the\n                            # built-in default literal\n    \"default\":      str,    # the built-in default regex\n    \"effective\":    str,    # what's actually interpolated into VCL\n  }",
+        "operationId": "scoring_exclude_regex_get_api_services__service_id__scoring_exclude_regex_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Exclude Regex Get Api Services  Service Id  Scoring Exclude Regex Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Exclude Regex Put",
+        "description": "Update the URL-exclusion regex for the scoring recv snippet.\n\nValidation pipeline (must pass all four to land):\n  1. Input policy (length cap, no quote / control chars, valid regex).\n  2. Falco static analysis on the assembled recv-snippet body.\n  3. Fastly's VCL ``validate`` endpoint on the cloned version.\n  4. ``activate_version`` (Fastly's compiler runs again).\n\nRe-deploys ONLY the recv snippet \u2014 Compute service, Wasm, log\nformat, and the other 5 scoring snippets stay untouched. Takes\n~5-10s end-to-end.\n\nPass ``{\"regex\": \"\"}`` to reset to the built-in default. Body shape:\n    { \"regex\": str }\n\nGated by ``?confirm=true`` because a typo here can disable scoring\nentirely (regex matches everything) or DoS Compute (regex matches\nnothing \u2192 every request scored). The confirm flag matches the\nenforce-threshold + matrix-restore precedent.",
+        "operationId": "scoring_exclude_regex_put_api_services__service_id__scoring_exclude_regex_put",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
+          },
+          {
+            "name": "confirm",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Set true to actually apply the change",
+              "default": false,
+              "title": "Confirm"
+            },
+            "description": "Set true to actually apply the change"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Exclude Regex Put Api Services  Service Id  Scoring Exclude Regex Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/exclude-regex/validate": {
+      "post": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Exclude Regex Validate",
+        "description": "Run the 2-layer pre-publish validator on a candidate regex WITHOUT\npersisting it or touching Fastly.\n\nDrives the admin UI's on-blur lint check: the operator types a regex,\ntabs out of the textarea, and gets immediate feedback on whether the\nvalue would pass input policy (length / quote / control-char / Python\nre.compile) AND falco's static analysis on the assembled snippet,\nBEFORE they commit to a publish flow.\n\nResponse shape:\n  Success:  {\"ok\": true,  \"lint_warnings\": [...]}\n  Failure:  {\"ok\": false, \"error\": \"...\", \"reason\": \"...\"}\n\nThe third layer (Fastly's own VCL compiler during version activate)\nonly runs on real publish \u2014 we don't burn a clone/activate round-trip\nfor a preview. False-positives between falco and Fastly's compiler are\nrare; the publish flow still catches them.",
+        "operationId": "scoring_exclude_regex_validate_api_services__service_id__scoring_exclude_regex_validate_post",
         "parameters": [
           {
             "name": "service_id",
@@ -9645,7 +11007,594 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Exclude Regex Validate Api Services  Service Id  Scoring Exclude Regex Validate Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/enforce-status-code": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Enforce Status Code Get",
+        "description": "Return the operator-configured HTTP status code that the enforce\nsnippet returns when the scorer flags a request.\n\nDefaults to 429 (Too Many Requests). Operators can pick any 4xx/5xx\ncode via the PUT endpoint below.\n\nResponse shape:\n  {\n    \"current\":     int,    # operator's override, or null when default\n    \"default\":     int,    # built-in default (429)\n    \"effective\":   int,    # what's actually baked into the VCL\n    \"min\":         int,    # min allowed value (400)\n    \"max\":         int,    # max allowed value (599)\n    \"is_default\":  bool,\n  }",
+        "operationId": "scoring_enforce_status_code_get_api_services__service_id__scoring_enforce_status_code_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Enforce Status Code Get Api Services  Service Id  Scoring Enforce Status Code Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Enforce Status Code Put",
+        "description": "Update the HTTP status code returned by the enforce snippet.\n\nBody shape: ``{\"status_code\": int | null}``. Pass ``null`` (or omit)\nto reset to the default 429.\n\nValidation:\n  - Must be int in 400-599 (4xx/5xx HTTP error range).\n  - Anything else \u2192 400 with explanation.\n\nRe-deploys ONLY the enforce snippet \u2014 Compute service, Wasm, log\nformat, and the other 5 scoring snippets stay untouched. Takes\n~5-10s end-to-end.\n\nGated by ``?confirm=true`` because the change affects live edge\nresponse codes seen by real users \u2014 same precedent as\nenforce-threshold and exclude-regex.",
+        "operationId": "scoring_enforce_status_code_put_api_services__service_id__scoring_enforce_status_code_put",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
+          },
+          {
+            "name": "confirm",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Set true to actually apply the change",
+              "default": false,
+              "title": "Confirm"
+            },
+            "description": "Set true to actually apply the change"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Enforce Status Code Put Api Services  Service Id  Scoring Enforce Status Code Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/matrix-versions": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Matrix Versions List",
+        "description": "List historical scoring matrices archived in FOS.\n\npublish_matrix_to_fos snapshots the prior current matrix to\n``iceberg/meta/scoring_matrix_history/{version}.json`` before\noverwriting, so the operator can roll back to any prior trained\nmatrix. Returns most-recent first.",
+        "operationId": "scoring_matrix_versions_list_api_services__service_id__scoring_matrix_versions_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Matrix Versions List Api Services  Service Id  Scoring Matrix Versions Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/matrix-versions/{version}/restore": {
+      "post": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Matrix Versions Restore",
+        "description": "Restore a historical matrix to the current scoring_matrix.json\nkey in FOS. Also deletes the local matrix.json so the next\n/scoring/evaluation call sees the FOS-restored matrix.\n\nLive edge scorer (Wasm) keeps using its previously-embedded matrix\nuntil the operator re-runs deploy_wasm.sh. The /scoring/evaluation\nAUC will reflect the restored matrix immediately.\n\nGated by ``?confirm=true`` so an accidental click can't silently\nrewind the live AUC numbers.",
+        "operationId": "scoring_matrix_versions_restore_api_services__service_id__scoring_matrix_versions__version__restore_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]+$",
+              "description": "Matrix version string to restore",
+              "title": "Version"
+            },
+            "description": "Matrix version string to restore"
+          },
+          {
+            "name": "confirm",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Set true to actually perform the restore",
+              "default": false,
+              "title": "Confirm"
+            },
+            "description": "Set true to actually perform the restore"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Matrix Versions Restore Api Services  Service Id  Scoring Matrix Versions  Version  Restore Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/rotate-key": {
+      "post": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Rotate Key",
+        "description": "Rotate the AES-GCM cookie-state encryption key.\n\nMoves the current key to ``previous_key_hex`` (grace window for\nin-flight cookies still using the old key) and writes a fresh\n32-byte key as the new ``current_key_hex``. The Rust scorer's\ncookie codec already tries previous as a fallback so existing\nsessions keep decoding for one rotation cycle.\n\nReturns rotation metadata \u2014 the new key itself is NOT returned in\nthe response (only stored in the Fastly ConfigStore + audit log).",
+        "operationId": "scoring_rotate_key_api_services__service_id__scoring_rotate_key_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Rotate Key Api Services  Service Id  Scoring Rotate Key Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/audit": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Audit List",
+        "description": "List recent operator actions on this service's scoring config.\n\nTracks: scoring_enabled, scoring_disabled, threshold_committed,\nthreshold_cleared, threshold_enforced, threshold_enforce_disabled,\nmatrix_retrained, matrix_restored, key_rotated. Each row has\ntimestamp, action, actor, details (JSON). Used for compliance review\n+ \"who broke prod last Tuesday?\" triage.\n\n``since`` (optional ISO timestamp) filters to rows at or after that\ninstant \u2014 handy for the admin UI to poll for new events without\nre-rendering the entire history.",
+        "operationId": "scoring_audit_list_api_services__service_id__scoring_audit_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ISO timestamp lower bound (inclusive)",
+              "title": "Since"
+            },
+            "description": "ISO timestamp lower bound (inclusive)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Audit List Api Services  Service Id  Scoring Audit Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/threshold": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Threshold Get",
+        "description": "Return the operator's chosen score threshold.\n\nNOT enforced \u2014 the live scorer doesn't read this. It's a persisted\noperator preference so the threshold slider can remember the\n'committed' value across sessions, and the StatusPanel can show\n'committed threshold: X' as a stable reference. Actual enforcement\nrequires a Rust scorer change + Wasm redeploy and is deferred to\na future release once the operator is confident in the value.",
+        "operationId": "scoring_threshold_get_api_services__service_id__scoring_threshold_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Threshold Get Api Services  Service Id  Scoring Threshold Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Threshold Put",
+        "description": "Persist the operator's chosen threshold (0-100) into the per-service\nconfig. Pass ``{\"threshold\": null}`` to clear. Always returns the\nnew state. Does NOT push to Compute \u2014 preview-only.",
+        "operationId": "scoring_threshold_put_api_services__service_id__scoring_threshold_put",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Threshold Put Api Services  Service Id  Scoring Threshold Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/evaluation/per-reason": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Evaluation Per Reason",
+        "description": "AUC broken down by L1/L2 rule (cookie-missing, impossibly-fast,\nrobotic-consistency, rare-transition, low-transition-prob).\n\nSame min-samples gate as /scoring/evaluation but applied per-bucket\n(so a reason with <3 labels in either class shows a 'need more\nlabels with reason=X' CTA instead of a noisy AUC). The headline\n/scoring/evaluation gives the combined AUC; this answers 'which\nrule contributed most to AUC' once enough per-reason labels exist.",
+        "operationId": "scoring_evaluation_per_reason_api_services__service_id__scoring_evaluation_per_reason_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Evaluation Per Reason Api Services  Service Id  Scoring Evaluation Per Reason Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/dashboard": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Dashboard",
+        "description": "One-shot dashboard payload. Returns:\n\n```\n{\n    since_hours, threshold,\n    status: {...},                                  # /scoring/status\n    evaluation: {...},                              # /scoring/evaluation\n    health: {...},                                  # /scoring/health\n    top_flagged: {rows: [...], since_hours},        # /scoring/top-flagged\n    score_distribution: {rows: [...]},              # /scoring/score-distribution\n    compliance_breakdown: {rows: [...]},            # /scoring/compliance-breakdown\n    curves: {...},                                  # /scoring/curves\n    threshold_preview: {...},                       # /scoring/threshold-preview\n}\n```\n\nEach sub-object is byte-identical to the corresponding individual\nendpoint's response \u2014 the frontend can swap to\n``dashboard.top_flagged`` without changing card-level contracts.\n\nCache key includes ``since_hours``, ``threshold``, and the per-class\nlabel counts so label mutations + slider drags invalidate naturally.",
+        "operationId": "scoring_dashboard_api_services__service_id__scoring_dashboard_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "since_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 168,
+              "minimum": 1,
+              "default": 24,
+              "title": "Since Hours"
+            }
+          },
+          {
+            "name": "threshold",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 0,
+              "description": "Preview cutoff for threshold-preview block",
+              "default": 75,
+              "title": "Threshold"
+            },
+            "description": "Preview cutoff for threshold-preview block"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Dashboard Api Services  Service Id  Scoring Dashboard Get"
+                }
               }
             }
           },
@@ -9735,6 +11684,26 @@
                 "schema": {
                   "$ref": "#/components/schemas/ClearSqliteResponse"
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/debug/state": {
+      "get": {
+        "tags": [
+          "debug"
+        ],
+        "summary": "Debug State",
+        "description": "Report whether the backend will include ``_debug_queries`` /\n``_debug_calls`` arrays in API responses.\n\nControlled by the process-level ``DEBUG_RESPONSES`` env var (defaults\nOFF in production for security; ON in local-dev ``.env``). The admin\npage calls this to dim the \"Query debugging panel\" + \"API call panel\"\ntoggles when the backend won't populate them \u2014 so the operator gets\na clear tooltip explaining why their toggle has no effect, instead of\nsilently flipping a switch that does nothing.",
+        "operationId": "debug_state_api_debug_state_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           }
@@ -11637,7 +13606,8 @@
             "type": "string",
             "enum": [
               "edge",
-              "origin"
+              "origin",
+              "deliver"
             ],
             "title": "Collection Stage",
             "default": "edge"
@@ -11737,7 +13707,8 @@
             "type": "string",
             "enum": [
               "edge",
-              "origin"
+              "origin",
+              "deliver"
             ],
             "title": "Collection Stage",
             "default": "edge"
@@ -11894,7 +13865,8 @@
                 "type": "string",
                 "enum": [
                   "edge",
-                  "origin"
+                  "origin",
+                  "deliver"
                 ]
               },
               {
@@ -17864,7 +19836,8 @@
             "type": "string",
             "enum": [
               "edge",
-              "origin"
+              "origin",
+              "deliver"
             ],
             "title": "Collection Stage",
             "default": "edge"

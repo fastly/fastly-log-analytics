@@ -1,17 +1,39 @@
 'use client'
 
 import React from 'react'
+import dynamic from 'next/dynamic'
 import { useCardVisibility } from '@/hooks/useCardVisibility'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { client } from '@/lib/api'
+import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates } from '@/lib/staleViewRetry'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
 import { FilterPopover } from '@/components/FilterPopover'
-import { ChoroplethMap } from '@/components/Map/ChoroplethMap'
+import { LazyMount } from '@/components/LazyMount'
+
+// ChoroplethMap pulls in d3-geo and the world-110m topojson. Static-import
+// blocked the dashboard's initial JS parse/eval; dynamic-import slices it
+// off the critical path so the rest of the page paints immediately.
+// ssr:false because d3-geo uses canvas/SVG measurement APIs that don't
+// work in the server-render pass.
+const ChoroplethMap = dynamic(
+  () => import('@/components/Map/ChoroplethMap').then((m) => ({ default: m.ChoroplethMap })),
+  {
+    ssr: false,
+    loading: () => (
+      <div
+        className="flex-1 min-h-[300px] flex items-center justify-center bg-muted/20 rounded"
+        aria-busy="true"
+      >
+        <span className="text-muted-foreground text-xs animate-pulse">Loading map…</span>
+      </div>
+    ),
+  },
+)
 import { TopTenTable } from '@/components/Dashboard/TopTenTable'
 import { DashboardHeader } from '@/components/Dashboard/DashboardHeader'
 import { DataTable } from '@/components/DataTable'
@@ -35,6 +57,7 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { useShallow } from 'zustand/react/shallow'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useDashboardCards } from '@/hooks/useDashboardCards'
+import { FlagSessionPopover, type LabelValue } from '@/components/SessionScoring/FlagSessionPopover'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -126,6 +149,21 @@ const CUSTOM_TINT = {
 const CATEGORIZED_CARD_IDS = new Set(CARD_CATEGORIES.flatMap(c => c.cardIds))
 
 const COLLAPSED_SECTIONS_KEY = 'dashboard_collapsed_sections'
+
+// Raw-logs panel: which columns to fetch. Previously the panel pulled SELECT *
+// (~75 cols) on every dashboard load, which dominated /api/dashboard/raw time
+// because wide text fields (ua, referer, url, ja3, etc.) bloat the parquet
+// read. Default set covers the columns most users actually look at; everything
+// else can be opted in via the column dropdown (which triggers a refetch).
+// `timestamp` is always included so the default sort doesn't break.
+const RAW_COLUMNS_STORAGE_KEY = 'dashboard_raw_columns'
+const DEFAULT_RAW_COLUMNS = [
+  'timestamp', 'ip', 'country', 'host', 'url', 'method',
+  'status', 'cache', 'elapsed', 'resp_bytes', 'ttfb', 'ua', 'edge_sid',
+]
+// Catalog ids that aren't real parquet columns and can't be returned per-row
+// (they're aggregate-only views like the exploded waf_sig signal breakdown).
+const RAW_DROPDOWN_EXCLUDE = new Set(['waf_sig_ind', 'edge_score_reason_ind', '_source_file'])
 
 // ── Page ───────────────────────────────────────────────────────────────────────
 
@@ -230,8 +268,8 @@ export default function DashboardPage() {
 
         const { data: aggregates, isLoading: isLoadingAggs, isFetching: isFetchingAggs } = useServiceQuery(
           ['dashboard', 'aggregates', activeServiceId, startTime, endTime, filterPayload, metric, config.effectiveInterval],
-          async () => {
-            const { data } = await client.POST("/api/dashboard/aggregates", {
+          async ({ signal }) => {
+            const { data } = await client.POST("/api/dashboard/aggregates", { signal,
               body: {
                 start_time: startTime!,
                 end_time: endTime!,
@@ -240,14 +278,15 @@ export default function DashboardPage() {
                 chart_interval: config.effectiveInterval
               }
             })
-            return data
-          }
+            return throwIfStaleAggregates(data)
+          },
+          STALE_VIEW_RETRY_OPTIONS,
         )
 
         const { data: compareAggregates } = useQuery({
           queryKey: ['dashboard', 'aggregates', 'compare', activeServiceId, compareStartTime, compareEndTime, filterPayload, metric, config.effectiveInterval],
-          queryFn: async () => {
-            const { data } = await client.POST("/api/dashboard/aggregates", {
+          queryFn: async ({ signal }) => {
+            const { data } = await client.POST("/api/dashboard/aggregates", { signal,
               body: {
                 start_time: compareStartTime!,
                 end_time: compareEndTime!,
@@ -256,18 +295,47 @@ export default function DashboardPage() {
                 chart_interval: config.effectiveInterval
               }
             })
-            return data
+            return throwIfStaleAggregates(data)
           },
-          enabled: isReady && compareMode && !!compareStartTime && !!compareEndTime
+          enabled: isReady && compareMode && !!compareStartTime && !!compareEndTime,
+          ...STALE_VIEW_RETRY_OPTIONS,
         })
 
         const [sorting, setSorting] = React.useState<SortingState>([{ id: 'timestamp', desc: true }])
 
+        // User-selected raw-log columns. `timestamp` is forced into the list
+        // because the default sort references it; without it the API picks an
+        // arbitrary sort col and the table feels broken.
+        const [selectedRawColumns, setSelectedRawColumns] = React.useState<string[]>(() => {
+          if (typeof window === 'undefined') return DEFAULT_RAW_COLUMNS
+          try {
+            const raw = localStorage.getItem(RAW_COLUMNS_STORAGE_KEY)
+            const parsed = raw ? JSON.parse(raw) : null
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              return parsed.includes('timestamp') ? parsed : ['timestamp', ...parsed]
+            }
+          } catch { /* fall through to default */ }
+          return DEFAULT_RAW_COLUMNS
+        })
+
+        const toggleRawColumn = React.useCallback((id: string, visible: boolean) => {
+          setSelectedRawColumns(prev => {
+            const set = new Set(prev)
+            if (visible) set.add(id)
+            else if (id !== 'timestamp') set.delete(id)
+            const next = Array.from(set)
+            try {
+              localStorage.setItem(RAW_COLUMNS_STORAGE_KEY, JSON.stringify(next))
+            } catch { /* ignore quota / private-mode errors */ }
+            return next
+          })
+        }, [])
+
         const { data: rawLogs, isLoading: isLoadingRaw, isFetching: isFetchingRaw } = useServiceQuery(
-          ['dashboard', 'raw', activeServiceId, startTime, endTime, filterPayload, sorting],
-          async () => {
+          ['dashboard', 'raw', activeServiceId, startTime, endTime, filterPayload, sorting, selectedRawColumns],
+          async ({ signal }) => {
             const sort = sorting[0]
-            const { data } = await client.POST("/api/dashboard/raw", {
+            const { data } = await client.POST("/api/dashboard/raw", { signal, 
               body: {
                 start_time: startTime!,
                 end_time: endTime!,
@@ -276,7 +344,7 @@ export default function DashboardPage() {
                 page: 1,
                 sort_col: sort?.id,
                 sort_dir: sort?.desc ? 'desc' : 'asc',
-                columns: []
+                columns: selectedRawColumns
               }
             })
             return data
@@ -285,8 +353,8 @@ export default function DashboardPage() {
 
         const { data: topBotsData } = useQuery({
           queryKey: ['dashboard', 'top-bots', activeServiceId, startTime, endTime, filterPayload],
-          queryFn: async () => {
-            const { data } = await client.POST("/api/security/top-bots", {
+          queryFn: async ({ signal }) => {
+            const { data } = await client.POST("/api/security/top-bots", { signal, 
               body: {
                 start_time: startTime!,
                 end_time: endTime!,
@@ -495,12 +563,72 @@ export default function DashboardPage() {
         }, [addFilter])
 
         // ── Raw logs columns ───────────────────────────────────────────────────────
-        
-        const [rawVisibility, setRawVisibility] = React.useState<Record<string, boolean>>({})
+
+        // Catalog-driven option list for the raw-logs column dropdown. Lets
+        // users toggle on heavy fields (ua, referer, ja4, etc.) that aren't in
+        // DEFAULT_RAW_COLUMNS — toggling refetches with the expanded set.
+        const rawColumnOptions = React.useMemo(() => {
+          const fields = (catalog?.fields as any[]) || []
+          const seen = new Set<string>()
+          const out: { id: string; label: string }[] = []
+          for (const f of fields) {
+            if (!f?.id || RAW_DROPDOWN_EXCLUDE.has(f.id) || f.group === 'METRICS') continue
+            if (seen.has(f.id)) continue
+            seen.add(f.id)
+            out.push({ id: f.id, label: getFieldLabel(f.id) })
+          }
+          // Defensive: ensure any currently-selected column not present in the
+          // catalog (e.g. custom field that bootstrap hasn't loaded yet) still
+          // shows up checked in the dropdown.
+          for (const id of selectedRawColumns) {
+            if (!seen.has(id)) {
+              seen.add(id)
+              out.push({ id, label: getFieldLabel(id) })
+            }
+          }
+          return out
+        }, [catalog, getFieldLabel, selectedRawColumns])
+
+        const rawColumnVisibility = React.useMemo(() => {
+          const v: Record<string, boolean> = {}
+          for (const opt of rawColumnOptions) v[opt.id] = selectedRawColumns.includes(opt.id)
+          return v
+        }, [rawColumnOptions, selectedRawColumns])
+
+        // hasSidCol still drives the FLAG-COLUMN render below — it can't
+        // be determined until rawLogs returns. labelsQuery, however, fires
+        // immediately on serviceId (see comment on labelsQuery below).
+        const hasSidCol = !!rawLogs?.columns?.includes('edge_sid')
+
+        // Pull session-labels for the active service so we can render a
+        // colored Flag icon per row reflecting the current label state.
+        // Fire as soon as a serviceId is known — previously this was gated
+        // on `hasSidCol`, which created a real request waterfall: rawLogs
+        // took ~1s on prod, and this 10ms query couldn't start until then,
+        // blocking DataTable's first paint by the full rawLogs round-trip.
+        // The result is harmless when the service has no edge_sid column
+        // (the FLAG column simply doesn't render and the data goes unused).
+        const labelsQuery = useQuery({
+          queryKey: ['scoring-labels', activeServiceId],
+          enabled: !!activeServiceId,
+          queryFn: async ({ signal }) => {
+            const { data, response } = await client.GET(
+              '/api/services/{service_id}/scoring/labels' as any,
+              { params: { path: { service_id: activeServiceId || '' } } } as any,
+            )
+            if (!response.ok) throw new Error(`status ${response.status}`)
+            return data as { labels: Array<{ sid: string; label: LabelValue }> }
+          },
+        })
+        const labelBySid = React.useMemo(() => {
+          const m = new Map<string, LabelValue>()
+          for (const l of labelsQuery.data?.labels ?? []) m.set(l.sid, l.label)
+          return m
+        }, [labelsQuery.data])
 
         const columns: ColumnDef<any>[] = React.useMemo(() => {
           if (!rawLogs?.columns) return []
-          return rawLogs.columns.map(col => ({
+          const dataCols: ColumnDef<any>[] = rawLogs.columns.map((col: string): ColumnDef<any> => ({
             id: col,
             accessorFn: (row) => row[col],
             meta: { label: getFieldLabel(col) },
@@ -544,7 +672,32 @@ export default function DashboardPage() {
               )
             }
           }))
-        }, [rawLogs?.columns, full, abbr, addFilter, getFieldLabel])
+          // Flag column: only shown when edge_sid is present in the schema
+          // (i.e. session scoring is enabled). Disabled for rows where the
+          // sid is empty (cookieless requests — already caught by L1).
+          if (hasSidCol && activeServiceId) {
+            dataCols.push({
+              id: '__flag',
+              accessorFn: (_row: any) => '',
+              meta: { label: 'Flag' },
+              header: 'Flag',
+              cell: ({ row }: { row: any }) => {
+                const sid = String(row.original['edge_sid'] ?? '')
+                return (
+                  <FlagSessionPopover
+                    serviceId={activeServiceId}
+                    sid={sid}
+                    sampleIp={String(row.original['ip'] ?? '')}
+                    sampleUa={String(row.original['ua'] ?? '')}
+                    sampleUrl={String(row.original['url'] ?? '')}
+                    currentLabel={labelBySid.get(sid) ?? null}
+                  />
+                )
+              },
+            } as ColumnDef<any>)
+          }
+          return dataCols
+        }, [rawLogs?.columns, full, abbr, addFilter, getFieldLabel, hasSidCol, activeServiceId, labelBySid])
 
         const visibleCardList = React.useMemo(
           () => allCards.filter((c: any) => visibleCards.has(c.id)),
@@ -770,6 +923,15 @@ export default function DashboardPage() {
             {/* ── Aggregation cards ── */}
             {visibleCardList.length > 0 && (() => {
               const visibleById = new Map(visibleCardList.map((c: any) => [c.id, c]))
+              // Wrap each card in LazyMount so the FIRST dashboard paint
+              // only mounts the cards above the fold (~5-10) instead of
+              // all 86. Off-screen cards land as the user scrolls — the
+              // rootMargin of 600px (one screen) pre-mounts before the
+              // user actually reaches them, so they feel instant. Cuts
+              // initial DOM nodes from ~860 to ~100 and skips ~80
+              // TopTenTable mount cycles on first render. The loading
+              // placeholder branch is NOT wrapped — it's already cheap
+              // and we want every "Initializing..." tile visible.
               const renderCard = (card: any) => {
                 if (!isReady || (isLoadingAggs && !aggregates)) {
                   return (
@@ -782,47 +944,50 @@ export default function DashboardPage() {
                 }
                 if (card.id === '_bot_name') {
                   return (
-                    <TopTenTable
-                      key={card.id}
-                      title={card.label}
-                      icon={<Bot className="h-4 w-4" />}
-                      field="_bot_name"
-                      inActiveFormat={card.inActiveFormat}
-                      data={{
-                        total: topBotsData?.bots?.reduce((acc: number, b: any) => acc + b.request_count, 0) || 0,
-                        top: (topBotsData?.bots ?? []).map((b: any) => ({ value: b.id, label: b.name, count: b.request_count }))
-                      }}
-                      compareData={undefined}
-                      onRowClick={handleRowClick}
-                    />
+                    <LazyMount key={card.id} minHeight={300}>
+                      <TopTenTable
+                        title={card.label}
+                        icon={<Bot className="h-4 w-4" />}
+                        field="_bot_name"
+                        inActiveFormat={card.inActiveFormat}
+                        data={{
+                          total: topBotsData?.bots?.reduce((acc: number, b: any) => acc + b.request_count, 0) || 0,
+                          top: (topBotsData?.bots ?? []).map((b: any) => ({ value: b.id, label: b.name, count: b.request_count }))
+                        }}
+                        compareData={undefined}
+                        onRowClick={handleRowClick}
+                      />
+                    </LazyMount>
                   )
                 }
                 if (card.id === '_ngwaf_bot_name') {
                   return (
-                    <TopTenTable
-                      key={card.id}
-                      title={card.label}
-                      field="_ngwaf_bot_name"
-                      inActiveFormat={card.inActiveFormat}
-                      data={{
-                        total: (topBotsData?.ngwaf_bots ?? []).reduce((acc: number, b: any) => acc + b.request_count, 0),
-                        top: (topBotsData?.ngwaf_bots ?? []).map((b: any) => ({ value: b.name, label: b.name, count: b.request_count }))
-                      }}
-                      compareData={undefined}
-                      onRowClick={handleRowClick}
-                    />
+                    <LazyMount key={card.id} minHeight={300}>
+                      <TopTenTable
+                        title={card.label}
+                        field="_ngwaf_bot_name"
+                        inActiveFormat={card.inActiveFormat}
+                        data={{
+                          total: (topBotsData?.ngwaf_bots ?? []).reduce((acc: number, b: any) => acc + b.request_count, 0),
+                          top: (topBotsData?.ngwaf_bots ?? []).map((b: any) => ({ value: b.name, label: b.name, count: b.request_count }))
+                        }}
+                        compareData={undefined}
+                        onRowClick={handleRowClick}
+                      />
+                    </LazyMount>
                   )
                 }
                 return (
-                  <TopTenTable
-                    key={card.id}
-                    title={card.label}
-                    field={card.id}
-                    inActiveFormat={card.inActiveFormat}
-                    data={aggregates?.data?.[card.id]}
-                    compareData={compareMode ? compareAggregates?.data?.[card.id] : undefined}
-                    onRowClick={handleRowClick}
-                  />
+                  <LazyMount key={card.id} minHeight={300}>
+                    <TopTenTable
+                      title={card.label}
+                      field={card.id}
+                      inActiveFormat={card.inActiveFormat}
+                      data={aggregates?.data?.[card.id]}
+                      compareData={compareMode ? compareAggregates?.data?.[card.id] : undefined}
+                      onRowClick={handleRowClick}
+                    />
+                  </LazyMount>
                 )
               }
 
@@ -886,13 +1051,12 @@ export default function DashboardPage() {
               contentClassName="p-0"
               headerAction={
                 <div className="flex items-center gap-2">
-                  {rawLogs?.columns && (
-                    <ColumnVisibilityDropdown
-                      columns={rawLogs.columns.map((c: any) => ({ id: c, label: getFieldLabel(c) }))}
-                      visibility={rawVisibility}
-                      onChange={(id, vis) => setRawVisibility(prev => ({ ...prev, [id]: vis }))}
-                    />
-                  )}
+                  <ColumnVisibilityDropdown
+                    columns={rawColumnOptions}
+                    visibility={rawColumnVisibility}
+                    onChange={toggleRawColumn}
+                  />
+
                   <Button
                     variant="outline"
                     size="sm"
@@ -930,8 +1094,6 @@ export default function DashboardPage() {
                 columns={columns}
                 data={rawLogs?.data || []}
                 hideToolbar={true}
-                columnVisibility={rawVisibility}
-                onColumnVisibilityChange={setRawVisibility}
                 sorting={sorting}
                 onSortingChange={setSorting}
               />

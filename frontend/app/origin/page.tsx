@@ -113,8 +113,8 @@ function OriginReportContent({
 
   const summary = useServiceQuery(
     ['origin', 'summary', activeServiceId, startTime, endTime, filterPayload],
-    async () => {
-      const { data } = await client.POST("/api/origin/summary", {
+    async ({ signal }) => {
+      const { data } = await client.POST("/api/origin/summary", { signal, 
         body: { start_time: startTime, end_time: endTime, filters: filterPayload }
       })
       return data as any
@@ -123,7 +123,7 @@ function OriginReportContent({
 
   const originTs = useServiceQuery(
     ['origin', 'timeseries', activeServiceId, startTime, endTime, filterPayload, config.effectiveInterval, originMetric, originPercentile],
-    async () => {
+    async ({ signal }) => {
       const intervalMap = {
         "1 second": 1 / 60,
         "1 minute": 1,
@@ -137,7 +137,7 @@ function OriginReportContent({
       }
       const bucketMinutes = (intervalMap as Record<string, number>)[config.effectiveInterval] || 5
 
-      const { data } = await client.POST('/api/origin/timeseries', {
+      const { data } = await client.POST('/api/origin/timeseries', { signal, 
         body: {
           start_time: startTime,
           end_time: endTime,
@@ -154,8 +154,8 @@ function OriginReportContent({
 
   const slowUrls = useServiceQuery(
     ['origin', 'slow-urls', activeServiceId, startTime, endTime, filterPayload],
-    async () => {
-      const { data } = await client.POST("/api/origin/slow-urls", {
+    async ({ signal }) => {
+      const { data } = await client.POST("/api/origin/slow-urls", { signal, 
         body: { start_time: startTime, end_time: endTime, filters: filterPayload, limit: 20, min_requests: 10 }
       })
       return data as any
@@ -164,8 +164,8 @@ function OriginReportContent({
 
   const statusCodes = useServiceQuery(
     ['origin', 'status-codes', activeServiceId, startTime, endTime, filterPayload],
-    async () => {
-      const { data } = await client.POST("/api/origin/status-codes", {
+    async ({ signal }) => {
+      const { data } = await client.POST("/api/origin/status-codes", { signal, 
         body: { start_time: startTime, end_time: endTime, filters: filterPayload }
       })
       return data as any
@@ -174,8 +174,8 @@ function OriginReportContent({
 
   const popLatency = useServiceQuery(
     ['origin', 'pop-latency', activeServiceId, startTime, endTime, filterPayload],
-    async () => {
-      const { data } = await client.POST("/api/origin/pop-latency", {
+    async ({ signal }) => {
+      const { data } = await client.POST("/api/origin/pop-latency", { signal, 
         body: { start_time: startTime, end_time: endTime, filters: filterPayload, limit: 30 }
       })
       return data as any
@@ -184,8 +184,8 @@ function OriginReportContent({
 
   const ipHealth = useServiceQuery(
     ['origin', 'ip-health', activeServiceId, startTime, endTime, filterPayload],
-    async () => {
-      const { data } = await client.POST("/api/origin/ip-health", {
+    async ({ signal }) => {
+      const { data } = await client.POST("/api/origin/ip-health", { signal, 
         body: { start_time: startTime, end_time: endTime, filters: filterPayload, limit: 30 }
       })
       return data as any

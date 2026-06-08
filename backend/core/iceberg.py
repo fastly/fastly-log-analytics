@@ -525,6 +525,7 @@ from pyiceberg.types import (
 )
 
 from backend.core.log_fields import LOG_FIELD_CATALOG
+from backend.utils.sql_validator import escape_sql_literal
 
 # ---------------------------------------------------------------------------
 # Iceberg Schema — derived from LOG_FIELD_CATALOG (single source of truth).
@@ -1095,11 +1096,14 @@ def _read_metadata_pointer(source: dict, identifier: tuple) -> str | None:
 
     try:
         from backend.core.duckdb import _get_fos_client
+        from backend.models.lake import _safe_cdn_url
 
         s3 = _get_fos_client(source)
         bucket = source["bucket"]
         base_prefix = source.get("prefix", "").strip("/")
-        cdn_url = (source.get("cdn_url") or "").rstrip("/")
+        # SSRF guard: only follow ``cdn_url`` when it parses as an https
+        # Fastly hostname. Otherwise fall through to the S3 SDK.
+        cdn_url = _safe_cdn_url((source.get("cdn_url") or "").rstrip("/"))
         cdn_secret = source.get("cdn_secret") or ""
 
         iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
@@ -1807,7 +1811,7 @@ def optimize_table(source: dict, target_file_size_mb: int = 128, min_files_per_p
 
             # Use DuckDB to read only these files (most efficient)
             paths = [f.file_path for f in files]
-            paths_sql = ", ".join(f"'{p}'" for p in paths)
+            paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
 
             try:
                 # Read into PyArrow. Must materialise to a Table — pyiceberg's
@@ -2397,10 +2401,10 @@ def configure_duckdb_s3(con) -> None:
     unmatched URLs and silently bypass telemetry.
     """
     try:
-        con.execute("INSTALL iceberg; INSTALL avro; INSTALL httpfs; INSTALL parquet;")
         con.execute("LOAD iceberg; LOAD avro; LOAD httpfs; LOAD parquet;")
     except Exception:
         try:
+            con.execute("INSTALL iceberg; INSTALL avro; INSTALL httpfs; INSTALL parquet;")
             con.execute("LOAD iceberg; LOAD avro; LOAD httpfs; LOAD parquet;")
         except Exception:
             pass
@@ -2724,13 +2728,24 @@ def get_last_view_stats(source: dict) -> dict:
 def inject_view_debug(debug_list: list, source: dict):
     stats = get_last_view_stats(source)
     if stats and stats.get("sql"):
+        # Apply the same path-list compaction as the per-query recorder
+        # in repositories/_base. The view-build SQL is the WORST offender
+        # because it inlines every buffer file twice (in the UNION ALL
+        # RHS) — pre-compaction it accounted for ~30 KB on its own in
+        # the dashboard response.
+        from backend.repositories._base import _compact_sql_for_debug
+
         mode = (
             "FAST PATH (Local Cache / Buffer Match)"
             if stats.get("was_fast_path")
             else "SLOW PATH (S3 Read / Manifest Resolve)"
         )
         debug_list.insert(
-            0, {"sql": f"-- DuckDB Iceberg View Resolution [{mode}] --\n{stats['sql']}", "time_ms": stats["time_ms"]}
+            0,
+            {
+                "sql": _compact_sql_for_debug(f"-- DuckDB Iceberg View Resolution [{mode}] --\n{stats['sql']}"),
+                "time_ms": stats["time_ms"],
+            },
         )
 
 
@@ -2848,7 +2863,7 @@ def _rebuild_locked(con, source: dict, source_key: str) -> None:
                 del _rebuild_signals[source_key]
 
 
-def update_iceberg_view(con, source: dict, lock_timeout: float = 5.0) -> None:
+def update_iceberg_view(con, source: dict, lock_timeout: float = 5.0, force: bool = False) -> None:
     """Refresh the per-service DuckDB view over the Iceberg table + buffer.
 
     ``lock_timeout`` (default 5s) caps how long we wait on the per-service
@@ -2860,12 +2875,23 @@ def update_iceberg_view(con, source: dict, lock_timeout: float = 5.0) -> None:
     match the pattern …/buffer/batch_*.parquet`` on the next read. Five
     seconds is long enough to outlast a typical commit without making
     sync-status polls feel sticky.
+
+    ``force=True`` skips the lock-free fast path and goes straight to a
+    full rebuild under the lock. The QueryRunner self-heal path uses
+    this: when a query already failed with a stale-view IOException,
+    the fast path can't help — its buf_set check might match cached
+    state that's still inconsistent with what the DuckDB query planner
+    just saw on disk, OR (the symptom-from-prod) the cached view SQL
+    has hardcoded file paths and re-executing it just re-binds the same
+    bad SQL. Force-rebuild reads disk fresh under the lock and
+    regenerates the SQL.
     """
     source_key = source.get("name", "default")
 
     # Lock-free fast path first. Parallel dashboard reads (6+ endpoints
     # per page load) only need the lock when a real rebuild is required.
-    if _try_fast_path_view(con, source):
+    # Skipped on ``force=True`` (see self-heal path in QueryRunner).
+    if not force and _try_fast_path_view(con, source):
         return
 
     lock = _get_service_lock(source_key)
@@ -2982,8 +3008,7 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
     dynamic_arrow_schema = get_arrow_schema(log_fields_config)
     dynamic_schema_field_names = {f.name for f in dynamic_arrow_schema}
 
-    logger.info("▶️  %s %s: View refresh started.", _ICE_PLAIN, source_key)
-    logger.info("%s %s: Refreshing view...", _ICE, source_key)
+    logger.info("▶️  %s %s: View refresh started...", _ICE_PLAIN, source_key)
 
     # Try to load from persistent cache if memory cache is empty
     _load_persistent_cache(source)
@@ -3195,7 +3220,7 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
     # (a) plan_files() returned S3 URIs and no local files are cached yet, OR
     # (b) plan_files() failed silently but iceberg_loc is known (avoids WHERE false view)
     if iceberg_loc and not local_paths and (s3_paths or not local_iceberg_files):
-        parts.append(_strip_computed(f"iceberg_scan('{iceberg_loc}', allow_moved_paths=true)"))
+        parts.append(_strip_computed(f"iceberg_scan('{escape_sql_literal(iceberg_loc)}', allow_moved_paths=true)"))
         logger.info(
             "%s Falling back to iceberg_scan for %s (s3_paths=%d, local_iceberg_files=%d).",
             _ICE,
@@ -3204,7 +3229,13 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
             len(local_iceberg_files),
         )
     elif s3_paths:
-        logger.info(
+        # Demoted from INFO to DEBUG (2026-06-01): this fires on every
+        # view refresh whenever the local cache lags the iceberg manifest
+        # (very common during catch-up / right after a commit). Useful for
+        # debugging stale-view issues, not useful as a routine signal —
+        # was spamming the GCE backend log every few seconds with no
+        # actionable content.
+        logger.debug(
             "%s Skipping %d missing cloud files in view (local files present, CDN sync pending).",
             _ICE,
             len(s3_paths),
@@ -3215,7 +3246,7 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
     buf_files = [p for p in buf_files if os.path.isfile(p)]
 
     if buf_files:
-        paths_sql = ", ".join(f"'{p}'" for p in buf_files)
+        paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in buf_files)
         parts.append(_strip_computed(f"read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"))
 
     if not parts:
@@ -3258,11 +3289,30 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
         is_analyst = source.get("access_level") == "read_only"
 
         if tr and (is_analyst or not source.get("provisioning", {}).get("cron_sync", {}).get("enabled", True)):
+            # Security: validate via isoparse before interpolation. Without
+            # this, an attacker-controlled tr["start"] / tr["end"] dict value
+            # (these come from saved-view JSON which originates from the
+            # frontend) is interpolated raw into DuckDB SQL — a payload like
+            #   "2024-01-01'; ATTACH '/tmp/x.db' AS y; --"
+            # would execute multi-statement SQL against the connection.
+            # isoparse rejects anything that isn't a valid ISO-8601 timestamp;
+            # we then interpolate the canonical .isoformat() output, which
+            # contains only digits, ":", "-", "T", "+", and "Z".
+            import dateutil.parser as _dt
+
             where_clauses = []
             if tr.get("start"):
-                where_clauses.append(f"timestamp >= '{tr['start']}'::TIMESTAMPTZ")
+                try:
+                    start_iso = _dt.isoparse(str(tr["start"])).isoformat()
+                except (ValueError, TypeError) as e:
+                    raise ValueError(f"invalid time_range start: {e}") from e
+                where_clauses.append(f"timestamp >= '{start_iso}'::TIMESTAMPTZ")
             if tr.get("end"):
-                where_clauses.append(f"timestamp <= '{tr['end']}'::TIMESTAMPTZ")
+                try:
+                    end_iso = _dt.isoparse(str(tr["end"])).isoformat()
+                except (ValueError, TypeError) as e:
+                    raise ValueError(f"invalid time_range end: {e}") from e
+                where_clauses.append(f"timestamp <= '{end_iso}'::TIMESTAMPTZ")
             if where_clauses:
                 union_sql = f"SELECT * FROM ({union_sql}) WHERE {' AND '.join(where_clauses)}"
 
@@ -3329,8 +3379,7 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
 
     t_end = time.time()
     duration_ms = (t_end - t_start) * 1000
-    logger.info("%s %s: View refresh complete (%.0f ms).", _ICE, source_key, duration_ms)
-    logger.info("⏹️  %s %s: View refresh finished.", _ICE_PLAIN, source_key)
+    logger.info("⏹️  %s %s: View refresh complete (%.0f ms).", _ICE_PLAIN, source_key, duration_ms)
     _view_cache[source_key] = (
         metadata_loc,
         buf_set,
@@ -3431,6 +3480,17 @@ def _save_manifest_metadata_cache(source: dict, live_manifest_paths: list[str]) 
                 "files": m_files,
                 "size": m_size,
             }
+        # Mirror the on-disk prune in memory. Pre-fix this dict was only
+        # ever appended to (lines 3428, 2656) — entries for manifests
+        # dropped by snapshot expiry or compaction stayed resident
+        # forever, growing into multi-hundred-MB RSS over days of uptime
+        # and compounding the host-OOM problem. Compute the live set
+        # ONCE outside the loop so the cost is O(live + cache) rather
+        # than O(live × cache).
+        live_set = set(live_manifest_paths)
+        dead_keys = [k for k in _manifest_metadata_cache if k not in live_set]
+        for k in dead_keys:
+            _manifest_metadata_cache.pop(k, None)
 
     try:
         tmp = cache_file + ".tmp"

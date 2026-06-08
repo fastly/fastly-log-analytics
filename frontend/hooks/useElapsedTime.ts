@@ -1,22 +1,29 @@
-import { useEffect, useState } from 'react'
-
-function computeElapsed(startedAt: string | null | undefined): number {
-  if (!startedAt) return 0
-  return Math.max(0, (Date.now() - new Date(startedAt).getTime()) / 1000)
-}
+import { useNowMs } from '@/hooks/useNowSeconds'
 
 /**
- * Returns seconds elapsed since `startedAt`, ticking every `intervalMs`.
- * Pass null/undefined to pause.
+ * Returns seconds elapsed since `startedAt`.
+ *
+ * Subscribes to the SHARED global 1-second tick (useNowMs) instead of
+ * registering its own setInterval. Pre-fix each consumer spawned a
+ * private 1Hz setState; N consumers on a page meant N independent
+ * timers and N re-renders per second. Now the whole tree shares one
+ * timer (lazily registered on first subscribe, torn down on last
+ * unsubscribe).
+ *
+ * Pass null/undefined to pause (returns 0 and doesn't subscribe).
+ *
+ * ``intervalMs`` is accepted for API compatibility with the prior
+ * implementation but is ignored — the shared ticker runs at 1Hz.
+ * Sub-second resolution wasn't observable to operators anyway.
  */
-export function useElapsedTime(startedAt: string | null | undefined, intervalMs = 1000): number {
-  const [elapsed, setElapsed] = useState(() => computeElapsed(startedAt))
-
-  useEffect(() => {
-    if (!startedAt) return
-    const id = setInterval(() => setElapsed(computeElapsed(startedAt)), intervalMs)
-    return () => clearInterval(id)
-  }, [startedAt, intervalMs])
-
-  return elapsed
+export function useElapsedTime(
+  startedAt: string | null | undefined,
+  _intervalMs: number = 1000,
+): number {
+  // Always call the hook (React rules of hooks) — but ignore the value
+  // when there's no startedAt so we don't pin a subscription for a
+  // paused timer.
+  const nowMs = useNowMs()
+  if (!startedAt) return 0
+  return Math.max(0, (nowMs - new Date(startedAt).getTime()) / 1000)
 }

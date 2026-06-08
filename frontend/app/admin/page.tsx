@@ -60,6 +60,7 @@ import {
   Save,
   Loader2,
   Pencil,
+  ShieldCheck,
 } from 'lucide-react'
 
 import {
@@ -75,6 +76,7 @@ import { formatBytes } from '@/lib/utils'
 import { useDebugStore } from '@/stores/debugStore'
 import { PageHeader } from '@/components/ui/page-header'
 import { useDateFormat } from '@/hooks/useDateFormat'
+import { useNowMs } from '@/hooks/useNowSeconds'
 import { useEffect } from 'react'
 import { formatCompactDuration, toUTCDate } from '@/lib/date'
 import {
@@ -88,21 +90,20 @@ type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 function SystemJobBox({ job }: { job: any }) {
   const { timeAgo, full, abbr } = useDateFormat()
-  
+  const nowMs = useNowMs()
+
   const lastRunText = job.last_run_at ? timeAgo(job.last_run_at) : 'Never'
-  
-  const [nextRunText, setNextRunText] = useState('Disabled')
-  useEffect(() => {
-    function compute() {
-      if (!job.next_run_at) { setNextRunText('Disabled'); return }
-      const d = toUTCDate(job.next_run_at)
-      const secs = Math.floor((d.getTime() - Date.now()) / 1000)
-      setNextRunText(formatCompactDuration(secs))
-    }
-    compute()
-    const id = setInterval(compute, 1000)
-    return () => clearInterval(id)
-  }, [job.next_run_at])
+
+  // Pre-fix this had a per-instance setInterval(compute, 1000) that
+  // re-rendered every box every second. On a 10-cron page that's 10
+  // independent timers firing on the same 1s boundary, each forcing a
+  // setState — the main thread was constantly busy and clicks queued
+  // behind the cascade ("admin page takes 2 seconds to respond").
+  // Now we derive nextRunText on-render from useNowMs() (a single
+  // shared global ticker). Same UX, ~10x fewer timers + state updates.
+  const nextRunText = job.next_run_at
+    ? formatCompactDuration(Math.floor((toUTCDate(job.next_run_at).getTime() - nowMs) / 1000))
+    : 'Disabled'
 
   const isError = job.status === 'error'
   const borderColor = isError ? 'border-destructive/50' : 'border-muted'
@@ -185,7 +186,7 @@ const PricingSettings = () => {
 
   const { data: settings, isLoading } = useQuery({
     queryKey: ['usage-logging-settings'],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const { data } = await client.GET('/api/admin/usage-logging')
       if (!data) return null
       const d = data as any
@@ -360,6 +361,12 @@ export default function AdminPage() {
   const [ngwafFetching, setNgwafFetching] = useState(false)
   const [ngwafSaving, setNgwafSaving] = useState(false)
   const [ngwafSaved, setNgwafSaved] = useState(false)
+  // Security: backend now requires a caller-supplied Fastly token for
+  // the PATCH that rebinds the workspace. The admin enters the same token
+  // they use to fetch the workspaces list, so the constant-time stored-key
+  // match in the backend lets through the legitimate admin flow without
+  // requiring them to remember it from somewhere else.
+  const [ngwafApiToken, setNgwafApiToken] = useState('')
 
   function openCredentials(service: ServiceConfig) {
     setCredentialsService(service)
@@ -389,25 +396,46 @@ export default function AdminPage() {
 
   const { data: services, isLoading } = useQuery({
     queryKey: ['services'],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/services")
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/services", { signal })
       return data
     },
   })
 
   const { data: botSourcesData, refetch: refetchBotSources } = useQuery({
     queryKey: ['bot-sources'],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/admin/bot-sources")
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/admin/bot-sources", { signal })
       return data as any
     },
     staleTime: 60_000,
   })
 
+  // Backend gate for the two "Show ... panel" toggles below. The frontend
+  // panels render data from response.`_debug_queries` / `_debug_calls` —
+  // when DEBUG_RESPONSES=false on the server (the prod default per the
+  // 2026 security hardening) those arrays are stripped and the panel
+  // shows nothing. Surface that so the toggle doesn't silently lie.
+  const { data: debugState } = useQuery({
+    queryKey: ['debug-state'],
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET('/api/debug/state' as any, { signal, } as any)
+      return data as { debug_responses_enabled: boolean }
+    },
+    staleTime: 5 * 60_000, // env doesn't change without a restart
+  })
+  // Default to "enabled" on first paint so the toggle isn't briefly dimmed
+  // before the query resolves. Only mark disabled when we have a real
+  // false from the backend.
+  const debugBackendOn = debugState?.debug_responses_enabled !== false
+  const debugDisabledTooltip = !debugBackendOn
+    ? 'Backend debug responses are disabled — set DEBUG_RESPONSES=true in the server env (or .env file) and restart to see data here.'
+    : undefined
+
   const { data: systemJobsData, refetch: refetchSystemJobs } = useQuery({
     queryKey: ['system-jobs'],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/admin/system-jobs")
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/admin/system-jobs", { signal })
       return data as any
     },
     staleTime: 30_000,
@@ -416,7 +444,7 @@ export default function AdminPage() {
 
   const { data: usageLoggingSettings } = useQuery({
     queryKey: ['usage-logging-settings'],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const { data } = await client.GET('/api/admin/usage-logging')
       return data
     },
@@ -648,23 +676,16 @@ export default function AdminPage() {
                 variant="outline"
                 size="sm"
                 className="h-8 w-24 text-[11px] font-bold uppercase tracking-tight"
-                onClick={async () => {
+                onClick={() => {
+                  // Security: workspace fetch now requires a token,
+                  // so we open the dialog empty and the admin pastes
+                  // their token + clicks Load Workspaces.
                   setNgwafService(service)
                   setNgwafWorkspaceId(service.ngwaf_workspace_id || '')
                   setNgwafWorkspaces([])
                   setNgwafFetchError('')
                   setNgwafSaved(false)
-                  setNgwafFetching(true)
-                  try {
-                    const { data } = await client.GET("/api/provision/ngwaf-workspaces" as any, {
-                      params: { query: { service_id: service.service_id } }
-                    })
-                    setNgwafWorkspaces((data as any)?.workspaces || [])
-                  } catch (e: any) {
-                    setNgwafFetchError(e?.message || 'Could not load workspaces')
-                  } finally {
-                    setNgwafFetching(false)
-                  }
+                  setNgwafApiToken('')
                 }}
                 title={service.ngwaf_workspace_id ? `NGWAF: ${service.ngwaf_workspace_id}` : 'Configure NGWAF workspace'}
               >
@@ -735,23 +756,14 @@ export default function AdminPage() {
                   <DropdownMenuItem onClick={() => setSettingsService(service)}>
                     <Settings2 className="mr-2 h-4 w-4" /> Log Settings
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={async () => {
+                  <DropdownMenuItem onClick={() => {
+                    // Security: open empty; user pastes token + clicks Load Workspaces.
                     setNgwafService(service)
                     setNgwafWorkspaceId(service.ngwaf_workspace_id || '')
                     setNgwafWorkspaces([])
                     setNgwafFetchError('')
                     setNgwafSaved(false)
-                    setNgwafFetching(true)
-                    try {
-                      const { data } = await client.GET("/api/provision/ngwaf-workspaces" as any, {
-                        params: { query: { service_id: service.service_id } }
-                      })
-                      setNgwafWorkspaces((data as any)?.workspaces || [])
-                    } catch (e: any) {
-                      setNgwafFetchError(e?.message || 'Could not load workspaces')
-                    } finally {
-                      setNgwafFetching(false)
-                    }
+                    setNgwafApiToken('')
                   }}>
                     <Bot className="mr-2 h-4 w-4" /> NGWAF Config
                   </DropdownMenuItem>
@@ -784,7 +796,65 @@ export default function AdminPage() {
       <PageHeader
         title="Admin"
         description="Manage your global settings, Fastly services, and log ingestion pipelines."
-      />
+      >
+        {/* Navigation chips for sibling admin pages. These used to live
+            next to the "Add Service" button in the Service Management
+            section, which conflated "act on this service list" with
+            "go somewhere else" — and the cluster of three buttons made
+            it ambiguous which one performed the destructive action.
+            Moving them up to the PageHeader's action slot establishes
+            "here's where you switch between admin sub-pages" as a
+            top-of-page navigation pattern. */}
+        {/* `secondary` variant gives these a visible filled background so
+            they read as obviously-clickable nav buttons on a white page.
+            The previous `outline` variant rendered as white-on-white and
+            only revealed itself on hover, making the slot look empty. */}
+        <Link
+          href="/admin/share"
+          prefetch={true}
+          onMouseEnter={() => {
+            // Warm the share-status query so by the time the click
+            // resolves, /admin/share's useQuery hits a fresh cache
+            // entry instead of paying a ~300ms fetch round-trip.
+            // staleTime=5s on the destination's useQuery means the
+            // prefetched payload counts as fresh for the click that
+            // immediately follows.
+            queryClient.prefetchQuery({
+              queryKey: ['admin', 'share', 'status'],
+              queryFn: async ({ signal }) => {
+                const { data, response } = await client.GET('/api/admin/share/status' as any, { signal, })
+                if (!response.ok) throw new Error(`status ${response.status}`)
+                return data
+              },
+            })
+          }}
+          data-testid="open-share-dialog"
+          className={buttonVariants({ variant: 'secondary', size: 'sm' })}
+        >
+          <UserPlus className="h-4 w-4 mr-1" /> Share Dashboard
+        </Link>
+        <Link
+          href="/admin/session-scoring"
+          prefetch={true}
+          onMouseEnter={() => {
+            if (!activeServiceId) return
+            queryClient.prefetchQuery({
+              queryKey: ['scoring-status', activeServiceId],
+              queryFn: async ({ signal }) => {
+                const { data } = await client.GET(
+                  '/api/services/{service_id}/scoring/status',
+                  { params: { path: { service_id: activeServiceId } } },
+                )
+                return data
+              },
+              staleTime: 20_000,
+            })
+          }}
+          className={buttonVariants({ variant: 'secondary', size: 'sm' })}
+        >
+          <ShieldCheck className="h-4 w-4 mr-1" /> Session Scoring
+        </Link>
+      </PageHeader>
 
       <div className="space-y-4">
         <div className="flex items-center gap-4">
@@ -792,13 +862,6 @@ export default function AdminPage() {
           <Button size="sm" onClick={() => setWizardOpen(true)}>
             <Plus className="h-4 w-4 mr-1" /> Add Service
           </Button>
-          <Link
-            href="/admin/share"
-            data-testid="open-share-dialog"
-            className={buttonVariants({ variant: 'outline', size: 'sm' })}
-          >
-            <UserPlus className="h-4 w-4 mr-1" /> Share Dashboard
-          </Link>
         </div>
 
         <div className="border rounded-lg bg-card shadow-sm overflow-hidden">
@@ -814,63 +877,99 @@ export default function AdminPage() {
       <SystemHealthCard />
 
       <AnalyticsCard title="Overall Settings" description="Global preferences for the application.">
-        <div className="flex flex-col gap-4">
-        <div className="flex items-center justify-between p-4 border rounded-lg">
-          <div className="space-y-0.5">
-            <Label className="text-sm font-medium">Show query debugging information</Label>
-            <p className="text-xs text-muted-foreground">
-              Displays a panel at the bottom of the screen with the underlying DuckDB SQL queries and their execution times.
-            </p>
+        <div className="flex flex-col gap-3">
+        {/* Compact 2-up grid for the simple toggle/button rows. Each box
+            has a fixed shape: title + description block at the top, then a
+            right-aligned control strip pinned to the bottom — so the four
+            cards line up visually even when the control sets differ in
+            width (single Switch vs Switch + inputs + button). Bot
+            Intelligence Sources stays full-width below because it embeds
+            a data table that would compress poorly in a half-column. */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          <div className={`flex flex-col p-3 border rounded-lg gap-3 ${!debugBackendOn ? 'opacity-60' : ''}`}>
+            <div className="min-w-0 space-y-0.5">
+              <Label className="text-sm font-medium">Query debugging panel</Label>
+              <p className="text-xs text-muted-foreground">
+                Bottom-of-screen panel with DuckDB SQL queries and execution times.
+              </p>
+              {!debugBackendOn && (
+                <p className="text-[11px] text-amber-500" title={debugDisabledTooltip}>
+                  Disabled — backend ``DEBUG_RESPONSES`` env is off.
+                </p>
+              )}
+            </div>
+            <div className="flex items-center justify-end mt-auto" title={debugDisabledTooltip}>
+              <Switch
+                checked={debugEnabled}
+                onCheckedChange={setDebugEnabled}
+                disabled={!debugBackendOn}
+              />
+            </div>
           </div>
-          <Switch checked={debugEnabled} onCheckedChange={setDebugEnabled} />
-        </div>
-        <div className="flex items-center justify-between p-4 border rounded-lg">
-          <div className="space-y-0.5">
-            <Label className="text-sm font-medium">Show API calls and Fastly Object Storage information</Label>
-            <p className="text-xs text-muted-foreground">
-              Displays a panel at the bottom of the screen with all Fastly API calls and FOS operations (HEAD, GET, PUT, etc) made during the request.
-            </p>
+
+          <div className={`flex flex-col p-3 border rounded-lg gap-3 ${!debugBackendOn ? 'opacity-60' : ''}`}>
+            <div className="min-w-0 space-y-0.5">
+              <Label className="text-sm font-medium">API call panel</Label>
+              <p className="text-xs text-muted-foreground">
+                Bottom-of-screen panel with all Fastly API calls and FOS operations per request.
+              </p>
+              {!debugBackendOn && (
+                <p className="text-[11px] text-amber-500" title={debugDisabledTooltip}>
+                  Disabled — backend ``DEBUG_RESPONSES`` env is off.
+                </p>
+              )}
+            </div>
+            <div className="flex items-center justify-end mt-auto" title={debugDisabledTooltip}>
+              <Switch
+                checked={apiCallsEnabled}
+                onCheckedChange={setApiCallsEnabled}
+                disabled={!debugBackendOn}
+              />
+            </div>
           </div>
-          <Switch checked={apiCallsEnabled} onCheckedChange={setApiCallsEnabled} />
-        </div>
-        <div className="flex items-center justify-between p-4 border rounded-lg">
-          <div className="space-y-0.5">
-            <Label className="text-sm font-medium">Log Fastly Object Storage usage</Label>
-            <p className="text-xs text-muted-foreground">
-              Records every FOS Class A/B operation and CDN download with function name and process context for cost optimization analysis.
-            </p>
+
+          <div className="flex flex-col p-3 border rounded-lg gap-3">
+            <div className="min-w-0 space-y-0.5">
+              <Label className="text-sm font-medium">Log FOS / CDN usage</Label>
+              <p className="text-xs text-muted-foreground">
+                Records every Class A/B operation and CDN download with function + process context for cost analysis.
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-2 flex-wrap mt-auto">
+              {usageLoggingEnabled && (
+                <>
+                  <UsageLogRetentionInput initial={usageLogRetention} onSave={saveUsageLogRetention} />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => router.push('/admin/usage-log')}
+                  >
+                    View Usage Log
+                  </Button>
+                </>
+              )}
+              <Switch
+                checked={usageLoggingEnabled}
+                onCheckedChange={handleUsageLoggingToggle}
+                disabled={usageLoggingLoading}
+              />
+            </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            {usageLoggingEnabled && (
-              <>
-                <UsageLogRetentionInput initial={usageLogRetention} onSave={saveUsageLogRetention} />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => router.push('/admin/usage-log')}
-                >
-                  View Usage Log
-                </Button>
-              </>
-            )}
-            <Switch
-              checked={usageLoggingEnabled}
-              onCheckedChange={handleUsageLoggingToggle}
-              disabled={usageLoggingLoading}
-            />
+
+          <div className="flex flex-col p-3 border rounded-lg gap-3">
+            <div className="min-w-0 space-y-0.5">
+              <Label className="text-sm font-medium">POP location data</Label>
+              <p className="text-xs text-muted-foreground">
+                Fastly PoP coordinates used by the Impossible Distance insight for geo/RTT spoofing detection.
+              </p>
+            </div>
+            <div className="flex items-center justify-end mt-auto">
+              <Button variant="outline" size="sm" onClick={() => setPopLocationsOpen(true)}>
+                <MapPin className="h-3.5 w-3.5 mr-1.5" /> Update POP Info
+              </Button>
+            </div>
           </div>
-        </div>
-        <div className="flex items-center justify-between p-4 border rounded-lg">
-          <div className="space-y-0.5">
-            <Label className="text-sm font-medium">POP Location Data</Label>
-            <p className="text-xs text-muted-foreground">
-              Fastly PoP coordinates used by the Impossible Distance insight to detect geo/RTT spoofing.
-            </p>
-          </div>
-          <Button variant="outline" size="sm" onClick={() => setPopLocationsOpen(true)}>
-            <MapPin className="h-3.5 w-3.5 mr-1.5" /> Update POP Info
-          </Button>
         </div>
 
         {/* Bot Intelligence Sources */}
@@ -1188,6 +1287,54 @@ export default function AdminPage() {
           </DialogHeader>
 
           <div className="space-y-4 py-2">
+            {/* Security: token must be supplied before workspace fetch
+                AND before workspace save. Single input drives both. */}
+            {ngwafService && !ngwafSaved && (
+              <div className="space-y-1">
+                <Label htmlFor="ngwaf-api-token" className="text-xs font-semibold">
+                  Fastly API token
+                </Label>
+                <p className="text-[10px] text-muted-foreground">
+                  Required to list AND save NGWAF workspace bindings (security /).
+                </p>
+                <div className="flex gap-2">
+                  <Input
+                    id="ngwaf-api-token"
+                    type="password"
+                    placeholder="Fastly API token"
+                    value={ngwafApiToken}
+                    onChange={(e) => setNgwafApiToken(e.target.value)}
+                    className="h-8 font-mono text-xs flex-1"
+                    autoComplete="off"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!ngwafApiToken.trim() || ngwafFetching}
+                    onClick={async () => {
+                      if (!ngwafService) return
+                      setNgwafWorkspaces([])
+                      setNgwafFetchError('')
+                      setNgwafFetching(true)
+                      try {
+                        const { data } = await client.GET("/api/provision/ngwaf-workspaces" as any, {
+                          params: { query: { service_id: ngwafService.service_id, token: ngwafApiToken } }
+                        })
+                        setNgwafWorkspaces((data as any)?.workspaces || [])
+                      } catch (e: any) {
+                        setNgwafFetchError(e?.message || 'Could not load workspaces')
+                      } finally {
+                        setNgwafFetching(false)
+                      }
+                    }}
+                    className="h-8 text-xs"
+                  >
+                    {ngwafFetching ? 'Loading…' : 'Load'}
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {ngwafFetching ? (
               <p className="text-xs text-muted-foreground animate-pulse">Loading workspaces…</p>
             ) : ngwafWorkspaces.length > 0 ? (
@@ -1223,13 +1370,22 @@ export default function AdminPage() {
                 <Button variant="outline" size="sm" onClick={() => setNgwafService(null)}>Cancel</Button>
                 <Button
                   size="sm"
-                  disabled={ngwafSaving}
+                  disabled={ngwafSaving || !ngwafApiToken.trim()}
+                  title={!ngwafApiToken.trim() ? 'Enter your Fastly API token to save' : undefined}
                   onClick={async () => {
                     if (!ngwafService) return
                     setNgwafSaving(true)
                     try {
+                      // Security: backend requires a Fastly token bound
+                      // to this service. We pass whatever token the admin
+                      // entered above; backend accepts either the stored key
+                      // (constant-time match) or a token with the 'global'
+                      // scope on this service.
                       await client.PATCH("/api/provision/services/{service_id}/ngwaf-workspace" as any, {
-                        params: { path: { service_id: ngwafService.service_id } },
+                        params: {
+                          path: { service_id: ngwafService.service_id },
+                          query: { token: ngwafApiToken },
+                        },
                         body: { ngwaf_workspace_id: ngwafWorkspaceId.trim() || null } as any,
                       })
                       setNgwafSaved(true)

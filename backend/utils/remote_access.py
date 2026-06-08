@@ -83,7 +83,17 @@ _ANALYST_SSE_ALLOWLIST: set[str] = set()
 
 # Local "is this a real LAN hostname" allowlist; admins can extend via env.
 # ``testserver`` is starlette.testclient.TestClient's default Host header.
-_LOCAL_HOST_ALLOWLIST = {"localhost", "127.0.0.1", "[::1]", "0.0.0.0", "testserver", "backend", "frontend", "caddy", "web"}
+_LOCAL_HOST_ALLOWLIST = {
+    "localhost",
+    "127.0.0.1",
+    "[::1]",
+    "0.0.0.0",
+    "testserver",
+    "backend",
+    "frontend",
+    "caddy",
+    "web",
+}
 
 import os
 
@@ -101,93 +111,93 @@ import ipaddress
 
 
 def _is_private_or_loopback(ip_str: str) -> bool:
-    """Check if the provided IP or hostname is loopback, local, or private subnet."""
+    """Check if the provided IP or hostname is loopback or a local-test stub.
+
+    The original implementation treated ANY RFC1918 / link-local IP as
+    "local admin" — which broke down for real users coming in from a
+    private corporate network (10.x, 172.16/12, 192.168.x). A remote
+    analyst behind a VPN would be misclassified as an admin and bypass
+    the analyst-blocked endpoint prefixes (``/api/provision/``,
+    ``/api/admin/`` etc.) entirely. Even worse, an SSRF probe of
+    ``169.254.169.254`` (GCE metadata) would land as "local" too.
+
+    Production topology: Caddy connects to uvicorn over loopback
+    (127.0.0.1, host network mode + ``--forwarded-allow-ips=127.0.0.1``)
+    so the only legitimate "this is the admin / TestClient" peer is
+    loopback. Keep ``is_loopback`` and the literal-stub set; drop the
+    over-broad ``is_private`` rule.
+
+    Function name is retained for backwards compatibility with the rest
+    of remote_access.py — callers see no signature change.
+    """
     try:
         ip = ipaddress.ip_address(ip_str)
-        return ip.is_private or ip.is_loopback
+        return ip.is_loopback
     except ValueError:
         # Hostnames or test client stub names (e.g. "testclient", "localhost")
         return ip_str in ("testclient", "localhost")
 
 
-def _host_matches_public_endpoint(request: Request) -> bool:
-    """Return True if the request's Host header matches the registered
-    public_endpoint or tunnel_url. Used to identify Caddy-proxied analyst
-    traffic in deployments where every service binds to 127.0.0.1 — peer
-    IP can't distinguish Caddy-from-Fastly from local-admin, so the Host
-    header (which only a Caddy-proxied Fastly visitor can legitimately
-    present) is the disambiguator.
-    """
-    mgr = get_tunnel_manager()
-    state = mgr.state
-    if not (state.public_endpoint or state.tunnel_url):
-        return False
-    host_header = (request.headers.get("host") or "").split(":")[0].lower()
-    if not host_header:
-        return False
-    from urllib.parse import urlparse
-
-    if state.tunnel_url and state.tunnel_url.lower() == host_header:
-        return True
-    if state.public_endpoint:
-        pe = urlparse(state.public_endpoint)
-        if pe.hostname and pe.hostname.lower() == host_header:
-            return True
-    return False
-
-
 def is_request_remote(request: Request) -> bool:
     """Decide whether this request is from a remote analyst.
 
-    Ground truth: the connected-socket peer address. We never trust the
-    ``Host`` or ``X-Forwarded-Host`` header for this — those are
-    sender-supplied. Two rules:
+    Production topology:
+      Fastly edge → Caddy on this VM → uvicorn on 127.0.0.1.
+      Caddy rewrites X-Forwarded-For to the authoritative Fastly-Client-IP
+      header (stripping any client-supplied XFF). uvicorn runs with
+      ``--proxy-headers --forwarded-allow-ips=127.0.0.1`` so it populates
+      ``request.client.host`` from XFF ONLY when the TCP peer is loopback.
 
-      1. If the connection came from loopback or a private local subnet
-         (e.g., container-to-container Docker traffic), it's local by default.
-         (The Next.js rewrite proxy at localhost:3000 → localhost:8000 means
-         every analyst request ALSO arrives at FastAPI from 127.0.0.1 or a private
-         network peer — but we set ``is_remote`` via Next.js sending an
-         ``X-Remote-Analyst: 1`` header that the middleware trusts ONLY when
-         the tunnel manager reports an active tunnel.)
-      2. Otherwise, the connection is genuinely remote (direct-expose mode,
-         or the tunnel is forwarding 0.0.0.0).
+    Therefore by the time the middleware sees a request:
+      * ``request.client.host == "127.0.0.1"`` — direct loopback connection
+        (admin SSH-tunnel, container-internal healthcheck, TestClient stub).
+      * otherwise — Caddy-proxied request and the value is the real client IP.
+
+    We never trust the ``Host`` header or any other client-supplied header for
+    this classification — the Host header was the source of the critical
+    auth bypass.
+
+    The ``X-Remote-Analyst: 1`` fallback is honored ONLY when the TCP peer is
+    loopback AND tunnel sharing is active. This exists for two legitimate
+    paths: (a) tests using starlette TestClient which always presents
+    127.0.0.1 as the peer, and (b) future deployments where the analyst
+    surface is served via a same-host proxy (e.g., the Next.js dev rewrite at
+    localhost:3000 → localhost:8000). Direct admin connections never set this
+    header, so the gate stays closed for them.
     """
     host = request.client.host if request.client else "127.0.0.1"
-    
-    # If the connection came from an external public IP, it's genuinely remote.
+
+    # Caddy-proxied request: uvicorn has rewritten the peer to the real
+    # client IP via --proxy-headers, so any non-loopback/non-private peer is
+    # genuinely remote. ``_is_private_or_loopback`` also accepts the stub
+    # values starlette TestClient uses ("testclient", "localhost") so tests
+    # don't accidentally hit the remote branch.
     if not _is_private_or_loopback(host):
         return True
 
-    # Loopback or private subnet peer — disambiguate by Host header in deployments
-    # where Caddy also runs on the host network or in container networks (then all
-    # peers look like loopback or private IPs). Only Caddy proxying a real Fastly
-    # visitor can present the registered public_endpoint hostname; local admin
-    # traffic uses localhost/127.0.0.1/private network names.
-    if _host_matches_public_endpoint(request):
-        return True
-
-    # Proxied case: the Next.js rewrite layer marks remote requests.
+    # Loopback peer. Promote to remote ONLY if the explicit marker is set AND
+    # tunnel sharing is actually live. Tunnel-sharing gating means a stale
+    # header on a non-sharing instance can't toggle the branch.
     if request.headers.get("x-remote-analyst") == "1":
         mgr = get_tunnel_manager()
         if mgr.is_sharing_active():
             return True
-            
+
     return False
 
 
 def get_client_ip(request: Request, *, is_remote: bool) -> str:
     """Return the trusted client IP.
 
-    Only honor ``X-Forwarded-For`` when ``is_remote`` (the middleware's
-    socket-bound check classified this as a remote request). For local
-    listener traffic we use the raw socket peer to prevent header spoofing
-    by a same-LAN attacker (Section #5).
+    With uvicorn running ``--proxy-headers --forwarded-allow-ips=127.0.0.1``
+    the framework already populates ``request.client.host`` from X-Forwarded-For
+    when the TCP peer is loopback (i.e., Caddy on this host). For all other
+    peers, ``request.client.host`` IS the socket peer. We never re-parse the
+    XFF header ourselves — that's what made exploitable. The
+    ``is_remote`` parameter is kept for backwards compatibility but no longer
+    influences the result.
     """
-    if is_remote:
-        fwd = request.headers.get("x-forwarded-for", "")
-        if fwd:
-            return fwd.split(",")[0].strip()
+    del is_remote  # signal: parameter intentionally ignored, kept for ABI stability
     return request.client.host if request.client else "0.0.0.0"
 
 
@@ -257,11 +267,24 @@ def apply_response_hardening(response: Response) -> Response:
 
 
 class _StaticAssetLimiter:
-    """Per-IP token bucket: 600 requests/min OR 50 MB/min."""
+    """Per-IP token bucket: 600 requests/min OR 50 MB/min.
+
+    Security: bound the in-memory ``_reqs`` / ``_bytes`` dicts so a
+    high-cardinality IP attack (one request per source) cannot OOM the
+    server by inflating the dicts indefinitely. The original implementation
+    never evicted; an attacker with a botnet (or one that spoofed XFF before
+    Phase 0 closed it) could pump ~50 bytes of memory per unique IP per
+    minute with no upper bound.
+    """
 
     REQ_LIMIT = 600
     BYTE_LIMIT = 50 * 1024 * 1024
     WINDOW_S = 60
+    # Total distinct IPs we'll track concurrently. Sized to comfortably
+    # accommodate a busy real workload (thousands of analyst sessions on
+    # NAT'd corporate networks share a small set of egress IPs) while
+    # blocking a runaway-cardinality DoS in single-digit-MB territory.
+    MAX_TRACKED_IPS = 10_000
 
     def __init__(self) -> None:
         import threading
@@ -270,10 +293,32 @@ class _StaticAssetLimiter:
         self._reqs: dict[str, list[float]] = {}
         self._bytes: dict[str, list[tuple[float, int]]] = {}
 
+    def _evict_locked(self, cutoff: float) -> None:
+        """Sweep stale per-IP entries whose all timestamps fall before cutoff."""
+        # Iterate over a snapshot so we can mutate during the loop.
+        for ip in list(self._reqs.keys()):
+            recent = [t for t in self._reqs[ip] if t >= cutoff]
+            if not recent:
+                self._reqs.pop(ip, None)
+                self._bytes.pop(ip, None)
+            else:
+                # Take this opportunity to also trim the surviving list.
+                self._reqs[ip] = recent
+        if len(self._reqs) > self.MAX_TRACKED_IPS:
+            # Cardinality bomb: drop everything rather than spending CPU
+            # on quadratic LRU tracking. Limits get a one-minute reset for
+            # all IPs but the next legitimate burst will re-grow the dict.
+            self._reqs.clear()
+            self._bytes.clear()
+
     def check(self, ip: str, content_length: int) -> bool:
         with self._lock:
             now = time.time()
             cutoff = now - self.WINDOW_S
+            # Cheap pre-check: only sweep when we're past the cap. The sweep
+            # is O(n) so we don't want to run it on every request.
+            if len(self._reqs) > self.MAX_TRACKED_IPS:
+                self._evict_locked(cutoff)
             rs = [t for t in self._reqs.get(ip, []) if t >= cutoff]
             rs.append(now)
             self._reqs[ip] = rs

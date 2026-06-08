@@ -82,6 +82,68 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
 
     custom_edge = [cf for cf in enabled_custom if cf.get("collection_stage", "edge") == "edge"]
     custom_origin = [cf for cf in enabled_custom if cf.get("collection_stage", "edge") == "origin"]
+    # "deliver" stage: capture from response headers in vcl_deliver and
+    # promote into req.http.x-fos-edge-data:* so the same log-format
+    # consumer that handles edge-stage fields picks them up. Used by the
+    # session-scoring integration to capture X-Edge-Score* response headers
+    # from the scorer Compute backend.
+    custom_deliver = [cf for cf in enabled_custom if cf.get("collection_stage", "edge") == "deliver"]
+
+    # Security: scrub internal-routing headers a client could spoof.
+    # The cluster-fetch / edge-data headers are set by THIS service's own
+    # snippets on the origin-bound bereq (vcl_miss / vcl_pass) and must
+    # never appear on an inbound req. Without this scrub, a client header
+    # like ``x-is-cluster-fetch: 1`` makes the conditional in vcl_deliver
+    # incorrectly classify the response as internal-cluster traffic and
+    # SKIP the "strip internal headers" cleanup — leaking origin-side
+    # metric headers (x-of-oip = origin backend IP, x-of-ttfb, etc.) to
+    # the client. Run BEFORE the edge-capture conditional so even
+    # configurations without any group-L / custom fields get the scrub.
+    # 020: Build scrub as a list so we can append per-custom-field
+    # unsets. ``unset req.http.x-fos-edge-data;`` strips the bare
+    # header but does NOT strip arbitrary subfield variants
+    # (``req.http.x-fos-edge-data:my_field``) on Fastly VCL — those
+    # are independent header slots once the colon-subfield syntax is
+    # in play. A client that knows a custom-field name (and they often
+    # leak through CSP, error pages, or just by being mentioned in
+    # public docs) can pre-set ``x-fos-edge-data:<field>`` and have
+    # the log line read the spoofed value instead of the edge-captured
+    # one. Per-name scrubs close the gap.
+    scrub_lines = [
+        "# [security] strip client-supplied internal-routing headers",
+        "if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {",
+        "  unset req.http.x-is-cluster-fetch;",
+        "  unset req.http.x-fos-edge-data;",
+        "  unset req.http.x-fos-origin-data;",
+        "  unset req.http.x-of-start;",
+        "  unset req.http.x-of-ttfb;",
+        "  unset req.http.x-of-ttlb;",
+        "  unset req.http.x-of-ost;",
+        "  unset req.http.x-of-oip;",
+        "  unset req.http.x-of-oretries;",
+        "  unset req.http.x-of-status;",
+        "  unset req.http.x-edge-req-id;",
+        "  # Session-scoring internal markers. X-Edge-Scoring-Pass=1 from a",
+        "  # client would bypass scoring entirely; x-edge-score* / X-Edge-Sid",
+        "  # from a client could forge a clean score / sid that the deliver",
+        "  # subfields propagate into the log line. Scrub them all at the",
+        "  # client edge regardless of whether scoring is currently enabled.",
+        "  unset req.http.X-Edge-Scoring-Pass;",
+        "  unset req.http.x-edge-score;",
+        "  unset req.http.X-Edge-Score;",
+        "  unset req.http.X-Edge-Score-Reason;",
+        "  unset req.http.X-Edge-Score-Enforce;",
+        "  unset req.http.X-Edge-Sid;",
+        "  unset req.http.X-Edge-Score-Set-Cookie;",
+    ]
+    if enabled_custom:
+        scrub_lines.append("  # --- Per-custom-field subfield scrubs (020) ---")
+        for cf in enabled_custom:
+            name = cf["name"]
+            scrub_lines.append(f"  unset req.http.x-fos-edge-data:{name};")
+            scrub_lines.append(f"  unset req.http.x-fos-origin-data:{name};")
+    scrub_lines.append("}")
+    edge_header_scrub = "\n".join(scrub_lines)
 
     # recv: edge capture + optional group-L request ID + custom edge fields
     if required or custom_edge:
@@ -108,9 +170,9 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
                 recv_lines.append(f"  set req.http.x-fos-edge-data:{cf['name']} = {cf['vcl_log_expression']};")
 
         recv_lines.append("}")
-        recv_vcl = "\n".join(recv_lines)
+        recv_vcl = edge_header_scrub + "\n" + "\n".join(recv_lines)
     else:
-        recv_vcl = "# No edge data capture required for current log configuration."
+        recv_vcl = edge_header_scrub + "\n# No edge data capture required for current log configuration."
 
     if group_l:
         recv_vcl += (
@@ -123,10 +185,22 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
     # miss and pass: unset edge headers + optional group-L timing
     base_unset = "if (req.backend.is_origin) {\n  unset bereq.http.x-fos-edge-data;\n}"
 
+    # Session-scoring services route the first-pass request to the scorer
+    # Compute backend via `return(pass)` in vcl_recv. That triggers the
+    # PASS subroutine for the scorer fetch, which would otherwise capture
+    # x-of-start AT THE SCORER FETCH TIME — polluting the eventual TTFB/
+    # TTLB numbers with scorer-leg latency. The X-Edge-Scoring-Pass=="1"
+    # marker (set by session_scoring_vcl.recv_snippet just before the
+    # `return(pass)`) is our discriminator. Non-scoring services never set
+    # this header, so the guard is always true and timing fires normally.
+    _scoring_guard_open = 'if (req.http.X-Edge-Scoring-Pass != "1") {\n'
+    _scoring_guard_close = "}\n"
+
     if group_l:
         miss_vcl = base_unset + (
             "\n# [group-L] Record timing start for origin fetch\n"
-            "set req.http.x-of-start = time.elapsed.usec;\n"
+            + _scoring_guard_open
+            + "set req.http.x-of-start = time.elapsed.usec;\n"
             "unset bereq.http.x-of-start;\n"
             'set bereq.http.x-is-cluster-fetch = "1";\n'
             "if (req.http.x-edge-req-id) {\n"
@@ -134,11 +208,12 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
             "} else if (req.http.x-req-id) {\n"
             "  set bereq.http.x-edge-req-id = req.http.x-req-id;\n"
             "}\n"
-            "unset bereq.http.x-req-id;"
+            "unset bereq.http.x-req-id;\n" + _scoring_guard_close
         )
         pass_vcl = base_unset + (
             "\n# [group-L] Record timing start for PASS fetch\n"
-            "set req.http.x-of-start = time.elapsed.usec;\n"
+            + _scoring_guard_open
+            + "set req.http.x-of-start = time.elapsed.usec;\n"
             "unset bereq.http.x-of-start;\n"
             'set bereq.http.x-is-cluster-fetch = "1";\n'
             "if (req.http.x-edge-req-id) {\n"
@@ -146,7 +221,7 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
             "} else if (req.http.x-req-id) {\n"
             "  set bereq.http.x-edge-req-id = req.http.x-req-id;\n"
             "}\n"
-            "unset bereq.http.x-req-id;"
+            "unset bereq.http.x-req-id;\n" + _scoring_guard_close
         )
     else:
         miss_vcl = base_unset
@@ -159,7 +234,9 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
         if group_l:
             fetch_lines.append(
                 "# [group-L] Record TTFB and capture origin metadata\n"
-                'if (req.http.x-of-start != "") {\n'
+                # Skip the scoring sub-fetch — we want TTFB for the real
+                # origin, not the scorer Compute backend.
+                'if (req.http.X-Edge-Scoring-Pass != "1" && req.http.x-of-start != "") {\n'
                 "  declare local var.ttfb INTEGER;\n"
                 "  set var.ttfb = std.atoi(time.elapsed.usec);\n"
                 "  set var.ttfb -= std.atoi(req.http.x-of-start);\n"
@@ -182,7 +259,10 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
         if group_l:
             error_lines.append(
                 "# [group-L] Capture timing for failed origin fetches\n"
-                'if (req.http.x-of-start != "") {\n'
+                # Skip the scoring sub-fetch — a scorer error is fail-open
+                # handled by our session-scoring snippet and shouldn't
+                # pollute the customer's origin-error telemetry.
+                'if (req.http.X-Edge-Scoring-Pass != "1" && req.http.x-of-start != "") {\n'
                 "  declare local var.ttfb INTEGER;\n"
                 "  set var.ttfb = std.atoi(time.elapsed.usec);\n"
                 "  set var.ttfb -= std.atoi(req.http.x-of-start);\n"
@@ -194,12 +274,14 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
             )
         snippets["error"] = "\n".join(error_lines)
 
-    if group_l or custom_origin:
+    if group_l or custom_origin or custom_deliver:
         deliver_lines = []
         if group_l:
             deliver_lines.append(
                 "# [group-L] Record TTLB, capture bytes, strip all internal headers\n"
-                'if (req.http.x-of-start != "") {\n'
+                # Skip scoring sub-fetch — don't capture scorer-leg TTLB
+                # into the real-request's telemetry.
+                'if (req.http.X-Edge-Scoring-Pass != "1" && req.http.x-of-start != "") {\n'
                 "  declare local var.ttlb INTEGER;\n"
                 "  set var.ttlb = std.atoi(time.elapsed.usec);\n"
                 "  set var.ttlb -= std.atoi(req.http.x-of-start);\n"
@@ -257,6 +339,20 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
                 deliver_lines.append(f"  unset resp.http.x-fos-origin-data:{name};")
                 deliver_lines.append("}")
 
+        if custom_deliver:
+            # Deliver-stage fields read from the RESPONSE headers
+            # (e.g. resp.http.X-Edge-Score after a Compute scorer sub-fetch
+            # returned). The expression in vcl_log_expression points at the
+            # ``req.http.*`` slot the upstream snippet copied it into — same
+            # final namespace as edge fields, just captured a stage later in
+            # the request lifecycle.
+            deliver_lines.append("# --- Custom Deliver Fields ---")
+            for cf in custom_deliver:
+                name = cf["name"]
+                deliver_lines.append(f'if ({cf["vcl_log_expression"]} != "") {{')
+                deliver_lines.append(f"  set req.http.x-fos-edge-data:{name} = {cf['vcl_log_expression']};")
+                deliver_lines.append("}")
+
         snippets["deliver"] = "\n".join(deliver_lines)
 
     return snippets
@@ -301,6 +397,55 @@ def validate_log_format(log_fields_config: dict = None) -> list[str]:
         return []
 
     return _validate_log_format_regex(raw)
+
+
+def install_capture_snippets(
+    service_id: str,
+    version: int,
+    log_fields_config: dict | None,
+    token: str,
+) -> None:
+    """Install the auto-generated "Fastly Log Analysis *" capture VCL
+    snippets on the given draft version. Idempotent via ``ensure_vcl_
+    snippet``'s content/priority diff.
+
+    Mapping table here is the single source of truth for which subroutine
+    each capture phase targets and at what priority. Both the
+    full-provisioning path (`ensure_logging_endpoint`) and the
+    session-scoring orchestrator (which installs onto an existing service
+    that already has a logging endpoint) call into this helper.
+
+    Note on the Origin Error snippet: a prior copy of this logic in
+    ``session_scoring_orchestrator.enable_scoring`` omitted the error
+    snippet install, so a service first provisioned via the orchestrator
+    silently lacked failed-origin TTFB capture. This helper closes that
+    drift by installing all phases via one loop.
+    """
+    snippets = generate_capture_vcl(log_fields_config)
+    # (snippet_name, subroutine_type, priority, required)
+    # 'required' phases ("recv", "miss", "pass") are always generated.
+    # Group-L phases ("fetch", "deliver", "error") only exist when
+    # group L is enabled — guarded by `in snippets`.
+    install_plan = (
+        ("Fastly Log Analysis Capture", "recv", 1, True),
+        ("Fastly Log Analysis Miss", "miss", 100, True),
+        ("Fastly Log Analysis Pass", "pass", 100, True),
+        ("Fastly Log Analysis Origin Fetch", "fetch", 100, False),
+        ("Fastly Log Analysis Origin Deliver", "deliver", 100, False),
+        ("Fastly Log Analysis Origin Error", "error", 100, False),
+    )
+    for snip_name, kind, priority, required in install_plan:
+        if not required and kind not in snippets:
+            continue
+        ensure_vcl_snippet(
+            snip_name,
+            kind,
+            snippets[kind],
+            priority,
+            service_id,
+            version,
+            token,
+        )
 
 
 def _validate_log_format_regex(raw: str) -> list[str]:
@@ -698,26 +843,7 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
         if status_cb:
             status_cb("⏳ Deploying VCL snippets to capture edge values...")
 
-        vcl_snippets = generate_capture_vcl(cfg.get("log_fields"))
-        ensure_vcl_snippet("Fastly Log Analysis Capture", "recv", vcl_snippets["recv"], 1, service_id, new_ver, token)
-        ensure_vcl_snippet("Fastly Log Analysis Miss", "miss", vcl_snippets["miss"], 100, service_id, new_ver, token)
-        ensure_vcl_snippet("Fastly Log Analysis Pass", "pass", vcl_snippets["pass"], 100, service_id, new_ver, token)
-        if "fetch" in vcl_snippets:
-            ensure_vcl_snippet(
-                "Fastly Log Analysis Origin Fetch", "fetch", vcl_snippets["fetch"], 100, service_id, new_ver, token
-            )
-            ensure_vcl_snippet(
-                "Fastly Log Analysis Origin Error", "error", vcl_snippets["error"], 100, service_id, new_ver, token
-            )
-            ensure_vcl_snippet(
-                "Fastly Log Analysis Origin Deliver",
-                "deliver",
-                vcl_snippets["deliver"],
-                100,
-                service_id,
-                new_ver,
-                token,
-            )
+        install_capture_snippets(service_id, new_ver, cfg.get("log_fields"), token)
 
         ok("Logging endpoint and VCL snippets added to draft")
 
@@ -991,27 +1117,8 @@ def update_logging_endpoint(cfg: dict, token: str):
 
         yield {"type": "progress", "current": 3, "total": total_steps}
 
-        vcl_snippets = generate_capture_vcl(lf_config)
-        ensure_vcl_snippet("Fastly Log Analysis Capture", "recv", vcl_snippets["recv"], 1, service_id, new_ver, token)
-        ensure_vcl_snippet("Fastly Log Analysis Miss", "miss", vcl_snippets["miss"], 100, service_id, new_ver, token)
-        ensure_vcl_snippet("Fastly Log Analysis Pass", "pass", vcl_snippets["pass"], 100, service_id, new_ver, token)
-        if "fetch" in vcl_snippets:
-            ensure_vcl_snippet(
-                "Fastly Log Analysis Origin Fetch", "fetch", vcl_snippets["fetch"], 100, service_id, new_ver, token
-            )
-            ensure_vcl_snippet(
-                "Fastly Log Analysis Origin Error", "error", vcl_snippets["error"], 100, service_id, new_ver, token
-            )
-            ensure_vcl_snippet(
-                "Fastly Log Analysis Origin Deliver",
-                "deliver",
-                vcl_snippets["deliver"],
-                100,
-                service_id,
-                new_ver,
-                token,
-            )
-        else:
+        install_capture_snippets(service_id, new_ver, lf_config, token)
+        if "fetch" not in generate_capture_vcl(lf_config):
             for snip in [
                 "Fastly Log Analysis Origin Fetch",
                 "Fastly Log Analysis Origin Error",

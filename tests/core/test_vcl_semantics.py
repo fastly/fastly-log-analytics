@@ -280,3 +280,148 @@ sub test_edge_promotes_metrics_from_shield_resp {
 """
     result = run_falco_test(cfg, test_code)
     assert result.returncode == 0, f"Falco test failed:\\n{result.stdout}\\n{result.stderr}"
+
+
+# ── collection_stage="deliver" — pure-Python emission tests ────────────────────
+# These don't need falco — they assert on the exact strings the generator
+# emits. Falco-based runtime tests would be a future enhancement once the
+# scoring-service VCL stabilizes.
+
+
+def test_deliver_stage_emits_capture_block_in_vcl_deliver():
+    """A custom_field with collection_stage='deliver' must produce a guarded
+    capture line in the vcl_deliver snippet that copies the response header
+    into the req.http.x-fos-edge-data:* namespace."""
+    cfg = {
+        "groups": ["A"],
+        "custom_fields": [
+            {
+                "name": "edge_score",
+                "vcl_log_expression": "resp.http.X-Edge-Score",
+                "collection_stage": "deliver",
+                "value_type": "numeric",
+                "enabled": True,
+            }
+        ],
+    }
+    snippets = generate_capture_vcl(cfg)
+    deliver = snippets.get("deliver", "")
+    assert "# --- Custom Deliver Fields ---" in deliver
+    assert 'if (resp.http.X-Edge-Score != "") {' in deliver
+    assert "set req.http.x-fos-edge-data:edge_score = resp.http.X-Edge-Score;" in deliver
+
+
+def test_deliver_stage_field_appears_in_log_format():
+    """Deliver-stage fields read their vcl_log_expression directly in the log
+    format, bypassing the x-fos-edge-data subfield indirection used by
+    edge-stage fields. (Subfield writes in vcl_deliver are readable via the
+    subfield syntax within VCL but don't show up in the log-format evaluator's
+    snapshot, so deliver-stage fields would land as NULL otherwise.)"""
+    from backend.core.log_fields import generate_log_format
+
+    cfg = {
+        "groups": ["A"],
+        "custom_fields": [
+            {
+                "name": "edge_score",
+                "vcl_log_expression": "req.http.x-edge-score",
+                "collection_stage": "deliver",
+                "value_type": "numeric",
+                "enabled": True,
+            },
+            {
+                "name": "edge_cookie_compliance",
+                "vcl_log_expression": "req.http.x-edge-cookie-compliance",
+                "collection_stage": "deliver",
+                "value_type": "string",
+                "enabled": True,
+            },
+        ],
+    }
+    fmt = generate_log_format(cfg)
+    # Numeric field: single-level if() with compound AND condition.
+    # Nested if(if(...) != "", ...) would be rejected by Fastly's
+    # parser ("if() condition must be a simple expression, not a
+    # function call"), so we flatten with `gate && value-is-numeric`.
+    # 014: the second predicate is a strict numeric regex (not just
+    # ``!= ""``) so a custom field value like ``"]"`` cannot break out
+    # of the JSON log line.
+    assert (
+        '"edge_score":%{if('
+        "fastly.ff.visits_this_service == 0 && "
+        'req.http.x-edge-score ~ "^-?[0-9]+(\\.[0-9]+)?$"'
+        ', req.http.x-edge-score, "null")}V'
+    ) in fmt
+    # String field: json.escape wraps a single if() that gates on the
+    # shield-vs-edge check and substr-clamps the value (016) so an
+    # oversized custom field cannot push the line past Fastly's 16 KB
+    # log-line limit. Empty string at shield → JSON empty string.
+    assert (
+        '"edge_cookie_compliance":"%{json.escape('
+        "if(fastly.ff.visits_this_service == 0, "
+        'substr(req.http.x-edge-cookie-compliance, 0, 2000), "")'
+        ')}V"'
+    ) in fmt
+
+
+def test_deliver_stage_does_not_fire_when_disabled():
+    """disabled=False fields must NOT appear in the generated VCL."""
+    cfg = {
+        "groups": ["A"],
+        "custom_fields": [
+            {
+                "name": "edge_score",
+                "vcl_log_expression": "resp.http.X-Edge-Score",
+                "collection_stage": "deliver",
+                "enabled": False,
+            }
+        ],
+    }
+    snippets = generate_capture_vcl(cfg)
+    assert "edge_score" not in snippets.get("deliver", "")
+
+
+def test_deliver_stage_coexists_with_edge_and_origin():
+    """Edge + origin + deliver fields all in one config — each lands in
+    the right snippet."""
+    cfg = {
+        "groups": ["L"],
+        "custom_fields": [
+            {
+                "name": "f_edge",
+                "vcl_log_expression": "req.http.X-Custom-Edge",
+                "collection_stage": "edge",
+                "enabled": True,
+            },
+            {
+                "name": "f_origin",
+                "vcl_log_expression": "beresp.http.X-Custom-Origin",
+                "collection_stage": "origin",
+                "origin_log_frequency": "all",
+                "enabled": True,
+            },
+            {
+                "name": "f_deliver",
+                "vcl_log_expression": "resp.http.X-Custom-Deliver",
+                "collection_stage": "deliver",
+                "enabled": True,
+            },
+        ],
+    }
+    snippets = generate_capture_vcl(cfg)
+    assert "f_edge" in snippets["recv"]
+    assert "f_origin" in snippets["fetch"]
+    assert "f_deliver" in snippets["deliver"]
+    # 020: every custom field appears in the recv scrub block (per-name
+    # ``unset req.http.x-fos-edge-data:<name>;`` lines) so a client
+    # cannot pre-set a value for any known field. That means f_origin
+    # SHOULD appear in recv — but only inside the scrub block, never as
+    # a ``set`` assignment. (Use space-prefix to disambiguate ``set``
+    # from ``unset`` since the latter ends in ``...set`` too.)
+    assert "unset req.http.x-fos-edge-data:f_origin;" in snippets["recv"]
+    assert "unset req.http.x-fos-origin-data:f_origin;" in snippets["recv"]
+    assert "  set req.http.x-fos-edge-data:f_origin" not in snippets["recv"]
+    # Same property for the other cross-stage fields.
+    assert "  set req.http.x-fos-edge-data:f_deliver" not in snippets["fetch"]
+    assert "  set beresp.http.x-fos-origin-data:f_edge" not in snippets["fetch"]
+    assert "f_edge" not in snippets["deliver"]

@@ -143,8 +143,8 @@ export default function InsightsPage() {
       }) => {
         const { data, isLoading, error } = useQuery({
     queryKey: ['insights', activeServiceId, windowHours, baselineHours],
-    queryFn: async () => {
-      const { data } = await client.POST("/api/insights", {
+    queryFn: async ({ signal }) => {
+      const { data } = await client.POST("/api/insights", { signal, 
         body: {
           window_size_hrs: parseFloat(windowHours),
           baseline_hours: parseFloat(baselineHours),
@@ -159,8 +159,8 @@ export default function InsightsPage() {
 
   const { data: availability } = useQuery({
     queryKey: ['insights', 'availability', activeServiceId],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/insight-availability")
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/insight-availability", { signal })
       return data
     },
     enabled: !!activeServiceId
@@ -186,6 +186,9 @@ export default function InsightsPage() {
       )}
 
       {isLoading ? (
+        // Use the route-level skeleton shape (matches loading.tsx +
+        // ReportShell's not-ready skeleton) so the loading state is
+        // CONSISTENT across click → skeleton → real-content.
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           <SkeletonGrid count={6} height="250px" />
         </div>

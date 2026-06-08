@@ -44,14 +44,43 @@ export const client = createClient<paths>({
   baseUrl: getApiBase(),
 });
 
+// Paths that don't need an active service (bootstrap before service is
+// known, share/login flows, share-analyst chrome). Anything else is
+// treated as a service-scoped call, and we abort on the FE if no
+// service is set rather than letting the backend return a 400 that
+// TanStack would log as an error.
+const SERVICELESS_PATH_PREFIXES = [
+  "/api/bootstrap",
+  "/api/share",        // share-login, share-status, etc.
+  "/api/auth",
+  "/api/login",
+  "/api/health",
+  "/api/debug",
+];
+
 // Middleware to inject activeServiceId and handle errors
 client.use({
   async onRequest({ request }) {
     const { activeServiceId } = useServiceStore.getState();
     if (activeServiceId) {
       request.headers.set("x-service-id", activeServiceId);
+      return request;
     }
-    return request;
+    // No active service at request time. Most paths will 400 — short-
+    // circuit instead of making the round-trip. Race we're guarding:
+    // useServiceQuery's `enabled: !!activeServiceId` was true when the
+    // query mounted, but the store transitioned to null between mount
+    // and fetch (page nav, bootstrap re-hydration). Result: queryFn
+    // already running, middleware sees null, request goes out without
+    // x-service-id, backend's get_source raises 400.
+    const url = String(request.url);
+    if (SERVICELESS_PATH_PREFIXES.some(p => url.includes(p))) {
+      return request;
+    }
+    // Path needs a service we don't have. Throw a sentinel error that
+    // TanStack surfaces as a normal query error; the next render with a
+    // non-null activeServiceId will refire naturally via queryKey change.
+    throw new Error("No active service — request aborted");
   },
   async onResponse({ response }) {
     if (!response.ok) {

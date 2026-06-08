@@ -49,11 +49,15 @@ export function SystemHealthCard() {
       const { data } = await client.GET('/api/admin/health-snapshot' as any, {} as any)
       return data as HealthSnapshot
     },
-    // 2s polling for a live, ping-like feel. The endpoint is cheap
-    // (~20ms — reads /proc, shutil.disk_usage, in-memory scheduler
-    // state, no DB queries). Background tabs skip polling so a stray
-    // admin tab doesn't keep hitting the endpoint.
-    refetchInterval: 2_000,
+    // 10s polling. Pre-fix this was 2s for "live ping" feel — but the
+    // endpoint that was claimed to be 20ms cheap routinely took
+    // 1-1.7s when the backend was under sync load, which meant the
+    // page was constantly waiting on health-snapshot. Combined with
+    // navigation away from /admin (the old in-flight request kept
+    // running because queryFns don't pass signal yet), clicks felt
+    // sluggish. 10s is plenty for an operator glance — there's a
+    // refresh button below if real-time matters.
+    refetchInterval: 10_000,
     refetchIntervalInBackground: false,
   })
 

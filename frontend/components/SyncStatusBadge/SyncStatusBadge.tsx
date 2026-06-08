@@ -27,15 +27,19 @@ export function SyncStatusBadge() {
       return data
     },
     enabled: !!activeServiceId,
-    refetchInterval: 15000 // Poll every 15s to keep status fresh
+    refetchInterval: 15000, // Poll every 15s to keep status fresh
+    staleTime: 15000 // Prevent immediate refetch on route navigation
   })
 
-  // 1s ticker so the "Xs ago" label advances between the 15s polls.
-  const [, setTick] = React.useState(0)
-  React.useEffect(() => {
-    const id = setInterval(() => setTick(t => t + 1), 1000)
-    return () => clearInterval(id)
-  }, [])
+  // Pre-fix this had a 1-second setState ticker so the "Xs ago" label
+  // advanced between the 15s polls. That ticker re-rendered the entire
+  // header chrome every second — observable as visual jumpiness even
+  // when nothing was actively loading. The "Xs ago" granularity is
+  // good enough at the 15s poll cadence: the label updates whenever
+  // the query refetches OR when any other state in the badge changes,
+  // and the formatTimeAgo call below uses the latest fileTs each
+  // render. Cost: the "X seconds" portion isn't real-time but the
+  // value is at most 15s stale — fine for an operator glance.
 
   if (!activeServiceId || !status) return null
 

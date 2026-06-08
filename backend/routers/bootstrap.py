@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import duckdb
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.deps import get_meta_con, get_service_id, get_source
 from backend.models.common import BootstrapResponse
@@ -18,7 +18,7 @@ def bootstrap(
     service_id: str | None = Depends(get_service_id),
 ):
     from backend.core import duckdb as _db
-    from backend.core.duckdb import STORAGE_MODE, get_schema
+    from backend.core.duckdb import STORAGE_MODE
     from backend.services.service_manager import get_enriched_services
     from backend.utils.countries import COUNTRY_MAP
     from backend.utils.pop_utils import get_pop_lat_lon_map
@@ -80,20 +80,15 @@ def bootstrap(
         if active_svc and active_svc.get("status"):
             schema = active_svc["status"].get("schema", [])
 
-    if not schema and valid_active_id:
-        src = _db.get_source_for_service(valid_active_id)
-        if src:
-            try:
-                from backend.core.duckdb import get_connection
-
-                # read_only: schema lookup only, no writes.
-                con = get_connection(source=src, max_wait=3, skip_view_update=True, read_only=True)
-                try:
-                    schema = get_schema(con, src)
-                finally:
-                    con.close()
-            except Exception:
-                pass
+    # NOTE: the previous fallback opened a read-only DuckDB connection here
+    # and ran get_schema() against the source on cold-cache loads. That call
+    # acquired the per-service lock + did a parquet glob, costing 1-3s on
+    # the very first /api/bootstrap after a backend restart and blocking
+    # the whole admin UI from rendering. With the status-refresh cron
+    # populating active_svc["status"]["schema"], the cache is the source
+    # of truth — drop the fallback. If schema is empty here, the dashboard
+    # renders without a hint banner; the user can refresh once the cron
+    # has run (typically <60s after startup).
 
     pops = get_pop_lat_lon_map()
 
@@ -147,13 +142,26 @@ def bootstrap(
 
 @router.get("/sources")
 @query_errors(status_code=500)
-def sources_endpoint():
+def sources_endpoint(request: Request):
+    """Return storage metadata (endpoint / bucket / prefix / region) for the
+    configured sources the caller is authorized to see.
+
+    Security: filter by analyst session scope. Without this, an
+    authenticated analyst can enumerate every service's S3 bucket / endpoint
+    / prefix configuration, including ones not in their invite. Admin
+    requests (no analyst_session on request.state) see the full list.
+    """
     from backend import config as svcconfig
     from backend.core.duckdb import _safe_table_name
+
+    analyst_session = getattr(request.state, "analyst_session", None)
+    allowed: set[str] | None = set(analyst_session.service_ids or []) if analyst_session else None
 
     configs = svcconfig.list_configs()
     sources = []
     for cfg in configs:
+        if allowed is not None and cfg.get("service_id") not in allowed:
+            continue
         src = svcconfig.config_to_source(cfg)
         sources.append(
             {
@@ -171,11 +179,24 @@ def sources_endpoint():
 @router.get("/schema")
 @query_errors(status_code=500)
 def schema_endpoint(
+    request: Request,
     source: dict = Depends(get_source),
     con: duckdb.DuckDBPyConnection = Depends(get_meta_con),
 ):
     from backend import config as svcconfig
     from backend.core.duckdb import _safe_table_name, get_schema
+
+    # Cross-tenant guard: an analyst session scoped to ``svc-A`` must not
+    # be able to read ``svc-B``'s schema (custom-field names, types, and
+    # PII flags). Mirrors the check in ``log_fields_catalog``.
+    analyst_session = getattr(request.state, "analyst_session", None)
+    if analyst_session is not None:
+        allowed = set(analyst_session.service_ids or [])
+        if source.get("name") not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "service_not_authorized", "service": source.get("name")},
+            )
 
     # Try cache first
     cached_status = svcconfig.get_status(source["name"])
@@ -187,9 +208,28 @@ def schema_endpoint(
 
 @router.get("/log-fields/catalog")
 @query_errors(status_code=500)
-def log_fields_catalog(service_id: str | None = Depends(get_service_id)):
+def log_fields_catalog(
+    request: Request,
+    service_id: str | None = Depends(get_service_id),
+):
+    """Return the log-fields catalog for the requested service.
+
+    Security: enforce analyst session scope on the requested
+    ``service_id``. Without this, an analyst scoped to ``svc-A`` can pass
+    ``?service_id=svc-B`` and read svc-B's custom field configuration
+    (including PII-related field configs).
+    """
     from backend.core import log_fields as lf
     from backend.core.log_fields import INSIGHT_DEFINITIONS
+
+    analyst_session = getattr(request.state, "analyst_session", None)
+    if analyst_session is not None and service_id is not None:
+        allowed = set(analyst_session.service_ids or [])
+        if service_id not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "service_not_authorized", "service": service_id},
+            )
 
     # Try to load existing limits
     field_limits = {}
@@ -225,10 +265,23 @@ from backend.models.dashboard import InsightsAvailabilityResponse
 @router.get("/insight-availability", response_model=InsightsAvailabilityResponse)
 @query_errors(status_code=500)
 def insight_availability(
+    request: Request,
     source: dict = Depends(get_source),
     con: duckdb.DuckDBPyConnection = Depends(get_meta_con),
 ):
     from backend.core.duckdb import get_schema
+
+    # Cross-tenant guard: insight availability discloses which fields are
+    # populated (presence/absence of optional columns), so it needs the
+    # same scope check as the schema endpoint.
+    analyst_session = getattr(request.state, "analyst_session", None)
+    if analyst_session is not None:
+        allowed = set(analyst_session.service_ids or [])
+        if source.get("name") not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "service_not_authorized", "service": source.get("name")},
+            )
 
     actual_cols = {col["name"] for col in get_schema(con, source)}
     from backend.core.log_fields import INSIGHT_DEFINITIONS

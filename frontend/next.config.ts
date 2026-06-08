@@ -26,14 +26,20 @@ const nextConfig: NextConfig = {
       // edge caching it is wrong — every visitor would get the same shell
       // and the redirect-to-/share-login would never run.
       //
-      // Override to no-store for ALL routes except hashed static assets under
-      // /_next/static/* and /_next/image, which are safe to cache forever
-      // (their filenames are content-hashed).
+      // Override with `private, no-cache` for ALL routes except hashed static
+      // assets under /_next/static/* and /_next/image, which are safe to cache
+      // forever (their filenames are content-hashed).
+      //
+      // `private` prevents Fastly/CDN from caching (the original concern).
+      // `no-cache` (not `no-store`) allows the Next.js Router Cache to retain
+      // prefetched RSC payloads for instant client-side navigation — `no-store`
+      // caused Next.js to bypass its Router Cache entirely, forcing a fresh
+      // server round-trip on every link click.
       return [
         {
           source: '/((?!_next/static|_next/image|favicon.ico).*)',
           headers: [
-            { key: 'Cache-Control', value: 'private, no-store, must-revalidate' },
+            { key: 'Cache-Control', value: 'private, no-cache, must-revalidate' },
           ],
         },
       ]

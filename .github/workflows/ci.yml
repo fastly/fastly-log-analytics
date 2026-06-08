@@ -40,6 +40,25 @@ jobs:
           sudo curl -sL https://github.com/ysugimoto/falco/releases/latest/download/falco-linux-amd64 -o /usr/local/bin/falco
           sudo chmod +x /usr/local/bin/falco
 
+      - name: Install gitleaks
+        # Same curl-binary-to-PATH pattern as falco above. Version pinned so
+        # a detector-rule change doesn't suddenly fail an unrelated PR; bump
+        # deliberately when wanted. Mirrors `.pre-commit-config.yaml`.
+        run: |
+          GITLEAKS_VERSION=8.30.1
+          sudo curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          sudo chmod +x /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Secret scan (gitleaks)
+        # Scans full git history against the .gitleaks.toml allowlist.
+        # `--exit-code 1` is the default; explicit for clarity. Anything
+        # the allowlist doesn't cover fails the build with a redacted
+        # diagnostic — see CONTRIBUTING.md / AGENTS.md for the
+        # suppression playbook.
+        run: gitleaks detect --no-banner --redact --config .gitleaks.toml --exit-code 1
+
       - name: Install terraform
         # Required by tests/utils/test_terraform_gen.py — runs `terraform fmt`
         # against generator output and `validate` when TERRAFORM_VALIDATE=1.

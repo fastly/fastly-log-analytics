@@ -84,6 +84,73 @@ class TestQueryRunner:
         result = runner.execute("SELECT 42 AS n")
         assert result.fetchone()[0] == 42
 
+    def test_execute_self_heals_on_stale_view(self, test_service_source):
+        """``execute()`` itself refreshes the view + retries once when DuckDB
+        raises a stale-view error. This is the safety net that catches buffer
+        commits landing mid-query, complementing the pool's checkout fingerprint."""
+        from unittest.mock import MagicMock
+
+        attempts = {"n": 0}
+
+        def flaky_execute(sql, params=None):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise Exception("IO Error: No files found that match the pattern .../buffer/batch_x.parquet")
+            cursor = MagicMock()
+            cursor.fetchone.return_value = (1,)
+            return cursor
+
+        fake_con = MagicMock()
+        fake_con.execute.side_effect = flaky_execute
+        runner = QueryRunner(fake_con, test_service_source)
+
+        refresh_calls = {"n": 0, "force_seen": None}
+
+        def fake_refresh(con, src, force=False, lock_timeout=5.0):
+            refresh_calls["n"] += 1
+            refresh_calls["force_seen"] = force
+
+        with patch("backend.core.iceberg.update_iceberg_view", side_effect=fake_refresh):
+            res = runner.execute("SELECT 1")
+
+        assert attempts["n"] == 2, "should retry once after refresh"
+        assert refresh_calls["n"] == 1, "should call update_iceberg_view exactly once"
+        # Self-heal must force a real rebuild — fast-path would re-execute
+        # the same cached SQL that contains the deleted file path.
+        assert refresh_calls["force_seen"] is True, "self-heal must pass force=True"
+        assert res.fetchone()[0] == 1
+
+    def test_execute_reraises_non_stale_error(self, test_service_source):
+        """A non-stale error (e.g. syntax) is re-raised immediately — no retry."""
+        from unittest.mock import MagicMock
+
+        attempts = {"n": 0}
+
+        def always_fail(sql, params=None):
+            attempts["n"] += 1
+            raise Exception("Parser Error: syntax error at or near 'BLOOP'")
+
+        fake_con = MagicMock()
+        fake_con.execute.side_effect = always_fail
+        runner = QueryRunner(fake_con, test_service_source)
+
+        with pytest.raises(Exception, match="Parser Error"):
+            runner.execute("BLOOP")
+        assert attempts["n"] == 1, "non-stale error should not trigger retry"
+
+    def test_execute_surfaces_original_error_when_refresh_fails(self, test_service_source):
+        """If update_iceberg_view itself raises, the caller should see the
+        original stale-view error — not the refresh side-effect error."""
+        from unittest.mock import MagicMock
+
+        fake_con = MagicMock()
+        fake_con.execute.side_effect = Exception("IO Error: No files found at path")
+        runner = QueryRunner(fake_con, test_service_source)
+
+        with patch("backend.core.iceberg.update_iceberg_view", side_effect=RuntimeError("rebind failed")):
+            with pytest.raises(Exception, match="No files found"):
+                runner.execute("SELECT 1")
+
     def test_execute_with_retry_succeeds_on_first_try(self, in_memory_duckdb, test_service_source):
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         result = runner.execute_with_retry("SELECT 99 AS n")

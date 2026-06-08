@@ -24,21 +24,33 @@ from backend.core import metadata_db
 _EXPECTED_TABLES = {
     "sources",
     "ingested_files",
+    "ingested_files_summary",
     "ingest_in_flight",
     "cron_runs",
     "asn_names",
     "audit_logs",
     "views",
     "alerts",
+    "scoring_labels",
     "usage_log",
+    "usage_log_hourly_summary",
+    "local_compacted_files",
 }
 
 _EXPECTED_INDEXES = {
-    "idx_ingested_files_source",
+    "idx_ingested_files_source_ingested_at",
     "idx_in_flight_source",
     "idx_cron_task_started",
+    "idx_cron_started",
     "idx_audit_source",
+    "idx_scoring_labels_svc_sid",
+    "idx_scoring_labels_svc_label",
     "idx_usage_timestamp",
+    "idx_usage_dedup",
+    "idx_usage_reconcile",
+    "idx_usage_process_context_ts",
+    "idx_usage_service_ts",
+    "idx_usage_hourly_svc_hour",
 }
 
 

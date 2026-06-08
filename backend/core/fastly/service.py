@@ -25,22 +25,6 @@ def find_service_by_name(name: str, token: str) -> dict | None:
     return None
 
 
-def find_dictionary_by_name(service_id: str, version: int, name: str, token: str) -> dict | None:
-    try:
-        dicts = fastly("GET", f"/service/{service_id}/version/{version}/dictionary", token=token)
-        for d in dicts:
-            if d.get("name") == name:
-                return d
-    except RuntimeError:
-        pass
-    return None
-
-
-def upsert_dictionary_items(service_id: str, dictionary_id: str, items: dict[str, str], token: str):
-    payload = {"items": [{"item_key": k, "item_value": v} for k, v in items.items()]}
-    return fastly("PATCH", f"/service/{service_id}/dictionary/{dictionary_id}/items", payload, token=token)
-
-
 def find_condition(name: str, service_id: str, version: int, token: str) -> dict | None:
     try:
         conditions = fastly("GET", f"/service/{service_id}/version/{version}/condition", token=token)

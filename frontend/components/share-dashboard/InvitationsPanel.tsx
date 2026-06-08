@@ -32,9 +32,21 @@ interface InvitationsPanelProps {
   onViewAuditLogs?: (email: string) => void
 }
 
-function buildShareCard(invite: any, publicUrl: string | null): string {
+function buildShareCard(
+  invite: any,
+  publicUrl: string | null,
+  allServices: Array<{ service_id: string; name?: string }> = []
+): string {
   const url = publicUrl || '(sharing not active)'
-  const services = (invite.service_ids || []).join(', ') || 'all assigned services'
+  // Render each authorized service as "Name (ID)" — falls back to bare
+  // ID when the lookup misses (newly-added service the UI hasn't seen
+  // yet, e.g.) so the invite is still useful.
+  const nameById = new Map(allServices.map(s => [s.service_id, s.name || '']))
+  const formatted = (invite.service_ids || []).map((id: string) => {
+    const name = nameById.get(id)
+    return name ? `${name} (${id})` : id
+  })
+  const services = formatted.length ? formatted.join(', ') : 'all assigned services'
   return `==================================================
 FASTLY LOG ANALYSIS - SHARE DASHBOARD INVITATION
 ==================================================
@@ -137,7 +149,9 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
   }
 
   const handleCopyShareCard = (invite: any) => {
-    navigator.clipboard.writeText(buildShareCard(invite, status?.public_url ?? null))
+    navigator.clipboard.writeText(
+      buildShareCard(invite, status?.public_url ?? null, services)
+    )
     setCopiedInviteId(invite.id)
     setTimeout(() => setCopiedInviteId(null), 1500)
   }

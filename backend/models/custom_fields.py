@@ -15,7 +15,7 @@ class CustomField(BaseModel):
     label: str
     description: str = ""
     vcl_log_expression: str
-    collection_stage: Literal["edge", "origin"] = "edge"
+    collection_stage: Literal["edge", "origin", "deliver"] = "edge"
     origin_log_frequency: Literal["all", "miss_pass"] = "all"
     duckdb_type: Literal["VARCHAR", "INTEGER", "BIGINT", "DOUBLE", "BOOLEAN"] = "VARCHAR"
     value_type: Literal["string", "numeric", "boolean", "ip", "url"] = "string"
@@ -51,7 +51,7 @@ class CustomFieldUpdate(BaseModel):
     label: str | None = None
     description: str | None = None
     vcl_log_expression: str | None = None
-    collection_stage: Literal["edge", "origin"] | None = None
+    collection_stage: Literal["edge", "origin", "deliver"] | None = None
     origin_log_frequency: Literal["all", "miss_pass"] | None = None
     duckdb_type: Literal["VARCHAR", "INTEGER", "BIGINT", "DOUBLE", "BOOLEAN"] | None = None
     value_type: Literal["string", "numeric", "boolean", "ip", "url"] | None = None
@@ -74,7 +74,7 @@ class CustomFieldsListResponse(BaseResponse):
 
 class VclLintRequest(BaseModel):
     vcl_log_expression: str
-    collection_stage: Literal["edge", "origin"] = "edge"
+    collection_stage: Literal["edge", "origin", "deliver"] = "edge"
     log_fields_config: dict | None = None
 
 

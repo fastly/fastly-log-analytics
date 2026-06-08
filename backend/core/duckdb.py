@@ -38,19 +38,7 @@ ACCESS_LEVEL = "read_write"  # per-service from config
 _ORPHAN_THRESHOLD_MINS = 5
 
 
-def _safe_iso(dt) -> str | None:
-    """Normalise a DuckDB datetime or string to an ISO-8601 string ending in Z."""
-    if dt is None:
-        return None
-    if hasattr(dt, "isoformat"):
-        s = dt.isoformat()
-        # DuckDB TIMESTAMP is timezone-naive but always represents UTC.
-        # Append Z so JavaScript parses it as UTC instead of local time.
-        if not s.endswith("Z") and "+" not in s and s.count("-") <= 2:
-            s += "Z"
-        return s
-    return str(dt)
-
+from backend.utils.date_utils import safe_iso as _safe_iso  # noqa: E402
 
 # Cached per-process constants — computed once, reused on every connection open.
 _cached_n_threads: int | None = None
@@ -258,28 +246,46 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
     # nested in CREATE SECRET, so the keys go in as a literal SQL
     # fragment. Keys are a hardcoded set, never user input.
     hdr_map_sql = "MAP {" + ", ".join(f"'{k}': ?" for k in headers) + "}"
-    with _fos_proxy_secret_lock:
-        con.execute(
-            f"""
-            CREATE OR REPLACE SECRET fos_proxy (
-                TYPE S3,
-                KEY_ID ?,
-                SECRET ?,
-                REGION ?,
-                ENDPOINT ?,
-                USE_SSL false,
-                URL_STYLE 'path',
-                EXTRA_HTTP_HEADERS {hdr_map_sql}
-            )
-            """,
-            [
-                source["access_key_id"],
-                source["secret_access_key"],
-                source["region"],
-                proxy_ep,
-                *headers.values(),
-            ],
+    create_secret_sql = f"""
+        CREATE OR REPLACE SECRET fos_proxy (
+            TYPE S3,
+            KEY_ID ?,
+            SECRET ?,
+            REGION ?,
+            ENDPOINT ?,
+            USE_SSL false,
+            URL_STYLE 'path',
+            EXTRA_HTTP_HEADERS {hdr_map_sql}
         )
+    """
+    secret_params = [
+        source["access_key_id"],
+        source["secret_access_key"],
+        source["region"],
+        proxy_ep,
+        *headers.values(),
+    ]
+    with _fos_proxy_secret_lock:
+        # _load_httpfs above runs INSTALL/LOAD httpfs, which starts an implicit
+        # transaction with a catalog snapshot taken BEFORE we acquired the lock.
+        # If another thread committed its own CREATE OR REPLACE SECRET while we
+        # were waiting, our stale snapshot trips a write-write conflict even
+        # though only one thread is inside this critical section. Rolling back
+        # discards the stale snapshot so CREATE OR REPLACE sees current catalog
+        # state. The retry handles the rare case where the rollback itself
+        # races with another commit (e.g. a third thread queued behind us).
+        for attempt in range(3):
+            try:
+                con.rollback()
+            except Exception:
+                pass
+            try:
+                con.execute(create_secret_sql, secret_params)
+                break
+            except Exception as e:
+                if "write-write conflict" in str(e).lower() and attempt < 2:
+                    continue
+                raise
     try:
         con.execute("SET http_timeout=60;")
         con.execute("SET http_retries=5;")
@@ -787,14 +793,22 @@ def get_connection(
     global _cached_n_threads, _cached_mem_limit_gb
     if _cached_n_threads is None:
         _cached_n_threads = min(multiprocessing.cpu_count(), 8)
-    if _cached_mem_limit_gb is None:
-        try:
-            _total_ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-            _cached_mem_limit_gb = max(1, int(_total_ram * 0.6 / (1024**3)))
-        except (AttributeError, ValueError):
-            _cached_mem_limit_gb = 4
     con.execute(f"SET threads = {_cached_n_threads};")
-    con.execute(f"SET memory_limit = '{_cached_mem_limit_gb}GB';")
+    # CRITICAL: only auto-derive memory_limit when DUCKDB_MEMORY_LIMIT is
+    # UNSET. Pre-fix, the env-based ``SET max_memory`` at line 762 was
+    # silently overridden here by ``SET memory_limit`` (they're aliases
+    # in DuckDB — the second SET wins). Container env DUCKDB_MEMORY_LIMIT=8GB
+    # was clobbered by ~60% of physical RAM (~9-10GB on the 16GB VM),
+    # leaving only ~6GB headroom for Python + pyiceberg + aiohttp + OS +
+    # frontend + caddy — recurring host OOM-kills followed.
+    if not os.getenv("DUCKDB_MEMORY_LIMIT"):
+        if _cached_mem_limit_gb is None:
+            try:
+                _total_ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+                _cached_mem_limit_gb = max(1, int(_total_ram * 0.6 / (1024**3)))
+            except (AttributeError, ValueError):
+                _cached_mem_limit_gb = 4
+        con.execute(f"SET memory_limit = '{_cached_mem_limit_gb}GB';")
     con.execute("SET checkpoint_threshold = '512MB';")
 
     # ALWAYS update the view to ensure local buffer files
@@ -938,9 +952,18 @@ def log_cron_run(
     service_id = source["name"]
     cfg = svcconfig.load_config(service_id) or {}
     prov = cfg.get("provisioning", {})
-    cron_key = "cron_sync" if task == "sync" else "cron_compact"
-    cron_cfg = prov.get(cron_key, {})
-    log_enabled = cron_cfg.get("log_enabled", True)
+    # Map each cron task to the cfg block whose log_enabled flag governs it.
+    # Tasks not in the map always log — the prior ``"cron_sync" if task ==
+    # "sync" else "cron_compact"`` ternary silently coupled metadata_cleanup,
+    # optimize, expire, full_sync, gap_heal, alerts, ngwaf_sync, etc. to
+    # cron_compact's log_enabled. Setting cron_compact.log_enabled=false on
+    # a service would suppress success rows for every task except sync.
+    _TASK_TO_CRON_KEY = {
+        "sync": "cron_sync",
+        "local_compact": "cron_compact",
+    }
+    cron_key = _TASK_TO_CRON_KEY.get(task)
+    log_enabled = prov.get(cron_key, {}).get("log_enabled", True) if cron_key else True
 
     if status == "success" and corrupt_rows and corrupt_rows > 0:
         status = "partial_success"
@@ -1117,162 +1140,166 @@ def get_sync_status(
         if m:
             latest_ingested_file_at = f"{m.group(1)} {m.group(2).replace('-', ':').replace('.', ':')}"
 
-    table_exists = (
-        con.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table_name]).fetchone() is not None
-    )
-
     # The iceberg view is always the source of truth for row counts.
     # We fetch row counts and time extents if the table exists, even if skip_fos=True,
     # because these are derived from local metadata (Iceberg manifests) and are
     # relatively cheap. This allows the UI to auto-range correctly even during
     # lightweight status polls.
+    #
+    # The split-path query inside the try block reads parquet DIRECTLY via
+    # read_parquet() and doesn't need the iceberg view to exist in the
+    # current connection.
+    # This matters because sync-status opens a fresh RO connection that
+    # doesn't yet have the per-session view; without this, every sync-
+    # status poll fell through to ingested_files.row_count (which sums
+    # raw FOS line counts BEFORE the timestamp filter and consistently
+    # over-reports ~2-3×).
     latest_log_at = None
     earliest_log_at = None
     local_rows = local_rows_ingested
 
-    if table_exists:
-        try:
-            # Fetch row count and time extents. The view is built with
-            # read_parquet('cache/<bucket>/data/**/*.parquet') UNION ALL
-            # read_parquet([buffer_paths]) — DuckDB opens every parquet
-            # footer (~150 µs × 1.7 k data files = ~155 ms warm) plus the
-            # cheap buffer side. Split the query: cache the data-side
-            # count/min/max keyed by a data-dir mtime fingerprint (only
-            # changes on commit/optimize), run the buffer side fresh each
-            # call (~1 ms for <100 files), then merge. Cache hits go from
-            # ~240 ms full-view query down to ~1 ms (data cached + buffer
-            # query + fingerprint stat).
-            stats = None
-            data_fp = _data_stats_fingerprint(src)
-            cache_key = src["name"]
-            if data_fp is not None:
-                try:
+    try:
+        # Fetch row count and time extents. The view is built with
+        # read_parquet('cache/<bucket>/data/**/*.parquet') UNION ALL
+        # read_parquet([buffer_paths]) — DuckDB opens every parquet
+        # footer (~150 µs × 1.7 k data files = ~155 ms warm) plus the
+        # cheap buffer side. Split the query: cache the data-side
+        # count/min/max keyed by a data-dir mtime fingerprint (only
+        # changes on commit/optimize), run the buffer side fresh each
+        # call (~1 ms for <100 files), then merge. Cache hits go from
+        # ~240 ms full-view query down to ~1 ms (data cached + buffer
+        # query + fingerprint stat).
+        stats = None
+        data_fp = _data_stats_fingerprint(src)
+        cache_key = src["name"]
+        if data_fp is not None:
+            try:
+                with _data_stats_cache_lock:
+                    cached = _data_stats_cache.get(cache_key)
+                if cached is not None and cached[0] == data_fp:
+                    d_count, d_min, d_max = cached[1], cached[2], cached[3]
+                else:
+                    data_glob = os.path.join(_cache_dir(src), "data", "**", "*.parquet")
+                    d_row = con.execute(
+                        "SELECT count(*), min(timestamp), max(timestamp) "
+                        f"FROM read_parquet('{data_glob}', union_by_name=true, hive_partitioning=false)"
+                    ).fetchone()
+                    d_count = (d_row[0] or 0) if d_row else 0
+                    d_min = d_row[1] if d_row else None
+                    d_max = d_row[2] if d_row else None
                     with _data_stats_cache_lock:
-                        cached = _data_stats_cache.get(cache_key)
-                    if cached is not None and cached[0] == data_fp:
-                        d_count, d_min, d_max = cached[1], cached[2], cached[3]
-                    else:
-                        data_glob = os.path.join(_cache_dir(src), "data", "**", "*.parquet")
-                        d_row = con.execute(
-                            "SELECT count(*), min(timestamp), max(timestamp) "
-                            f"FROM read_parquet('{data_glob}', union_by_name=true, hive_partitioning=false)"
-                        ).fetchone()
-                        d_count = (d_row[0] or 0) if d_row else 0
-                        d_min = d_row[1] if d_row else None
-                        d_max = d_row[2] if d_row else None
-                        with _data_stats_cache_lock:
-                            _data_stats_cache[cache_key] = (data_fp, d_count, d_min, d_max)
+                        _data_stats_cache[cache_key] = (data_fp, d_count, d_min, d_max)
 
-                    from backend.core import iceberg as _ice
+                from backend.core import iceberg as _ice
 
-                    buf_paths = [p for p in _ice.buffer_files(src) if os.path.isfile(p)]
-                    if buf_paths:
-                        paths_sql = ", ".join(f"'{p}'" for p in buf_paths)
-                        b_row = con.execute(
-                            "SELECT count(*), min(timestamp), max(timestamp) "
-                            f"FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
-                        ).fetchone()
-                        b_count = (b_row[0] or 0) if b_row else 0
-                        b_min = b_row[1] if b_row else None
-                        b_max = b_row[2] if b_row else None
-                    else:
-                        b_count, b_min, b_max = 0, None, None
+                buf_paths = [p for p in _ice.buffer_files(src) if os.path.isfile(p)]
+                if buf_paths:
+                    paths_sql = ", ".join(f"'{p}'" for p in buf_paths)
+                    b_row = con.execute(
+                        "SELECT count(*), min(timestamp), max(timestamp) "
+                        f"FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
+                    ).fetchone()
+                    b_count = (b_row[0] or 0) if b_row else 0
+                    b_min = b_row[1] if b_row else None
+                    b_max = b_row[2] if b_row else None
+                else:
+                    b_count, b_min, b_max = 0, None, None
 
-                    mins = [m for m in (d_min, b_min) if m is not None]
-                    maxs = [m for m in (d_max, b_max) if m is not None]
-                    stats = (
-                        d_count + b_count,
-                        min(mins) if mins else None,
-                        max(maxs) if maxs else None,
-                    )
-                except Exception as split_err:
-                    # Bust the data cache so we don't pin a half-built result.
-                    with _data_stats_cache_lock:
-                        _data_stats_cache.pop(cache_key, None)
-                    # Stale-cache failure modes ("No files found", missing
-                    # catalog entries) must flow to the outer view-rebuild
-                    # handler below — the cure is the same. Re-raise here
-                    # rather than swallowing, so the existing recovery path
-                    # still triggers clear_source_caches+update_iceberg_view.
-                    err_str = str(split_err)
-                    if (
-                        "No files found" in err_str
-                        or "Catalog Error: Table with name" in err_str
-                        or "does not exist" in err_str
-                        or "No such file or directory" in err_str
-                    ):
-                        raise
-                    logger.debug("[sync-status] split-stats query failed, falling back to view: %s", split_err)
+                mins = [m for m in (d_min, b_min) if m is not None]
+                maxs = [m for m in (d_max, b_max) if m is not None]
+                stats = (
+                    d_count + b_count,
+                    min(mins) if mins else None,
+                    max(maxs) if maxs else None,
+                )
+            except Exception as split_err:
+                # Bust the data cache so we don't pin a half-built result.
+                with _data_stats_cache_lock:
+                    _data_stats_cache.pop(cache_key, None)
+                # Stale-cache failure modes ("No files found", missing
+                # catalog entries) must flow to the outer view-rebuild
+                # handler below — the cure is the same. Re-raise here
+                # rather than swallowing, so the existing recovery path
+                # still triggers clear_source_caches+update_iceberg_view.
+                err_str = str(split_err)
+                if (
+                    "No files found" in err_str
+                    or "Catalog Error: Table with name" in err_str
+                    or "does not exist" in err_str
+                    or "No such file or directory" in err_str
+                ):
+                    raise
+                logger.debug("[sync-status] split-stats query failed, falling back to view: %s", split_err)
 
-            if stats is None:
+        if stats is None:
+            stats = con.execute(f"SELECT count(*), min(timestamp), max(timestamp) FROM {table_name}").fetchone()
+        if stats:
+            view_rows = stats[0] if stats[0] is not None else 0
+            # When the view returns a real (non-zero) count, trust it
+            # as the source of truth — it reflects the rows actually
+            # queryable in Iceberg. ingested_files.row_count records
+            # the raw JSON line count from each FOS file BEFORE the
+            # `WHERE timestamp IS NOT NULL` filter and any time-range
+            # filter, and never reflects post-compaction dedup, so it
+            # consistently over-reports. Only fall back when the view
+            # itself is empty (the "WHERE false" transient-failure
+            # fallback) — there we degrade to the metadata sum so the
+            # header doesn't read 0 while we have data on disk.
+            if view_rows > 0:
+                local_rows = view_rows
+                earliest_log_at = stats[1]
+                latest_log_at = stats[2]
+            else:
+                local_rows = local_rows_ingested
+    except Exception as e:
+        if (
+            "No files found" in str(e)
+            or "Catalog Error: Table with name" in str(e)
+            or "does not exist" in str(e)
+            or "No such file or directory" in str(e)
+        ):
+            try:
+                from backend.core import iceberg
+
+                # Bust the cached view SQL FIRST. Without this, when ingest
+                # is mid-commit and holding the per-service lock,
+                # update_iceberg_view falls back to executing the cached
+                # SQL — which is exactly the stale SQL that referenced
+                # the missing parquet, looping us right back into the same
+                # error. Clearing the cache forces a real rebuild on the
+                # next view-update window (possibly the next poll).
+                #
+                # ``keep_snapshot_cache=True``: do NOT also wipe the
+                # snapshot/path cache. If we wipe both, then a transient
+                # catalog-load failure (FOS rate limit, network blip)
+                # causes update_iceberg_view to fall through to its
+                # empty-view branch — "WHERE false" — which then sticks
+                # in _view_cache and shows the user "Total Logs: 0"
+                # despite millions of rows being in the table.
+                iceberg.clear_source_caches(src.get("name", "default"), keep_snapshot_cache=True)
+                iceberg.update_iceberg_view(con, src)
                 stats = con.execute(f"SELECT count(*), min(timestamp), max(timestamp) FROM {table_name}").fetchone()
-            if stats:
-                view_rows = stats[0] if stats[0] is not None else 0
-                # When the view returns a real (non-zero) count, trust it
-                # as the source of truth — it reflects the rows actually
-                # queryable in Iceberg. ingested_files.row_count records
-                # the raw JSON line count from each FOS file BEFORE the
-                # `WHERE timestamp IS NOT NULL` filter and any time-range
-                # filter, and never reflects post-compaction dedup, so it
-                # consistently over-reports. Only fall back when the view
-                # itself is empty (the "WHERE false" transient-failure
-                # fallback) — there we degrade to the metadata sum so the
-                # header doesn't read 0 while we have data on disk.
-                if view_rows > 0:
-                    local_rows = view_rows
+                if stats:
+                    local_rows = stats[0] if stats[0] is not None else 0
                     earliest_log_at = stats[1]
                     latest_log_at = stats[2]
-                else:
-                    local_rows = local_rows_ingested
-        except Exception as e:
-            if (
-                "No files found" in str(e)
-                or "Catalog Error: Table with name" in str(e)
-                or "does not exist" in str(e)
-                or "No such file or directory" in str(e)
-            ):
-                try:
-                    from backend.core import iceberg
-
-                    # Bust the cached view SQL FIRST. Without this, when ingest
-                    # is mid-commit and holding the per-service lock,
-                    # update_iceberg_view falls back to executing the cached
-                    # SQL — which is exactly the stale SQL that referenced
-                    # the missing parquet, looping us right back into the same
-                    # error. Clearing the cache forces a real rebuild on the
-                    # next view-update window (possibly the next poll).
-                    #
-                    # ``keep_snapshot_cache=True``: do NOT also wipe the
-                    # snapshot/path cache. If we wipe both, then a transient
-                    # catalog-load failure (FOS rate limit, network blip)
-                    # causes update_iceberg_view to fall through to its
-                    # empty-view branch — "WHERE false" — which then sticks
-                    # in _view_cache and shows the user "Total Logs: 0"
-                    # despite millions of rows being in the table.
-                    iceberg.clear_source_caches(src.get("name", "default"), keep_snapshot_cache=True)
-                    iceberg.update_iceberg_view(con, src)
-                    stats = con.execute(f"SELECT count(*), min(timestamp), max(timestamp) FROM {table_name}").fetchone()
-                    if stats:
-                        local_rows = stats[0] if stats[0] is not None else 0
-                        earliest_log_at = stats[1]
-                        latest_log_at = stats[2]
-                except Exception as retry_e:
-                    # The fallback to ``local_rows_ingested`` below is the
-                    # designed degradation path — when the cache is mid-
-                    # rebuild and we couldn't acquire the lock, ``local_rows``
-                    # still reflects the row count we tracked at ingest time.
-                    # Demoted from print/warning to debug because the cascade
-                    # spams stderr on every sync-status poll until ingest
-                    # releases the lock; the bust above breaks the loop on
-                    # the next attempt regardless.
-                    logger.debug("[sync-status] log stats unavailable mid-rebuild: %s", retry_e)
-                    local_rows = local_rows_ingested
-            else:
-                # Unexpected exception — this one is worth keeping as a
-                # warning since it doesn't match any of the known "stale
-                # cache" patterns above and the fallback may hide real bugs.
-                logger.warning("[sync-status] Failed to get log stats from view: %s", e)
+            except Exception as retry_e:
+                # The fallback to ``local_rows_ingested`` below is the
+                # designed degradation path — when the cache is mid-
+                # rebuild and we couldn't acquire the lock, ``local_rows``
+                # still reflects the row count we tracked at ingest time.
+                # Demoted from print/warning to debug because the cascade
+                # spams stderr on every sync-status poll until ingest
+                # releases the lock; the bust above breaks the loop on
+                # the next attempt regardless.
+                logger.debug("[sync-status] log stats unavailable mid-rebuild: %s", retry_e)
                 local_rows = local_rows_ingested
+        else:
+            # Unexpected exception — this one is worth keeping as a
+            # warning since it doesn't match any of the known "stale
+            # cache" patterns above and the fallback may hide real bugs.
+            logger.warning("[sync-status] Failed to get log stats from view: %s", e)
+            local_rows = local_rows_ingested
 
     # Latest available filename mirrors latest_file_name since FOS LIST is
     # not consulted here (comment above explains why). Reuse the summary's

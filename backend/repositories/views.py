@@ -30,6 +30,27 @@ def _find_view_service(view_id: str) -> str | None:
     return None
 
 
+def get_view_by_id(view_id: str) -> dict | None:
+    """Return the saved-view row whose id matches ``view_id`` (or None).
+
+    Security mirror of ``alerts.get_alert_by_id`` — the router-level
+    cross-tenant scope gate calls this before delete_view so an
+    unauthorized analyst gets 403 without the row being deleted.
+    """
+    for cfg in svcconfig.list_configs():
+        sid = cfg.get("service_id")
+        if not sid:
+            continue
+        for v in metadata_db.list_views(sid):
+            if v.get("id") == view_id:
+                # Stamp the owning service_id onto the result so the
+                # caller's scope check can compare without re-scanning.
+                out = dict(v)
+                out.setdefault("service_id", sid)
+                return out
+    return None
+
+
 def delete_view(view_id: str, service_id_hint: str | None = None) -> dict:
     sid = service_id_hint or _find_view_service(view_id)
     if not sid:

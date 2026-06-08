@@ -18,7 +18,14 @@ from .registry import registry
 # ── Caches ────────────────────────────────────────────────────────────────────
 
 INSIGHTS_CACHE_TTL = 300  # seconds
-_insights_cache: dict = {}
+# Bounded + lazy-reaped. Pre-migration this was a plain dict; entries
+# were time-bucketed by ``int(time.time() / TTL)`` so each TTL window
+# minted distinct keys but old buckets were never removed. Across hours
+# of admin use the bucket-count grew linearly. 500 entries × insights
+# payload (~100KB) caps this around ~50MB.
+from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
+
+_insights_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=500, ttl_seconds=INSIGHTS_CACHE_TTL)
 _insights_cache_lock = threading.Lock()
 
 

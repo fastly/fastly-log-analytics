@@ -149,8 +149,12 @@ export const FilterBar = React.memo(function FilterBar() {
         // 1. If we have 1 day of data or less, default to the full available range.
         // 2. If we have more than 1 day, default to the most recent 24 hours of data.
         // This ensures the dashboard is never empty on load if data exists, while prioritizing recent traffic.
+        // To prevent double-fetching on every page load, only snap the range if
+        // the available data is stale (>15 mins old). If data is actively flowing,
+        // the default "last 24h from now" is correct and captures everything.
         
         const spanDays = (latestLog.getTime() - earliestLog.getTime()) / (1000 * 3600 * 24)
+        const ageMinutes = (new Date().getTime() - latestLog.getTime()) / (1000 * 60)
 
         let finalStart: string
         let finalEnd: string
@@ -166,7 +170,14 @@ export const FilterBar = React.memo(function FilterBar() {
         }
 
         if (isAutoRange) {
-          autoSetRange(finalStart, finalEnd)
+          // Only snap if the data is stale. If it's fresh, the default "last 24 hours"
+          // from the store is perfectly fine and avoids an unnecessary duplicate query.
+          if (ageMinutes > 15) {
+            autoSetRange(finalStart, finalEnd)
+          } else {
+            // Data is fresh. Keep the default range but mark auto-range as done
+            autoSetRange(useFilterStore.getState().startTime, useFilterStore.getState().endTime)
+          }
         }
         setHasSyncedExtents(true)
       } else {

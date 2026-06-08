@@ -120,7 +120,8 @@ def test_update_logging_settings_passes_custom_condition(
 
     mock_update.side_effect = fake_generator
 
-    response = client.get(
+    # Security: route moved from GET → POST/PATCH. Tests use POST.
+    response = client.post(
         "/api/services/test-service/logging-settings/update",
         params={
             "period": 120,

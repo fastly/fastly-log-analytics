@@ -11,6 +11,14 @@ export function useBootstrap() {
       const { data } = await client.GET("/api/bootstrap")
       return data
     },
+    // Bootstrap returns the services list + role flags + analyst session
+    // metadata — none of which change within a typical browsing session.
+    // staleTime: 5min so revisits to ANY route within that window skip
+    // the refetch and don't re-block AppLayout's loading flag.
+    // gcTime: 30min keeps the cache entry alive across brief tab
+    // backgrounding so returning to the tab doesn't pay the cold fetch.
+    staleTime: 5 * 60 * 1000,
+    gcTime: 30 * 60 * 1000,
   })
 
   const activeServiceId = useServiceStore(state => state.activeServiceId)

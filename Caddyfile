@@ -1,15 +1,30 @@
 # Caddyfile — plain HTTP origin behind Fastly, hardened.
 #
 # Fastly terminates TLS at the edge and proxies to this VM on port 80.
-# GCP firewall locks port 80 to Fastly's IP ranges. Backend and frontend
-# bind to 127.0.0.1 only (host network mode) — Caddy reaches them on
-# loopback, nothing else can.
+# Backend and frontend bind to 127.0.0.1 only (host network mode) — Caddy
+# reaches them on loopback, nothing else can.
+#
+# Trust topology (security #013/#029/#032/#034 and extra E1):
+#   The reverse_proxy directives use header_up to rewrite X-Forwarded-For
+#   from the Fastly-Client-IP header. That trust is only valid for
+#   requests that actually came through Fastly — anyone connecting
+#   directly to port 80 can set Fastly-Client-IP to whatever they want.
+#   The @from_fastly remote_ip matcher gates the header rewrite on the
+#   TCP peer being inside Fastly's published edge ranges. Direct callers
+#   skip the header_up clause, so request.client.host in uvicorn comes
+#   from their real (untrusted) peer IP and the IP-based gates kick in.
 #
 # Routing:
 #   /api/*  → backend directly (preserves Host header so the backend's
 #             DNS-rebinding gate matches the registered public_endpoint;
 #             peer = 127.0.0.1 from Caddy in host net mode).
 #   else    → Next.js frontend.
+#
+# Note on edge IP list maintenance:
+#   The Fastly CIDRs below are the published v4 ranges as of 2026-06-03
+#   (https://api.fastly.com/public-ip-list). When Fastly adds a new edge
+#   range, refresh this list. A stale list means legitimate traffic from a
+#   new POP is treated as direct (untrusted) until Caddy reloads.
 
 {
 	# No auto-HTTPS — Fastly handles TLS termination at the edge.
@@ -60,19 +75,48 @@
 		}
 	}
 
+	# Defense in depth (extra E1): replace any client-supplied X-Forwarded-For
+	# with Caddy's authoritative view of the TCP peer. Then, only when the
+	# TCP peer is a Fastly edge IP, override with Fastly-Client-IP.
+	#
+	# Non-Fastly direct caller: XFF = their real peer IP. uvicorn (with
+	#   --proxy-headers --forwarded-allow-ips=127.0.0.1) sees Caddy at the
+	#   loopback peer and trusts XFF, so request.client.host = the real
+	#   attacker IP. Backend's DNS-rebinding and remote-host checks then
+	#   fire correctly instead of misclassifying as admin.
+	# Fastly-edge caller: the second directive overrides XFF with the
+	#   client IP that Fastly's edge signed and attached.
+	request_header X-Forwarded-For {http.request.remote.host}
+
+	# Caddy-injected internal proxy marker (security #032): the frontend
+	# middleware blocks /admin requests when this header is present, while
+	# direct SSH-tunnel admin connections (which bypass Caddy) have no
+	# such header and reach the admin surface. Set unconditionally — there
+	# is no legitimate reason for an upstream to send this themselves.
+	request_header X-Proxied-By-Caddy "true"
+
+	# Named matcher: TCP peer is an actual Fastly edge IP.
+	@from_fastly_v4 {
+		remote_ip 23.235.32.0/20 43.249.72.0/22 103.244.50.0/24 103.245.222.0/23 103.245.224.0/24 104.156.80.0/20 140.248.64.0/18 140.248.128.0/17 146.75.0.0/17 151.101.0.0/16 157.52.64.0/18 167.82.0.0/17 167.82.128.0/20 167.82.160.0/20 167.82.224.0/20 172.111.64.0/18 185.31.16.0/22 199.27.72.0/21 199.232.0.0/16
+	}
+
+	# When AND ONLY WHEN the request came from a Fastly edge, propagate the
+	# authoritative Fastly-Client-IP as X-Forwarded-For. Requests bypassing
+	# Fastly retain the {client_ip} XFF set above (their real TCP peer),
+	# so a direct port-80 attacker cannot spoof their source IP regardless
+	# of what Fastly-Client-IP value they send.
+	request_header @from_fastly_v4 X-Forwarded-For {http.request.header.Fastly-Client-IP}
+
 	# API → backend (preserve Host so backend's DNS-rebinding gate matches the
 	# registered public_endpoint).
 	@api path /api/*
 	reverse_proxy @api 127.0.0.1:8000 {
 		flush_interval -1
-		# Replace X-Forwarded-For with Fastly's authoritative client-IP header.
-		header_up X-Forwarded-For {http.request.header.Fastly-Client-IP}
 	}
 
 	# Everything else → Next.js frontend.
 	reverse_proxy 127.0.0.1:3000 {
 		flush_interval -1
-		header_up X-Forwarded-For {http.request.header.Fastly-Client-IP}
 	}
 
 	# Detailed access log: JSON format with every request's client IP, host,

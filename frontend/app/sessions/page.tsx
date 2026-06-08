@@ -61,8 +61,8 @@ export default function SessionsPage() {
 
         const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['sessions', 'list', activeServiceId, startTime, endTime, filterPayload, flaggedOnly, minReqs, min4xxPct],
-    queryFn: async () => {
-      const { data } = await client.POST("/api/sessions", {
+    queryFn: async ({ signal }) => {
+      const { data } = await client.POST("/api/sessions", { signal, 
         body: {
           start_time: startTime,
           end_time: endTime,
@@ -86,8 +86,8 @@ export default function SessionsPage() {
 
   const { data: detailData, isLoading: isLoadingDetail } = useQuery({
     queryKey: ['sessions', 'detail', activeServiceId, selectedSession?.ip, selectedSession?.ja4, selectedSession?.session_start],
-    queryFn: async () => {
-      const { data } = await client.POST("/api/sessions/detail", {
+    queryFn: async ({ signal }) => {
+      const { data } = await client.POST("/api/sessions/detail", { signal, 
         body: {
           ip: selectedSession.ip,
           ja4: selectedSession.ja4,

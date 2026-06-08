@@ -1,18 +1,19 @@
 'use client'
 
 import React, { useState, useEffect } from 'react'
-import { 
-  Dialog, 
-  DialogContent, 
-  DialogHeader, 
-  DialogTitle, 
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
   DialogFooter
 } from '@/components/ui/dialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { 
+import {
   AlertTriangle,
   Trash2,
   AlertCircle
@@ -46,7 +47,13 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
   const [removeBucket, setRemoveBucket] = useState(true)
   const [removeCache, setRemoveCache] = useState(true)
   const [isExecuting, setIsExecuting] = useState(false)
-  
+  // Security: backend now requires a caller-supplied Fastly token with the
+  // `global` scope for any teardown that touches Fastly (logging/CDN/bucket).
+  // Server-stored credentials are no longer accepted as a fallback. The admin
+  // must paste their own token each time so a CSRF or stolen-session attacker
+  // cannot trigger a customer outage without also having a valid Fastly token.
+  const [apiToken, setApiToken] = useState('')
+
   const { lines, status, error: sseError, start, stop, reset } = useSSE()
 
   // Reset state when dialog closes
@@ -54,6 +61,7 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
     if (!open) {
       setTimeout(() => {
         setIsExecuting(false)
+        setApiToken('')
         reset()
       }, 300)
     }
@@ -62,13 +70,35 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
   if (!service) return null
 
   const analyst = isAnalyst(service)
-  const teardownUrl = analyst
-    ? `/api/provision/teardown?service_id=${service.service_id}&remove_logging=false&remove_cdn=false&remove_bucket=false&remove_cache=${removeCache}`
-    : `/api/provision/teardown?service_id=${service.service_id}&remove_logging=${removeLogging}&remove_cdn=${removeCdn}&remove_bucket=${removeBucket}&remove_cache=${removeCache}`
+  // Security: teardown is now POST-only (CSRF defense). The token, service
+  // id and removal flags travel in the request body, not the URL — keeps
+  // the Fastly API token out of browser history, proxy access logs, and
+  // the Referer header on any subsequent navigation.
+  const teardownUrl = '/api/provision/teardown'
+  const teardownBody: Record<string, unknown> = analyst
+    ? {
+        service_id: service.service_id,
+        remove_logging: false,
+        remove_cdn: false,
+        remove_bucket: false,
+        remove_cache: removeCache,
+      }
+    : {
+        service_id: service.service_id,
+        remove_logging: removeLogging,
+        remove_cdn: removeCdn,
+        remove_bucket: removeBucket,
+        remove_cache: removeCache,
+        token: apiToken,
+      }
+
+  const tokenRequired = !analyst && (removeLogging || removeCdn || removeBucket)
+  const canExecute = !tokenRequired || apiToken.trim().length > 0
 
   const handleExecute = () => {
+    if (!canExecute) return
     setIsExecuting(true)
-    start(teardownUrl)
+    start(teardownUrl, teardownBody)
   }
 
   const handleClose = (isOpen: boolean) => {
@@ -191,6 +221,33 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
                   </div>
                 </div>
               </div>
+
+              {tokenRequired && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 mb-1">
+                    <AlertCircle className="h-4 w-4 text-destructive" />
+                    <h4 className="text-xs font-bold uppercase tracking-widest text-destructive">Fastly API Token</h4>
+                  </div>
+                  <div className="bg-destructive/5 border border-destructive/20 rounded-lg p-4 space-y-2">
+                    <Label htmlFor="teardown-api-token" className="text-sm font-medium">
+                      Paste a Fastly token with the <code>global</code> scope
+                    </Label>
+                    <p className="text-[11px] text-muted-foreground">
+                      The server no longer falls back to a stored token for destructive teardown.
+                      Provide a token validated to have full permissions on this service.
+                    </p>
+                    <Input
+                      id="teardown-api-token"
+                      type="password"
+                      placeholder="Fastly API token"
+                      value={apiToken}
+                      onChange={(e) => setApiToken(e.target.value)}
+                      className="font-mono text-sm"
+                      autoComplete="off"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -203,6 +260,8 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
                 variant="destructive"
                 className="h-10 px-8 font-bold"
                 onClick={handleExecute}
+                disabled={!canExecute}
+                title={!canExecute ? 'Enter your Fastly API token to proceed' : undefined}
               >
                 Execute Teardown
               </Button>

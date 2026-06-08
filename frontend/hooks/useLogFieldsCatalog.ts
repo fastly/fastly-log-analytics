@@ -11,12 +11,18 @@ import { useServiceStore } from '@/stores/serviceStore'
 export function useLogFieldsCatalog(serviceId?: string) {
   const { activeServiceId } = useServiceStore()
   const sid = serviceId ?? activeServiceId ?? undefined
-  
+
   return useQuery({
     queryKey: queryKeys.logFieldsCatalog(sid),
     queryFn: async () => {
       const { data } = await client.GET('/api/log-fields/catalog', {
-        params: { query: { service_id: serviceId } },
+        // Use the resolved `sid` (which falls back to the active service)
+        // so callers that don't pass a serviceId still get per-service
+        // custom_fields. Previously this used the raw `serviceId` param
+        // and silently dropped the fallback, so any UI that called
+        // useLogFieldsCatalog() — including the main dashboard's column
+        // header lookup — got the global catalog without custom labels.
+        params: { query: { service_id: sid } },
       })
       return data as { fields?: any[]; groups?: any[]; insights?: any[]; presets?: any } | undefined
     },

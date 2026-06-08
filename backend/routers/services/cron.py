@@ -16,7 +16,7 @@ def api_cron_logs(
     sort: str = Query(default="started_at"),
     dir: str = Query(default="DESC"),
 ):
-    from backend.utils.telemetry import get_tracked_calls
+    from backend.utils.telemetry import get_queries, get_tracked_calls
 
     try:
         total, entries = get_cron_logs(source["name"], task, status, page, per_page, sort, dir)
@@ -25,7 +25,7 @@ def api_cron_logs(
             "page": page,
             "per_page": per_page,
             "entries": entries,
-            "_debug_queries": [],
+            "_debug_queries": get_queries(),
             "_debug_calls": get_tracked_calls(),
         }
     except Exception as e:

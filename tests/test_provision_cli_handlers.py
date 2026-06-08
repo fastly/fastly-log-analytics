@@ -371,6 +371,50 @@ def test_handle_update_logs_pushes_to_fastly_and_persists_config():
     assert token == "tok"
 
 
+def test_handle_update_logs_preserves_scoring_custom_fields_on_preset_swap():
+    """REGRESSION (sibling of 2026-06-02 state_sync incident): running
+    ``handle_update_logs`` with a --preset (or --enable-group/--disable-group)
+    argument used to clobber the entire cfg.log_fields, silently dropping
+    the 6 scoring custom_fields that ``enable_scoring`` had injected.
+    The new merge guard preserves existing custom_fields and re-injects
+    ``_SCORING_CUSTOM_FIELDS`` when scoring is enabled."""
+    write_calls = []
+
+    def _record_update(cfg, token):
+        return iter([{"type": "done", "version": 1}])
+
+    pre_scoring_field = {"name": "edge_score", "duckdb_type": "INTEGER", "enabled": True}
+
+    with (
+        patch("backend.config.list_service_ids", return_value=["svc"]),
+        patch(
+            "backend.config.load_config",
+            return_value={
+                "fastly_api_key": "tok",
+                "scoring": {"enabled": True},
+                "log_fields": {
+                    "groups": ["A"],
+                    "custom_fields": [pre_scoring_field],
+                },
+                "provisioning": {"endpoint_name": "ep"},
+            },
+        ),
+        patch("backend.provision.cli.write_service_config", side_effect=lambda c: write_calls.append(c)),
+        patch("backend.provision.cli.update_logging_endpoint", side_effect=_record_update),
+        patch("backend.core.log_fields.format_hash", return_value="h"),
+    ):
+        # --preset triggers the rebuild path (the bug-bait branch). Without
+        # the merge guard, the persisted cfg's custom_fields would be empty.
+        cli.handle_update_logs(_args(service_id="svc", preset="standard"))
+
+    from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
+
+    assert len(write_calls) == 1
+    persisted_names = {cf["name"] for cf in write_calls[0]["log_fields"]["custom_fields"]}
+    for name in _SCORING_FIELD_NAMES:
+        assert name in persisted_names, f"scoring field {name!r} dropped on preset swap"
+
+
 def test_handle_update_logs_exits_1_on_orchestrator_exception():
     with (
         patch("backend.config.list_service_ids", return_value=["svc"]),

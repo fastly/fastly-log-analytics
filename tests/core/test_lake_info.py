@@ -106,8 +106,12 @@ def test_fast_path_handles_non_empty_source_prefix(fos_src):
 def test_fast_path_uses_cdn_when_cdn_url_is_set(fos_src):
     """When the source has ``cdn_url``, the helper goes through the CDN
     (cheaper than S3 reads) instead of the boto3 client. The secret
-    query-param appends with URL encoding."""
-    src = {**fos_src, "cdn_url": "https://cdn.example.com/", "cdn_secret": "shh secret"}
+    query-param appends with URL encoding.
+
+    The hostname must be an https Fastly hostname — fetch_lake_info's
+    SSRF guard rejects anything else and falls through to the S3 SDK.
+    """
+    src = {**fos_src, "cdn_url": "https://cdn-test.fastly.net/", "cdn_secret": "shh secret"}
     payload_bytes = json.dumps(_summary_payload()).encode("utf-8")
 
     fake_resp = MagicMock()
@@ -130,17 +134,17 @@ def test_fast_path_uses_cdn_when_cdn_url_is_set(fos_src):
     # The CDN URL must include the secret AND URL-encode the space in it
     req = mock_open.call_args[0][0]
     full_url = req.full_url
-    assert "cdn.example.com" in full_url
+    assert "cdn-test.fastly.net" in full_url
     assert "shh%20secret" in full_url
     # Don't double-slash the CDN base (trailing-slash safety)
-    assert "//iceberg" not in full_url.split("cdn.example.com", 1)[1]
+    assert "//iceberg" not in full_url.split("cdn-test.fastly.net", 1)[1]
 
 
 def test_fast_path_records_cdn_call_telemetry(fos_src):
     """Every CDN fetch must call ``record_cdn_call`` so the usage page
     can attribute bytes/latency. Pinned because skipping it would
     under-report customer egress and miscompute their bill."""
-    src = {**fos_src, "cdn_url": "https://cdn.example.com"}
+    src = {**fos_src, "cdn_url": "https://cdn-test.fastly.net"}
     payload_bytes = json.dumps(_summary_payload()).encode("utf-8")
 
     fake_resp = MagicMock()
