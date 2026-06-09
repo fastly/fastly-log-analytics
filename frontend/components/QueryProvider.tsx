@@ -25,6 +25,27 @@ export default function QueryProvider({ children }: { children: React.ReactNode 
         // typical click-back behaviour without bloating memory.
         gcTime: 5 * 60 * 1000,
         refetchOnWindowFocus: false,
+        // Skip retries on 4xx (caller error — retrying just amplifies
+        // the same failure into 3-4x traffic per the React Query
+        // default of `retry: 3`). Allow up to 2 retries on 5xx / network
+        // errors where a retry can plausibly succeed. The /api/sessions
+        // CORS preflight failure used to fan one user click into 4
+        // identical /api/sessions POSTs visible in HAR.
+        retry: (failureCount: number, error: unknown) => {
+          const status = (error as { response?: { status?: number } } | null)?.response?.status
+          if (status !== undefined && status >= 400 && status < 500) return false
+          return failureCount < 2
+        },
+      },
+      mutations: {
+        // Same retry-on-4xx-is-amplification rule for mutations (the
+        // /api/sessions POST that powers session list refresh is a
+        // mutation, not a query).
+        retry: (failureCount: number, error: unknown) => {
+          const status = (error as { response?: { status?: number } } | null)?.response?.status
+          if (status !== undefined && status >= 400 && status < 500) return false
+          return failureCount < 1
+        },
       },
     },
   }))

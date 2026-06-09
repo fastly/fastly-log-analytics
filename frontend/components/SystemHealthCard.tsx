@@ -49,15 +49,17 @@ export function SystemHealthCard() {
       const { data } = await client.GET('/api/admin/health-snapshot' as any, {} as any)
       return data as HealthSnapshot
     },
-    // 10s polling. Pre-fix this was 2s for "live ping" feel — but the
-    // endpoint that was claimed to be 20ms cheap routinely took
-    // 1-1.7s when the backend was under sync load, which meant the
-    // page was constantly waiting on health-snapshot. Combined with
-    // navigation away from /admin (the old in-flight request kept
-    // running because queryFns don't pass signal yet), clicks felt
-    // sluggish. 10s is plenty for an operator glance — there's a
-    // refresh button below if real-time matters.
-    refetchInterval: 10_000,
+    // 1s polling. The endpoint is OS-level reads + per-service
+    // compaction_stats (top-level os.listdir, NOT recursive); no DB,
+    // no FOS, no network. Per-service cost is ~5-30ms; at 1-10
+    // services per backend that's ~30-300ms per poll, well under one
+    // worker's capacity. Gives operator-grade live feedback for the
+    // "is the box healthy?" glance — useful during an attack or sync
+    // backlog when load can climb second-to-second. Caveat: a future
+    // change that grows N to 50+ services per backend, or that adds
+    // a recursive walk inside compaction_stats, would need to revisit
+    // this interval.
+    refetchInterval: 1_000,
     refetchIntervalInBackground: false,
   })
 
@@ -87,7 +89,7 @@ export function SystemHealthCard() {
   const inFlight = snap.in_flight_runs ?? []
 
   return (
-    <AnalyticsCard title="System Health" description="Live snapshot of the host machine — polls every 15s while this page is open.">
+    <AnalyticsCard title="System Health" description="Live snapshot of the host machine — polls every 1s while this page is open.">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Stat
           label="Load (1m)"

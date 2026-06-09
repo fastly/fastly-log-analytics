@@ -335,3 +335,23 @@ def test_put_reset_to_default(seeded_service):
     body = r.json()
     assert body["is_default"] is True
     assert "Reset to default" in body["message"]
+
+
+def test_scoring_vcl_excludes_query_params():
+    """Assert that the default asset exclusion regex does not match
+    excluded extensions in the query string parameter, but does match them in the path."""
+    import re
+
+    from backend.provision.session_scoring_vcl import DEFAULT_ASSET_EXT_REGEX
+
+    pattern = re.compile(DEFAULT_ASSET_EXT_REGEX, re.IGNORECASE)
+
+    # Valid asset paths (should match and bypass scoring)
+    assert pattern.search("/static/logo.png")
+    assert pattern.search("/assets/styles.css")
+    assert pattern.search("/js/app.js?v=1.2")
+
+    # Dynamic paths with query params containing asset extensions (should NOT match, so they are scored)
+    assert not pattern.search("/api/v1/login?file=.png")
+    assert not pattern.search("/api/v1/user?bypass=.css")
+    assert not pattern.search("/index.html?extension=.js")

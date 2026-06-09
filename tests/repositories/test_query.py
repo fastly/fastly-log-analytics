@@ -136,3 +136,12 @@ class TestAutoLimitPushdown:
         assert result["row_count"] == 1
         assert result["data"][0]["n"] == 42
         assert result["truncated"] is False
+
+    def test_limit_pushdown_with_prepended_comment(self):
+        """Finding 015: Verify that SQL comments (e.g., /* comment */) prepended to a query
+        do not bypass the automatic SELECT statement limit wrapping logic."""
+        con = self._con(rows=50)
+        sql = "/* This is a comment */ SELECT * FROM logs"
+        result = execute_query(con, None, sql, max_rows=10, want_explain=False)
+        assert result["row_count"] == 10
+        assert result["truncated"] is True

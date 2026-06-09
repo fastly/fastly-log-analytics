@@ -1,10 +1,10 @@
 {
   "name": "fastly-log-analysis-frontend",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "scripts": {
     "dev": "npm run gen:types && next dev -H 127.0.0.1",
-    "build": "npm run gen:types && next build",
+    "build": "npm run gen:types && next build && node scripts/build-preload-manifest.mjs",
     "start": "next start",
     "lint": "eslint",
     "gen:types": "uv run python3 ../scripts/generate_openapi.py openapi.json && node ../scripts/refresh_api_types.js",

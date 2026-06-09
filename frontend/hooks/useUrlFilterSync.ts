@@ -3,10 +3,12 @@ import { useFilterStore } from '@/stores/filterStore'
 import { useReportConfig } from './useReportConfig'
 import { usePageContext } from './usePageContext'
 import { client } from '@/lib/api'
+import { useQueryClient } from '@tanstack/react-query'
 
 export function useUrlFilterSync() {
   const { addFilter, clearFilters, setRange } = useFilterStore()
   const { activeServiceId } = usePageContext()
+  const queryClient = useQueryClient()
   const { setMetric } = useReportConfig({
     defaultMetric: 'requests',
     defaultInterval: '1 minute',
@@ -16,7 +18,7 @@ export function useUrlFilterSync() {
   // Parse URL parameters on mount or when service changes
   useEffect(() => {
     if (typeof window === 'undefined' || !activeServiceId) return
-    
+
     const params = new URLSearchParams(window.location.search)
     let updated = false
 
@@ -26,9 +28,17 @@ export function useUrlFilterSync() {
     const viewId = params.get('view')
 
     const loadView = async (id: string) => {
-      const { data: views } = await client.GET("/api/views/{service_id}", {
-        params: { path: { service_id: activeServiceId } }
-      })
+      // Prefer the views cache (seeded by /api/bootstrap or warmed by
+      // ViewSelector's useQuery). Falls back to a direct GET only when
+      // the cache is cold — keeps the legacy ?view=<id> deep-link path
+      // working even before ViewSelector mounts.
+      let views = queryClient.getQueryData(['views', activeServiceId]) as any
+      if (!views) {
+        const { data } = await client.GET("/api/views/{service_id}", {
+          params: { path: { service_id: activeServiceId } }
+        })
+        views = data
+      }
       const view = (views as any)?.find((v: any) => v.id === id)
       if (view) {
         if (view.start_time && view.end_time) {

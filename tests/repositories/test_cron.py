@@ -94,3 +94,89 @@ def test_purge_cron_logs_by_task():
     con = metadata_db.get_con(sid)
     tasks = [row[0] for row in con.execute("SELECT task FROM cron_runs").fetchall()]
     assert tasks == ["commit"]
+
+
+def test_get_cron_logs_since_id_returns_only_newer_rows():
+    """Delta polling (O5): with since_id set, rows with id <= since_id are
+    excluded UNLESS they are still running. Used by /logs `recentCrons`
+    poll to make steady-state polls return ~0 rows instead of 10.
+    """
+    sid = "svc-cron-since-1"
+    ids = _seed_runs(
+        sid,
+        [
+            {"task": "sync", "status": "success"},
+            {"task": "commit", "status": "success"},
+            {"task": "sync", "status": "success"},
+        ],
+    )
+    total, entries = get_cron_logs(sid, since_id=ids[1])
+    assert total == 1, "only the third row (id > since_id) should match"
+    assert {e["id"] for e in entries} == {ids[2]}
+
+
+def test_get_cron_logs_since_id_keeps_running_rows_even_if_id_below_cutoff():
+    """The poll MUST keep status='running' rows visible across polls even
+    after their id <= since_id — otherwise the client's
+    `backgroundCronToast` status-update effect can't observe the row's
+    eventual completion (it looks the row up by id). The
+    `(id > ? OR status = 'running')` clause is what guarantees this.
+    """
+    sid = "svc-cron-since-2"
+    ids = _seed_runs(
+        sid,
+        [
+            {"task": "sync", "status": "running"},
+            {"task": "commit", "status": "success"},
+            {"task": "sync", "status": "success"},
+        ],
+    )
+    # Cursor is past the running row's id — it would normally be excluded.
+    total, entries = get_cron_logs(sid, since_id=ids[2])
+    returned_ids = {e["id"] for e in entries}
+    assert ids[0] in returned_ids, (
+        "running row must remain in the response even when id <= since_id, "
+        "so the toast-completion-detection effect on /logs keeps working"
+    )
+    assert total == len(returned_ids)
+
+
+def test_get_cron_logs_since_id_none_returns_all_rows():
+    """Backwards-compat: when since_id is None (or omitted), the response
+    is unchanged from pre-O5 behaviour — all matching rows up to per_page.
+    """
+    sid = "svc-cron-since-3"
+    ids = _seed_runs(
+        sid,
+        [
+            {"task": "sync", "status": "success"},
+            {"task": "sync", "status": "success"},
+        ],
+    )
+    total, entries = get_cron_logs(sid)
+    assert total == 2
+    assert {e["id"] for e in entries} == set(ids)
+
+
+def test_get_cron_logs_since_id_combines_with_task_filter():
+    """since_id + task filter compose: only NEW or RUNNING rows of that
+    task are returned. Ensures the main 500-row admin paginator (which
+    doesn't pass since_id) is unaffected, while the delta poll can still
+    layer a task filter if it ever wants to.
+    """
+    sid = "svc-cron-since-4"
+    ids = _seed_runs(
+        sid,
+        [
+            {"task": "sync", "status": "success"},
+            {"task": "commit", "status": "success"},
+            {"task": "sync", "status": "success"},
+            {"task": "sync", "status": "running"},
+        ],
+    )
+    total, entries = get_cron_logs(sid, task="sync", since_id=ids[2])
+    returned_ids = {e["id"] for e in entries}
+    # ids[2] is excluded (id == since_id), ids[3] is new AND running.
+    # ids[1] (commit) is excluded by task filter. ids[0] is sync but old + not running.
+    assert returned_ids == {ids[3]}
+    assert total == 1

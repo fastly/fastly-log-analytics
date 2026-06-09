@@ -135,7 +135,17 @@ if [ "$DEV_MODE" = true ] && [ "$NO_RELOAD" = false ]; then
         --reload-exclude "node_modules" \
         --reload-exclude ".venv" \
         --reload-exclude ".git" \
-        --reload-exclude "*.duckdb*" &
+        --reload-exclude "*.duckdb*" \
+        --reload-exclude "*.db-wal" \
+        --reload-exclude "*.db-shm" \
+        --reload-exclude "*.sqlite*" \
+        --reload-exclude "*.log" \
+        --reload-exclude ".aider*" \
+        --reload-exclude ".mypy_cache" \
+        --reload-exclude ".ruff_cache" \
+        --reload-exclude ".pytest_cache" \
+        --reload-exclude ".hypothesis" \
+        --reload-exclude "__pycache__" &
 else
     # --no-reload (or non-dev) skips uvicorn's --reload flag entirely. Avoids
     # the watchfiles thrashing seen when sqlite WAL pulses or other

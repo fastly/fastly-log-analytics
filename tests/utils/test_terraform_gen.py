@@ -300,3 +300,20 @@ def test_injection_fuzz_does_not_break_terraform_fmt(tmp_path, field, value):
     assert "Error:" not in r.stderr, (
         f"Injection broke HCL parse for {field}={value!r}:\nstdout: {r.stdout[:400]}\nstderr: {r.stderr[:400]}"
     )
+
+
+def test_region_injection_escaped():
+    """Verify that a region containing HCL template evaluation syntax or quote breakout
+    is safely escaped in the generated Terraform configuration."""
+    cfg = _baseline_cfg()
+    cfg["fos_region"] = 'us-east-1"}\nresource "null_resource" "hack" { #\n${file("/etc/passwd")}'
+    out = generate_terraform(cfg, "AKIA", "sec")
+    # Verify the escaped version appears in the key attributes
+    assert (
+        'us-east-1\\"}\\nresource \\"null_resource\\" \\"hack\\" { #\\n$${file(\\"/etc/passwd\\")}.object.fastlystorage.app'
+        in out["cdn_proxy.tf"]
+    )
+    assert (
+        'us-east-1\\"}\\nresource \\"null_resource\\" \\"hack\\" { #\\n$${file(\\"/etc/passwd\\")}.object.fastlystorage.app'
+        in out["logging_service.tf"]
+    )

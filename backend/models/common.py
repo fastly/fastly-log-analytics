@@ -157,6 +157,12 @@ class BaseResponse(BaseModel):
     debug_queries: list[DebugQuery] = Field(default_factory=list, serialization_alias="_debug_queries")
     debug_calls: list[DebugCall] = Field(default_factory=list, serialization_alias="_debug_calls")
     is_cached: bool = Field(default=False, serialization_alias="_is_cached")
+    # Per-phase wall-clock timing for the handler. Always emitted as
+    # _section_timings under serialization. Default empty so endpoints
+    # that don't instrument get a benign empty list. Safe to surface in
+    # prod — phase names + millisecond timings are operational metadata,
+    # not SQL/URLs.
+    section_timings: list[dict] = Field(default_factory=list, serialization_alias="_section_timings")
 
     @model_serializer(mode="wrap")
     def _strip_debug_when_disabled(self, handler):
@@ -164,6 +170,8 @@ class BaseResponse(BaseModel):
         if not _debug_responses_enabled():
             data.pop("_debug_queries", None)
             data.pop("_debug_calls", None)
+            data.pop("debug_queries", None)
+            data.pop("debug_calls", None)
         return data
 
     @classmethod
@@ -210,3 +218,8 @@ class BootstrapResponse(BaseResponse):
     custom_dashboard_cards: list[dict] = Field(default_factory=list)
     custom_fields_catalog: list[dict] = Field(default_factory=list)
     active_log_field_ids: list[str] = Field(default_factory=list)
+    # Saved views for the active service, folded in so the frontend can
+    # render ViewSelector and rehydrate from URL view params without a
+    # second /api/views/{service_id} round-trip on every page nav.
+    views: list[dict] = Field(default_factory=list)
+    # section_timings is inherited from BaseResponse.

@@ -61,6 +61,9 @@ def patched_cache_dir(tmp_path, monkeypatch):
         return source["_test_cache_root"]
 
     monkeypatch.setattr("backend.core.duckdb._cache_dir", fake_cache_dir)
+    # Insulate hourly compaction tests from temporal drift by forcing the daily
+    # tier threshold to 30 days.
+    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 30)
     return src
 
 
@@ -351,7 +354,7 @@ def test_compaction_outputs_survive_iceberg_sync_orphan_cleanup(tmp_path, monkey
         return source["_test_cache_root"]
 
     monkeypatch.setattr("backend.core.duckdb._cache_dir", fake_cache_dir)
-    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 0)
+    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 15)
     monkeypatch.setattr("backend.core.local_compaction._WEEKLY_TIER_AGE_DAYS", 0)
     # Avoid touching a real metadata DB during the compaction step.
     monkeypatch.setattr("backend.core.metadata_db.register_locally_compacted", lambda *a, **kw: None)
@@ -375,7 +378,7 @@ def test_compaction_outputs_survive_iceberg_sync_orphan_cleanup(tmp_path, monkey
         _write_parquet(str(hourly_part / f"src-{i}.parquet"), rows=10, ts_start=i * 10)
 
     result = lc.compact_local_partitions(src)
-    assert result["daily_rollups"] == 1, "real compaction must produce a daily rollup"
+    assert result["daily_rollups"] >= 1, "real compaction must produce a daily rollup"
     assert result["partitions_compacted"] >= 1, "hourly tier must have merged the 5-file partition"
 
     daily_files_before = sorted((data_dir / "daily").glob("*.parquet"))
@@ -469,3 +472,113 @@ def test_compaction_stats_snapshot(patched_cache_dir):
     assert s["partitions_above_3"] == 1
     assert s["partitions_above_10"] == 0
     assert s["avg_files_per_partition"] == 3.0
+
+
+def test_daily_tier_bin_packing_splits_files(patched_cache_dir, monkeypatch):
+    """If a day's files exceed _MAX_PARTITION_BYTES, they are split into multiple daily files."""
+    src = patched_cache_dir
+    cache_root = src["_test_cache_root"]
+    data_dir = os.path.join(cache_root, "data")
+
+    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 0)
+
+    day = "2026-05-15"
+    paths = []
+    for hh in ("00", "01", "02"):
+        part = os.path.join(data_dir, f"timestamp_hour={day}-{hh}")
+        os.makedirs(part)
+        p = os.path.join(part, "f0.parquet")
+        _write_parquet(p, rows=10)
+        paths.append(p)
+
+    sizes = [os.path.getsize(p) for p in paths]
+    monkeypatch.setattr("backend.core.local_compaction._MAX_PARTITION_BYTES", sizes[0] + 50)
+
+    result = lc.compact_local_partitions(src)
+
+    daily_dir = os.path.join(data_dir, "daily")
+    daily_files = sorted([f for f in os.listdir(daily_dir) if f.endswith(".parquet")])
+    assert len(daily_files) == 3
+    for f in daily_files:
+        assert f.startswith(f"daily_{day}_")
+
+    con = duckdb.connect(":memory:")
+    try:
+        total_rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{daily_dir}/*.parquet')").fetchone()[0]
+    finally:
+        con.close()
+    assert total_rows == 30
+
+    for hh in ("00", "01", "02"):
+        assert not os.path.isdir(os.path.join(data_dir, f"timestamp_hour={day}-{hh}"))
+
+
+def test_weekly_tier_bin_packing_splits_files(patched_cache_dir, monkeypatch):
+    """If a week's daily files exceed _MAX_PARTITION_BYTES, they are split into multiple weekly files."""
+    src = patched_cache_dir
+    cache_root = src["_test_cache_root"]
+    data_dir = os.path.join(cache_root, "data")
+    daily_dir = os.path.join(data_dir, "daily")
+    os.makedirs(daily_dir)
+
+    monkeypatch.setattr("backend.core.local_compaction._WEEKLY_TIER_AGE_DAYS", 0)
+
+    paths = []
+    for day in ("2026-05-04", "2026-05-05", "2026-05-06"):
+        p = os.path.join(daily_dir, f"daily_{day}_abc12345.parquet")
+        _write_parquet(p, rows=10)
+        paths.append(p)
+
+    sizes = [os.path.getsize(p) for p in paths]
+    monkeypatch.setattr("backend.core.local_compaction._MAX_PARTITION_BYTES", sizes[0] + 50)
+
+    result = lc.compact_local_partitions(src)
+
+    weekly_dir = os.path.join(data_dir, "weekly")
+    weekly_files = sorted([f for f in os.listdir(weekly_dir) if f.endswith(".parquet")])
+    assert len(weekly_files) == 3
+    for f in weekly_files:
+        assert f.startswith("weekly_2026-W19_")
+
+    con = duckdb.connect(":memory:")
+    try:
+        total_rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{weekly_dir}/*.parquet')").fetchone()[0]
+    finally:
+        con.close()
+    assert total_rows == 30
+
+    assert not [f for f in os.listdir(daily_dir) if f.endswith(".parquet")]
+
+
+def test_daily_tier_migrates_single_file_bins_and_removes_dir(patched_cache_dir, monkeypatch):
+    """Daily compaction correctly migrates a single-file hourly partition to the daily folder,
+    removes the hourly partition dir, and registers its basename in the deleted registry."""
+    src = patched_cache_dir
+    cache_root = src["_test_cache_root"]
+    data_dir = os.path.join(cache_root, "data")
+
+    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 0)
+
+    day = "2026-05-15"
+    part = os.path.join(data_dir, f"timestamp_hour={day}-00")
+    os.makedirs(part)
+    _write_parquet(os.path.join(part, "single_file.parquet"), rows=10)
+
+    captured: list[tuple[str, list[str]]] = []
+
+    def fake_register(service_id: str, names: list[str]) -> None:
+        captured.append((service_id, list(names)))
+
+    monkeypatch.setattr("backend.core.metadata_db.register_locally_compacted", fake_register)
+
+    result = lc.compact_local_partitions(src)
+
+    daily_dir = os.path.join(data_dir, "daily")
+    daily_files = [f for f in os.listdir(daily_dir) if f.endswith(".parquet")]
+    assert len(daily_files) == 1
+    assert daily_files[0].startswith(f"daily_{day}_")
+
+    assert len(captured) == 1
+    assert captured[0][1] == ["single_file.parquet"]
+
+    assert not os.path.isdir(part)

@@ -130,6 +130,7 @@ def test_set_ngwaf_workspace_saves_body_field():
         patch("backend.config.load_config", return_value=cfg_with_key),
         patch("backend.config.save_config", side_effect=fake_save),
         patch("backend.provision._sync_crontab"),
+        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
     ):
         client = TestClient(app)
         response = client.patch(
@@ -138,6 +139,7 @@ def test_set_ngwaf_workspace_saves_body_field():
         )
 
     assert response.status_code == 200, response.text[:500]
+    mock_validate.assert_called_once_with("test-stored-key", service_id="svc123")
     data = response.json()
     assert data["ngwaf_workspace_id"] == "workspace-abc"
     assert saved.get("ngwaf_workspace_id") == "workspace-abc"
@@ -160,6 +162,7 @@ def test_set_ngwaf_workspace_query_param_is_ignored():
         patch("backend.config.load_config", return_value=cfg_with_key),
         patch("backend.config.save_config", side_effect=fake_save),
         patch("backend.provision._sync_crontab"),
+        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
     ):
         client = TestClient(app)
         # Send workspace_id as query param (wrong) with empty body
@@ -169,6 +172,7 @@ def test_set_ngwaf_workspace_query_param_is_ignored():
         )
 
     assert response.status_code == 200, response.text[:500]
+    mock_validate.assert_called_once_with("test-stored-key", service_id="svc123")
     # Body was empty so ngwaf_workspace_id should be None/cleared, not "workspace-abc"
     assert saved.get("ngwaf_workspace_id") is None
 
@@ -206,6 +210,55 @@ def test_set_ngwaf_workspace_with_wrong_token_rejected_401():
             json={"ngwaf_workspace_id": "workspace-abc"},
         )
     assert response.status_code == 401
+
+
+def test_set_ngwaf_workspace_with_read_only_stored_token_rejected_401():
+    """Security: Finding 016. Even if the caller-supplied token matches
+    the stored fastly_api_key, we must always validate it via /tokens/self.
+    If that validation reveals it's a read-only token (missing 'global' scope),
+    it must be rejected with 401."""
+    cfg_with_key = dict(_FAKE_CFG, fastly_api_key="stored-read-only-token")
+
+    # Mock /tokens/self return value representing a read-only token
+    read_only_token_data = {
+        "id": "tok-id",
+        "scope": "global:read",  # Read-only scope, not the required "global"
+        "services": [],
+        "customer_id": "cust-T",
+    }
+
+    with (
+        patch("backend.config.load_config", return_value=cfg_with_key),
+        patch("backend.config.save_config"),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.utils.fastly_auth.fastly", return_value=read_only_token_data),
+    ):
+        client = TestClient(app)
+        response = client.patch(
+            "/api/provision/services/svc123/ngwaf-workspace?token=stored-read-only-token",
+            json={"ngwaf_workspace_id": "workspace-abc"},
+        )
+    assert response.status_code == 401
+    assert response.json()["detail"]["error"] == "insufficient_scope"
+
+
+def test_ngwaf_workspaces_with_read_only_stored_token_rejected_401():
+    """Security: Finding 016. Even if the token matches the stored api key,
+    the NGWAF workspace listing route must validate it via /tokens/self,
+    blocking read-only tokens with 401."""
+    cfg_with_key = dict(_FAKE_CFG, fastly_api_key="stored-read-only-token")
+    read_only_token_data = {"id": "tok-id", "scope": "global:read", "services": [], "customer_id": "cust-T"}
+    with (
+        patch("backend.config.load_config", return_value=cfg_with_key),
+        patch("backend.utils.fastly_auth.fastly", return_value=read_only_token_data),
+    ):
+        client = TestClient(app)
+        response = client.get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc123", "token": "stored-read-only-token"},
+        )
+    assert response.status_code == 401
+    assert response.json()["detail"]["error"] == "insufficient_scope"
 
 
 # ── /api/provision/services ────────────────────────────────────────────────
@@ -826,17 +879,47 @@ def test_ngwaf_workspaces_returns_data_shape_workspaces():
         TestClient(app) as c,
         patch("backend.config.get_fastly_api_key", return_value="tok"),
         patch("urllib.request.urlopen", return_value=fake_resp),
+        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
     ):
         resp = c.get(
             "/api/provision/ngwaf-workspaces",
             params={"service_id": "svc", "token": "tok"},
         )
+        mock_validate.assert_called_once_with("tok", service_id="svc")
 
     assert resp.status_code == 200, resp.text[:500]
     body = resp.json()
     workspaces = body["workspaces"]
     assert len(workspaces) == 2
     assert workspaces[0] == {"id": "ws-1", "name": "Prod"}
+
+
+def test_ngwaf_workspaces_accepts_authorization_header():
+    """Verify that `/api/provision/ngwaf-workspaces` correctly accepts and extracts
+    the token from the `Authorization: Bearer <token>` header."""
+    fake_body = b'{"data": [{"id": "ws-1", "name": "Prod"}]}'
+    fake_resp = MagicMock()
+    fake_resp.read.return_value = fake_body
+    fake_resp.status = 200
+    fake_resp.__enter__ = lambda s: s
+    fake_resp.__exit__ = MagicMock(return_value=False)
+
+    with (
+        TestClient(app) as c,
+        patch("backend.config.get_fastly_api_key", return_value="tok"),
+        patch("urllib.request.urlopen", return_value=fake_resp),
+        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
+    ):
+        resp = c.get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc"},
+            headers={"Authorization": "Bearer tok"},
+        )
+        mock_validate.assert_called_once_with("tok", service_id="svc")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["workspaces"][0] == {"id": "ws-1", "name": "Prod"}
 
 
 def test_ngwaf_workspaces_returns_workspaces_shape():
@@ -856,11 +939,13 @@ def test_ngwaf_workspaces_returns_workspaces_shape():
         TestClient(app) as c,
         patch("backend.config.get_fastly_api_key", return_value="tok"),
         patch("urllib.request.urlopen", return_value=fake_resp),
+        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
     ):
         resp = c.get(
             "/api/provision/ngwaf-workspaces",
             params={"service_id": "svc", "token": "tok"},
         )
+        mock_validate.assert_called_once_with("tok", service_id="svc")
 
     body = resp.json()
     # The route falls back to attributes.name when top-level name is absent
@@ -887,11 +972,13 @@ def test_ngwaf_workspaces_maps_401_to_400_with_permissions_hint():
         TestClient(app) as c,
         patch("backend.config.get_fastly_api_key", return_value="bad-tok"),
         patch("urllib.request.urlopen", side_effect=err),
+        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
     ):
         resp = c.get(
             "/api/provision/ngwaf-workspaces",
             params={"service_id": "svc", "token": "bad-tok"},
         )
+        mock_validate.assert_called_once_with("bad-tok", service_id="svc")
 
     assert resp.status_code == 400
     assert "permissions" in resp.json()["detail"]["error"].lower()
@@ -909,9 +996,9 @@ def test_provision_execute_rejects_invalid_bucket_name_format():
         patch("backend.provision.parse_period", return_value=60),
     ):
         # Underscore is invalid in S3 bucket names
-        r = c.get(
+        r = c.post(
             "/api/provision/execute",
-            params={
+            json={
                 "token": "tok",
                 "service_id": "svc-1",
                 "fos_bucket_name": "invalid_underscore_name",
@@ -931,9 +1018,9 @@ def test_provision_execute_rejects_bucket_with_double_hyphens():
         patch("backend.config.fetch_service_name", return_value="x"),
         patch("backend.provision.parse_period", return_value=60),
     ):
-        r = c.get(
+        r = c.post(
             "/api/provision/execute",
-            params={
+            json={
                 "token": "tok",
                 "service_id": "svc-1",
                 "fos_bucket_name": "bad--bucket",
@@ -951,9 +1038,9 @@ def test_provision_execute_rejects_bucket_starting_with_hyphen():
         patch("backend.config.fetch_service_name", return_value="x"),
         patch("backend.provision.parse_period", return_value=60),
     ):
-        r = c.get(
+        r = c.post(
             "/api/provision/execute",
-            params={
+            json={
                 "token": "tok",
                 "service_id": "svc-1",
                 "fos_bucket_name": "-leading-hyphen",
@@ -973,9 +1060,9 @@ def test_provision_execute_400s_on_bad_log_period():
         patch("backend.config.fetch_service_name", return_value="x"),
         patch("backend.provision.parse_period", side_effect=ValueError("unknown: fortnight")),
     ):
-        r = c.get(
+        r = c.post(
             "/api/provision/execute",
-            params={
+            json={
                 "token": "tok",
                 "service_id": "svc-1",
                 "fos_bucket_name": "valid-bucket",
@@ -1001,9 +1088,9 @@ def test_provision_execute_400s_when_cdn_domain_unavailable():
             return_value=(False, "Domain already registered or in use"),
         ),
     ):
-        r = c.get(
+        r = c.post(
             "/api/provision/execute",
-            params={
+            json={
                 "token": "tok",
                 "service_id": "svc-1",
                 "fos_bucket_name": "valid-bucket",
@@ -1038,9 +1125,9 @@ def test_provision_execute_allows_cdn_domain_with_dns_unavailable_reason():
         patch("backend.core.duckdb.reload_default_source"),
         patch("backend.core.metadata_db.record_audit"),
     ):
-        r = c.get(
+        r = c.post(
             "/api/provision/execute",
-            params={
+            json={
                 "token": "tok",
                 "service_id": "svc-1",
                 "fos_bucket_name": "valid-bucket",
@@ -1072,11 +1159,13 @@ def test_ngwaf_workspaces_empty_list_with_automation_token_returns_hint():
         patch("backend.config.get_fastly_api_key", return_value="tok"),
         patch("urllib.request.urlopen", return_value=fake_resp),
         patch("backend.provision.fastly", return_value=fake_token_info),
+        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
     ):
         resp = c.get(
             "/api/provision/ngwaf-workspaces",
             params={"service_id": "svc", "token": "tok"},
         )
+        mock_validate.assert_called_once_with("tok", service_id="svc")
 
     body = resp.json()
     assert body["workspaces"] == []

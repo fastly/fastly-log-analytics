@@ -669,6 +669,263 @@ def test_get_insights_severity_logic_callable_overrides_default(in_memory_duckdb
     assert card["severity"] == "warning"
 
 
+def _seed_city_data_for_all_four_insights(con, table_name: str) -> None:
+    """Insert rows engineered to trigger each of the 4 city-based insights.
+
+    Layout:
+      - city_surges: "SurgeCity" has 25 window reqs vs 0 baseline reqs
+        (HAVING w_cnt >= 20 AND w_cnt > b_normalized * 3).
+      - city_error_spikes: "ErrorCity" has 20 window reqs, 15 status>=400
+        (75% rate, well above the 10% floor and the 3× baseline ratchet).
+      - city_latency_regressions: "SlowCity" needs >= 10 window reqs and
+        >= 50 baseline reqs with w_p95 / b_p95 ratio >= 3 and absolute
+        delta >= 500. Window has 12 rows at elapsed=2_000_000 (p95=2000 ms);
+        baseline has 60 rows at elapsed=100_000 (p95=100 ms).
+      - new_city_traffic: "FreshCity" has 8 window reqs and 0 baseline.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    window_ts = now - timedelta(minutes=30)  # within last hour (window)
+    baseline_ts = now - timedelta(hours=12)  # < window_start (baseline)
+
+    def _ins(ts: datetime, city: str, region: str, country: str, status: int, elapsed: int) -> None:
+        con.execute(
+            f'INSERT INTO {table_name} ("timestamp", "city", "region", "country", "status", "elapsed") '
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [ts.isoformat(), city, region, country, status, elapsed],
+        )
+
+    # city_surges: 25 window rows in SurgeCity (>= 20 trigger floor), no baseline
+    for _ in range(25):
+        _ins(window_ts, "SurgeCity", "RegionS", "US", 200, 50_000)
+
+    # city_error_spikes: 20 window rows in ErrorCity, 15 of which are 5xx (75% rate)
+    for i in range(20):
+        _ins(window_ts, "ErrorCity", "RegionE", "US", 500 if i < 15 else 200, 50_000)
+    # 50 baseline rows at 1% error rate (so b_rate ≈ 0.02) — keeps b_total < 50? no,
+    # b_total = 50 which is NOT < 50, so the ratchet path applies: w_rate (0.75)
+    # >= b_rate (0.02) * 3 + 0.05 = 0.11 → True.
+    for i in range(50):
+        _ins(baseline_ts, "ErrorCity", "RegionE", "US", 500 if i < 1 else 200, 50_000)
+
+    # city_latency_regressions: 12 window rows at elapsed=2_000_000us (p95=2000ms),
+    # 60 baseline rows at elapsed=100_000us (p95=100ms). w_p95/b_p95 = 20 >= 3, and
+    # delta 1900 >= 500.
+    for _ in range(12):
+        _ins(window_ts, "SlowCity", "RegionL", "US", 200, 2_000_000)
+    for _ in range(60):
+        _ins(baseline_ts, "SlowCity", "RegionL", "US", 200, 100_000)
+
+    # new_city_traffic: 8 window rows in FreshCity, 0 baseline. b_cnt = 0
+    for _ in range(8):
+        _ins(window_ts, "FreshCity", "RegionF", "US", 200, 50_000)
+
+
+def test_coalesced_city_path_matches_per_insight_scan_output(in_memory_duckdb, test_service_source, monkeypatch):
+    """Regression for O2: the coalesced city-aggregate path
+    (`_coalesced_city_aggregates`) must produce per-insight items that
+    are *equivalent* to the legacy per-insight scans.
+
+    Compares the 4 city-based insights (city_surges, city_error_spikes,
+    city_latency_regressions, new_city_traffic) item-by-item between
+    the coalesced path (fast) and the legacy path (fallback when
+    coalescing is monkeypatched out).
+    """
+    from backend.repositories.insights import repository as insights_repo
+
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        '"timestamp" TIMESTAMPTZ, '
+        '"city" VARCHAR, '
+        '"region" VARCHAR, '
+        '"country" VARCHAR, '
+        '"status" INTEGER, '
+        '"elapsed" INTEGER'
+        ")"
+    )
+    _seed_city_data_for_all_four_insights(in_memory_duckdb, table_name)
+
+    # Pass 1 — coalesced path (default).
+    _insights_cache.clear()
+    fast = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    fast_city = {i["id"]: i for i in fast["insights"] if i["id"].startswith(("city_", "new_city"))}
+
+    # Pass 2 — disable coalescing, force per-insight scans.
+    _insights_cache.clear()
+    monkeypatch.setattr(insights_repo, "_coalesced_city_aggregates", lambda *a, **k: {})
+    slow = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    slow_city = {i["id"]: i for i in slow["insights"] if i["id"].startswith(("city_", "new_city"))}
+
+    # Verify both paths produced all four city insights at all.
+    expected_ids = {"city_surges", "city_error_spikes", "city_latency_regressions", "new_city_traffic"}
+    assert set(fast_city.keys()) == expected_ids, f"fast missing: {expected_ids - set(fast_city.keys())}"
+    assert set(slow_city.keys()) == expected_ids, f"slow missing: {expected_ids - set(slow_city.keys())}"
+
+    for insight_id in expected_ids:
+        fast_items = fast_city[insight_id]["items"]
+        slow_items = slow_city[insight_id]["items"]
+
+        assert len(fast_items) == len(slow_items), (
+            f"{insight_id}: fast had {len(fast_items)} items, slow had {len(slow_items)}"
+        )
+
+        # Compare ordered tuples of (label, current_val, baseline_val) — order
+        # matters because each insight has an ORDER BY clause that the bypass
+        # has to replicate. Use rough float-equality on values because the
+        # coalesced PERCENTILE_CONT and the legacy one can differ in the
+        # last ULP across SQL execution paths.
+        def _norm(items: list[dict]) -> list[tuple]:
+            return [
+                (
+                    i["label"],
+                    round(float(i.get("current_val") or 0), 4),
+                    round(float(i.get("baseline_val") or 0), 4),
+                )
+                for i in items
+            ]
+
+        assert _norm(fast_items) == _norm(slow_items), (
+            f"{insight_id} item lists differ between fast and slow paths:\n"
+            f"  fast: {_norm(fast_items)}\n  slow: {_norm(slow_items)}"
+        )
+
+
+def _seed_url_data_for_all_four_insights(con, table_name: str) -> None:
+    """Insert rows engineered to trigger each of the 4 URL-keyed insights
+    folded into the coalesced URL aggregate (Step 2 / Option C, 2026-06-06).
+
+    Layout:
+      - error_spikes: "ErrUrl" has 20 window reqs, 14 5xx (70% rate, well
+        above 5% floor + 2× baseline ratchet).
+      - cache_collapse: "CollUrl" has 30 window reqs (5 HITs → 17% hit rate)
+        vs 200 baseline reqs (160 HITs → 80%). Drop is 63 points (>= 20),
+        and 17% <= 80% * 0.6 = 48%.
+      - latency_regression: "RegUrl" has 12 window reqs at elapsed=4_000_000
+        (p95=4000ms) vs 60 baseline at elapsed=200_000 (p95=200ms).
+        w_p95/b_p95 = 20 >= 2.0; delta 3800 >= 200.
+      - tail_latency: "TailUrl" has 25 window reqs with elapsed distribution
+        producing p99 >> 5*p50. 23 fast (elapsed=10_000) + 2 slow
+        (elapsed=10_000_000) → p99 ≈ 10000ms, p50 ≈ 10ms, ratio ≈ 1000.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    window_ts = now - timedelta(minutes=30)
+    baseline_ts = now - timedelta(hours=12)
+
+    def _ins(ts: datetime, url: str, status: int, cache: str, elapsed: int) -> None:
+        con.execute(
+            f'INSERT INTO {table_name} ("timestamp", "url", "status", "cache", "elapsed") VALUES (?, ?, ?, ?, ?)',
+            [ts.isoformat(), url, status, cache, elapsed],
+        )
+
+    # error_spikes: "ErrUrl" — 20 window, 14 of which are 5xx
+    for i in range(20):
+        _ins(window_ts, "/ErrUrl", 500 if i < 14 else 200, "MISS", 50_000)
+    # Baseline: 50 reqs, only 1 5xx (b_rate ~ 0.02), so w_rate 0.70 >= 0.02*2+0.05=0.09 ✓
+    for i in range(50):
+        _ins(baseline_ts, "/ErrUrl", 500 if i < 1 else 200, "MISS", 50_000)
+
+    # cache_collapse: "CollUrl" — 30 window (5 HIT = 17%) vs 200 baseline (160 HIT = 80%)
+    for i in range(30):
+        _ins(window_ts, "/CollUrl", 200, "HIT" if i < 5 else "MISS", 50_000)
+    for i in range(200):
+        _ins(baseline_ts, "/CollUrl", 200, "HIT" if i < 160 else "MISS", 50_000)
+
+    # latency_regression: "RegUrl" — 12 window at 4000ms, 60 baseline at 200ms
+    for _ in range(12):
+        _ins(window_ts, "/RegUrl", 200, "MISS", 4_000_000)
+    for _ in range(60):
+        _ins(baseline_ts, "/RegUrl", 200, "MISS", 200_000)
+
+    # tail_latency: "TailUrl" — window only, 23 fast + 2 slow → ratio ≈ 1000
+    for _ in range(23):
+        _ins(window_ts, "/TailUrl", 200, "MISS", 10_000)
+    for _ in range(2):
+        _ins(window_ts, "/TailUrl", 200, "MISS", 10_000_000)
+
+
+def test_coalesced_url_path_matches_per_insight_scan_output(in_memory_duckdb, test_service_source, monkeypatch):
+    """Regression for Step 2 / Option C: the coalesced URL-aggregate path
+    (`_coalesced_url_aggregates`) must produce per-insight items
+    *equivalent* to the legacy per-insight scans, item-by-item.
+
+    Compares the 4 URL-keyed insights coalesced into the new CTE
+    (error_spikes, cache_collapse, latency_regression, tail_latency)
+    between the coalesced path (fast) and the legacy per-insight SQL
+    templates (slow, forced by monkeypatching the coalesce to return {}).
+
+    Modeled directly on test_coalesced_city_path_matches_per_insight_scan_output
+    so the two regression tests pin the same equivalence contract for
+    both O2 (city) and Step 2 (URL).
+    """
+    from backend.repositories.insights import repository as insights_repo
+
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        '"timestamp" TIMESTAMPTZ, '
+        '"url" VARCHAR, '
+        '"status" INTEGER, '
+        '"cache" VARCHAR, '
+        '"elapsed" INTEGER'
+        ")"
+    )
+    _seed_url_data_for_all_four_insights(in_memory_duckdb, table_name)
+
+    # Pass 1 — coalesced path (default).
+    _insights_cache.clear()
+    fast = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    fast_url = {
+        i["id"]: i
+        for i in fast["insights"]
+        if i["id"] in ("error_spikes", "cache_collapse", "latency_regression", "tail_latency")
+    }
+
+    # Pass 2 — disable URL coalescing, force per-insight scans.
+    _insights_cache.clear()
+    monkeypatch.setattr(insights_repo, "_coalesced_url_aggregates", lambda *a, **k: {})
+    slow = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    slow_url = {
+        i["id"]: i
+        for i in slow["insights"]
+        if i["id"] in ("error_spikes", "cache_collapse", "latency_regression", "tail_latency")
+    }
+
+    expected_ids = {"error_spikes", "cache_collapse", "latency_regression", "tail_latency"}
+    assert set(fast_url.keys()) == expected_ids, f"fast missing: {expected_ids - set(fast_url.keys())}"
+    assert set(slow_url.keys()) == expected_ids, f"slow missing: {expected_ids - set(slow_url.keys())}"
+
+    for insight_id in expected_ids:
+        fast_items = fast_url[insight_id]["items"]
+        slow_items = slow_url[insight_id]["items"]
+
+        assert len(fast_items) == len(slow_items), (
+            f"{insight_id}: fast had {len(fast_items)} items, slow had {len(slow_items)}"
+        )
+
+        # Same _norm comparison shape as the city equivalence test: (label,
+        # current_val, baseline_val) rounded to 4 decimals to absorb the
+        # last-ULP differences between Python aggregation and DuckDB's
+        # native PERCENTILE_CONT.
+        def _norm(items: list[dict]) -> list[tuple]:
+            return [
+                (
+                    i["label"],
+                    round(float(i.get("current_val") or 0), 4),
+                    round(float(i.get("baseline_val") or 0), 4),
+                )
+                for i in items
+            ]
+
+        assert _norm(fast_items) == _norm(slow_items), (
+            f"{insight_id} item lists differ between fast and slow paths:\n"
+            f"  fast: {_norm(fast_items)}\n  slow: {_norm(slow_items)}"
+        )
+
+
 def test_impossible_distance_items_include_pop_coords(in_memory_duckdb, test_service_source):
     """When POP data is cached, impossible-distance items include finite pop_lat and pop_lon."""
     table_name = _safe_table(test_service_source["name"])

@@ -341,15 +341,28 @@ export default function LogsPage() {
     staleTime: 0
   })
 
-  // Separate query specifically for checking recent crons (including running) without reloading the entire 500-row table
+  // Separate query specifically for checking recent crons (including running) without reloading the entire 500-row table.
+  // Delta poll (O5): reads `maxSeenIdRef.current` and passes (max - 1) as
+  // `since_id` so steady-state polls return ~1 entry instead of 10.
+  // Backend semantics (`backend/core/metadata_db.py::get_cron_runs`): rows
+  // where id > since_id OR status = 'running'. The OR keeps still-running
+  // rows visible across polls. The `-1` keeps the most-recently-seen row
+  // in the response for ONE more poll so the toast-completion-detection
+  // effect below (line ~497) can observe the running→completed transition
+  // for the row backgroundCronToast is tracking. First poll
+  // (maxSeenIdRef.current is null) omits since_id and returns up to
+  // per_page recent rows like before.
   const { data: recentCrons, isFetching: isFetchingRecent } = useQuery({
     queryKey: ['admin', 'cron-logs-recent', activeServiceId],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/cron-runs", { signal, 
+      const max = maxSeenIdRef.current
+      const sinceId = max != null ? Math.max(0, max - 1) : undefined
+      const { data } = await client.GET("/api/cron-runs", { signal,
         params: {
           query: {
             page: 1,
             per_page: 10,
+            since_id: sinceId,
           }
         }
       })
@@ -357,7 +370,7 @@ export default function LogsPage() {
     },
     enabled: !!activeServiceId, // Tab independent polling!
     refetchInterval: 5000,
-    staleTime: 0
+    staleTime: 5_000,
   })
 
   // Derive currently running crons and loading state from recent crons to keep downstream compatibility intact

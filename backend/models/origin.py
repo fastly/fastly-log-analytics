@@ -51,3 +51,26 @@ class OriginShieldingAnalysisResponse(HasDataMixin, BaseResponse):
     requires_fields: list[str] = []
     edge_only: bool = False
     rows: list[dict[str, Any]] = []
+
+
+class OriginAggregatesResponse(HasDataMixin, BaseResponse):
+    """Composite of every origin card on the /origin page.
+
+    One CREATE TEMP TABLE filtered to the requested window populates a
+    `t_origin` projection; six sub-queries run against that single
+    materialization. Shielding analysis is NOT included here — it lives
+    in /api/network-health post item 13 (the join semantics overlap with
+    network-level shielding metadata).
+
+    Granular endpoints (/api/origin/summary, /timeseries, etc.) stay
+    alive behind the same router so the frontend can flip back during a
+    rollback without a backend redeploy.
+    """
+
+    summary: dict[str, Any] = {}
+    timeseries: dict[str, Any] = {}
+    slow_urls: dict[str, Any] = {}
+    status_codes: dict[str, Any] = {}
+    path_breakdown: dict[str, Any] = {}
+    pop_latency: dict[str, Any] = {}
+    ip_health: dict[str, Any] = {}

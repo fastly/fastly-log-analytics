@@ -225,7 +225,11 @@ def score_layer2(
         return 0, [], 1.0
 
     direct_p = _transition_prob(matrix, prev_route.path, current_route.path, vocab_size)
-    if prev_anchor_route is not None and prev_anchor_route.path != prev_route.path:
+    if (
+        prev_anchor_route is not None
+        and prev_anchor_route.path != prev_route.path
+        and prev_anchor_route.path in matrix.get("counts", {})
+    ):
         anchor_p = _transition_prob(matrix, prev_anchor_route.path, current_route.path, vocab_size) * L2_SKIPGRAM_BETA
         trans_prob = max(direct_p, anchor_p)
     else:

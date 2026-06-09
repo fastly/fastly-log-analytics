@@ -172,7 +172,6 @@ def s3_iceberg_env(moto_s3_server, monkeypatch):
             _catalog_db_path,
             _catalog_lock,
             _get_fos_catalog_class,
-            _register_proxy_source,
         )
 
         source_key = src.get("name", "default")
@@ -180,7 +179,6 @@ def s3_iceberg_env(moto_s3_server, monkeypatch):
             if source_key in _catalog_cache:
                 return _catalog_cache[source_key]
             _PENDING_FS_SOURCE.set(src)
-            _register_proxy_source(src)
             props = {
                 "uri": f"sqlite:///{_catalog_db_path(src)}",
                 "warehouse": f"s3://{bucket}/iceberg",

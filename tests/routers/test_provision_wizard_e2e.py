@@ -127,9 +127,9 @@ def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_co
         patch("backend.core.iceberg.init_iceberg_table", side_effect=RuntimeError("iceberg init skipped (test)")),
     ):
         with TestClient(app) as client:
-            r = client.get(
+            r = client.post(
                 "/api/provision/execute",
-                params={
+                json={
                     "token": "fake-fastly-token",
                     "service_id": sid,
                     "service_name": "Wizard E2E Service",
@@ -138,13 +138,13 @@ def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_co
                     "fos_bucket_name": "wizard-e2e-bucket",
                     "fos_prefix": "logs/",
                     "sample_rate": "100",
-                    "edge_only": "true",
+                    "edge_only": True,
                     "log_period": "60",
-                    "enable_cron_sync": "true",
-                    "delete_after": "true",
-                    "commit_interval_mins": "5",
-                    "enable_cron_compact": "true",
-                    "log_retention_days": "30",
+                    "enable_cron_sync": True,
+                    "delete_after": True,
+                    "commit_interval_mins": 5,
+                    "enable_cron_compact": True,
+                    "log_retention_days": 30,
                 },
             )
 
@@ -229,16 +229,16 @@ def test_wizard_execute_rolls_back_on_helper_failure(isolated_configs_dir, tmp_p
         patch("backend.scheduler.get_scheduler"),
     ):
         with TestClient(app) as client:
-            r = client.get(
+            r = client.post(
                 "/api/provision/execute",
-                params={
+                json={
                     "token": "fake-fastly-token",
                     "service_id": sid,
                     "service_name": "Wizard E2E Service Fail",
                     "endpoint_name": "Wizard E2E Logger Fail",
                     "fos_region": "us-east-1",
                     "fos_bucket_name": "wizard-e2e-fail-bucket",
-                    "edge_only": "true",
+                    "edge_only": True,
                     "log_period": "60",
                 },
             )

@@ -15,10 +15,26 @@ the wrong window if the timestamp range is off.
 
 from __future__ import annotations
 
+import io
 import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def _bytes_response(data: bytes, headers: dict | None = None):
+    """Build a context-manager mock whose ``read([size])`` drains a BytesIO,
+    matching the production behaviour (read returns ``b""`` once exhausted)
+    so size/deadline-bounded readers terminate."""
+    buf = io.BytesIO(data)
+    resp = MagicMock()
+    resp.read.side_effect = buf.read
+    resp.headers = headers or {}
+    cm = MagicMock()
+    cm.__enter__.return_value = resp
+    cm.__exit__.return_value = False
+    return cm
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -53,8 +69,9 @@ def test_fast_path_returns_payload_from_s3(fos_src):
     returns its parsed contents without touching Iceberg."""
     payload = _summary_payload()
 
-    fake_resp = {"Body": MagicMock()}
-    fake_resp["Body"].read.return_value = json.dumps(payload).encode("utf-8")
+    body = MagicMock()
+    body.read.side_effect = io.BytesIO(json.dumps(payload).encode("utf-8")).read
+    fake_resp = {"Body": body}
     fake_s3 = MagicMock()
     fake_s3.get_object.return_value = fake_resp
 
@@ -85,8 +102,10 @@ def test_fast_path_handles_non_empty_source_prefix(fos_src):
     the lookup to land on the wrong customer's data."""
     src = {**fos_src, "prefix": "services/svc1"}
 
+    body = MagicMock()
+    body.read.side_effect = io.BytesIO(json.dumps(_summary_payload()).encode("utf-8")).read
     fake_s3 = MagicMock()
-    fake_s3.get_object.return_value = {"Body": MagicMock(read=lambda: json.dumps(_summary_payload()).encode("utf-8"))}
+    fake_s3.get_object.return_value = {"Body": body}
 
     with (
         patch("backend.core.duckdb._get_fos_client", return_value=fake_s3),
@@ -113,13 +132,7 @@ def test_fast_path_uses_cdn_when_cdn_url_is_set(fos_src):
     """
     src = {**fos_src, "cdn_url": "https://cdn-test.fastly.net/", "cdn_secret": "shh secret"}
     payload_bytes = json.dumps(_summary_payload()).encode("utf-8")
-
-    fake_resp = MagicMock()
-    fake_resp.read.return_value = payload_bytes
-    fake_resp.headers = {}
-    cm = MagicMock()
-    cm.__enter__.return_value = fake_resp
-    cm.__exit__.return_value = False
+    cm = _bytes_response(payload_bytes)
 
     with (
         patch("urllib.request.urlopen", return_value=cm) as mock_open,
@@ -146,13 +159,7 @@ def test_fast_path_records_cdn_call_telemetry(fos_src):
     under-report customer egress and miscompute their bill."""
     src = {**fos_src, "cdn_url": "https://cdn-test.fastly.net"}
     payload_bytes = json.dumps(_summary_payload()).encode("utf-8")
-
-    fake_resp = MagicMock()
-    fake_resp.read.return_value = payload_bytes
-    fake_resp.headers = {"x-cache": "HIT"}
-    cm = MagicMock()
-    cm.__enter__.return_value = fake_resp
-    cm.__exit__.return_value = False
+    cm = _bytes_response(payload_bytes, headers={"x-cache": "HIT"})
 
     with (
         patch("urllib.request.urlopen", return_value=cm),
@@ -176,8 +183,10 @@ def test_fast_path_missing_info_falls_through_to_iceberg(fos_src):
     """If ``table_summary.json`` exists but lacks ``info`` / ``calendar``
     keys (legacy summary, partial write), the helper must fall through
     to the Iceberg discovery path, not return a malformed result."""
+    body = MagicMock()
+    body.read.side_effect = io.BytesIO(json.dumps({"unrelated": True}).encode("utf-8")).read
     fake_s3 = MagicMock()
-    fake_s3.get_object.return_value = {"Body": MagicMock(read=lambda: json.dumps({"unrelated": True}).encode("utf-8"))}
+    fake_s3.get_object.return_value = {"Body": body}
 
     fake_table = object()  # init_iceberg_table is mocked, identity doesn't matter
 

@@ -34,6 +34,11 @@ class NetworkHealthResponse(BaseResponse):
     summary: NetworkHealthSummary | None = None
     countries: list[str] = []
     has_metro: bool = False
+    # Phase 3 item 13 — shielding-analysis is conceptually network-level
+    # (edge → shield latency arcs). Folding it into the network-health
+    # response lets the /network page get both shapes in one round-trip
+    # instead of fanning to /api/origin/shielding-analysis.
+    shielding_analysis: dict[str, Any] | None = None
 
 
 class NetworkQualityResponse(BaseResponse):

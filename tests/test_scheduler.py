@@ -1614,6 +1614,177 @@ def test_run_expire_snapshots_handles_error_dict_without_raising():
         _run_expire_snapshots("s")  # must not raise
 
 
+def test_run_expire_snapshots_writes_cron_runs_row_on_success(monkeypatch):
+    """Pins the telemetry contract for the maintenance cron: every
+    success path must write a cron_runs row with status='success' and a
+    summary that includes the keys returned by run_cloud_maintenance.
+    Without this row the weekly maintenance is invisible to the cron
+    audit UI."""
+    from backend import scheduler as sch
+
+    log_calls: list = []
+    start_calls: list = []
+
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_source_for_service",
+        lambda sid: {"name": sid, "service_id": sid},
+    )
+    monkeypatch.setattr(
+        "backend.core.duckdb.start_cron_run",
+        lambda src, task: start_calls.append((src["name"], task)) or 7777,
+    )
+    monkeypatch.setattr(
+        "backend.core.duckdb.log_cron_run",
+        lambda *a, **kw: log_calls.append({"args": a, "kwargs": kw}),
+    )
+    monkeypatch.setattr(
+        "backend.core.iceberg.run_cloud_maintenance",
+        lambda src: {
+            "data_deleted_before_days": 30,
+            "snapshots_expired_before_days": 7,
+            "local_cache_files_deleted": 42,
+        },
+    )
+    monkeypatch.setattr("backend.utils.usage_logger.flush_usage_log", lambda sid: None)
+
+    sch._run_expire_snapshots("svc-test")
+
+    # start_cron_run was called with the right task name
+    assert start_calls == [("svc-test", "expire_snapshots")], (
+        f"start_cron_run must be called with task='expire_snapshots'; got {start_calls}"
+    )
+    # exactly one log_cron_run write with status='success' and the run_id
+    # threaded through (so it UPDATEs the started row rather than INSERTing
+    # a separate one).
+    assert len(log_calls) == 1, f"expected 1 log_cron_run call, got {len(log_calls)}"
+    kwargs = log_calls[0]["kwargs"]
+    args = log_calls[0]["args"]
+    assert args[3] == "success", f"expected success status, got {args[3]!r}"
+    assert kwargs.get("run_id") == 7777, (
+        f"run_id MUST flow through so log_cron_run UPDATEs the running row "
+        f"instead of INSERTing a new one. Got kwargs: {kwargs}"
+    )
+    # Summary surfaces the work the maintenance did so the audit row is
+    # human-readable.
+    summary = kwargs.get("summary") or ""
+    assert "data_deleted_before_days=30" in summary
+    assert "snapshots_expired_before_days=7" in summary
+    assert "local_cache_files_deleted=42" in summary
+
+
+def test_run_expire_snapshots_writes_cron_runs_row_on_sub_step_error(monkeypatch):
+    """If ANY sub-step of run_cloud_maintenance fails (snapshot_expiry_error,
+    data_deletion_error, local_cache_error), status is 'warning' (not 'error')
+    so the audit shows partial-success — the cleanups that DID complete still
+    register, but the failing sub-step's error message surfaces in
+    error_message for triage."""
+    from backend import scheduler as sch
+
+    log_calls: list = []
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_source_for_service",
+        lambda sid: {"name": sid, "service_id": sid},
+    )
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 4242)
+    monkeypatch.setattr(
+        "backend.core.duckdb.log_cron_run",
+        lambda *a, **kw: log_calls.append({"args": a, "kwargs": kw}),
+    )
+    monkeypatch.setattr(
+        "backend.core.iceberg.run_cloud_maintenance",
+        lambda src: {
+            "data_deleted_before_days": 30,  # ok
+            "snapshot_expiry_error": "S3 PreconditionFailed",  # sub-step error
+        },
+    )
+    monkeypatch.setattr("backend.utils.usage_logger.flush_usage_log", lambda sid: None)
+
+    sch._run_expire_snapshots("svc-warn")
+
+    assert len(log_calls) == 1
+    args = log_calls[0]["args"]
+    kwargs = log_calls[0]["kwargs"]
+    assert args[3] == "warning", (
+        f"sub-step errors must yield status='warning' (partial success), not 'error'. Got {args[3]!r}"
+    )
+    assert "snapshot_expiry_error" in (kwargs.get("error_message") or ""), (
+        f"sub-step error message must surface in error_message. Got kwargs: {kwargs}"
+    )
+    assert kwargs.get("run_id") == 4242
+
+
+def test_run_expire_snapshots_writes_cron_runs_row_on_uncaught_exception(monkeypatch):
+    """An uncaught exception from run_cloud_maintenance must still produce
+    a cron_runs row (status='error') with the run_id threaded through —
+    otherwise the row started by start_cron_run sits forever as 'running'."""
+    from backend import scheduler as sch
+
+    log_calls: list = []
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_source_for_service",
+        lambda sid: {"name": sid, "service_id": sid},
+    )
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 9001)
+    monkeypatch.setattr(
+        "backend.core.duckdb.log_cron_run",
+        lambda *a, **kw: log_calls.append({"args": a, "kwargs": kw}),
+    )
+    monkeypatch.setattr(
+        "backend.core.iceberg.run_cloud_maintenance",
+        lambda src: (_ for _ in ()).throw(RuntimeError("S3 down")),
+    )
+    monkeypatch.setattr("backend.utils.usage_logger.flush_usage_log", lambda sid: None)
+
+    sch._run_expire_snapshots("svc-err")
+
+    assert len(log_calls) == 1
+    args = log_calls[0]["args"]
+    kwargs = log_calls[0]["kwargs"]
+    assert args[3] == "error"
+    assert "S3 down" in (kwargs.get("error_message") or "")
+    assert kwargs.get("run_id") == 9001, (
+        f"run_id MUST flow through so the running row is UPDATEd to 'error', "
+        f"not orphaned (same bug as rollup_compact_daily before today's fix). "
+        f"Got kwargs: {kwargs}"
+    )
+
+
+def test_run_expire_snapshots_skips_silently_when_start_cron_run_raises(monkeypatch):
+    """RuntimeError from start_cron_run means another maintenance instance
+    is already running (overlap guard). The function returns silently with
+    no log_cron_run call — there's no row to update."""
+    from backend import scheduler as sch
+
+    log_calls: list = []
+
+    def _busy(src, task):
+        raise RuntimeError("expire_snapshots already running")
+
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_source_for_service",
+        lambda sid: {"name": sid, "service_id": sid},
+    )
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", _busy)
+    monkeypatch.setattr(
+        "backend.core.duckdb.log_cron_run",
+        lambda *a, **kw: log_calls.append({"args": a, "kwargs": kw}),
+    )
+
+    def _should_not_run(*a, **kw):
+        import pytest
+
+        pytest.fail("run_cloud_maintenance must NOT be called when start_cron_run raises")
+
+    monkeypatch.setattr("backend.core.iceberg.run_cloud_maintenance", _should_not_run)
+    monkeypatch.setattr("backend.utils.usage_logger.flush_usage_log", lambda sid: None)
+
+    sch._run_expire_snapshots("svc-busy")
+
+    assert log_calls == [], (
+        "log_cron_run must NOT be called when start_cron_run raised — there's no running row to update."
+    )
+
+
 # ── _run_ngwaf_bot_sync (NGWAF verified-bot cache refresh) ───────────────
 
 

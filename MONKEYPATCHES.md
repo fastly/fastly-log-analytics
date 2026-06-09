@@ -4,10 +4,12 @@ This file catalogs every third-party class/function we monkeypatch at import
 time so we can audit, justify, and eventually replace them with cleaner
 abstractions (subclasses, fsspec hooks, custom catalogs, etc.).
 
-All patches today live in [backend/core/iceberg.py](backend/core/iceberg.py)
-and form a single category: **s3fs cache + telemetry-proxy** — five patches,
-all behind a single `try: ... except ImportError` block
-([iceberg.py:187-443](backend/core/iceberg.py#L187-L443)).
+All patches today live in [backend/core/iceberg.py](backend/core/iceberg.py).
+Five patches form a single **s3fs cache + telemetry-proxy** category, all
+behind a single `try: ... except ImportError` block
+([iceberg.py:187-443](backend/core/iceberg.py#L187-L443)). One additional
+**stdlib** patch (`ThreadPoolExecutor.submit`) propagates ContextVars to
+worker threads so cross-tenant proxy routing stays correct.
 
 (A sixth `SqlCatalog.load_table` patch lived here until 2026-05-21; it has
 been replaced by a clean `FosSqlCatalog` subclass — see the "Replaced patches"
@@ -136,6 +138,42 @@ that lands.
 **Long-term**: If pyiceberg upstream gains a "supply your own FileSystem"
 hook (there's discussion in the project), all five remaining patches become
 obsolete.
+
+---
+
+## 6. `concurrent.futures.ThreadPoolExecutor.submit`
+
+- **Site:** [iceberg.py:60-71](backend/core/iceberg.py#L60) (top-level, runs
+  at module import — does NOT live behind the s3fs `try: ... except
+  ImportError` block).
+- **What:** Wraps `submit(fn, *args, **kwargs)` so the worker thread runs
+  `fn` inside `contextvars.copy_context()` instead of an empty context.
+  All other behavior (Future return, error propagation, cancellation) is
+  unchanged.
+- **Why (security incident, audit finding 003, 2026-06-06):** PyIceberg
+  writes parquet data files via a `ThreadPoolExecutor` inside
+  `pyiceberg/io/pyarrow.py`. The s3fs `__init__` patch (#1) reads
+  `_PENDING_FS_SOURCE` (a ContextVar set by `_get_catalog`) to discover
+  which tenant's source/CDN/proxy config to use. ContextVars do NOT
+  propagate to executor workers natively — PEP 567 covers asyncio tasks
+  only. The previous fix was an endpoint-keyed global registry
+  (`_PROXY_SOURCE_REGISTRY`) that worker threads queried as a fallback.
+  That registry was vulnerable to cross-tenant overwrite: if two tenants
+  shared an endpoint URL, the second `_get_catalog` overwrote the first
+  tenant's source, and the first tenant's still-running worker threads
+  resolved the wrong source — wrong CDN target, wrong `x-fastly-key`,
+  wrong `X-Telemetry-Service-Id`. This patch eliminates the registry by
+  making ContextVars propagate the way they propagate for asyncio.
+- **Scope of effect:** GLOBAL — affects every `ThreadPoolExecutor` in the
+  process, not just pyiceberg's. The semantic change is benign for all
+  known callers (FastAPI, aiobotocore, etc.) because submitting work with
+  the caller's ContextVars is the more-defensive default and matches
+  asyncio's `loop.run_in_executor` semantics. Workers that previously saw
+  empty ContextVars now see the submitter's context.
+- **Cleanup:** Remove if/when CPython adds first-class context propagation
+  to `concurrent.futures` (proposals exist) or if PyIceberg switches to
+  asyncio for parquet writes. Until then, the global patch is the
+  smallest correct fix.
 
 ---
 

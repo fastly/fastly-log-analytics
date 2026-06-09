@@ -227,10 +227,12 @@ def test_download_file_400s_without_key(client):
     assert resp.status_code == 400
 
 
-def test_download_file_redirects_to_cdn_when_configured(client, test_service_source):
-    """When the source has a ``cdn_url``, the route returns a 307
-    redirect to the CDN. Pinned because hitting FOS directly when CDN
-    is available wastes the customer's CDN cache + egress savings."""
+def test_download_file_streams_through_backend_when_cdn_configured(client, test_service_source):
+    """When the source has a ``cdn_url``, the route streams the CDN response
+    through the backend instead of 307-redirecting the browser. The shared
+    ``cdn_secret`` is sent server-side as ``x-fastly-key`` so it never lands
+    in browser history / Referer / address bar. Audit finding 009 — closing
+    the URL-query-param leak that the previous redirect implementation had."""
     from backend.deps import get_source
     from backend.main import app
 
@@ -240,8 +242,22 @@ def test_download_file_redirects_to_cdn_when_configured(client, test_service_sou
         "cdn_secret": "secret123",
     }
 
-    # Patch _cache_dir to a missing path so the local-file branch is skipped
-    with patch("backend.core.duckdb._cache_dir", return_value="/nonexistent/path"):
+    captured_request = {}
+    fake_response = MagicMock()
+    fake_response.headers = {"Content-Type": "application/gzip", "Content-Length": "10"}
+    chunks = iter([b"helloworld", b""])
+    fake_response.read = lambda _n=None: next(chunks)
+    fake_response.close = MagicMock()
+
+    def fake_urlopen(req, timeout=None):
+        captured_request["url"] = req.full_url
+        captured_request["headers"] = dict(req.header_items())
+        return fake_response
+
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value="/nonexistent/path"),
+        patch("urllib.request.urlopen", side_effect=fake_urlopen),
+    ):
         resp = client.get(
             "/api/download",
             headers={"x-fastly-service-id": MOCK_SERVICE_ID},
@@ -249,18 +265,29 @@ def test_download_file_redirects_to_cdn_when_configured(client, test_service_sou
             follow_redirects=False,
         )
 
-    assert resp.status_code == 307
-    location = resp.headers["location"]
-    assert location.startswith("https://cdn.example.com/")
-    # cdn_secret threaded into URL query
-    assert "key=secret123" in location
+    assert resp.status_code == 200
+    # cdn_secret threaded as header, NOT as ?key= URL parameter
+    headers_lc = {k.lower(): v for k, v in captured_request["headers"].items()}
+    assert headers_lc.get("X-fastly-key".lower()) == "secret123"
+    assert "?key=" not in captured_request["url"]
+    assert captured_request["url"].startswith("https://cdn.example.com/raw/")
+    # Streamed body comes through
+    assert resp.content == b"helloworld"
+    # Content-Disposition surfaces the basename so the browser saves the file
+    assert "filename=" in resp.headers.get("content-disposition", "")
 
 
-def test_download_file_uses_presigned_url_when_no_cdn(client, test_service_source):
-    """No CDN → presigned FOS URL. Pinned because the FE's "Download
+def test_download_file_streams_from_fos_when_no_cdn(client, test_service_source):
+    """No CDN → Stream FOS object directly server-side. Pinned because the FE's "Download
     raw file" action must work even before a CDN is provisioned."""
     fake_s3 = MagicMock()
-    fake_s3.generate_presigned_url.return_value = "https://fos.example/presigned?sig=abc"
+    fake_body = MagicMock()
+    fake_body.iter_chunks.return_value = [b"helloworld"]
+    fake_s3.get_object.return_value = {
+        "ContentType": "text/plain",
+        "ContentLength": 10,
+        "Body": fake_body,
+    }
 
     from backend.deps import get_source
     from backend.main import app
@@ -278,20 +305,20 @@ def test_download_file_uses_presigned_url_when_no_cdn(client, test_service_sourc
             follow_redirects=False,
         )
 
-    assert resp.status_code == 307
-    assert resp.headers["location"] == "https://fos.example/presigned?sig=abc"
-    # Verify presigned URL was built with the correct bucket + key
-    _, kwargs = fake_s3.generate_presigned_url.call_args
-    assert kwargs["Params"]["Bucket"] == "test-bucket"
-    assert kwargs["Params"]["Key"] == "raw/file.log"
+    assert resp.status_code == 200
+    assert resp.content == b"helloworld"
+    assert 'filename="file.log"' in resp.headers.get("content-disposition", "")
+    assert "no-store" in resp.headers.get("cache-control", "")
+    # Verify FOS object read was made with the correct bucket + key
+    fake_s3.get_object.assert_called_once_with(Bucket="test-bucket", Key="raw/file.log")
 
 
-def test_download_file_500s_when_presign_raises(client, test_service_source):
-    """Presigned URL generation raising (expired creds, bad region)
-    → 500 with the error. Pinned because the FE renders the error
+def test_download_file_502s_when_fos_raises(client, test_service_source):
+    """FOS object retrieval raising (expired creds, bad region)
+    → 502 with the error. Pinned because the FE renders the error
     text in the download dialog."""
     fake_s3 = MagicMock()
-    fake_s3.generate_presigned_url.side_effect = RuntimeError("creds expired")
+    fake_s3.get_object.side_effect = RuntimeError("creds expired")
 
     from backend.deps import get_source
     from backend.main import app
@@ -307,7 +334,29 @@ def test_download_file_500s_when_presign_raises(client, test_service_source):
             headers={"x-fastly-service-id": MOCK_SERVICE_ID},
             params={"key": "x"},
         )
-    assert resp.status_code == 500
+    assert resp.status_code == 502
+    assert "creds expired" in resp.json()["detail"]["error"]
+
+
+def test_download_file_fails_on_sibling_prefix_partial_match(client, test_service_source):
+    """Enforce directory-level boundaries. If prefix is 'tenant', checking
+    against 'tenant-2/file.log' must fail with 400 invalid_key."""
+    from backend.deps import get_source
+    from backend.main import app
+
+    app.dependency_overrides[get_source] = lambda: {
+        **test_service_source,
+        "prefix": "tenant",
+        "bucket": "b",
+    }
+
+    resp = client.get(
+        "/api/download",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        params={"key": "tenant-2/file.log"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "invalid_key"
 
 
 # ── POST /admin/commit-iceberg ────────────────────────────────────────────
@@ -465,7 +514,8 @@ def test_purge_usage_log_calls_metadata_db_clear(client, test_service_source):
         resp = client.delete("/api/admin/usage-log", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
+    # M1 backstop adds _debug_* keys; check the meaningful field explicitly.
+    assert resp.json()["ok"] is True
     # Confirm we cleared the right service
     mock_clear.assert_called_once()
     called_with = mock_clear.call_args[0][0]
@@ -646,17 +696,39 @@ def test_download_all_400s_without_service_id(client):
     FE never constructs this URL without an ID; a 400 here means a
     bug upstream — better than confusing 404 from the source-lookup
     path."""
-    resp = client.get("/api/download-all")
-    assert resp.status_code == 400
+    from backend.deps import get_service_id, get_source
+    from backend.main import app
+
+    old_source = app.dependency_overrides.pop(get_source, None)
+    old_sid = app.dependency_overrides.pop(get_service_id, None)
+    try:
+        resp = client.get("/api/download-all")
+        assert resp.status_code == 400
+    finally:
+        if old_source is not None:
+            app.dependency_overrides[get_source] = old_source
+        if old_sid is not None:
+            app.dependency_overrides[get_service_id] = old_sid
 
 
 def test_download_all_404s_when_service_not_found(client):
-    """Unknown service_id → 404 (not 500). Pinned because admins
-    sometimes edit URL params manually — the 404 is the clearest
-    "fix your URL" signal."""
-    with patch("backend.core.duckdb.get_source_for_service", return_value=None):
-        resp = client.get("/api/download-all", params={"service_id": "ghost-svc"})
-    assert resp.status_code == 404
+    """Unknown service_id → 400 (not 500 or 404). Pinned because the standard get_source dependency
+    returns a 400 with no_service: True when the lookup fails."""
+    from backend.deps import get_service_id, get_source
+    from backend.main import app
+
+    old_source = app.dependency_overrides.pop(get_source, None)
+    old_sid = app.dependency_overrides.pop(get_service_id, None)
+    try:
+        with patch("backend.core.duckdb.get_source_for_service", return_value=None):
+            resp = client.get("/api/download-all", params={"service_id": "ghost-svc"})
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["no_service"] is True
+    finally:
+        if old_source is not None:
+            app.dependency_overrides[get_source] = old_source
+        if old_sid is not None:
+            app.dependency_overrides[get_service_id] = old_sid
 
 
 # ── GET /admin/usage-log/export ───────────────────────────────────────────
@@ -1059,30 +1131,51 @@ def test_download_folder_invokes_fetch_for_each_listed_object(in_memory_duckdb):
 
 
 def test_download_all_404s_when_service_unknown(client):
-    """Unknown service → 404. Pinned because the FE differentiates
-    "no service selected" (400) from "service deleted between
-    page-load and click" (404) — the user gets different help text."""
-    with patch("backend.core.duckdb.get_source_for_service", return_value=None):
-        resp = client.get("/api/download-all", params={"service_id": "ghost"})
+    """Unknown service → 400. Pinned because the standard get_source dependency
+    returns a 400 with no_service: True when the lookup fails."""
+    from backend.deps import get_service_id, get_source
+    from backend.main import app
 
-    assert resp.status_code == 404
-    assert "service not found" in resp.json()["detail"]["error"]
+    old_source = app.dependency_overrides.pop(get_source, None)
+    old_sid = app.dependency_overrides.pop(get_service_id, None)
+    try:
+        with patch("backend.core.duckdb.get_source_for_service", return_value=None):
+            resp = client.get("/api/download-all", params={"service_id": "ghost"})
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["no_service"] is True
+    finally:
+        if old_source is not None:
+            app.dependency_overrides[get_source] = old_source
+        if old_sid is not None:
+            app.dependency_overrides[get_service_id] = old_sid
 
 
 def test_download_all_returns_zip_with_service_named_filename(client, test_service_source):
     """Happy path: response has `Content-Disposition` filename
     containing the service_id. Pinned because admins identify the
     downloaded zip by service in their Downloads folder."""
-    src = {"name": "svc", "service_id": "svc-123", "bucket": "b", "cdn_url": ""}
+    from backend.deps import get_service_id, get_source
+    from backend.main import app
+
+    src = {"name": "svc-123", "service_id": "svc-123", "bucket": "b", "cdn_url": ""}
     fake_client = MagicMock()
     fake_client.get_paginator.return_value = _fake_paginator_with_pages([])
 
-    with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
-        patch("backend.routers.admin._fetch_file_to_zip"),
-    ):
-        resp = client.get("/api/download-all", params={"service_id": "svc-123"})
+    old_source = app.dependency_overrides.pop(get_source, None)
+    old_sid = app.dependency_overrides.pop(get_service_id, None)
+    try:
+        with (
+            patch("backend.core.duckdb.get_source_for_service", return_value=src),
+            patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc-123"}),
+            patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
+            patch("backend.routers.admin._fetch_file_to_zip"),
+        ):
+            resp = client.get("/api/download-all", params={"service_id": "svc-123"})
+    finally:
+        if old_source is not None:
+            app.dependency_overrides[get_source] = old_source
+        if old_sid is not None:
+            app.dependency_overrides[get_service_id] = old_sid
 
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
@@ -1094,6 +1187,9 @@ def test_download_all_local_mode_zips_duckdb_and_cache_files(client, tmp_path, t
     the per-service cache dir. Pinned because the FE's "Export local
     cache" button relies on this — losing the cache-dir walk would
     silently produce a zip with only the duckdb file."""
+    from backend.deps import get_service_id, get_source
+    from backend.main import app
+
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     (cache_dir / "parquet1.parquet").write_bytes(b"P1")
@@ -1103,12 +1199,21 @@ def test_download_all_local_mode_zips_duckdb_and_cache_files(client, tmp_path, t
 
     src = {"name": "svc", "service_id": "svc", "duckdb_path": str(db_path), "bucket": "b"}
 
-    with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_dir)),
-    ):
-        resp = client.get("/api/download-all", params={"service_id": "svc", "include": "local"})
-        body = b"".join(resp.iter_bytes())
+    old_source = app.dependency_overrides.pop(get_source, None)
+    old_sid = app.dependency_overrides.pop(get_service_id, None)
+    try:
+        with (
+            patch("backend.core.duckdb.get_source_for_service", return_value=src),
+            patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc"}),
+            patch("backend.core.duckdb._cache_dir", return_value=str(cache_dir)),
+        ):
+            resp = client.get("/api/download-all", params={"service_id": "svc", "include": "local"})
+            body = b"".join(resp.iter_bytes())
+    finally:
+        if old_source is not None:
+            app.dependency_overrides[get_source] = old_source
+        if old_sid is not None:
+            app.dependency_overrides[get_service_id] = old_sid
 
     assert resp.status_code == 200
     import io
@@ -1256,3 +1361,39 @@ def test_sync_status_500s_on_unexpected_exception(client, test_service_source):
 
     assert resp.status_code == 500
     assert "disk full" in resp.json()["detail"]["error"]
+
+
+def test_stream_from_worker_disconnect_closes_worker_thread():
+    """Verify that when a streaming client disconnects (raising GeneratorExit),
+    the background thread is notified via ClientDisconnected and exits cleanly
+    instead of blocking indefinitely on a full queue.
+    """
+    import time
+
+    from backend.routers.admin import ClientDisconnected, _stream_from_worker
+
+    thread_failed = []
+    thread_success = []
+
+    def dummy_worker(q):
+        try:
+            # We put more than the queue maxsize (10) to force a blocking put
+            for _ in range(100):
+                q.put(b"some_bytes")
+            thread_failed.append(True)
+        except ClientDisconnected:
+            thread_success.append(True)
+
+    gen = _stream_from_worker(dummy_worker)
+    # Read one chunk to start the thread
+    chunk = next(gen)
+    assert chunk == b"some_bytes"
+
+    # Simulate client disconnect by closing the generator
+    gen.close()
+
+    # Give the thread a moment to execute its next put and catch ClientDisconnected
+    time.sleep(0.1)
+
+    assert thread_success == [True]
+    assert thread_failed == []
