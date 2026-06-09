@@ -353,6 +353,18 @@ class QueryRunner:
             try:
                 from backend.core import iceberg as db_iceberg
 
+                # Mirror execute()'s self-heal: bust the cached view SQL
+                # FIRST so the lock-timeout fallback in update_iceberg_view
+                # (iceberg.py:3306-3312) can't re-execute the SAME stale
+                # SQL when ingest is holding the per-service lock. Without
+                # this, the self-heal "succeeds" but the view stays bound
+                # to the dead buffer path — _get_schema returns [] again,
+                # the caller short-circuits via empty_schema_response, and
+                # the dashboard shows "No data available" on a 200.
+                # ``keep_snapshot_cache=True`` matches the execute() pattern:
+                # preserves the snapshot/path cache so a transient catalog
+                # blip doesn't collapse the view to "WHERE false".
+                db_iceberg.clear_source_caches(self.src.get("name", "default"), keep_snapshot_cache=True)
                 db_iceberg.update_iceberg_view(self.con, self.src, force=True)
                 actual_cols = [col["name"] for col in _get_schema(self.con, self.src)]
             except Exception:

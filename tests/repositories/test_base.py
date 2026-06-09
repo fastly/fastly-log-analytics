@@ -212,6 +212,49 @@ class TestQueryRunner:
         cols = runner.get_schema_cols()
         assert isinstance(cols, list)
 
+    def test_get_schema_cols_self_heal_busts_view_cache_before_rebuild(self, test_service_source):
+        """When ``_get_schema`` returns [] (view bound to deleted buffer file),
+        the self-heal must call ``clear_source_caches`` BEFORE
+        ``update_iceberg_view(force=True)``. Without busting the cache, the
+        lock-timeout fallback in update_iceberg_view re-executes the SAME
+        stale cached SQL, the view stays bound to the dead path, the next
+        ``_get_schema`` returns [] again, and the caller short-circuits via
+        ``empty_schema_response`` — surfacing as 'No data available' on a 200.
+        Prod regression witnessed 2026-06-09."""
+        from unittest.mock import MagicMock
+
+        runner = QueryRunner(MagicMock(), test_service_source)
+
+        call_order: list[str] = []
+
+        def fake_clear(source_key, keep_snapshot_cache=False):
+            call_order.append(f"clear_source_caches(keep_snapshot_cache={keep_snapshot_cache})")
+
+        def fake_refresh(con, src, force=False, lock_timeout=5.0):
+            call_order.append(f"update_iceberg_view(force={force})")
+
+        get_schema_calls = {"n": 0}
+
+        def fake_get_schema(con, src):
+            get_schema_calls["n"] += 1
+            # First call returns empty (stale view); second call (post-rebuild) returns a real schema
+            if get_schema_calls["n"] == 1:
+                return []
+            return [{"name": "timestamp"}, {"name": "ip"}, {"name": "status"}]
+
+        with (
+            patch("backend.repositories._base._get_schema", side_effect=fake_get_schema),
+            patch("backend.core.iceberg.clear_source_caches", side_effect=fake_clear),
+            patch("backend.core.iceberg.update_iceberg_view", side_effect=fake_refresh),
+        ):
+            cols = runner.get_schema_cols()
+
+        assert call_order == [
+            "clear_source_caches(keep_snapshot_cache=True)",
+            "update_iceberg_view(force=True)",
+        ], f"clear must run BEFORE refresh; got: {call_order}"
+        assert cols == ["timestamp", "ip", "status"], "post-rebuild schema should be returned"
+
 
 # ── optional_col ──────────────────────────────────────────────────────────────
 
