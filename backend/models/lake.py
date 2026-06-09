@@ -11,7 +11,8 @@ import urllib.parse
 # attacker-supplied internal hostnames) is rejected — the field is
 # user-controlled at provision time and an attacker who can inject
 # ``http://169.254.169.254`` would otherwise turn fetch_lake_info into
-# an SSRF probe of the GCE metadata service.
+# an SSRF probe of the cloud metadata service (same link-local IP on
+# AWS, GCE, and Azure).
 _CDN_URL_ALLOWED_HOST_SUFFIXES = (
     ".fastly.net",
     ".fastlystorage.app",

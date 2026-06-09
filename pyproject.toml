@@ -64,6 +64,14 @@ testpaths = ["tests"]
 # swap. -n 4 caps the worker pool at 4 regardless of CPU count.
 addopts = "-q -n 4"
 asyncio_mode = "auto"
+markers = [
+    # Tests deriving from an audit-findings/ fix or covering a security
+    # invariant the v2.0 cleanup must not silently regress. CI asserts the
+    # count is monotonically >= the Phase 0 baseline so a refactor can't
+    # delete coverage of a verified fix without surfacing the change.
+    # Phase 0 floor: 24 marked tests (derives from the 24 verified findings).
+    "security_regression: tests covering a verified security fix; CI gates on count",
+]
 # Test-only suppression: FastAPI's TestClient runs requests in worker
 # threads that open metadata_db SQLite connections. Most of them are
 # closed by close_all_connections() in tests/conftest.py, but a handful

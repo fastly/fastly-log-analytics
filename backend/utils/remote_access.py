@@ -125,7 +125,8 @@ def _is_private_or_loopback(ip_str: str) -> bool:
     analyst behind a VPN would be misclassified as an admin and bypass
     the analyst-blocked endpoint prefixes (``/api/provision/``,
     ``/api/admin/`` etc.) entirely. Even worse, an SSRF probe of
-    ``169.254.169.254`` (GCE metadata) would land as "local" too.
+    ``169.254.169.254`` (cloud metadata service — same IP on AWS, GCE,
+    Azure) would land as "local" too.
 
     Production topology: Caddy connects to uvicorn over loopback
     (127.0.0.1, host network mode + ``--forwarded-allow-ips=127.0.0.1``)

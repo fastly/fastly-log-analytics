@@ -99,6 +99,22 @@ jobs:
         # Local run: 2268 passed in 58s under `-n auto` vs ~3min serial.
         run: uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=78
 
+      - name: Security-regression count gate
+        # v2.0 cleanup Phase 0.8: asserts the
+        # @pytest.mark.security_regression count never drops below the
+        # baseline floor (24 — derived from audit-findings/ verified
+        # fixes). A refactor cannot silently delete coverage of a
+        # verified fix without surfacing the change.
+        run: bash scripts/check_security_regression_count.sh
+
+      - name: Perf gate (load-harness baseline)
+        # v2.0 cleanup Phase 0.9: scaffolding for the >10% cold-path
+        # regression gate. Reads tests/perf/baseline.json + latest.json.
+        # Phase 0 ships this as a no-op (latest.json missing → skip).
+        # Phase 1.6 hooks the emitter and turns the skip into a hard
+        # fail.
+        run: bash scripts/perf_gate.sh
+
   frontend:
     name: Frontend (Node)
     runs-on: forge-amd64-medium

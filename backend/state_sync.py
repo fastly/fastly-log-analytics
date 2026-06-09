@@ -140,7 +140,7 @@ def restore_scoring_matrix_version(service_id: str, version: str) -> dict | None
 
 def publish_matrix_to_fos(service_id: str, matrix: dict) -> None:
     """Upload the trained scoring matrix JSON to FOS so analyst replicas
-    + GCE backend can fetch the same matrix the admin host has on disk.
+    + the prod VM backend can fetch the same matrix the admin host has on disk.
 
     Without this, every fresh container needs the matrix scp'd in
     manually (which is how the AUC field got bootstrapped the first
@@ -269,8 +269,9 @@ def _cdn_get(source: dict, key: str) -> bytes:
 
     # SSRF guard: ``cdn_url`` is user-supplied at provision time. Reject
     # anything that isn't an https Fastly hostname so the helper can't be
-    # turned into an outbound HTTP probe of internal services (GCE
-    # metadata, peer VMs, link-local addresses).
+    # turned into an outbound HTTP probe of internal services (cloud
+    # metadata at 169.254.169.254 on AWS/GCE/Azure, peer VMs, link-local
+    # addresses).
     cdn_url = _safe_cdn_url((source.get("cdn_url") or "").rstrip("/"))
     if not cdn_url:
         raise urllib.error.URLError("cdn_url missing or not on the Fastly allowlist")

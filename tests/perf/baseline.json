@@ -1,0 +1,15 @@
+{
+  "_comment": "Baseline thresholds for the load-harness CI step (Phase 0.9). Phase 1.6 hooks scripts/loadtest_generator.py + scripts/dev/loadtest_probe.sh to emit numbers in this shape per run; PR job fails on >10% cold-path regression vs these baselines. Numbers seeded from pending-docs/performance_load_test_plan.md §0.2 success criteria; tighten as actuals come in.",
+  "schema_version": 1,
+  "baseline_commit": "78f23d1",
+  "baseline_date_utc": "2026-06-09",
+  "regression_pct_threshold": 10,
+  "scenarios": {
+    "cold_path_36M_1h_iceberg_committed_p95_ms": 2800,
+    "warm_path_36M_1h_p50_ms": 1900
+  },
+  "notes": [
+    "These thresholds are the v2.0 success-criteria targets, not Phase 0 actuals. Phase 0.3 runs scripts/baseline_metrics.sh which captures source-level metrics (LOC, file size, security comments); actual perf numbers from the load harness land in pending-docs/baseline/<ts>/perf.json once Phase 1.6 wires the emitter.",
+    "Phase 1.6 reads this file in scripts/perf_gate.sh and exits non-zero if any scenario's measured p-value is > baseline * (1 + regression_pct_threshold/100)."
+  ]
+}

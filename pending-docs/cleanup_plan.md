@@ -445,7 +445,9 @@ Pre-cutover checklist:
 
 ## Phase 9b — Frontend large-file splits (4–8 hours)
 
-**Goal:** No frontend file > 500 lines. Carve the 8 files above that threshold (combined 23,080 lines today, ~7,000 of which is ProvisionWizard alone).
+**Goal:** No frontend file > 500 lines. Phase 0 baseline re-grep found **16 files** above that threshold (combined ~16,400 lines), not 8 as originally enumerated — `app/*/page.tsx` route files were missed. Sub-tasks below cover all 16.
+
+### Component splits (8 files — original 9b.1–9b.8)
 
 - **9b.1** [components/ProvisionWizard/ProvisionWizard.tsx](../frontend/components/ProvisionWizard/ProvisionWizard.tsx) (**3,582 lines** — the elephant). Carve into:
   - `ProvisionWizard/index.tsx` — top-level shell + step navigation
@@ -460,7 +462,26 @@ Pre-cutover checklist:
 - **9b.6** [components/Map/NetworkMap.tsx](../frontend/components/Map/NetworkMap.tsx) (562) — split into NetworkMap/{index, MapLayer, OverlayLayer, controls}.tsx
 - **9b.7** [components/DataTable/DataTable.tsx](../frontend/components/DataTable/DataTable.tsx) (514) — split into DataTable/{index, Header, Body, Toolbar, ColumnPicker}.tsx
 - **9b.8** [components/CronSettingsModal/CronSettingsModal.tsx](../frontend/components/CronSettingsModal/CronSettingsModal.tsx) (510) — split into CronSettingsModal/{index, Schedule, Triggers, Preview}.tsx
-- **9b.9** **Test cleanup:** keep existing test coverage; rewrite imports as files move. Add coverage for any newly-extracted utility modules (wizard state machine, datatable column picker logic). Standardize all Vitest frontend integration tests for step-by-step form submission flows (especially the split step components under `ProvisionWizard/steps/*`) on `msw` (Mock Service Worker) to mock backend responses at the network level, guaranteeing test correctness and structural decoupling.
+
+### Route splits (8 files — added 2026-06-09 after Phase 0 baseline)
+
+Pattern: extract per-section components into `app/<route>/_sections/<Section>.tsx` (Next.js underscore-prefixed folders aren't routable). The `page.tsx` becomes the RSC/CSR shell per ADR-05 + the Phase 9a routing table.
+
+- **9b.12** [app/logs/page.tsx](../frontend/app/logs/page.tsx) (**2,136 lines** — second largest after ProvisionWizard). Carve into:
+  - `app/logs/page.tsx` — shell + URL state via nuqs (post-Phase 9a)
+  - `app/logs/_sections/{Filters,ResultsTable,FieldPicker,SavedQueries,DetailsDrawer}.tsx`
+  - `app/logs/_state.ts` — derived filter/window state hooks
+- **9b.13** [app/admin/page.tsx](../frontend/app/admin/page.tsx) (1,438) — split into `app/admin/_sections/{ServicesTable,GlobalSettings,SystemStatus,DiagnosticsPanel}.tsx`
+- **9b.14** [app/dashboard/page.tsx](../frontend/app/dashboard/page.tsx) (1,184) — split into `app/dashboard/_sections/{Aggregates,Timeseries,TopN,GeoMap}.tsx`
+- **9b.15** [app/alerts/page.tsx](../frontend/app/alerts/page.tsx) (959) — split into `app/alerts/_sections/{AlertsList,AlertEditor,AlertPreview}.tsx`
+- **9b.16** [app/admin/usage-log/page.tsx](../frontend/app/admin/usage-log/page.tsx) (656) — split into `app/admin/usage-log/_sections/{UsageTable,UsageChart,Filters}.tsx`
+- **9b.17** [app/security/page.tsx](../frontend/app/security/page.tsx) (628) — split into `app/security/_sections/{AnomaliesTable,SignatureLanding,ThreatMap}.tsx`
+- **9b.18** [app/origin/page.tsx](../frontend/app/origin/page.tsx) (562) — split into `app/origin/_sections/{Aggregates,Timeseries,LatencyHeatmap}.tsx`
+- **9b.19** [app/sessions/page.tsx](../frontend/app/sessions/page.tsx) (510) — split into `app/sessions/_sections/{SessionsTable,SessionDetail,ScoringControls}.tsx`
+
+### Closing
+
+- **9b.9** **Test cleanup:** keep existing test coverage; rewrite imports as files move. Add coverage for any newly-extracted utility modules (wizard state machine, datatable column picker logic, route-section hooks). Standardize all Vitest frontend integration tests for step-by-step form submission flows (especially the split step components under `ProvisionWizard/steps/*`) on `msw` (Mock Service Worker) to mock backend responses at the network level.
 - **9b.10** **CI gate ratchet:** bump `coverage.thresholds.lines` to 58% frontend.
 - **9b.11** Verify dev → deploy → verify prod.
 

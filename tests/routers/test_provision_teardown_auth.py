@@ -18,6 +18,10 @@ from fastapi.testclient import TestClient
 from backend import config as svcconfig
 from backend.main import app
 
+# Destructive-teardown auth gate is a verified-fix surface: refactors
+# must preserve the "no fallback to server-stored fastly_api_key" rule.
+pytestmark = pytest.mark.security_regression
+
 
 @pytest.fixture
 def isolated_configs_dir(tmp_path, monkeypatch):

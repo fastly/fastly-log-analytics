@@ -3,9 +3,11 @@
 
 This document provides a detailed technical overview of how the dashboard and ingest system are architected, how data flows through the application, and the internal design patterns used to maintain high performance, atomic crash safety, and strong security.
 
+> ⚠️ **v2.0 rewrite in progress.** Sections marked `[v2.0-pending]` are being rewritten as part of the architecture cleanup. Target state is described in the ADRs under `pending-docs/adr/` (01: storage model; 02: request lifecycle; 03: tenancy; 04: middleware order; 05: frontend rendering boundary). The banner is removed section-by-section as each phase ships and confirms the new shape in production. Tracking issue: `pending-docs/cleanup_plan.md`.
+
 ---
 
-## 1. Directory & Storage Layout
+## 1. Directory & Storage Layout `[v2.0-pending]`
 
 The system uses a layered storage architecture to optimize for real-time query speed, long-term durable query planning, and transactional consistency of administrative state:
 
@@ -25,7 +27,7 @@ To provide real-time query speed without waiting for Iceberg table commits, the 
 
 ---
 
-## 2. Ingest Pipeline & Atomic Guarantees
+## 2. Ingest Pipeline & Atomic Guarantees `[v2.0-pending]`
 
 In-gestion is scheduled using APScheduler. It performs active sync, commit, optimization, and expiration cycles on a per-service level:
 
@@ -65,7 +67,7 @@ Admins can also define custom log fields using arbitrary VCL expressions. Each c
 
 ---
 
-## 4. Live Dashboard Sharing Architecture
+## 4. Live Dashboard Sharing Architecture `[v2.0-pending]`
 
 The **Share Dashboard** feature allows administrators to invite read-only analysts to collaborate on log views. Rather than copying log files, the system exposes a secure, read-only session that feeds from the administrator's running analytical engine.
 

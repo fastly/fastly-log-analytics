@@ -23,9 +23,13 @@ does not honor XFF as expected.
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
+
+# Trust topology invariant — every test in this file pins one of the two
+# protections that keep request.client.host on the real client IP.
+pytestmark = pytest.mark.security_regression
+
+import asyncio
 
 # ── 1. Startup assertion behavior ──────────────────────────────────────────
 

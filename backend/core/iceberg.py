@@ -3649,7 +3649,7 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
         # view refresh whenever the local cache lags the iceberg manifest
         # (very common during catch-up / right after a commit). Useful for
         # debugging stale-view issues, not useful as a routine signal —
-        # was spamming the GCE backend log every few seconds with no
+        # was spamming the prod VM backend log every few seconds with no
         # actionable content.
         logger.debug(
             "%s Skipping %d missing cloud files in view (local files present, CDN sync pending).",

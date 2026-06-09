@@ -1,4 +1,4 @@
-.PHONY: test lint format typecheck ci install install-hooks clean gen-types verify-deps secret-scan osv outdated
+.PHONY: test lint format typecheck ci install install-hooks clean gen-types verify-deps secret-scan osv outdated perf security-regression baseline verify ratchet
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
@@ -105,6 +105,44 @@ vcl-test:
 # slots free up.
 ci:
 	@$(MAKE) -j2 test test-frontend typecheck-frontend lint format-check typecheck vcl-test verify-deps secret-scan osv
+
+# ── v2.0 cleanup targets ──────────────────────────────────────────────────────
+
+# Load-harness perf gate. Reads tests/perf/baseline.json + latest.json.
+# Phase 0 ships scaffolding (no-op if latest.json missing). Phase 1.6
+# hooks the emitter and turns the skip into a hard fail.
+perf:
+	bash scripts/perf_gate.sh
+
+# Security-regression count gate. Asserts the
+# @pytest.mark.security_regression count is monotonically >= floor
+# (Phase 0.8 baseline: 24, derived from audit-findings/ verified fixes).
+security-regression:
+	bash scripts/check_security_regression_count.sh
+
+# Architectural baseline snapshot. Captures LOC, large files,
+# TODO/FIXME markers, # Security: comment count, and mypy ignore
+# overrides into pending-docs/baseline/<ts>/. Run at Phase 0 + end of
+# Phase 10 for the success-criteria scorecard.
+baseline:
+	bash scripts/baseline_metrics.sh
+
+# Pre-deploy gate. Runs the full CI suite + the cleanup-plan gates
+# (perf, security-regression). Use locally before any phase deploy.
+verify: ci perf security-regression
+
+# CI gate ratchet helper. After a phase lifts coverage in a touched
+# module, bump the gate in .github/workflows/ci.yml's --cov-fail-under.
+# This target prints the current values + suggests the next floor
+# ("current actual − 2pp" per existing convention).
+ratchet:
+	@echo "Current backend gate:"
+	@grep -E "cov-fail-under" .github/workflows/ci.yml
+	@echo
+	@echo "Current frontend gate:"
+	@grep -E "coverage.thresholds.lines" .github/workflows/ci.yml
+	@echo
+	@echo "Edit .github/workflows/ci.yml to bump. Floor: current actual − 2pp."
 
 
 clean:

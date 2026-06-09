@@ -20,6 +20,12 @@ from fastapi.testclient import TestClient
 from backend.routers import alerts as alerts_router
 from backend.routers import views as views_router
 
+# Every test in this file pins a cross-tenant scope invariant — the
+# router-level read gate that prevents an analyst from enumerating or
+# modifying resources for a service they don't own. Refactors that
+# touch tenancy must keep this coverage.
+pytestmark = pytest.mark.security_regression
+
 
 @pytest.fixture
 def app_with_session():
