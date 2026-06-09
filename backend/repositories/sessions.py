@@ -46,6 +46,7 @@ def get_sessions(
             has_rtt=False,
             has_ja4=False,
             has_edge=False,
+            has_edge_sid=False,
             **runner.telemetry(),
         )
 
@@ -72,6 +73,7 @@ def get_sessions(
     has_ua = "ua" in actual_cols
     has_url = "url" in actual_cols
     has_edge = "edge" in actual_cols
+    has_edge_sid = "edge_sid" in actual_cols
 
     group_cols = ["ip"]
     if has_ja4:
@@ -81,6 +83,12 @@ def get_sessions(
     part_key = group_key
 
     extra_aggs = ""
+    if has_edge_sid:
+        # Representative cookie session id per (ip[, ja4]) session.
+        # MAX() across rows in the same session ensures a stable value;
+        # rows where the inbound request had no valid cookie store ''
+        # (see backend/provision/session_scoring_orchestrator.py).
+        extra_aggs += ', MAX("edge_sid") AS edge_sid'
     if has_edge:
         extra_aggs += ', SUM(CASE WHEN "edge" = 1 THEN 1 ELSE 0 END) AS edge_count'
         extra_aggs += ', SUM(CASE WHEN "edge" = 0 THEN 1 ELSE 0 END) AS shield_count'
@@ -137,6 +145,7 @@ def get_sessions(
         country_proj=', "country"' if has_country else "",
         url_proj=', "url"' if has_url else "",
         edge_proj=', "edge"' if has_edge else "",
+        edge_sid_proj=', "edge_sid"' if has_edge_sid else "",
         table_name=table_name,
         where_clause=where_clause,
         part_key=part_key,
@@ -162,6 +171,7 @@ def get_sessions(
             has_rtt=has_rtt,
             has_ja4=has_ja4,
             has_edge=has_edge,
+            has_edge_sid=has_edge_sid,
             **runner.telemetry(),
         )
 
@@ -193,6 +203,7 @@ def get_sessions(
         "has_rtt": has_rtt,
         "has_ja4": has_ja4,
         "has_edge": has_edge,
+        "has_edge_sid": has_edge_sid,
         "min_reqs_flag": min_reqs_flag,
         "min_4xx_pct_flag": min_4xx_pct_flag,
         **runner.telemetry(),

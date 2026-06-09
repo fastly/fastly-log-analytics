@@ -19040,6 +19040,17 @@
             ],
             "title": "Median Rtt Ms"
           },
+          "edge_sid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge Sid"
+          },
           "flagged": {
             "type": "boolean",
             "title": "Flagged"
@@ -19283,6 +19294,11 @@
           "has_edge": {
             "type": "boolean",
             "title": "Has Edge"
+          },
+          "has_edge_sid": {
+            "type": "boolean",
+            "title": "Has Edge Sid",
+            "default": false
           },
           "min_reqs_flag": {
             "type": "integer",

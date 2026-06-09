@@ -4,6 +4,22 @@ Every loggable field is defined here: its VCL expression, DuckDB type, typical
 byte cost, and which insights require it.  Nothing else in the codebase should
 hard-code VCL log format strings.
 
+Phase 7 migration in progress
+-----------------------------
+A new frozen-dataclass view of this catalog lives at
+``backend/core/field_registry.py`` (`REGISTRY`, `BY_CODE`, `BY_GROUP`,
+`WIRE_ORDER`). The new module is derived from `LOG_FIELD_CATALOG` below at
+import time and stays byte-for-byte equivalent — a parity test in
+``tests/core/test_field_registry.py`` guards both views.
+
+Callers are migrating one-at-a-time per the order in
+``pending-docs/phase_7_field_registry_migration.md``. While the migration
+is in flight DO NOT add a new field by editing only the new registry: add
+it here (as a dict) and the registry will pick it up automatically. After
+the final caller migrates, the legacy `LOG_FIELD_CATALOG` literal will
+be rewritten in place as `LogField(...)` calls and this module will shed
+the dict layer.
+
 Usage
 -----
     from backend.core.log_fields import generate_log_format, estimate_log_line_bytes, PRESETS

@@ -2,17 +2,15 @@
 
 import React from 'react'
 import dynamic from 'next/dynamic'
+import { useRouter } from 'next/navigation'
 import { useCardVisibility } from '@/hooks/useCardVisibility'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { client } from '@/lib/api'
 import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates } from '@/lib/staleViewRetry'
 import { useFilterStore } from '@/stores/filterStore'
-import { useServiceStore } from '@/stores/serviceStore'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
-import { useFieldLabel } from '@/hooks/useFieldLabel'
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
-import { FilterPopover } from '@/components/FilterPopover'
 import { LazyMount } from '@/components/LazyMount'
 
 // ChoroplethMap pulls in d3-geo and the world-110m topojson. Static-import
@@ -36,13 +34,8 @@ const ChoroplethMap = dynamic(
 )
 import { TopTenTable } from '@/components/Dashboard/TopTenTable'
 import { DashboardHeader } from '@/components/Dashboard/DashboardHeader'
-import { DataTable } from '@/components/DataTable'
-import { ColumnVisibilityDropdown } from '@/components/DataTable'
-import { ColumnDef, SortingState } from '@tanstack/react-table'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
-import { badgeVariants } from '@/components/ui/badge'
-import { useDateFormat } from '@/hooks/useDateFormat'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -50,16 +43,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { formatDate, parseFromInput } from '@/lib/date'
-import { LayoutDashboard, ChevronDown, ChevronRight, Download, Bot } from 'lucide-react'
-import { cn, downloadBlob } from '@/lib/utils'
+import { LayoutDashboard, ChevronDown, ChevronRight, Bot, ArrowRight } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { ReportLayout } from '@/components/ReportLayout'
 import type { ReportConfiguration } from '@/hooks/useReportConfig'
-import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { useShallow } from 'zustand/react/shallow'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useDashboardCards } from '@/hooks/useDashboardCards'
-import { FlagSessionPopover } from '@/components/SessionScoring/FlagSessionPopover'
-import { useScoringLabels } from '@/hooks/useScoringLabels'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -152,21 +142,6 @@ const CATEGORIZED_CARD_IDS = new Set(CARD_CATEGORIES.flatMap(c => c.cardIds))
 
 const COLLAPSED_SECTIONS_KEY = 'dashboard_collapsed_sections'
 
-// Raw-logs panel: which columns to fetch. Previously the panel pulled SELECT *
-// (~75 cols) on every dashboard load, which dominated /api/dashboard/raw time
-// because wide text fields (ua, referer, url, ja3, etc.) bloat the parquet
-// read. Default set covers the columns most users actually look at; everything
-// else can be opted in via the column dropdown (which triggers a refetch).
-// `timestamp` is always included so the default sort doesn't break.
-const RAW_COLUMNS_STORAGE_KEY = 'dashboard_raw_columns'
-const DEFAULT_RAW_COLUMNS = [
-  'timestamp', 'ip', 'country', 'host', 'url', 'method',
-  'status', 'cache', 'elapsed', 'resp_bytes', 'ttfb', 'ua', 'edge_sid',
-]
-// Catalog ids that aren't real parquet columns and can't be returned per-row
-// (they're aggregate-only views like the exploded waf_sig signal breakdown).
-const RAW_DROPDOWN_EXCLUDE = new Set(['waf_sig_ind', 'edge_score_reason_ind', '_source_file'])
-
 // ── DashboardBody ──────────────────────────────────────────────────────────────
 //
 // Lifted out of the ReportLayout render-prop so all hooks (useQuery,
@@ -223,8 +198,7 @@ function DashboardBody({
   })))
 
   const [metric, setMetric] = React.useState("requests")
-  const getFieldLabel = useFieldLabel()
-  const { full, abbr } = useDateFormat()
+  const router = useRouter()
 
   const [hiddenCategories, setHiddenCategories] = React.useState<Set<string>>(new Set())
 
@@ -302,56 +276,6 @@ function DashboardBody({
     enabled: isReady && compareMode && !!compareStartTime && !!compareEndTime,
     ...STALE_VIEW_RETRY_OPTIONS,
   })
-
-  const [sorting, setSorting] = React.useState<SortingState>([{ id: 'timestamp', desc: true }])
-
-  // User-selected raw-log columns. `timestamp` is forced into the list
-  // because the default sort references it; without it the API picks an
-  // arbitrary sort col and the table feels broken.
-  const [selectedRawColumns, setSelectedRawColumns] = React.useState<string[]>(() => {
-    if (typeof window === 'undefined') return DEFAULT_RAW_COLUMNS
-    try {
-      const raw = localStorage.getItem(RAW_COLUMNS_STORAGE_KEY)
-      const parsed = raw ? JSON.parse(raw) : null
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.includes('timestamp') ? parsed : ['timestamp', ...parsed]
-      }
-    } catch { /* fall through to default */ }
-    return DEFAULT_RAW_COLUMNS
-  })
-
-  const toggleRawColumn = React.useCallback((id: string, visible: boolean) => {
-    setSelectedRawColumns(prev => {
-      const set = new Set(prev)
-      if (visible) set.add(id)
-      else if (id !== 'timestamp') set.delete(id)
-      const next = Array.from(set)
-      try {
-        localStorage.setItem(RAW_COLUMNS_STORAGE_KEY, JSON.stringify(next))
-      } catch { /* ignore quota / private-mode errors */ }
-      return next
-    })
-  }, [])
-
-  const { data: rawLogs, isLoading: isLoadingRaw, isFetching: isFetchingRaw } = useServiceQuery(
-    ['dashboard', 'raw', activeServiceId, startTime, endTime, filterPayload, sorting, selectedRawColumns],
-    async ({ signal }) => {
-      const sort = sorting[0]
-      const { data } = await client.POST("/api/dashboard/raw", { signal,
-        body: {
-          start_time: startTime!,
-          end_time: endTime!,
-          filters: filterPayload,
-          limit: 500,
-          page: 1,
-          sort_col: sort?.id,
-          sort_dir: sort?.desc ? 'desc' : 'asc',
-          columns: selectedRawColumns
-        }
-      })
-      return data
-    }
-  )
 
   const { data: topBotsData } = useQuery({
     queryKey: ['dashboard', 'top-bots', activeServiceId, startTime, endTime, filterPayload],
@@ -563,126 +487,6 @@ function DashboardBody({
       addFilter('country', countryName, 'include')
     })
   }, [addFilter])
-
-  // ── Raw logs columns ───────────────────────────────────────────────────────
-
-  // Catalog-driven option list for the raw-logs column dropdown. Lets
-  // users toggle on heavy fields (ua, referer, ja4, etc.) that aren't in
-  // DEFAULT_RAW_COLUMNS — toggling refetches with the expanded set.
-  const rawColumnOptions = React.useMemo(() => {
-    const fields = (catalog?.fields as any[]) || []
-    const seen = new Set<string>()
-    const out: { id: string; label: string }[] = []
-    for (const f of fields) {
-      if (!f?.id || RAW_DROPDOWN_EXCLUDE.has(f.id) || f.group === 'METRICS') continue
-      if (seen.has(f.id)) continue
-      seen.add(f.id)
-      out.push({ id: f.id, label: getFieldLabel(f.id) })
-    }
-    // Defensive: ensure any currently-selected column not present in the
-    // catalog (e.g. custom field that bootstrap hasn't loaded yet) still
-    // shows up checked in the dropdown.
-    for (const id of selectedRawColumns) {
-      if (!seen.has(id)) {
-        seen.add(id)
-        out.push({ id, label: getFieldLabel(id) })
-      }
-    }
-    return out
-  }, [catalog, getFieldLabel, selectedRawColumns])
-
-  const rawColumnVisibility = React.useMemo(() => {
-    const v: Record<string, boolean> = {}
-    for (const opt of rawColumnOptions) v[opt.id] = selectedRawColumns.includes(opt.id)
-    return v
-  }, [rawColumnOptions, selectedRawColumns])
-
-  // hasSidCol still drives the FLAG-COLUMN render below — it can't
-  // be determined until rawLogs returns. labelsQuery, however, fires
-  // immediately on serviceId (see comment on labelsQuery below).
-  const hasSidCol = !!rawLogs?.columns?.includes('edge_sid')
-
-  // Pull session-labels for the active service via the shared
-  // useScoringLabels hook so the same fetch dedupes with the admin
-  // Labels tab + TopFlaggedTable's "currently labeled" badges
-  // under the same React Query cache key. The hook already returns
-  // the {sid → label} Map so we don't re-derive per render here.
-  const { labelBySid } = useScoringLabels(activeServiceId || '', {
-    enabled: !!activeServiceId,
-  })
-
-  const columns: ColumnDef<any>[] = React.useMemo(() => {
-    if (!rawLogs?.columns) return []
-    const dataCols: ColumnDef<any>[] = rawLogs.columns.map((col: string): ColumnDef<any> => ({
-      id: col,
-      accessorFn: (row) => row[col],
-      meta: { label: getFieldLabel(col) },
-      header: getFieldLabel(col),
-      cell: ({ row }: { row: any }) => {
-        const value = row.original[col]
-        if (col === 'timestamp') return (
-          <span className="text-xs font-mono whitespace-nowrap">
-            {full(value as string)} {abbr()}
-          </span>
-        )
-        if (col === 'status') {
-          const status = Number(value)
-          const variant = status >= 500 ? 'destructive' : 'outline'
-          return (
-            <FilterPopover
-              col={col}
-              value={String(status)}
-              onInclude={() => React.startTransition(() => addFilter(col, String(status), 'include'))}
-              onExclude={() => React.startTransition(() => addFilter(col, String(status), 'exclude'))}
-              triggerClassName={badgeVariants({ variant: variant as any, className: 'cursor-pointer' })}
-              triggerLabel={<span>{status}</span>}
-              header={<p className="text-xs text-muted-foreground mb-2 font-mono">{col}: {status}</p>}
-              contentClassName="w-44 p-2"
-            />
-          )
-        }
-        const strVal = String(value ?? '')
-        if (strVal === '') {
-          return <span className="text-muted-foreground/40 text-xs">—</span>
-        }
-        return (
-          <FilterPopover
-            col={col}
-            value={strVal}
-            onInclude={() => React.startTransition(() => addFilter(col, strVal, 'include'))}
-            onExclude={() => React.startTransition(() => addFilter(col, strVal, 'exclude'))}
-            triggerClassName="text-xs font-mono cursor-pointer hover:text-primary underline-offset-2 hover:underline"
-            triggerLabel={<span className="truncate max-w-[200px] inline-block">{strVal}</span>}
-          />
-        )
-      }
-    }))
-    // Flag column: only shown when edge_sid is present in the schema
-    // (i.e. session scoring is enabled). Disabled for rows where the
-    // sid is empty (cookieless requests — already caught by L1).
-    if (hasSidCol && activeServiceId) {
-      dataCols.push({
-        id: '__flag',
-        accessorFn: (_row: any) => '',
-        meta: { label: 'Flag' },
-        header: 'Flag',
-        cell: ({ row }: { row: any }) => {
-          const sid = String(row.original['edge_sid'] ?? '')
-          return (
-            <FlagSessionPopover
-              serviceId={activeServiceId}
-              sid={sid}
-              sampleIp={String(row.original['ip'] ?? '')}
-              sampleUa={String(row.original['ua'] ?? '')}
-              sampleUrl={String(row.original['url'] ?? '')}
-              currentLabel={labelBySid.get(sid) ?? null}
-            />
-          )
-        },
-      } as ColumnDef<any>)
-    }
-    return dataCols
-  }, [rawLogs?.columns, full, abbr, addFilter, getFieldLabel, hasSidCol, activeServiceId, labelBySid])
 
   const visibleCardList = React.useMemo(
     () => allCards.filter((c: any) => visibleCards.has(c.id)),
@@ -1076,62 +880,34 @@ function DashboardBody({
         )
       })()}
 
-      {/* ── Raw logs table ── */}
-      <AnalyticsCard
-        title="Raw Logs"
-        isLoading={!isReady || (isLoadingRaw && !rawLogs)}
-        isFetching={isFetchingRaw}
-        className="min-h-[400px]"
-        contentClassName="p-0"
-        headerAction={
-          <div className="flex items-center gap-2">
-            <ColumnVisibilityDropdown
-              columns={rawColumnOptions}
-              visibility={rawColumnVisibility}
-              onChange={toggleRawColumn}
-            />
-
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 text-[10px] gap-1.5"
-              onClick={async () => {
-                const body = {
-                  start_time: startTime,
-                  end_time: endTime,
-                  filters: filterPayload,
-                  columns: rawLogs?.columns || []
-                }
-                // Raw fetch (not typed `client`): this endpoint
-                // streams a CSV body; openapi-fetch's JSON
-                // deserialization in middleware would corrupt it.
-                const { getApiBase } = await import('@/lib/api')
-                const res = await fetch(`${getApiBase()}/api/dashboard/raw/csv`, {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'x-service-id': useServiceStore.getState().activeServiceId || ''
-                  },
-                  body: JSON.stringify(body)
-                })
-                const blob = await res.blob()
-                downloadBlob(blob, `logs_${activeServiceId}_${Date.now()}.csv`)
-              }}
-            >
-              <Download className="h-3 w-3" />
-              Export CSV
-            </Button>
-          </div>
-        }
-      >
-        <DataTable
-          columns={columns}
-          data={rawLogs?.data || []}
-          hideToolbar={true}
-          sorting={sorting}
-          onSortingChange={setSorting}
-        />
-      </AnalyticsCard>
+      {/* ── Raw logs CTA ── */}
+      {/* Dashboard previously rendered a full DataTable here fed by
+       *  /api/dashboard/raw, which forced a wide parquet read (~13 cols
+       *  by default, expandable to ~75) on every dashboard load. The
+       *  unified /query explorer now owns raw inspection; this CTA
+       *  hands off the current time window + filter state via URL
+       *  params so the explorer opens pre-scoped. */}
+      <div className="border rounded-lg bg-card p-6 flex flex-col md:flex-row items-center justify-between gap-4 shadow-sm">
+        <div className="space-y-1">
+          <h3 className="font-semibold text-sm">Raw Request Log Inspector</h3>
+          <p className="text-xs text-muted-foreground">
+            Inspect detailed parameters, search specific fields, and write advanced analytical queries.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          onClick={() => {
+            const params = new URLSearchParams()
+            if (startTime) params.set('start_time', startTime)
+            if (endTime) params.set('end_time', endTime)
+            if (filterPayload) params.set('filters', JSON.stringify(filterPayload))
+            const qs = params.toString()
+            router.push(qs ? `/query?${qs}` : '/query')
+          }}
+        >
+          See Raw Logs <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+        </Button>
+      </div>
     </>
   )
 }

@@ -16,11 +16,9 @@ the public API surface still returns the expected shapes. A separate
 
 from __future__ import annotations
 
-import os
 from unittest.mock import patch
 
 import pytest
-from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter

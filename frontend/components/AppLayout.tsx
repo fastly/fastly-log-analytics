@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useSearchParams } from 'next/navigation'
 import { 
   LayoutDashboard, 
   BarChart3, 
@@ -72,6 +72,20 @@ function UrlServiceSync() {
   return null
 }
 
+// Lifts the `?mode=raw` search-param flag into a callback so the parent
+// AppLayout can react to it without calling `useSearchParams()` directly.
+// `useSearchParams()` requires a Suspense boundary above it for Next.js
+// static rendering; isolating it here lets us wrap just this slice in
+// <Suspense> rather than every consumer of the layout.
+function RawQueryModeProbe({ onChange }: { onChange: (isRaw: boolean) => void }) {
+  const searchParams = useSearchParams()
+  const isRaw = searchParams.get('mode') === 'raw'
+  React.useEffect(() => {
+    onChange(isRaw)
+  }, [isRaw, onChange])
+  return null
+}
+
 interface NavLinkProps {
   href: string
   icon: React.ElementType
@@ -120,6 +134,10 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
   const { data: bootstrapData, isSuccess, isLoading } = useBootstrap()
+  // Tracks whether the current /query page is in raw-SQL mode (?mode=raw).
+  // Populated by <RawQueryModeProbe> inside the Suspense boundary below
+  // so we don't have to call useSearchParams() directly here.
+  const [isRawQueryMode, setIsRawQueryMode] = React.useState(false)
 
   // (Removed) Navigation cancel pattern was here. The intent was to
   // abort the previous route's in-flight polls on route change, but
@@ -209,8 +227,13 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     }
   }, [isLoading, hasServices, isAnalyst, isShareAnalyst, needsLogin, pathname, router, activeServiceId])
 
-  // Hide the global filter bar on pages where it does not apply
-  const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || pathname.startsWith('/query') || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || !hasServices
+  // Hide the global filter bar on pages where it does not apply.
+  // /query is a special case: Structured Mode (default) syncs with the
+  // FilterBar, so we keep it visible; Raw SQL Mode (?mode=raw) owns its
+  // own editor + filters and the global bar would only confuse the
+  // SQL the user is hand-writing.
+  const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
+  const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || !hasServices
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-background">
@@ -232,6 +255,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       )}
       <React.Suspense fallback={null}>
         <UrlServiceSync />
+        <RawQueryModeProbe onChange={setIsRawQueryMode} />
       </React.Suspense>
       {/* Force Plotly to parse + complete its first-plot draw during
           app mount so the dashboard's real chart's data-arrival render

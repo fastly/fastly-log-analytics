@@ -299,7 +299,6 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
     import duckdb
 
     from backend.core.duckdb import get_connection
-
     from backend.core.iceberg import _get_service_lock
 
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")

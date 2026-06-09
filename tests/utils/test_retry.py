@@ -9,7 +9,6 @@ existing retry loops to these decorators is a separate per-site review
 
 from __future__ import annotations
 
-import socket
 import sqlite3
 import urllib.error
 from unittest.mock import patch
@@ -23,7 +22,6 @@ from backend.utils.retry import (
     http_api_retry,
     sqlite_busy_retry,
 )
-
 
 # ── http_api_retry ───────────────────────────────────────────────────────────
 
@@ -62,7 +60,7 @@ def test_http_api_retry_retries_on_url_error():
 
 
 def test_http_api_retry_retries_on_timeout_and_connection_errors():
-    for exc in [TimeoutError("read timed out"), ConnectionError("reset"), socket.timeout()]:
+    for exc in [TimeoutError("read timed out"), ConnectionError("reset"), TimeoutError()]:
         calls = {"n": 0}
 
         @http_api_retry(max_attempts=3, min_wait=0, max_wait=0)

@@ -6129,6 +6129,8 @@ export interface components {
             total_bytes?: number | null;
             /** Median Rtt Ms */
             median_rtt_ms?: number | null;
+            /** Edge Sid */
+            edge_sid?: string | null;
             /** Flagged */
             flagged: boolean;
         };
@@ -6237,6 +6239,11 @@ export interface components {
             has_ja4: boolean;
             /** Has Edge */
             has_edge: boolean;
+            /**
+             * Has Edge Sid
+             * @default false
+             */
+            has_edge_sid: boolean;
             /** Min Reqs Flag */
             min_reqs_flag: number;
             /** Min 4Xx Pct Flag */

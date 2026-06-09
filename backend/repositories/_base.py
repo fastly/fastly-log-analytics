@@ -987,7 +987,6 @@ class QueryRunner:
         import os
         from datetime import UTC, datetime, timedelta
 
-        from backend.core.duckdb import _cache_dir
         from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME, _hour_bundled_root
 
         if chart_metric not in self._TS_ROLLUP_METRIC_SQL:

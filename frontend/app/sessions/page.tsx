@@ -2,10 +2,12 @@
 
 import React, { useState } from 'react'
 import Link from 'next/link'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
+import { useScoringLabels } from '@/hooks/useScoringLabels'
+import { FlagSessionPopover } from '@/components/SessionScoring/FlagSessionPopover'
 import { DataTable } from '@/components/DataTable'
 import { ColumnDef } from '@tanstack/react-table'
 import { Badge } from '@/components/ui/badge'
@@ -58,6 +60,14 @@ export default function SessionsPage() {
         filterPayload,
       }) => {
         const isReady = useIsDataReady()
+
+        const qc = useQueryClient()
+        const { labelBySid, labels } = useScoringLabels(activeServiceId || '', {
+          enabled: !!activeServiceId,
+        })
+        const onFlagged = React.useCallback(() => {
+          qc.invalidateQueries({ queryKey: ['scoring-labels', activeServiceId] })
+        }, [qc, activeServiceId])
 
         const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['sessions', 'list', activeServiceId, startTime, endTime, filterPayload, flaggedOnly, minReqs, min4xxPct],
@@ -210,6 +220,30 @@ export default function SessionsPage() {
       },
     })
 
+    // TODO: drop `as any` once openapi types regenerate to include has_edge_sid/edge_sid.
+    if ((data as any)?.has_edge_sid) {
+      cols.push({
+        id: '__flag',
+        header: 'Flag',
+        cell: ({ row }) => {
+          const sid = (row.original as any).edge_sid as string | undefined
+          if (!sid) return null
+          const labelRow = labels.find((l) => l.sid === sid)
+          return (
+            <FlagSessionPopover
+              serviceId={activeServiceId || ''}
+              sid={sid}
+              sampleIp={row.original.ip}
+              sampleUa={row.original.ua}
+              currentLabel={labelBySid.get(sid) ?? null}
+              currentLabelId={labelRow?.id ?? null}
+              onFlagged={onFlagged}
+            />
+          )
+        },
+      })
+    }
+
     cols.push({
       id: 'actions',
       header: '',
@@ -221,7 +255,7 @@ export default function SessionsPage() {
     })
 
     return cols
-  }, [data, relative, full, abbr])
+  }, [data, relative, full, abbr, labels, labelBySid, activeServiceId, onFlagged])
 
   // ── Detail dialog columns (all available from backend) ───────────────────
 
@@ -360,6 +394,20 @@ export default function SessionsPage() {
               <Users className="h-4 w-4" />
               Session: {selectedSession?.ip}
               {selectedSession?.flagged && <AlertTriangle className="h-4 w-4 text-yellow-500" />}
+              {/* TODO: drop `as any` cast once openapi types include edge_sid. */}
+              {(selectedSession as any)?.edge_sid && (
+                <FlagSessionPopover
+                  serviceId={activeServiceId || ''}
+                  sid={(selectedSession as any).edge_sid}
+                  sampleIp={selectedSession?.ip}
+                  sampleUa={selectedSession?.ua}
+                  currentLabel={labelBySid.get((selectedSession as any).edge_sid) ?? null}
+                  currentLabelId={
+                    labels.find((l) => l.sid === (selectedSession as any).edge_sid)?.id ?? null
+                  }
+                  onFlagged={onFlagged}
+                />
+              )}
             </DialogTitle>
           </DialogHeader>
 

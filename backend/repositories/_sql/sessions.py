@@ -36,6 +36,7 @@ SESSIONS_CTE_PIPELINE = """
                {country_proj}
                {url_proj}
                {edge_proj}
+               {edge_sid_proj}
         FROM {table_name}
         WHERE {where_clause} AND timestamp IS NOT NULL
     ),
@@ -78,6 +79,10 @@ Inputs (all trusted-identifier substitutions):
 - ``{country_proj}`` — empty string or ``, "country"``.
 - ``{url_proj}`` — empty string or ``, "url"``.
 - ``{edge_proj}`` — empty string or ``, "edge"``.
+- ``{edge_sid_proj}`` — empty string or ``, "edge_sid"`` (Fastly cookie
+  session id; present only after the session_scoring orchestrator has
+  provisioned the field — see
+  ``backend/provision/session_scoring_orchestrator.py``).
 - ``{table_name}`` — output of ``_safe_table(src["name"])``.
 - ``{where_clause}`` — output of ``build_where_clause(...)`` (uses ``?`` for
   user values; the caller binds those via the ``params`` arg, not here).
