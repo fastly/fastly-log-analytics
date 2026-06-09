@@ -8,6 +8,7 @@ import duckdb
 
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, _safe_table, empty_schema_response
+from backend.repositories._sql import sessions as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.pagination import calc_offset
 
@@ -126,57 +127,31 @@ def get_sessions(
     # profiling identified sessions_raw materialization as the bottleneck
     # (~3000ms of ~3700ms total). DuckDB pipelines single-consumer CTEs
     # without intermediate materialization, saving the I/O overhead.
-    cte_prefix = f"""
-        WITH base AS (
-            SELECT {group_key}
-                   {', "ua"' if has_ua else ""}
-                   , timestamp AS ts
-                   {', "status"' if has_status else ""}
-                   {', "resp_bytes"' if has_resp_bytes else ""}
-                   {', "tcp_rtt"' if has_rtt else ""}
-                   {', "asn"' if has_asn else ""}
-                   {', "country"' if has_country else ""}
-                   {', "url"' if has_url else ""}
-                   {', "edge"' if has_edge else ""}
-            FROM {table_name}
-            WHERE {where_clause} AND timestamp IS NOT NULL
-        ),
-        gaps AS (
-            SELECT *,
-                   ts - LAG(ts) OVER (PARTITION BY {part_key} ORDER BY ts) AS gap
-            FROM base
-        ),
-        marks AS (
-            SELECT *,
-                   CASE WHEN gap IS NULL OR gap > INTERVAL 30 MINUTES THEN 1 ELSE 0 END AS is_new
-            FROM gaps
-        ),
-        sessions_raw AS (
-            SELECT *,
-                   SUM(is_new) OVER (PARTITION BY {part_key} ORDER BY ts
-                                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sid
-            FROM marks
-        ),
-        sessions_agg AS (
-            SELECT {group_key},
-                   MIN(ts) AS session_start,
-                   MAX(ts) AS session_end,
-                   COUNT(*) AS req_count
-                   {extra_aggs}
-                   , sid
-            FROM sessions_raw
-            GROUP BY {group_key}, sid
-        )
-    """
+    cte_prefix = SQL.SESSIONS_CTE_PIPELINE.format(
+        group_key=group_key,
+        ua_proj=', "ua"' if has_ua else "",
+        status_proj=', "status"' if has_status else "",
+        resp_bytes_proj=', "resp_bytes"' if has_resp_bytes else "",
+        rtt_proj=', "tcp_rtt"' if has_rtt else "",
+        asn_proj=', "asn"' if has_asn else "",
+        country_proj=', "country"' if has_country else "",
+        url_proj=', "url"' if has_url else "",
+        edge_proj=', "edge"' if has_edge else "",
+        table_name=table_name,
+        where_clause=where_clause,
+        part_key=part_key,
+        extra_aggs=extra_aggs,
+    )
 
-    data_sql = f"""
-        {cte_prefix}
-        SELECT *, ({flag_expr}) AS flagged
-        FROM sessions_agg
-        {flagged_filter}
-        ORDER BY {sort_by} {sort_dir}
-        LIMIT {limit} OFFSET {offset}
-    """
+    data_sql = SQL.SESSIONS_PAGE_SELECT.format(
+        cte_prefix=cte_prefix,
+        flag_expr=flag_expr,
+        flagged_filter=flagged_filter,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        limit=limit,
+        offset=offset,
+    )
     result = runner.execute_with_retry(data_sql, params)
     if result is None:
         return empty_schema_response(
@@ -203,11 +178,11 @@ def get_sessions(
     total = len(sessions)
 
     if not rows and offset > 0:
-        count_sql = f"""
-            {cte_prefix}
-            SELECT COUNT(*) FROM (SELECT ({flag_expr}) AS flagged FROM sessions_agg) sub
-            {flagged_filter}
-        """
+        count_sql = SQL.SESSIONS_COUNT_WRAPPER.format(
+            cte_prefix=cte_prefix,
+            flag_expr=flag_expr,
+            flagged_filter=flagged_filter,
+        )
         total = runner.execute(count_sql, params).fetchone()[0]
 
     return {

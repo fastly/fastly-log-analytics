@@ -9,6 +9,7 @@ import duckdb
 from backend.core import duckdb as _db
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, _safe_table
+from backend.repositories._sql import network as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.utils.geo import format_city_label
 
@@ -132,32 +133,16 @@ def get_health(
             countries = [r[0] for r in rows]
 
         # ── Heatmap (ASN × bucket) ─────────────────────────────────────────
-        heatmap_sql = f"""
-            SELECT
-                asn,
-                EPOCH_MS(
-                    CAST((EPOCH_MS(timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
-                )::TIMESTAMP AS bucket,
-                MEDIAN(
-                    CASE WHEN cache LIKE '%HIT%' AND elapsed > 0
-                    THEN resp_bytes * 1000000.0 / elapsed END
-                ) AS throughput_bps,
-                MEDIAN(tcp_rtt)          AS rtt_med_us,
-                {rtt_min_expr}           AS rtt_baseline_us,
-                {congestion_expr}        AS rtt_congestion_us,
-                {ploss_expr}             AS avg_ploss,
-                {rtt_var_expr}           AS rtt_jitter_us,
-                SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END)
-                    * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,
-                COUNT(*) AS reqs
-            FROM {t}
-            WHERE {w}
-              AND asn IS NOT NULL
-              AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
-            GROUP BY asn, bucket
-            ORDER BY reqs DESC
-            LIMIT {top_n * 200}
-        """
+        heatmap_sql = SQL.HEATMAP_BY_ASN_BUCKET.format(
+            bucket_ms=bucket_ms,
+            rtt_min_expr=rtt_min_expr,
+            congestion_expr=congestion_expr,
+            ploss_expr=ploss_expr,
+            rtt_var_expr=rtt_var_expr,
+            table=t,
+            where=w,
+            row_limit=top_n * 200,
+        )
         heatmap_rows = runner.execute(heatmap_sql, p).fetchall()
 
         # ── Map (country × bucket) ─────────────────────────────────────────
@@ -181,32 +166,16 @@ def get_health(
             # /network cold-load wall time via transfer + JSON parse.
             # Re-sorted by (bucket, reqs DESC) after the cap to preserve
             # the downstream chronological ordering the map expects.
-            map_sql = f"""
-                SELECT * FROM (
-                    SELECT
-                        country,
-                        {city_col} AS city,
-                        {lat_col}  AS lat,
-                        {lon_col}  AS lon,
-                        {metro_col} AS metro,
-                        EPOCH_MS(
-                            CAST((EPOCH_MS(timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
-                        )::TIMESTAMP AS bucket,
-                        MEDIAN(tcp_rtt) AS rtt_med_us,
-                        {ploss_expr}    AS avg_ploss,
-                        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END)
-                            * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,
-                        COUNT(*) AS reqs
-                    FROM {t}
-                    WHERE {map_where}
-                      AND country IS NOT NULL AND country != ''
-                      AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
-                    GROUP BY country, city, lat, lon, metro, bucket
-                    ORDER BY reqs DESC
-                    LIMIT 5000
-                ) ranked
-                ORDER BY bucket, reqs DESC
-            """
+            map_sql = SQL.MAP_BY_COUNTRY_BUCKET.format(
+                city_col=city_col,
+                lat_col=lat_col,
+                lon_col=lon_col,
+                metro_col=metro_col,
+                bucket_ms=bucket_ms,
+                ploss_expr=ploss_expr,
+                table=t,
+                where=map_where,
+            )
             map_rows = runner.execute(map_sql, map_params).fetchall()
 
         # ── Metro leaderboard ──────────────────────────────────────────────
@@ -215,25 +184,14 @@ def get_health(
             metro_col_m = "metro" if has_metro else "NULL"
             city_col = "city" if "city" in actual_cols else "''"
             region_col = "region" if "region" in actual_cols else "''"
-            metro_sql = f"""
-                SELECT
-                    country,
-                    {city_col}   AS city,
-                    {region_col} AS region,
-                    {metro_col_m} AS metro,
-                    MEDIAN(tcp_rtt) AS rtt_med_us,
-                    {ploss_expr} AS avg_ploss,
-                    SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END)
-                        * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,
-                    COUNT(*) AS reqs
-                FROM {t}
-                WHERE {w}
-                  AND country IS NOT NULL AND country != ''
-                  AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
-                GROUP BY country, city, region, metro
-                ORDER BY reqs DESC
-                LIMIT 100
-            """
+            metro_sql = SQL.METRO_LEADERBOARD.format(
+                city_col=city_col,
+                region_col=region_col,
+                metro_col=metro_col_m,
+                ploss_expr=ploss_expr,
+                table=t,
+                where=w,
+            )
             metro_rows = runner.execute(metro_sql, p).fetchall()
 
         # ── Derive top ASNs ────────────────────────────────────────────────
@@ -256,13 +214,11 @@ def get_health(
         if has_c_speed and top_asns:
             placeholders = ",".join(["?"] * len(top_asns))
             speed_rows = runner.execute(
-                f"""
-                SELECT asn, c_speed, COUNT(*) AS cnt FROM {t}
-                WHERE {w} AND asn IN ({placeholders})
-                  AND c_speed IS NOT NULL AND c_speed != ''
-                GROUP BY asn, c_speed
-                ORDER BY asn, cnt DESC
-                """,
+                SQL.SPEED_DISTRIBUTION_BY_ASN.format(
+                    table=t,
+                    where=w,
+                    placeholders=placeholders,
+                ),
                 p + top_asns,
             ).fetchall()
             asn_speed_rows: dict[int, list[tuple]] = {}
@@ -436,15 +392,11 @@ def get_health(
         if top_asns:
             placeholders = ",".join(["?"] * len(top_asns))
             pct_rows = runner.execute(
-                f"""
-                SELECT asn,
-                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY tcp_rtt) AS p95_us,
-                    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY tcp_rtt) AS p99_us
-                FROM {t}
-                WHERE {w} AND asn IN ({placeholders})
-                  AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
-                GROUP BY asn
-                """,
+                SQL.RTT_PERCENTILES_BY_ASN.format(
+                    table=t,
+                    where=w,
+                    placeholders=placeholders,
+                ),
                 p + top_asns,
             ).fetchall()
             for row in pct_rows:
@@ -608,23 +560,19 @@ def get_quality(
         }
 
     def run_bar(group_col: str, extra_where: str = "", extra_params: list | None = None) -> list[dict]:
-        sql = f"""
-            SELECT "{group_col}" AS label, MEDIAN(tcp_rtt) / 1000.0 AS rtt_ms, COUNT(*) AS reqs
-            FROM {table_name}
-            WHERE {rtt_filter}{extra_where}
-              AND "{group_col}" IS NOT NULL AND CAST("{group_col}" AS VARCHAR) != ''
-            GROUP BY "{group_col}"
-            ORDER BY reqs DESC
-            LIMIT 25
-        """
+        sql = SQL.QUALITY_BAR_BY_GROUP.format(
+            group_col=group_col,
+            table=table_name,
+            rtt_filter=rtt_filter,
+            extra_where=extra_where,
+        )
         rows = runner.execute(sql, params + (extra_params or [])).fetchall()
         return [{"label": str(r[0]), "rtt_ms": round(float(r[1]), 2), "reqs": int(r[2])} for r in rows]
 
-    countries_sql = f"""
-        SELECT DISTINCT country FROM {table_name}
-        WHERE {where_clause} AND country IS NOT NULL AND country != ''
-        ORDER BY country
-    """
+    countries_sql = SQL.QUALITY_COUNTRIES_DISTINCT.format(
+        table=table_name,
+        where_clause=where_clause,
+    )
     countries = [r[0] for r in runner.execute(countries_sql, params).fetchall()]
 
     by_country = run_bar("country")
@@ -638,13 +586,10 @@ def get_quality(
 
     scatter: list[dict] = []
     if "ttfb" in actual_cols:
-        scatter_sql = f"""
-            SELECT tcp_rtt / 1000.0 AS rtt_ms, ttfb * 1000.0 AS ttfb_ms,
-                   COALESCE(cache, 'UNKNOWN') AS cache_state
-            FROM {table_name}
-            WHERE {rtt_filter} AND ttfb IS NOT NULL AND ttfb > 0
-            USING SAMPLE 2000
-        """
+        scatter_sql = SQL.QUALITY_SCATTER.format(
+            table=table_name,
+            rtt_filter=rtt_filter,
+        )
         scatter = [
             {"rtt_ms": round(float(r[0]), 2), "ttfb_ms": round(float(r[1]), 2), "cache": str(r[2])}
             for r in runner.execute(scatter_sql, params).fetchall()

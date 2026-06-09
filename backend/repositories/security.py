@@ -8,6 +8,7 @@ import duckdb
 
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, _safe_table, safe_iso, time_bucket_select
+from backend.repositories._sql import security as SQL
 from backend.repositories.utils.filters import build_where_clause
 
 
@@ -70,14 +71,7 @@ def get_top_bots(
                 # distinct UAs by count (cheap GROUP BY + ORDER BY) then run
                 # build_matcher() on them in Python where the per-UA result
                 # is lru_cached and most lookups are sub-microsecond.
-                q = f"""
-                    SELECT ua, count(*) AS cnt
-                    FROM {temp_table}
-                    WHERE ua IS NOT NULL
-                    GROUP BY ua
-                    ORDER BY cnt DESC
-                    LIMIT 50000
-                """
+                q = SQL.TOP_UAS_BY_COUNT.format(temp_table=temp_table)
                 rows = runner.execute(q).fetchall()
 
                 match_ua = build_matcher()
@@ -136,15 +130,7 @@ def get_top_bots(
             try:
                 # Join against the temp table instead of re-scanning the
                 # source view — same filter window, no second manifest walk.
-                q = f"""
-                    SELECT nb.bot_name, nb.category, count(*) AS cnt
-                    FROM {temp_table} t
-                    INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id)
-                    WHERE nb.bot_name IS NOT NULL
-                    GROUP BY 1, 2
-                    ORDER BY 3 DESC
-                    LIMIT {n}
-                """
+                q = SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table=temp_table, n=n)
                 res = runner.execute(q).fetchall()
                 ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
             except Exception as e:
@@ -264,20 +250,7 @@ def _build_security_response(
 
     # 0. Verified Bots Time Series (waf_sig fallback — category-level, no bot names)
     if "waf_sig" in actual_cols:
-        q = f"""
-            SELECT
-                time_bucket(INTERVAL '{bucket_seconds} seconds', timestamp) AS bucket,
-                replace(tag, 'VERIFIED-BOT.', '') AS bot_type,
-                count(*) AS count
-            FROM (
-                SELECT timestamp, unnest(string_split(waf_sig, ',')) AS tag
-                FROM {temp_table}
-                WHERE waf_sig IS NOT NULL AND waf_sig ILIKE '%VERIFIED-BOT.%'
-            ) sub
-            WHERE tag LIKE 'VERIFIED-BOT.%'
-            GROUP BY 1, 2
-            ORDER BY 1, 2
-        """
+        q = SQL.VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
         res = runner.execute(q).fetchall()
         results["verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in res]
     else:
@@ -287,18 +260,7 @@ def _build_security_response(
     if _ngwaf_attached:
         try:
             # Table: group by bot_name + wellknown_bot_name + category
-            q = f"""
-                SELECT
-                    nb.bot_name,
-                    nb.wellknown_bot_name,
-                    nb.category,
-                    count(*) AS request_count
-                FROM {temp_table} t
-                INNER JOIN ngwaf_cache.ngwaf_bots nb USING (waf_req_id)
-                WHERE nb.bot_name IS NOT NULL
-                GROUP BY 1, 2, 3
-                ORDER BY 4 DESC
-            """
+            q = SQL.NGWAF_VERIFIED_BOTS.format(temp_table=temp_table)
             res = runner.execute(q).fetchall()
             results["ngwaf_verified_bots"] = [
                 {
@@ -311,17 +273,7 @@ def _build_security_response(
             ]
 
             # Time series: bucketed counts by bot_name
-            q = f"""
-                SELECT
-                    time_bucket(INTERVAL '{bucket_seconds} seconds', t.timestamp) AS bucket,
-                    nb.bot_name,
-                    count(*) AS count
-                FROM {temp_table} t
-                INNER JOIN ngwaf_cache.ngwaf_bots nb USING (waf_req_id)
-                WHERE nb.bot_name IS NOT NULL
-                GROUP BY 1, 2
-                ORDER BY 1, 2
-            """
+            q = SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
             res = runner.execute(q).fetchall()
             results["ngwaf_verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]} for r in res]
         except Exception as e:
@@ -336,14 +288,7 @@ def _build_security_response(
 
     # 1. TLS Fingerprints (Cipher SHA + IP Spread)
     if "tls_ciphers_sha" in actual_cols and "ip" in actual_cols:
-        q = f"""
-            SELECT tls_ciphers_sha,
-                   count(DISTINCT ip) as ip_count,
-                   count(*) as req_count
-            FROM {temp_table}
-            WHERE tls_ciphers_sha IS NOT NULL
-            GROUP BY 1 ORDER BY 3 DESC LIMIT 20
-        """
+        q = SQL.TLS_FINGERPRINTS.format(temp_table=temp_table)
         res = runner.execute(q).fetchall()
         results["tls_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
     else:
@@ -351,41 +296,12 @@ def _build_security_response(
 
     # 3. Request Header Size Distribution
     if "req_header_bytes" in actual_cols:
-        q = f"""
-            SELECT
-                CASE
-                    WHEN req_header_bytes <= 256 THEN '0-256B'
-                    WHEN req_header_bytes <= 512 THEN '256-512B'
-                    WHEN req_header_bytes <= 768 THEN '512-768B'
-                    WHEN req_header_bytes <= 1024 THEN '768B-1KB'
-                    WHEN req_header_bytes <= 1536 THEN '1-1.5KB'
-                    WHEN req_header_bytes <= 2048 THEN '1.5-2KB'
-                    WHEN req_header_bytes <= 3072 THEN '2-3KB'
-                    WHEN req_header_bytes <= 4096 THEN '3-4KB'
-                    WHEN req_header_bytes <= 6144 THEN '4-6KB'
-                    WHEN req_header_bytes <= 8192 THEN '6-8KB'
-                    WHEN req_header_bytes <= 12288 THEN '8-12KB'
-                    WHEN req_header_bytes <= 16384 THEN '12-16KB'
-                    WHEN req_header_bytes <= 24576 THEN '16-24KB'
-                    WHEN req_header_bytes <= 32768 THEN '24-32KB'
-                    ELSE '>32KB'
-                END as bucket,
-                count(*) as count,
-                MIN(req_header_bytes) as min_val
-            FROM {temp_table}
-            WHERE req_header_bytes IS NOT NULL
-            GROUP BY 1 ORDER BY min_val
-        """
+        q = SQL.REQ_HEADER_SIZE_DIST.format(temp_table=temp_table)
         res = runner.execute(q).fetchall()
         results["req_size_dist"] = [{"bucket": r[0], "count": r[1]} for r in res]
 
         # Top IPs by Max Header Size
-        q = f"""
-            SELECT ip, MAX(req_header_bytes) as max_header
-            FROM {temp_table}
-            WHERE ip IS NOT NULL AND req_header_bytes IS NOT NULL
-            GROUP BY 1 ORDER BY 2 DESC LIMIT 10
-        """
+        q = SQL.TOP_IPS_BY_MAX_HEADER.format(temp_table=temp_table)
         res = runner.execute(q).fetchall()
         results["top_ips_header"] = [{"ip": r[0], "max_header": r[1]} for r in res]
     else:
@@ -394,12 +310,10 @@ def _build_security_response(
 
     # 4. IPv6 Adoption over Time
     if "is_ipv6" in actual_cols:
-        q = f"""
-            SELECT {time_bucket_select("1 hour")},
-                   SUM(CASE WHEN is_ipv6 THEN 1 ELSE 0 END) * 100.0 / count(*) as ipv6_pct
-            FROM {temp_table}
-            GROUP BY 1 ORDER BY 1
-        """
+        q = SQL.IPV6_ADOPTION_TS.format(
+            time_bucket_select=time_bucket_select("1 hour"),
+            temp_table=temp_table,
+        )
         res = runner.execute(q).fetchall()
         results["ipv6_adoption"] = [{"time": safe_iso(r[0]), "pct": r[1]} for r in res]
     else:
@@ -407,12 +321,7 @@ def _build_security_response(
 
     # 5. Proxy/Anonymizer Breakdown
     if "p_type" in actual_cols:
-        q = f"""
-            SELECT p_type, count(*) as count
-            FROM {temp_table}
-            WHERE p_type IS NOT NULL AND p_type != ''
-            GROUP BY 1 ORDER BY 2 DESC
-        """
+        q = SQL.PROXY_TYPE_DIST.format(temp_table=temp_table)
         res = runner.execute(q).fetchall()
         results["proxy_dist"] = [{"type": r[0], "count": r[1]} for r in res]
     else:
@@ -420,21 +329,7 @@ def _build_security_response(
 
     # 6. Connection Reuse Distribution
     if "conn_requests" in actual_cols:
-        q = f"""
-            SELECT
-                CASE
-                    WHEN conn_requests = 1 THEN '1 (None)'
-                    WHEN conn_requests <= 5 THEN '2-5'
-                    WHEN conn_requests <= 20 THEN '6-20'
-                    WHEN conn_requests <= 100 THEN '21-100'
-                    ELSE '>100'
-                END as bucket,
-                count(*) as count,
-                MIN(conn_requests) as min_val
-            FROM {temp_table}
-            WHERE conn_requests IS NOT NULL AND conn_requests > 0
-            GROUP BY 1 ORDER BY min_val
-        """
+        q = SQL.CONN_REUSE_DIST.format(temp_table=temp_table)
         res = runner.execute(q).fetchall()
         results["conn_reuse_dist"] = [{"bucket": r[0], "count": r[1]} for r in res]
     else:
@@ -455,14 +350,7 @@ def _build_security_response(
             else:
                 prefilter = "WHERE ua IS NOT NULL AND ip IS NOT NULL"
 
-            q = f"""
-                SELECT ua, ip, count(*) AS cnt
-                FROM {temp_table}
-                {prefilter}
-                GROUP BY ua, ip
-                ORDER BY cnt DESC
-                LIMIT 10000
-            """
+            q = SQL.WELLKNOWN_BOTS_UA_IP.format(temp_table=temp_table, prefilter=prefilter)
             ua_ip_rows = runner.execute(q).fetchall()
 
             match_ua = build_matcher()

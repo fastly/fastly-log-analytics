@@ -15,6 +15,7 @@ from backend import config as svcconfig
 from backend.core import metadata_db
 from backend.core.metrics import get_metric_sql
 from backend.models.alerts import Alert
+from backend.repositories._sql import alerts as SQL
 from backend.utils.telemetry import track_query
 
 
@@ -101,7 +102,7 @@ def evaluate_alert(
     status_codes = alert.get("status_codes")
 
     try:
-        max_ts_query = f"SELECT max(timestamp) FROM {table_name}"
+        max_ts_query = SQL.MAX_TIMESTAMP.format(table=table_name)
         with track_query(con, max_ts_query, [], "alerts") as cursor:
             max_ts = cursor.fetchone()[0]
 
@@ -129,16 +130,18 @@ def evaluate_alert(
                 return f"{agg_or_sel} WHERE {where_clause}"
             return f"SELECT {agg_or_sel} FROM {table_name} WHERE {where_clause}"
 
-        current_start = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '{window} minutes'"
-        current_end = f"(SELECT max(timestamp) FROM {table_name})"
+        current_start = SQL.WINDOW_OFFSET_EXPR.format(table=table_name, minutes_ago=window)
+        current_end = SQL.MAX_TIMESTAMP_SUBQUERY_EXPR.format(table=table_name)
         q_current = build_metric_query(current_start, current_end)
 
         with track_query(con, q_current, [], "alerts") as cursor:
             val = cursor.fetchone()[0] or 0
 
         if metric != "requests":
-            q_req = (
-                f"SELECT count(*) FROM {table_name} WHERE timestamp >= {current_start} AND timestamp <= {current_end}"
+            q_req = SQL.COUNT_REQUESTS_IN_WINDOW.format(
+                table=table_name,
+                window_start_expr=current_start,
+                window_end_expr=current_end,
             )
             with track_query(con, q_req, [], "alerts") as cursor:
                 req_count = cursor.fetchone()[0] or 0
@@ -149,8 +152,8 @@ def evaluate_alert(
             if req_count < 10:
                 return False, None, None, None
 
-            hist_start = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '{comp_period + window} minutes'"
-            hist_end = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '{comp_period} minutes'"
+            hist_start = SQL.WINDOW_OFFSET_EXPR.format(table=table_name, minutes_ago=comp_period + window)
+            hist_end = SQL.WINDOW_OFFSET_EXPR.format(table=table_name, minutes_ago=comp_period)
             q_hist = build_metric_query(hist_start, hist_end)
 
             with track_query(con, q_hist, [], "alerts") as cursor:

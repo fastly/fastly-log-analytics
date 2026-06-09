@@ -10,6 +10,7 @@ from typing import Any
 import duckdb
 
 from backend.repositories._base import _compact_sql_for_debug, _get_schema, _safe_table
+from backend.repositories._sql import query as SQL
 from backend.utils.sql_validator import (
     SQLValidationError,
     apply_user_query_limits,
@@ -70,10 +71,11 @@ def execute_query(
     explain_plan: str | None = None
     if want_explain:
         t_exp = time.monotonic()
-        plan_rows = con.execute(f"EXPLAIN {sql}").fetchall()
+        explain_sql = SQL.EXPLAIN_WRAPPER.format(sql=sql)
+        plan_rows = con.execute(explain_sql).fetchall()
         explain_plan = "\n".join(r[1] for r in plan_rows if r[1])
         _debug_queries.append(
-            {"sql": _compact_sql_for_debug(f"EXPLAIN {sql}"), "time_ms": round((time.monotonic() - t_exp) * 1000, 2)}
+            {"sql": _compact_sql_for_debug(explain_sql), "time_ms": round((time.monotonic() - t_exp) * 1000, 2)}
         )
 
     # Auto-apply LIMIT max_rows+1 when the query doesn't already have one.
@@ -92,7 +94,7 @@ def execute_query(
     if is_simple_select:
         # Strip trailing semicolon so the wrapper LIMIT lands in the same statement.
         inner = sql.rstrip().rstrip(";")
-        exec_sql = f"SELECT * FROM ({inner}) AS _q LIMIT {max_rows + 1}"
+        exec_sql = SQL.AUTO_LIMIT_WRAPPER.format(inner=inner, limit=max_rows + 1)
 
     t0 = time.monotonic()
     result = con.execute(exec_sql)
@@ -153,16 +155,16 @@ def get_presets(src: dict | None, con: duckdb.DuckDBPyConnection | None = None) 
         {
             "name": "Sample rows",
             "description": "Preview 100 raw log rows",
-            "sql": f"SELECT * FROM {table_name} LIMIT 100",
+            "sql": SQL.PRESET_SAMPLE_ROWS.format(table=table_name),
         },
         {
             "name": "Row count",
             "description": "Total number of rows",
-            "sql": f"SELECT count(*) AS total_rows FROM {table_name}",
+            "sql": SQL.PRESET_ROW_COUNT.format(table=table_name),
         },
         {
             "name": "Column stats",
             "description": "Non-null counts and unique values per column",
-            "sql": f"SUMMARIZE {table_name}",
+            "sql": SQL.PRESET_COLUMN_STATS.format(table=table_name),
         },
     ]

@@ -23,6 +23,7 @@ from backend.repositories._base import (
     safe_iso,
     time_bucket_select,
 )
+from backend.repositories._sql import dashboard as SQL
 from backend.repositories.utils.filters import build_where_clause, resolve_col
 from backend.repositories.utils.pagination import calc_offset
 
@@ -468,23 +469,12 @@ def get_aggregates(
             if backing_col not in actual_cols:
                 results[virtual_id] = {"top": [], "total": 0}
                 return
-            q = f"""
-                WITH split_data AS (
-                    SELECT trim(signal) AS signal
-                    FROM (
-                        SELECT unnest(string_split("{backing_col}", ',')) AS signal
-                        FROM {table_name}
-                        WHERE "{backing_col}" IS NOT NULL AND "{backing_col}" != '' AND {where_clause}
-                    )
-                    WHERE trim(signal) != ''
-                ),
-                total_count AS (SELECT {CANONICAL_METRICS["requests"]} AS tc FROM split_data),
-                top_values AS (
-                    SELECT signal AS value, {CANONICAL_METRICS["requests"]} AS c
-                    FROM split_data GROUP BY 1 ORDER BY 2 DESC LIMIT 10
-                )
-                SELECT tv.value, tv.c, tc.tc FROM top_values tv CROSS JOIN total_count tc
-            """
+            q = SQL.VIRTUAL_FIELD_EXPLODED_TOP_N.format(
+                backing_col=backing_col,
+                table_name=table_name,
+                where_clause=where_clause,
+                requests_metric=CANONICAL_METRICS["requests"],
+            )
             res = runner.execute(q).fetchall()
             if res:
                 results[virtual_id] = {
@@ -500,20 +490,11 @@ def get_aggregates(
         # Special handling for conn_requests (bucketed histogram)
         t_conn_req_0 = time.perf_counter()
         if "conn_requests" in actual_cols:
-            q = f"""
-                SELECT
-                    CASE
-                        WHEN "conn_requests" = 1 THEN '1'
-                        WHEN "conn_requests" BETWEEN 2 AND 5 THEN '2–5'
-                        WHEN "conn_requests" BETWEEN 6 AND 20 THEN '6–20'
-                        ELSE '21+'
-                    END AS bucket,
-                    {CANONICAL_METRICS["requests"]} AS c
-                FROM {table_name}
-                WHERE "conn_requests" IS NOT NULL AND "conn_requests" > 0 AND {where_clause}
-                GROUP BY 1
-                ORDER BY MIN("conn_requests")
-            """
+            q = SQL.CONN_REQUESTS_BUCKET.format(
+                requests_metric=CANONICAL_METRICS["requests"],
+                table_name=table_name,
+                where_clause=where_clause,
+            )
             res = runner.execute(q).fetchall()
             total_conn = sum(r[1] for r in res)
             results["conn_requests"] = {
@@ -581,34 +562,34 @@ def get_aggregates(
                 pass
             elif chart_metric == "5xx" and "status" in actual_cols:
                 chart_metric_out = "5xx"
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["5xx_rate"]} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["5xx_rate"],
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             elif chart_metric == "4xx" and "status" in actual_cols:
                 chart_metric_out = "4xx"
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["4xx_rate"]} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["4xx_rate"],
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             elif chart_metric == "hit_rate" and ("cache" in actual_cols or "resp_state" in actual_cols):
                 chart_metric_out = "hit_rate"
                 # Fallback to resp_state if cache is missing
                 cache_col = '"cache"' if "cache" in actual_cols else '"resp_state"'
                 hit_rate_expr = CANONICAL_METRICS["hit_rate"].format(cache_col=cache_col)
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {hit_rate_expr} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=hit_rate_expr,
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             elif chart_metric.endswith("_latency") and ("elapsed" in actual_cols or "elapsed_us" in actual_cols):
                 chart_metric_out = chart_metric
                 percentile = 0.95
@@ -616,54 +597,61 @@ def get_aggregates(
                     percentile = 0.50
                 elif chart_metric.startswith("p99"):
                     percentile = 0.99
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {percentile_ms_expr(sql_elapsed, percentile)} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {sql_elapsed} IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=percentile_ms_expr(sql_elapsed, percentile),
+                    table_name=table_name,
+                    extra_where=f" AND {sql_elapsed} IS NOT NULL",
+                    where_clause=where_clause,
+                )
             elif chart_metric == "throughput" and "resp_bytes" in actual_cols and "elapsed" in actual_cols:
                 chart_metric_out = "throughput"
                 sql_resp_bytes = resolve_col("resp_bytes", actual_cols)
                 # Note: elapsed and elapsed_us both map to the same field in DuckDB (µs)
                 sql_elapsed_val = resolve_col("elapsed", actual_cols)
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["throughput"].format(cache_col=sql_cache, elapsed_col=sql_elapsed_val, resp_bytes_col=sql_resp_bytes)} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["throughput"].format(
+                        cache_col=sql_cache,
+                        elapsed_col=sql_elapsed_val,
+                        resp_bytes_col=sql_resp_bytes,
+                    ),
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             elif chart_metric == "req_size" and any(c in actual_cols for c in ["req_header_bytes", "req_bytes"]):
                 chart_metric_out = "req_size"
                 header_col = '"req_header_bytes"' if "req_header_bytes" in actual_cols else "0"
                 body_col = resolve_col("req_bytes", actual_cols) if "req_bytes" in actual_cols else "0"
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["req_size"].format(header_bytes_col=header_col, req_bytes_col=body_col)} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["req_size"].format(
+                        header_bytes_col=header_col,
+                        req_bytes_col=body_col,
+                    ),
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             elif chart_metric == "ttfb" and "ttfb" in actual_cols:
                 chart_metric_out = "ttfb"
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["ttfb_ms"]} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["ttfb_ms"],
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             else:
                 chart_metric_out = "requests"
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["requests"]} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["requests"],
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
 
             if not _skip_raw_time_series:
                 ts_res = runner.execute(ts_q, params).fetchall()
@@ -694,12 +682,11 @@ def get_aggregates(
                 map_data = [{"country": k, "count": v} for k, v in country_counts.items()]
             else:
                 # Non-rollup path runs over the full filtered temp table.
-                map_q = f"""
-                    SELECT "country" AS country, {CANONICAL_METRICS["requests"]} AS count
-                    FROM {table_name}
-                    WHERE "country" IS NOT NULL AND {where_clause}
-                    GROUP BY 1
-                """
+                map_q = SQL.MAP_DATA_BY_COUNTRY.format(
+                    requests_metric=CANONICAL_METRICS["requests"],
+                    table_name=table_name,
+                    where_clause=where_clause,
+                )
                 map_data = [{"country": r[0], "count": r[1]} for r in runner.execute(map_q, params).fetchall()]
         section_timings.append({"section": "map_data", "time_ms": round((time.perf_counter() - t_map_0) * 1000, 2)})
 
@@ -987,14 +974,12 @@ def get_field_values(
             ua_filter = f"AND regexp_matches(ua, '{pattern_sql}')"
 
         # We query unique UAs to keep local bot-matching overhead manageable
-        q = f"""
-            SELECT ua, {CANONICAL_METRICS["requests"]} AS cnt
-            FROM {table_name}
-            WHERE {where_clause} AND ua IS NOT NULL {ua_filter}
-            GROUP BY ua
-            ORDER BY cnt DESC
-            LIMIT 5000
-        """
+        q = SQL.FIELD_VALUES_BOT_UA.format(
+            requests_metric=CANONICAL_METRICS["requests"],
+            table_name=table_name,
+            where_clause=where_clause,
+            ua_filter=ua_filter,
+        )
         rows = runner.execute(q, params).fetchall()
 
         match_ua = build_matcher()
@@ -1040,16 +1025,14 @@ def get_field_values(
         if search:
             search_cond = "AND trim(signal) ILIKE ?"
             search_params.append(f"%{search}%")
-        q = f"""
-            SELECT trim(signal) AS value, {CANONICAL_METRICS["requests"]} AS count
-            FROM (
-                SELECT unnest(string_split("{backing_col}", ',')) AS signal
-                FROM {table_name}
-                WHERE {where_clause} AND "{backing_col}" IS NOT NULL AND "{backing_col}" != ''
-            )
-            WHERE trim(signal) != '' {search_cond}
-            GROUP BY 1 ORDER BY 2 DESC LIMIT {limit}
-        """
+        q = SQL.FIELD_VALUES_VIRTUAL_SIGNALS.format(
+            requests_metric=CANONICAL_METRICS["requests"],
+            backing_col=backing_col,
+            table_name=table_name,
+            where_clause=where_clause,
+            search_cond=search_cond,
+            limit=limit,
+        )
     else:
         search_cond = ""
         if search:
@@ -1093,12 +1076,14 @@ def get_field_values(
                 search_cond = f'AND CAST("{clean_field}" AS VARCHAR) ILIKE ?'
                 search_params.append(f"%{search}%")
 
-        q = f"""
-            SELECT "{clean_field}" AS value, {CANONICAL_METRICS["requests"]} AS count
-            FROM {table_name}
-            WHERE {where_clause} {search_cond}
-            GROUP BY 1 ORDER BY 2 DESC LIMIT {limit}
-        """
+        q = SQL.FIELD_VALUES_NATIVE_COLUMN.format(
+            clean_field=clean_field,
+            requests_metric=CANONICAL_METRICS["requests"],
+            table_name=table_name,
+            where_clause=where_clause,
+            search_cond=search_cond,
+            limit=limit,
+        )
 
     result = runner.execute_with_retry(q, search_params)
     if result is None:
