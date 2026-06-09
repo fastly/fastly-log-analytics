@@ -174,26 +174,37 @@ def get_health(
                 map_where += " AND asn = ?"
                 map_params.append(int(map_asn))
 
+            # Cap to top 5000 (country, city, bucket) cells by request
+            # volume — the map UI renders dots, and the long tail beyond a
+            # few thousand points is invisible. Without the cap the
+            # response body grew to 5.8MB on busy windows, dominating
+            # /network cold-load wall time via transfer + JSON parse.
+            # Re-sorted by (bucket, reqs DESC) after the cap to preserve
+            # the downstream chronological ordering the map expects.
             map_sql = f"""
-                SELECT
-                    country,
-                    {city_col} AS city,
-                    {lat_col}  AS lat,
-                    {lon_col}  AS lon,
-                    {metro_col} AS metro,
-                    EPOCH_MS(
-                        CAST((EPOCH_MS(timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
-                    )::TIMESTAMP AS bucket,
-                    MEDIAN(tcp_rtt) AS rtt_med_us,
-                    {ploss_expr}    AS avg_ploss,
-                    SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END)
-                        * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,
-                    COUNT(*) AS reqs
-                FROM {t}
-                WHERE {map_where}
-                  AND country IS NOT NULL AND country != ''
-                  AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
-                GROUP BY country, city, lat, lon, metro, bucket
+                SELECT * FROM (
+                    SELECT
+                        country,
+                        {city_col} AS city,
+                        {lat_col}  AS lat,
+                        {lon_col}  AS lon,
+                        {metro_col} AS metro,
+                        EPOCH_MS(
+                            CAST((EPOCH_MS(timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
+                        )::TIMESTAMP AS bucket,
+                        MEDIAN(tcp_rtt) AS rtt_med_us,
+                        {ploss_expr}    AS avg_ploss,
+                        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END)
+                            * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,
+                        COUNT(*) AS reqs
+                    FROM {t}
+                    WHERE {map_where}
+                      AND country IS NOT NULL AND country != ''
+                      AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                    GROUP BY country, city, lat, lon, metro, bucket
+                    ORDER BY reqs DESC
+                    LIMIT 5000
+                ) ranked
                 ORDER BY bucket, reqs DESC
             """
             map_rows = runner.execute(map_sql, map_params).fetchall()

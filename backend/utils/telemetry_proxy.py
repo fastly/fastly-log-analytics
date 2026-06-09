@@ -533,8 +533,23 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
             # The X-Cache value MUST be the first `· `-separated chunk of
             # `details` — the shield-egress doubling at metadata_db.py:1113
             # parses it from there.
+            # Translate the raw HTTP verb to the S3 op name when we can
+            # recognise the shape — log_usage_calls keys Class A vs Class B
+            # off the S3 op name (LIST_OBJECTS_V2 = A), so a bare `GET`
+            # would otherwise misclassify every boto3 list_objects_v2 call
+            # as a Class B read. Only LIST is common enough to bother with;
+            # other S3 ops keep their raw HTTP verb (PUT/POST/COPY are
+            # already in the Class A list, HEAD/DELETE/GET-of-object are
+            # correctly Class B).
+            billing_method = request.method
+            if (
+                service == "FOS"
+                and request.method == "GET"
+                and "list-type=" in request.query_string
+            ):
+                billing_method = "LIST_OBJECTS_V2"
             row = {
-                "method": request.method,
+                "method": billing_method,
                 "path": request.path_qs,
                 "bytes": bytes_received,
                 "status": status_str,

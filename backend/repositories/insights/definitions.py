@@ -55,12 +55,13 @@ registry.register(
 def botnet_grouping_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     """Process a row from the botnet_grouping query."""
     # row schema: [fp, w_ips, w_reqs, b_ips, ip_ratio]
+    fp_col = context.get("fp_col", "ja4")
     return {
         "label": row[0],
         "current_val": row[1],
         "baseline_val": row[3],  # Raw baseline IPS
         "unit": "distinct IPs",
-        "meta": {"requests": row[2], "ip_ratio": round(float(row[4]), 1), "filters": {"ja3": row[0], "ja4": row[0]}},
+        "meta": {"requests": row[2], "ip_ratio": round(float(row[4]), 1), "filters": {fp_col: row[0]}},
         "severity": "critical" if row[1] >= 50 else "warning",
     }
 
@@ -1059,7 +1060,7 @@ registry.register(
         GROUP BY "url" HAVING total_bytes > 1024 * 512
         ORDER BY total_bytes DESC LIMIT 15
     """,
-        required_fields=["url", "resp_bytes", "status", "timestamp"],
+        required_fields=["url", "resp_bytes", "status", "timestamp", "ua"],
         row_processor=image_optimization_processor,
     )
 )

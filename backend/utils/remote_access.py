@@ -20,6 +20,7 @@ Per the plan:
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from fastapi import Request
@@ -38,6 +39,11 @@ _UNAUTH_ANALYST_PATHS = {
     "/api/share/login",
     "/api/share/logout",
     "/api/share/heartbeat",
+    "/api/share/acknowledge",
+    # /tos is callable from the pending-cookie state (pre-TOS-acceptance) so
+    # the middleware can't gate it on a full session — the handler validates
+    # the pending or full cookie itself, mirroring /acknowledge.
+    "/api/share/tos",
     "/api/health",
     # Bootstrap is callable without a session so the frontend can detect
     # is_remote_analyst=true and redirect anonymous remote visitors to
@@ -252,6 +258,59 @@ def _is_blocked_path(path: str) -> bool:
     return any(path.startswith(p) for p in _ANALYST_BLOCKED_PREFIXES)
 
 
+# Path-parameter patterns that carry a service ID. The middleware extracts the
+# service from the URL path so that an analyst scoped to service A cannot reach
+# /api/services/serviceB/scoring/status by relying on the active-service
+# fallback in get_active_service_id() to satisfy the per-request scope check
+# while the route handler reads the unrelated service_id from the path. See
+# audit finding 006 for the desync vector.
+#
+# Each pattern captures group(1) as the candidate service_id token. The token
+# may be either a logging service ID or a CDN service ID — the dispatcher
+# resolves both shapes against svcconfig.get_cdn_service_id_map() before
+# enforcing the analyst's allowlist.
+_PATH_SERVICE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^/api/services/([^/]+)(?:/|$)"),
+    re.compile(r"^/api/alerts/([^/]+)(?:/|$)"),
+    re.compile(r"^/api/views/([^/]+)(?:/|$)"),
+)
+
+
+def _path_service_ids(request: Request) -> list[str]:
+    """Return every service-ID token embedded in the request path parameters.
+
+    Instead of relying on fragile regex path matching which is prone to desync and bypass
+    vulnerabilities, we leverage Starlette's actual router definitions to match the
+    request scope and extract any path parameters that identify the service.
+    """
+    out: list[str] = []
+
+    # 1. Primary robust approach: match request scope against the application's actual router routes
+    app = getattr(request, "app", None)
+    if app and hasattr(app, "router") and hasattr(app.router, "routes"):
+        from starlette.routing import Match
+
+        for route in app.router.routes:
+            match, child_scope = route.matches(request.scope)
+            if match == Match.FULL:
+                path_params = child_scope.get("path_params", {})
+                for k in ("service_id", "service"):
+                    if k in path_params:
+                        out.append(path_params[k])
+                break
+
+    # 2. Resilient fallback: regex-based path matching for backwards-compatibility or cases
+    # where routing details aren't populated/available on request.app
+    if not out:
+        path = request.url.path
+        for pat in _PATH_SERVICE_PATTERNS:
+            m = pat.match(path)
+            if m:
+                out.append(m.group(1))
+
+    return out
+
+
 def _is_sse_route(path: str) -> bool:
     return "/sse" in path or path.endswith("/stream")
 
@@ -433,27 +492,69 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         if _is_sse_route(path) and path not in _ANALYST_SSE_ALLOWLIST:
             return JSONResponse(status_code=403, content={"error": "sse_blocked"})
 
-        # Service-scope gate. If the route has a ?service= param, the linked
-        # invite must be allowed to access it.
-        service_param = (
-            request.query_params.get("service")
-            or request.headers.get("x-fastly-service-id")
-            or request.headers.get("x-service-id")
-        )
-        if service_param and service_param not in (session.service_ids or []):
-            return JSONResponse(
-                status_code=403,
-                content={"error": "service_not_authorized", "service": service_param},
-            )
-
         # Read-only gate: refuse mutating verbs except on routes confirmed to
         # be read-only-via-POST (most dashboard/security/etc. queries POST
         # JSON filter bodies). See _ANALYST_ALLOWED_WRITE_PREFIXES for the
         # allowlist rationale.
-        if method in ("POST", "PUT", "PATCH", "DELETE") and not any(
-            path.startswith(p) for p in _ANALYST_ALLOWED_WRITE_PREFIXES
-        ):
+        if method in ("PUT", "PATCH", "DELETE"):
             return JSONResponse(status_code=403, content={"error": "read_only"})
+        if method == "POST" and not any(path.startswith(p) for p in _ANALYST_ALLOWED_WRITE_PREFIXES):
+            return JSONResponse(status_code=403, content={"error": "read_only"})
+
+        # Service-scope gate (skipped for system/session paths starting with /api/share/).
+        # Collect every candidate the route handler might key off:
+        #   - path params (/api/services/{sid}/..., /api/alerts/{sid}, /api/views/{sid})
+        #   - query params (service, service_id)
+        #   - headers (x-fastly-service-id, x-service-id)
+        # Each is resolved via the cdn_service_id map (same as deps.get_service_id)
+        # and the analyst's invite allowlist must cover ALL of them. Requiring
+        # every candidate to be authorized closes audit finding 006: a request
+        # with the analyst's allowed service in the query string and a different
+        # service in the path was previously accepted because only the query
+        # value was checked, and the route handler then used the path value.
+        if not path.startswith("/api/share/"):
+            from backend import config as svcconfig
+
+            raw_candidates: list[str] = list(_path_service_ids(request))
+            for src in (
+                request.query_params.get("service"),
+                request.query_params.get("service_id"),
+                request.headers.get("x-fastly-service-id"),
+                request.headers.get("x-service-id"),
+            ):
+                if src:
+                    raw_candidates.append(src)
+
+            cdn_map = svcconfig.get_cdn_service_id_map() if raw_candidates else {}
+            resolved_candidates: list[str] = []
+            for cand in raw_candidates:
+                if svcconfig.load_config(cand):
+                    resolved_candidates.append(cand)
+                else:
+                    resolved_candidates.append(cdn_map.get(cand, cand))
+
+            if not resolved_candidates:
+                # No explicit service in the request — fall back to the active
+                # default (preserves pre-fix behavior for analyst-facing GET
+                # /api/dashboard etc. where the active service comes from the
+                # session config).
+                fallback = svcconfig.get_active_service_id()
+                if fallback:
+                    resolved_candidates.append(fallback)
+
+            allowed_services = set(session.service_ids or [])
+            for eff in resolved_candidates:
+                if not eff or eff not in allowed_services:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"error": "service_not_authorized", "service": eff or ""},
+                    )
+            if not resolved_candidates:
+                # No candidate could be derived — fail closed.
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": "service_not_authorized", "service": ""},
+                )
 
         # IP-roaming: update without booting if whitelist still passes.
         current_ip = get_client_ip(request, is_remote=True)

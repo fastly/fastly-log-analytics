@@ -93,6 +93,89 @@ def test_get_aggregates_with_data(in_memory_duckdb, test_service_source):
         assert "count" in entry
 
 
+def test_get_aggregates_rollup_path_map_data_uses_per_field_limits(in_memory_duckdb, test_service_source, monkeypatch):
+    """Rollup fast-path: map_data must come from the ALREADY-RUNNING batch
+    execute_top_n_rollups call via per_field_limits={"country": 500},
+    NOT from a second execute_top_n_rollups invocation.
+
+    History: the original choropleth-cap bug (commit 3cec3b0) was fixed
+    by adding a second call for ["country"] with limit=500. Profiling
+    revealed that second call cost ~200-250ms per request (full duplicate
+    active-hour temp + rollup parquet scan for one low-cardinality field).
+    This commit collapses to ONE call with per_field_limits — same
+    correctness, ~200ms cheaper.
+
+    Pinned to catch a regression that re-introduces the second call OR
+    drops per_field_limits and falls back to limit=10 for country (which
+    would silently re-cap the choropleth at 10 entries)."""
+    import os
+
+    from backend.repositories import dashboard as dash
+    from backend.repositories._base import QueryRunner
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=40)
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    real_isdir = os.path.isdir
+
+    def fake_isdir(path: str) -> bool:
+        if path.endswith(os.path.join("rollups", "hour")):
+            return True
+        return real_isdir(path)
+
+    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+
+    # Track every execute_top_n_rollups call: (fields, limit, per_field_limits).
+    calls: list[tuple] = []
+
+    def spy_top_n(self, fields, start_time, end_time, limit=10, per_field_limits=None, _phase_log=None):
+        calls.append((tuple(fields), limit, dict(per_field_limits or {})))
+        # Return 12 country entries to confirm the panel caps at 10 but
+        # map_data sees all 12.
+        country_entries = [("country", f"C{i:02d}", 100 - i) for i in range(12)]
+        url_entries = [("url", "/page1", 50), ("url", "/page2", 30)]
+        return country_entries + url_entries, list(fields)
+
+    monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", spy_top_n)
+
+    result = dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+    )
+
+    # Exactly ONE call to execute_top_n_rollups (not two — that's the perf fix).
+    assert len(calls) == 1, f"expected exactly 1 execute_top_n_rollups call (was 2 pre-fix); got {len(calls)}: {calls}"
+    fields_called, limit_called, pfl_called = calls[0]
+    assert "country" in fields_called, (
+        f"country must be included in the batch call so its results can populate map_data; got fields={fields_called}"
+    )
+    assert pfl_called.get("country") == 500, (
+        f"country must use per_field_limits=500 so the choropleth gets the full distribution. "
+        f"per_field_limits passed: {pfl_called}"
+    )
+    assert limit_called == 10, f"default limit for other fields stays at 10; got limit={limit_called}"
+
+    # The panel must cap country at 10 (not show all 12 returned by the spy).
+    assert len(result["data"]["country"]["top"]) == 10, (
+        f"country PANEL must be capped at 10 entries even when more are available for the map; "
+        f"got {len(result['data']['country']['top'])} entries"
+    )
+
+    # map_data sees ALL country entries (12 in this fixture, would be up to 500 in prod).
+    assert len(result["map_data"]) == 12, (
+        f"map_data must include ALL country entries from all_top_res (not the panel-cap slice); "
+        f"got {len(result['map_data'])} entries"
+    )
+    countries = {entry["country"] for entry in result["map_data"]}
+    assert countries == {f"C{i:02d}" for i in range(12)}
+
+
 def test_get_aggregates_result_is_cached(in_memory_duckdb, test_service_source):
     """Second call with identical params returns a cached result."""
     table_name = _safe_table(test_service_source["name"])

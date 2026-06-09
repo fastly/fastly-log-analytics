@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { middleware } from '../middleware'
+import { proxy as middleware } from '../proxy'
 
 function makeReq(url: string, headers: Record<string, string> = {}): any {
   const u = new URL(url)

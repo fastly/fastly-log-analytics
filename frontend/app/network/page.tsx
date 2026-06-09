@@ -6,12 +6,26 @@ import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { client } from '@/lib/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
-import { PlotlyChart } from '@/components/PlotlyChart'
 import { UpdatingBadge } from '@/components/UpdatingBadge'
 import { DashboardLinkCell } from '@/components/DashboardLinkCell'
 import { downloadAsCsv } from '@/lib/utils'
 import { cn } from '@/lib/utils'
 import dynamic from 'next/dynamic'
+// PlotlyChart renders conditionally on heatmapData (the RTT heatmap card).
+// Static-importing it dragged the ~1MB plotly chunk into the critical path
+// for every /network cold load even when the heatmap wasn't being rendered.
+// Dynamic-import defers the chunk to when the heatmap card actually mounts.
+const PlotlyChart = dynamic(
+  () => import('@/components/PlotlyChart').then(mod => mod.PlotlyChart),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="w-full h-[300px] flex items-center justify-center bg-muted/20 border rounded-lg">
+        Loading chart...
+      </div>
+    ),
+  },
+)
 const NetworkMap = dynamic(() => import('@/components/Map/NetworkMap').then(mod => mod.NetworkMap), {
   ssr: false,
   loading: () => (
@@ -80,21 +94,8 @@ export default function NetworkPage() {
 
   const isLoadingInitial = isLoading || (isFetching && !data)
 
-  const { data: shieldingData, isLoading: shieldingLoading } = useServiceQuery(
-    ['network', 'shielding', activeServiceId, startTime, endTime, filterPayload],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/origin/shielding-analysis", { signal, 
-        body: {
-          start_time: startTime!,
-          end_time: endTime!,
-          filters: filterPayload,
-          limit: 100,
-        }
-      })
-      return data as any
-    },
-    { staleTime: 30000 }
-  )
+  const shieldingData = data?.shielding_analysis as any
+  const shieldingLoading = isLoadingInitial
 
   const asnOptions = React.useMemo(() => {
     if (!data?.leaderboard) return []

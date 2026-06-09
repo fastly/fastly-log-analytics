@@ -148,6 +148,28 @@ fn score_request(req: &Request) -> Response {
         },
     };
 
+    if debug {
+        match &state {
+            Some(s) => {
+                dbg_log(&format!(
+                    "inbound_cookie: status={} sid={} seq={} sum_dt={} sum_dt_sq={} last_ts={} issued_at={} prev_route_path={:?} last_score={}",
+                    compliance,
+                    hex::encode(s.sid),
+                    s.seq,
+                    s.sum_dt,
+                    s.sum_dt_sq,
+                    s.last_ts,
+                    s.issued_at,
+                    s.prev_route_path,
+                    s.score,
+                ));
+            }
+            None => {
+                dbg_log(&format!("inbound_cookie: status={}", compliance));
+            }
+        }
+    }
+
     // ── Resolve previous route(s) for L2. ────────────────────────────────────
     // Prefer the prev_route stored in the cookie state (carried forward
     // from the last scored request in this session) — req.http doesn't
@@ -194,7 +216,7 @@ fn score_request(req: &Request) -> Response {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
-    let updated = update_state(state, &result, &current_route.path, now_secs);
+    let updated = update_state(state.clone(), &result, &current_route.path, now_secs);
     let set_cookie = match cookie::encode(
         &updated,
         &key,
@@ -248,6 +270,11 @@ fn score_request(req: &Request) -> Response {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let elapsed_us = (t1.saturating_sub(t0)) / 1_000;
+        
+        let current_dt_secs = state.as_ref()
+            .map(|s| now_secs.saturating_sub(s.last_ts).min(3600))
+            .unwrap_or(0);
+
         dbg_log(&format!(
             "scored: score={} l1={} l2={} compliance={} reasons=[{}] mean_dwell_s={:.3} variance_s2={:.3} trans_prob={:.6} matrix_version={} elapsed_us={}",
             result.score,
@@ -260,6 +287,17 @@ fn score_request(req: &Request) -> Response {
             result.trans_prob,
             result.matrix_version,
             elapsed_us,
+        ));
+
+        dbg_log(&format!(
+            "outbound_cookie: sid={} seq={} current_dt={} sum_dt={} sum_dt_sq={} last_ts={} prev_route_path={:?}",
+            hex::encode(updated.sid),
+            updated.seq,
+            current_dt_secs,
+            updated.sum_dt,
+            updated.sum_dt_sq,
+            updated.last_ts,
+            updated.prev_route_path,
         ));
     }
 

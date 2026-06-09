@@ -37,7 +37,20 @@ const nextConfig: NextConfig = {
       // server round-trip on every link click.
       return [
         {
-          source: '/((?!_next/static|_next/image|favicon.ico).*)',
+          // /geo/* are static reference datasets (world.geojson is 256KB,
+          // shipped once and effectively immutable for a year). Browsers
+          // hit it from NetworkMap, ShieldingMap, ChoroplethMap and
+          // ImpossibleDistanceModal — without caching, every page load
+          // that mounts a map re-downloads the full payload. 24h public
+          // cache covers the lifetime of a typical session without
+          // requiring content-hashing.
+          source: '/geo/:path*',
+          headers: [
+            { key: 'Cache-Control', value: 'public, max-age=86400, immutable' },
+          ],
+        },
+        {
+          source: '/((?!_next/static|_next/image|favicon.ico|geo/).*)',
           headers: [
             { key: 'Cache-Control', value: 'private, no-cache, must-revalidate' },
           ],

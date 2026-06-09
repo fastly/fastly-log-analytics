@@ -20,7 +20,13 @@ export default function AcknowledgePage() {
     // Raw fetch: the share-* routes use a relative path so the request flows
     // through the Next.js proxy in remote-analyst mode rather than the typed
     // client's `getApiBase()` which routes direct to 127.0.0.1:8000.
-    fetch('/api/share/heartbeat', {
+    //
+    // /api/share/tos doubles as an auth check (401 → bounce to /share-login)
+    // and the source of truth for the version we'll POST to /acknowledge.
+    // The backend enforces an exact version match (audit finding 021), so the
+    // version we display has to be the one the backend currently considers
+    // latest — fetching it here is the only way to stay in sync.
+    fetch('/api/share/tos', {
       credentials: 'include',
       headers: { 'X-Remote-Analyst': '1' },
     })
@@ -30,16 +36,12 @@ export default function AcknowledgePage() {
           router.replace('/share-login')
           return
         }
-        // The /heartbeat response doesn't include TOS text — pull it from the
-        // login response that just preceded this navigation. Fall back to a
-        // generic acknowledgment text if we landed here cold (refresh).
-        setTos({
-          version: '__current__',
-          text:
-            'I acknowledge that I am viewing third-party operational log data, ' +
-            'that my access is logged, and that I will not retain, redistribute, ' +
-            'or use this data outside the scope of my engagement.',
-        })
+        if (!res.ok) {
+          setError(`Could not load the terms (HTTP ${res.status}).`)
+          return
+        }
+        const body = (await res.json()) as TosPayload
+        setTos({ version: body.version, text: body.text })
       })
       .catch(() => {
         if (!cancelled) setError('Could not reach the server.')

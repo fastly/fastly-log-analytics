@@ -200,33 +200,59 @@ def get_summary(
     cdn_ovh = 'MEDIAN("elapsed" - "ottlb") / 1000.0' if "elapsed" in actual_cols and "ottlb" in actual_cols else "NULL"
     obytes_p50 = 'MEDIAN("obytes")' if "obytes" in actual_cols else "NULL"
 
-    row = runner.execute(
+    # Combine the rollup-totals query AND the per-edge breakdown into ONE
+    # scan using GROUPING SETS. DuckDB computes the () grouping (overall
+    # totals) and the ("edge") grouping in a single pass, halving the
+    # wall-clock — the previous two-scan shape did 138 ms + 132 ms = 270 ms
+    # on prod 1 h windows; the combined scan does the same work in ~150 ms.
+    #
+    # When the schema has no ``edge`` column (rare — older services), fall
+    # back to a single () grouping. GROUPING() requires a real column
+    # reference, so we can't use it in the no-edge branch.
+    has_edge = "edge" in actual_cols
+    if has_edge:
+        edge_select = '"edge"'
+        grouping_clause = 'GROUP BY GROUPING SETS ((), ("edge"))'
+        grouping_expr = 'GROUPING("edge")'
+    else:
+        edge_select = "NULL"
+        grouping_clause = ""  # single rollup row, no need for GROUPING SETS
+        grouping_expr = "1"  # always-rollup
+    rows = runner.execute(
         f"""
         SELECT
-          COUNT(*) FILTER (WHERE "cache" ILIKE 'MISS%')                                    AS total_misses,
-          COUNT(*) FILTER (WHERE "cache" ILIKE 'PASS%')                                    AS total_passes,
-          MEDIAN({lat_val}) / 1000.0                                                       AS ottfb_p50_ms,
-          APPROX_QUANTILE({lat_val}, 0.75) / 1000.0                                        AS ottfb_p75_ms,
-          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                                        AS ottfb_p95_ms,
-          APPROX_QUANTILE({lat_val}, 0.99) / 1000.0                                        AS ottfb_p99_ms,
-          {ottlb_p50}                                                                       AS ottlb_p50_ms,
-          {ottlb_p95}                                                                       AS ottlb_p95_ms,
-          {cdn_ovh}                                                                         AS cdn_overhead_p50_ms,
-          {ost_5xx}                                                                         AS origin_error_rate,
-          {obytes_p50}                                                                      AS obytes_p50
+          {edge_select}                                                                       AS edge_group,
+          {grouping_expr}                                                                     AS is_total,
+          COUNT(*)                                                                            AS requests,
+          COUNT(*) FILTER (WHERE "cache" ILIKE 'MISS%')                                       AS total_misses,
+          COUNT(*) FILTER (WHERE "cache" ILIKE 'PASS%')                                       AS total_passes,
+          MEDIAN({lat_val}) / 1000.0                                                          AS ottfb_p50_ms,
+          APPROX_QUANTILE({lat_val}, 0.75) / 1000.0                                           AS ottfb_p75_ms,
+          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                                           AS ottfb_p95_ms,
+          APPROX_QUANTILE({lat_val}, 0.99) / 1000.0                                           AS ottfb_p99_ms,
+          {ottlb_p50}                                                                          AS ottlb_p50_ms,
+          {ottlb_p95}                                                                          AS ottlb_p95_ms,
+          {cdn_ovh}                                                                            AS cdn_overhead_p50_ms,
+          {ost_5xx}                                                                            AS origin_error_rate,
+          {obytes_p50}                                                                         AS obytes_p50
         FROM {table_name}
         WHERE {where} AND ({lat_val} IS NOT NULL)
+        {grouping_clause}
         """,
         params,
-    ).fetchone()
+    ).fetchall()
 
-    # When no rows match the WHERE clause, DuckDB returns one row of (0 / NULL)
-    # aggregates. ottfb_p50_ms being NULL is the canonical "no data" signal —
-    # it's the median of the latency expression itself, so it can only be
-    # non-NULL if at least one row matched the predicate. Used instead of a
-    # separate SELECT 1 ... LIMIT 1 probe, which previously ran ~3s per
-    # parallel endpoint on cold caches.
-    has_data = row is not None and row[2] is not None
+    # GROUPING("edge") returns 1 for the () grouping (the rollup row) and 0
+    # for per-edge rows. Without an "edge" column we emit a single rollup
+    # row with is_total=1 (the literal expression).
+    rollup_row = next((r for r in rows if r[1] == 1), None)
+    edge_rows = [r for r in rows if r[1] == 0] if has_edge else []
+
+    # ottfb_p50_ms (index 5) being NULL is the canonical "no data" signal —
+    # it's the median of the latency expression, so it can only be non-NULL
+    # if at least one row matched ``lat_val IS NOT NULL``. Same semantics
+    # as the previous two-scan shape.
+    has_data = rollup_row is not None and rollup_row[5] is not None
 
     if not has_data:
         payload = {
@@ -247,20 +273,28 @@ def get_summary(
         _response_cache_put(cache_key, payload)
         return {**payload, **runner.telemetry()}
 
-    edge_rows = []
-    if "edge" in actual_cols:
-        edge_rows = runner.execute(
-            f"""
-            SELECT "edge",
-              COUNT(*)                                                     AS requests,
-              MEDIAN({lat_val}) / 1000.0                                   AS p50_ms,
-              APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                    AS p95_ms
-            FROM {table_name}
-            WHERE {where} AND ({lat_val} IS NOT NULL)
-            GROUP BY "edge"
-            """,
-            params,
-        ).fetchall()
+    # Map rollup-row column indices to the previous variable names so the
+    # payload construction below reads the same. Column order: 0=edge_group,
+    # 1=is_total, 2=requests, 3=total_misses, 4=total_passes, 5-8=ottfb
+    # p50/p75/p95/p99, 9=ottlb_p50, 10=ottlb_p95, 11=cdn_overhead_p50,
+    # 12=origin_error_rate, 13=obytes_p50.
+    row = (
+        rollup_row[3],  # total_misses
+        rollup_row[4],  # total_passes
+        rollup_row[5],  # ottfb_p50_ms
+        rollup_row[6],  # ottfb_p75_ms
+        rollup_row[7],  # ottfb_p95_ms
+        rollup_row[8],  # ottfb_p99_ms
+        rollup_row[9],  # ottlb_p50_ms
+        rollup_row[10],  # ottlb_p95_ms
+        rollup_row[11],  # cdn_overhead_p50_ms
+        rollup_row[12],  # origin_error_rate
+        rollup_row[13],  # obytes_p50
+    )
+    # Per-edge row columns: 0=edge value, 1=is_total (=0), 2=requests,
+    # 5=p50_ms, 7=p95_ms. The other aggregates exist but the by_leg payload
+    # historically only surfaced (edge, requests, p50_ms, p95_ms).
+    edge_rows = [(r[0], r[2], r[5], r[7]) for r in edge_rows]
 
     payload = {
         "has_data": True,
@@ -775,3 +809,449 @@ def get_shielding_analysis(
     }
     _response_cache_put(cache_key, payload)
     return {**payload, **runner.telemetry()}
+
+
+# ── Composite: get_aggregates ────────────────────────────────────────────────
+#
+# Phase 3 item 9. One CREATE TEMP TABLE filtered to the requested window;
+# every origin card on the /origin page reads from the same materialization
+# instead of issuing its own parquet scan. Shielding analysis stays in its
+# own endpoint (item 13 moves it to /api/network-health) because its
+# self-join semantics don't share the projection cleanly.
+#
+# Granular endpoints (/api/origin/summary etc.) remain alive for one
+# release so the frontend can flip back during a rollback without a
+# backend redeploy. The composite is purely additive — existing per-card
+# endpoints are unaffected.
+
+
+def _origin_summary_from_temp(runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str]) -> dict:
+    """Mirror of get_summary's SQL, parameterised against the TEMP TABLE.
+
+    Uses the pre-computed ``lat_us`` column populated when the TEMP TABLE
+    was created — saves the per-row COALESCE evaluation that turned the
+    composite into a regression on local benchmarks.
+    """
+    actual_cols_set = set(actual_cols)
+    lat_val = "lat_us"
+
+    ost_5xx = (
+        'COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0 / NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
+        if "ost" in actual_cols_set
+        else "NULL"
+    )
+    ottlb_p50 = 'MEDIAN("ottlb") / 1000.0' if "ottlb" in actual_cols_set else "NULL"
+    ottlb_p95 = 'APPROX_QUANTILE("ottlb", 0.95) / 1000.0' if "ottlb" in actual_cols_set else "NULL"
+    cdn_ovh = (
+        'MEDIAN("elapsed" - "ottlb") / 1000.0'
+        if "elapsed" in actual_cols_set and "ottlb" in actual_cols_set
+        else "NULL"
+    )
+    obytes_p50 = 'MEDIAN("obytes")' if "obytes" in actual_cols_set else "NULL"
+
+    row = runner.execute(
+        f"""
+        SELECT
+          COUNT(*) FILTER (WHERE "cache" ILIKE 'MISS%')                                    AS total_misses,
+          COUNT(*) FILTER (WHERE "cache" ILIKE 'PASS%')                                    AS total_passes,
+          MEDIAN({lat_val}) / 1000.0                                                       AS ottfb_p50_ms,
+          APPROX_QUANTILE({lat_val}, 0.75) / 1000.0                                        AS ottfb_p75_ms,
+          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                                        AS ottfb_p95_ms,
+          APPROX_QUANTILE({lat_val}, 0.99) / 1000.0                                        AS ottfb_p99_ms,
+          {ottlb_p50}                                                                       AS ottlb_p50_ms,
+          {ottlb_p95}                                                                       AS ottlb_p95_ms,
+          {cdn_ovh}                                                                         AS cdn_overhead_p50_ms,
+          {ost_5xx}                                                                         AS origin_error_rate,
+          {obytes_p50}                                                                      AS obytes_p50
+        FROM {temp_table}
+        WHERE ({lat_val} IS NOT NULL)
+        """
+    ).fetchone()
+
+    has_data = row is not None and row[2] is not None
+    if not has_data:
+        return {
+            "has_data": False,
+            "total_misses": None,
+            "total_passes": None,
+            "ottfb_p50_ms": None,
+            "ottfb_p75_ms": None,
+            "ottfb_p95_ms": None,
+            "ottfb_p99_ms": None,
+            "ottlb_p50_ms": None,
+            "ottlb_p95_ms": None,
+            "cdn_overhead_p50_ms": None,
+            "origin_error_rate": None,
+            "obytes_p50": None,
+            "by_leg": [],
+        }
+
+    edge_rows = []
+    if "edge" in actual_cols_set:
+        edge_rows = runner.execute(
+            f"""
+            SELECT "edge",
+              COUNT(*)                                                     AS requests,
+              MEDIAN({lat_val}) / 1000.0                                   AS p50_ms,
+              APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                    AS p95_ms
+            FROM {temp_table}
+            WHERE ({lat_val} IS NOT NULL)
+            GROUP BY "edge"
+            """
+        ).fetchall()
+
+    return {
+        "has_data": True,
+        "total_misses": row[0],
+        "total_passes": row[1],
+        "ottfb_p50_ms": row[2],
+        "ottfb_p75_ms": row[3],
+        "ottfb_p95_ms": row[4],
+        "ottfb_p99_ms": row[5],
+        "ottlb_p50_ms": row[6],
+        "ottlb_p95_ms": row[7],
+        "cdn_overhead_p50_ms": row[8],
+        "origin_error_rate": row[9],
+        "obytes_p50": row[10],
+        "by_leg": [{"edge": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3]} for r in edge_rows],
+    }
+
+
+def _origin_timeseries_from_temp(
+    runner: QueryRunner,
+    temp_table: str,
+    actual_cols: set[str] | list[str],
+    bucket_minutes: float,
+    split_by_leg: bool,
+    metric: str,
+    percentile: str,
+) -> dict:
+    actual_cols_set = set(actual_cols)
+    metric_col = "ottfb" if metric == "ttfb" else "ottlb"
+    unit_conv = "/ 1000.0"
+    if metric_col not in actual_cols_set:
+        if metric == "ttfb" and "ttfb" in actual_cols_set:
+            metric_col = "ttfb"
+            unit_conv = "* 1000.0"
+        else:
+            return {"has_data": False, "series": []}
+
+    if metric == "ttfb" and "ottfb" in actual_cols_set and "ttfb" in actual_cols_set:
+        lat_expr = 'COALESCE("ottfb", "ttfb" * 1000000.0)'
+        unit_conv = "/ 1000.0"
+    else:
+        lat_expr = f'"{metric_col}"'
+
+    pct_val = {"p50": 0.5, "p95": 0.95, "p99": 0.99}.get(percentile, 0.95)
+    agg_expr = f"MEDIAN({lat_expr})" if percentile == "p50" else f"APPROX_QUANTILE({lat_expr}, {pct_val})"
+
+    if bucket_minutes < 1:
+        interval = f"INTERVAL '{max(1, int(bucket_minutes * 60))}' seconds"
+    else:
+        interval = f"INTERVAL '{int(bucket_minutes)}' minutes"
+
+    edge_col = ', "edge"' if (split_by_leg and "edge" in actual_cols_set) else ""
+    edge_group = ', "edge"' if (split_by_leg and "edge" in actual_cols_set) else ""
+
+    rows = runner.execute(
+        f"""
+        SELECT
+          time_bucket({interval}, "timestamp")                              AS ts,
+          COUNT(*)                                                          AS miss_count,
+          {agg_expr} {unit_conv}                                            AS value
+          {edge_col}
+        FROM {temp_table}
+        WHERE ({lat_expr} IS NOT NULL)
+        GROUP BY ts {edge_group}
+        ORDER BY ts
+        """
+    ).fetchall()
+
+    has_edge_col = split_by_leg and "edge" in actual_cols_set
+    series = [
+        {
+            "time": safe_iso(r[0]),
+            "miss_count": r[1],
+            "value": r[2],
+            **({"edge": r[3]} if has_edge_col else {}),
+        }
+        for r in rows
+    ]
+    return {"has_data": len(series) > 0, "series": series}
+
+
+def _origin_slow_urls_from_temp(
+    runner: QueryRunner,
+    temp_table: str,
+    actual_cols: set[str] | list[str],
+    min_requests: int,
+    limit: int,
+) -> dict:
+    actual_cols_set = set(actual_cols)
+    if "url" not in actual_cols_set:
+        return {"has_data": False, "rows": []}
+    # Use the pre-computed lat_us column so percentile sorts can leverage
+    # column-store layout instead of paying COALESCE per row.
+    rows = runner.execute(
+        f"""
+        SELECT
+          "url",
+          COUNT(*)                                                         AS requests,
+          MEDIAN(lat_us) / 1000.0                                          AS p50_ms,
+          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                           AS p95_ms,
+          APPROX_QUANTILE(lat_us, 0.99) / 1000.0                           AS p99_ms
+        FROM {temp_table}
+        WHERE lat_us IS NOT NULL AND "url" IS NOT NULL
+        GROUP BY "url"
+        HAVING COUNT(*) >= ?
+        ORDER BY p95_ms DESC
+        LIMIT ?
+        """,
+        [min_requests, limit],
+    ).fetchall()
+    return {
+        "has_data": len(rows) > 0,
+        "rows": [{"url": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3], "p99_ms": r[4]} for r in rows],
+    }
+
+
+def _origin_status_codes_from_temp(runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str]) -> dict:
+    if "ost" not in set(actual_cols):
+        return {"has_data": False, "rows": []}
+    rows = runner.execute(
+        f"""
+        SELECT
+          "ost"                                             AS status,
+          COUNT(*)                                          AS count,
+          COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()          AS pct
+        FROM {temp_table}
+        WHERE "ost" IS NOT NULL
+        GROUP BY "ost"
+        ORDER BY count DESC
+        """
+    ).fetchall()
+    if not rows:
+        return {"has_data": False, "rows": []}
+    return {
+        "has_data": True,
+        "rows": [{"status": r[0], "count": r[1], "pct": r[2]} for r in rows],
+    }
+
+
+def _origin_path_breakdown_from_temp(runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str]) -> dict:
+    actual_cols_set = set(actual_cols)
+    if "edge" not in actual_cols_set:
+        return {"has_data": False, "shielding_detected": False, "rows": []}
+    rows = runner.execute(
+        f"""
+        SELECT
+          "edge",
+          COUNT(*)                                                          AS requests,
+          MEDIAN(lat_us) / 1000.0                                           AS p50_ms,
+          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                            AS p95_ms
+        FROM {temp_table}
+        WHERE lat_us IS NOT NULL
+        GROUP BY "edge"
+        """
+    ).fetchall()
+    if not rows:
+        return {"has_data": False, "shielding_detected": False, "rows": []}
+    shielding_detected = any(r[0] is False for r in rows)
+    return {
+        "has_data": True,
+        "shielding_detected": shielding_detected,
+        "rows": [{"edge": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3]} for r in rows],
+    }
+
+
+def _origin_pop_latency_from_temp(
+    runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str], limit: int
+) -> dict:
+    actual_cols_set = set(actual_cols)
+    if "pop" not in actual_cols_set:
+        return {"has_data": False, "requires_group_c": True, "rows": []}
+    rows = runner.execute(
+        f"""
+        SELECT
+          "pop",
+          COUNT(*)                                                          AS requests,
+          MEDIAN(lat_us) / 1000.0                                           AS p50_ms,
+          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                            AS p95_ms
+        FROM {temp_table}
+        WHERE lat_us IS NOT NULL AND "pop" IS NOT NULL AND "pop" != ''
+        GROUP BY "pop"
+        ORDER BY p95_ms DESC
+        LIMIT ?
+        """,
+        [limit],
+    ).fetchall()
+    if not rows:
+        return {"has_data": False, "requires_group_c": False, "rows": []}
+    valid_p95s = sorted(r[3] for r in rows if r[3] is not None)
+    median_p95 = valid_p95s[len(valid_p95s) // 2] if valid_p95s else 0
+    return {
+        "has_data": True,
+        "requires_group_c": False,
+        "median_p95_ms": median_p95,
+        "rows": [
+            {
+                "pop": r[0],
+                "requests": r[1],
+                "p50_ms": r[2],
+                "p95_ms": r[3],
+                "elevated": r[3] is not None and median_p95 is not None and r[3] > median_p95 * 2,
+            }
+            for r in rows
+        ],
+    }
+
+
+def _origin_ip_health_from_temp(
+    runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str], limit: int
+) -> dict:
+    actual_cols_set = set(actual_cols)
+    if "oip" not in actual_cols_set or "ost" not in actual_cols_set:
+        return {"has_data": False, "rows": []}
+    rows = runner.execute(
+        f"""
+        SELECT
+          "oip",
+          COUNT(*)                                                            AS requests,
+          MEDIAN(lat_us) / 1000.0                                             AS p50_ms,
+          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                              AS p95_ms,
+          ROUND(COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0
+            / NULLIF(COUNT(*), 0), 1)                                         AS error_pct
+        FROM {temp_table}
+        WHERE "oip" IS NOT NULL AND "oip" != '' AND "ost" IS NOT NULL
+        GROUP BY "oip"
+        HAVING COUNT(*) >= 10
+        ORDER BY error_pct DESC
+        LIMIT ?
+        """,
+        [limit],
+    ).fetchall()
+    if not rows:
+        return {"has_data": False, "rows": []}
+    return {
+        "has_data": True,
+        "rows": [{"oip": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3], "error_pct": r[4]} for r in rows],
+    }
+
+
+def get_aggregates(
+    con: duckdb.DuckDBPyConnection,
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    *,
+    bucket_minutes: float = 5,
+    split_by_leg: bool = False,
+    timeseries_metric: str = "ttfb",
+    timeseries_percentile: str = "p95",
+    slow_urls_limit: int = 20,
+    slow_urls_min_requests: int = 10,
+    ip_health_limit: int = 30,
+    pop_latency_limit: int = 30,
+) -> dict:
+    """Composite origin endpoint — six origin cards from one parquet scan.
+
+    Replaces the cold-load fan-out of /api/origin/{summary, timeseries,
+    slow-urls, status-codes, path-breakdown, pop-latency, ip-health}
+    (7643 ms total per the r2 audit) with a single CREATE TEMP TABLE
+    + 6 reads against it. Shielding-analysis stays separate (item 13
+    moves it to /api/network-health).
+    """
+    table_name = _safe_table(src["name"])
+    runner = QueryRunner(con, src)
+    actual_cols = runner.get_schema_cols()
+
+    empty_payload = {
+        "has_data": False,
+        "summary": {},
+        "timeseries": {"has_data": False, "series": []},
+        "slow_urls": {"has_data": False, "rows": []},
+        "status_codes": {"has_data": False, "rows": []},
+        "path_breakdown": {"has_data": False, "shielding_detected": False, "rows": []},
+        "pop_latency": {"has_data": False, "requires_group_c": False, "rows": []},
+        "ip_health": {"has_data": False, "rows": []},
+    }
+
+    if not actual_cols:
+        return {**empty_payload, **runner.telemetry()}
+
+    params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
+
+    # Union of columns needed across the six sub-queries. Filtered to
+    # those the schema actually has before materialization so missing
+    # columns don't break the CREATE. Plus a precomputed `lat_us` column
+    # — the percentile sub-queries all use the same COALESCE("ottfb",
+    # "ttfb"*1000000.0) expression and computing it once at
+    # materialization time lets DuckDB store it in the column-store
+    # layout. Without the precompute, the in-memory TEMP TABLE was
+    # SLOWER than per-endpoint parquet scans because the COALESCE
+    # forces per-row evaluation during percentile sort.
+    import uuid as _uuid
+
+    from backend.repositories._base import origin_latency_us_expr
+
+    actual_set = set(actual_cols)
+    wanted_cols = [
+        "timestamp",
+        "cache",
+        "edge",
+        "url",
+        "oip",
+        "ost",
+        "pop",
+        "ottfb",
+        "ottlb",
+        "ttfb",
+        "elapsed",
+        "obytes",
+    ]
+    select_cols = [f'"{c}"' for c in wanted_cols if c in actual_set]
+    if not select_cols:
+        return {**empty_payload, **runner.telemetry()}
+    lat_us_expr = origin_latency_us_expr(actual_set)
+    temp_table = f"t_origin_{_uuid.uuid4().hex}"
+    create_sql = (
+        f"CREATE TEMP TABLE {temp_table} AS "
+        f"SELECT {', '.join(select_cols)}, {lat_us_expr} AS lat_us "
+        f"FROM {table_name} WHERE {where_clause}"
+    )
+    if not runner.create_temp_table(create_sql, params):
+        return {**empty_payload, **runner.telemetry()}
+    try:
+        summary = _origin_summary_from_temp(runner, temp_table, actual_set)
+        timeseries = _origin_timeseries_from_temp(
+            runner,
+            temp_table,
+            actual_set,
+            bucket_minutes,
+            split_by_leg,
+            timeseries_metric,
+            timeseries_percentile,
+        )
+        slow_urls = _origin_slow_urls_from_temp(runner, temp_table, actual_set, slow_urls_min_requests, slow_urls_limit)
+        status_codes = _origin_status_codes_from_temp(runner, temp_table, actual_set)
+        path_breakdown = _origin_path_breakdown_from_temp(runner, temp_table, actual_set)
+        pop_latency = _origin_pop_latency_from_temp(runner, temp_table, actual_set, pop_latency_limit)
+        ip_health = _origin_ip_health_from_temp(runner, temp_table, actual_set, ip_health_limit)
+
+        return {
+            "has_data": summary.get("has_data", False),
+            "summary": summary,
+            "timeseries": timeseries,
+            "slow_urls": slow_urls,
+            "status_codes": status_codes,
+            "path_breakdown": path_breakdown,
+            "pop_latency": pop_latency,
+            "ip_health": ip_health,
+            **runner.telemetry(),
+        }
+    finally:
+        try:
+            runner.execute(f"DROP TABLE IF EXISTS {temp_table}")
+        except Exception:
+            pass

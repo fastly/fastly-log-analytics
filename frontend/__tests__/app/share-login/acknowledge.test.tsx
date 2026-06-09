@@ -32,10 +32,13 @@ beforeEach(() => {
   })
 })
 
+const TOS_TEXT =
+  'I acknowledge that I am viewing third-party operational log data, that my access is logged, and that I will not retain, redistribute, or use this data outside the scope of my engagement.'
+
 describe('AcknowledgePage', () => {
-  it('redirects to /share-login when heartbeat returns 401', async () => {
+  it('redirects to /share-login when tos fetch returns 401', async () => {
     server.use(
-      http.get('/api/share/heartbeat', () =>
+      http.get('/api/share/tos', () =>
         HttpResponse.json({ detail: 'unauthenticated' }, { status: 401 }),
       ),
     )
@@ -45,13 +48,15 @@ describe('AcknowledgePage', () => {
   })
 
   it('renders TOS text and acknowledges → hard-reload to /dashboard', async () => {
+    const ackBody = vi.fn()
     server.use(
-      http.get('/api/share/heartbeat', () =>
-        HttpResponse.json({ ok: true, name: 'Jane', email: 'jane@example.com' }),
+      http.get('/api/share/tos', () =>
+        HttpResponse.json({ version: 'v1', text: TOS_TEXT }),
       ),
-      http.post('/api/share/acknowledge', () =>
-        HttpResponse.json({ ok: true }),
-      ),
+      http.post('/api/share/acknowledge', async ({ request }) => {
+        ackBody(await request.json())
+        return HttpResponse.json({ ok: true })
+      }),
     )
 
     const user = userEvent.setup()
@@ -64,12 +69,14 @@ describe('AcknowledgePage', () => {
     await user.click(screen.getByRole('button', { name: /i acknowledge/i }))
 
     await waitFor(() => expect(locationAssignSpy).toHaveBeenCalledWith('/dashboard'))
+    // The version POSTed must be the one /tos returned — not a sentinel.
+    expect(ackBody).toHaveBeenCalledWith({ version: 'v1' })
   })
 
   it('shows server error if acknowledge fails', async () => {
     server.use(
-      http.get('/api/share/heartbeat', () =>
-        HttpResponse.json({ ok: true }),
+      http.get('/api/share/tos', () =>
+        HttpResponse.json({ version: 'v1', text: TOS_TEXT }),
       ),
       http.post('/api/share/acknowledge', () =>
         HttpResponse.json(

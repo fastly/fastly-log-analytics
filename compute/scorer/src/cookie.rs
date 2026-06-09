@@ -118,8 +118,8 @@ fn pack_payload(state: &SessionState) -> Vec<u8> {
     // of UTF-8 path. We always emit the v2 length prefix even when the
     // path is empty so the decoder can dispatch unambiguously on
     // plaintext length (== 30 → v1 legacy, > 30 → v2).
+    let path_len = state.prev_route_path.floor_char_boundary(PREV_ROUTE_MAX_BYTES);
     let path_bytes = state.prev_route_path.as_bytes();
-    let path_len = path_bytes.len().min(PREV_ROUTE_MAX_BYTES);
     let mut out = Vec::with_capacity(V1_PLAINTEXT_BYTES + 1 + path_len);
     out.push(state.v);
     out.extend_from_slice(&state.sid);
@@ -457,6 +457,24 @@ mod tests {
         // Truncated to the cap; decoder reads exactly what was encoded.
         assert_eq!(decoded.prev_route_path.len(), PREV_ROUTE_MAX_BYTES);
     }
+
+    #[test]
+    fn encode_truncates_path_safely_on_utf8_char_boundary() {
+        let mut s = state();
+        // A multi-byte character (🦀 is 4 bytes). Place it right at the boundary.
+        let mut path = "a".repeat(PREV_ROUTE_MAX_BYTES - 1);
+        path.push_str("🦀"); // Total: 254 + 4 = 258 bytes
+        s.prev_route_path = path;
+
+        let cookie = encode(&s, &KEY_A, &NONCE_FIXED, SVC, SCHEMA_VERSION).unwrap();
+        let decoded = decode(&cookie, &KEY_A, None, SVC, SCHEMA_VERSION).unwrap();
+
+        // Assert that the decoded path has exactly PREV_ROUTE_MAX_BYTES - 1 bytes,
+        // dropping the whole straddling emoji cleanly instead of splitting its raw bytes.
+        assert_eq!(decoded.prev_route_path.len(), PREV_ROUTE_MAX_BYTES - 1);
+        assert_eq!(decoded.prev_route_path, "a".repeat(PREV_ROUTE_MAX_BYTES - 1));
+    }
+
 
     #[test]
     fn decode_rejects_tampered_ciphertext() {

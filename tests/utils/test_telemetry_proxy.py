@@ -418,6 +418,75 @@ async def test_proxy_writes_one_usage_log_row_per_request(proxy_server):
     assert captured_ctx["value"] == "api:GET /api/dashboard/aggregates"
 
 
+async def test_proxy_translates_fos_list_get_to_list_objects_v2(proxy_server):
+    """boto3's list_objects_v2 lands at the proxy as a raw HTTP GET with
+    ``?list-type=2&...``. log_usage_calls keys Class A vs Class B off the
+    S3 op name (LIST_OBJECTS_V2 = A), so a bare ``GET`` in the row would
+    misclassify every LIST as a Class B read. Bug observed in prod:
+    ~10k LISTs/day inflating Class B by ~12%.
+    """
+    ctx, _ = _mock_upstream(
+        chunks=(b"<ListBucketResult/>",),
+        headers={"Content-Length": "19"},
+    )
+    captured_rows = []
+
+    def _capture(service_id, rows, process_context=None):
+        captured_rows.extend(rows)
+
+    with patch.object(telemetry_proxy._SESSION, "request", return_value=ctx):
+        with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
+            async with aiohttp.ClientSession() as s:
+                url = (
+                    f"{proxy_server.proxy_endpoint()}/bucket"
+                    "?list-type=2&prefix=raw%2F&start-after=raw%2F2026-06-08%2F"
+                )
+                async with s.get(
+                    url,
+                    headers={
+                        "X-Fos-Target": "bucket.s3.amazonaws.com",
+                        "X-Telemetry-Service-Id": "test-svc",
+                        "X-Telemetry-Caller": "ingest_scan",
+                    },
+                ) as resp:
+                    await resp.read()
+            telemetry_proxy._flush_log_writes_for_tests()
+
+    assert len(captured_rows) == 1
+    row = captured_rows[0]
+    assert row["service"] == "FOS"
+    assert row["method"] == "LIST_OBJECTS_V2", row["method"]
+    # The raw query string is preserved in path for forensic queries.
+    assert "list-type=2" in row["path"]
+
+
+async def test_proxy_keeps_get_for_non_list_fos_reads(proxy_server):
+    """Guardrail for the LIST translation: a plain object GET (no
+    ``list-type=`` query) must stay ``GET`` so it lands in Class B."""
+    ctx, _ = _mock_upstream(chunks=(b"x" * 32,), headers={"Content-Length": "32"})
+    captured_rows = []
+
+    def _capture(service_id, rows, process_context=None):
+        captured_rows.extend(rows)
+
+    with patch.object(telemetry_proxy._SESSION, "request", return_value=ctx):
+        with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    f"{proxy_server.proxy_endpoint()}/bucket/key.parquet?versionId=abc",
+                    headers={
+                        "X-Fos-Target": "bucket.s3.amazonaws.com",
+                        "X-Telemetry-Service-Id": "test-svc",
+                        "X-Telemetry-Caller": "duckdb.httpfs",
+                    },
+                ) as resp:
+                    await resp.read()
+            telemetry_proxy._flush_log_writes_for_tests()
+
+    assert len(captured_rows) == 1
+    assert captured_rows[0]["method"] == "GET", captured_rows[0]["method"]
+
+
 async def test_proxy_encodes_xcache_chain_in_details_for_shield_doubling(proxy_server):
     """The downstream shield-egress doubling at metadata_db.py:1113 reads
     the first `· `-separated chunk of details and looks for `MISS, MISS`

@@ -695,9 +695,14 @@ def get_connection(
 ) -> duckdb.DuckDBPyConnection:
     """Create a configured DuckDB connection.
 
-    When read_only=True, multiple processes can share the database file.
-    When read_only=False (default), only one process can have a connection.
+    ``read_only`` is accepted for API compatibility but always overridden
+    to False.  Within a single process DuckDB shares the database instance
+    across connections, so mixing ``read_only=True`` (pool / API) with
+    ``read_only=False`` (cron writes) raises "different configuration".
+    Using False everywhere avoids the conflict; concurrent reads are still
+    safe because DuckDB serialises via its internal WAL.
     """
+    read_only = False
     src = source or _DEFAULT_SOURCE
 
     # Use per-source duckdb_path if present, fall back to global DUCKDB_PATH

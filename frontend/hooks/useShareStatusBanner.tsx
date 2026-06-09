@@ -25,7 +25,12 @@ export function useShareStatusBanner({ enabled }: Options) {
     let cancelled = false
     const tick = async () => {
       try {
-        const { data, response } = await client.GET('/api/admin/share/status' as any, {})
+        // Use the lean /api/admin/share/banner endpoint (~80B) instead of
+        // /status (~11KB). The banner only needs sharing_active +
+        // public_url; the full status response carries services / invites
+        // / sessions / audit_logs / telemetry that the banner never reads
+        // and the poll runs every 15s on every page with AppLayout.
+        const { data, response } = await client.GET('/api/admin/share/banner' as any, {})
         if (cancelled) return
         if (!response.ok) return
         const body = data as any

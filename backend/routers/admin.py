@@ -7,7 +7,8 @@ import queue
 import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from backend.deps import get_service_id, get_source
 from backend.models.admin import (
@@ -51,22 +52,49 @@ class _QueueFile:
         return self.offset
 
 
+class ClientDisconnected(Exception):
+    """Raised when the client disconnects during a streaming response."""
+
+    pass
+
+
+class _AbortableQueue(queue.Queue):
+    def __init__(self, maxsize=0):
+        super().__init__(maxsize)
+        self.aborted = False
+
+    def put(self, item, block=True, timeout=None):
+        if self.aborted:
+            if item is None:
+                return
+            raise ClientDisconnected("Client disconnected during streaming")
+        super().put(item, block, timeout)
+
+
 def _stream_from_worker(worker):
     """Run *worker(q)* in a daemon thread and yield the bytes it puts into the queue."""
     import contextvars
     import threading
 
-    q: queue.Queue = queue.Queue(maxsize=10)
+    q: _AbortableQueue = _AbortableQueue(maxsize=10)
     # Copy the request's context (process_context, _CALLS list) so any
     # record_call() inside the worker thread lands in the same _usage_log batch.
     ctx = contextvars.copy_context()
     thread = threading.Thread(target=lambda: ctx.run(worker, q), daemon=True)
     thread.start()
-    while True:
-        chunk = q.get()
-        if chunk is None:
-            break
-        yield chunk
+    try:
+        while True:
+            chunk = q.get()
+            if chunk is None:
+                break
+            yield chunk
+    finally:
+        q.aborted = True
+        while True:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
 
 
 def _fetch_file_to_zip(
@@ -145,12 +173,24 @@ def get_pop_locations():
     return PopLocationsResponse.with_telemetry(pops=get_pop_locations())
 
 
+class RefreshPopLocationsRequest(BaseModel):
+    token: str = Field(..., description="Fastly API key")
+
+
 @router.post("/admin/pop-locations/refresh", response_model=PopLocationsResponse)
-def refresh_pop_locations(token: str = Query(...)):
+def refresh_pop_locations(req: RefreshPopLocationsRequest | None = None, token: str | None = Query(default=None)):
     """Refresh the POP locations cache from the Fastly API."""
-    api_key = token.strip()
+    api_key = ""
+    if req is not None:
+        api_key = req.token.strip()
+
     if not api_key:
-        raise HTTPException(status_code=400, detail={"error": "api_key is required"})
+        if token is None:
+            raise HTTPException(status_code=422, detail="token is required")
+        api_key = token.strip()
+        if not api_key:
+            raise HTTPException(status_code=400, detail={"error": "api_key is required"})
+
     from backend.utils.pop_utils import fetch_pop_locations, get_pop_locations
 
     ok = fetch_pop_locations(api_key)
@@ -345,6 +385,7 @@ def download_file(
     source: dict = Depends(get_source),
     key: str = Query(default=""),
 ):
+    import posixpath
     import urllib.parse
 
     from fastapi.responses import FileResponse
@@ -354,6 +395,8 @@ def download_file(
     if not key:
         raise HTTPException(status_code=400, detail={"error": "Missing key parameter"})
 
+    key = posixpath.normpath(key)
+
     # Cross-tenant guard: a single FOS bucket can host multiple services
     # separated by per-source prefixes. The path-traversal cage below
     # bounds local cache reads, but a sibling-tenant key like
@@ -361,8 +404,11 @@ def download_file(
     # redirect for that object. Require the key to live under this
     # service's prefix before any FOS / CDN URL minting.
     src_prefix = source.get("prefix", "")
-    if src_prefix and not key.startswith(src_prefix):
-        raise HTTPException(status_code=400, detail={"error": "invalid_key"})
+    if src_prefix:
+        if not src_prefix.endswith("/"):
+            src_prefix += "/"
+        if not key.startswith(src_prefix):
+            raise HTTPException(status_code=400, detail={"error": "invalid_key"})
 
     # Security: ``os.path.join(base, key)`` returns ``key`` when
     # ``key`` is absolute, which a malicious caller exploits by passing
@@ -383,59 +429,132 @@ def download_file(
     if os.path.exists(local_path):
         return FileResponse(local_path, filename=os.path.basename(local_path))
 
-    # Record the user-initiated download as a synthetic CDN/FOS GET. The
-    # actual transfer happens browser→edge so we never see the response, but
-    # we know we *issued* one billable redirect — count it.
     from backend.utils.telemetry import record_call as _record_call
 
     cdn = source.get("cdn_url", "").rstrip("/")
     if cdn:
+        # Stream the CDN response through this server rather than 307-ing the
+        # browser to ``{cdn}/{key}?key={cdn_secret}``. The static cdn_secret
+        # is a shared bearer token; embedding it in the redirect Location
+        # leaks it into browser history, the address bar, the Referer header
+        # of any subsequent navigation, and any HTTP intermediaries. By
+        # fetching server-side with the ``x-fastly-key`` header (which the
+        # CDN VCL accepts equivalently — see backend/core/fastly/utils.py)
+        # the secret never leaves the trust boundary. See audit finding 009.
+        import time as _time
+        import urllib.request
+
+        from backend.utils.telemetry import record_cdn_call as _rcdn
+
         url = f"{cdn}/{urllib.parse.quote(key)}"
+        req = urllib.request.Request(url)
         if source.get("cdn_secret"):
-            url += f"?key={urllib.parse.quote(source['cdn_secret'])}"
-        _record_call(
-            "GET",
-            key,
-            0.0,
-            status="REDIRECT",
-            service="CDN",
-            details="user-initiated redirect (bytes unknown)",
-            caller="api:/download",
-        )
-        return RedirectResponse(url=url)
+            req.add_header("x-fastly-key", source["cdn_secret"])
+        try:
+            cdn_resp = urllib.request.urlopen(req, timeout=30)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={"error": f"cdn fetch failed: {exc}"},
+            )
+
+        content_type = cdn_resp.headers.get("Content-Type") or "application/octet-stream"
+        content_length = cdn_resp.headers.get("Content-Length")
+        filename = os.path.basename(key) or "download"
+
+        def _iter_cdn(chunk_size: int = 65536):
+            bytes_read = 0
+            t0 = _time.time()
+            cdn_headers = cdn_resp.headers
+            try:
+                while True:
+                    chunk = cdn_resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    bytes_read += len(chunk)
+                    yield chunk
+            finally:
+                try:
+                    cdn_resp.close()
+                except Exception:
+                    pass
+                try:
+                    _rcdn(
+                        "GET",
+                        key,
+                        round((_time.time() - t0) * 1000, 2),
+                        headers=cdn_headers,
+                        bytes_count=bytes_read,
+                        caller="api:/download",
+                    )
+                except Exception:
+                    pass
+
+        headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+        }
+        if content_length:
+            headers["Content-Length"] = content_length
+        return StreamingResponse(_iter_cdn(), media_type=content_type, headers=headers)
 
     fos_client = _get_fos_client(source)
-    url = fos_client.generate_presigned_url(
-        ClientMethod="get_object",
-        Params={"Bucket": source["bucket"], "Key": key},
-        ExpiresIn=3600,
-    )
-    _record_call(
-        "GET_OBJECT",
-        f"{source['bucket']}/{key}",
-        0.0,
-        status="REDIRECT",
-        service="FOS",
-        details="presigned URL · Class B · bytes unknown",
-        caller="api:/download",
-    )
-    return RedirectResponse(url=url)
+    import time as _time
+
+    try:
+        t0 = _time.time()
+        obj = fos_client.get_object(Bucket=source["bucket"], Key=key)
+        _record_call(
+            "GET_OBJECT",
+            f"{source['bucket']}/{key}",
+            round((_time.time() - t0) * 1000, 2),
+            status="SUCCESS",
+            service="FOS",
+            details="download stream · Class B",
+            caller="api:/download",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": f"FOS fetch failed: {exc}"},
+        )
+
+    body = obj["Body"]
+    content_type = obj.get("ContentType") or "application/octet-stream"
+    content_length = obj.get("ContentLength")
+    filename = os.path.basename(key) or "download"
+
+    def _iter_fos(chunk_size: int = 65536):
+        try:
+            yield from body.iter_chunks(chunk_size)
+        finally:
+            try:
+                body.close()
+            except Exception:
+                pass
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "private, no-store",
+    }
+    if content_length:
+        headers["Content-Length"] = str(content_length)
+
+    return StreamingResponse(_iter_fos(), media_type=content_type, headers=headers)
 
 
 @router.get("/download-all")
 def download_all_files(
-    service_id: str = Query(default=""),
+    source: dict = Depends(get_source),
     include: str = Query(default="all"),
 ):
 
     from backend.core import duckdb as _db
 
+    src = source
+    service_id = src.get("name", "")
     if not service_id:
         raise HTTPException(status_code=400, detail={"error": "service_id required"})
-
-    src = _db.get_source_for_service(service_id)
-    if not src:
-        raise HTTPException(status_code=404, detail={"error": "service not found"})
 
     def zip_worker(q: queue.Queue):
         # process_context_scope (not set_process_context) so the fsspec
@@ -463,8 +582,13 @@ def download_all_files(
                             zf.write(db_path, os.path.basename(db_path))
 
                         cache_dir = _db._cache_dir(src)
-                        if os.path.exists(cache_dir):
-                            for root, _, files in os.walk(cache_dir):
+                        walk_dir = (
+                            os.path.join(cache_dir, src.get("prefix", "").lstrip("/"))
+                            if src.get("prefix")
+                            else cache_dir
+                        )
+                        if os.path.exists(walk_dir):
+                            for root, _, files in os.walk(walk_dir):
                                 for file in files:
                                     file_path = os.path.join(root, file)
                                     arcname = os.path.relpath(file_path, cache_dir)
