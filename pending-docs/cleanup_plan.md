@@ -11,7 +11,7 @@ The `performance-improvement` branch (129 commits, +17,886/-2,561 across 159 fil
 - **Telemetry was Phase 1 of the perf remediation, not Phase 0 of the product.** A query-heavy analytics app shipped without per-section timings, query attribution, or a load harness. Every regression became archaeology.
 - **Three query layers** (`backend/routers/` → `backend/repositories/` → `backend/core/`) with SQL leaking across all three. Single largest file is `backend/core/iceberg.py` at 4,232 lines.
 - **Five storage tiers stitched together** (live buffer, Parquet, Iceberg, local compaction, rollups). The F3 wedge (Iceberg view-rebuild holding `_Pool.acquire`'s `_cond` lock) was a layering bug between two subsystems that should never have shared a lock.
-- **Composite endpoints landed additive.** The granular endpoints they replace are still wired into the UI (see `local-docs/performance_remediation_remaining.md §1`).
+- **Composite endpoints landed additive.** The granular endpoints they replace are still wired into the UI (see `pending-docs/performance_remediation_remaining.md §1`).
 - **Tenancy was retrofitted, not designed.** Writer contention between cron and API, cross-tenant remediation, service-scope desync on path-params, per-service slug rollup view names, and a security-load-bearing private attribute in [deps.py:84](../backend/deps.py#L84) that exists because FastAPI converts primitive-typed dep params into query params.
 - **Middleware ordering keeps biting.** [main.py:434-501](../backend/main.py#L434-L501) carries paragraph-long comments documenting a 2026-06-09 audit. No invariant test.
 - **Frontend hydration/preload is a war of attrition.** Hidden-Plotly pre-warm, MapLibre `styledata` swap, LazyMount `visible=false`, per-page modulepreload vs dynamic import, route prefetch chips — all symptoms of not having decided RSC/CSR/code-split up front.
@@ -68,7 +68,7 @@ The `performance-improvement` branch (129 commits, +17,886/-2,561 across 159 fil
 
 | Dimension | Target |
 |---|---|
-| Cold-path p95, 36M rows / 1h, Iceberg-committed | ≤ 2.8s (matches `local-docs/performance_load_test_plan.md` §0.2) |
+| Cold-path p95, 36M rows / 1h, Iceberg-committed | ≤ 2.8s (matches `pending-docs/performance_load_test_plan.md` §0.2) |
 | Warm-path p50, 36M rows / 1h | ≤ 1.9s |
 | Backend Python LOC | -18% (from 54,070 to ≤ 44,300) |
 | Backend files > 2,500 lines | 0 (today: 4 — iceberg, metadata_db, scheduler, session_scoring router) |
@@ -155,7 +155,7 @@ Approximate phase sizing (hours, not days):
   - `05-frontend-rendering-boundary.md` — per-route RSC vs CSR rules, code-split policy, prefetch policy.
 - **0.3** Baseline metrics dump (script in `scripts/baseline_metrics.sh`):
   - `cloc backend/` + `wc -l backend/**/*.py` snapshot
-  - Load-harness run (cold + warm, 36M rows / 1h, per `local-docs/performance_load_test_plan.md`)
+  - Load-harness run (cold + warm, 36M rows / 1h, per `pending-docs/performance_load_test_plan.md`)
   - Middleware order dump from a `print()` at boot
   - File-touch count for a representative widget add (manual count)
   - Coverage baseline: `pytest --cov=backend --cov=frontend` → record per-module %
@@ -406,7 +406,7 @@ Pre-cutover checklist:
 
 **Goal:** Backend granular endpoints replaced with composites, frontend swaps to composites, dead code removed — all in one deploy. **No deprecation shims.** External integrators who haven't migrated get 404s; they were warned 24–48h ahead.
 
-- **8.1** Execute frontend swaps from `local-docs/performance_remediation_remaining.md §1` — every granular call replaced with its composite.
+- **8.1** Execute frontend swaps from `pending-docs/performance_remediation_remaining.md §1` — every granular call replaced with its composite.
 - **8.2** Delete granular endpoints. Verified internal usage via grep on `frontend/`; external usage was warned to migrate.
 - **8.3** Drop `_meta_con` parallel path from [deps.py:233](../backend/deps.py#L233). The Phase 4 storage carve-up means metadata queries no longer pay the Iceberg view cost.
 - **8.4** Drop `is_cached`/`_is_cached` Pydantic alias on `BaseResponse` (commit 571810b workaround). Pick one canonical name.
