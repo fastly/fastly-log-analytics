@@ -72,7 +72,19 @@ classDiagram
 ```python
 import sqlite3
 import os
+import tenacity
 from contextlib import contextmanager
+
+# Standardized retry policy for SQLite "database is locked" / OperationalError
+# under WAL contention (concurrent cron writers + API writers).
+# Per Phase 3.5a of cleanup_plan.md (tenacity adoption).
+sync_db_retry = tenacity.retry(
+    retry=tenacity.retry_if_exception_type(sqlite3.OperationalError),
+    stop=tenacity.stop_after_attempt(5),
+    wait=tenacity.wait_exponential(multiplier=0.1, min=0.1, max=1.0),
+    reraise=True,
+)
+
 
 class BaseMetadataDB:
     def __init__(self, db_path: str):
@@ -81,7 +93,18 @@ class BaseMetadataDB:
 
     @contextmanager
     def connection(self):
-        con = sqlite3.connect(self.db_path)
+        """Synchronous connection context manager.
+
+        All metadata mixin methods are sync. FastAPI's threadpool dispatches
+        sync route handlers off the event loop already, so there is no
+        measurable win from rewriting these as `async def + await aiosqlite`
+        (which itself just wraps sync sqlite3 in a thread). Any future async
+        caller uses `await asyncio.to_thread(self.<method>, ...)`.
+
+        Decided in planning round: aiosqlite is scoped to `rdns_cache.py`
+        only (its flow is already async via aiodns + asyncio.gather).
+        """
+        con = sqlite3.connect(self.db_path, timeout=5.0)
         con.execute("PRAGMA journal_mode=WAL;")
         con.execute("PRAGMA foreign_keys=ON;")
         try:
@@ -96,37 +119,68 @@ class BaseMetadataDB:
 
 #### `backend/core/metadata/alerts.py`
 ```python
-from backend.core.metadata.base import BaseMetadataDB
+from backend.core.metadata.base import BaseMetadataDB, sync_db_retry
 from typing import List, Dict, Any
 
 class AlertsMixin(BaseMetadataDB):
+    @sync_db_retry
     def create_alert(self, service_id: str, alert_config: dict) -> str:
+        """Synchronous insert with tenacity retry on SQLite busy/locked.
+
+        FastAPI sync routes dispatch to the threadpool; this does not block
+        the event loop. Async routes (if any in v2.0) call via
+        `await asyncio.to_thread(metadata.create_alert, service_id, cfg)`.
+        """
         with self.connection() as con:
-            # Alert insertion SQL
-            pass
-            
+            cur = con.execute(
+                "INSERT INTO alerts (service_id, config) VALUES (?, ?);",
+                (service_id, alert_config),
+            )
+            con.commit()
+            return str(cur.lastrowid)
+
     def list_alerts(self, service_id: str) -> List[Dict[str, Any]]:
+        """Read path — no retry decorator (reads don't take the write lock)."""
         with self.connection() as con:
-            # Fetch alerts SQL
-            pass
+            cur = con.execute(
+                "SELECT id, config FROM alerts WHERE service_id = ?;",
+                (service_id,),
+            )
+            return [{"id": r[0], "config": r[1]} for r in cur.fetchall()]
 ```
 
 #### `backend/core/metadata/ingest_log.py`
 ```python
-from backend.core.metadata.base import BaseMetadataDB
+from backend.core.metadata.base import BaseMetadataDB, sync_db_retry
 from typing import List, Tuple
 
 class IngestLogMixin(BaseMetadataDB):
+    @sync_db_retry
     def record_in_flight(self, source_name: str, buf_filename: str, file_rows: int):
+        """
+        Synchronous transactional logging for cron jobs.
+        Retries automatically on sqlite3.OperationalError locks via tenacity.
+        """
         with self.connection() as con:
-            # Write in-flight manifest SQL
-            pass
+            con.execute(
+                "INSERT INTO ingest_in_flight (source_name, filename, rows) VALUES (?, ?, ?);",
+                (source_name, buf_filename, file_rows)
+            )
+            con.commit()
 
+    @sync_db_retry
     def insert_ingested_files(self, files: List[Tuple[str, int, int]]):
+        """
+        Bulk insert of ingested files under transactional retry protection.
+        """
         with self.connection() as con:
-            # Commit ingested files SQL
-            pass
+            con.executemany(
+                "INSERT OR REPLACE INTO ingested_files (filename, rows, bytes) VALUES (?, ?, ?);",
+                files
+            )
+            con.commit()
 ```
+
 
 ---
 
