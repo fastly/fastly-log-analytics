@@ -42,9 +42,11 @@ export default function ShareDashboardPage() {
       return data as ShareStatus
     },
     refetchInterval: 10_000,
-    // Treat as fresh for 5s so the hover-prefetch immediately preceding
-    // a click is reused, but live polling stays at 10s.
-    staleTime: 5_000,
+    // 30s staleTime so the hover-prefetch from the /admin PageHeader chip
+    // is reused on click even when the user lingers on hover. Live
+    // polling still ticks at 10s while the page is open; staleTime only
+    // affects the initial mount-time decision to refetch vs. use cache.
+    staleTime: 30_000,
   })
   const refresh = React.useCallback(async () => {
     await refetch()

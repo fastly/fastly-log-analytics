@@ -9,7 +9,7 @@ import re
 import urllib.error
 import urllib.request
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from backend.utils.router_utils import SSE_HEADERS as _SSE_HEADERS
@@ -178,8 +178,22 @@ def provision_check_fos(
         return {"ok": False, "error": err_msg, "_debug_calls": get_tracked_calls()}
 
 
-@router.post("/teardown")
-def provision_teardown(body: dict | None = None):
+def _require_json_content_type(req: Request) -> None:
+    """Reject any teardown request whose Content-Type isn't application/json.
+
+    CSRF defense: an HTML form with ``enctype=text/plain`` can POST a body
+    that LOOKS like JSON without triggering a CORS preflight. Requiring
+    ``Content-Type: application/json`` forces the browser to preflight any
+    cross-origin call (text/plain is "simple"; application/json is not),
+    blocking the silent-invocation vector. Runs as a Depends() so it fires
+    before FastAPI's body parser — otherwise a malformed text/plain body
+    returns 422 from the parser and the explicit 415 never executes."""
+    if not (req.headers.get("content-type") or "").startswith("application/json"):
+        raise HTTPException(status_code=415, detail="Unsupported Media Type")
+
+
+@router.post("/teardown", dependencies=[Depends(_require_json_content_type)])
+def provision_teardown(req: Request, body: dict | None = None):
     """Destructive service teardown over SSE.
 
     Switched from ``GET`` to ``POST`` to defend against CSRF: a GET
@@ -392,29 +406,54 @@ def provision_lake_info(
     return fetch_lake_info(src, use_temp_cache=True)
 
 
-@router.get("/execute")
-def provision_execute(
-    token: str = Query(...),
-    service_id: str = Query(...),
-    service_name: str | None = Query(default=None),
-    endpoint_name: str = Query(default="Fastly Object Storage Logs"),
-    fos_region: str = Query(default="us-east-1"),
-    fos_bucket_name: str = Query(...),
-    fos_prefix: str = Query(default=""),
-    sample_rate: str = Query(default="100"),
-    edge_only: bool = Query(default=True),
-    custom_condition: str | None = Query(default=None),
-    log_period: str = Query(default="1 minute"),
-    cdn_service_name: str | None = Query(default=None),
-    cdn_url: str | None = Query(default=None),
-    cdn_shield: str = Query(default="none"),
-    enable_cron_sync: bool = Query(default=True),
-    delete_after: bool = Query(default=True),
-    commit_interval_mins: int = Query(default=5),
-    enable_cron_compact: bool = Query(default=True),
-    log_retention_days: int = Query(default=30),
-    log_fields: str | None = Query(default=None),
-):
+from pydantic import BaseModel
+
+
+class ProvisionExecuteRequest(BaseModel):
+    token: str
+    service_id: str
+    service_name: str | None = None
+    endpoint_name: str = "Fastly Object Storage Logs"
+    fos_region: str = "us-east-1"
+    fos_bucket_name: str
+    fos_prefix: str = ""
+    sample_rate: str = "100"
+    edge_only: bool = True
+    custom_condition: str | None = None
+    log_period: str = "1 minute"
+    cdn_service_name: str | None = None
+    cdn_url: str | None = None
+    cdn_shield: str = "none"
+    enable_cron_sync: bool = True
+    delete_after: bool = True
+    commit_interval_mins: int = 5
+    enable_cron_compact: bool = True
+    log_retention_days: int = 30
+    log_fields: str | None = None
+
+
+@router.post("/execute")
+def provision_execute(req: ProvisionExecuteRequest):
+    token = req.token
+    service_id = req.service_id
+    service_name = req.service_name
+    endpoint_name = req.endpoint_name
+    fos_region = req.fos_region
+    fos_bucket_name = req.fos_bucket_name
+    fos_prefix = req.fos_prefix
+    sample_rate = req.sample_rate
+    edge_only = req.edge_only
+    custom_condition = req.custom_condition
+    log_period = req.log_period
+    cdn_service_name = req.cdn_service_name
+    cdn_url = req.cdn_url
+    cdn_shield = req.cdn_shield
+    enable_cron_sync = req.enable_cron_sync
+    delete_after = req.delete_after
+    commit_interval_mins = req.commit_interval_mins
+    enable_cron_compact = req.enable_cron_compact
+    log_retention_days = req.log_retention_days
+    log_fields = req.log_fields
     import secrets
 
     from backend.core import duckdb as _db
@@ -672,6 +711,10 @@ def provision_ingest(body: dict):
         except Exception:
             pass
 
+    from backend.utils.fastly_auth import validate_destructive_token
+
+    validate_destructive_token(token, service_id=state.get("logging_service_id") or "")
+
     write_service_config(state)
 
     try:
@@ -813,7 +856,11 @@ def provision_check_config(
 
 
 @router.get("/ngwaf-workspaces")
-def provision_ngwaf_workspaces(service_id: str = Query(...), token: str = Query(default="")):
+def provision_ngwaf_workspaces(
+    service_id: str = Query(...),
+    token: str = Query(default=""),
+    authorization: str | None = Header(default=None),
+):
     """List NGWAF workspaces for a service.
 
     Security: previously the endpoint would silently fall back to
@@ -829,14 +876,15 @@ def provision_ngwaf_workspaces(service_id: str = Query(...), token: str = Query(
     Either way an unauthenticated caller can't enumerate workspaces
     even if they reach the loopback admin surface.
     """
-    import hmac
     import urllib.error
 
-    from backend import config as svcconfig
     from backend.provision import fastly
     from backend.utils.fastly_auth import validate_destructive_token
 
-    token = token.strip()
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[len("bearer ") :].strip()
+    else:
+        token = token.strip()
     if not token:
         raise HTTPException(
             status_code=401,
@@ -845,12 +893,11 @@ def provision_ngwaf_workspaces(service_id: str = Query(...), token: str = Query(
                 "message": "A Fastly API token is required to list NGWAF workspaces.",
             },
         )
-    stored = (svcconfig.get_fastly_api_key(service_id) or "").strip()
-    matches_stored = bool(stored) and hmac.compare_digest(token, stored)
-    if not matches_stored:
-        # The validator raises HTTPException(401) on scope / service /
-        # network failures, which is the right user-visible behavior.
-        validate_destructive_token(token, service_id=service_id)
+    # Secure token validation: we must always run validate_destructive_token
+    # to verify that the token holds the necessary 'global' scope and is
+    # authorized for this tenant's service. This prevents read-only token
+    # bypasses, even if the token matches the server-stored fastly_api_key.
+    validate_destructive_token(token, service_id=service_id)
 
     from backend.utils.router_utils import format_debug_request
 
@@ -914,7 +961,12 @@ def provision_ngwaf_workspaces(service_id: str = Query(...), token: str = Query(
 
 
 @router.patch("/services/{service_id}/ngwaf-workspace")
-def provision_set_ngwaf_workspace(service_id: str, body: dict, token: str = Query(default="")):
+def provision_set_ngwaf_workspace(
+    service_id: str,
+    body: dict,
+    token: str = Query(default=""),
+    authorization: str | None = Header(default=None),
+):
     """Persist the NGWAF workspace ID for a service and reload the scheduler.
 
     Security: require the caller to present a Fastly token bound to
@@ -930,7 +982,6 @@ def provision_set_ngwaf_workspace(service_id: str, body: dict, token: str = Quer
     rebind the workspace because they don't know the token. The middleware
     /api/provision/ block also gates this for analysts.
     """
-    import hmac
 
     from backend import config as svcconfig
     from backend.utils.fastly_auth import validate_destructive_token
@@ -939,7 +990,10 @@ def provision_set_ngwaf_workspace(service_id: str, body: dict, token: str = Quer
     if not cfg:
         raise HTTPException(status_code=404, detail={"error": "Service not found"})
 
-    token = (token or "").strip()
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[len("bearer ") :].strip()
+    else:
+        token = (token or "").strip()
     stored = (cfg.get("fastly_api_key") or "").strip()
     if not token:
         raise HTTPException(
@@ -947,14 +1001,11 @@ def provision_set_ngwaf_workspace(service_id: str, body: dict, token: str = Quer
             detail={"error": "token_required", "message": "A Fastly API token is required."},
         )
 
-    # Fast path: caller presented the stored key. Constant-time compare so
-    # we don't leak the stored value via timing.
-    matches_stored = bool(stored) and hmac.compare_digest(token, stored)
-    if not matches_stored:
-        # Fall back to the strict scope-validation path. validate_destructive_token
-        # raises HTTPException(401) on any failure (missing/insufficient scope,
-        # service mismatch, Fastly unreachable).
-        validate_destructive_token(token, service_id=service_id)
+    # Secure token validation: we must always run validate_destructive_token
+    # to verify that the token holds the necessary 'global' scope and is
+    # authorized for this tenant's service. This prevents read-only token
+    # bypasses, even if the token matches the server-stored fastly_api_key.
+    validate_destructive_token(token, service_id=service_id)
 
     workspace_id = (body.get("ngwaf_workspace_id") or "").strip() or None
     cfg["ngwaf_workspace_id"] = workspace_id

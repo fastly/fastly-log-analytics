@@ -16,6 +16,7 @@ def get_cron_logs(
     per_page: int = 50,
     sort_col: str = "started_at",
     sort_dir: str = "DESC",
+    since_id: int | None = None,
 ) -> tuple[int, list[dict]]:
     return metadata_db.get_cron_runs(
         service_id,
@@ -25,6 +26,7 @@ def get_cron_logs(
         per_page=per_page,
         sort_col=sort_col,
         sort_dir=sort_dir,
+        since_id=since_id,
     )
 
 

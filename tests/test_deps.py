@@ -292,8 +292,10 @@ def test_connection_holder_pool_path_skipped_when_skip_view_update():
     from backend.core import duckdb_pool
 
     fake_con = MagicMock()
-    with patch.object(duckdb_pool, "checkout_connection") as mock_checkout, \
-         patch("backend.deps.get_connection", return_value=fake_con) as mock_get:
+    with (
+        patch.object(duckdb_pool, "checkout_connection") as mock_checkout,
+        patch("backend.deps.get_connection", return_value=fake_con) as mock_get,
+    ):
         holder = deps._ConnectionHolder({"name": "x"}, skip_view_update=True)
         holder.__enter__()
         mock_checkout.assert_not_called()

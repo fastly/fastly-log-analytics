@@ -190,18 +190,18 @@ def test_execute_delegates_to_provision_with_query_args(isolated_configs_dir):
         patch("backend.scheduler.get_scheduler"),
     ):
         with TestClient(app) as client:
-            r = client.get(
+            r = client.post(
                 "/api/provision/execute",
-                params={
+                json={
                     "token": "test-token",
                     "service_id": sid,
                     "fos_bucket_name": "create-test-bucket",
                     "fos_region": "us-east-1",
                     "endpoint_name": "Test Logger",
-                    "edge_only": "true",
+                    "edge_only": True,
                     "log_period": "60",
-                    "enable_cron_sync": "true",
-                    "enable_cron_compact": "true",
+                    "enable_cron_sync": True,
+                    "enable_cron_compact": True,
                 },
             )
 
@@ -231,9 +231,9 @@ def test_execute_propagates_orchestrator_error_event(isolated_configs_dir):
         patch("backend.config.fetch_service_name", return_value="x"),
     ):
         with TestClient(app) as client:
-            r = client.get(
+            r = client.post(
                 "/api/provision/execute",
-                params={
+                json={
                     "token": "tok",
                     "service_id": "svc-create-err",
                     "fos_bucket_name": "create-err-bucket",  # valid: ≥3 chars

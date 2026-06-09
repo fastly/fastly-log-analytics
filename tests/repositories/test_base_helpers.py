@@ -463,6 +463,85 @@ def test_queryrunner_execute_with_retry_reraises_non_stale_errors():
         con.close()
 
 
+def test_queryrunner_execute_clears_view_cache_before_force_rebuild(monkeypatch):
+    """Regression for the 2026-06-05 prod incident: dashboard surfaced
+    ``No files found ... batch_0398ac66102f151b.parquet`` for ~30 min.
+
+    Root cause: ``QueryRunner.execute`` self-heal called
+    ``update_iceberg_view(force=True)`` without first calling
+    ``clear_source_caches``. When the per-service lock is contended (the
+    every-10s sync cron holds it) the force-rebuild's 5 s lock-acquire
+    times out and falls back to executing the cached view SQL — which
+    is the STALE SQL that referenced the missing buffer. The retry then
+    re-binds the same dead paths and re-raises the same IOException.
+
+    This test pins the ordering: ``clear_source_caches`` MUST be called
+    before ``update_iceberg_view`` so the lock-timeout fallback sees an
+    empty ``_view_cache`` and falls through to persistent-view /
+    extended-wait paths.
+    """
+    from backend.core import iceberg as db_iceberg
+
+    call_order: list[str] = []
+
+    def _track_clear(name, *, keep_snapshot_cache=False):
+        call_order.append(f"clear_source_caches(name={name},keep_snapshot_cache={keep_snapshot_cache})")
+
+    def _track_update(con, src, *args, force=False, **kwargs):
+        call_order.append(f"update_iceberg_view(force={force})")
+
+    monkeypatch.setattr(db_iceberg, "clear_source_caches", _track_clear)
+    monkeypatch.setattr(db_iceberg, "update_iceberg_view", _track_update)
+
+    con = duckdb.connect(":memory:")
+    try:
+        runner = QueryRunner(con, src={"name": "svc-stale"})
+
+        # Force the first ``con.execute`` to raise a stale-view error so
+        # the self-heal path runs. Pre-create a real table so the RETRY
+        # succeeds — that lets the test reach the assertion instead of
+        # exploding on the second execute. DuckDB's PyConnection.execute
+        # is read-only at the C level, so we wrap the connection in a
+        # proxy object and swap it into the runner.
+        con.execute("CREATE TABLE retry_target (x INT)")
+        con.execute("INSERT INTO retry_target VALUES (1)")
+
+        raise_once = {"done": False}
+
+        class _ProxyCon:
+            def __init__(self, real):
+                self._real = real
+
+            def execute(self, q, p=None):
+                if not raise_once["done"] and "retry_target" in q:
+                    raise_once["done"] = True
+                    raise Exception(
+                        'IO Error: No files found that match the pattern "cache/fos-test/buffer/batch_dead.parquet"'
+                    )
+                return self._real.execute(q, p if p is not None else [])
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        runner.con = _ProxyCon(con)
+
+        # Should self-heal and succeed on retry.
+        result = runner.execute("SELECT x FROM retry_target").fetchone()
+        assert result == (1,), "retry should have produced the real row"
+
+        assert call_order == [
+            "clear_source_caches(name=svc-stale,keep_snapshot_cache=True)",
+            "update_iceberg_view(force=True)",
+        ], (
+            "clear_source_caches MUST be called before update_iceberg_view, "
+            "with keep_snapshot_cache=True (matches the duckdb.py:1284 "
+            "self-heal pattern). Reordering or omitting the clear call "
+            f"reintroduces the 2026-06-05 prod hang. Got: {call_order}"
+        )
+    finally:
+        con.close()
+
+
 # ── get_source_extent: status-cache fallback ──────────────────────────────
 
 

@@ -168,6 +168,7 @@ def _pack_payload(state: SessionState) -> bytes:
     if state.v == 1:
         return head
     path_bytes = state.prev_route_path.encode("utf-8")[:PREV_ROUTE_MAX_BYTES]
+    path_bytes = path_bytes.decode("utf-8", errors="ignore").encode("utf-8")
     return head + bytes([len(path_bytes)]) + path_bytes
 
 

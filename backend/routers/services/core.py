@@ -141,7 +141,7 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
         for _line in _sse_flush():
             yield _line
         while True:
-            evs = get_progress(run_id, last_idx)
+            evs = get_progress(run_id, last_idx, service_id=service_id)
             if evs is None:
                 if last_idx == 0:
                     # Fall back to SQLite database if progress cache doesn't have it (completed / historical)

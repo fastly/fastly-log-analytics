@@ -57,13 +57,16 @@ def test_status_returns_disabled_when_no_scoring_block(client, with_config):
     with_config[LOG_SVC] = {"service_id": LOG_SVC}
     r = client.get(f"/api/services/{LOG_SVC}/scoring/status")
     assert r.status_code == 200
-    assert r.json() == {"enabled": False}
+    # M1 telemetry middleware injects _debug_queries / _debug_calls / _is_cached
+    # into plain-dict responses when DEBUG_RESPONSES is set (it is in tests).
+    # Assert the meaningful keys instead of full equality.
+    assert r.json()["enabled"] is False
 
 
 def test_status_returns_disabled_when_block_present_but_false(client, with_config):
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": False}}
     r = client.get(f"/api/services/{LOG_SVC}/scoring/status")
-    assert r.json() == {"enabled": False}
+    assert r.json()["enabled"] is False
 
 
 def test_status_returns_block_when_enabled(client, with_config):
@@ -951,7 +954,9 @@ def test_matrix_versions_list_returns_empty_when_scoring_not_enabled(client, wit
         r = client.get(f"/api/services/{LOG_SVC}/scoring/matrix-versions")
     assert r.status_code == 200
     body = r.json()
-    assert body == {"versions": [], "current_version": None}
+    # M1 backstop adds _debug_* keys; check meaningful fields explicitly.
+    assert body["versions"] == []
+    assert body["current_version"] is None
 
 
 def test_matrix_versions_list_empty_history_returns_current_version(client, with_config):
@@ -1360,7 +1365,10 @@ def test_scoring_enforce_threshold_get_returns_unset_when_configstore_404s(clien
 
     assert r.status_code == 200
     body = r.json()
-    assert body == {"threshold": None, "enforced": False, "key": "enforce_threshold"}
+    # M1 backstop adds _debug_* keys; assert the meaningful fields explicitly.
+    assert body["threshold"] is None
+    assert body["enforced"] is False
+    assert body["key"] == "enforce_threshold"
 
 
 def test_scoring_enforce_threshold_get_returns_value_when_set(client, with_config):

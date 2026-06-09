@@ -106,12 +106,15 @@ def test_botnet_grouping_severity_threshold_at_50_ips():
     assert at_boundary["severity"] == "critical"
 
 
-def test_botnet_grouping_filters_apply_to_both_ja3_and_ja4():
-    """The fingerprint column may be either ``ja3`` or ``ja4`` depending
-    on which schema the service has; the meta filter must include both
-    so the click-through filter pill matches whichever the catalog has."""
-    out = defs.botnet_grouping_processor(("fp123", 10, 100, 5, 2.0), None, {})
-    assert out["meta"]["filters"] == {"ja3": "fp123", "ja4": "fp123"}
+def test_botnet_grouping_filters_use_actual_fp_col():
+    """The filter must use the column that was actually queried (from
+    context['fp_col']), not both ja3 and ja4 — setting both creates an
+    AND filter on the dashboard that matches nothing."""
+    out = defs.botnet_grouping_processor(("fp123", 10, 100, 5, 2.0), None, {"fp_col": "ja4"})
+    assert out["meta"]["filters"] == {"ja4": "fp123"}
+
+    out = defs.botnet_grouping_processor(("fp123", 10, 100, 5, 2.0), None, {"fp_col": "ja3"})
+    assert out["meta"]["filters"] == {"ja3": "fp123"}
 
 
 # ── new_country_traffic ─────────────────────────────────────────────────────

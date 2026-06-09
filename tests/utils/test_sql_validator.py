@@ -75,6 +75,14 @@ def test_valid_user_queries_pass(con, sql):
         ("SELECT * FROM postgres_scan('host=evil', 'public', 't')", "postgres_scan"),
         ("SELECT * FROM sqlite_scan('/tmp/x.db', 't')", "sqlite_scan"),
         ("SELECT * FROM iceberg_scan('/tmp/iceberg')", "iceberg_scan"),
+        # Regression for audit finding 014: parquet_scan / parquet_metadata
+        # / parquet_schema / parquet_kv_metadata are DuckDB aliases that
+        # bypassed the denylist before. They must be rejected for the same
+        # reason as read_parquet (arbitrary path → exfil).
+        ("SELECT * FROM parquet_scan('/etc/passwd.parquet')", "parquet_scan"),
+        ("SELECT * FROM parquet_metadata('/tmp/x.parquet')", "parquet_metadata"),
+        ("SELECT * FROM parquet_schema('/tmp/x.parquet')", "parquet_schema"),
+        ("SELECT * FROM parquet_kv_metadata('/tmp/x.parquet')", "parquet_kv_metadata"),
     ],
 )
 def test_blocked_functions_rejected(con, sql, blocked_function):
@@ -352,3 +360,48 @@ def test_escape_rejects_non_string():
         escape_sql_literal(42)
     with pytest.raises(TypeError):
         escape_sql_literal(None)
+
+
+# ── REGRESSION TESTS: BATCH B Hardening ─────────────────────────────────────
+
+
+def test_query_table_function_blocked(con):
+    """Finding 010: Ensure query() table function is blocked."""
+    sql = "SELECT * FROM query('SELECT * FROM duckdb_secrets()')"
+    with pytest.raises(SQLValidationError) as exc:
+        validate_user_sql(sql, parser_con=con)
+    assert exc.value.reason == "function_denylist:query"
+
+
+def test_has_limit_clause_strictly_outermost(con):
+    """Finding 011: Ensure LIMIT clauses inside subqueries are ignored for outer limit wrapping."""
+    from backend.utils.sql_validator import has_limit_clause
+
+    # Limit nested in subquery
+    nested_sql = "SELECT * FROM range(10) a CROSS JOIN range(10) b WHERE 1 IN (SELECT 1 LIMIT 1)"
+    assert not has_limit_clause(nested_sql, parser_con=con)
+
+    # Limit on top-level SELECT
+    outer_sql = "SELECT * FROM range(10) LIMIT 5"
+    assert has_limit_clause(outer_sql, parser_con=con)
+
+
+def test_replacement_scan_blocked_by_table_name_characters(con):
+    """Finding 029: Ensure table names containing slashes, backslashes, or dots (file paths/replacement scans) are rejected."""
+    sql_slash = "SELECT * FROM '/etc/passwd'"
+    with pytest.raises(SQLValidationError) as exc:
+        validate_user_sql(sql_slash, parser_con=con)
+    assert exc.value.reason == "catalog_blocklist:table_name_path"
+
+    sql_dot = "SELECT * FROM 'data.parquet'"
+    with pytest.raises(SQLValidationError) as exc:
+        validate_user_sql(sql_dot, parser_con=con)
+    assert exc.value.reason == "catalog_blocklist:table_name_path"
+
+
+def test_query_table_function_blocked_finding_011(con):
+    """Finding 011: Ensure query_table() table function is blocked."""
+    sql = "SELECT * FROM query_table('my_table')"
+    with pytest.raises(SQLValidationError) as exc:
+        validate_user_sql(sql, parser_con=con)
+    assert exc.value.reason == "function_denylist:query_table"

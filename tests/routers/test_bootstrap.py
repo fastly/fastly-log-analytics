@@ -211,6 +211,101 @@ def test_bootstrap_includes_custom_dashboard_cards_when_configured(client, tmp_p
     assert "my_silent_field" not in card_ids
 
 
+# ── /api/bootstrap: views fold ─────────────────────────────────────────────
+
+
+def test_bootstrap_includes_saved_views_for_active_service(client, tmp_path, monkeypatch):
+    """Bootstrap folds saved views in so the frontend skips its own
+    /api/views/{service_id} round-trip on initial load. Pinned because
+    losing this key reintroduces ~50ms per page nav (one Iceberg/SQLite
+    round-trip per nav)."""
+    from backend import config
+    from backend.repositories import views as _views_repo
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+    def _fake_views(sid):
+        assert sid == MOCK_SERVICE_ID, f"bootstrap must only fetch views for the ACTIVE service. Got sid={sid!r}"
+        return [
+            {
+                "id": "v1",
+                "service_id": sid,
+                "name": "Errors",
+                "filters_json": "[]",
+                "start_time": None,
+                "end_time": None,
+                "page": "/dashboard",
+            },
+            {
+                "id": "v2",
+                "service_id": sid,
+                "name": "Slow",
+                "filters_json": "[]",
+                "start_time": None,
+                "end_time": None,
+                "page": "/dashboard",
+            },
+        ]
+
+    monkeypatch.setattr(_views_repo, "get_views", _fake_views)
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    data = response.json()
+    assert "views" in data, "bootstrap response must include 'views' key"
+    assert len(data["views"]) == 2
+    ids = {v["id"] for v in data["views"]}
+    assert ids == {"v1", "v2"}
+
+
+def test_bootstrap_views_empty_when_no_active_service(client, tmp_path, monkeypatch):
+    """No active service → no views to fold. Pinned so the views
+    fetch isn't called with None (which would crash get_views)."""
+    from backend import config
+    from backend.repositories import views as _views_repo
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+
+    get_views_calls: list = []
+    monkeypatch.setattr(
+        _views_repo,
+        "get_views",
+        lambda sid: get_views_calls.append(sid) or [],
+    )
+
+    response = client.get("/api/bootstrap")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["views"] == [], f"empty/missing active service must return [] for views, got {data.get('views')!r}"
+    assert get_views_calls == [], (
+        f"get_views must NOT be called when there's no active service; got calls={get_views_calls}"
+    )
+
+
+def test_bootstrap_views_survives_repo_error(client, tmp_path, monkeypatch):
+    """A repo error fetching views must NOT break /api/bootstrap.
+    Views are UX nicety, not correctness — degrade gracefully to
+    empty list and let ViewSelector fall back to its granular GET."""
+    from backend import config
+    from backend.repositories import views as _views_repo
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+    def _explode(sid):
+        raise RuntimeError("simulated repo failure")
+
+    monkeypatch.setattr(_views_repo, "get_views", _explode)
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200, (
+        f"bootstrap must NOT 500 when views repo fails; got status={response.status_code}"
+    )
+    data = response.json()
+    assert data["views"] == [], "views must degrade to [] on repo error, not propagate"
+
+
 # ── /api/sources ───────────────────────────────────────────────────────────
 
 
@@ -413,7 +508,11 @@ def test_dma_endpoint_falls_back_to_in_memory_map_when_no_file(client):
         response = client.get("/api/dma.json")
 
     assert response.status_code == 200
-    assert response.json() == fake_map
+    # M1 backstop adds _debug_* keys; pull out only the DMA codes (keys
+    # are 3-digit numeric strings; telemetry keys start with underscore).
+    body = response.json()
+    dma_only = {k: v for k, v in body.items() if not k.startswith("_")}
+    assert dma_only == fake_map
 
 
 def test_dma_endpoint_500s_when_in_memory_map_fails(client):

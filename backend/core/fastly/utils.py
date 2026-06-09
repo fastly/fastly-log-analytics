@@ -149,16 +149,6 @@ sub vcl_recv {
     set req.http.Fastly-Client-IP = client.ip;
   }
 
-  # Handle FASTLYPURGE natively. Without this, an unsigned purge on a
-  # cache miss is forwarded to the FOS origin, which returns 403 — and
-  # Fastly caches that 403 for the object's TTL. An attacker can poison
-  # the cache for legitimate clients by issuing purges against arbitrary
-  # keys. ``return(purge)`` short-circuits the pipeline before any
-  # backend fetch happens.
-  if (req.method == "FASTLYPURGE") {
-    return(purge);
-  }
-
   # Block requests that do not provide the correct secret key.
   # NOTE on the auth fallback: the third argument to ``table.lookup`` is
   # returned when ``cdn_auth.secret`` is absent from the edge dictionary.
@@ -184,6 +174,16 @@ sub vcl_recv {
     }
   }
 #RATELIMIT_END
+
+  # Handle FASTLYPURGE natively. Without this, an unsigned purge on a
+  # cache miss is forwarded to the FOS origin, which returns 403 — and
+  # Fastly caches that 403 for the object's TTL. An attacker can poison
+  # the cache for legitimate clients by issuing purges against arbitrary
+  # keys. ``return(purge)`` short-circuits the pipeline before any
+  # backend fetch happens.
+  if (req.method == "FASTLYPURGE") {
+    return(purge);
+  }
 
   # Enable segmented caching for potentially large log or parquet files
   set req.enable_segmented_caching = true;

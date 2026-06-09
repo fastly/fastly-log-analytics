@@ -86,6 +86,47 @@ def test_get_summary_returns_expected_keys(in_memory_duckdb, test_service_source
     assert isinstance(result["by_leg"], list)
 
 
+def test_get_summary_uses_single_scan_via_grouping_sets(in_memory_duckdb, test_service_source):
+    """Audit fix (2026-06-06): the rollup totals + per-edge breakdown
+    were previously two separate scans of the logs view (~270 ms on prod
+    1 h windows). Combined into ONE scan via GROUPING SETS ((), ("edge")),
+    cutting wall-clock roughly in half (~150 ms on prod).
+
+    This test pins the contract: ``get_summary`` must execute a SINGLE
+    scan against the logs table when the ``edge`` column is present. The
+    debug_queries list should contain exactly one query that scans the
+    logs table (plus optionally a view-bind/refresh query). If anyone
+    splits the query into two scans the test fails loudly so the audit
+    win isn't quietly lost.
+    """
+    logs = _origin_logs(test_service_source, num=50)
+    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
+
+    result = get_summary(in_memory_duckdb, test_service_source, None, None, {})
+    assert result["has_data"] is True
+    # Both the rollup totals AND the per-edge breakdown must be populated.
+    assert result["ottfb_p50_ms"] is not None
+    assert isinstance(result["by_leg"], list)
+
+    # Count queries against the logs table (exclude view-bind statements
+    # which start with CREATE OR REPLACE VIEW). The repository function
+    # surfaces queries via ``debug_queries`` key per QueryRunner convention.
+    debug_queries = result.get("debug_queries") or result.get("_debug_queries") or []
+    logs_scans = [
+        q for q in debug_queries if "logs_" in q["sql"] and not q["sql"].lstrip().upper().startswith("CREATE")
+    ]
+    assert len(logs_scans) == 1, (
+        f"get_summary must scan logs ONCE via GROUPING SETS, not multiple times. "
+        f"Got {len(logs_scans)} scan(s): {[q['sql'][:200] for q in logs_scans]}. "
+        f"If you split this back into separate rollup + per-edge queries, the "
+        f"prod wall-clock regresses from ~150ms to ~270ms per origin page load."
+    )
+    assert "GROUPING SETS" in logs_scans[0]["sql"], (
+        f"single-scan must use GROUPING SETS to combine totals + per-edge in "
+        f"one pass. Got: {logs_scans[0]['sql'][:300]}"
+    )
+
+
 # ── get_timeseries ────────────────────────────────────────────────────────────
 
 

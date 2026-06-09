@@ -161,12 +161,38 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
     """Pull rows from usage_log tagged with the current request's
     process_context since start_call_tracking() ran.
 
-    No-op unless usage logging is enabled AND the request was tagged with
-    an "api:..." process_context. Forces telemetry_proxy's coalescer to
-    flush pending rows first so iothread calls completed mid-request are
-    visible. Bounded query: typically <100 rows per request.
+    No-op unless DEBUG_RESPONSES is on (the data is only surfaced via
+    _debug_calls, which BaseResponse strips otherwise) AND usage logging
+    is enabled AND the request was tagged with an "api:..." process_context.
+    Bounded query: capped at 25 rows to keep the response body sub-2KB
+    even under cron contention where /api/sync-status?skip_fos=true would
+    otherwise see 122KB of iothread spam dragging admin nav from <500ms
+    to 5+s (item 23 / commit 5e8b795).
+
+    Visibility lag (item 24 / M5): we DO NOT block on the
+    telemetry_proxy coalescer here. Previously this called
+    `_flush_log_writes_for_tests(timeout=0.25)` to drain pending rows
+    so iothread calls completed mid-request were guaranteed visible
+    in the debug panel. Under cron contention that wait routinely
+    hit the full 250 ms ceiling — the coalescer was busy serialising
+    against cron's own usage_log writes — and a few of those per
+    admin nav stacked to 500 ms - 5 s of extra wall time. Removing
+    the wait trades up to one batch interval (~100 ms,
+    `_LOG_BATCH_MAX_INTERVAL_S`) of visibility for iothread calls
+    that completed in the very last slice of the request: those
+    calls land in usage_log AFTER this SELECT, so they won't
+    appear in this request's debug panel. They are still recorded
+    correctly (tagged with this request's process_context) and
+    surface in the Admin → Usage Log page for post-hoc inspection.
     """
     try:
+        # Gate on DEBUG_RESPONSES — when off, BaseResponse strips
+        # _debug_calls anyway, so the SQLite scan is pure overhead.
+        from backend.models.common import _debug_responses_enabled
+
+        if not _debug_responses_enabled():
+            return []
+
         start_ts = _REQUEST_START_TS.get()
         if start_ts is None:
             return []
@@ -182,16 +208,6 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
         if not sid:
             return []
 
-        # Drain the telemetry_proxy coalescer so anything submitted before
-        # we query is actually in SQLite. 250ms ceiling — we'd rather show
-        # a partial picture than block the response.
-        try:
-            from backend.utils import telemetry_proxy
-
-            telemetry_proxy._flush_log_writes_for_tests(timeout=0.25)
-        except Exception:
-            pass
-
         from datetime import UTC, datetime
 
         from backend.core import metadata_db
@@ -203,12 +219,14 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
         # iso_z_now() ("YYYY-MM-DDTHH:MM:SSZ"); legacy-format rows would be
         # months old and can't have a timestamp >= a start_iso captured
         # seconds ago, so they're correctly excluded by string comparison.
+        # LIMIT 25 caps the response body so an admin nav during a cron
+        # tick doesn't drag in 500 rows of iothread spam (~120KB / 5s).
         con = metadata_db.get_con(sid)
         cur = con.execute(
             "SELECT operation_type, url, status, duration_ms, function_name, bytes, operation_class "
             "FROM usage_log "
             "WHERE process_context = ? AND timestamp >= ? "
-            "ORDER BY timestamp ASC LIMIT 500",
+            "ORDER BY timestamp ASC LIMIT 25",
             (ctx, start_iso),
         )
         rows = cur.fetchall()

@@ -36,7 +36,27 @@ RUN npx openapi-typescript openapi.json -o types/api.generated.ts
 
 ENV NEXT_TELEMETRY_DISABLED=1
 
-RUN npx next build
+# Two-pass build for the O6 bootstrap-manifest pattern:
+#   1. First ``next build`` — SSG runs with whatever's in
+#      ``lib/_preload-chunks.json`` at git HEAD. Chunk hashes get
+#      assigned by Webpack/Turbopack during this pass.
+#   2. ``build-preload-manifest.mjs`` — scans the just-built
+#      .next/static/chunks/ for plotly bundles, rewrites
+#      lib/_preload-chunks.json with the CURRENT build's hashes.
+#   3. Second ``next build`` — SSG runs again, but the static JSON
+#      import now picks up the freshly-written hashes, so the
+#      rendered HTML for /dashboard /network /sessions etc. includes
+#      ``<link rel="modulepreload" href="/_next/static/chunks/{hash}.js">``
+#      pointing at chunks that actually exist in this image.
+# Why two-pass: chunk hashes are not stable across build environments
+# (local Mac/node-22 vs Docker/node-24 produce different hashes for
+# byte-identical source), so the committed JSON's hashes are only
+# accurate within their build environment. Running ``next build``
+# twice in the same Docker stage means SSG always sees hashes that
+# match THIS build's actual chunks. Cost: ~doubles the builder-stage
+# time (~60s → ~120s). Worth it — saves ~300-700ms per first
+# dashboard load that uses the plotly chart.
+RUN npx next build && node scripts/build-preload-manifest.mjs && npx next build
 
 # --- Production Stage ---
 FROM node:24-slim AS runner

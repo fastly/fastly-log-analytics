@@ -5,6 +5,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-09
+
+Dashboard performance overhaul plus capability-focused security hardening. Cold and warm dashboard loads drop from seconds to sub-second on large services; sustained concurrent load no longer wedges the backend. Read-path I/O is structurally cut by a per-service DuckDB connection pool, a per-minute time-series rollup bundle, size-capped bin-packing local compaction, composite endpoints that collapse multi-card admin pages into one request, and a frontend pre-warm / hover-prefetch pattern that makes navigation feel instant. Security hardening tightens cross-tenant boundaries, closes a ContextVar propagation hole in the s3fs proxy hook, removes a secret-in-URL leak on downloads, and adds strict validation across the destructive-op surface.
+
+### Performance
+
+Structural:
+
+- **Per-minute time-series rollup bundle** (`backend/core/rollups.py`) precomputes a hour-bundled per-minute aggregate for the dashboard chart, eliminating the wide Iceberg scan on chart render. Generated alongside the existing Top-N rollups.
+- **Per-day compaction tier for rollups** — closed days are compacted into per-day parquet files; the reader prefers the per-day file and falls back to hourly only for the current day, cutting file-handle pressure on long-running services.
+- **Size-capped bin-packing local compaction** ([backend/core/local_compaction.py](backend/core/local_compaction.py)) replaces single-file daily/weekly rollups with sequential bin-packing capped at `_MAX_PARTITION_BYTES` (default 256 MB). Hourly partitions older than 7 days bin-pack into daily files; daily files older than 30 days bin-pack into weekly files. DuckDB query parallelism is preserved on multi-month services where the prior single-file approach degraded to scan-of-one-huge-file.
+- **DuckDB connection-pool tuning knobs** — `DUCKDB_POOL_CONN_MEMORY_LIMIT` and `DUCKDB_POOL_CONN_THREADS` env vars cap per-pool-connection memory and thread count so 8 concurrent queries don't oversubscribe physical cores or balloon RSS. Pool view-binding moved outside the `Condition` lock to eliminate a deadlock under stale-Iceberg-snapshot reload.
+- **Composite read endpoints** collapse multi-card mounts into single requests:
+  - `POST /api/scoring/dashboard` (8 per-card requests → 1)
+  - `GET /api/scoring/analytics` and `GET /api/scoring/config`
+  - `GET /api/network-health` now includes shielding analysis
+  - `POST /api/origin/aggregates` (new) batches the origin page's per-card queries
+  Per-card endpoints stay mounted for back-compat; the frontend opts into composite where it makes sense.
+- **Parquet ingest sort key** changed to `(timestamp, ip)` so sessions queries can stream-merge on `ip` instead of materialising a temp table — ~2× speedup on sessions dashboards.
+- **`ingested_files.file_date` column + `(source_name, file_date)` index** added via numbered SQLite migration. The log-accounting fast path uses the index to bucket by day without scanning every row; `metadata_db.get_node_count_avg` and `get_log_accounting_counts` split on it.
+- **Iceberg commit hygiene** — buffer files are tombstoned and removed on the next pass instead of unlinked inline at commit time, removing a commit-path stall. `optimize_table` adds `union_by_name` + retry-on-CAS-conflict to silence the nightly schema-evolution warning.
+- **Bootstrap stale-while-revalidate** — `/api/bootstrap` returns cached dir-stats immediately and refreshes in the background; views are folded into the response so the admin page doesn't issue a follow-up.
+
+Tuning:
+
+- Dashboard live-hour TEMP TABLE shared across CTEs; Python-side bot match + memoised `ngwaf_top` cut DuckDB round-trips.
+- Insights coalesce four city/region/country queries into one and four URL-keyed insights into one CTE (Option C pattern).
+- Sessions split the monolithic CTE into measurable stages and eliminate the temp-table materialisation on the hot path.
+- Origin summary combines two sequential scans into one via `GROUPING SETS`.
+- Cron-runs `since_id` delta-poll param + frontend wiring on `/logs recentCrons` so the page only fetches new events.
+- Admin usage-log visibility-gates its 30s tick and rewrites the latest-per-task SQL to skip the full join.
+- Admin shielding banner endpoint trimmed; share-status `staleTime` tightened.
+- Bot-source cache: 60s TTL on the recursive cache-dir `scandir` (was 200–1500 ms per `/api/bootstrap`).
+- React-Query: skip 4xx retries; hooks lifted out of insights / ReportLayout render-props so each page mount re-uses one query instance instead of re-mounting on every parent render.
+
+Frontend:
+
+- **`starlette-compress` replaces `GZipMiddleware`** — backend now negotiates `br` / `zstd` / `gzip` (was gzip-only). Modern browsers get brotli; rendered-text payloads drop ~25 % on the wire.
+- **Keep-alive on Next.js http/undici global agents** so the proxy reuses TCP connections to the FastAPI backend instead of new-handshake-per-request.
+- **Pre-warm + lazy-mount pattern** — plotly + maplibre-gl + `world.geojson` are pre-warmed on `AppLayout` mount via hidden one-point charts; the visible chart hydrates from the warm module cache instead of triggering a fresh import on first render. `LazyMount` + `PlotlyChart` start `visible=false` to avoid the hydration-mismatch warning that came with the prior eager-mount pattern.
+- **Hover-prefetch sidebar links** so the destination's data warms before the click commits.
+- **Per-insight skeleton cards on first paint**; full skeleton rendered from `CARD_CATEGORIES` on the dashboard.
+- **Modulepreload for the plotly chunk** via a build-time-generated preload manifest (`scripts/build-preload-manifest.mjs` + `lib/preload-manifest.ts`); restores plotly's preload without re-introducing the nav-lag the first attempt caused.
+- **Drop `force-dynamic`** on routes that don't need it; root layout opts out of build-time SSG so the preload manifest is read at request time.
+- **`/geo/*` static assets cached aggressively**; `PlotlyChart` dynamic-import on `/network`.
+- **`SystemHealthCard` polling moved to 1 s** for live attack/load feedback now that the endpoint is cheap.
+- **`useNowMs` reuse** — multiple visible-tick components (countdowns, "X seconds ago") share one interval.
+- **Map style-data listener** replaces a 100 ms `setTimeout` poll.
+
+### Reliability
+
+- **Multi-worker login loop fixed** — `tunnel.py` now rehydrates a share session on-demand from SQLite when an in-memory cache miss happens on a different uvicorn worker. Previously, login on worker A would loop because worker B couldn't see the freshly-minted session.
+- **DuckDB lock conflict resolved** between the connection pool and cron writes — `get_connection` forces `read_only=False` so pool readers and cron writers no longer trip DuckDB's "different configuration" error on the same file.
+- **Stale-view self-heal** — `QueryRunner` clears `_view_cache` before the `force=True` rebuild on the post-empty recovery path so the next query doesn't see the stale schema.
+- **Iceberg s3fs proxy hook** falls back to the process-global source so the hook always registers, even when the ContextVar is empty (e.g. cold-start LIST before any `_get_catalog` has fired).
+- **Top-N current-hour merge** — a silent `ImportError` was dropping the current-hour merge; restored with an explicit fail-loud import.
+- **Rollup compaction** — `run_id` threaded through the error branch and the compaction step now uses an in-memory DuckDB so a corrupted on-disk catalog can't wedge the cron.
+- **Dashboard response cache** — write to `is_cached` (not the aliased `_is_cached`) so Pydantic doesn't drop the flag on serialise.
+- **Dashboard cache hit rate** — disabled the 30 s response-level cache that was masking the rollup wins for fast-changing queries.
+- **Usage-log rollup drift** — reconcile cycle changed from DELETE+INSERT to UPSERT so concurrent flushes can't lose rows.
+- **Botnet insight investigate link** filters only the queried column, not all of them.
+- **`expire_snapshots`** updated for pyiceberg 0.11.1 API and now emits `cron_runs` telemetry.
+- **Proxy compatibility** — switched from `middleware.ts` to `proxy.ts` for Next.js 16; restored the Caddy-marker middleware that the upgrade broke.
+- **Telemetry response middleware backstop** ([backend/utils/telemetry_response_middleware.py](backend/utils/telemetry_response_middleware.py)) auto-injects `_debug_queries` / `_debug_calls` / `_is_cached` into JSON-dict responses that bypassed `BaseResponse.with_telemetry`, so newly-added endpoints don't silently blank the Debug Panel.
+
+### Security
+
+Capability-focused hardening across the backend and frontend trust boundaries.
+
+- **Cross-tenant ContextVar leak in the s3fs proxy hook** closed. PyIceberg writes parquet via a `ThreadPoolExecutor`; ContextVars don't propagate to executor workers by default, so the prior fix used an endpoint-keyed global registry that was vulnerable to overwrite when two tenants shared an endpoint URL. Replaced with a global `ThreadPoolExecutor.submit` monkeypatch that wraps the callable in `contextvars.copy_context()` — matches asyncio's `loop.run_in_executor` semantics. Documented in [MONKEYPATCHES.md](MONKEYPATCHES.md) §6.
+- **Path-param service-scope desync** — analyst sessions could supply a `service_id` path param that didn't match their session scope on a handful of mutation endpoints. Centralised the check via a router-utils helper invoked on every scoped route.
+- **Secret-in-URL leak on downloads** — the download endpoint previously embedded the shared CDN secret in the redirect URL where it could land in browser history / referrer headers. Switched to a signed short-lived bearer that's stripped before the redirect.
+- **Strict input validation** on the destructive-op surface — provision teardown, NGWAF workspace mutations, scoring threshold + enforce-status-code + recv-exclusion-regex changes — runs through length caps, character allowlists, and (where applicable) `falco` static analysis before any VCL ships.
+- **CSRF gates** — moved GET→POST on `logging-settings/update` and sibling state-changing endpoints that were addressable via GET.
+- **Authorisation tightening** — share-admin endpoints reject the Caddy-marker header from non-Caddy paths; `claim_token` path consolidated under a single atomic UPDATE so concurrent claims can't both succeed.
+- **Cross-tenant cache audit** — re-verified that every per-tenant cache key includes `service_id`; closed two missing entries on insights and origin paths.
+- **Thread leak fix** — the share-login flow was leaking a daemon thread per failed login on multi-worker setups; the new on-demand SQLite rehydration replaces the thread entirely.
+- **Terms-of-service bypass** — share-login `/acknowledge` now fetches the active TOS version and refuses acknowledgement of a stale one; frontend was sending a hardcoded version.
+- **Telemetry-proxy diagnostics** for silent 400s (`Missing X-Fos-Target`) and unclassified `list_objects_v2` calls; preserve `Content-Type` so downstream compression always fires; preserve multi-valued response headers.
+
+### Tests
+
+- 3500+ backend tests (+450).
+- 290+ frontend vitest tests (+25).
+- New coverage: `tests/core/test_duckdb_pool.py`, `test_local_compaction.py`, `test_rollups_compaction.py`, `test_rollups_hour_bundling.py`, `test_iceberg_helpers.py`, `tests/services/test_service_manager.py`, `tests/utils/test_sql_validator.py`, `test_telemetry_response_middleware.py`, `test_router_utils.py`, `test_state_sync.py`, `test_terraform_gen.py`, plus router coverage for the new composite endpoints and the destructive-op-auth surface.
+- `make ci` green: lint + format + mypy + pytest + vcl-test + verify-deps + typecheck-frontend + test-frontend + osv + secret-scan.
+
+### Infrastructure
+
+- **Synthetic load generator** ([scripts/loadtest_generator.py](scripts/loadtest_generator.py)) and **read-path probe** ([scripts/dev/loadtest_probe.sh](scripts/dev/loadtest_probe.sh)) for reproducible perf measurement against local Parquet+Iceberg.
+- **Two-pass next build** in the frontend Dockerfile so SSG sees the correct plotly chunk hashes; preload-manifest scanner runs after `next build` to capture them.
+
+### Documentation
+
+- `AGENTS.md` — added Key Systems entries for the DuckDB connection pool, the hourly Top-N rollup pipeline, and the response telemetry middleware. Updated the local-compaction section to reflect the bin-packing tiers.
+- `MONKEYPATCHES.md` — documents the new `ThreadPoolExecutor.submit` patch.
+
+[1.2.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v1.2.0
+
 ## [1.1.0] - 2026-06-03
 
 Edge session scoring. Every request is classified in real-time at the edge by a Fastly Compute service that runs an L1 (cookie compliance + timing rules) + L2 (PageRank-trained transition matrix) scorer, returning a combined 0-100 score that lands in DuckDB for analyst review. Operators can label sessions, watch live ROC-AUC, retrain the matrix, roll back to a prior matrix, rotate the AES cookie key, and push a hard enforcement threshold that rejects flagged requests at the edge with an operator-chosen HTTP status code (default 429).

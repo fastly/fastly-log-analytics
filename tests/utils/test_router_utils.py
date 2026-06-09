@@ -242,3 +242,111 @@ def test_query_errors_passes_args_and_kwargs_through():
         return a + b + c
 
     assert handler(1, 2, c=3) == 6
+
+
+# ── query_errors: async handler support (M4) ─────────────────────────────────
+
+
+def test_query_errors_wraps_async_handler_and_returns_value():
+    """Async route handlers (introduced with M4 for asyncio.gather
+    parallelisation of Fastly calls in usage::prefill) must work with
+    the decorator. The wrapper detects coroutine functions and awaits
+    them — without this branch, FastAPI would receive a coroutine
+    object as the response and fail to serialize it."""
+    import asyncio
+
+    @router_utils.query_errors()
+    async def handler() -> dict:
+        await asyncio.sleep(0)
+        return {"ok": True}
+
+    result = asyncio.run(handler())
+    assert result == {"ok": True}
+
+
+def test_query_errors_maps_value_error_in_async_handler_to_400():
+    """Same ValueError → 400 mapping that the sync branch provides,
+    pinned for the async branch. Without this, an async handler raising
+    ValueError would surface as a 500."""
+    import asyncio
+
+    @router_utils.query_errors()
+    async def handler():
+        raise ValueError("bad input")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(handler())
+    assert exc.value.status_code == 400
+    assert exc.value.detail == {"error": "bad input"}
+
+
+def test_query_errors_passes_httpexception_through_for_async_handler():
+    """An async handler that raises HTTPException itself (e.g. a 502
+    from a Fastly call) must NOT be remapped — the original status
+    code is what the frontend renders."""
+    import asyncio
+
+    @router_utils.query_errors()
+    async def handler():
+        raise HTTPException(status_code=502, detail={"error": "upstream down"})
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(handler())
+    assert exc.value.status_code == 502
+    assert exc.value.detail == {"error": "upstream down"}
+
+
+def test_query_errors_maps_unknown_exception_in_async_handler_to_configured_status(caplog):
+    """An async handler raising a generic Exception is mapped to the
+    decorator's configured status_code. Mirrors the sync branch behavior
+    so callers don't need to know whether the handler is async."""
+    import asyncio
+    import logging
+
+    @router_utils.query_errors(status_code=500)
+    async def handler():
+        raise RuntimeError("boom")
+
+    with caplog.at_level(logging.ERROR, logger="backend.utils.router_utils"):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(handler())
+    assert exc.value.status_code == 500
+    assert exc.value.detail == {"error": "boom"}
+    assert "trace" not in (exc.value.detail or {}), (
+        "stack-trace leakage regression for async handlers — query_errors must "
+        "not put a 'trace' key in the response detail (security)"
+    )
+
+
+def test_query_errors_async_branch_preserves_concurrency():
+    """The whole point of converting to async: two awaitables started
+    via asyncio.gather under @query_errors must run concurrently. If
+    the decorator accidentally awaits in a way that serialises them,
+    the wall-clock would be ~ sum(sleeps) instead of ~ max(sleeps).
+    """
+    import asyncio
+    import time
+
+    @router_utils.query_errors()
+    async def handler():
+        async def _slow_a():
+            await asyncio.sleep(0.10)
+            return "a"
+
+        async def _slow_b():
+            await asyncio.sleep(0.10)
+            return "b"
+
+        a, b = await asyncio.gather(_slow_a(), _slow_b())
+        return {"a": a, "b": b}
+
+    t0 = time.monotonic()
+    result = asyncio.run(handler())
+    elapsed = time.monotonic() - t0
+
+    assert result == {"a": "a", "b": "b"}
+    assert elapsed < 0.18, (
+        f"two 100ms awaits under asyncio.gather must run concurrently "
+        f"(wall clock should be ~100ms, not ~200ms). Got {elapsed * 1000:.0f}ms — "
+        f"the async decorator branch is serialising them."
+    )

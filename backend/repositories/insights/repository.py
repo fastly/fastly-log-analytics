@@ -29,6 +29,297 @@ _insights_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=500, ttl_seconds=IN
 _insights_cache_lock = threading.Lock()
 
 
+def _coalesced_city_aggregates(
+    runner: QueryRunner,
+    table_name: str,
+    window_start_s: str,
+    label_expr: str,
+    region_sel: str,
+    country_sel: str,
+    window_hours: float,
+    baseline_hours: float,
+) -> dict[str, list[tuple]]:
+    """Run ONE pass over `table_name` to compute every aggregate the four
+    city-based insights need, then demux into per-insight result lists
+    whose row schemas match each insight's existing row_processor contract.
+
+    The four insights — city_surges, city_error_spikes,
+    city_latency_regressions, new_city_traffic — all GROUP BY
+    (city, region, country) over the same WHERE clause
+    (``"city" IS NOT NULL AND "city" != ''``). Pre-coalesce, they ran as
+    four independent SELECTs and re-read the temp table four times. This
+    coalesces them into a single SELECT that computes the superset of
+    counts/rates/p95s, then applies each insight's HAVING/ORDER/LIMIT in
+    Python.
+
+    Returns ``{insight_id: rows}`` where each rows list matches the per-
+    insight schema the existing processor expects:
+
+    - city_surges:              [label, city, region, country, w_cnt, b_cnt, spike_ratio]
+    - city_error_spikes:        [label, city, region, country, w_rate, b_rate, w_errors, w_total, b_total]
+    - city_latency_regressions: [label, city, region, country, w_p95, b_p95, w_total, b_total]
+    - new_city_traffic:         [label, city, region, country, w_cnt, b_cnt]
+    """
+    sql = f"""
+    WITH base AS (
+        SELECT
+            "city",
+            {region_sel} AS region,
+            {country_sel} AS country,
+            {label_expr} AS label,
+            status,
+            elapsed,
+            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+        FROM {table_name}
+        WHERE "city" IS NOT NULL AND "city" != ''
+    )
+    SELECT
+        label, "city", region, country,
+        COUNT(*) FILTER (WHERE is_w) AS w_cnt,
+        COUNT(*) FILTER (WHERE is_b) AS b_cnt,
+        SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_errors_4xx,
+        SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_errors_4xx,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
+            FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0 AS w_p95,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
+            FILTER (WHERE is_b AND elapsed IS NOT NULL) / 1000.0 AS b_p95,
+        COUNT(*) FILTER (WHERE is_w AND elapsed IS NOT NULL) AS w_lat_total,
+        COUNT(*) FILTER (WHERE is_b AND elapsed IS NOT NULL) AS b_lat_total
+    FROM base
+    GROUP BY ALL
+    """
+    rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
+
+    surges: list[tuple] = []
+    error_spikes: list[tuple] = []
+    latency: list[tuple] = []
+    new_city: list[tuple] = []
+
+    baseline_scale = max(baseline_hours, 1.0)
+
+    for r in rows:
+        (
+            label,
+            city,
+            region,
+            country,
+            w_cnt,
+            b_cnt,
+            w_err,
+            b_err,
+            w_p95,
+            b_p95,
+            w_lat_total,
+            b_lat_total,
+        ) = r
+        b_cnt_i = b_cnt or 0
+        b_err_i = b_err or 0
+
+        # city_surges — HAVING w_cnt >= 20 AND w_cnt > b_cnt/baseline_hours*window_hours*3
+        if w_cnt >= 20:
+            b_normalized = b_cnt_i * 1.0 / baseline_scale * window_hours
+            if w_cnt > b_normalized * 3:
+                spike_ratio = w_cnt * 1.0 / max(b_normalized, 1.0)
+                surges.append((label, city, region, country, w_cnt, b_cnt, spike_ratio))
+
+        # city_error_spikes — w_total/b_total here are total reqs in window/baseline
+        # HAVING w_total >= 10 AND w_rate >= 0.10 AND (b_total < 50 OR w_rate >= b_rate*3 + 0.05)
+        if w_cnt >= 10:
+            w_rate = (w_err / w_cnt) if w_cnt else 0.0
+            b_rate = (b_err_i / b_cnt_i) if b_cnt_i else None
+            if w_rate >= 0.10 and (b_cnt_i < 50 or (b_rate is not None and w_rate >= b_rate * 3 + 0.05)):
+                error_spikes.append((label, city, region, country, w_rate, b_rate, w_err, w_cnt, b_cnt))
+
+        # city_latency_regressions — uses elapsed-only counts (w_lat_total / b_lat_total)
+        # HAVING w_total >= 10 AND b_total >= 50 AND w_p95 >= b_p95*3.0 AND w_p95 - b_p95 >= 500
+        if (
+            w_lat_total >= 10
+            and b_lat_total >= 50
+            and w_p95 is not None
+            and b_p95 is not None
+            and w_p95 >= b_p95 * 3.0
+            and w_p95 - b_p95 >= 500
+        ):
+            latency.append((label, city, region, country, w_p95, b_p95, w_lat_total, b_lat_total))
+
+        # new_city_traffic — HAVING w_cnt >= 5 AND b_cnt = 0
+        if w_cnt >= 5 and b_cnt_i == 0:
+            new_city.append((label, city, region, country, w_cnt, b_cnt))
+
+    surges.sort(key=lambda x: -(x[6] or 0))
+    error_spikes.sort(key=lambda x: -((x[4] or 0) - (x[5] or 0)))
+    latency.sort(key=lambda x: -((x[4] / x[5]) if x[5] else 0))
+    new_city.sort(key=lambda x: -(x[4] or 0))
+
+    return {
+        "city_surges": surges[:15],
+        "city_error_spikes": error_spikes[:15],
+        "city_latency_regressions": latency[:15],
+        "new_city_traffic": new_city[:20],
+    }
+
+
+def _coalesced_url_aggregates(
+    runner: QueryRunner,
+    table_name: str,
+    window_start_s: str,
+) -> dict[str, list[tuple]]:
+    """Coalesce 4 URL-keyed insights (error_spikes, cache_collapse,
+    latency_regression, tail_latency) into ONE pass over ``table_name``.
+
+    Each of those four insights previously ran its own GROUP BY url
+    scan with the same WHERE clause and same baseline/window split
+    ((timestamp < window_start) → baseline, (>=) → window). Coalescing
+    them mirrors the O2 city-aggregates pattern that demonstrably saved
+    ~520 ms on prod by replacing 4 city scans with 1.
+
+    Why these 4 and not all 5: ``origin_latency_spike`` is grouped by
+    URL too but its SQL has a different shape — it uses overall_stats
+    CTEs to normalize against the entire population's percentile, so
+    its per-url aggregates need a second pass. Leaving it on its own
+    SQL template avoids cross-contaminating the simpler 4-insight CTE.
+
+    Returns ``{insight_id: rows}`` where each rows list matches the
+    insight's existing processor row-schema. On any exception the
+    caller falls back to the legacy per-insight scans transparently.
+
+    - error_spikes:        [url, w_rate, b_rate, w_errors, w_total, b_total]
+    - cache_collapse:      [url, w_rate, b_rate, w_total, b_total]
+    - latency_regression:  [url, w_p95, b_p95, w_total, b_total]
+    - tail_latency:        [url, p99_ms, p50_ms, ratio, total]
+    """
+    sql = f"""
+    WITH base AS (
+        SELECT
+            "url",
+            status,
+            cache,
+            elapsed,
+            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+        FROM {table_name}
+        WHERE "url" IS NOT NULL
+    )
+    SELECT
+        "url",
+        -- Common counts
+        COUNT(*) FILTER (WHERE is_w) AS w_total,
+        COUNT(*) FILTER (WHERE is_b) AS b_total,
+        -- error_spikes: 5xx counters
+        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_5xx,
+        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_5xx,
+        -- cache_collapse: cache-hit counters
+        SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
+        SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,
+        -- latency_regression: elapsed-only counts + p95s in MILLISECONDS
+        COUNT(*) FILTER (WHERE is_w AND elapsed IS NOT NULL) AS w_lat_total,
+        COUNT(*) FILTER (WHERE is_b AND elapsed IS NOT NULL) AS b_lat_total,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
+            FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0 AS w_p95,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
+            FILTER (WHERE is_b AND elapsed IS NOT NULL) / 1000.0 AS b_p95,
+        -- tail_latency: window-only p99/p50 (rounded to whole ms to match
+        -- the legacy template's output exactly)
+        ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY elapsed)
+              FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p99,
+        ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY elapsed)
+              FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p50
+    FROM base
+    GROUP BY "url"
+    HAVING (COUNT(*) FILTER (WHERE is_w) > 0) OR (COUNT(*) FILTER (WHERE is_b) > 0)
+    """
+    cursor = runner.execute(sql, [window_start_s, window_start_s])
+
+    error_spikes_out: list[tuple] = []
+    cache_collapse_out: list[tuple] = []
+    latency_regression_out: list[tuple] = []
+    tail_latency_out: list[tuple] = []
+
+    while True:
+        rows = cursor.fetchmany(10000)
+        if not rows:
+            break
+        for r in rows:
+            (
+                url,
+                w_total,
+                b_total,
+                w_5xx,
+                b_5xx,
+                w_hits,
+                b_hits,
+                w_lat_total,
+                b_lat_total,
+                w_p95,
+                b_p95,
+                w_p99,
+                w_p50,
+            ) = r
+
+            w_total_i = w_total or 0
+            b_total_i = b_total or 0
+
+            # ── error_spikes ──────────────────────────────────────────────────
+            # Legacy HAVING: w_total >= 3 AND w_rate >= 0.05
+            #                AND (b_total < 10 OR w_rate >= b_rate * 2 + 0.05)
+            # ORDER BY (w_rate - COALESCE(b_rate, 0)) DESC LIMIT 15
+            if w_total_i >= 3:
+                w_rate_e = (w_5xx or 0) / w_total_i if w_total_i else 0.0
+                b_rate_e = ((b_5xx or 0) / b_total_i) if b_total_i else None
+                if w_rate_e >= 0.05 and (b_total_i < 10 or (b_rate_e is not None and w_rate_e >= b_rate_e * 2 + 0.05)):
+                    error_spikes_out.append((url, w_rate_e, b_rate_e, w_5xx, w_total, b_total))
+
+            # ── cache_collapse ────────────────────────────────────────────────
+            # Legacy HAVING: w_total >= 5 AND b_total >= 20 AND b_rate >= 0.40
+            #                AND w_rate <= b_rate - 0.20 AND w_rate <= b_rate * 0.6
+            # ORDER BY (b_rate - w_rate) DESC LIMIT 15
+            if w_total_i >= 5 and b_total_i >= 20:
+                w_rate_c = (w_hits or 0) / w_total_i if w_total_i else 0.0
+                b_rate_c = (b_hits or 0) / b_total_i if b_total_i else 0.0
+                if b_rate_c >= 0.40 and w_rate_c <= b_rate_c - 0.20 and w_rate_c <= b_rate_c * 0.6:
+                    cache_collapse_out.append((url, w_rate_c, b_rate_c, w_total, b_total))
+
+            # ── latency_regression ────────────────────────────────────────────
+            # Legacy HAVING: w_total >= 5 AND b_total >= 20 AND w_p95 >= b_p95 * 2.0
+            #                AND w_p95 - b_p95 >= 200
+            # ORDER BY (w_p95 / NULLIF(b_p95, 0)) DESC LIMIT 15
+            #
+            # Note: legacy uses w_total/b_total (TOTAL counts) for the >=5/>=20
+            # gate, NOT w_lat_total/b_lat_total — preserve that or this insight
+            # would surface MORE urls than the legacy implementation.
+            if (
+                w_total_i >= 5
+                and b_total_i >= 20
+                and w_p95 is not None
+                and b_p95 is not None
+                and w_p95 >= b_p95 * 2.0
+                and w_p95 - b_p95 >= 200
+            ):
+                latency_regression_out.append((url, w_p95, b_p95, w_total, b_total))
+
+            # ── tail_latency (window-only) ────────────────────────────────────
+            # Legacy WHERE timestamp >= window_start; HAVING COUNT(*) >= 20 AND
+            # ratio > 5. ORDER BY ratio DESC LIMIT 15.
+            # ratio = p99 / NULLIF(p50, 0)
+            if w_lat_total is not None and w_lat_total >= 20 and w_p99 is not None and w_p50 is not None and w_p50 > 0:
+                ratio = round(w_p99 / w_p50, 1)
+                if ratio > 5:
+                    tail_latency_out.append((url, w_p99, w_p50, ratio, w_lat_total))
+
+    error_spikes_out.sort(key=lambda x: -((x[1] or 0) - (x[2] or 0)))
+    cache_collapse_out.sort(key=lambda x: -((x[2] or 0) - (x[1] or 0)))
+    latency_regression_out.sort(key=lambda x: -((x[1] / x[2]) if x[2] else 0))
+    tail_latency_out.sort(key=lambda x: -(x[3] or 0))
+
+    return {
+        "error_spikes": error_spikes_out[:15],
+        "cache_collapse": cache_collapse_out[:15],
+        "latency_regression": latency_regression_out[:15],
+        "tail_latency": tail_latency_out[:15],
+    }
+
+
 def get_insights(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -72,7 +363,24 @@ def get_insights(
         **runner.telemetry(),
     }
     if not actual_cols:
-        return empty_resp
+        # Empty actual_cols can mean two things: legitimate "no schema yet,
+        # service was just provisioned" OR a race where a concurrent
+        # commit deleted the buffer file between get_schema_cols's first
+        # call and us reading it. The latter silently shipped an empty
+        # insights payload that the frontend cached. Force-rebuild the
+        # view once and retry — if the schema lookup STILL returns empty,
+        # that's the "legitimate no-data" branch and we ship the empty
+        # response. (force=True bypasses the catalog-refresh fast path so
+        # the retry actually does work.)
+        try:
+            from backend.core import iceberg as db_iceberg
+
+            db_iceberg.update_iceberg_view(con, src, force=True)
+            actual_cols = runner.get_schema_cols()
+        except Exception:
+            pass
+        if not actual_cols:
+            return empty_resp
 
     # ── Materialize relevant window into temp table ───────────────────────────
     # This is the single most important optimization: avoid globbing/metadata parsing 30+ times.
@@ -190,6 +498,73 @@ def get_insights(
     url_col = '"url"' if "url" in actual_cols else "NULL"
     q_col = '"url"' if "url" in actual_cols else ('"digest"' if "digest" in actual_cols else "'(unknown)'")
 
+    # ── Coalesced city aggregates (O2 bypass) ─────────────────────────────────
+    # The 4 city-based insights (city_surges, city_error_spikes,
+    # city_latency_regressions, new_city_traffic) each issued their own
+    # GROUP BY (city, region, country) scan of the temp table. On prod
+    # 2026-06-05 those four scans were 177+205+219+181 = 782 ms of pure
+    # duplication — every row read four times to compute counts/rates/p95s
+    # that fit naturally in a single SELECT. Run one pass here and reuse
+    # the per-(city, region, country) aggregate rows below; each insight
+    # task short-circuits via `city_precomputed` instead of issuing its
+    # own SELECT.
+    #
+    # Only fires when ALL 4 are eligible (city + status + elapsed + timestamp
+    # all in schema). When a service is missing one of those columns the
+    # per-insight scans still run for the eligible subset.
+    city_precomputed: dict[str, list[tuple]] = {}
+    if "city" in actual_cols and "status" in actual_cols and "elapsed" in actual_cols and "timestamp" in actual_cols:
+        try:
+            city_precomputed = _coalesced_city_aggregates(
+                runner,
+                table_name,
+                window_start_s,
+                label_expr,
+                region_sel,
+                country_sel,
+                window_hours,
+                baseline_hours,
+            )
+        except Exception as e:
+            # Fall back transparently to per-insight scans; never break
+            # the page on a coalesced-path bug.
+            import logging
+
+            logging.getLogger(__name__).warning("[insights] coalesced city aggregates failed, falling back: %s", e)
+            city_precomputed = {}
+
+    # ── Coalesced URL aggregates (Step 2 / Option C, 2026-06-06) ─────────────
+    # 4 URL-keyed insights (error_spikes, cache_collapse, latency_regression,
+    # tail_latency) all GROUP BY url over the same WHERE clause with the same
+    # is_w/is_b baseline-vs-window split. Pre-coalesce, each ran its own scan
+    # of the temp table; the audit showed they totalled ~400-600 ms. Coalescing
+    # them mirrors O2's city pattern (proven ~520 ms save on prod).
+    #
+    # origin_latency_spike is the 5th url-keyed insight but its SQL has an
+    # overall_stats CTE that normalizes against the entire population's p95
+    # — different shape, kept on its own template.
+    #
+    # Fires only when all the columns the CTE touches are present (url,
+    # status, cache, elapsed, timestamp). When a service is missing any of
+    # them the per-insight scans run normally for whichever subset is
+    # eligible. Failure transparently falls back to per-insight scans —
+    # never blocks the page.
+    url_precomputed: dict[str, list[tuple]] = {}
+    if (
+        "url" in actual_cols
+        and "status" in actual_cols
+        and "cache" in actual_cols
+        and "elapsed" in actual_cols
+        and "timestamp" in actual_cols
+    ):
+        try:
+            url_precomputed = _coalesced_url_aggregates(runner, table_name, window_start_s)
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).warning("[insights] coalesced URL aggregates failed, falling back: %s", e)
+            url_precomputed = {}
+
     for definition in registry.get_all():
         # Check if all required fields are present
         if not all(col in actual_cols for col in definition.required_fields):
@@ -220,29 +595,38 @@ def get_insights(
                     if r:
                         return r
 
-                try:
-                    sql = d.sql_template.format(
-                        table_name=table_name,
-                        window_hours=window_hours,
-                        baseline_hours=baseline_hours,
-                        fp_col=fp_col,
-                        loc_cols=loc_cols,
-                        label_expr=label_expr,
-                        country_sel=country_sel,
-                        region_sel=region_sel,
-                        ua_mobile_sel=ua_mobile_sel,
-                        url_col=url_col,
-                        q_col=q_col,
-                        **extra_args,
-                    )
-                except KeyError:
-                    # If hydration fails due to missing keys (e.g. pop_values), skip this insight
-                    return None
+                # O2 / Step 2 bypass: insights pull rows from the precomputed
+                # coalesced aggregates instead of issuing their own SELECT.
+                # Row schema is constructed to match each insight's existing
+                # `# row schema: [...]` processor contract.
+                if d.id in city_precomputed:
+                    rows = city_precomputed[d.id]
+                elif d.id in url_precomputed:
+                    rows = url_precomputed[d.id]
+                else:
+                    try:
+                        sql = d.sql_template.format(
+                            table_name=table_name,
+                            window_hours=window_hours,
+                            baseline_hours=baseline_hours,
+                            fp_col=fp_col,
+                            loc_cols=loc_cols,
+                            label_expr=label_expr,
+                            country_sel=country_sel,
+                            region_sel=region_sel,
+                            ua_mobile_sel=ua_mobile_sel,
+                            url_col=url_col,
+                            q_col=q_col,
+                            **extra_args,
+                        )
+                    except KeyError:
+                        # If hydration fails due to missing keys (e.g. pop_values), skip this insight
+                        return None
 
-                param_count = sql.count("?")
-                params = [window_start_s] * param_count
+                    param_count = sql.count("?")
+                    params = [window_start_s] * param_count
 
-                rows = runner.execute(sql, params).fetchall()
+                    rows = runner.execute(sql, params).fetchall()
                 items = []
                 if d.row_processor:
                     # Build context for processors

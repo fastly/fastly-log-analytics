@@ -80,10 +80,76 @@ def _migration_001_add_ingested_files_error_count(con: sqlite3.Connection) -> No
     con.execute("ALTER TABLE ingested_files ADD COLUMN error_count INTEGER DEFAULT 0")
 
 
+def _migration_002_add_ingested_files_file_date(con: sqlite3.Connection) -> None:
+    """Add ``ingested_files.file_date`` (DATE parsed from filename) + index.
+
+    Backfills via the same GLOB-validated substr/instr pattern used at
+    runtime by ``get_log_accounting_counts``: locate the first 'T' in the
+    filename (the Fastly emit-time marker) and use the 10 chars before it
+    when they match YYYY-MM-DD. Filenames that don't match the canonical
+    Fastly basename get NULL — callers must treat the column as optional.
+
+    The composite index ``(source_name, file_date)`` lets per-day usage
+    queries scan only the date range they need instead of walking every
+    row for the source and computing the date per-row via substr — which
+    the existing ``(source_name, ingested_at)`` index can't help with
+    because the bucket extraction wraps the column in a function.
+    """
+    if not _has_column(con, "ingested_files", "file_date"):
+        con.execute("ALTER TABLE ingested_files ADD COLUMN file_date DATE")
+    con.execute(
+        """
+        UPDATE ingested_files
+        SET file_date = substr(file_name, instr(file_name, 'T') - 10, 10)
+        WHERE file_date IS NULL
+          AND instr(file_name, 'T') >= 11
+          AND substr(file_name, instr(file_name, 'T') - 10, 10)
+              GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+        """
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_ingested_files_source_date ON ingested_files(source_name, file_date)")
+
+
+def _migration_003_rebuild_usage_log_hourly_summary(con: sqlite3.Connection) -> None:
+    """Rebuild ``usage_log_hourly_summary`` from raw ``usage_log``.
+
+    The v0-v2 rollup is corrupted on any DB that has run
+    ``reconcile_fastly_stats``: the INSERT-only trigger never accounted for
+    the per-hour DELETE+INSERT refresh cycle, so RECONCILE_A/B contributions
+    accumulated across passes — 30-60x inflation observed in prod. The
+    matching DELETE/UPDATE triggers ship in ``_SCHEMA`` and are already
+    present by the time this migration runs (``_init_schema`` runs the
+    schema pass before ``apply_pending``).
+    """
+    if not _has_table(con, "usage_log_hourly_summary") or not _has_table(con, "usage_log"):
+        return
+    con.execute("DELETE FROM usage_log_hourly_summary")
+    con.execute(
+        """
+        INSERT INTO usage_log_hourly_summary
+            (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+        SELECT service_id,
+               substr(timestamp, 1, 13),
+               COALESCE(operation_class, ''),
+               COALESCE(operation_type, ''),
+               SUM(COALESCE(count, 1)),
+               SUM(COALESCE(bytes, 0)),
+               datetime('now')
+        FROM usage_log
+        WHERE service_id IS NOT NULL
+          AND timestamp IS NOT NULL
+          AND length(timestamp) >= 13
+        GROUP BY 1, 2, 3, 4
+        """
+    )
+
+
 # Insertion order = application order. Use integer keys; gaps are not
 # allowed (`apply_pending` iterates sorted keys and stops on failure).
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_001_add_ingested_files_error_count,
+    2: _migration_002_add_ingested_files_file_date,
+    3: _migration_003_rebuild_usage_log_hourly_summary,
 }
 
 LATEST_VERSION = max(MIGRATIONS) if MIGRATIONS else 0

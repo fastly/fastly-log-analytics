@@ -65,12 +65,22 @@ fn strip_query(url: &str) -> &str {
     // Drop scheme://host if present (urlsplit-equivalent: only keep the path
     // component).
     if let Some(idx) = path.find("://") {
-        // Look for the FIRST '/' after the scheme separator.
-        let rest = &path[idx + 3..];
-        if let Some(slash) = rest.find('/') {
-            return &rest[slash..];
+        let scheme = &path[..idx];
+        let is_valid_scheme = scheme
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.');
+        if is_valid_scheme {
+            // Look for the FIRST '/' after the scheme separator.
+            let rest = &path[idx + 3..];
+            if let Some(slash) = rest.find('/') {
+                return &rest[slash..];
+            }
+            return "/";
         }
-        return "/";
     }
     path
 }
@@ -276,6 +286,24 @@ mod tests {
         assert_eq!(normalize("/admin/dashboard").category, "admin");
         assert_eq!(normalize("/blog/post").category, "content");
         assert_eq!(normalize("/about-us").category, "other");
+    }
+
+    #[test]
+    fn embedded_scheme_separator_does_not_truncate_path() {
+        // Regression for audit finding 023: an unanchored "://" search
+        // in strip_query treated ANY occurrence of "://" as a scheme/host
+        // separator, letting an attacker bypass route-specific rules by
+        // crafting paths like /admin/delete/http://x/. Now we only strip
+        // the prefix when what precedes "://" looks like a valid RFC 3986
+        // scheme (starts ascii-alpha, then ascii-alnum/+/-/.).
+        assert_eq!(normalize("/admin/delete/http://x/").path, "/admin/delete/http:/x");
+        assert_eq!(normalize("/api/v2/orders/file://x/").path, "/api/v2/orders/file:/x");
+        // Real absolute URLs still strip correctly.
+        assert_eq!(
+            normalize("https://www.example.com/api/v1/users/777").path,
+            "/api/v1/users/*"
+        );
+        assert_eq!(normalize("ftp://h/a/b").path, "/a/b");
     }
 
     #[test]

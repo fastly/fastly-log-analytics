@@ -901,3 +901,55 @@ def test_restore_scoring_matrix_version_proceeds_when_snapshot_fails():
     assert result is not None, "restore must succeed even when snapshot step fails"
     assert result["version"] == "v7"
     assert len(s3.copy_object.call_args_list) == 2
+
+
+def test_cdn_get_blocks_invalid_redirects():
+    """Verify that SafeRedirectHandler allows redirects to safe cdn URLs
+    but blocks any redirects to forbidden URLs with URLError."""
+    import urllib.error
+    import urllib.request
+    from unittest.mock import MagicMock, patch
+
+    import pytest
+
+    src = {"bucket": "test", "cdn_url": "https://cdn-test.fastly.net"}
+    from backend.state_sync import _cdn_get
+
+    captured_handler = None
+
+    def fake_build_opener(*handlers):
+        nonlocal captured_handler
+        for h in handlers:
+            if h.__class__.__name__ == "SafeRedirectHandler" or (
+                isinstance(h, type) and h.__name__ == "SafeRedirectHandler"
+            ):
+                captured_handler = h
+        mock_opener = MagicMock()
+        mock_opener.open.return_value.__enter__.return_value.read.return_value = b"{}"
+        mock_opener.open.return_value.__enter__.return_value.headers = {}
+        return mock_opener
+
+    # Ensure hasattr(urlopen, "assert_called") is False during this call so the opener code path is taken
+    with (
+        patch("urllib.request.build_opener", side_effect=fake_build_opener),
+        patch("urllib.request.urlopen", new=lambda *a, **kw: None),
+        patch("backend.utils.telemetry.record_cdn_call"),
+    ):
+        _cdn_get(src, "some/key.json")
+
+    assert captured_handler is not None
+    handler_inst = captured_handler() if isinstance(captured_handler, type) else captured_handler
+
+    # 1. Test redirect to safe URL
+    req_mock = MagicMock()
+    # It delegates to super().redirect_request, so let's mock the super class call or verify it doesn't raise
+    with patch("urllib.request.HTTPRedirectHandler.redirect_request") as mock_super_redirect:
+        handler_inst.redirect_request(req_mock, None, 302, "Found", {}, "https://cdn-another.fastly.net/safe")
+        mock_super_redirect.assert_called_once_with(
+            req_mock, None, 302, "Found", {}, "https://cdn-another.fastly.net/safe"
+        )
+
+    # 2. Test redirect to unsafe URL (e.g. localhost, cloud metadata, or anything not ending in .fastly.net/.fastlystorage.app)
+    with pytest.raises(urllib.error.URLError) as excinfo:
+        handler_inst.redirect_request(req_mock, None, 302, "Found", {}, "http://169.254.169.254/")
+    assert "Redirected to an invalid URL" in str(excinfo.value)

@@ -124,6 +124,44 @@ def test_cron_logs_per_page_validation(client):
     assert r.status_code == 422
 
 
+def test_cron_logs_since_id_returns_only_newer_rows(client, test_service_source):
+    """O5 delta poll: passing ?since_id=X returns rows with id > X,
+    plus any row whose status is still 'running' (visibility-keep so the
+    client can detect completion of long-lived runs)."""
+    ids = _seed_cron_runs(
+        test_service_source["name"],
+        [
+            {"task": "sync", "status": "success"},
+            {"task": "sync", "status": "running"},
+            {"task": "commit", "status": "success"},
+        ],
+    )
+
+    r = client.get(
+        "/api/cron-runs",
+        params={"since_id": ids[2]},
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    returned_ids = {e["id"] for e in body["entries"]}
+    # ids[2] excluded (id == since_id, not >); ids[1] included because
+    # status='running' overrides the id cutoff; ids[0] excluded (old + done).
+    assert returned_ids == {ids[1]}
+    assert body["total"] == 1
+
+
+def test_cron_logs_since_id_rejects_negative(client):
+    """Validation: since_id must be >= 0 (run IDs are unsigned)."""
+    r = client.get(
+        "/api/cron-runs",
+        params={"since_id": -1},
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+    assert r.status_code == 422
+
+
 # ── DELETE /api/cron-runs/{log_id} ───────────────────────────────────────────
 
 

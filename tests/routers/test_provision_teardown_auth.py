@@ -377,3 +377,20 @@ def test_destructive_teardown_get_method_rejected(isolated_configs_dir):
     # is acceptable; both mean the GET-CSRF vector is closed. What MUST NOT
     # happen is a 200 SSE stream.
     assert r.status_code in (404, 405), f"GET must be rejected; got {r.status_code}: {r.text[:300]}"
+
+
+def test_destructive_teardown_text_plain_content_type_rejected(isolated_configs_dir):
+    """Regression for audit finding 012: a malicious HTML form with
+    ``enctype=text/plain`` can POST a JSON-shaped body without triggering a
+    CORS preflight, bypassing the intended same-origin gate. The teardown
+    handler must require ``Content-Type: application/json`` explicitly so
+    the browser is forced to preflight."""
+    sid = "svc-csrf-text-plain"
+    _seed_cfg(sid)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/provision/teardown",
+            data='{"service_id":"' + sid + '","remove_logging":true}',
+            headers={"Content-Type": "text/plain"},
+        )
+    assert r.status_code == 415, f"text/plain must be rejected with 415; got {r.status_code}: {r.text[:300]}"

@@ -978,7 +978,7 @@ export function ProvisionWizard({ open, onOpenChange }: ProvisionWizardProps) {
   const handleDeploy = () => {
     if (!selectedService) return;
     setIsDeploying(true);
-    const params: Record<string, string> = {
+    const body: Record<string, any> = {
       token,
       service_id: selectedService.id,
       service_name: selectedService.name,
@@ -987,23 +987,21 @@ export function ProvisionWizard({ open, onOpenChange }: ProvisionWizardProps) {
       fos_bucket_name: config.fos_bucket_name,
       fos_prefix: config.fos_prefix,
       sample_rate: String(config.sample_rate),
-      edge_only: String(config.edge_only),
+      edge_only: config.edge_only,
       custom_condition: config.custom_condition,
       log_period: String(config.log_period),
       cdn_service_name: config.cdn_service_name,
       cdn_shield: config.cdn_shield,
-      enable_cron_sync: String(config.enable_cron_sync),
-      delete_after: String(config.delete_after),
-      commit_interval_mins: String(config.commit_interval_mins),
-      enable_cron_compact: String(config.enable_cron_compact),
-      log_fields: JSON.stringify(config.log_fields),
+      enable_cron_sync: config.enable_cron_sync,
+      delete_after: config.delete_after,
+      commit_interval_mins: Number(config.commit_interval_mins),
+      enable_cron_compact: config.enable_cron_compact,
+      log_fields: config.log_fields ? JSON.stringify(config.log_fields) : null,
     };
     if (config.cdn_prefix) {
-      params.cdn_url = `https://${config.cdn_prefix}.global.ssl.fastly.net`;
+      body.cdn_url = `https://${config.cdn_prefix}.global.ssl.fastly.net`;
     }
-    const qs = new URLSearchParams(params).toString();
-    const url = `/api/provision/execute?${qs}`;
-    start(url);
+    start("/api/provision/execute", body);
   };
 
   const fetchTerraformPreview = async () => {

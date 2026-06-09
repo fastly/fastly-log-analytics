@@ -789,6 +789,47 @@ def test_sync_data_orphan_cleanup_preserves_local_compaction_dirs(
     )
 
 
+def test_sync_data_prevents_path_traversal(fos_source, tmp_path):
+    """Verify that sync_data prevents path traversal if data file URIs contain traversal sequences."""
+    from backend.core import iceberg as _ice
+
+    source = {**fos_source, "name": "traversal-test"}
+
+    # Let's mock a scan containing a file with traversal path
+    malicious_uri = "s3://test-bucket/logs/iceberg/data/../../../../tmp/evil.parquet"
+    mock_file = MagicMock()
+    mock_file.file_path = malicious_uri
+    mock_file.record_count = 100
+
+    mock_plan_file = MagicMock()
+    mock_plan_file.file = mock_file
+
+    mock_scan = MagicMock()
+    mock_scan.filter.return_value = mock_scan
+    mock_scan.plan_files.return_value = [mock_plan_file]
+    mock_table = MagicMock()
+    mock_table.metadata_location = "s3://b/m"
+    mock_table.location.return_value = "s3://b"
+    mock_table.scan.return_value = mock_scan
+    catalog = MagicMock()
+    catalog.load_table.return_value = mock_table
+
+    fake_s3 = MagicMock()
+
+    # Mock the catalog and files list
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)),
+        patch("backend.core.iceberg._get_catalog", return_value=catalog),
+        patch("backend.core.duckdb._get_fos_client", return_value=fake_s3),
+    ):
+        result = _ice.sync_data(source)
+
+    # Since the file is skipped, result should have 0 files downloaded and files_skipped as 0
+    assert result.get("files_downloaded") == 0
+    assert result.get("files_skipped") == 0
+    assert not fake_s3.download_file.called
+
+
 # ── _update_iceberg_view_locked: do not downgrade non-empty view ─────────────
 
 
@@ -2174,3 +2215,744 @@ def test_patched_open_routes_through_iothread_not_stale_cat_file_alias():
         _ice._manifest_bytes_cache.clear()
         _ice._manifest_cache_size = 0
         _ice._inflight_async.clear()
+
+
+def test_update_iceberg_view_locked_escapes_single_quotes(monkeypatch):
+    from backend.core import iceberg as _ice
+
+    source_key = "test-escapes-single-quotes"
+    _ice._view_cache.pop(source_key, None)
+
+    metadata_loc = None
+    snapshot_id = 12345
+    # The vulnerability key: table location contains a single quote
+    malicious_loc = "s3://bucket/O'Brien/logs"
+    _ice._snapshot_files_cache[source_key] = (metadata_loc, snapshot_id, malicious_loc, [])
+
+    source = {
+        "name": source_key,
+        "bucket": "b",
+        "prefix": "p",
+    }
+
+    monkeypatch.setattr(_ice, "buffer_files", lambda src: [])
+    monkeypatch.setattr(_ice, "_read_metadata_pointer", lambda src, ident: metadata_loc)
+    monkeypatch.setattr(_ice, "_load_persistent_cache", lambda src: None)
+    monkeypatch.setattr(_ice, "configure_duckdb_s3", lambda con: None)
+    monkeypatch.setattr("os.path.exists", lambda p: False)
+
+    # Fresh service: no ingested files in sqlite metadata either.
+    from backend.core import metadata_db as _meta
+
+    monkeypatch.setattr(
+        _meta,
+        "get_ingested_files_status_summary",
+        lambda svc: {
+            "file_count": 0,
+            "total_rows": 0,
+            "total_bytes": 0,
+            "count_with_bytes": 0,
+            "last_ingested": None,
+            "latest_file_name": None,
+        },
+    )
+
+    fake_con = MagicMock()
+    _ice._update_iceberg_view_locked(fake_con, source)
+
+    create_view_calls = [
+        c
+        for c in fake_con.execute.call_args_list
+        if c.args and "CREATE OR REPLACE" in str(c.args[0]) and "VIEW" in str(c.args[0])
+    ]
+    assert create_view_calls, "View should have been created"
+    view_sql = str(create_view_calls[0].args[0])
+    # Ensure that single quotes are correctly escaped to '' inside iceberg_scan
+    assert "iceberg_scan('s3://bucket/O''Brien/logs'" in view_sql
+    assert "s3://bucket/O'Brien/logs" not in view_sql.replace("s3://bucket/O''Brien/logs", "")
+
+    _ice._view_cache.pop(source_key, None)
+
+
+def test_optimize_table_escapes_single_quotes(monkeypatch):
+    from backend.core import iceberg as _ice
+
+    source = {
+        "name": "test-optimize-escapes",
+        "bucket": "b",
+        "prefix": "p",
+    }
+
+    # Mock catalog and table loading
+    fake_catalog = MagicMock()
+    fake_table = MagicMock()
+    monkeypatch.setattr(_ice, "_get_catalog", lambda src: fake_catalog)
+    monkeypatch.setattr(_ice, "_load_table_cached", lambda src, ident, cat: fake_table)
+
+    # Mock scan().plan_files() to return our single-quoted file path
+    mock_file = MagicMock()
+    mock_file.file.partition = (12345,)
+    mock_file.file.file_path = "s3://bucket/O'Brien/logs/data.parquet"
+    fake_table.scan().plan_files.return_value = [mock_file]
+
+    # Mock get_connection to capture executed SQL
+    captured_queries = []
+    fake_con = MagicMock()
+
+    def mock_execute(sql, *args, **kwargs):
+        captured_queries.append(sql)
+        # Raise an exception so it fails after executing read_parquet and doesn't proceed to overwrite
+        raise RuntimeError("Stop simulation")
+
+    fake_con.execute.side_effect = mock_execute
+
+    from backend.core import duckdb as _duckdb
+
+    monkeypatch.setattr(_duckdb, "get_connection", lambda src, **kwargs: fake_con)
+
+    # Run optimization with min_files_per_partition=0 to ensure it selects the partition
+    _ice.optimize_table(source, min_files_per_partition=0)
+
+    # Assert that DuckDB was called with read_parquet enclosing our escaped single quotes
+    assert captured_queries, "Should have executed DuckDB query"
+    parquet_query = captured_queries[0]
+    assert "read_parquet(['s3://bucket/O''Brien/logs/data.parquet']" in parquet_query
+    assert "s3://bucket/O'Brien/logs/data.parquet" not in parquet_query.replace(
+        "s3://bucket/O''Brien/logs/data.parquet", ""
+    )
+
+
+def test_optimize_table_uses_union_by_name(monkeypatch):
+    """Regression for the 2026-06-06 optimize-cron warning: when a partition
+    contains files written before AND after a schema bump (e.g. ``edge_sid``
+    added mid-day), the DuckDB ``read_parquet([...])`` defaults to positional
+    union and raises ``Schema mismatch ... try setting union_by_name=True``.
+    Prod had two partitions (494541, 494542) stuck at 14+ files each since
+    2026-06-01 because every nightly optimize attempt raised here.
+
+    The fix passes ``union_by_name=true`` so DuckDB merges the column sets
+    and fills missing columns with NULL — matching how Iceberg already
+    presents the merged schema to readers."""
+    from backend.core import iceberg as _ice
+
+    source = {"name": "test-optimize-union", "bucket": "b", "prefix": "p"}
+
+    fake_catalog = MagicMock()
+    fake_table = MagicMock()
+    monkeypatch.setattr(_ice, "_get_catalog", lambda src: fake_catalog)
+    monkeypatch.setattr(_ice, "_load_table_cached", lambda src, ident, cat: fake_table)
+
+    mock_file = MagicMock()
+    mock_file.file.partition = (12345,)
+    mock_file.file.file_path = "s3://bucket/data.parquet"
+    fake_table.scan().plan_files.return_value = [mock_file, mock_file]
+
+    captured_queries: list[str] = []
+    fake_con = MagicMock()
+
+    def mock_execute(sql, *args, **kwargs):
+        captured_queries.append(sql)
+        raise RuntimeError("Stop simulation")
+
+    fake_con.execute.side_effect = mock_execute
+
+    from backend.core import duckdb as _duckdb
+
+    monkeypatch.setattr(_duckdb, "get_connection", lambda src, **kwargs: fake_con)
+
+    _ice.optimize_table(source, min_files_per_partition=0)
+
+    assert captured_queries
+    parquet_query = captured_queries[0]
+    assert "union_by_name=true" in parquet_query, (
+        f"read_parquet must pass union_by_name=true so partitions with "
+        f"schema-evolved files (pre- vs post-schema-bump) can coalesce. "
+        f"Removing this argument re-introduces the 2026-06-06 prod warnings. "
+        f"Got SQL: {parquet_query[:300]}"
+    )
+
+
+def test_optimize_table_retries_on_sequence_number_cas_conflict(monkeypatch):
+    """Regression for the 2026-06-04 sporadic CAS conflict during optimize:
+    ``ValueError: Cannot add snapshot with sequence number 2159 older than
+    last sequence number 2159`` — raised when an ingest commit lands between
+    optimize's plan_files read and its overwrite. The fix wraps overwrite()
+    in a bounded retry that reloads the table head and tries once more.
+
+    This test pins the retry behavior:
+      1. First overwrite() raises the CAS ValueError → caught + reloaded
+      2. Second overwrite() succeeds → loop exits
+      3. Catalog.load_table is invoked exactly once for the reload
+
+    If the retry is removed, the test fails because optimize raises on the
+    first attempt and the partition lands in partition_errors with
+    status='warning' on the cron row."""
+    from backend.core import iceberg as _ice
+
+    source = {"name": "test-optimize-cas-retry", "bucket": "b", "prefix": "p"}
+
+    overwrite_calls = {"n": 0}
+    reload_calls = {"n": 0}
+
+    fake_catalog = MagicMock()
+    initial_table = MagicMock()
+    reloaded_table = MagicMock()
+
+    def _initial_overwrite(*a, **kw):
+        overwrite_calls["n"] += 1
+        raise ValueError("Cannot add snapshot with sequence number 2159 older than last sequence number 2159")
+
+    def _reloaded_overwrite(*a, **kw):
+        overwrite_calls["n"] += 1  # increments the SAME counter so we count total attempts
+
+    initial_table.overwrite.side_effect = _initial_overwrite
+    reloaded_table.overwrite.side_effect = _reloaded_overwrite
+
+    def _catalog_load(ident):
+        reload_calls["n"] += 1
+        return reloaded_table
+
+    fake_catalog.load_table.side_effect = _catalog_load
+
+    monkeypatch.setattr(_ice, "_get_catalog", lambda src: fake_catalog)
+    monkeypatch.setattr(_ice, "_load_table_cached", lambda src, ident, cat: initial_table)
+    monkeypatch.setattr(_ice, "_set_cached_table", lambda src, ident, tbl: None)
+    monkeypatch.setattr(_ice, "_write_metadata_pointer", lambda src, loc, table=None: None)
+    monkeypatch.setattr(_ice, "sync_data", lambda src: {"files_cached": 0, "rows_cached": 0})
+
+    mock_file = MagicMock()
+    mock_file.file.partition = (12345,)
+    mock_file.file.file_path = "s3://bucket/data.parquet"
+    initial_table.scan().plan_files.return_value = [mock_file, mock_file]
+
+    fake_con = MagicMock()
+    fake_arrow = MagicMock()
+    fake_con.execute.return_value.to_arrow_table.return_value = fake_arrow
+
+    from backend.core import duckdb as _duckdb
+
+    monkeypatch.setattr(_duckdb, "get_connection", lambda src, **kwargs: fake_con)
+
+    result = _ice.optimize_table(source, min_files_per_partition=0)
+
+    assert overwrite_calls["n"] == 2, (
+        f"expected exactly 2 overwrite() calls (1 fail + 1 retry success); got {overwrite_calls['n']}"
+    )
+    assert reload_calls["n"] == 1, (
+        f"expected exactly 1 catalog.load_table() reload after the CAS conflict; got {reload_calls['n']}"
+    )
+    # Partition should not appear in partition_errors — the retry succeeded.
+    assert not result.get("partition_errors"), (
+        f"retry should have prevented the partition from landing in partition_errors. "
+        f"Got: {result.get('partition_errors')}"
+    )
+
+
+def test_optimize_table_does_not_retry_unrelated_value_errors(monkeypatch):
+    """The CAS-conflict retry must ONLY catch the specific sequence-number
+    message. Unrelated ValueErrors (e.g. a real schema bug, a corrupted
+    file path) should propagate immediately so they aren't silently
+    retried 3 times before showing up as errors."""
+    from backend.core import iceberg as _ice
+
+    source = {"name": "test-optimize-no-spurious-retry", "bucket": "b", "prefix": "p"}
+
+    overwrite_calls = {"n": 0}
+    reload_calls = {"n": 0}
+
+    def _bad_overwrite(*a, **kw):
+        overwrite_calls["n"] += 1
+        raise ValueError("Some unrelated value error")
+
+    fake_catalog = MagicMock()
+    fake_catalog.load_table.side_effect = lambda ident: (
+        reload_calls.__setitem__("n", reload_calls["n"] + 1),
+        MagicMock(),
+    )[1]
+
+    fake_table = MagicMock()
+    fake_table.overwrite.side_effect = _bad_overwrite
+    mock_file = MagicMock()
+    mock_file.file.partition = (12345,)
+    mock_file.file.file_path = "s3://bucket/data.parquet"
+    fake_table.scan().plan_files.return_value = [mock_file, mock_file]
+
+    monkeypatch.setattr(_ice, "_get_catalog", lambda src: fake_catalog)
+    monkeypatch.setattr(_ice, "_load_table_cached", lambda src, ident, cat: fake_table)
+    monkeypatch.setattr(_ice, "_set_cached_table", lambda src, ident, tbl: None)
+    monkeypatch.setattr(_ice, "_write_metadata_pointer", lambda src, loc, table=None: None)
+    monkeypatch.setattr(_ice, "sync_data", lambda src: {"files_cached": 0, "rows_cached": 0})
+
+    fake_con = MagicMock()
+    fake_con.execute.return_value.to_arrow_table.return_value = MagicMock()
+
+    from backend.core import duckdb as _duckdb
+
+    monkeypatch.setattr(_duckdb, "get_connection", lambda src, **kwargs: fake_con)
+
+    _ice.optimize_table(source, min_files_per_partition=0)
+
+    # The partition_errors path swallows the raised ValueError into
+    # partition_errors — but the IMPORTANT invariant is that overwrite
+    # was only attempted ONCE and reload was NEVER called.
+    assert overwrite_calls["n"] == 1, (
+        f"unrelated ValueErrors must propagate immediately, not trigger CAS retry. "
+        f"Got {overwrite_calls['n']} overwrite calls."
+    )
+    assert reload_calls["n"] == 0, (
+        f"unrelated ValueErrors must NOT trigger table reload. Got {reload_calls['n']} reloads."
+    )
+
+
+# ---------------------------------------------------------------------------
+# run_cloud_maintenance — snapshot expiry (pyiceberg 0.11.1 API)
+# ---------------------------------------------------------------------------
+
+
+def _maintenance_table(snapshots_before: int, snapshots_after: int, commit_side_effect=None):
+    """Build a MagicMock pyiceberg.Table that mimics the maintenance chain
+    table.maintenance.expire_snapshots().older_than(<dt>).commit() and reports
+    `snapshots_before` snapshots until .commit() runs (after which it reports
+    `snapshots_after`). Returns (table, captured_calls dict)."""
+    captured = {
+        "maintenance_property_reads": 0,
+        "expire_snapshots_calls": 0,
+        "older_than_args": [],
+        "commit_calls": 0,
+    }
+
+    state = {"snapshot_count": snapshots_before}
+    fake_table = MagicMock()
+    fake_table.metadata_location = "s3://bucket/m.json"
+
+    def _snapshots_list():
+        return [MagicMock(snapshot_id=i) for i in range(state["snapshot_count"])]
+
+    type(fake_table.metadata).snapshots = property(lambda _self: _snapshots_list())
+
+    def _commit():
+        captured["commit_calls"] += 1
+        if commit_side_effect is not None:
+            exc = commit_side_effect()
+            if exc is not None:
+                raise exc
+        state["snapshot_count"] = snapshots_after
+
+    def _older_than(dt):
+        captured["older_than_args"].append(dt)
+        builder = MagicMock()
+        builder.commit.side_effect = _commit
+        return builder
+
+    def _expire_snapshots():
+        captured["expire_snapshots_calls"] += 1
+        builder = MagicMock()
+        builder.older_than.side_effect = _older_than
+        return builder
+
+    def _maintenance_getter(_self):
+        captured["maintenance_property_reads"] += 1
+        m = MagicMock()
+        m.expire_snapshots.side_effect = _expire_snapshots
+        return m
+
+    # `.maintenance` is a @property in pyiceberg 0.11.1 — accessing it with
+    # parens (e.g. table.maintenance()) must NOT work, otherwise we'd never
+    # catch the original AttributeError-shaped bug returning.
+    type(fake_table).maintenance = property(_maintenance_getter)
+
+    return fake_table, captured
+
+
+def _maintenance_source():
+    return {
+        "name": "expire-test",
+        "service_id": "expire-test",
+        "bucket": "b",
+        "prefix": "p",
+    }
+
+
+def _patch_maintenance_deps(monkeypatch, table, catalog):
+    """Wire up the minimum set of patches so run_cloud_maintenance reaches the
+    expire-snapshots block without touching data deletion or local cache."""
+    from backend import config as _svcconfig
+    from backend.core import iceberg as _ice
+
+    monkeypatch.setattr(_svcconfig, "load_config", lambda sid: {})
+    monkeypatch.setattr(_ice, "_get_catalog", lambda src: catalog)
+    monkeypatch.setattr(_ice, "_load_table_cached", lambda src, ident, cat: table)
+    monkeypatch.setattr(_ice, "_set_cached_table", lambda src, ident, tbl: None)
+    monkeypatch.setattr(_ice, "_write_metadata_pointer", lambda src, loc, table=None: None)
+    # Step 1 (data delete) succeeds as a no-op via the table's delete mock.
+    # Step 3 (local cache) is skipped because cache_retention_days falls back
+    # to 90 but _cache_dir won't exist for this synthetic source.
+
+
+def test_run_cloud_maintenance_calls_correct_expire_snapshots_api(monkeypatch):
+    """Pins the EXACT pyiceberg 0.11.1 maintenance chain so a future API drift
+    fails CI loudly instead of silently swallowing AttributeError into
+    snapshot_expiry_error (the original bug, which lived undetected for the
+    service's entire lifetime because the wrapper test only mocked
+    run_cloud_maintenance as a whole).
+
+    Invariants pinned:
+      - .maintenance is accessed as a PROPERTY (one read per call, no parens)
+      - .expire_snapshots() returns a builder (not table.expire_snapshots)
+      - .older_than(<arg>) is called with a tz-aware datetime (NOT int millis)
+      - .commit() is invoked exactly once on the success path
+    """
+    from datetime import datetime as _dt
+
+    from backend.core import iceberg as _ice
+
+    table, captured = _maintenance_table(snapshots_before=5, snapshots_after=2)
+    catalog = MagicMock()
+    catalog.load_table.return_value = table
+    _patch_maintenance_deps(monkeypatch, table, catalog)
+
+    result = _ice.run_cloud_maintenance(_maintenance_source())
+
+    assert captured["maintenance_property_reads"] >= 1, (
+        ".maintenance must be accessed (as a @property — no parens). If this is 0, "
+        "the call chain is broken and the cron will silently AttributeError again."
+    )
+    assert captured["expire_snapshots_calls"] == 1, (
+        f"expire_snapshots() must be invoked exactly once on success; got {captured['expire_snapshots_calls']}"
+    )
+    assert len(captured["older_than_args"]) == 1, (
+        f"older_than(...) must be called exactly once; got {len(captured['older_than_args'])} calls"
+    )
+    arg = captured["older_than_args"][0]
+    assert isinstance(arg, _dt), (
+        f"older_than(...) must receive a datetime, not {type(arg).__name__}. "
+        f"Passing int millis (the original bug) raises TypeError in pyiceberg 0.11.1."
+    )
+    assert arg.tzinfo is not None, (
+        f"older_than(...) must receive a tz-aware datetime to avoid silent UTC-vs-local drift. "
+        f"Got naive datetime: {arg!r}"
+    )
+    assert captured["commit_calls"] == 1, (
+        f"commit() must be invoked exactly once on success; got {captured['commit_calls']}"
+    )
+    assert "snapshot_expiry_error" not in result, (
+        f"successful path must NOT populate snapshot_expiry_error. Got: {result}"
+    )
+
+
+def test_run_cloud_maintenance_reports_snapshot_counts(monkeypatch):
+    """Locks in the observability contract: results include snapshots_before,
+    snapshots_after, snapshots_expired_count, snapshots_expired_before_days,
+    and (when count > 0) snapshot_expiry_note explaining the file-cleanup gap.
+    Without these keys operators cannot detect future silent failures (the
+    original bug went undetected precisely because no count was reported)."""
+    from backend.core import iceberg as _ice
+
+    table, _ = _maintenance_table(snapshots_before=10, snapshots_after=3)
+    catalog = MagicMock()
+    catalog.load_table.return_value = table
+    _patch_maintenance_deps(monkeypatch, table, catalog)
+
+    result = _ice.run_cloud_maintenance(_maintenance_source())
+
+    assert result.get("snapshots_before") == 10
+    assert result.get("snapshots_after") == 3
+    assert result.get("snapshots_expired_count") == 7
+    assert result.get("snapshots_expired_before_days") == 7
+    note = result.get("snapshot_expiry_note", "")
+    assert "metadata" in note.lower() and "not deleted" in note.lower(), (
+        f"when snapshots are actually expired, the result must include a note explaining "
+        f"that underlying data/manifest files are not removed by pyiceberg 0.11.1. Got: {note!r}"
+    )
+
+
+def test_run_cloud_maintenance_skips_snapshot_note_on_noop(monkeypatch):
+    """When pre and post snapshot counts are equal (nothing eligible for
+    expiry), snapshot_expiry_note must be ABSENT from results — prevents the
+    orphan-files caveat from becoming weekly log noise on healthy services
+    whose entire history fits within the 7-day retention window."""
+    from backend.core import iceberg as _ice
+
+    table, _ = _maintenance_table(snapshots_before=2, snapshots_after=2)
+    catalog = MagicMock()
+    catalog.load_table.return_value = table
+    _patch_maintenance_deps(monkeypatch, table, catalog)
+
+    result = _ice.run_cloud_maintenance(_maintenance_source())
+
+    assert result.get("snapshots_expired_count") == 0
+    assert "snapshot_expiry_note" not in result, (
+        f"snapshot_expiry_note must be absent on no-op runs (expired_count == 0). Got: {result}"
+    )
+
+
+def test_run_cloud_maintenance_retries_on_commit_failed_exception(monkeypatch):
+    """Mirrors the optimize-table CAS retry: a CommitFailedException from the
+    expire-snapshots commit triggers catalog.load_table reload + retry. After
+    one failure followed by a success, snapshots_before must be re-pinned from
+    the RELOADED head (otherwise snapshots_expired_count would conflate
+    'we expired N' with 'concurrent writer added M while we retried')."""
+    from pyiceberg.exceptions import CommitFailedException
+
+    from backend.core import iceberg as _ice
+
+    call_state = {"commit_attempts": 0}
+
+    def _commit_side():
+        call_state["commit_attempts"] += 1
+        if call_state["commit_attempts"] == 1:
+            return CommitFailedException("Table has been updated by another process: ns.tbl")
+        return None
+
+    table_initial, captured_initial = _maintenance_table(
+        snapshots_before=10, snapshots_after=10, commit_side_effect=_commit_side
+    )
+    # After the CAS conflict the reload returns a table whose CURRENT snapshot
+    # count is 12 (a concurrent writer added 2 since our first load). The
+    # successful commit on this reloaded table drops it to 5.
+    table_reloaded, captured_reloaded = _maintenance_table(
+        snapshots_before=12, snapshots_after=5, commit_side_effect=_commit_side
+    )
+
+    reload_returns = [table_reloaded]
+    catalog = MagicMock()
+
+    def _catalog_load(_ident):
+        # 1st call = initial load_table at top of expiry block; subsequent
+        # calls = post-CAS reloads.
+        if not reload_returns:
+            return table_reloaded
+        return reload_returns.pop() if reload_returns and catalog.load_table.call_count > 1 else table_initial
+
+    catalog.load_table.side_effect = _catalog_load
+    _patch_maintenance_deps(monkeypatch, table_initial, catalog)
+
+    result = _ice.run_cloud_maintenance(_maintenance_source())
+
+    assert call_state["commit_attempts"] == 2, (
+        f"expected exactly 2 commit attempts (1 CAS fail + 1 retry success); got {call_state['commit_attempts']}"
+    )
+    assert catalog.load_table.call_count == 2, (
+        f"expected exactly 2 catalog.load_table calls (initial + 1 reload after CAS); "
+        f"got {catalog.load_table.call_count}"
+    )
+    # snapshots_before MUST be re-pinned from the reloaded head (12), not the
+    # initial load (10). Otherwise snapshots_expired_count = max(0, 10-5) = 5
+    # instead of the correct max(0, 12-5) = 7.
+    assert result.get("snapshots_before") == 12, (
+        f"snapshots_before must be re-pinned after CAS reload; got {result.get('snapshots_before')}. "
+        f"Reporting the stale pre-reload count would misrepresent the diff on the path the retry exists for."
+    )
+    assert result.get("snapshots_after") == 5
+    assert result.get("snapshots_expired_count") == 7
+    assert "snapshot_expiry_error" not in result
+
+
+def test_run_cloud_maintenance_retries_on_concurrent_expire_value_error(monkeypatch):
+    """When another expire run (admin re-trigger overlapping the scheduled
+    run) already removed snapshots in our expire set, pyiceberg's
+    RemoveSnapshotsUpdate handler raises:
+        ValueError('Snapshot with snapshot id N does not exist: ...')
+    The retry must self-heal this by reloading and recomputing the expire
+    set via older_than against the post-overlap snapshot list. Pinning
+    because catching ONLY CommitFailedException would turn this into a
+    weekly false-positive snapshot_expiry_error on a multi-trigger fleet."""
+    from backend.core import iceberg as _ice
+
+    commit_attempts = {"n": 0}
+
+    def _commit_side():
+        commit_attempts["n"] += 1
+        if commit_attempts["n"] == 1:
+            return ValueError("Snapshot with snapshot id 12345 does not exist: ['67890', '11111']")
+        return None
+
+    table_initial, _ = _maintenance_table(snapshots_before=8, snapshots_after=8, commit_side_effect=_commit_side)
+    table_reloaded, _ = _maintenance_table(snapshots_before=6, snapshots_after=3, commit_side_effect=_commit_side)
+
+    catalog = MagicMock()
+    load_calls = {"n": 0}
+
+    def _catalog_load(_ident):
+        load_calls["n"] += 1
+        return table_initial if load_calls["n"] == 1 else table_reloaded
+
+    catalog.load_table.side_effect = _catalog_load
+    _patch_maintenance_deps(monkeypatch, table_initial, catalog)
+
+    result = _ice.run_cloud_maintenance(_maintenance_source())
+
+    assert commit_attempts["n"] == 2, (
+        f"expected 2 commit attempts (1 ValueError + 1 retry success); got {commit_attempts['n']}. "
+        f"If 1, the retry never fired — catching only CommitFailedException would miss the "
+        f"concurrent-expire ValueError shape."
+    )
+    assert load_calls["n"] == 2, f"expected 2 load_table calls; got {load_calls['n']}"
+    assert "snapshot_expiry_error" not in result, (
+        f"successful retry must NOT populate snapshot_expiry_error. Got: {result.get('snapshot_expiry_error')!r}"
+    )
+    assert result.get("snapshots_expired_count") == 3
+
+
+def test_run_cloud_maintenance_does_not_retry_unrelated_value_errors(monkeypatch):
+    """The ValueError retry must ONLY match the 'does not exist' message.
+    A generic ValueError (real bug — schema mismatch, type error) must
+    propagate immediately, not get retried 3 times before surfacing.
+    Mirrors the optimize_table 'does not retry unrelated' invariant."""
+    from backend.core import iceberg as _ice
+
+    commit_attempts = {"n": 0}
+
+    def _commit_side():
+        commit_attempts["n"] += 1
+        return ValueError("Some unrelated schema bug")
+
+    table, _ = _maintenance_table(snapshots_before=5, snapshots_after=5, commit_side_effect=_commit_side)
+    catalog = MagicMock()
+    load_calls = {"n": 0}
+
+    def _catalog_load(_ident):
+        load_calls["n"] += 1
+        return table
+
+    catalog.load_table.side_effect = _catalog_load
+    _patch_maintenance_deps(monkeypatch, table, catalog)
+
+    result = _ice.run_cloud_maintenance(_maintenance_source())
+
+    assert commit_attempts["n"] == 1, (
+        f"unrelated ValueError must propagate immediately, not trigger retry. Got {commit_attempts['n']} attempts."
+    )
+    assert load_calls["n"] == 1, f"unrelated ValueError must NOT trigger reload. Got {load_calls['n']} reloads."
+    assert "snapshot_expiry_error" in result
+    assert "unrelated schema bug" in result["snapshot_expiry_error"]
+
+
+def test_run_cloud_maintenance_invalidates_pointer_cache_before_retry_reload(monkeypatch):
+    """FosSqlCatalog.load_table consults a 2-sec _read_metadata_pointer
+    cache (_POINTER_CACHE_TTL_SEC). Without explicit invalidation, all 3
+    CAS retries finish in microseconds and read the same pre-conflict
+    pointer entry — the retry exhausts without ever seeing post-conflict
+    state. Pinning so a future refactor that drops the
+    _pointer_cache_invalidate call re-introduces the silent CAS death-loop."""
+    from pyiceberg.exceptions import CommitFailedException
+
+    from backend.core import iceberg as _ice
+
+    invalidate_calls: list = []
+    real_invalidate = _ice._pointer_cache_invalidate
+
+    def _spy_invalidate(src, ident):
+        invalidate_calls.append((src.get("name"), ident))
+        real_invalidate(src, ident)
+
+    monkeypatch.setattr(_ice, "_pointer_cache_invalidate", _spy_invalidate)
+
+    commit_attempts = {"n": 0}
+
+    def _commit_side():
+        commit_attempts["n"] += 1
+        if commit_attempts["n"] == 1:
+            return CommitFailedException("pointer race")
+        return None
+
+    table_initial, _ = _maintenance_table(snapshots_before=10, snapshots_after=10, commit_side_effect=_commit_side)
+    table_reloaded, _ = _maintenance_table(snapshots_before=10, snapshots_after=7, commit_side_effect=_commit_side)
+
+    catalog = MagicMock()
+    load_calls = {"n": 0}
+
+    def _catalog_load(_ident):
+        load_calls["n"] += 1
+        return table_initial if load_calls["n"] == 1 else table_reloaded
+
+    catalog.load_table.side_effect = _catalog_load
+    _patch_maintenance_deps(monkeypatch, table_initial, catalog)
+
+    _ice.run_cloud_maintenance(_maintenance_source())
+
+    # _pointer_cache_invalidate must be called BEFORE each retry reload
+    # (i.e. at least once for the single CAS conflict in this test).
+    assert any(call[0] == "expire-test" for call in invalidate_calls), (
+        f"_pointer_cache_invalidate must be called before catalog.load_table retry to bypass the "
+        f"2-sec pointer cache. Got invalidate_calls={invalidate_calls}. Without this, the retry "
+        f"reads the same pre-conflict cache entry 3 times and exhausts in microseconds."
+    )
+
+
+def test_run_cloud_maintenance_records_snapshots_before_even_on_cas_exhaustion(monkeypatch):
+    """When every CAS retry fails, results must still surface snapshots_before
+    (so operators can see the snapshot pile size at the moment of failure,
+    which is when they MOST need that signal). snapshots_after and
+    snapshots_expired_count must NOT be present — reporting a bogus 0 there
+    would lie about what happened."""
+    from pyiceberg.exceptions import CommitFailedException
+
+    from backend.core import iceberg as _ice
+
+    def _always_cas():
+        return CommitFailedException("Table has been updated by another process: ns.tbl")
+
+    table, _ = _maintenance_table(snapshots_before=42, snapshots_after=42, commit_side_effect=_always_cas)
+    catalog = MagicMock()
+    catalog.load_table.return_value = table
+    _patch_maintenance_deps(monkeypatch, table, catalog)
+
+    result = _ice.run_cloud_maintenance(_maintenance_source())
+
+    assert "snapshot_expiry_error" in result, (
+        f"on CAS exhaustion the error must surface in snapshot_expiry_error. Got: {result}"
+    )
+    assert result.get("snapshots_before") == 42, (
+        f"snapshots_before must be reported even when commit ultimately fails (it's the operator's "
+        f"key signal at failure time). Got: {result.get('snapshots_before')}"
+    )
+    assert "snapshots_after" not in result, (
+        "snapshots_after must NOT be reported on failure — would mislead about actual end state"
+    )
+    assert "snapshots_expired_count" not in result, (
+        "snapshots_expired_count must NOT be reported on failure — would falsely claim expirations succeeded"
+    )
+
+
+def test_run_cloud_maintenance_does_not_invalidate_snapshot_files_cache_on_expire(monkeypatch):
+    """expire_snapshots removes OLD snapshot metadata entries; the CURRENT
+    snapshot's file membership is unchanged. So unlike step 1 (data_delete)
+    and optimize_table, this step must NOT pop _snapshot_files_cache /
+    _view_cache. A future 'helpful' refactor that adds the pops here would
+    break the post-expire snapshot fast-path.
+
+    Pinned because the discipline 'expire is metadata-only, do not bust the
+    file-membership cache' is exactly the kind of invariant that gets
+    accidentally violated during cleanup passes."""
+    from backend import config as _svcconfig
+    from backend.core import iceberg as _ice
+
+    # Pre-populate the caches as a real workload would.
+    _ice._snapshot_files_cache["expire-test"] = {"sentinel": "preserve-me"}
+    _ice._view_cache["expire-test"] = {"sentinel": "preserve-me-too"}
+
+    try:
+        table, _ = _maintenance_table(snapshots_before=5, snapshots_after=3)
+        catalog = MagicMock()
+        catalog.load_table.return_value = table
+        _patch_maintenance_deps(monkeypatch, table, catalog)
+        # Disable step 1 (data deletion) so its cache pop doesn't mask step 2.
+        monkeypatch.setattr(
+            _svcconfig,
+            "load_config",
+            lambda sid: {"provisioning": {"cron_sync": {"data_retention_days": 0, "cache_retention_days": 0}}},
+        )
+
+        _ice.run_cloud_maintenance(_maintenance_source())
+
+        assert _ice._snapshot_files_cache.get("expire-test") == {"sentinel": "preserve-me"}, (
+            "expire_snapshots must NOT invalidate _snapshot_files_cache — current snapshot's file "
+            "membership is unchanged. Bug would silently slow down every post-expire dashboard load."
+        )
+        assert _ice._view_cache.get("expire-test") == {"sentinel": "preserve-me-too"}, (
+            "expire_snapshots must NOT invalidate _view_cache — same reason as above."
+        )
+    finally:
+        _ice._snapshot_files_cache.pop("expire-test", None)
+        _ice._view_cache.pop("expire-test", None)

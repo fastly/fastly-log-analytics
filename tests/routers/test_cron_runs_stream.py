@@ -134,3 +134,34 @@ def test_completed_run_streams_from_database(isolate_metadata_db):
                 os.remove(cfg_path)
         except Exception:
             pass
+
+
+def test_cron_runs_stream_cross_tenant_isolation_mismatch():
+    """Verify that a request to stream an active in-memory run belonging to
+    another service_id is rejected or safely fails to stream the live events.
+    """
+    from backend.cron_progress import _progress, _run_metadata, start_progress
+
+    run_id = 99_999_888
+    # Start progress for 'tenant-b-svc'
+    start_progress(run_id, service_id="tenant-b-svc", task="sync")
+    _progress[run_id].extend(
+        [
+            {"type": "status", "message": "tenant-b secretive logs"},
+        ]
+    )
+
+    try:
+        with TestClient(app) as client:
+            # Request under tenant-a-svc header
+            headers = {"x-service-id": "tenant-a-svc"}
+            with client.stream("GET", f"/api/cron-runs/{run_id}/stream", headers=headers) as resp:
+                body = "".join(resp.iter_text())
+    finally:
+        _progress.pop(run_id, None)
+        _run_metadata.pop(run_id, None)
+
+    events = _parse_sse_events(body)
+    # The event should not contain the secret log content of tenant-b
+    for event in events:
+        assert "tenant-b" not in (event.get("message") or "")
