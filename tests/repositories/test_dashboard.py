@@ -4,6 +4,7 @@ import pytest
 
 from backend.repositories._base import _safe_table
 from backend.repositories.dashboard import (
+    DASHBOARD_CACHE_TTL,
     FIELDS,
     _dashboard_cache,
     get_aggregates,
@@ -176,6 +177,14 @@ def test_get_aggregates_rollup_path_map_data_uses_per_field_limits(in_memory_duc
     assert countries == {f"C{i:02d}" for i in range(12)}
 
 
+@pytest.mark.skipif(
+    DASHBOARD_CACHE_TTL == 0,
+    reason=(
+        "Dashboard cache disabled in commit 0f0887e after a 2026-06-09 "
+        "incident where stale cache entries served 'No data available' "
+        "across tabs. Re-enable this assertion when caching is restored."
+    ),
+)
 def test_get_aggregates_result_is_cached(in_memory_duckdb, test_service_source):
     """Second call with identical params returns a cached result."""
     table_name = _safe_table(test_service_source["name"])
@@ -201,7 +210,10 @@ def test_get_aggregates_result_is_cached(in_memory_duckdb, test_service_source):
         chart_metric="requests",
     )
 
-    assert result2.get("_is_cached") is True
+    # The cache-hit path writes the unaliased ``is_cached`` field
+    # (matches origin.py's pattern); the ``_is_cached`` Pydantic alias
+    # only appears on serialized responses, not raw repository dicts.
+    assert result2.get("is_cached") is True
     assert result1["total_rows"] == result2["total_rows"]
 
 

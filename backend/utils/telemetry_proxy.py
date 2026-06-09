@@ -472,10 +472,16 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
                     )
                     await proxy_resp.prepare(request)
                     client_response_started = True
+                    # RFC 7231 §4.3.2: HEAD responses MUST NOT include a body.
+                    # Drain the upstream body for byte-counting + telemetry,
+                    # but never forward to the client. aiohttp 3.14's stricter
+                    # parser otherwise rejects HEAD-with-body as BadStatusLine.
+                    is_head = request.method == "HEAD"
                     try:
                         async for chunk in upstream_resp.content.iter_chunked(65536):
                             bytes_received += len(chunk)
-                            await proxy_resp.write(chunk)
+                            if not is_head:
+                                await proxy_resp.write(chunk)
                         await proxy_resp.write_eof()
                     except ConnectionResetError as ce:
                         # Client (e.g. aiobotocore) closed its socket
