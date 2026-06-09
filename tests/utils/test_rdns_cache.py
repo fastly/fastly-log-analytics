@@ -227,9 +227,10 @@ def test_get_stats_counts_total_and_pending():
 def test_do_lookup_returns_nxdomain_on_herror():
     """``socket.herror`` (PTR record missing) → ('nxdomain', no
     hostname). Pinned because the classifier treats nxdomain as
-    impersonator only when the bot defines a verification domain;
-    a refactor that surfaced these as 'error' would shift the
-    distinction."""
+    impersonator only when the bot defines a verification domain.
+    Phase 1.4a: assertion targets the sync fallback (the running-loop
+    safety net); the aiodns hot path translates ARES_ENOTFOUND /
+    ARES_ENODATA to the same status."""
     with patch("socket.gethostbyaddr", side_effect=socket.herror("no PTR")):
         host, status, fcrdns = rdns_cache._do_lookup("1.2.3.4")
     assert host is None
@@ -239,8 +240,10 @@ def test_do_lookup_returns_nxdomain_on_herror():
 
 def test_do_lookup_returns_error_on_unexpected_exception():
     """Any other exception (timeout, gaierror) → 'error' status.
-    Pinned distinct from nxdomain so the classifier can choose
-    whether to retry."""
+    Phase 1.4a: the socket-based path lives in
+    ``_do_lookup_sync_fallback`` (production uses the aiodns async
+    path); this test pins the fallback contract because the running-
+    loop fallback branch still relies on it."""
     with patch("socket.gethostbyaddr", side_effect=OSError("timeout")):
         host, status, fcrdns = rdns_cache._do_lookup("1.2.3.4")
     assert host is None
@@ -250,8 +253,9 @@ def test_do_lookup_returns_error_on_unexpected_exception():
 
 def test_do_lookup_fcrdns_verified_when_forward_matches_reverse():
     """Reverse DNS returns hostname, forward DNS for that hostname
-    includes the original IP → FCrDNS verified. This is the gold
-    standard for bot verification."""
+    includes the original IP → FCrDNS verified. Pinned against
+    the sync-fallback path (the aiodns path is exercised via the
+    enrich_batch tests above)."""
     fake_forward = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("66.249.66.1", 0)),
     ]
@@ -267,10 +271,9 @@ def test_do_lookup_fcrdns_verified_when_forward_matches_reverse():
 
 
 def test_do_lookup_fcrdns_unverified_when_forward_mismatches():
-    """The classic impersonator pattern: PTR points to a googlebot
-    hostname, but forward lookup of that hostname returns a different
-    IP. Pinned because losing this check would let attackers spoof
-    PTR records to pass verification."""
+    """Classic impersonator pattern: PTR points to a googlebot
+    hostname, but forward lookup returns a different IP. Pinned
+    against the sync-fallback path."""
     fake_forward = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("66.249.66.99", 0)),  # different!
     ]
@@ -287,9 +290,8 @@ def test_do_lookup_fcrdns_unverified_when_forward_mismatches():
 
 def test_do_lookup_fcrdns_false_when_forward_resolution_errors():
     """Reverse DNS succeeds but forward DNS fails (NXDOMAIN, timeout)
-    → fcrdns=False but status is still 'resolved'. Pinned because
-    the cache shouldn't discard a known hostname just because forward
-    resolution flaked."""
+    → fcrdns=False but status is still 'resolved'. Pinned against
+    the sync-fallback path."""
     with (
         patch("socket.gethostbyaddr", return_value=("known.example.com", [], [])),
         patch("socket.getaddrinfo", side_effect=OSError("forward DNS down")),
@@ -612,10 +614,10 @@ def test_enrich_batch_refreshes_stale_entries():
 # ── enrich_batch_gen: per-IP log event stream ──────────────────────────────
 
 
-def test_enrich_batch_gen_yields_log_per_resolved_ip():
-    """Each successfully-resolved IP emits a "Resolved X -> hostname"
-    log line. Pinned because admins use these log lines to debug
-    why a particular IP isn't resolving."""
+def test_enrich_batch_gen_yields_batch_summary_for_resolved_pass():
+    """Phase 1.4a: per-IP log lines collapse into one batch-summary
+    log per pass ("Pending pass: resolved=N errors=M"). Per-IP traces
+    live in OTel spans now. The FE consumes the summary counts."""
     rdns_cache.enqueue(["3.3.3.3"])
 
     with (
@@ -625,13 +627,11 @@ def test_enrich_batch_gen_yields_log_per_resolved_ip():
         events = list(rdns_cache.enrich_batch_gen(limit=10))
 
     log_messages = [e["message"] for e in events if e["type"] == "log"]
-    assert any("Resolved 3.3.3.3" in m and "h.example.com" in m for m in log_messages)
+    assert any("Pending pass" in m and "resolved=1" in m for m in log_messages)
 
 
-def test_enrich_batch_gen_yields_log_per_failed_ip():
-    """Failed lookups emit "Failed to resolve X: nxdomain" lines.
-    Pinned because the FE keys on the "Failed to resolve" prefix to
-    colour the log entry red."""
+def test_enrich_batch_gen_yields_batch_summary_for_failed_pass():
+    """Failed lookups appear in the batch summary as errors=N."""
     rdns_cache.enqueue(["7.7.7.7"])
 
     with (
@@ -641,7 +641,7 @@ def test_enrich_batch_gen_yields_log_per_failed_ip():
         events = list(rdns_cache.enrich_batch_gen(limit=10))
 
     log_messages = [e["message"] for e in events if e["type"] == "log"]
-    assert any("Failed to resolve 7.7.7.7" in m and "nxdomain" in m for m in log_messages)
+    assert any("Pending pass" in m and "errors=1" in m for m in log_messages)
 
 
 # ── _discover_new_ips_gen: source iteration ──────────────────────────────

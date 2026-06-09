@@ -27,6 +27,26 @@ dependencies = [
     "cryptography>=42",
     "python-multipart>=0.0.9",
     "starlette-compress>=1.7",
+    # v2.0 Phase 1: OpenTelemetry + structlog replace the four fragmented
+    # custom telemetry surfaces (see pending-docs/telemetry_map.md). Phase
+    # ships with the console exporter only; adding Jaeger/Tempo/etc. is a
+    # post-v2.0 deploy-config decision (no SaaS subscription).
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-botocore>=0.48b0",
+    "opentelemetry-instrumentation-aiohttp-client>=0.48b0",
+    "structlog>=24.4",
+    # v2.0 Phase 1.4a: aiodns + aiosqlite implement concurrent reverse DNS
+    # with FCrDNS verification and a single-transaction bulk SQLite write
+    # per pending-docs/design_rdns_async.md. aiosqlite is scoped to
+    # rdns_cache.py only — every other SQLite call site stays sync.
+    "aiodns>=3.2",
+    "aiosqlite>=0.20",
+    # v2.0 Phase 3: tenacity provides standardized declarative retry
+    # decorators replacing fragile custom try/except loops in
+    # provision/fastly_api.py + utils/ngwaf.py + SQLite write paths.
+    "tenacity>=9.0",
 ]
 
 [dependency-groups]
