@@ -18,10 +18,11 @@ sections of the site appear.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from dataclasses import dataclass
 from typing import Final
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 # A segment is "id-like" — and therefore gets collapsed to '*' — if it matches
 # any of these. Order matters only when patterns overlap; current set is
@@ -103,6 +104,8 @@ class Route:
 def _strip_query(url: str) -> str:
     """Return just the path component of a URL. Handles both relative
     (``/foo/bar?x=1``) and absolute (``https://h/foo/bar?x=1``) inputs."""
+    while url.startswith("//"):
+        url = url[1:]
     parts = urlsplit(url)
     return parts.path or "/"
 
@@ -130,7 +133,7 @@ def normalize(url: str) -> Route:
         /api/v2/orders/00000abc-...        → Route('/api/v2/orders/*',  'api')
         /search?q=red+shoes&page=2         → Route('/search',           'browse')
     """
-    path = _strip_query(url)
+    path = posixpath.normpath(_strip_query(url))
     # Treat the root specially — there's no segment to inspect, and the
     # category is unambiguously 'home'.
     if path in ("", "/"):
@@ -139,7 +142,7 @@ def normalize(url: str) -> Route:
     # Split, normalize each segment, rejoin. Empty strings between
     # consecutive '/' or at the leading position drop out cleanly via the
     # filter; we re-prepend the leading '/' below.
-    raw_segments = [s for s in path.split("/") if s != ""]
+    raw_segments = [unquote(s) for s in path.split("/") if s != ""]
     if not raw_segments:
         return Route(path="/", category="home")
 

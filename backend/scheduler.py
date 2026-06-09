@@ -525,6 +525,31 @@ class Scheduler:
                 self._job_ids[lc_job_id] = lc_job_id
                 logger.info("⚙️  [scheduler] Registered local_compact job %s (every 2 min, local-only).", lc_job_id)
 
+            # ── Daily rollup compaction (per-day parquet from per-hour) ────
+            # 02:00 UTC — runs before optimize (03:00) so per-day rollups
+            # are ready when the next day's queries start. Only for
+            # read-write services that own the rollup data.
+            if compact_cfg.get("enabled", True) and prov.get("access_level") != "read_only":
+                rc_job_id = f"rollup_compact_{service_id}"
+                seen_ids.add(rc_job_id)
+                if rc_job_id not in self._job_ids:
+                    self._sched.add_job(
+                        _run_rollup_compact_daily,
+                        "cron",
+                        hour=2,
+                        minute=0,
+                        args=[service_id],
+                        id=rc_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=3600,
+                    )
+                    self._job_ids[rc_job_id] = rc_job_id
+                    logger.info(
+                        "📦 [scheduler] Registered rollup compaction job %s (daily 02:00 UTC).",
+                        rc_job_id,
+                    )
+
             # ── Weekly expire-snapshots job ───────────────────────────────────
             if compact_cfg.get("enabled", True):
                 exp_job_id = f"expire_{service_id}"
@@ -791,6 +816,8 @@ def _run_metadata_sync(
     if src is None:
         return
 
+    is_manual = run_id is not None
+
     if run_id is None:
         try:
             run_id = start_cron_run(src, "metadata_sync")
@@ -807,7 +834,6 @@ def _run_metadata_sync(
     # For manual runs (run_id is not None), we ignore the default limit unless
     # it was explicitly passed in. If a manual run is triggered without
     # start_time, it means "Import All", so we should clear any existing limit.
-    is_manual = run_id is not None
 
     if not start_time and not is_manual:
         prov = cfg.get("provisioning", {})
@@ -2210,11 +2236,19 @@ def _run_optimize(service_id: str) -> None:
 @cron_task("expire_snapshots")
 def _run_expire_snapshots(service_id: str) -> None:
     """Weekly job: perform cloud maintenance including data deletion, cache cleanup, and snapshot expiry."""
+    import time
+
     from backend.core import iceberg as db_iceberg
-    from backend.core.duckdb import get_source_for_service
+    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
 
     src = get_source_for_service(service_id)
     if src is None:
+        return
+
+    try:
+        run_id = start_cron_run(src, "expire_snapshots")
+    except RuntimeError as e:
+        logger.info("⏭️  [expire] %s: skipping — %s", service_id, str(e))
         return
 
     svc_id = src.get("service_id", "unknown")
@@ -2222,23 +2256,121 @@ def _run_expire_snapshots(service_id: str) -> None:
     display_name = f"{svc_name} ({svc_id})" if svc_name != svc_id else svc_id
     logger.info("▶️  \x1b[90m[expire]\x1b[0m %s: Maintenance job started.", display_name)
 
-    try:
-        pass
-    except Exception:
-        pass
-
+    start_time = time.time()
     try:
         result = db_iceberg.run_cloud_maintenance(src)
+        duration = time.time() - start_time
         if "error" in result:
             logger.warning("%s %s: %s", JOB_COLORS["expire"] + "[expire]" + RESET_COLOR, display_name, result["error"])
+            log_cron_run(
+                src,
+                "expire_snapshots",
+                duration,
+                "error",
+                error_message=str(result["error"]),
+                summary="Maintenance failed at catalog load",
+                run_id=run_id,
+            )
         else:
+            summary_parts = []
+            sub_errors = []
+            for k, v in result.items():
+                if k.endswith("_error"):
+                    sub_errors.append(f"{k}={v}")
+                else:
+                    summary_parts.append(f"{k}={v}")
+            summary = ", ".join(summary_parts) if summary_parts else "no work to do"
+            status = "warning" if sub_errors else "success"
+            error_message = "; ".join(sub_errors) if sub_errors else None
             logger.info("🗑️ \x1b[90m[expire]\x1b[0m %s: Maintenance completed. %s", display_name, result)
+            log_cron_run(
+                src,
+                "expire_snapshots",
+                duration,
+                status,
+                error_message=error_message,
+                summary=summary,
+                run_id=run_id,
+            )
     except Exception as e:
+        duration = time.time() - start_time
         logger.exception(
             "%s %s: Maintenance failed: %s", JOB_COLORS["expire"] + "[expire]" + RESET_COLOR, display_name, e
         )
+        log_cron_run(
+            src,
+            "expire_snapshots",
+            duration,
+            "error",
+            error_message=str(e),
+            summary="Maintenance raised an uncaught exception",
+            run_id=run_id,
+        )
 
     logger.info("⏹️  \x1b[90m[expire]\x1b[0m %s: Maintenance job finished.", display_name)
+
+
+@cron_task("rollup_compact_daily")
+def _run_rollup_compact_daily(service_id: str) -> None:
+    """Daily job: consolidate closed-day per-hour rollup parquet into per-day files.
+
+    Reduces file-open overhead on 7-day dashboard queries from ~1500 files
+    to ~30. Reader automatically falls back to per-hour when per-day is
+    missing, so this is purely additive.
+    """
+    import time
+
+    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.rollups import compact_closed_days_to_daily
+
+    src = get_source_for_service(service_id)
+    if src is None:
+        return
+
+    try:
+        run_id = start_cron_run(src, "rollup_compact_daily")
+    except RuntimeError as e:
+        logger.info("⏭️  [rollup-compact] %s: skipping — %s", service_id, str(e))
+        return
+
+    _svc_name = _display_name(src, service_id)
+    _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
+    logger.info("▶️  [rollup-compact] %s: Daily rollup compaction started.", _display)
+
+    start_time = time.time()
+    try:
+        rebuilt = compact_closed_days_to_daily(service_id, src)
+        duration = time.time() - start_time
+        # Pass run_id so log_cron_run UPDATEs the 'running' row that
+        # start_cron_run inserted (instead of orphaning it and inserting
+        # a fresh terminal row). The same fix applies to the error
+        # branch below — without run_id pass-through both branches
+        # leave the original 'running' row stuck forever.
+        log_cron_run(
+            src,
+            "rollup_compact_daily",
+            duration,
+            "success",
+            summary=f"Rebuilt {rebuilt} (field, day) parquet file(s).",
+            run_id=run_id,
+        )
+        logger.info(
+            "⏹️  [rollup-compact] %s: Compacted %d (field, day) file(s) in %.1fs.",
+            _display,
+            rebuilt,
+            duration,
+        )
+    except Exception as e:
+        duration = time.time() - start_time
+        log_cron_run(
+            src,
+            "rollup_compact_daily",
+            duration,
+            "error",
+            error_message=str(e),
+            run_id=run_id,
+        )
+        logger.exception("[rollup-compact] %s: Daily rollup compaction failed: %s", _display, e)
 
 
 @cron_task("sync_ngwaf_bots")

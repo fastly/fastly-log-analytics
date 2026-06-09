@@ -63,7 +63,13 @@ def test_get_top_bots_empty_table(in_memory_duckdb):
         filters={},
     )
 
-    assert result == {"bots": [], "ngwaf_bots": []}
+    assert result["bots"] == []
+    assert result["ngwaf_bots"] == []
+    # `**runner.telemetry()` is spread into the return so the dashboard
+    # can attribute the cold cost of /api/security/top-bots; both fields
+    # must be present even on the empty-table fast path.
+    assert "debug_queries" in result
+    assert "debug_calls" in result
 
 
 def test_get_top_bots_with_bot_uas(in_memory_duckdb, test_service_source):

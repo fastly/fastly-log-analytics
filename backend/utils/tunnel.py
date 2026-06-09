@@ -443,6 +443,16 @@ class TunnelManager:
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
+                try:
+                    row = share_db.get_session(session_id)
+                    if row:
+                        rehydrated = AnalystSession.from_row(row)
+                        rehydrated.service_ids = share_db.get_remote_invite_services(row["invite_id"])
+                        self._sessions[session_id] = rehydrated
+                        session = rehydrated
+                except Exception:
+                    logger.exception("[tunnel] failed to rehydrate session %s on demand", session_id[:8] if session_id else "")
+            if session is None:
                 return None
             now = datetime.now(UTC)
             try:
@@ -474,7 +484,9 @@ class TunnelManager:
             # the latest invite-side values onto the cached AnalystSession
             # before returning, so every downstream request sees fresh
             # permissions on the next call.
-            session.pii_policy = invite.get("pii_policy") or session.pii_policy
+            session.pii_policy = (
+                invite.get("pii_policy") if invite.get("pii_policy") is not None else session.pii_policy
+            )
             session.query_window_hours = invite.get("query_window_hours")
             session.query_start_time = invite.get("query_start_time")
             session.query_end_time = invite.get("query_end_time")

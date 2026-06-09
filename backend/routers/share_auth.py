@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/share", tags=["share-auth"])
 
 COOKIE_NAME = "analyst_session_id"
+PENDING_COOKIE_NAME = "analyst_pending_session_id"
 
 
 def _client_ip(request: Request) -> str:
@@ -111,23 +112,36 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         details=f"session={session.session_id[:8]}…",
     )
 
-    # Cookie contract — see Section #4. secure=True is non-negotiable.
-    # In test mode (TestClient defaults to http://testserver), uvicorn won't
-    # send secure cookies; we tag it anyway because tests can read Set-Cookie.
-    response.set_cookie(
-        key=COOKIE_NAME,
-        value=session.session_id,
-        httponly=True,
-        secure=True,
-        samesite="strict",
-        max_age=share_db.iso_z_now() and 24 * 60 * 60,
-        path="/",
-    )
-
     tos = share_db.get_latest_tos()
     tos_pending = bool(
         tos and (invite.get("tos_accepted_at") is None or (invite.get("tos_version") or "") != tos["version"])
     )
+
+    # Cookie contract — see Section #4. secure=True is non-negotiable.
+    # In test mode (TestClient defaults to http://testserver), uvicorn won't
+    # send secure cookies; we tag it anyway because tests can read Set-Cookie.
+    if tos_pending:
+        response.set_cookie(
+            key=PENDING_COOKIE_NAME,
+            value=session.session_id,
+            httponly=True,
+            secure=True,
+            samesite="strict",
+            max_age=share_db.iso_z_now() and 24 * 60 * 60,
+            path="/",
+        )
+        response.delete_cookie(COOKIE_NAME, path="/")
+    else:
+        response.set_cookie(
+            key=COOKIE_NAME,
+            value=session.session_id,
+            httponly=True,
+            secure=True,
+            samesite="strict",
+            max_age=share_db.iso_z_now() and 24 * 60 * 60,
+            path="/",
+        )
+        response.delete_cookie(PENDING_COOKIE_NAME, path="/")
 
     return ShareLoginResponse(
         ok=True,
@@ -143,11 +157,12 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
 
 @router.post("/logout", response_model=ShareLogoutResponse)
 def share_logout(request: Request, response: Response):
-    sid = request.cookies.get(COOKIE_NAME)
+    sid = request.cookies.get(COOKIE_NAME) or request.cookies.get(PENDING_COOKIE_NAME)
     mgr = get_tunnel_manager()
     if sid:
         mgr.boot_session(sid, reason="analyst logout")
     response.delete_cookie(COOKIE_NAME, path="/")
+    response.delete_cookie(PENDING_COOKIE_NAME, path="/")
     return ShareLogoutResponse(ok=True)
 
 
@@ -155,13 +170,39 @@ class TosAckPayload(BaseModel):
     version: str
 
 
-@router.post("/acknowledge", response_model=ShareAcknowledgeResponse)
-def share_acknowledge_tos(payload: TosAckPayload, request: Request):
-    sid = request.cookies.get(COOKIE_NAME)
+@router.get("/tos", response_model=TosDocument)
+def share_get_tos(request: Request):
+    """Return the latest TOS document so the acknowledge page can render the
+    real text and POST back the matching version.
+
+    Session-gated (pending OR full cookie) — the same shape /acknowledge uses —
+    so anonymous callers can't enumerate the TOS surface. The strict version
+    check in /acknowledge (audit finding 021) means the frontend must know the
+    exact current version; this endpoint is how it learns it.
+    """
+    sid = request.cookies.get(PENDING_COOKIE_NAME) or request.cookies.get(COOKIE_NAME)
     mgr = get_tunnel_manager()
     session = mgr.validate_session(sid)
     if session is None:
         raise HTTPException(status_code=401, detail={"error": "unauthenticated"})
+    tos = share_db.get_latest_tos()
+    if not tos:
+        raise HTTPException(status_code=404, detail={"error": "no_tos"})
+    return TosDocument(version=tos["version"], text=tos["text"])
+
+
+@router.post("/acknowledge", response_model=ShareAcknowledgeResponse)
+def share_acknowledge_tos(payload: TosAckPayload, request: Request, response: Response):
+    sid = request.cookies.get(PENDING_COOKIE_NAME) or request.cookies.get(COOKIE_NAME)
+    mgr = get_tunnel_manager()
+    session = mgr.validate_session(sid)
+    if session is None:
+        raise HTTPException(status_code=401, detail={"error": "unauthenticated"})
+
+    tos = share_db.get_latest_tos()
+    if tos and payload.version != tos["version"]:
+        raise HTTPException(status_code=400, detail={"error": "invalid_tos_version"})
+
     share_db.mark_tos_accepted(session.invite_id, payload.version)
     share_db.log_share_audit_event(
         event_type="TOS_ACCEPTED",
@@ -169,6 +210,16 @@ def share_acknowledge_tos(payload: TosAckPayload, request: Request):
         ip_address=session.ip_address,
         details=f"version={payload.version}",
     )
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=session.session_id,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=share_db.iso_z_now() and 24 * 60 * 60,
+        path="/",
+    )
+    response.delete_cookie(PENDING_COOKIE_NAME, path="/")
     return ShareAcknowledgeResponse(ok=True)
 
 
@@ -178,7 +229,7 @@ def share_heartbeat(request: Request):
 
     Returns 401 if the session is gone so the frontend redirects to login.
     """
-    sid = request.cookies.get(COOKIE_NAME)
+    sid = request.cookies.get(COOKIE_NAME) or request.cookies.get(PENDING_COOKIE_NAME)
     mgr = get_tunnel_manager()
     session = mgr.validate_session(sid)
     if session is None:

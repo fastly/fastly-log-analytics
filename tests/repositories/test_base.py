@@ -212,6 +212,49 @@ class TestQueryRunner:
         cols = runner.get_schema_cols()
         assert isinstance(cols, list)
 
+    def test_get_schema_cols_self_heal_busts_view_cache_before_rebuild(self, test_service_source):
+        """When ``_get_schema`` returns [] (view bound to deleted buffer file),
+        the self-heal must call ``clear_source_caches`` BEFORE
+        ``update_iceberg_view(force=True)``. Without busting the cache, the
+        lock-timeout fallback in update_iceberg_view re-executes the SAME
+        stale cached SQL, the view stays bound to the dead path, the next
+        ``_get_schema`` returns [] again, and the caller short-circuits via
+        ``empty_schema_response`` — surfacing as 'No data available' on a 200.
+        Prod regression witnessed 2026-06-09."""
+        from unittest.mock import MagicMock
+
+        runner = QueryRunner(MagicMock(), test_service_source)
+
+        call_order: list[str] = []
+
+        def fake_clear(source_key, keep_snapshot_cache=False):
+            call_order.append(f"clear_source_caches(keep_snapshot_cache={keep_snapshot_cache})")
+
+        def fake_refresh(con, src, force=False, lock_timeout=5.0):
+            call_order.append(f"update_iceberg_view(force={force})")
+
+        get_schema_calls = {"n": 0}
+
+        def fake_get_schema(con, src):
+            get_schema_calls["n"] += 1
+            # First call returns empty (stale view); second call (post-rebuild) returns a real schema
+            if get_schema_calls["n"] == 1:
+                return []
+            return [{"name": "timestamp"}, {"name": "ip"}, {"name": "status"}]
+
+        with (
+            patch("backend.repositories._base._get_schema", side_effect=fake_get_schema),
+            patch("backend.core.iceberg.clear_source_caches", side_effect=fake_clear),
+            patch("backend.core.iceberg.update_iceberg_view", side_effect=fake_refresh),
+        ):
+            cols = runner.get_schema_cols()
+
+        assert call_order == [
+            "clear_source_caches(keep_snapshot_cache=True)",
+            "update_iceberg_view(force=True)",
+        ], f"clear must run BEFORE refresh; got: {call_order}"
+        assert cols == ["timestamp", "ip", "status"], "post-rebuild schema should be returned"
+
 
 # ── optional_col ──────────────────────────────────────────────────────────────
 
@@ -356,3 +399,280 @@ class TestExecuteTopNBatchIntegerAggregation:
         # Should preserve fractional values, not collapse to 0
         assert "." in next(iter(buckets))
         assert buckets.get("0.013") == 2
+
+    def test_execute_top_n_rollups_uses_direct_active_hour_fast_path(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Pinned: the live merge branch attempts the direct-parquet fast
+        path BEFORE the view-based create_filtered_temp_table fallback.
+
+        Profiling on 2026-06-08 showed the view-based path takes ~700ms
+        per request (entirely view-traversal overhead). The direct path
+        reads buffer/*.parquet + data/timestamp_hour=<active>/*.parquet
+        in ~6ms. Pinned because removing the fast-path call would silently
+        regress the dashboard cold path by ~700ms.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from backend.repositories._base import QueryRunner
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        cache_root = tmp_path / "cache"
+        (cache_root / "buffer").mkdir(parents=True)
+
+        # Write a buffer parquet containing one active-hour row.
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq.write_table(
+            pa.table(
+                {
+                    "timestamp": pa.array([active_dt + timedelta(minutes=5)], type=pa.timestamp("us", tz="UTC")),
+                    "country": pa.array(["US"]),
+                }
+            ),
+            str(cache_root / "buffer" / "batch_test.parquet"),
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+        # Ensure the rollup hour dir exists so we enter execute_top_n_rollups.
+        (cache_root / "rollups" / "hour").mkdir(parents=True)
+
+        # Spy on _create_active_hour_temp_direct to assert it's tried.
+        direct_calls = {"n": 0}
+        orig_direct = QueryRunner._create_active_hour_temp_direct
+
+        def spy_direct(self, *a, **kw):
+            direct_calls["n"] += 1
+            return orig_direct(self, *a, **kw)
+
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", spy_direct)
+
+        # Spy on create_filtered_temp_table to assert it's NOT called when direct succeeds.
+        view_fallback_calls = {"n": 0}
+        orig_view = QueryRunner.create_filtered_temp_table
+
+        def spy_view_fallback(self, *a, **kw):
+            view_fallback_calls["n"] += 1
+            return orig_view(self, *a, **kw)
+
+        monkeypatch.setattr(QueryRunner, "create_filtered_temp_table", spy_view_fallback)
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        active_end = active_dt + timedelta(hours=1)
+        rows, _ = runner.execute_top_n_rollups(["country"], active_dt.isoformat(), active_end.isoformat(), limit=10)
+
+        assert direct_calls["n"] == 1, f"direct active-hour fast path must be tried; got {direct_calls['n']} calls"
+        assert view_fallback_calls["n"] == 0, (
+            f"view-based fallback must NOT fire when direct path succeeds; got {view_fallback_calls['n']} fallback calls. "
+            f"This regression means the dashboard cold path silently dropped ~700ms back."
+        )
+        # And the result must include the active-hour row.
+        country_rows = [r for r in rows if r[0] == "country"]
+        assert ("country", "US", 1) in country_rows, (
+            f"active-hour buffer row must be merged into top-N; got {country_rows}"
+        )
+
+    def test_execute_top_n_rollups_falls_back_to_view_when_direct_finds_nothing(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """When neither buffer/ nor data/timestamp_hour=<active>/ has any
+        parquet files (e.g. brand-new service that hasn't ingested yet
+        OR the buffer was just flushed), the direct path returns None
+        and the live merge skips. live_res stays empty — semantically
+        correct (no active-hour data exists)."""
+        from datetime import UTC, datetime, timedelta
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        # Intentionally NO buffer/ or data/timestamp_hour=<active>/ dirs.
+        (cache_root / "rollups" / "hour").mkdir(parents=True)
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+        # Spy: view fallback should NOT fire either (direct returns None
+        # meaning "nothing on disk", not "failure" — caller should skip).
+        view_fallback_calls = {"n": 0}
+        orig_view = QueryRunner.create_filtered_temp_table
+
+        def spy_view_fallback(self, *a, **kw):
+            view_fallback_calls["n"] += 1
+            return orig_view(self, *a, **kw)
+
+        monkeypatch.setattr(QueryRunner, "create_filtered_temp_table", spy_view_fallback)
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        active_end = active_dt + timedelta(hours=1)
+        rows, _ = runner.execute_top_n_rollups(["country"], active_dt.isoformat(), active_end.isoformat(), limit=10)
+
+        # No data anywhere → no live rows, but call shouldn't crash.
+        # IMPORTANT: today the direct path returns None when no files
+        # exist, AND the view fallback would still fire. That's fine for
+        # correctness (view returns empty) but wastes ~700ms. Future
+        # optimization: have direct return a sentinel meaning "no data"
+        # vs "couldn't read" so caller can skip the view too.
+        country_rows = [r for r in rows if r[0] == "country"]
+        assert country_rows == [], f"no data anywhere → no country rows; got {country_rows}"
+
+    def test_execute_top_n_rollups_live_branch_actually_runs(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Regression: the live-active-hour merge branch had a broken
+        ``from backend.core.duckdb import _get_schema`` import (the
+        symbol lives in _base.py, not duckdb.py). The ImportError got
+        caught by the surrounding bare except, silently dropping the
+        live merge — so the top-N panels were missing the current
+        hour's data for an indeterminate time in prod. Pinned so any
+        future refactor that re-introduces a wrong-module import is
+        caught: the test asserts the live query path actually executes
+        AND returns the live-hour data."""
+        from datetime import UTC, datetime, timedelta
+
+        from backend.repositories._base import QueryRunner
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        in_memory_duckdb.execute("CREATE TABLE logs_liveimport (timestamp TIMESTAMPTZ, country VARCHAR)")
+        # Insert ONLY into the active hour so the only way the result
+        # has any rows is if the live branch actually ran.
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_liveimport VALUES (?, 'US'), (?, 'US'), (?, 'JP')",
+            [
+                active_dt + timedelta(minutes=5),
+                active_dt + timedelta(minutes=15),
+                active_dt + timedelta(minutes=25),
+            ],
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_liveimport")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+        (tmp_path / "rollups" / "hour").mkdir(parents=True)
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+
+        # Window spans the active hour so the live branch must fire.
+        st = active_dt.isoformat()
+        et = (active_dt + timedelta(hours=1)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_liveimport")
+
+        country_counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert country_counts.get("US") == 2 and country_counts.get("JP") == 1, (
+            f"live branch did not run — top-N is missing the current hour's data. "
+            f"This is the silent ImportError regression. Got: {country_counts}"
+        )
+
+    def test_execute_top_n_rollups_clamps_live_window_to_requested_range(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Pinned: when the requested window starts/ends mid-hour, the
+        live-active-hour query must clamp to the INTERSECTION of
+        [active_dt, active_dt_end) and [start_time, end_time]. Without
+        the clamp a request for [active_dt+5min, active_dt+35min]
+        over-counts by querying the FULL active hour and including
+        rows outside the user's window — silently misleading counts
+        for custom-date-range users.
+
+        Uses the real current hour to avoid mocking datetime (which
+        breaks other tests if it leaks). The test is robust across
+        any wall-clock time: it pins rows at offsets relative to the
+        actual active_dt computed at test start."""
+        from datetime import UTC, datetime, timedelta
+
+        from backend.repositories._base import QueryRunner
+
+        # Compute active_dt the same way the production code does.
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        active_dt_end = active_dt + timedelta(hours=1)
+
+        # Insert rows at known offsets relative to active_dt.
+        in_memory_duckdb.execute("CREATE TABLE logs_clamp (timestamp TIMESTAMPTZ, country VARCHAR)")
+        t1 = active_dt + timedelta(minutes=10)  # inside requested + active
+        t2 = active_dt + timedelta(minutes=30)  # inside requested + active
+        t3 = active_dt + timedelta(minutes=45)  # OUTSIDE requested, inside active
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_clamp VALUES (?, 'US'), (?, 'US'), (?, 'JP')",
+            [t1, t2, t3],
+        )
+
+        # Point the runner at our test table; bypass rollup enumeration
+        # by giving it a real but empty rollup dir (forces rolled_res=[]).
+        monkeypatch.setattr("backend.repositories._base._cache_dir", lambda _src: str(tmp_path), raising=False)
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_clamp")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+        rollup_hour_dir = tmp_path / "rollups" / "hour"
+        rollup_hour_dir.mkdir(parents=True)
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+
+        # Request [active_dt + 5min, active_dt + 35min]. Without the clamp,
+        # the live query would scan [active_dt, active_dt_end) and pick up
+        # the t3 row at +45min. With the clamp, t3 must be excluded.
+        st = (active_dt + timedelta(minutes=5)).isoformat()
+        et = (active_dt + timedelta(minutes=35)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+
+        in_memory_duckdb.execute("DROP TABLE logs_clamp")
+
+        country_counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert country_counts.get("US") == 2, (
+            f"US rows at +10min and +30min should both be counted. Got {country_counts}"
+        )
+        assert "JP" not in country_counts, (
+            f"JP row at +45min is OUTSIDE the requested [+5min, +35min] window but inside the "
+            f"active hour — must NOT be counted. The clamp regressed. Got {country_counts}"
+        )
+
+    def test_execute_top_n_batch_prevents_sql_injection(self, in_memory_duckdb, test_service_source):
+        in_memory_duckdb.execute("CREATE TABLE logs_safe (status VARCHAR)")
+        in_memory_duckdb.execute("INSERT INTO logs_safe VALUES ('200'), ('200'), ('500')")
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        # Attempt an injection as a field name
+        malicious_field = "status' UNION ALL SELECT 'evil' as field, 'payload' as value, 100 as c --"
+        rows, order = runner.execute_top_n_batch(
+            fields=[malicious_field, "status"],
+            table_name="logs_safe",
+            actual_cols=["status"],
+            schema_types={"status": "VARCHAR"},
+        )
+        in_memory_duckdb.execute("DROP TABLE logs_safe")
+
+        # The malicious field should have been skipped, so order only contains 'status'
+        assert order == ["status"]
+        assert len(rows) == 2
+        assert all(row[0] == "status" for row in rows)

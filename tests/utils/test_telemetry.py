@@ -251,3 +251,49 @@ def test_process_context_scope_handles_concurrent_setter_outside_scope():
     assert captured["after"] is None, (
         "Scope exit should restore from the stack, not preserve whatever a rogue setter happened to write last."
     )
+
+
+def test_query_iothread_calls_does_not_synchronously_flush_proxy(monkeypatch):
+    """Regression for M5 (item 24): the request-path
+    `_query_iothread_calls_from_usage_log` MUST NOT block on
+    `telemetry_proxy._flush_log_writes_for_tests`. Under cron contention
+    that wait routinely hit its 250 ms ceiling and stacked across
+    every admin nav request, dragging total wait to 5 s+ during a
+    cron sync tick. The fix accepts up to one batch interval (~100 ms)
+    of visibility lag in the debug panel as the trade-off.
+
+    Test asserts the flusher is never called from this function. If a
+    future refactor reintroduces a synchronous wait, this fails."""
+    _reset_global_fallback()
+    set_process_context("api:GET /api/test")
+
+    from backend import config as svcconfig
+    from backend.models import common as common_models
+    from backend.utils import telemetry, telemetry_proxy
+
+    flush_calls: list[float] = []
+
+    def _track_flush(timeout: float = 2.0) -> None:
+        flush_calls.append(timeout)
+
+    monkeypatch.setattr(telemetry_proxy, "_flush_log_writes_for_tests", _track_flush)
+    monkeypatch.setattr(common_models, "_debug_responses_enabled", lambda: True)
+    monkeypatch.setattr(svcconfig, "is_usage_logging_enabled", lambda: True)
+    monkeypatch.setattr(svcconfig, "get_active_service_id", lambda: "svc1")
+    telemetry._REQUEST_START_TS.set(0.0)
+
+    # Make get_con raise so we don't actually touch SQLite — we only
+    # care that the proxy flusher isn't called before that.
+    from backend.core import metadata_db
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("intentionally unreachable in test")
+
+    monkeypatch.setattr(metadata_db, "get_con", _boom)
+
+    result = telemetry._query_iothread_calls_from_usage_log()
+    assert result == [], "Function should swallow get_con errors and return empty"
+    assert flush_calls == [], (
+        f"_query_iothread_calls_from_usage_log must NOT block on the proxy "
+        f"flusher (M5 regression). Got flush calls with timeouts: {flush_calls}"
+    )

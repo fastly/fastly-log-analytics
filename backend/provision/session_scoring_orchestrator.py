@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import os
 import subprocess
 import urllib.parse
 from pathlib import Path
@@ -167,8 +168,6 @@ def _deploy_wasm(scoring_service_id: str, token: str, status_cb=None) -> None:
         str(_DEPLOY_WASM_SCRIPT),
         "--service-id",
         scoring_service_id,
-        "--token",
-        token,
     ]
     # Only pass --matrix if a trained one exists; otherwise the script
     # uses the empty default (and refuses to deploy a real-matrix-required
@@ -192,11 +191,14 @@ def _deploy_wasm(scoring_service_id: str, token: str, status_cb=None) -> None:
     # If no real matrix, the script's vocab_size==0 check would fail. Skip
     # passing --matrix entirely so it just rebuilds with whatever's in
     # matrix.default.json (i.e. the tracked empty default).
+    env = os.environ.copy()
+    env["FASTLY_API_TOKEN"] = token
     proc = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         cwd=str(_REPO_ROOT),
+        env=env,
     )
     if proc.returncode != 0:
         # Surface the script's stderr so the operator can see what failed.

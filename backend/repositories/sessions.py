@@ -7,7 +7,7 @@ from typing import Any
 import duckdb
 
 from backend.models.common import FiltersDict
-from backend.repositories._base import QueryRunner, _safe_table
+from backend.repositories._base import QueryRunner, _safe_table, empty_schema_response
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.pagination import calc_offset
 
@@ -37,8 +37,6 @@ def get_sessions(
 
     actual_cols = set(runner.get_schema_cols())
     if not actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(
             sessions=[],
             total=0,
@@ -68,7 +66,6 @@ def get_sessions(
     has_asn = "asn" in actual_cols
     has_country = "country" in actual_cols
     has_rtt = "tcp_rtt" in actual_cols
-    has_ttfb = "ttfb" in actual_cols
     has_status = "status" in actual_cols
     has_resp_bytes = "resp_bytes" in actual_cols
     has_ua = "ua" in actual_cols
@@ -104,16 +101,39 @@ def get_sessions(
     if has_url:
         extra_aggs += ', COUNT(DISTINCT "url") AS unique_urls'
 
-    sessions_cte = f"""
-        WITH ordered AS (
+    flag_parts = [f"req_count >= {min_reqs_flag}"]
+    if has_status:
+        flag_parts.append(f"(reqs_4xx * 100.0 / NULLIF(req_count, 0)) >= {min_4xx_pct_flag}")
+    flag_expr = " OR ".join(f"({p})" for p in flag_parts)
+
+    flagged_filter = "WHERE flagged = true" if flagged_only else ""
+
+    valid_sorts = {
+        "session_start",
+        "session_end",
+        "req_count",
+        "edge_count",
+        "shield_count",
+        "unique_urls",
+        "median_rtt_ms",
+        "total_bytes",
+    }
+    if sort_by not in valid_sorts:
+        sort_by = "session_start"
+
+    # Single CTE pipeline: filter → window functions → aggregation.
+    # Replaces the item-19 three-stage TEMP TABLE approach now that
+    # profiling identified sessions_raw materialization as the bottleneck
+    # (~3000ms of ~3700ms total). DuckDB pipelines single-consumer CTEs
+    # without intermediate materialization, saving the I/O overhead.
+    cte_prefix = f"""
+        WITH base AS (
             SELECT {group_key}
                    {', "ua"' if has_ua else ""}
-                   {', "ja4"' if has_ja4 and "ja4" not in group_cols else ""}
                    , timestamp AS ts
                    {', "status"' if has_status else ""}
                    {', "resp_bytes"' if has_resp_bytes else ""}
                    {', "tcp_rtt"' if has_rtt else ""}
-                   {', "ttfb"' if has_ttfb else ""}
                    {', "asn"' if has_asn else ""}
                    {', "country"' if has_country else ""}
                    {', "url"' if has_url else ""}
@@ -124,7 +144,7 @@ def get_sessions(
         gaps AS (
             SELECT *,
                    ts - LAG(ts) OVER (PARTITION BY {part_key} ORDER BY ts) AS gap
-            FROM ordered
+            FROM base
         ),
         marks AS (
             SELECT *,
@@ -149,35 +169,28 @@ def get_sessions(
         )
     """
 
-    flag_parts = [f"req_count >= {min_reqs_flag}"]
-    if has_status:
-        flag_parts.append(f"(reqs_4xx * 100.0 / NULLIF(req_count, 0)) >= {min_4xx_pct_flag}")
-    flag_expr = " OR ".join(f"({p})" for p in flag_parts)
-
-    flagged_filter = "WHERE flagged = true" if flagged_only else ""
-
-    valid_sorts = {
-        "session_start",
-        "session_end",
-        "req_count",
-        "edge_count",
-        "shield_count",
-        "unique_urls",
-        "median_rtt_ms",
-        "total_bytes",
-    }
-    if sort_by not in valid_sorts:
-        sort_by = "session_start"
-
     data_sql = f"""
-        {sessions_cte}
+        {cte_prefix}
         SELECT *, ({flag_expr}) AS flagged
         FROM sessions_agg
         {flagged_filter}
         ORDER BY {sort_by} {sort_dir}
         LIMIT {limit} OFFSET {offset}
     """
-    rows = runner.execute(data_sql, params).fetchall()
+    result = runner.execute_with_retry(data_sql, params)
+    if result is None:
+        return empty_schema_response(
+            sessions=[],
+            total=0,
+            page=page,
+            limit=limit,
+            has_rtt=has_rtt,
+            has_ja4=has_ja4,
+            has_edge=has_edge,
+            **runner.telemetry(),
+        )
+
+    rows = result.fetchall()
     col_names = [desc[0] for desc in con.description]
 
     sessions: list[dict] = []
@@ -191,7 +204,7 @@ def get_sessions(
 
     if not rows and offset > 0:
         count_sql = f"""
-            {sessions_cte}
+            {cte_prefix}
             SELECT COUNT(*) FROM (SELECT ({flag_expr}) AS flagged FROM sessions_agg) sub
             {flagged_filter}
         """

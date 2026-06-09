@@ -423,6 +423,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/origin/aggregates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Origin Aggregates
+         * @description Composite of the six origin cards (summary, timeseries, slow-urls,
+         *     status-codes, path-breakdown, pop-latency, ip-health) backed by ONE
+         *     parquet scan. Shielding-analysis stays at /api/origin/shielding-analysis
+         *     until item 13 folds it into /api/network-health.
+         *
+         *     Granular endpoints below are unchanged so the frontend can roll back
+         *     to the per-card pattern by flipping a feature flag without a backend
+         *     redeploy.
+         */
+        post: operations["origin_aggregates_api_origin_aggregates_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/origin/summary": {
         parameters: {
             query?: never;
@@ -1908,10 +1935,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Provision Execute */
-        get: operations["provision_execute_api_provision_execute_get"];
+        get?: never;
         put?: never;
-        post?: never;
+        /** Provision Execute */
+        post: operations["provision_execute_api_provision_execute_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2093,6 +2120,69 @@ export interface paths {
          * @description Disable session scoring. Reverse of enable_scoring.
          */
         post: operations["scoring_disable_api_services__service_id__scoring_disable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/analytics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Analytics Composite
+         * @description Composite of the seven analytics endpoints
+         *     (top-flagged, score-distribution, compliance-breakdown, health,
+         *     evaluation, evaluation/per-reason, threshold-preview) into a single
+         *     round-trip. Each is already individually cached via `_cached` so
+         *     repeated composite calls within the 20s TTL collapse to dict
+         *     lookups; the composite primarily saves the per-request HTTP +
+         *     auth-middleware overhead that the 7-card admin_session_scoring
+         *     page paid on cold mount.
+         *
+         *     Granular endpoints unchanged — frontend swap to use the composite
+         *     is a separate commit so the per-card endpoints remain a rollback
+         *     target.
+         */
+        get: operations["scoring_analytics_composite_api_services__service_id__scoring_analytics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/scoring/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoring Config Composite
+         * @description Composite of the four token-free /scoring/* config endpoints
+         *     (status, threshold, exclude-regex, enforce-status-code). The admin
+         *     session-scoring page was firing four parallel GETs on mount; each
+         *     is a sub-50ms local config read so cold-load cost is dominated by
+         *     HTTP overhead rather than computation. Combining them into one
+         *     round-trip saves ~300-500ms on the cold-load waterfall.
+         *
+         *     Excluded: /scoring/enforce-threshold (requires a Fastly API token
+         *     and makes a network round-trip out — frontend should fetch that
+         *     one separately if it needs the live edge-side value).
+         *
+         *     Granular endpoints unchanged so the frontend can keep using them
+         *     individually during a rollback.
+         */
+        get: operations["scoring_config_composite_api_services__service_id__scoring_config_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2927,6 +3017,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/share/tos": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Share Get Tos
+         * @description Return the latest TOS document so the acknowledge page can render the
+         *     real text and POST back the matching version.
+         *
+         *     Session-gated (pending OR full cookie) — the same shape /acknowledge uses —
+         *     so anonymous callers can't enumerate the TOS surface. The strict version
+         *     check in /acknowledge (audit finding 021) means the frontend must know the
+         *     exact current version; this endpoint is how it learns it.
+         */
+        get: operations["share_get_tos_api_share_tos_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/share/acknowledge": {
         parameters: {
             query?: never;
@@ -2984,6 +3100,33 @@ export interface paths {
          *     putting credentials in a chat tool that retains history.
          */
         get: operations["share_claim_api_share_claim__token__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/share/banner": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Share Banner
+         * @description Tiny payload (~80B) for the global share-status banner.
+         *
+         *     Used by frontend/hooks/useShareStatusBanner.tsx — polls every 15s on
+         *     every page that mounts AppLayout. The full /api/admin/share/status
+         *     response is ~11KB and includes services + invites + sessions + audit
+         *     logs + telemetry that the banner never reads. Per-poll-per-page
+         *     multiplied across the 12+ pages with AppLayout was a meaningful
+         *     cumulative cost.
+         */
+        get: operations["share_banner_api_admin_share_banner_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3364,6 +3507,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Data */
             data: {
                 [key: string]: components["schemas"]["FieldAggregate"];
@@ -3454,6 +3601,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Data */
             data: components["schemas"]["Alert"][];
             /** Evaluated At */
@@ -3470,6 +3621,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Data */
             data?: {
                 [key: string]: unknown;
@@ -3488,6 +3643,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Data */
             data: {
                 [key: string]: unknown;
@@ -3504,6 +3663,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Name */
             name: string;
             /** Service Id */
@@ -3557,6 +3720,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Active Service Id */
             active_service_id: string | null;
             /** Services */
@@ -3590,6 +3757,10 @@ export interface components {
             }[];
             /** Active Log Field Ids */
             active_log_field_ids?: string[];
+            /** Views */
+            views?: {
+                [key: string]: unknown;
+            }[];
         };
         /** BootstrapService */
         BootstrapService: {
@@ -3624,6 +3795,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Sources */
             sources: components["schemas"]["BotSourceMeta"][];
             rdns: components["schemas"]["RdnsStats"];
@@ -3653,6 +3828,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Live Bytes */
             live_bytes: number;
             /** Live Files */
@@ -3819,6 +3998,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             field: components["schemas"]["CustomField"];
             /**
              * Warnings
@@ -3869,6 +4052,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Fields */
             fields: components["schemas"]["CustomField"][];
         };
@@ -3954,6 +4141,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Values */
             values: components["schemas"]["FieldTopEntry"][];
             /** Field */
@@ -4043,6 +4234,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
         };
         /**
          * IngestCatchupStatus
@@ -4084,6 +4279,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Files */
             files: components["schemas"]["IngestedFile"][];
         };
@@ -4199,6 +4398,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Insights */
             insights: components["schemas"]["InsightCard"][];
             /** Window Start */
@@ -4270,6 +4473,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * By
              * @enum {string}
@@ -4326,6 +4533,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             log_fields: components["schemas"]["LogFieldsConfig"];
             /** Waf Warning */
             waf_warning: boolean;
@@ -4358,6 +4569,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Ok */
             ok: boolean;
             /** Prefix */
@@ -4427,6 +4642,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Has Data
              * @default true
@@ -4484,6 +4703,10 @@ export interface components {
              * @default false
              */
             has_metro: boolean;
+            /** Shielding Analysis */
+            shielding_analysis?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** NetworkHealthSummary */
         NetworkHealthSummary: {
@@ -4526,6 +4749,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Available */
             available: boolean;
             /**
@@ -4578,6 +4805,150 @@ export interface components {
             /** Score */
             score?: number | null;
         };
+        /** OriginAggregatesRequest */
+        OriginAggregatesRequest: {
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /**
+             * Filters
+             * @default {}
+             */
+            filters: {
+                [key: string]: components["schemas"]["FilterSpec"];
+            };
+            /**
+             * Bucket Minutes
+             * @default 5
+             */
+            bucket_minutes: number;
+            /**
+             * Split By Leg
+             * @default false
+             */
+            split_by_leg: boolean;
+            /**
+             * Timeseries Metric
+             * @default ttfb
+             * @enum {string}
+             */
+            timeseries_metric: "ttfb" | "ttlb";
+            /**
+             * Timeseries Percentile
+             * @default p95
+             * @enum {string}
+             */
+            timeseries_percentile: "p50" | "p95" | "p99";
+            /**
+             * Slow Urls Limit
+             * @default 20
+             */
+            slow_urls_limit: number;
+            /**
+             * Slow Urls Min Requests
+             * @default 10
+             */
+            slow_urls_min_requests: number;
+            /**
+             * Ip Health Limit
+             * @default 30
+             */
+            ip_health_limit: number;
+            /**
+             * Pop Latency Limit
+             * @default 30
+             */
+            pop_latency_limit: number;
+        };
+        /**
+         * OriginAggregatesResponse
+         * @description Composite of every origin card on the /origin page.
+         *
+         *     One CREATE TEMP TABLE filtered to the requested window populates a
+         *     `t_origin` projection; six sub-queries run against that single
+         *     materialization. Shielding analysis is NOT included here — it lives
+         *     in /api/network-health post item 13 (the join semantics overlap with
+         *     network-level shielding metadata).
+         *
+         *     Granular endpoints (/api/origin/summary, /timeseries, etc.) stay
+         *     alive behind the same router so the frontend can flip back during a
+         *     rollback without a backend redeploy.
+         */
+        OriginAggregatesResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /**
+             * Summary
+             * @default {}
+             */
+            summary: {
+                [key: string]: unknown;
+            };
+            /**
+             * Timeseries
+             * @default {}
+             */
+            timeseries: {
+                [key: string]: unknown;
+            };
+            /**
+             * Slow Urls
+             * @default {}
+             */
+            slow_urls: {
+                [key: string]: unknown;
+            };
+            /**
+             * Status Codes
+             * @default {}
+             */
+            status_codes: {
+                [key: string]: unknown;
+            };
+            /**
+             * Path Breakdown
+             * @default {}
+             */
+            path_breakdown: {
+                [key: string]: unknown;
+            };
+            /**
+             * Pop Latency
+             * @default {}
+             */
+            pop_latency: {
+                [key: string]: unknown;
+            };
+            /**
+             * Ip Health
+             * @default {}
+             */
+            ip_health: {
+                [key: string]: unknown;
+            };
+        };
         /** OriginIpHealthRequest */
         OriginIpHealthRequest: {
             /** Start Time */
@@ -4608,6 +4979,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Has Data
              * @default false
@@ -4637,6 +5012,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Has Data
              * @default false
@@ -4690,6 +5069,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Has Data
              * @default false
@@ -4759,6 +5142,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Has Data
              * @default false
@@ -4822,6 +5209,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Has Data
              * @default false
@@ -4851,6 +5242,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Has Data
              * @default false
@@ -4880,6 +5275,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Has Data
              * @default false
@@ -4967,6 +5366,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Has Data
              * @default false
@@ -5033,6 +5436,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Latency Ts
              * @default []
@@ -5080,6 +5487,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Timeseries
              * @default []
@@ -5138,6 +5549,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Pops */
             pops: components["schemas"]["PopLocation"][];
         };
@@ -5152,6 +5567,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Requests Per Day */
             requests_per_day?: number | null;
             /** Edge Requests Per Day */
@@ -5211,6 +5630,85 @@ export interface components {
             storage_rate_per_gb_month?: number | null;
             /** Min Billed Days */
             min_billed_days?: number | null;
+        };
+        /** ProvisionExecuteRequest */
+        ProvisionExecuteRequest: {
+            /** Token */
+            token: string;
+            /** Service Id */
+            service_id: string;
+            /** Service Name */
+            service_name?: string | null;
+            /**
+             * Endpoint Name
+             * @default Fastly Object Storage Logs
+             */
+            endpoint_name: string;
+            /**
+             * Fos Region
+             * @default us-east-1
+             */
+            fos_region: string;
+            /** Fos Bucket Name */
+            fos_bucket_name: string;
+            /**
+             * Fos Prefix
+             * @default
+             */
+            fos_prefix: string;
+            /**
+             * Sample Rate
+             * @default 100
+             */
+            sample_rate: string;
+            /**
+             * Edge Only
+             * @default true
+             */
+            edge_only: boolean;
+            /** Custom Condition */
+            custom_condition?: string | null;
+            /**
+             * Log Period
+             * @default 1 minute
+             */
+            log_period: string;
+            /** Cdn Service Name */
+            cdn_service_name?: string | null;
+            /** Cdn Url */
+            cdn_url?: string | null;
+            /**
+             * Cdn Shield
+             * @default none
+             */
+            cdn_shield: string;
+            /**
+             * Enable Cron Sync
+             * @default true
+             */
+            enable_cron_sync: boolean;
+            /**
+             * Delete After
+             * @default true
+             */
+            delete_after: boolean;
+            /**
+             * Commit Interval Mins
+             * @default 5
+             */
+            commit_interval_mins: number;
+            /**
+             * Enable Cron Compact
+             * @default true
+             */
+            enable_cron_compact: boolean;
+            /**
+             * Log Retention Days
+             * @default 30
+             */
+            log_retention_days: number;
+            /** Log Fields */
+            log_fields?: string | null;
         };
         /** ProvisionService */
         ProvisionService: {
@@ -5283,6 +5781,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Columns */
             columns: string[];
             /** Data */
@@ -5323,6 +5825,14 @@ export interface components {
             dropped: number;
             /** Last Seq */
             last_seq: number;
+        };
+        /** RefreshPopLocationsRequest */
+        RefreshPopLocationsRequest: {
+            /**
+             * Token
+             * @description Fastly API key
+             */
+            token: string;
         };
         /** SavedView */
         SavedView: {
@@ -5375,6 +5885,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Tls Fingerprints
              * @default []
@@ -5462,6 +5976,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Bots
              * @default []
@@ -5572,6 +6090,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Services */
             services: components["schemas"]["ServiceConfig"][];
         };
@@ -5632,6 +6154,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Columns */
             columns: string[];
             /** Data */
@@ -5693,6 +6219,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Sessions */
             sessions: components["schemas"]["Session"][];
             /** Total */
@@ -5886,6 +6416,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
         };
         /** SystemJobStatus */
         SystemJobStatus: {
@@ -5915,6 +6449,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Jobs */
             jobs: components["schemas"]["SystemJobStatus"][];
         };
@@ -5974,6 +6512,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Nodes */
             nodes: components["schemas"]["TreeNode"][];
         };
@@ -5997,6 +6539,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Data */
             data: components["schemas"]["UsageBandwidthPoint"][];
             /** Total Bytes */
@@ -6030,6 +6576,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Data */
             data: components["schemas"]["UsageLogActivityPoint"][];
             /** Total Rows */
@@ -6148,6 +6698,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Entries */
             entries: components["schemas"]["UsageLogEntry"][];
             /** Total */
@@ -6174,6 +6728,10 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
             /** Data */
             data: components["schemas"]["UsageOperationsPoint"][];
             /** Total Class A */
@@ -7116,6 +7674,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AlertResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    origin_aggregates_api_origin_aggregates_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OriginAggregatesRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OriginAggregatesResponse"];
                 };
             };
             /** @description Validation Error */
@@ -8463,6 +9060,7 @@ export interface operations {
                 per_page?: number;
                 sort?: string;
                 dir?: string;
+                since_id?: number | null;
                 service?: string | null;
                 service_id?: string | null;
             };
@@ -8777,14 +9375,18 @@ export interface operations {
     };
     refresh_pop_locations_api_admin_pop_locations_refresh_post: {
         parameters: {
-            query: {
-                token: string;
+            query?: {
+                token?: string | null;
             };
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RefreshPopLocationsRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -8991,10 +9593,14 @@ export interface operations {
     download_all_files_api_download_all_get: {
         parameters: {
             query?: {
-                service_id?: string;
                 include?: string;
+                service?: string | null;
+                service_id?: string | null;
             };
-            header?: never;
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -10031,35 +10637,18 @@ export interface operations {
             };
         };
     };
-    provision_execute_api_provision_execute_get: {
+    provision_execute_api_provision_execute_post: {
         parameters: {
-            query: {
-                token: string;
-                service_id: string;
-                service_name?: string | null;
-                endpoint_name?: string;
-                fos_region?: string;
-                fos_bucket_name: string;
-                fos_prefix?: string;
-                sample_rate?: string;
-                edge_only?: boolean;
-                custom_condition?: string | null;
-                log_period?: string;
-                cdn_service_name?: string | null;
-                cdn_url?: string | null;
-                cdn_shield?: string;
-                enable_cron_sync?: boolean;
-                delete_after?: boolean;
-                commit_interval_mins?: number;
-                enable_cron_compact?: boolean;
-                log_retention_days?: number;
-                log_fields?: string | null;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProvisionExecuteRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -10226,7 +10815,9 @@ export interface operations {
                 service_id: string;
                 token?: string;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -10257,7 +10848,9 @@ export interface operations {
             query?: {
                 token?: string;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 service_id: string;
             };
@@ -10346,6 +10939,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_analytics_composite_api_services__service_id__scoring_analytics_get: {
+        parameters: {
+            query?: {
+                since_hours?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Logging service ID */
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scoring_config_composite_api_services__service_id__scoring_config_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Logging service ID */
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */
@@ -11540,6 +12203,26 @@ export interface operations {
             };
         };
     };
+    share_get_tos_api_share_tos_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TosDocument"];
+                };
+            };
+        };
+    };
     share_acknowledge_tos_api_share_acknowledge_post: {
         parameters: {
             query?: never;
@@ -11620,6 +12303,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    share_banner_api_admin_share_banner_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
         };

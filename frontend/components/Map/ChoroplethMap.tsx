@@ -151,7 +151,20 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
 
     const updateData = () => {
       if (!map.current?.getLayer('countries')) {
-        setTimeout(updateData, 100)
+        // Layer not added yet — the init effect's 'load' handler adds
+        // it. Listen for 'styledata' (fires whenever layers/sources
+        // change) and retry. Previously this used setTimeout(100ms)
+        // polling, which added 100-300ms of artificial latency to the
+        // first paint when data arrived before the map's 'load' event.
+        // 'styledata' fires synchronously after addLayer() so this
+        // path resolves with zero polling delay.
+        const onStyleData = () => {
+          if (map.current?.getLayer('countries')) {
+            map.current.off('styledata', onStyleData)
+            updateData()
+          }
+        }
+        map.current?.on('styledata', onStyleData)
         return
       }
 
@@ -162,7 +175,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
 
       const max = Math.max(...data.map(d => d.count))
       const matchExpression: any[] = ['match', ['get', 'name']]
-      
+
       data.forEach(d => {
         const intensity = 0.2 + (d.count / max) * 0.8
         const englishName = getCountryName(d.country)
@@ -170,7 +183,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
         matchExpression.push(countryName)
         matchExpression.push(`rgba(59, 130, 246, ${intensity})`)
       })
-      
+
       matchExpression.push(theme === 'dark' ? '#27272a' : '#e4e4e7')
       map.current.setPaintProperty('countries', 'fill-color', matchExpression)
     }

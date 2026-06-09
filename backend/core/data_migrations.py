@@ -75,6 +75,25 @@ def _rollups_initial_backfill(service_id: str, source: dict) -> str | None:
     return "rollups: ensure_field_backfills complete"
 
 
+def _rollups_hour_bundling_backfill(service_id: str, source: dict) -> str | None:
+    """Bundle all closed-hour per-field rollup parquets into a single
+    per-hour parquet under ``rollups/hour_bundled/hour=H/all_fields.parquet``.
+
+    The dashboard reader prefers bundled files (one open per hour) over
+    per-field files (~40 opens per hour), cutting cold-path parquet
+    metadata reads by ~40x on a 24h query. The per-field tree stays in
+    place — the reader falls back to it when a bundle is missing, so the
+    migration is non-destructive.
+
+    Idempotent: bundle_hours skips hours whose bundle is already up to
+    date (mtime check), so re-running is cheap.
+    """
+    from backend.core import rollups
+
+    n = rollups.backfill_hour_bundles(service_id, source)
+    return f"rollups: bundled {n} hour(s) into hour_bundled/"
+
+
 # Ordered registry. Append-only — never remove or reorder entries.
 # Names must be globally unique and stable; the DB matches by name.
 MIGRATIONS: list[Migration] = [
@@ -82,6 +101,11 @@ MIGRATIONS: list[Migration] = [
         name="2026-06-04_rollups_initial_backfill",
         description="Build initial hourly top-N rollups for dashboard top-N queries",
         fn=_rollups_initial_backfill,
+    ),
+    Migration(
+        name="2026-06-08_rollups_hour_bundling",
+        description="Bundle per-field hour rollups into one parquet per hour (40x fewer file opens)",
+        fn=_rollups_hour_bundling_backfill,
     ),
 ]
 

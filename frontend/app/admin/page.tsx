@@ -838,16 +838,44 @@ export default function AdminPage() {
           prefetch={true}
           onMouseEnter={() => {
             if (!activeServiceId) return
+            // Warm the two composite queries the destination page fires
+            // on mount. Pre-fix this warmed ['scoring-status', ...], but
+            // the page actually reads scoring-status via the config
+            // composite — so the prefetch was overwritten before any
+            // panel could use it, and the page showed `compositesLoading`
+            // skeleton on click. Matching the composite keys + default
+            // since_hours=24 (the page's initial useState) means the
+            // composites are warm on mount → no skeleton flash, same
+            // pattern as the Share Dashboard link above.
             queryClient.prefetchQuery({
-              queryKey: ['scoring-status', activeServiceId],
+              queryKey: ['scoring-analytics-composite', activeServiceId, 24],
               queryFn: async ({ signal }) => {
-                const { data } = await client.GET(
-                  '/api/services/{service_id}/scoring/status',
-                  { params: { path: { service_id: activeServiceId } } },
+                const { data, response } = await client.GET(
+                  '/api/services/{service_id}/scoring/analytics' as any,
+                  {
+                    params: {
+                      path: { service_id: activeServiceId },
+                      query: { since_hours: 24 },
+                    },
+                    signal,
+                  } as any,
                 )
+                if (!response.ok) throw new Error(`status ${response.status}`)
                 return data
               },
-              staleTime: 20_000,
+            })
+            queryClient.prefetchQuery({
+              queryKey: ['scoring-config-composite', activeServiceId],
+              queryFn: async ({ signal }) => {
+                const { data, response } = await client.GET(
+                  '/api/services/{service_id}/scoring/config' as any,
+                  {
+                    params: { path: { service_id: activeServiceId }, signal } as any,
+                  } as any,
+                )
+                if (!response.ok) throw new Error(`status ${response.status}`)
+                return data
+              },
             })
           }}
           className={buttonVariants({ variant: 'secondary', size: 'sm' })}
@@ -1318,7 +1346,8 @@ export default function AdminPage() {
                       setNgwafFetching(true)
                       try {
                         const { data } = await client.GET("/api/provision/ngwaf-workspaces" as any, {
-                          params: { query: { service_id: ngwafService.service_id, token: ngwafApiToken } }
+                          params: { query: { service_id: ngwafService.service_id } },
+                          headers: { Authorization: `Bearer ${ngwafApiToken}` }
                         })
                         setNgwafWorkspaces((data as any)?.workspaces || [])
                       } catch (e: any) {
@@ -1384,8 +1413,8 @@ export default function AdminPage() {
                       await client.PATCH("/api/provision/services/{service_id}/ngwaf-workspace" as any, {
                         params: {
                           path: { service_id: ngwafService.service_id },
-                          query: { token: ngwafApiToken },
                         },
+                        headers: { Authorization: `Bearer ${ngwafApiToken}` },
                         body: { ngwaf_workspace_id: ngwafWorkspaceId.trim() || null } as any,
                       })
                       setNgwafSaved(true)

@@ -50,6 +50,9 @@ export function ViewSelector() {
         params: { path: { view_id: id } }
       })
       queryClient.invalidateQueries({ queryKey: ['views', activeServiceId] })
+      // Bootstrap response also carries seeded views; invalidate so the
+      // next bootstrap refetch reflects the deletion.
+      queryClient.invalidateQueries({ queryKey: ['bootstrap'] })
     }
   }
 

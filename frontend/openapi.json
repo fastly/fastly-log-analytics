@@ -3,7 +3,7 @@
   "info": {
     "title": "Fastly Log Analytics API",
     "description": "FastAPI backend for the Fastly Log Analytics tool. Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json.",
-    "version": "1.1.0"
+    "version": "1.2.0"
   },
   "paths": {
     "/api/dashboard/aggregates": {
@@ -2207,6 +2207,114 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AlertResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/origin/aggregates": {
+      "post": {
+        "tags": [
+          "origin"
+        ],
+        "summary": "Origin Aggregates",
+        "description": "Composite of the six origin cards (summary, timeseries, slow-urls,\nstatus-codes, path-breakdown, pop-latency, ip-health) backed by ONE\nparquet scan. Shielding-analysis stays at /api/origin/shielding-analysis\nuntil item 13 folds it into /api/network-health.\n\nGranular endpoints below are unchanged so the frontend can roll back\nto the per-card pattern by flipping a feature flag without a backend\nredeploy.",
+        "operationId": "origin_aggregates_api_origin_aggregates_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OriginAggregatesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OriginAggregatesResponse"
                 }
               }
             }
@@ -5199,6 +5307,23 @@
             }
           },
           {
+            "name": "since_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since Id"
+            }
+          },
+          {
             "name": "service",
             "in": "query",
             "required": false,
@@ -6143,13 +6268,37 @@
           {
             "name": "token",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "title": "Token"
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RefreshPopLocationsRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -6744,16 +6893,6 @@
         "operationId": "download_all_files_api_download_all_get",
         "parameters": [
           {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Service Id"
-            }
-          },
-          {
             "name": "include",
             "in": "query",
             "required": false,
@@ -6761,6 +6900,70 @@
               "type": "string",
               "default": "all",
               "title": "Include"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
             }
           }
         ],
@@ -9226,241 +9429,22 @@
       }
     },
     "/api/provision/execute": {
-      "get": {
+      "post": {
         "tags": [
           "provision"
         ],
         "summary": "Provision Execute",
-        "operationId": "provision_execute_api_provision_execute_get",
-        "parameters": [
-          {
-            "name": "token",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Token"
+        "operationId": "provision_execute_api_provision_execute_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProvisionExecuteRequest"
+              }
             }
           },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "service_name",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "endpoint_name",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "Fastly Object Storage Logs",
-              "title": "Endpoint Name"
-            }
-          },
-          {
-            "name": "fos_region",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "us-east-1",
-              "title": "Fos Region"
-            }
-          },
-          {
-            "name": "fos_bucket_name",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Fos Bucket Name"
-            }
-          },
-          {
-            "name": "fos_prefix",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Fos Prefix"
-            }
-          },
-          {
-            "name": "sample_rate",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "100",
-              "title": "Sample Rate"
-            }
-          },
-          {
-            "name": "edge_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Edge Only"
-            }
-          },
-          {
-            "name": "custom_condition",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Custom Condition"
-            }
-          },
-          {
-            "name": "log_period",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "1 minute",
-              "title": "Log Period"
-            }
-          },
-          {
-            "name": "cdn_service_name",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Cdn Service Name"
-            }
-          },
-          {
-            "name": "cdn_url",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Cdn Url"
-            }
-          },
-          {
-            "name": "cdn_shield",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "none",
-              "title": "Cdn Shield"
-            }
-          },
-          {
-            "name": "enable_cron_sync",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Enable Cron Sync"
-            }
-          },
-          {
-            "name": "delete_after",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Delete After"
-            }
-          },
-          {
-            "name": "commit_interval_mins",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 5,
-              "title": "Commit Interval Mins"
-            }
-          },
-          {
-            "name": "enable_cron_compact",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Enable Cron Compact"
-            }
-          },
-          {
-            "name": "log_retention_days",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 30,
-              "title": "Log Retention Days"
-            }
-          },
-          {
-            "name": "log_fields",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Log Fields"
-            }
-          }
-        ],
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -9701,6 +9685,22 @@
               "default": "",
               "title": "Token"
             }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
           }
         ],
         "responses": {
@@ -9751,6 +9751,22 @@
               "type": "string",
               "default": "",
               "title": "Token"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
             }
           }
         ],
@@ -9878,6 +9894,112 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/analytics": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Analytics Composite",
+        "description": "Composite of the seven analytics endpoints\n(top-flagged, score-distribution, compliance-breakdown, health,\nevaluation, evaluation/per-reason, threshold-preview) into a single\nround-trip. Each is already individually cached via `_cached` so\nrepeated composite calls within the 20s TTL collapse to dict\nlookups; the composite primarily saves the per-request HTTP +\nauth-middleware overhead that the 7-card admin_session_scoring\npage paid on cold mount.\n\nGranular endpoints unchanged \u2014 frontend swap to use the composite\nis a separate commit so the per-card endpoints remain a rollback\ntarget.",
+        "operationId": "scoring_analytics_composite_api_services__service_id__scoring_analytics_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Logging service ID",
+              "title": "Service Id"
+            },
+            "description": "Logging service ID"
+          },
+          {
+            "name": "since_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 168,
+              "minimum": 1,
+              "default": 24,
+              "title": "Since Hours"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Analytics Composite Api Services  Service Id  Scoring Analytics Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/scoring/config": {
+      "get": {
+        "tags": [
+          "session-scoring"
+        ],
+        "summary": "Scoring Config Composite",
+        "description": "Composite of the four token-free /scoring/* config endpoints\n(status, threshold, exclude-regex, enforce-status-code). The admin\nsession-scoring page was firing four parallel GETs on mount; each\nis a sub-50ms local config read so cold-load cost is dominated by\nHTTP overhead rather than computation. Combining them into one\nround-trip saves ~300-500ms on the cold-load waterfall.\n\nExcluded: /scoring/enforce-threshold (requires a Fastly API token\nand makes a network round-trip out \u2014 frontend should fetch that\none separately if it needs the live edge-side value).\n\nGranular endpoints unchanged so the frontend can keep using them\nindividually during a rollback.",
+        "operationId": "scoring_config_composite_api_services__service_id__scoring_config_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Logging service ID",
+              "title": "Service Id"
+            },
+            "description": "Logging service ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Config Composite Api Services  Service Id  Scoring Config Get"
+                }
               }
             }
           },
@@ -11772,6 +11894,28 @@
         }
       }
     },
+    "/api/share/tos": {
+      "get": {
+        "tags": [
+          "share-auth"
+        ],
+        "summary": "Share Get Tos",
+        "description": "Return the latest TOS document so the acknowledge page can render the\nreal text and POST back the matching version.\n\nSession-gated (pending OR full cookie) \u2014 the same shape /acknowledge uses \u2014\nso anonymous callers can't enumerate the TOS surface. The strict version\ncheck in /acknowledge (audit finding 021) means the frontend must know the\nexact current version; this endpoint is how it learns it.",
+        "operationId": "share_get_tos_api_share_tos_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TosDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/share/acknowledge": {
       "post": {
         "tags": [
@@ -11872,6 +12016,26 @@
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/share/banner": {
+      "get": {
+        "tags": [
+          "share-admin"
+        ],
+        "summary": "Share Banner",
+        "description": "Tiny payload (~80B) for the global share-status banner.\n\nUsed by frontend/hooks/useShareStatusBanner.tsx \u2014 polls every 15s on\nevery page that mounts AppLayout. The full /api/admin/share/status\nresponse is ~11KB and includes services + invites + sessions + audit\nlogs + telemetry that the banner never reads. Per-poll-per-page\nmultiplied across the 12+ pages with AppLayout was a meaningful\ncumulative cost.",
+        "operationId": "share_banner_api_admin_share_banner_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           }
@@ -12689,6 +12853,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "data": {
             "additionalProperties": {
               "$ref": "#/components/schemas/FieldAggregate"
@@ -12949,6 +13121,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "data": {
             "items": {
               "$ref": "#/components/schemas/Alert"
@@ -12988,6 +13168,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "data": {
             "anyOf": [
@@ -13037,6 +13225,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "data": {
             "additionalProperties": true,
             "type": "object",
@@ -13069,6 +13265,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "name": {
             "type": "string",
@@ -13218,6 +13422,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "active_service_id": {
             "anyOf": [
               {
@@ -13349,6 +13561,14 @@
             },
             "type": "array",
             "title": "Active Log Field Ids"
+          },
+          "views": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Views"
           }
         },
         "type": "object",
@@ -13465,6 +13685,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "sources": {
             "items": {
               "$ref": "#/components/schemas/BotSourceMeta"
@@ -13531,6 +13759,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "live_bytes": {
             "type": "integer",
@@ -13806,6 +14042,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "field": {
             "$ref": "#/components/schemas/CustomField"
           },
@@ -14017,6 +14261,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "fields": {
             "items": {
@@ -14242,6 +14494,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "values": {
             "items": {
               "$ref": "#/components/schemas/FieldTopEntry"
@@ -14430,6 +14690,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           }
         },
         "type": "object",
@@ -14545,6 +14813,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "files": {
             "items": {
@@ -14898,6 +15174,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "insights": {
             "items": {
               "$ref": "#/components/schemas/InsightCard"
@@ -15104,6 +15388,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "by": {
             "type": "string",
             "enum": [
@@ -15281,6 +15573,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "log_fields": {
             "$ref": "#/components/schemas/LogFieldsConfig"
           },
@@ -15356,6 +15656,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "ok": {
             "type": "boolean",
@@ -15519,6 +15827,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "has_data": {
             "type": "boolean",
             "title": "Has Data",
@@ -15627,6 +15943,18 @@
             "type": "boolean",
             "title": "Has Metro",
             "default": false
+          },
+          "shielding_analysis": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shielding Analysis"
           }
         },
         "type": "object",
@@ -15740,6 +16068,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "available": {
             "type": "boolean",
             "title": "Available"
@@ -15839,6 +16175,177 @@
         ],
         "title": "NetworkWorstEntry"
       },
+      "OriginAggregatesRequest": {
+        "properties": {
+          "start_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Time"
+          },
+          "end_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Time"
+          },
+          "filters": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/FilterSpec"
+            },
+            "type": "object",
+            "title": "Filters",
+            "default": {}
+          },
+          "bucket_minutes": {
+            "type": "number",
+            "title": "Bucket Minutes",
+            "default": 5
+          },
+          "split_by_leg": {
+            "type": "boolean",
+            "title": "Split By Leg",
+            "default": false
+          },
+          "timeseries_metric": {
+            "type": "string",
+            "enum": [
+              "ttfb",
+              "ttlb"
+            ],
+            "title": "Timeseries Metric",
+            "default": "ttfb"
+          },
+          "timeseries_percentile": {
+            "type": "string",
+            "enum": [
+              "p50",
+              "p95",
+              "p99"
+            ],
+            "title": "Timeseries Percentile",
+            "default": "p95"
+          },
+          "slow_urls_limit": {
+            "type": "integer",
+            "title": "Slow Urls Limit",
+            "default": 20
+          },
+          "slow_urls_min_requests": {
+            "type": "integer",
+            "title": "Slow Urls Min Requests",
+            "default": 10
+          },
+          "ip_health_limit": {
+            "type": "integer",
+            "title": "Ip Health Limit",
+            "default": 30
+          },
+          "pop_latency_limit": {
+            "type": "integer",
+            "title": "Pop Latency Limit",
+            "default": 30
+          }
+        },
+        "type": "object",
+        "title": "OriginAggregatesRequest"
+      },
+      "OriginAggregatesResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "has_data": {
+            "type": "boolean",
+            "title": "Has Data",
+            "default": false
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
+          },
+          "summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Summary",
+            "default": {}
+          },
+          "timeseries": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Timeseries",
+            "default": {}
+          },
+          "slow_urls": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Slow Urls",
+            "default": {}
+          },
+          "status_codes": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Status Codes",
+            "default": {}
+          },
+          "path_breakdown": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Path Breakdown",
+            "default": {}
+          },
+          "pop_latency": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Pop Latency",
+            "default": {}
+          },
+          "ip_health": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Ip Health",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "title": "OriginAggregatesResponse",
+        "description": "Composite of every origin card on the /origin page.\n\nOne CREATE TEMP TABLE filtered to the requested window populates a\n`t_origin` projection; six sub-queries run against that single\nmaterialization. Shielding analysis is NOT included here \u2014 it lives\nin /api/network-health post item 13 (the join semantics overlap with\nnetwork-level shielding metadata).\n\nGranular endpoints (/api/origin/summary, /timeseries, etc.) stay\nalive behind the same router so the frontend can flip back during a\nrollback without a backend redeploy."
+      },
       "OriginIpHealthRequest": {
         "properties": {
           "start_time": {
@@ -15901,6 +16408,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "has_data": {
             "type": "boolean",
             "title": "Has Data",
@@ -15944,6 +16459,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "has_data": {
             "type": "boolean",
@@ -16034,6 +16557,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "has_data": {
             "type": "boolean",
@@ -16172,6 +16703,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "has_data": {
             "type": "boolean",
             "title": "Has Data",
@@ -16275,6 +16814,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "has_data": {
             "type": "boolean",
             "title": "Has Data",
@@ -16319,6 +16866,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "has_data": {
             "type": "boolean",
             "title": "Has Data",
@@ -16362,6 +16917,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "has_data": {
             "type": "boolean",
@@ -16593,6 +17156,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "has_data": {
             "type": "boolean",
             "title": "Has Data",
@@ -16716,6 +17287,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "latency_ts": {
             "items": {
               "additionalProperties": true,
@@ -16785,6 +17364,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "timeseries": {
             "items": {
@@ -16931,6 +17518,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "pops": {
             "items": {
               "$ref": "#/components/schemas/PopLocation"
@@ -16965,6 +17560,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "requests_per_day": {
             "anyOf": [
@@ -17137,6 +17740,144 @@
         "type": "object",
         "title": "PrefillResponse"
       },
+      "ProvisionExecuteRequest": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "service_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Name"
+          },
+          "endpoint_name": {
+            "type": "string",
+            "title": "Endpoint Name",
+            "default": "Fastly Object Storage Logs"
+          },
+          "fos_region": {
+            "type": "string",
+            "title": "Fos Region",
+            "default": "us-east-1"
+          },
+          "fos_bucket_name": {
+            "type": "string",
+            "title": "Fos Bucket Name"
+          },
+          "fos_prefix": {
+            "type": "string",
+            "title": "Fos Prefix",
+            "default": ""
+          },
+          "sample_rate": {
+            "type": "string",
+            "title": "Sample Rate",
+            "default": "100"
+          },
+          "edge_only": {
+            "type": "boolean",
+            "title": "Edge Only",
+            "default": true
+          },
+          "custom_condition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Custom Condition"
+          },
+          "log_period": {
+            "type": "string",
+            "title": "Log Period",
+            "default": "1 minute"
+          },
+          "cdn_service_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cdn Service Name"
+          },
+          "cdn_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cdn Url"
+          },
+          "cdn_shield": {
+            "type": "string",
+            "title": "Cdn Shield",
+            "default": "none"
+          },
+          "enable_cron_sync": {
+            "type": "boolean",
+            "title": "Enable Cron Sync",
+            "default": true
+          },
+          "delete_after": {
+            "type": "boolean",
+            "title": "Delete After",
+            "default": true
+          },
+          "commit_interval_mins": {
+            "type": "integer",
+            "title": "Commit Interval Mins",
+            "default": 5
+          },
+          "enable_cron_compact": {
+            "type": "boolean",
+            "title": "Enable Cron Compact",
+            "default": true
+          },
+          "log_retention_days": {
+            "type": "integer",
+            "title": "Log Retention Days",
+            "default": 30
+          },
+          "log_fields": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Fields"
+          }
+        },
+        "type": "object",
+        "required": [
+          "token",
+          "service_id",
+          "fos_bucket_name"
+        ],
+        "title": "ProvisionExecuteRequest"
+      },
       "ProvisionService": {
         "properties": {
           "id": {
@@ -17274,6 +18015,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "columns": {
             "items": {
               "type": "string"
@@ -17403,6 +18152,20 @@
           "last_seq"
         ],
         "title": "RecentSqliteResponse"
+      },
+      "RefreshPopLocationsRequest": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "description": "Fastly API key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "title": "RefreshPopLocationsRequest"
       },
       "SavedView": {
         "properties": {
@@ -17555,6 +18318,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "tls_fingerprints": {
             "items": {
               "additionalProperties": true,
@@ -17674,6 +18445,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "bots": {
             "items": {
@@ -18100,6 +18879,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "services": {
             "items": {
               "$ref": "#/components/schemas/ServiceConfig"
@@ -18323,6 +19110,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "columns": {
             "items": {
               "type": "string"
@@ -18449,6 +19244,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "sessions": {
             "items": {
@@ -18954,6 +19757,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           }
         },
         "type": "object",
@@ -19052,6 +19863,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "jobs": {
             "items": {
@@ -19252,6 +20071,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "nodes": {
             "items": {
               "$ref": "#/components/schemas/TreeNode"
@@ -19309,6 +20136,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "data": {
             "items": {
@@ -19404,6 +20239,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "data": {
             "items": {
@@ -19677,6 +20520,14 @@
             "title": "Is Cached",
             "default": false
           },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
           "entries": {
             "items": {
               "$ref": "#/components/schemas/UsageLogEntry"
@@ -19743,6 +20594,14 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
           },
           "data": {
             "items": {

@@ -29,6 +29,8 @@ import { FilterBar } from '@/components/FilterBar/FilterBar'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { DebugPanel } from '@/components/DebugPanel'
+import { PlotlyPrewarm } from '@/components/PlotlyChart/PlotlyPrewarm'
+import { MapPrewarm } from '@/components/Map/MapPrewarm'
 
 import { useUrlServiceSync } from '@/hooks/useUrlServiceSync'
 import { useBootstrap } from '@/hooks/useBootstrap'
@@ -78,29 +80,26 @@ interface NavLinkProps {
   disabled?: boolean
 }
 
-function NavLink({ href, icon: Icon, name, isActive, disabled, activeServiceId }: NavLinkProps & { activeServiceId?: string | null }) {
+function NavLink({ href, icon: Icon, name, isActive, disabled, activeServiceId, router }: NavLinkProps & { activeServiceId?: string | null; router: ReturnType<typeof useRouter> }) {
   const finalHref = activeServiceId && !href.startsWith('/admin')
     ? `${href}?service=${activeServiceId}`
     : href
 
-  // Disabled state (no services yet — onboarding) still renders a real
-  // <Link> with pointer-events disabled + aria-disabled. Pre-fix this
-  // returned a plain <div>, which made the entire sidebar inert during
-  // cold-start: an admin who had a services list but bootstrap hadn't
-  // returned yet couldn't click ANY nav item to bounce out of the
-  // /admin onboarding flow. Keeping it a Link is sufficient for that;
-  // the moment the disabled state flips off, clicks just work.
-  //
-  // Prefetch is disabled. Next.js auto-prefetches every visible <Link>
-  // on viewport entry — with ~12 sidebar items rendered on every page,
-  // that fires 30-60 RSC requests in the background of every page load
-  // (37-66 observed across page HARs, ~2s of bandwidth competition
-  // against the real data calls). Click-time fetch is ~100ms slower
-  // per navigation but the page-load cost it removes is much larger.
+  // Viewport-entry prefetch is disabled (prefetch={false}) — with ~12
+  // sidebar items, auto-prefetch fires 30-60 RSC requests per page load
+  // (37-66 observed, ~2s bandwidth competition). Instead we prefetch on
+  // hover: the mouse takes 100-300ms to travel + dwell before clicking,
+  // which is enough for Next.js to fetch the loading boundary so the
+  // transition feels instant on click.
+  const handleMouseEnter = React.useCallback(() => {
+    if (!disabled) router.prefetch(finalHref)
+  }, [disabled, finalHref, router])
+
   return (
     <Link
       href={finalHref}
       prefetch={false}
+      onMouseEnter={handleMouseEnter}
       aria-disabled={disabled || undefined}
       tabIndex={disabled ? -1 : undefined}
       className={cn(
@@ -234,6 +233,16 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       <React.Suspense fallback={null}>
         <UrlServiceSync />
       </React.Suspense>
+      {/* Force Plotly to parse + complete its first-plot draw during
+          app mount so the dashboard's real chart's data-arrival render
+          hits Plotly's fast react()-update path instead of the cold
+          init path. See PlotlyPrewarm.tsx for full rationale. */}
+      <PlotlyPrewarm />
+      {/* Same idea for MapLibre GL (used by the dashboard's
+          "Requests by Country" choropleth). ~1MB chunk + WebGL init
+          would otherwise run when the dashboard route mounts; the
+          prewarm gets it done during app mount instead. */}
+      <MapPrewarm />
       {/* Desktop Sidebar */}
       <aside className="hidden md:flex w-64 flex-col border-r bg-muted/40">
         <div className="flex h-14 items-center justify-center border-b px-4 py-2 shrink-0">
@@ -254,6 +263,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                 isActive={pathname === item.href}
                 disabled={!hasServices}
                 activeServiceId={activeServiceId}
+                router={router}
               />
             ))}
           </nav>
@@ -266,6 +276,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                 {...item}
                 isActive={pathname === item.href}
                 activeServiceId={activeServiceId}
+                router={router}
               />
             ))}
           </nav>

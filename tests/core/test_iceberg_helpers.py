@@ -22,6 +22,7 @@ code shares:
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -71,6 +72,200 @@ def test_get_cache_file_creates_cache_dir_and_returns_full_path(tmp_path):
         out = _get_cache_file({"name": "svc"}, "my-cache.json")
     assert target.exists()
     assert out == str(target / "my-cache.json")
+
+
+# ── Tombstone scheme: race-safe buffer file consumption ───────────────────
+
+
+def _make_buffer(tmp_path, *names: str) -> tuple[dict, list[str]]:
+    """Helper: pretend a source's buffer dir lives under tmp_path and
+    create ``names`` as empty parquet files. Returns (src, paths)."""
+    src = {"name": "svc-tomb"}
+    buf = tmp_path / "buffer"
+    buf.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for n in names:
+        p = buf / n
+        p.write_bytes(b"")
+        paths.append(str(p))
+    return src, paths
+
+
+def test_tombstone_buffer_files_writes_sidecar_marker_and_leaves_parquet(tmp_path):
+    """Tombstoning a buffer parquet must (a) write a ``.consumed-<ts>``
+    sidecar next to it and (b) leave the original file untouched. The
+    race fix depends on the parquet staying readable for the grace
+    window so any view bound BEFORE the tombstone can still query it.
+    """
+    from backend.core import iceberg
+
+    src, paths = _make_buffer(tmp_path, "batch_A.parquet", "batch_B.parquet")
+    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
+        tombstoned = iceberg.tombstone_buffer_files(src, paths, ts=1717_000_000)
+
+    assert tombstoned == paths
+    for p in paths:
+        assert os.path.exists(p), f"parquet must remain on disk after tombstone: {p}"
+        assert os.path.exists(p + ".consumed-1717000000"), f"tombstone sidecar missing for {p}"
+
+
+def test_buffer_files_excludes_tombstoned_parquets(tmp_path):
+    """``buffer_files()`` must filter out parquets that have a tombstone
+    sibling. View rebuilds rely on this to stop binding paths that are
+    about to be swept."""
+    from backend.core import iceberg
+
+    src, paths = _make_buffer(tmp_path, "batch_keep.parquet", "batch_consumed.parquet")
+    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
+        iceberg.tombstone_buffer_files(src, [paths[1]], ts=1717_000_000)
+        listing = iceberg.buffer_files(src)
+
+    assert listing == [paths[0]], f"tombstoned file leaked into buffer_files(): {listing}"
+
+
+def test_buffer_files_excludes_tombstone_markers_themselves(tmp_path):
+    """The glob picks up *.parquet — the tombstone sidecar is named
+    ``...parquet.consumed-N``, NOT a ``.parquet``, so it must not appear.
+    Defends against a future glob change that accidentally widens to
+    include the markers."""
+    from backend.core import iceberg
+
+    src, paths = _make_buffer(tmp_path, "batch_X.parquet")
+    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
+        iceberg.tombstone_buffer_files(src, paths, ts=1717_000_000)
+        # Sanity: make sure a marker actually exists on disk.
+        assert os.path.exists(paths[0] + ".consumed-1717000000")
+        listing = iceberg.buffer_files(src)
+
+    for entry in listing:
+        assert not entry.endswith("1717000000"), f"tombstone marker leaked: {entry}"
+
+
+def test_sweep_tombstoned_buffer_files_skips_within_grace(tmp_path):
+    """A tombstone younger than ``grace_seconds`` must NOT be swept —
+    a view bound during that window could still need the file. This is
+    the load-bearing invariant of the race fix."""
+    from backend.core import iceberg
+
+    src, paths = _make_buffer(tmp_path, "batch_young.parquet")
+    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
+        iceberg.tombstone_buffer_files(src, paths, ts=2_000_000_000)
+        # now = ts + 10s, grace = 60s → must be skipped
+        swept = iceberg.sweep_tombstoned_buffer_files(src, grace_seconds=60, now=2_000_000_010)
+
+    assert swept == 0
+    assert os.path.exists(paths[0]), "parquet should NOT be deleted within grace window"
+    assert os.path.exists(paths[0] + ".consumed-2000000000"), "tombstone should still exist"
+
+
+def test_sweep_tombstoned_buffer_files_unlinks_past_grace(tmp_path):
+    """Past the grace window, the sweeper must unlink BOTH the parquet
+    and the tombstone sidecar. Otherwise the buffer dir grows unbounded."""
+    from backend.core import iceberg
+
+    src, paths = _make_buffer(tmp_path, "batch_old.parquet")
+    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
+        iceberg.tombstone_buffer_files(src, paths, ts=2_000_000_000)
+        # now = ts + 90s, grace = 60s → must sweep
+        swept = iceberg.sweep_tombstoned_buffer_files(src, grace_seconds=60, now=2_000_000_090)
+
+    assert swept == 1
+    assert not os.path.exists(paths[0]), "parquet should be unlinked past grace"
+    assert not os.path.exists(paths[0] + ".consumed-2000000000"), "tombstone should be unlinked past grace"
+
+
+def test_sweep_tolerates_malformed_marker_filenames(tmp_path):
+    """A garbage filename ending in ``.consumed-NaN`` must not crash
+    the sweeper — production has had stray files from interrupted
+    operations before, and a sweeper crash blocks every subsequent
+    commit."""
+    from backend.core import iceberg
+
+    src, _paths = _make_buffer(tmp_path, "batch_X.parquet")
+    buf = tmp_path / "buffer"
+    (buf / "batch_X.parquet.consumed-notanumber").write_bytes(b"")
+    (buf / "batch_X.parquet.consumed-").write_bytes(b"")  # empty ts
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
+        swept = iceberg.sweep_tombstoned_buffer_files(src, grace_seconds=60, now=2_000_000_000)
+
+    # The malformed markers stay — neither matches the strict tombstone shape.
+    assert swept == 0
+
+
+def test_tombstone_then_query_race_keeps_parquet_readable_during_grace(tmp_path):
+    """End-to-end race regression: simulate the 2026-06-05 prod incident
+    pattern — a query binds a view to a buffer parquet, the commit
+    tombstones it, then the query reads the file. Pre-fix, the equivalent
+    ``os.remove`` would have made the read fail with ``No files found``.
+    With the tombstone scheme, the file stays on disk for the grace
+    window so the in-flight query succeeds.
+    """
+    import duckdb
+
+    from backend.core import iceberg
+
+    src = {"name": "svc-race"}
+    buf = tmp_path / "buffer"
+    buf.mkdir(parents=True, exist_ok=True)
+    parquet_path = str(buf / "batch_race.parquet")
+
+    # Write a real parquet so DuckDB can actually read it.
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    pq.write_table(pa.table({"v": [1, 2, 3]}), parquet_path)
+
+    con = duckdb.connect(":memory:")
+    try:
+        with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
+            # Step 1: "bind the view" — pin the path into a SQL string,
+            # mirroring what update_iceberg_view does.
+            view_sql = f"CREATE OR REPLACE VIEW race_view AS SELECT * FROM read_parquet('{parquet_path}')"
+            con.execute(view_sql)
+
+            # Step 2: commit tombstones the file (was ``os.remove`` pre-fix).
+            iceberg.tombstone_buffer_files(src, [parquet_path], ts=2_000_000_000)
+
+            # Step 3: query that was racing the commit — must succeed.
+            row = con.execute("SELECT count(*) FROM race_view").fetchone()
+            assert row == (3,), (
+                "Query against view bound BEFORE tombstone must still succeed during grace. "
+                "If this fails, the race fix has regressed and we're back to the 2026-06-05 incident."
+            )
+
+            # Step 4: buffer_files() correctly excludes the tombstoned file
+            # so the NEXT view rebuild won't bind a doomed path.
+            assert iceberg.buffer_files(src) == []
+
+            # Step 5: after grace, sweep actually unlinks.
+            swept = iceberg.sweep_tombstoned_buffer_files(src, grace_seconds=60, now=2_000_000_090)
+            assert swept == 1
+            assert not os.path.exists(parquet_path)
+    finally:
+        con.close()
+
+
+def test_tombstone_falls_back_to_unlink_on_marker_write_failure(tmp_path):
+    """If creating the sidecar fails (disk full, EROFS, etc.) the buffer
+    file falls back to immediate unlink. Without this fallback, a
+    persistent tombstone failure would let the buffer dir grow without
+    bound — preferable to leak the race fix once than to wedge the
+    pipeline forever."""
+    from backend.core import iceberg
+
+    src, paths = _make_buffer(tmp_path, "batch_failwrite.parquet")
+
+    def _boom_open(*_args, **_kwargs):
+        raise OSError("simulated EROFS")
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
+        with patch("builtins.open", side_effect=_boom_open):
+            tombstoned = iceberg.tombstone_buffer_files(src, paths, ts=1717_000_000)
+
+    assert tombstoned == paths
+    assert not os.path.exists(paths[0]), "fallback should have unlinked the parquet"
+    assert not os.path.exists(paths[0] + ".consumed-1717000000"), "no sidecar should exist after failure"
 
 
 # ── get_arrow_schema / get_schema_field_names ────────────────────────────
@@ -795,8 +990,13 @@ def test_commit_buffer_quarantines_unreadable_files_instead_of_skipping(tmp_path
     assert result["quarantined_files"] == 1
     assert result["rows_committed"] == 3
 
-    # Good file is deleted (committed).
-    assert not good.exists()
+    # Good file is committed: the parquet stays on disk (tombstoned for
+    # the grace window so any in-flight query bound before the commit
+    # can still read it), but it now has a ``.consumed-<ts>`` sidecar
+    # and ``buffer_files()`` excludes it from the next commit cycle.
+    assert good.exists(), "committed parquet must remain on disk during the tombstone grace window"
+    good_tombstones = list(good.parent.glob(good.name + ".consumed-*"))
+    assert len(good_tombstones) == 1, f"expected one tombstone for committed file, got {good_tombstones}"
     # Bad file is no longer at its original path — it was moved to quarantine.
     assert not bad.exists()
     quarantine_dir = buffer_dir / ".quarantine"
@@ -903,9 +1103,19 @@ def test_commit_buffer_chunks_appends_when_files_exceed_chunk_size(tmp_path, mon
     assert result["snapshot_id"] == 102
     assert result["files_committed"] == 7
     assert result["rows_committed"] == 7
-    # All buffer files were deleted.
+    # All buffer files were tombstoned — the parquets stay on disk until
+    # the grace window elapses (see ``tombstone_buffer_files`` docstring),
+    # but each one has a ``.consumed-<ts>`` sidecar and is filtered out
+    # of ``buffer_files()`` so the next commit cycle won't re-process them.
+    from backend.core import iceberg as ice_mod
+
     for p in paths:
-        assert not p.exists(), f"{p} was not cleaned up"
+        siblings = list(p.parent.glob(p.name + ".consumed-*"))
+        assert siblings, f"{p} should have a tombstone sidecar after commit"
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root / "bkt")):
+        assert ice_mod.buffer_files({"name": "svc"}) == [], (
+            "tombstoned files must NOT appear in buffer_files() — they would be re-processed forever otherwise."
+        )
     # Pointer write happens ONCE — not per chunk — to keep CDN purges bounded.
     assert write_pointer.call_count == 1
 
@@ -2071,7 +2281,6 @@ def test_buffer_backlog_stats_reports_count_bytes_age(tmp_path):
 
 
 # Silence ruff unused-imports
-import os  # noqa: E402
 
 _ = MagicMock
 _ = pytest

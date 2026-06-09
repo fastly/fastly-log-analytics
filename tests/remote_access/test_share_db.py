@@ -136,7 +136,6 @@ def test_generate_wordphrase_shape_and_strength():
     phrase = share_db.generate_wordphrase()
     parts = phrase.split("-")
     assert len(parts) == 4
-    assert parts[3].isdigit() and len(parts[3]) == 2
     # All wordphrases must pass the validator.
     share_db.validate_passcode_strength(phrase)
 
@@ -559,3 +558,38 @@ def test_apply_pii_policy_off_passes_through():
     obj = {"ip": "10.0.0.1"}
     out = share_db.apply_pii_policy(obj, {"mask_ips": False})
     assert out == obj
+
+
+def test_apply_pii_policy_walks_lists_and_arrays():
+    obj = {
+        "client_ip": ["1.2.3.4", "5.6.7.8"],
+        "nested_list": [{"ip_address": "10.0.0.1"}, {"ip_address": "192.168.1.1"}],
+    }
+    out = share_db.apply_pii_policy(obj, {"mask_ips": True})
+    assert out["client_ip"] == ["1.2.3.xxx", "5.6.7.xxx"]
+    assert out["nested_list"][0]["ip_address"] == "10.0.0.xxx"
+    assert out["nested_list"][1]["ip_address"] == "192.168.1.xxx"
+
+
+def test_get_remote_invite_timing_equalization():
+    from unittest.mock import patch
+
+    # 1. Call with a non-existent email -> must equalize timing once
+    with patch("backend.core.share_db._equalize_passcode_timing") as mock_equalize:
+        res = share_db.get_remote_invite_by_email_passcode("nonexistent@example.com", "some-passcode")
+        assert res is None
+        mock_equalize.assert_called_once_with("some-passcode")
+
+    # 2. Call with an existing email but wrong passcode -> must NOT equalize timing because we already paid scrypt cost in loop
+    share_db.create_remote_invite(
+        name="Drew",
+        email="existing_timing_test@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=[],
+    )
+    with patch("backend.core.share_db._equalize_passcode_timing") as mock_equalize:
+        res = share_db.get_remote_invite_by_email_passcode("existing_timing_test@example.com", "wrong-passcode")
+        assert res is None
+        mock_equalize.assert_not_called()

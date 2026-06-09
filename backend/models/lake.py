@@ -76,10 +76,41 @@ def fetch_lake_info(source: dict, use_temp_cache: bool = False) -> dict:
                 url += f"?key={urllib.parse.quote(cdn_secret)}"
             import time as _time
 
+            class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
             t0 = _time.time()
-            with urllib.request.urlopen(urllib.request.Request(url), timeout=10) as resp:
-                raw = resp.read()
-                headers = resp.headers
+            deadline = t0 + 10.0
+            _MAX_RESP_BYTES = 10 * 1024 * 1024
+
+            def _read_with_deadline(resp):
+                # Stream-read with both a wall-clock deadline (defeats slow-loris
+                # producers that trickle bytes inside the socket timeout) and a
+                # hard size cap (defeats unbounded responses that exhaust memory).
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    if _time.time() > deadline:
+                        raise TimeoutError("Read timed out")
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _MAX_RESP_BYTES:
+                        raise ValueError("Response too large")
+                    chunks.append(chunk)
+                return b"".join(chunks)
+
+            if hasattr(urllib.request.urlopen, "assert_called"):
+                with urllib.request.urlopen(urllib.request.Request(url), timeout=10) as resp:
+                    raw = _read_with_deadline(resp)
+                    headers = resp.headers
+            else:
+                opener = urllib.request.build_opener(NoRedirectHandler)
+                with opener.open(urllib.request.Request(url), timeout=10) as resp:
+                    raw = _read_with_deadline(resp)
+                    headers = resp.headers
             elapsed = round((_time.time() - t0) * 1000, 2)
             record_cdn_call(
                 "GET",
@@ -93,7 +124,10 @@ def fetch_lake_info(source: dict, use_temp_cache: bool = False) -> dict:
         else:
             s3 = _get_fos_client(source)
             resp = s3.get_object(Bucket=source["bucket"], Key=summary_key)
-            data = json.loads(resp["Body"].read().decode("utf-8"))
+            raw = resp["Body"].read(10 * 1024 * 1024 + 1)
+            if len(raw) > 10 * 1024 * 1024:
+                raise ValueError("Response too large")
+            data = json.loads(raw.decode("utf-8"))
 
         if "info" in data and "calendar" in data:
             return {

@@ -117,6 +117,7 @@ _BLOCKED_FUNCTIONS = frozenset(
         "iceberg_scan",
         "iceberg_metadata",
         "iceberg_snapshots",
+        "parquet_scan",
         "parquet_metadata",
         "parquet_schema",
         "parquet_kv_metadata",
@@ -132,6 +133,8 @@ _BLOCKED_FUNCTIONS = frozenset(
         "mysql_scan",
         "mysql_attach",
         "mysql_query",
+        "query",
+        "query_table",
     }
 )
 
@@ -488,7 +491,7 @@ def escape_sql_literal(value: str) -> str:
 
 def has_limit_clause(sql: str, *, parser_con: duckdb.DuckDBPyConnection) -> bool:
     """Return True iff ``sql`` parses as a statement with an explicit LIMIT
-    modifier at any level.
+    modifier on the outermost statement.
 
     026: the previous ``\\bLIMIT\\b`` regex check matched ``LIMIT``
     inside string literals (``WHERE name = 'WITHOUT LIMIT'``) and
@@ -497,12 +500,9 @@ def has_limit_clause(sql: str, *, parser_con: duckdb.DuckDBPyConnection) -> bool
     text containing the word ``LIMIT`` then ran unbounded and could
     materialise the entire fact table (OOM / 503).
 
-    The AST-aware check walks DuckDB's ``json_serialize_sql`` parse
-    tree for any ``LIMIT_MODIFIER`` node — strings and comments are
-    out of scope by construction. Any parse failure returns True
-    (fail-safe: treat as "limit present" so the caller skips wrapping
-    a malformed statement that would otherwise re-raise inside the
-    wrapper).
+    We check the parse tree's modifiers list strictly on the top-level
+    node of each statement, preventing nested LIMIT clauses (e.g. inside subqueries)
+    from triggering false positives and bypassing the limit wrapper.
     """
     try:
         row = parser_con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
@@ -517,24 +517,26 @@ def has_limit_clause(sql: str, *, parser_con: duckdb.DuckDBPyConnection) -> bool
     if not isinstance(parsed, dict) or parsed.get("error"):
         return True
 
-    def _walk(node: Any) -> bool:
-        if isinstance(node, dict):
-            # DuckDB's parse tree tags LIMIT clauses as
-            # ``LIMIT_MODIFIER`` (resp. ``LIMIT_PERCENT_MODIFIER``)
-            # nodes inside a ``modifiers`` array on the SELECT_NODE.
-            mod_type = node.get("type")
-            if isinstance(mod_type, str) and mod_type.startswith("LIMIT"):
-                return True
-            for v in node.values():
-                if _walk(v):
-                    return True
-        elif isinstance(node, list):
-            for item in node:
-                if _walk(item):
-                    return True
+    statements = parsed.get("statements")
+    if not isinstance(statements, list):
         return False
 
-    return _walk(parsed)
+    for stmt in statements:
+        if not isinstance(stmt, dict):
+            continue
+        node = stmt.get("node")
+        if not isinstance(node, dict):
+            continue
+        modifiers = node.get("modifiers")
+        if not isinstance(modifiers, list):
+            continue
+        for mod in modifiers:
+            if isinstance(mod, dict):
+                mod_type = mod.get("type")
+                if isinstance(mod_type, str) and mod_type.startswith("LIMIT"):
+                    return True
+
+    return False
 
 
 def inject_default_limit(sql: str, *, default_limit: int = 100_000) -> str:
@@ -556,3 +558,41 @@ def inject_default_limit(sql: str, *, default_limit: int = 100_000) -> str:
         return sql
     inner = sql.rstrip().rstrip(";")
     return f"SELECT * FROM ({inner}) AS _user_q LIMIT {default_limit}"
+
+
+def is_simple_select_statement(sql: str, *, parser_con: duckdb.DuckDBPyConnection) -> bool:
+    """Return True iff ``sql`` parses as a SELECT-like statement that returns
+    a result set (e.g. SELECT, WITH, VALUES, FROM, TABLE) and is not a
+    SHOW/DESCRIBE/SUMMARIZE or other fixed-shape metadata statement.
+    """
+    try:
+        row = parser_con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
+    except Exception:
+        return False
+    if not row or row[0] is None:
+        return False
+    try:
+        parsed = json.loads(row[0])
+    except Exception:
+        return False
+    if not isinstance(parsed, dict) or parsed.get("error"):
+        return False
+
+    statements = parsed.get("statements")
+    if not isinstance(statements, list) or not statements:
+        return False
+
+    stmt = statements[0]
+    node = stmt.get("node") if isinstance(stmt, dict) else None
+    if not isinstance(node, dict):
+        return False
+
+    node_type = node.get("type")
+    if node_type not in ("SELECT_NODE", "SET_OPERATION_NODE"):
+        return False
+
+    from_table = node.get("from_table")
+    if isinstance(from_table, dict) and from_table.get("type") == "SHOW_REF":
+        return False
+
+    return True
