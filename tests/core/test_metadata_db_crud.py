@@ -226,6 +226,79 @@ def test_get_node_count_avg_returns_none_when_empty(sid):
     assert metadata_db.get_node_count_avg(sid) is None
 
 
+def test_get_node_count_avg_combines_canonical_and_legacy_basenames(sid):
+    """Fast/slow split must produce the SAME average as the pre-split
+    single-arm query — fast arm aggregates canonical-basename rows
+    (file_date IS NOT NULL, walked via idx_ingested_files_source_date),
+    slow arm aggregates legacy/test rows (file_date IS NULL).
+
+    Pinned because a refactor that drops the slow arm would silently
+    omit test fixtures + ad-hoc backfills from the average; a refactor
+    that drops the fast arm would re-introduce the full-table scan."""
+    # Canonical-basename rows (insert_ingested_files runs _parse_file_date
+    # which populates file_date for these). Two distinct emission
+    # buckets: 23:30:00 has 2 files, 23:31:00 has 4 files. Mean-of-counts
+    # for the canonical group alone would be 3.0.
+    metadata_db.insert_ingested_files(
+        sid,
+        [
+            ("s3://b/raw/2026-05-15/23/2026-05-15T23:30:00.000-a.log.gz", 1, 1),
+            ("s3://b/raw/2026-05-15/23/2026-05-15T23:30:00.000-b.log.gz", 1, 1),
+            ("s3://b/raw/2026-05-15/23/2026-05-15T23:31:00.000-c.log.gz", 1, 1),
+            ("s3://b/raw/2026-05-15/23/2026-05-15T23:31:00.000-d.log.gz", 1, 1),
+            ("s3://b/raw/2026-05-15/23/2026-05-15T23:31:00.000-e.log.gz", 1, 1),
+            ("s3://b/raw/2026-05-15/23/2026-05-15T23:31:00.000-f.log.gz", 1, 1),
+        ],
+    )
+    # Legacy / test fixture rows: insert with file_date=NULL directly so
+    # they take the slow arm. Bucket 23:32:00 with 1 file, 23:33:00 with
+    # 1 file. Mean-of-counts for these alone would be 1.0.
+    con = metadata_db.get_con(sid)
+    con.execute(
+        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date) "
+        "VALUES (?, ?, ?, ?, NULL)",
+        ("s3://b/raw/2026-05-15/23/2026-05-15T23:32:00.000-legacy-x.log.gz", sid, 1, 1),
+    )
+    con.execute(
+        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date) "
+        "VALUES (?, ?, ?, ?, NULL)",
+        ("s3://b/raw/2026-05-15/23/2026-05-15T23:33:00.000-legacy-y.log.gz", sid, 1, 1),
+    )
+    con.commit()
+
+    # All four buckets contribute: (2, 4, 1, 1) → avg = 2.0. If the slow
+    # arm were dropped, average would be (2 + 4) / 2 = 3.0. If the fast
+    # arm were dropped, it'd be (1 + 1) / 2 = 1.0.
+    assert metadata_db.get_node_count_avg(sid) == 2.0
+
+
+def test_get_node_count_avg_slow_arm_skips_non_canonical_basenames(sid):
+    """The slow arm gates on ``instr(file_name, 'T') >= 11`` so junk
+    rows (no parseable T-timestamp) can't crash the substr and don't
+    contribute a NULL group key. Pinned because dropping the instr()
+    guard on the slow arm would let basenames without a T silently
+    produce GROUP BY NULL rows — averaged in as their own bucket of 0."""
+    con = metadata_db.get_con(sid)
+    # Rows where instr(file_name, 'T') < 11 — must NOT contribute.
+    # 'short-T.gz' has T at pos 7; 'lowercase-only.gz' has no uppercase
+    # T at all (instr returns 0). Both fail the `instr(...) >= 11` guard.
+    con.execute(
+        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date) "
+        "VALUES (?, ?, ?, ?, NULL)",
+        ("short-T.gz", sid, 1, 1),
+    )
+    con.execute(
+        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date) "
+        "VALUES (?, ?, ?, ?, NULL)",
+        ("lowercase-only.gz", sid, 1, 1),
+    )
+    con.commit()
+
+    # No canonical rows + only junk slow-arm rows → no contributing
+    # group keys → avg is None (not 0 or some pathological value).
+    assert metadata_db.get_node_count_avg(sid) is None
+
+
 def test_get_log_accounting_counts_groups_by_filename_when_iso_prefix_present(sid):
     """ISO-prefixed basenames bucket by emission time pulled from the path;
     rows + file counts aggregate per bucket. Pinned because the SQL CASE
@@ -244,6 +317,39 @@ def test_get_log_accounting_counts_groups_by_filename_when_iso_prefix_present(si
         ("s3://b/raw/2026-05-15/23/2026-05-15T23:30:00.000-b.log.gz", sid, "2026-05-15T23:30:05", 250, 1),
     )
     con.commit()
+    counts = metadata_db.get_log_accounting_counts(
+        sid, "2026-05-15T22:00:00", "2026-05-16T00:00:00", 13, "2026-05-15T23", "2026-05-15T23"
+    )
+    assert counts == {"2026-05-15T23": (350, 2)}
+
+
+def test_get_log_accounting_counts_uses_file_date_fast_arm_when_populated(sid):
+    """When file_date is populated (i.e. ingested via insert_ingested_files,
+    which auto-parses the basename), the fast UNION arm groups by the substr
+    of file_name AND filters by file_date >= start_date AND file_date <=
+    end_date — which uses the (source_name, file_date) composite index
+    instead of the unindexed datetime(ingested_at) scan. Result must equal
+    the slow-arm baseline (verified by test_groups_by_filename above) so
+    callers don't see a semantic shift after the split."""
+    metadata_db.insert_ingested_files(
+        sid,
+        [
+            ("s3://b/raw/2026-05-15/23/2026-05-15T23:00:00.000-a.log.gz", 100, 1),
+            ("s3://b/raw/2026-05-15/23/2026-05-15T23:30:00.000-b.log.gz", 250, 1),
+        ],
+    )
+    # Sanity: insert_ingested_files must populate file_date on the new rows
+    # — without it the fast arm would skip and the slow arm would shoulder
+    # the work, defeating the point of the rewrite.
+    con = metadata_db.get_con(sid)
+    fd_rows = con.execute(
+        "SELECT file_name, file_date FROM ingested_files WHERE source_name = ?",
+        (sid,),
+    ).fetchall()
+    assert all(r["file_date"] == "2026-05-15" for r in fd_rows), (
+        f"insert_ingested_files should populate file_date; got {[dict(r) for r in fd_rows]}"
+    )
+
     counts = metadata_db.get_log_accounting_counts(
         sid, "2026-05-15T22:00:00", "2026-05-16T00:00:00", 13, "2026-05-15T23", "2026-05-15T23"
     )

@@ -3,8 +3,10 @@
 import * as React from 'react'
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, RefreshCw, ShieldCheck } from 'lucide-react'
+
+import { client } from '@/lib/api'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -64,17 +66,86 @@ export default function SessionScoringPage() {
   const [sinceHours, setSinceHours] = React.useState(24)
   const qc = useQueryClient()
 
-  // Manual refresh replaces the per-component refetchInterval polling we
-  // removed after the 2026-06-01 mds_stores + VS Code RAM crash. Predicate
-  // invalidation matches every ['scoring-*', activeServiceId, ...] key,
-  // so new scoring queries (e.g. ['scoring-labels-counts', sid]) get
-  // refreshed without having to add a new invalidate line here.
+  // ── Composite queries: collapse 10+ individual requests into 2 ──
+  // Analytics composite: health, top-flagged, score-dist, compliance,
+  // evaluation, evaluation-per-reason. Config composite: status,
+  // threshold, exclude-regex, enforce-status-code.
+  // Individual component queries stay intact — they find pre-populated
+  // cache entries and skip their network requests.
+  const analyticsComposite = useQuery({
+    queryKey: ['scoring-analytics-composite', activeServiceId, sinceHours],
+    queryFn: async ({ signal }) => {
+      const { data, response } = await client.GET(
+        '/api/services/{service_id}/scoring/analytics' as any,
+        {
+          params: {
+            path: { service_id: activeServiceId },
+            query: { since_hours: sinceHours },
+          },
+          signal,
+        } as any,
+      )
+      if (!response.ok) throw new Error(`status ${response.status}`)
+      return data as Record<string, any>
+    },
+    enabled: !!activeServiceId,
+  })
+
+  const configComposite = useQuery({
+    queryKey: ['scoring-config-composite', activeServiceId],
+    queryFn: async ({ signal }) => {
+      const { data, response } = await client.GET(
+        '/api/services/{service_id}/scoring/config' as any,
+        {
+          params: { path: { service_id: activeServiceId }, signal } as any,
+        } as any,
+      )
+      if (!response.ok) throw new Error(`status ${response.status}`)
+      return data as Record<string, any>
+    },
+    enabled: !!activeServiceId,
+  })
+
+  // Seed individual component cache keys from composite responses.
+  // Ref-guarded by dataUpdatedAt so seeding runs once per fresh fetch.
+  const analyticsSeededAt = React.useRef(0)
+  const configSeededAt = React.useRef(0)
+
+  if (analyticsComposite.data && analyticsComposite.dataUpdatedAt > analyticsSeededAt.current) {
+    analyticsSeededAt.current = analyticsComposite.dataUpdatedAt
+    const d = analyticsComposite.data
+    if (d.health) qc.setQueryData(['scoring-health', activeServiceId, sinceHours], d.health)
+    if (d.top_flagged) qc.setQueryData(['scoring-top-flagged', activeServiceId, sinceHours], d.top_flagged)
+    if (d.score_distribution) qc.setQueryData(['scoring-score-dist', activeServiceId, sinceHours], d.score_distribution)
+    if (d.compliance_breakdown) qc.setQueryData(['scoring-compliance', activeServiceId, sinceHours], d.compliance_breakdown)
+    if (d.evaluation_per_reason) qc.setQueryData(['scoring-evaluation-per-reason', activeServiceId], d.evaluation_per_reason)
+    if (d.evaluation) qc.setQueryData(['scoring-evaluation', activeServiceId], d.evaluation)
+  }
+
+  if (configComposite.data && configComposite.dataUpdatedAt > configSeededAt.current) {
+    configSeededAt.current = configComposite.dataUpdatedAt
+    const d = configComposite.data
+    if (d.status) qc.setQueryData(['scoring-status', activeServiceId], d.status)
+    if (d.threshold) qc.setQueryData(['scoring-threshold-committed', activeServiceId], d.threshold)
+    if (d.exclude_regex) qc.setQueryData(['scoring-exclude-regex', activeServiceId], d.exclude_regex)
+    if (d.enforce_status_code) qc.setQueryData(['scoring-enforce-status-code', activeServiceId], d.enforce_status_code)
+  }
+
+  const compositesLoading = analyticsComposite.isLoading || configComposite.isLoading
+
+  // Refresh invalidates composite keys (re-seeding individual caches on
+  // resolve) plus any queries not covered by composites.
   const refreshAll = () => {
+    analyticsSeededAt.current = 0
+    configSeededAt.current = 0
+    qc.invalidateQueries({ queryKey: ['scoring-analytics-composite', activeServiceId] })
+    qc.invalidateQueries({ queryKey: ['scoring-config-composite', activeServiceId] })
     qc.invalidateQueries({
       predicate: (q) =>
         Array.isArray(q.queryKey) &&
         typeof q.queryKey[0] === 'string' &&
-        (q.queryKey[0] as string).startsWith('scoring-') &&
+        ['scoring-curves', 'scoring-enforce-threshold', 'scoring-threshold-preview',
+         'scoring-labels', 'scoring-labels-counts'].includes(q.queryKey[0] as string) &&
         q.queryKey[1] === activeServiceId,
     })
   }
@@ -121,7 +192,13 @@ export default function SessionScoringPage() {
         </Link>
       </PageHeader>
 
-      <StatusPanel serviceId={activeServiceId} />
+      {compositesLoading ? (
+        <div className="space-y-3" aria-busy="true">
+          <Skeleton className="h-48 w-full" />
+        </div>
+      ) : (
+        <StatusPanel serviceId={activeServiceId} />
+      )}
 
       <Tabs value={tab} onValueChange={setTab} className="w-full">
         <TabsList>
@@ -132,16 +209,26 @@ export default function SessionScoringPage() {
         </TabsList>
 
         <TabsContent value="overview" className="pt-4 space-y-6">
-          <ScoringHealthCard serviceId={activeServiceId} sinceHours={sinceHours} />
-          <ThresholdSlider serviceId={activeServiceId} sinceHours={sinceHours} />
-          <ExcludeRegexCard serviceId={activeServiceId} />
-          <RocPrCurves serviceId={activeServiceId} sinceHours={sinceHours} />
-          <PerReasonAucCard serviceId={activeServiceId} />
-          <TopFlaggedTable serviceId={activeServiceId} sinceHours={sinceHours} />
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            <ScoreDistChart serviceId={activeServiceId} sinceHours={sinceHours} />
-            <ComplianceChart serviceId={activeServiceId} sinceHours={sinceHours} />
-          </div>
+          {compositesLoading ? (
+            <div className="space-y-6" aria-busy="true">
+              <Skeleton className="h-48 w-full" />
+              <Skeleton className="h-64 w-full" />
+              <Skeleton className="h-32 w-full" />
+            </div>
+          ) : (
+            <>
+              <ScoringHealthCard serviceId={activeServiceId} sinceHours={sinceHours} />
+              <ThresholdSlider serviceId={activeServiceId} sinceHours={sinceHours} />
+              <ExcludeRegexCard serviceId={activeServiceId} />
+              <RocPrCurves serviceId={activeServiceId} sinceHours={sinceHours} />
+              <PerReasonAucCard serviceId={activeServiceId} />
+              <TopFlaggedTable serviceId={activeServiceId} sinceHours={sinceHours} />
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                <ScoreDistChart serviceId={activeServiceId} sinceHours={sinceHours} />
+                <ComplianceChart serviceId={activeServiceId} sinceHours={sinceHours} />
+              </div>
+            </>
+          )}
         </TabsContent>
 
         <TabsContent value="labels" className="pt-4">

@@ -101,11 +101,7 @@ class _ConnectionHolder:
         # so behaviour matches the pre-pool design exactly.
         from backend.core import duckdb_pool
 
-        use_pool = (
-            self._read_only
-            and not self._skip_view_update
-            and duckdb_pool._pool_enabled()
-        )
+        use_pool = self._read_only and not self._skip_view_update and duckdb_pool._pool_enabled()
         try:
             if use_pool:
                 self._pool_cm = duckdb_pool.checkout_connection(self._source, max_wait=10.0)

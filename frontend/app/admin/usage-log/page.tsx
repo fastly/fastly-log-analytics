@@ -265,8 +265,33 @@ export default function UsageLogPage() {
 
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 30_000)
-    return () => clearInterval(id)
+    // Gate the 30s tick on tab visibility so a backgrounded admin tab
+    // doesn't keep rotating `now` and refetching ~MB of usage_log every
+    // minute. Re-tick immediately on visibility-restore so the rolled
+    // window matches the moment the user returns to the tab.
+    const tick = () => setNow(new Date())
+    let id: ReturnType<typeof setInterval> | null = null
+    const start = () => {
+      if (id !== null) return
+      tick()
+      id = setInterval(tick, 30_000)
+    }
+    const stop = () => {
+      if (id !== null) {
+        clearInterval(id)
+        id = null
+      }
+    }
+    const onVis = () => {
+      if (document.visibilityState === 'visible') start()
+      else stop()
+    }
+    if (document.visibilityState === 'visible') start()
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      document.removeEventListener('visibilitychange', onVis)
+      stop()
+    }
   }, [])
   const startTime = useMemo(() => toQueryDate(new Date(now.getTime() - preset * 3600 * 1000)), [preset, now])
   const endTime = useMemo(() => toQueryDate(now), [now])
@@ -513,7 +538,7 @@ export default function UsageLogPage() {
         />
         <StatCard
           title="Est. Total Cost"
-          value={agg ? fmtCost(agg.estimated_cost_total) : '—'}
+          value={agg ? `$${agg.estimated_cost_total.toFixed(2)}` : '—'}
           icon={DollarSign}
           iconClassName="text-amber-500"
           sub={

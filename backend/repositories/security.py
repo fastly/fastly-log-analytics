@@ -60,18 +60,23 @@ def get_top_bots(
             return {"bots": [], "ngwaf_bots": []}
         if "ua" in actual_cols:
             try:
-                from backend.utils.bot_sources import build_matcher, get_bot_regex_pattern
+                from backend.utils.bot_sources import build_matcher
 
-                pattern = get_bot_regex_pattern(200)
-                ua_filter = f"AND regexp_matches(ua, '{pattern.replace(chr(39), chr(39) * 2)}')" if pattern else ""
-
+                # Item 41 — the inline regexp_matches(ua, '<200-pattern OR-chain>')
+                # cost ~353 ms on prod / week (per dashboard telemetry) because
+                # DuckDB has to evaluate the alternation per row. The Python
+                # matcher below is already what we use to classify each UA's
+                # bot_id, so move the regex out of SQL: pull the top 50,000
+                # distinct UAs by count (cheap GROUP BY + ORDER BY) then run
+                # build_matcher() on them in Python where the per-UA result
+                # is lru_cached and most lookups are sub-microsecond.
                 q = f"""
                     SELECT ua, count(*) AS cnt
                     FROM {temp_table}
-                    WHERE ua IS NOT NULL {ua_filter}
+                    WHERE ua IS NOT NULL
                     GROUP BY ua
                     ORDER BY cnt DESC
-                    LIMIT 2000
+                    LIMIT 50000
                 """
                 rows = runner.execute(q).fetchall()
 
@@ -95,27 +100,55 @@ def get_top_bots(
                 logging.getLogger(__name__).error("[security] arcjet top bots failed: %s", e)
 
         # ── NGWAF cache bot names ─────────────────────────────────────────────
+        # Memoize ATTACH per-connection the same way get_security_aggregates
+        # does for `ngwaf_cache`. The previous attach_ngwaf_cache context
+        # manager DETACHed on exit, so every /dashboard cold load paid the
+        # ~22 ms ATTACH cost on /api/security/top-bots even when the file
+        # was already attached. The duckdb_databases() catalog query is
+        # ~90 us — fast enough to run unconditionally.
         ngwaf_bots: list[dict] = []
-        from backend.repositories._base import attach_ngwaf_cache
+        ngwaf_attached = False
+        if "waf_req_id" in actual_cols:
+            try:
+                from backend import config as svcconfig
 
-        with attach_ngwaf_cache(con, actual_cols, alias="ngwaf_top") as attached:
-            if attached:
-                try:
-                    # Join against the temp table instead of re-scanning the
-                    # source view — same filter window, no second manifest walk.
-                    q = f"""
-                        SELECT nb.bot_name, nb.category, count(*) AS cnt
-                        FROM {temp_table} t
-                        INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id)
-                        WHERE nb.bot_name IS NOT NULL
-                        GROUP BY 1, 2
-                        ORDER BY 3 DESC
-                        LIMIT {n}
-                    """
-                    res = runner.execute(q).fetchall()
-                    ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
-                except Exception as e:
-                    logging.getLogger(__name__).error("[security] NGWAF top bots failed: %s", e)
+                ngwaf_db = svcconfig.ngwaf_db_path()
+                if ngwaf_db:
+                    existing = con.execute(
+                        "SELECT path FROM duckdb_databases() WHERE database_name='ngwaf_top' LIMIT 1"
+                    ).fetchone()
+                    already_path = existing[0] if existing else None
+                    if already_path == ngwaf_db:
+                        ngwaf_attached = True
+                    elif os.path.exists(ngwaf_db):
+                        if already_path is not None:
+                            try:
+                                con.execute("DETACH ngwaf_top")
+                            except Exception:
+                                pass
+                        ngwaf_db_escaped = ngwaf_db.replace("'", "''")
+                        con.execute(f"ATTACH '{ngwaf_db_escaped}' AS ngwaf_top (TYPE SQLITE, READ_ONLY)")
+                        ngwaf_attached = True
+            except Exception:
+                pass  # ATTACH failed — fall back gracefully
+
+        if ngwaf_attached:
+            try:
+                # Join against the temp table instead of re-scanning the
+                # source view — same filter window, no second manifest walk.
+                q = f"""
+                    SELECT nb.bot_name, nb.category, count(*) AS cnt
+                    FROM {temp_table} t
+                    INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id)
+                    WHERE nb.bot_name IS NOT NULL
+                    GROUP BY 1, 2
+                    ORDER BY 3 DESC
+                    LIMIT {n}
+                """
+                res = runner.execute(q).fetchall()
+                ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
+            except Exception as e:
+                logging.getLogger(__name__).error("[security] NGWAF top bots failed: %s", e)
 
     return {"bots": arcjet_bots, "ngwaf_bots": ngwaf_bots, **runner.telemetry()}
 
@@ -148,18 +181,18 @@ def get_security_aggregates(
 
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
 
+    # Projection narrowed: asn / req_bytes / ja3 / ja4 are not consumed
+    # by _build_security_response (audited 2026-06-05) so they're dropped
+    # from the TEMP TABLE materialization. Each saves a column scan +
+    # cast per parquet read.
     cols = [
         "timestamp",
         "ip",
-        "asn",
         "tls_ciphers_sha",
         "req_header_bytes",
-        "req_bytes",
         "is_ipv6",
         "p_type",
         "conn_requests",
-        "ja3",
-        "ja4",
         "waf_sig",
         "ua",
         "waf_req_id",
@@ -197,17 +230,35 @@ def _build_security_response(
         results["ngwaf_configured"] = False
 
     # Attach the NGWAF bot cache once per connection if it exists and waf_req_id is in schema.
-    # The attach costs ~22ms so we guard on both conditions to avoid overhead when unused.
+    # The attach costs ~22ms; check DuckDB's own duckdb_databases() catalog
+    # (~90us) first and skip the ATTACH if this connection already has the
+    # cache bound to the exact same path. The catalog query reflects live
+    # state, so we don't need Python-side memoization (DuckDBPyConnection
+    # has no __dict__ for arbitrary attrs anyway) and a config switch that
+    # changes the path triggers a DETACH + re-ATTACH instead of silently
+    # serving from a stale binding.
     _ngwaf_attached = False
     if "waf_req_id" in actual_cols:
         try:
             from backend import config as svcconfig
 
             ngwaf_db = svcconfig.ngwaf_db_path()
-            if os.path.exists(ngwaf_db):
-                ngwaf_db_escaped = ngwaf_db.replace("'", "''")
-                con.execute(f"ATTACH '{ngwaf_db_escaped}' AS ngwaf_cache (TYPE SQLITE, READ_ONLY)")
-                _ngwaf_attached = True
+            if ngwaf_db:
+                existing = con.execute(
+                    "SELECT path FROM duckdb_databases() WHERE database_name='ngwaf_cache' LIMIT 1"
+                ).fetchone()
+                already_path = existing[0] if existing else None
+                if already_path == ngwaf_db:
+                    _ngwaf_attached = True
+                elif os.path.exists(ngwaf_db):
+                    if already_path is not None:
+                        try:
+                            con.execute("DETACH ngwaf_cache")
+                        except Exception:
+                            pass
+                    ngwaf_db_escaped = ngwaf_db.replace("'", "''")
+                    con.execute(f"ATTACH '{ngwaf_db_escaped}' AS ngwaf_cache (TYPE SQLITE, READ_ONLY)")
+                    _ngwaf_attached = True
         except Exception:
             pass  # ATTACH failed (e.g. DuckDB SQLite extension not loaded) — fall back gracefully
 

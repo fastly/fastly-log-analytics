@@ -78,6 +78,27 @@ _analytics_cache_lock = threading.Lock()
 _inflight: dict[tuple, threading.Lock] = {}
 
 
+def _finalize_cached(value, *, is_cached: bool) -> object:
+    """Return *value* with `_is_cached` set, gating `_debug_*` on
+    `DEBUG_RESPONSES` so production responses don't leak SQL/URLs.
+
+    Mirrors `backend.models.common.BaseResponse._strip_debug_when_disabled`
+    so endpoints that return plain dicts get the same gating as endpoints
+    that return Pydantic responses. `_is_cached` is always included — it
+    isn't sensitive and downstream verification depends on it.
+    """
+    from backend.models.common import _debug_responses_enabled
+
+    if not isinstance(value, dict):
+        return value
+    out = dict(value)
+    out["_is_cached"] = is_cached
+    if not _debug_responses_enabled():
+        out.pop("_debug_queries", None)
+        out.pop("_debug_calls", None)
+    return out
+
+
 def _cached(key: tuple, producer):
     """Return cached value if fresh, else produce + store.
 
@@ -87,7 +108,20 @@ def _cached(key: tuple, producer):
     callers on DIFFERENT keys (the dashboard mount fires 8 endpoints
     with 8 different keys) run in parallel — they only contend on the
     global lock during the brief cache-lookup + per-key-lock-handoff
-    window."""
+    window.
+
+    Telemetry: snapshots the request-scoped `_QUERIES` / `_CALLS`
+    contextvars (from `backend.utils.telemetry`) before producer() and
+    captures the suffix added during producer(). The captured slice is
+    baked into the stored value under `_debug_queries` / `_debug_calls`
+    so cache hits return the same telemetry that populated the cache,
+    paired with `_is_cached: True` to flag the timings as historical.
+    `_query_logs` (and anything called transitively from a producer)
+    appends to the same shared contextvar via `get_queries()`.
+    """
+    from backend.utils.telemetry import _CALLS as _telemetry_calls
+    from backend.utils.telemetry import get_queries
+
     with _analytics_cache_lock:
         # Capture `now` INSIDE the lock so the freshness check evaluates
         # against the lock-acquisition timestamp, not a stale value from
@@ -97,7 +131,7 @@ def _cached(key: tuple, producer):
         now = _time.monotonic()
         entry = _analytics_cache.get(key)
         if entry and (now - entry[0]) < _ANALYTICS_TTL_SEC:
-            return entry[1]
+            return _finalize_cached(entry[1], is_cached=True)
         # Miss — claim the per-key lock under the global lock so two
         # concurrent misses on the same key don't both create new locks.
         key_lock = _inflight.get(key)
@@ -113,19 +147,47 @@ def _cached(key: tuple, producer):
             now = _time.monotonic()
             entry = _analytics_cache.get(key)
             if entry and (now - entry[0]) < _ANALYTICS_TTL_SEC:
-                return entry[1]
-        # Actual producer call happens OUTSIDE the global lock so other
-        # keys can be served while this one is computing.
-        value = producer()
-        with _analytics_cache_lock:
-            # Re-capture now after producer() so the TTL clock starts
-            # from when the value was actually computed, not from when
-            # we entered _cached.
-            _analytics_cache[key] = (_time.monotonic(), value)
-            # Drop the per-key lock entry — small saving but bounds the
-            # _inflight dict growth across the long-running TTL window.
-            _inflight.pop(key, None)
-        return value
+                return _finalize_cached(entry[1], is_cached=True)
+        try:
+            # Snapshot telemetry length so we can attribute only producer()'s
+            # additions — middleware-level call tracking already populated
+            # the contextvars before we got here, and we don't want to bake
+            # pre-producer entries into the cached value.
+            queries = get_queries()
+            calls_initial = _telemetry_calls.get() or []
+            q_start = len(queries)
+            c_start = len(calls_initial)
+            # Actual producer call happens OUTSIDE the global lock so other
+            # keys can be served while this one is computing.
+            value = producer()
+            queries_after = get_queries()
+            calls_after = _telemetry_calls.get() or []
+            # Defensive slice: if downstream code reset the contextvar mid-
+            # producer (start_call_tracking, an explicit clear, etc.) the
+            # suffix index could exceed the current length. Fall back to
+            # the full current list rather than crash on a slice error.
+            added_queries = list(queries_after[q_start:] if len(queries_after) >= q_start else queries_after)
+            added_calls = list(calls_after[c_start:] if len(calls_after) >= c_start else calls_after)
+            # Bake telemetry into the stored value so cache hits surface
+            # the same shape. `_is_cached` is added at return time, not
+            # stored, so the cached dict carries only stable data.
+            if isinstance(value, dict):
+                stored = dict(value)
+                stored.setdefault("_debug_queries", added_queries)
+                stored.setdefault("_debug_calls", added_calls)
+            else:
+                stored = value
+            with _analytics_cache_lock:
+                # Re-capture now after producer() so the TTL clock starts
+                # from when the value was actually computed, not from when
+                # we entered _cached.
+                _analytics_cache[key] = (_time.monotonic(), stored)
+            return _finalize_cached(stored, is_cached=False)
+        finally:
+            with _analytics_cache_lock:
+                # Drop the per-key lock entry — small saving but bounds the
+                # _inflight dict growth across the long-running TTL window.
+                _inflight.pop(key, None)
 
 
 def _bust_analytics_cache(service_id: str | None = None) -> None:
@@ -452,6 +514,63 @@ def scoring_disable(
     return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
+@router.get("/{service_id}/scoring/analytics")
+def scoring_analytics_composite(
+    service_id: str = Path(..., description="Logging service ID"),
+    since_hours: int = Query(default=24, ge=1, le=168),
+) -> dict:
+    """Composite of the seven analytics endpoints
+    (top-flagged, score-distribution, compliance-breakdown, health,
+    evaluation, evaluation/per-reason, threshold-preview) into a single
+    round-trip. Each is already individually cached via `_cached` so
+    repeated composite calls within the 20s TTL collapse to dict
+    lookups; the composite primarily saves the per-request HTTP +
+    auth-middleware overhead that the 7-card admin_session_scoring
+    page paid on cold mount.
+
+    Granular endpoints unchanged — frontend swap to use the composite
+    is a separate commit so the per-card endpoints remain a rollback
+    target.
+    """
+    # Cast params to plain ints — FastAPI resolves Query() objects when
+    # called via HTTP, but direct Python calls receive the Query wrapper.
+    sh = int(since_hours)
+    return {
+        "top_flagged": scoring_top_flagged(service_id=service_id, since_hours=sh, limit=200),
+        "score_distribution": scoring_score_distribution(service_id=service_id, since_hours=sh),
+        "compliance_breakdown": scoring_compliance_breakdown(service_id=service_id, since_hours=sh),
+        "health": scoring_health(service_id=service_id, since_hours=sh),
+        "evaluation": scoring_evaluation(service_id=service_id),
+        "evaluation_per_reason": scoring_evaluation_per_reason(service_id=service_id),
+    }
+
+
+@router.get("/{service_id}/scoring/config")
+def scoring_config_composite(
+    service_id: str = Path(..., description="Logging service ID"),
+) -> dict:
+    """Composite of the four token-free /scoring/* config endpoints
+    (status, threshold, exclude-regex, enforce-status-code). The admin
+    session-scoring page was firing four parallel GETs on mount; each
+    is a sub-50ms local config read so cold-load cost is dominated by
+    HTTP overhead rather than computation. Combining them into one
+    round-trip saves ~300-500ms on the cold-load waterfall.
+
+    Excluded: /scoring/enforce-threshold (requires a Fastly API token
+    and makes a network round-trip out — frontend should fetch that
+    one separately if it needs the live edge-side value).
+
+    Granular endpoints unchanged so the frontend can keep using them
+    individually during a rollback.
+    """
+    return {
+        "status": scoring_status(service_id),
+        "threshold": scoring_threshold_get(service_id),
+        "exclude_regex": scoring_exclude_regex_get(service_id),
+        "enforce_status_code": scoring_enforce_status_code_get(service_id),
+    }
+
+
 @router.get("/{service_id}/scoring/status")
 def scoring_status(
     service_id: str = Path(..., description="Logging service ID"),
@@ -572,16 +691,31 @@ def _query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:
     parametrized queries (e.g. ``WHERE edge_sid IN (?, ?, ?)``) without
     string-formatting user-controlled values into the SQL."""
     from backend.core.duckdb import get_connection, get_source_for_service
+    from backend.repositories._base import _compact_sql_for_debug
+    from backend.utils.telemetry import get_queries
 
     src = get_source_for_service(service_id)
     if src is None:
         raise HTTPException(status_code=404, detail={"error": f"No service {service_id}"})
     con = None
+    t0 = _time.monotonic()
     try:
         con = get_connection(source=src, max_wait=3, skip_view_update=True, read_only=True)
         rows = con.execute(sql, params).fetchall() if params else con.execute(sql).fetchall()
         cols = [d[0] for d in con.description] if con.description else []
-        return [dict(zip(cols, r)) for r in rows]
+        result = [dict(zip(cols, r)) for r in rows]
+        # Append to the request-scoped query log so `_cached` can attribute
+        # this query (and anything called transitively through
+        # `_reconstruct_labeled_sessions` / `_fetch_session_events`) to the
+        # producer that invoked it.
+        get_queries().append(
+            {
+                "sql": _compact_sql_for_debug(sql.strip()),
+                "time_ms": round((_time.monotonic() - t0) * 1000, 2),
+                "rows": len(result),
+            }
+        )
+        return result
     except HTTPException:
         raise
     except Exception as e:

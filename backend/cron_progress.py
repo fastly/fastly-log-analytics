@@ -134,9 +134,11 @@ def add_progress(run_id: int, event: dict):
             _last_update[run_id] = time.time()
 
 
-def get_progress(run_id: int, start_idx: int = 0) -> list[dict] | None:
+def get_progress(run_id: int, start_idx: int = 0, service_id: str | None = None) -> list[dict] | None:
     with _lock:
         if run_id not in _progress:
+            return None
+        if service_id and _run_metadata.get(run_id, {}).get("service_id") != service_id:
             return None
         # Return a copy of the slice to avoid race conditions when the caller iterates over it
         return list(_progress[run_id][start_idx:])

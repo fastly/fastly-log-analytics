@@ -143,3 +143,41 @@ def test_route_immutable():
     r = normalize("/foo")
     with pytest.raises(Exception):
         r.path = "/bar"  # type: ignore[misc]
+
+
+def test_normalize_canonicalizes_percent_encoding_and_dot_segments():
+    """Verify that percent-encoded characters and dot segments are canonicalized."""
+    assert normalize("/%61pi/foo").path == "/api/foo"
+    assert normalize("/%61pi/foo").category == "api"
+
+    assert normalize("/./api/foo").path == "/api/foo"
+    assert normalize("/./api/foo").category == "api"
+
+    assert normalize("/api/../auth/login").path == "/auth/login"
+    assert normalize("/api/../auth/login").category == "auth"
+
+
+def test_normalize_encoded_dot_segments_do_not_traverse():
+    """Regression for audit finding 017: an early unconditional unquote()
+    let a caller smuggle ``..`` via ``%2e%2e`` and escape the route. With
+    unquote applied per-segment AFTER normpath, ``%2e%2e`` survives as a
+    literal segment name and the route stays anchored to its real prefix."""
+    r = normalize("/admin/%2e%2e/items/foo")
+    # path stays under /admin (no traversal); the original encoded segment
+    # is decoded in place, not collapsed away
+    assert r.path.startswith("/admin/")
+    assert r.category == "admin"
+    r = normalize("/admin/%2e%2e/%2e%2e/etc/passwd")
+    assert r.path.startswith("/admin/")
+    assert r.category == "admin"
+
+
+def test_normalize_double_slash_path_is_not_authority():
+    """Regression for audit finding 018: ``urlsplit('//foo/bar')`` parses
+    ``foo`` as a network location and returns ``/bar`` as the path, which
+    let an attacker drop the first segment by prefixing the URL with a
+    double-slash. _strip_query now flattens leading double-slashes first."""
+    assert normalize("//admin/secret").path.startswith("/admin")
+    assert normalize("//admin/secret").category == "admin"
+    # Triple+ slashes get flattened too.
+    assert normalize("///admin/secret").path.startswith("/admin")

@@ -58,7 +58,9 @@ def _extract_fos_ops(record: dict) -> tuple[int, int]:
 
 @router.get("/prefill", response_model=PrefillResponse)
 @query_errors()
-def prefill(source: dict = Depends(get_source)):
+async def prefill(source: dict = Depends(get_source)):
+    import asyncio
+
     from backend import config as svcconfig
     from backend.config import get_fastly_api_key, get_fastly_logging_service_id
 
@@ -154,50 +156,75 @@ def prefill(source: dict = Depends(get_source)):
         from_ts = int((now - timedelta(days=3)).timestamp())
         to_ts = int(now.timestamp())
         by = "day"
+
+        # M4 parallelisation: the version → endpoint → condition chain
+        # (250 ms typical, fully serial because each step needs the
+        # previous response) is independent of the /stats call (150 ms
+        # typical) — neither uses the other's result. Run both as
+        # asyncio tasks so the prefill wall-clock is bound by the slower
+        # of the two instead of their sum. Each sync ``fastly()`` call
+        # runs inside ``asyncio.to_thread`` so the existing retry, auth,
+        # and telemetry machinery in ``backend/core/fastly/client.py``
+        # is reused unchanged.
+
+        async def _resolve_endpoint_chain() -> dict:
+            """Returns {log_period_seconds?, sample_rate?, edge_only?}."""
+            updates: dict = {}
+            try:
+                if not logging_svc_id:
+                    return updates
+                active_ver = await asyncio.to_thread(get_active_version, logging_svc_id, api_key)
+                if not active_ver:
+                    return updates
+                endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
+                encoded_name = urllib.parse.quote(endpoint_name, safe="")
+                current_ep = await asyncio.to_thread(
+                    fastly,
+                    "GET",
+                    f"/service/{logging_svc_id}/version/{active_ver}/logging/s3/{encoded_name}",
+                    token=api_key,
+                )
+                if "period" in current_ep:
+                    updates["log_period_seconds"] = int(current_ep["period"])
+                cond_name = current_ep.get("response_condition")
+                if cond_name == "Log Sampling":
+                    import re
+
+                    cond = await asyncio.to_thread(find_condition, cond_name, logging_svc_id, active_ver, api_key)
+                    if cond:
+                        stmt = cond.get("statement", "")
+                        m = re.search(r"randombool\((\d+),", stmt)
+                        if m:
+                            updates["sample_rate"] = int(m.group(1))
+                        if "req.restarts == 0" in stmt:
+                            updates["edge_only"] = True
+            except Exception:
+                pass
+            return updates
+
+        async def _fetch_stats() -> dict | None:
+            try:
+                if svc_id:
+                    return await asyncio.to_thread(
+                        _fastly_api, f"/stats/service/{svc_id}?by={by}&from={from_ts}&to={to_ts}", api_key
+                    )
+                return await asyncio.to_thread(
+                    _fastly_api, f"/stats/aggregate?by={by}&from={from_ts}&to={to_ts}", api_key
+                )
+            except Exception:
+                return None
+
         try:
+            chain_updates, payload = await asyncio.gather(_resolve_endpoint_chain(), _fetch_stats())
+            # Chain updates feed into the response shape's existing keys
+            # — overrides any defaults set above and any cron_sync values
+            # set from the local config, matching the prior precedence
+            # (Fastly-resolved values win over local config).
+            result.update(chain_updates)
+
             daily_reqs: dict[str, int] = {}
             daily_edge: dict[str, int] = {}
-            if svc_id:
-                try:
-                    active_ver = get_active_version(logging_svc_id, api_key) if logging_svc_id else None
-                    if active_ver:
-                        endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
-                        encoded_name = urllib.parse.quote(endpoint_name, safe="")
-                        current_ep = fastly(
-                            "GET",
-                            f"/service/{logging_svc_id}/version/{active_ver}/logging/s3/{encoded_name}",
-                            token=api_key,
-                        )
-                        if "period" in current_ep:
-                            result["log_period_seconds"] = int(current_ep["period"])
-                        cond_name = current_ep.get("response_condition")
-                        if cond_name == "Log Sampling":
-                            import re
-
-                            cond = find_condition(cond_name, logging_svc_id, active_ver, api_key)
-                            if cond:
-                                stmt = cond.get("statement", "")
-                                m = re.search(r"randombool\((\d+),", stmt)
-                                if m:
-                                    result["sample_rate"] = int(m.group(1))
-                                if "req.restarts == 0" in stmt:
-                                    result["edge_only"] = True
-                except Exception:
-                    pass
-                # tracked_call wrapper removed — _fastly_api → fastly()
-                # already does telemetry internally; the double-wrap was
-                # producing duplicate entries in /api/admin/usage-logging.
-                payload = _fastly_api(f"/stats/service/{svc_id}?by={by}&from={from_ts}&to={to_ts}", api_key)
-                for rec in payload.get("data", []):
-                    ts = rec.get("start_time")
-                    if ts is None:
-                        continue
-                    day = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
-                    daily_reqs[day] = daily_reqs.get(day, 0) + int(rec.get("requests") or 0)
-                    daily_edge[day] = daily_edge.get(day, 0) + int(rec.get("edge_requests") or 0)
-            else:
-                # See note above — fastly() does its own tracking.
-                payload = _fastly_api(f"/stats/aggregate?by={by}&from={from_ts}&to={to_ts}", api_key)
+            if payload:
                 for rec in payload.get("data", []):
                     ts = rec.get("start_time")
                     if ts is None:
@@ -228,13 +255,18 @@ def prefill(source: dict = Depends(get_source)):
             from backend.core.duckdb import get_connection
 
             # read_only: get_edge_ratio is a SELECT against the view.
-            con = get_connection(source=source, max_wait=5, read_only=True)
-            try:
-                edge_ratio, debug_queries = repo.get_edge_ratio(con, source)
-                if edge_ratio is not None:
-                    result["edge_ratio"] = edge_ratio
-            finally:
-                con.close()
+            # Wrapped in asyncio.to_thread so this sync I/O doesn't block
+            # the event loop now that prefill is an async handler.
+            def _edge_ratio_blocking() -> tuple:
+                con = get_connection(source=source, max_wait=5, read_only=True)
+                try:
+                    return repo.get_edge_ratio(con, source)
+                finally:
+                    con.close()
+
+            edge_ratio, debug_queries = await asyncio.to_thread(_edge_ratio_blocking)
+            if edge_ratio is not None:
+                result["edge_ratio"] = edge_ratio
         except Exception:
             pass
 
@@ -520,12 +552,13 @@ def usage_bandwidth(
             agg[ts]["bandwidth_bytes"] += int(record.get("bandwidth") or 0)
             agg[ts]["requests"] += int(record.get("requests") or 0)
 
-    from backend.utils.telemetry import tracked_call
-
     if cdn_svc:
         try:
-            with tracked_call("GET", f"/stats/service/{cdn_svc}?by={by}", service="Fastly API"):
-                payload = _fastly_api(f"/stats/service/{cdn_svc}?by={by}&from={from_ts}&to={to_ts}", api_key)
+            # tracked_call wrapper removed — _fastly_api → fastly() already
+            # does telemetry internally; the double-wrap was producing
+            # duplicate entries in /api/admin/usage-logging and inflating
+            # the visible call count to 2x for this endpoint.
+            payload = _fastly_api(f"/stats/service/{cdn_svc}?by={by}&from={from_ts}&to={to_ts}", api_key)
             _merge(payload)
         except Exception as e:
             raise HTTPException(status_code=502, detail={"error": str(e)})
@@ -575,10 +608,9 @@ def usage_log_activity(
         to_ts = int(end_dt.timestamp())
 
         try:
-            from backend.utils.telemetry import tracked_call
-
-            with tracked_call("GET", f"/stats/service/{logging_svc}?by={by}", service="Fastly API"):
-                payload = _fastly_api(f"/stats/service/{logging_svc}?by={by}&from={from_ts}&to={to_ts}", api_key)
+            # tracked_call wrapper removed — see _fastly_api docstring;
+            # double-wrap inflated the visible call count to 2x.
+            payload = _fastly_api(f"/stats/service/{logging_svc}?by={by}&from={from_ts}&to={to_ts}", api_key)
 
             fmt = "%Y-%m-%dT%H:00" if by == "hour" else "%Y-%m-%dT%H:%M" if by == "minute" else "%Y-%m-%d"
             stats_lookup: dict[str, int] = {}

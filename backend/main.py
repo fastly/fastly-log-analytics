@@ -47,8 +47,8 @@ logger = logging.getLogger("backend.main")
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette_compress import CompressMiddleware
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 # Ensure the project root is on sys.path so the backend package is importable.
@@ -403,7 +403,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Fastly Log Analytics API",
-    version="1.1.0",
+    version="1.2.0",
     description=(
         "FastAPI backend for the Fastly Log Analytics tool. "
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."
@@ -431,11 +431,17 @@ from backend.utils.remote_access import RemoteAccessMiddleware  # noqa: E402
 app.add_middleware(RemoteAccessMiddleware)
 
 
-# Gzip compression for analyst responses (responses to local-admin already
-# transit loopback without compression benefit, but enabling globally is fine —
-# the Starlette implementation skips SSE/streaming responses by content-type
-# automatically).
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+# M1 — telemetry backstop. Auto-injects _debug_queries / _debug_calls /
+# _is_cached into JSON dict responses that don't already carry them, so
+# a newly-added endpoint that returns a plain dict can't accidentally
+# drop the Debug Panel for that request. MUST register INNER to Gzip
+# (i.e. via add_middleware BEFORE the GZip line below — Starlette's
+# stack treats later add_middleware calls as OUTER) so the body it
+# reads isn't already compressed. Gated on DEBUG_RESPONSES, same flag
+# BaseResponse uses; off by default in prod.
+from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware  # noqa: E402
+
+app.add_middleware(TelemetryResponseBodyMiddleware)
 
 
 @app.middleware("http")
@@ -477,6 +483,22 @@ async def telemetry_middleware(request: Request, call_next):
             except Exception:
                 pass
     return response
+
+
+# Brotli / zstd / gzip compression for analyst responses. CompressMiddleware
+# negotiates the best available encoding from the client's Accept-Encoding
+# header (zstd > br > gzip > identity). Skips text/event-stream (SSE) and
+# any response already carrying a Content-Encoding header, so the streaming
+# routers in routers/services/core.py and routers/provision.py pass through
+# uncompressed. Registered LAST so it is the OUTERMOST middleware — the
+# decorator-style telemetry_middleware above uses Starlette's
+# BaseHTTPMiddleware, which buffers the response and re-emits it; that
+# re-emit strips the Content-Encoding header from any inner middleware.
+# Audit on 2026-06-09 confirmed every Accept-Encoding variant came back
+# uncompressed (11490 B raw, no content-encoding) when Compress sat
+# inside BaseHTTPMiddleware. Keeping it outermost preserves the encoded
+# response all the way to the client.
+app.add_middleware(CompressMiddleware, minimum_size=1024)
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────

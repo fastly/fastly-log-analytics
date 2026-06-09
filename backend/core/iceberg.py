@@ -57,39 +57,42 @@ import threading as _threading
 
 _PENDING_FS_SOURCE: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar("_PENDING_FS_SOURCE", default=None)
 
-# Thread-safe fallback registry. PyIceberg writes parquet data files via
-# concurrent.futures.ThreadPoolExecutor in pyiceberg/io/pyarrow.py, and
-# ContextVars do NOT propagate to executor workers (PEP 567 covers asyncio
-# only). Each worker thread's first FsspecFileIO call constructs a fresh
-# S3FileSystem; without this registry the worker's _PENDING_FS_SOURCE.get()
-# returns the default (None), the before-send hook is never registered, and
-# the proxy 400s with "Missing X-Fos-Target header".
-_PROXY_SOURCE_REGISTRY: dict[str, dict] = {}
-_PROXY_REGISTRY_LOCK = _threading.Lock()
+# Process-wide fallback for the ContextVar. PyIceberg / aiobotocore create
+# new s3fs instances on threads that the ``_patched_submit`` shim above
+# can't cover (fsspec's own iothread, asyncio's default executor, lazy
+# per-FS-call instantiations). Those threads see ``_PENDING_FS_SOURCE.get()
+# == None``, the proxy hook never registers, and every subsequent S3 call
+# reaches the proxy without ``X-Fos-Target`` so the proxy 400s silently.
+# The 2026-06-09 audit confirmed 68 silent 400s in 6 minutes with
+# ``caller-hint=None ua='aiobotocore/...'`` and an empty service-id header
+# — strong signal that the hook was missing.
+#
+# ``_get_catalog`` stamps the latest source it sees into this dict (keyed
+# by service name) AND keeps the most-recent value under
+# ``_LAST_FS_SOURCE`` as a last-resort fallback. The patched s3fs init
+# below now reads ``_PENDING_FS_SOURCE.get() or _LAST_FS_SOURCE`` so the
+# hook registers even on hostile threads. Multi-service deployments would
+# need the proxy to derive the source from the URL bucket name; today
+# this app is single-service in production so the last-source fallback is
+# always correct.
+_LAST_FS_SOURCE: dict | None = None
+
+# PyIceberg writes parquet data files via concurrent.futures.ThreadPoolExecutor
+# in pyiceberg/io/pyarrow.py. ContextVars do NOT propagate to executor workers
+# natively in Python 3, so we patch submit() to copy the context. Without this,
+# the worker's _PENDING_FS_SOURCE.get() returns None, the proxy hook is never
+# registered, and the proxy 400s with "Missing X-Fos-Target header".
+import concurrent.futures as _futures
+
+_orig_submit = _futures.ThreadPoolExecutor.submit
 
 
-def _normalize_endpoint(endpoint_url: str | None) -> str:
-    if not endpoint_url:
-        return ""
-    return endpoint_url.replace("https://", "").replace("http://", "").rstrip("/").lower()
+def _patched_submit(self, fn, /, *args, **kwargs):
+    ctx = _contextvars.copy_context()
+    return _orig_submit(self, ctx.run, fn, *args, **kwargs)
 
 
-def _register_proxy_source(source: dict) -> None:
-    """Register source by endpoint so worker threads can resolve it even
-    when the ContextVar is empty."""
-    endpoint = source.get("fos_native_endpoint") or source.get("endpoint", "")
-    normalized = _normalize_endpoint(endpoint)
-    if normalized:
-        with _PROXY_REGISTRY_LOCK:
-            _PROXY_SOURCE_REGISTRY[normalized] = source
-
-
-def _lookup_proxy_source(endpoint_url: str | None) -> dict:
-    normalized = _normalize_endpoint(endpoint_url)
-    if not normalized:
-        return {}
-    with _PROXY_REGISTRY_LOCK:
-        return _PROXY_SOURCE_REGISTRY.get(normalized, {})
+_futures.ThreadPoolExecutor.submit = _patched_submit
 
 
 def _proxy_targets_from_endpoint(endpoint_url: str, source: dict | None) -> tuple[str | None, str]:
@@ -202,9 +205,13 @@ try:
 
         client_kwargs = kwargs.setdefault("client_kwargs", {})
         original_endpoint = client_kwargs.get("endpoint_url") or kwargs.get("endpoint_url") or ""
-        # ContextVar covers the main thread; PyIceberg's thread-pool
-        # writers fall through to the endpoint-keyed registry.
-        source = _PENDING_FS_SOURCE.get() or _lookup_proxy_source(original_endpoint) or {}
+        # ContextVar covers the main thread, and we patch ThreadPoolExecutor
+        # to propagate it to PyIceberg's thread-pool writers. Fallback to the
+        # process-wide ``_LAST_FS_SOURCE`` for threads neither path reaches
+        # (fsspec iothread, lazy per-FS-call instantiations, asyncio's
+        # default executor) — see comment on _LAST_FS_SOURCE for full
+        # context.
+        source = _PENDING_FS_SOURCE.get() or _LAST_FS_SOURCE or {}
         cdn_target, fos_native_target = _proxy_targets_from_endpoint(original_endpoint, source)
         self._fos_proxy_cdn_target = cdn_target
         # _fos_proxy_target retained as the FOS native endpoint — existing
@@ -510,6 +517,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+from pyiceberg.exceptions import CommitFailedException
 from pyiceberg.io.pyarrow import schema_to_pyarrow
 from pyiceberg.schema import Schema
 from pyiceberg.table.name_mapping import create_mapping_from_schema
@@ -717,7 +725,29 @@ def _table_identifier(source: dict) -> tuple[str, str]:
     return ("default", "logs")
 
 
+def _is_local_only_source(source: dict) -> bool:
+    """True when this source is configured to use local files instead of FOS/S3.
+
+    Triggered by ``fos_local_warehouse: true`` in the source config, OR by
+    the conventional ``fos_endpoint: "http://localhost:0"`` scrub marker
+    (see CLAUDE.md ``dev-sandbox-scrub`` memory). Used by load-test and
+    other dev-only services to commit Iceberg snapshots to local disk
+    without touching real object storage.
+    """
+    if source.get("fos_local_warehouse") is True:
+        return True
+    endpoint = source.get("fos_endpoint") or source.get("endpoint") or ""
+    return endpoint in ("http://localhost:0", "http://127.0.0.1:0")
+
+
 def _warehouse_uri(source: dict) -> str:
+    if _is_local_only_source(source):
+        # Local-only: Iceberg writes commits, manifests, and data files into
+        # cache/{bucket}/iceberg/ on disk. Catalog stays SQLite (already local).
+        from backend.core.duckdb import _cache_dir
+
+        cache = _cache_dir(source)
+        return f"file://{os.path.abspath(os.path.join(cache, 'iceberg'))}"
     prefix = source.get("prefix", "").strip("/")
     base = f"{prefix}/iceberg" if prefix else "iceberg"
     return f"s3://{source['bucket']}/{base}"
@@ -742,6 +772,15 @@ _catalog_lock = threading.Lock()
 def _get_catalog(source: dict):
     """Return a configured PyIceberg SqlCatalog backed by a local SQLite file."""
     source_key = source.get("name", "default")
+    # Stamp the process-global fallback so s3fs instances created on
+    # threads without the ContextVar (fsspec iothread, lazy per-FS
+    # creations) still get a non-empty source in ``_patched_s3fs_init``.
+    # See the comment on ``_LAST_FS_SOURCE`` above for the failure mode
+    # this defends against. Always update on every call so a future
+    # multi-service deployment at least always has a recent source —
+    # though that case would need a proper per-bucket lookup, not this.
+    global _LAST_FS_SOURCE
+    _LAST_FS_SOURCE = source
     with _catalog_lock:
         if source_key in _catalog_cache:
             return _catalog_cache[source_key]
@@ -755,26 +794,31 @@ def _get_catalog(source: dict):
         warehouse = _warehouse_uri(source)
         db_path = _catalog_db_path(source)
 
-        # Hand the source dict to the s3fs patched __init__ via TWO parallel
-        # channels: a ContextVar (covers the main thread / any asyncio task
-        # that inherits the context), AND an endpoint-keyed registry (covers
-        # PyIceberg's parquet-write thread-pool workers, which don't inherit
-        # ContextVars). The patched __init__ tries the ContextVar first, then
-        # falls back to the registry.
+        # Hand the source dict to the s3fs patched __init__ via ContextVar.
+        # This covers the main thread, and we patched ThreadPoolExecutor
+        # to propagate ContextVars to PyIceberg's thread-pool workers.
         _PENDING_FS_SOURCE.set(source)
-        _register_proxy_source(source)
 
-        props = {
-            "uri": f"sqlite:///{db_path}",
-            "warehouse": warehouse,
-            "s3.endpoint": f"https://{endpoint}",
-            "s3.access-key-id": access_key,
-            "s3.secret-access-key": secret_key,
-            "s3.path-style-access": "true",
-            "s3.region": source.get("region", "us-east-1"),
-            "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO",
-            "s3.client.config": '{"retries": {"max_attempts": 5, "mode": "adaptive"}, "read_timeout": 30, "connect_timeout": 10}',
-        }
+        if _is_local_only_source(source):
+            # Local-only warehouse: skip S3 client config entirely. PyIceberg's
+            # default PyArrowFileIO handles file:// URIs natively without any
+            # network round-trip.
+            props = {
+                "uri": f"sqlite:///{db_path}",
+                "warehouse": warehouse,
+            }
+        else:
+            props = {
+                "uri": f"sqlite:///{db_path}",
+                "warehouse": warehouse,
+                "s3.endpoint": f"https://{endpoint}",
+                "s3.access-key-id": access_key,
+                "s3.secret-access-key": secret_key,
+                "s3.path-style-access": "true",
+                "s3.region": source.get("region", "us-east-1"),
+                "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO",
+                "s3.client.config": '{"retries": {"max_attempts": 5, "mode": "adaptive"}, "read_timeout": 30, "connect_timeout": 10}',
+            }
 
         catalog_cls = _get_fos_catalog_class()
         catalog = catalog_cls("fos", **props)
@@ -953,13 +997,13 @@ def _write_table_summary_async(source: dict, table=None) -> None:
 # even without explicit invalidation, staleness is capped — and writers in
 # the same process invalidate explicitly below.
 _POINTER_CACHE_TTL_SEC = 2.0
-_pointer_cache: dict[tuple[str, str, str], tuple[float, str | None]] = {}
+_pointer_cache: dict[tuple[str, str, str, str], tuple[float, str | None]] = {}
 _pointer_cache_lock = threading.Lock()
 
 
-def _pointer_cache_key(source: dict, identifier: tuple) -> tuple[str, str, str]:
+def _pointer_cache_key(source: dict, identifier: tuple) -> tuple[str, str, str, str]:
     namespace, table_name = identifier
-    return (source.get("bucket", ""), namespace, table_name)
+    return (source.get("bucket", ""), source.get("prefix", ""), namespace, table_name)
 
 
 def _pointer_cache_invalidate(source: dict, identifier: tuple) -> None:
@@ -974,7 +1018,7 @@ def _pointer_cache_invalidate(source: dict, identifier: tuple) -> None:
 # (itself CDN-cached + TTL-cached above). A pointer mismatch is exhaustive
 # proof of staleness because every snapshot commit produces a new
 # metadata.json and a new pointer value.
-_table_object_cache: dict[tuple[str, str, str], object] = {}
+_table_object_cache: dict[tuple[str, str, str, str], object] = {}
 _table_object_cache_lock = threading.Lock()
 
 
@@ -1028,6 +1072,10 @@ def _write_metadata_pointer(source: dict, location: str, table=None) -> None:
     Pass `table` so the async table-summary writer can reuse the
     just-committed in-memory metadata instead of re-downloading it.
     """
+    if _is_local_only_source(source):
+        # Local-only warehouse: SQLite catalog already tracks metadata_location;
+        # no separate FOS pointer to maintain. No-op.
+        return
     try:
         from backend.core.duckdb import _get_fos_client
 
@@ -1081,6 +1129,10 @@ def _write_metadata_pointer(source: dict, location: str, table=None) -> None:
 
 def _read_metadata_pointer(source: dict, identifier: tuple) -> str | None:
     """Read the latest metadata pointer from FOS via CDN if configured, else direct S3."""
+    if _is_local_only_source(source):
+        # Local-only warehouse: no FOS pointer to read. SqlCatalog already
+        # knows the metadata_location from its SQLite-backed iceberg_tables row.
+        return None
     namespace, table_name = identifier
 
     # In-process TTL cache. The 4-call-in-1-second pattern from cron_compact
@@ -1416,12 +1468,179 @@ def table_location(source: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+_TOMBSTONE_SUFFIX = ".consumed-"  # Followed by an integer Unix-epoch seconds value.
+_TOMBSTONE_GRACE_SECONDS = 60  # See tombstone_buffer_files docstring for the rationale.
+
+
+def _tombstone_marker_path(parquet_path: str, ts: int) -> str:
+    return f"{parquet_path}{_TOMBSTONE_SUFFIX}{ts}"
+
+
+def _is_tombstone_marker(name: str) -> bool:
+    """True iff ``name`` is a tombstone sidecar (``<basename>.parquet.consumed-<ts>``).
+
+    Centralised so the glob filter, sweeper, and tests all share one
+    definition. We only check the ``.parquet.consumed-`` substring to
+    avoid being fooled by partial matches on bucket-name-like substrings.
+    """
+    if _TOMBSTONE_SUFFIX not in name:
+        return False
+    head, _, tail = name.rpartition(_TOMBSTONE_SUFFIX)
+    return head.endswith(".parquet") and tail.isdigit()
+
+
+def _tombstoned_parquet_paths(buf_dir: str) -> set[str]:
+    """Return the set of buffer parquet paths that have an active tombstone
+    sibling. Used by ``buffer_files()`` to keep tombstoned files out of
+    new view binds — they stay on disk for the grace window so any view
+    bound BEFORE the tombstone can still read them."""
+    tombstoned: set[str] = set()
+    if not os.path.isdir(buf_dir):
+        return tombstoned
+    for p in _glob.glob(os.path.join(buf_dir, "**", "*" + _TOMBSTONE_SUFFIX + "*"), recursive=True):
+        base = os.path.basename(p)
+        if not _is_tombstone_marker(base):
+            continue
+        # Strip ``.consumed-<ts>`` to recover the original ``.parquet`` path.
+        parquet_path = p.rsplit(_TOMBSTONE_SUFFIX, 1)[0]
+        tombstoned.add(parquet_path)
+    return tombstoned
+
+
+def tombstone_buffer_files(source: dict, paths: list[str], *, ts: int | None = None) -> list[str]:
+    """Mark buffer parquet files as logically consumed without unlinking them.
+
+    Replaces the post-commit ``os.remove(path)`` race with a two-phase
+    scheme:
+
+    1. **Tombstone** (this function): write an empty sidecar file
+       ``<path>.consumed-<unix_seconds>`` next to the original ``.parquet``.
+       The original file stays on disk untouched. ``buffer_files()`` now
+       filters it out via ``_tombstoned_parquet_paths``, so subsequent
+       view rebuilds will not bind it. Crucially, any DuckDB view ALREADY
+       bound to that path continues to work because the file is still
+       readable.
+    2. **Sweep** (``sweep_tombstoned_buffer_files``): after a grace
+       window (default 60 s) elapses, the next commit run unlinks both
+       the parquet and its tombstone sidecar. By then no view should
+       reference the file — typical bind-to-execute windows are
+       milliseconds, and 60 s comfortably exceeds the slowest cold query.
+
+    **Why this fixes the 2026-06-05 incident:** the previous code did
+    ``os.remove(path)`` inline at commit time. A dashboard query whose
+    view was bound BEFORE the commit would then hit "No files found"
+    when DuckDB resolved the bound paths against disk. The
+    ``QueryRunner.execute`` self-heal exists for this case but had its
+    own race (cached-SQL re-bind under lock contention; see
+    ``backend/repositories/_base.py:288``). Tombstoning closes the race
+    at its source so the self-heal essentially never has to fire.
+
+    Tombstone creation uses ``open(..., "x")`` to fail loudly on
+    collisions instead of silently overwriting timing metadata. Errors
+    during tombstoning are swallowed (logged) — losing a tombstone just
+    means the file MIGHT be retained until a manual cleanup, never that
+    the wrong file gets unlinked.
+
+    Returns the subset of ``paths`` that were successfully tombstoned.
+    Callers that need atomicity should compare lengths.
+    """
+    if ts is None:
+        ts = int(time.time())
+    tombstoned: list[str] = []
+    for path in paths:
+        try:
+            marker = _tombstone_marker_path(path, ts)
+            with open(marker, "x"):
+                pass
+            tombstoned.append(path)
+        except FileExistsError:
+            # A previous commit at the exact same second already
+            # tombstoned this file — already-consumed is fine, skip.
+            tombstoned.append(path)
+        except Exception as e:
+            logger.warning(
+                "%s Failed to tombstone buffer file %s — falling back to immediate unlink. Error: %s",
+                _ICE,
+                path,
+                e,
+            )
+            # If tombstoning fails (disk full, permission flap), preserve
+            # the prior behaviour rather than letting the buffer file
+            # accumulate forever. The race we're fixing is preferable
+            # to an unbounded buffer dir.
+            try:
+                os.remove(path)
+                tombstoned.append(path)
+            except Exception:
+                pass
+    return tombstoned
+
+
+def sweep_tombstoned_buffer_files(
+    source: dict, *, grace_seconds: int = _TOMBSTONE_GRACE_SECONDS, now: int | None = None
+) -> int:
+    """Unlink tombstoned buffer parquets whose grace window has elapsed.
+
+    Called at the start of ``commit_buffer`` so the sweep cadence is
+    naturally tied to the commit cron (no new cron registration). When
+    a tombstone marker is at least ``grace_seconds`` old, both the
+    parquet and the marker are unlinked. Younger tombstones are left
+    alone — the corresponding parquet may still be referenced by an
+    in-flight query bound before the tombstone was written.
+
+    Returns the number of parquet files actually unlinked.
+    """
+    if now is None:
+        now = int(time.time())
+    buf = _buffer_dir(source)
+    if not os.path.isdir(buf):
+        return 0
+    swept = 0
+    for marker in _glob.glob(os.path.join(buf, "**", "*" + _TOMBSTONE_SUFFIX + "*"), recursive=True):
+        base = os.path.basename(marker)
+        if not _is_tombstone_marker(base):
+            continue
+        try:
+            ts = int(marker.rsplit(_TOMBSTONE_SUFFIX, 1)[1])
+        except (ValueError, IndexError):
+            continue
+        if now - ts < grace_seconds:
+            continue
+        parquet_path = marker.rsplit(_TOMBSTONE_SUFFIX, 1)[0]
+        # Unlink the parquet first so a partial failure doesn't leave
+        # the file visible without its tombstone (which would re-bind
+        # it into the next view rebuild).
+        try:
+            if os.path.exists(parquet_path):
+                os.remove(parquet_path)
+        except Exception as e:
+            logger.warning("%s Sweep failed to unlink %s: %s", _ICE, parquet_path, e)
+            continue
+        try:
+            os.remove(marker)
+        except Exception as e:
+            logger.warning("%s Sweep failed to unlink tombstone %s: %s", _ICE, marker, e)
+        swept += 1
+    return swept
+
+
 def buffer_files(source: dict) -> list[str]:
-    """Return sorted list of Parquet files currently in the local buffer."""
+    """Return sorted list of Parquet files currently in the local buffer.
+
+    Excludes files that have been tombstoned by ``tombstone_buffer_files``
+    so view rebuilds don't bind paths that are about to be swept. The
+    tombstoned files remain on disk for the grace window so any view
+    bound BEFORE the tombstone can still read them.
+    """
     buf = _buffer_dir(source)
     if not os.path.isdir(buf):
         return []
-    return sorted(p for p in _glob.glob(os.path.join(buf, "**", "*.parquet"), recursive=True) if os.path.isfile(p))
+    tombstoned = _tombstoned_parquet_paths(buf)
+    return sorted(
+        p
+        for p in _glob.glob(os.path.join(buf, "**", "*.parquet"), recursive=True)
+        if os.path.isfile(p) and p not in tombstoned and not _is_tombstone_marker(os.path.basename(p))
+    )
 
 
 _QUARANTINE_SUBDIR = ".quarantine"
@@ -1540,6 +1759,11 @@ def write_to_buffer(source: dict, arrow_table: pa.Table, filename: str) -> str:
     os.makedirs(buf, exist_ok=True)
     path = os.path.join(buf, filename)
     aligned = _align_to_schema(arrow_table, source=source)
+    if "timestamp" in aligned.column_names:
+        sort_keys = [("timestamp", "ascending")]
+        if "ip" in aligned.column_names:
+            sort_keys.append(("ip", "ascending"))
+        aligned = aligned.sort_by(sort_keys)
     pq.write_table(aligned, path, compression="zstd", compression_level=1)
     return path
 
@@ -1570,6 +1794,19 @@ def commit_buffer(source: dict, progress_callback=None) -> dict:
     ``snapshot_id`` is the LAST snapshot id produced by the loop (the one
     the metadata pointer now references).
     """
+    # Sweep any tombstoned buffers whose grace window has elapsed before
+    # we scan for fresh work. Co-locating the sweep with the commit cron
+    # avoids a separate scheduler registration; the cadence (every commit
+    # tick) easily covers the 60 s grace window.
+    try:
+        swept = sweep_tombstoned_buffer_files(source)
+        if swept:
+            logger.info("%s Swept %d tombstoned buffer file(s) past grace window", _ICE, swept)
+    except Exception as sweep_err:
+        # Sweep failures must NEVER block a commit — the file just stays
+        # on disk until the next sweep tick.
+        logger.warning("%s Tombstone sweep raised (continuing with commit): %s", _ICE, sweep_err)
+
     files = buffer_files(source)
     if not files:
         return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
@@ -1640,13 +1877,15 @@ def commit_buffer(source: dict, progress_callback=None) -> dict:
         del tables, combined
         snapshot_id = table.current_snapshot().snapshot_id if table.current_snapshot() else snapshot_id
         total_rows += chunk_rows
-        # Per-chunk delete: if we crash on a later chunk, the next commit
-        # cron only re-processes the un-committed remainder.
-        for path in chunk_successful:
-            try:
-                os.remove(path)
-            except Exception:
-                pass
+        # Per-chunk tombstone: if we crash on a later chunk, the next
+        # commit cron only re-processes the un-committed remainder
+        # (tombstoned files are excluded from buffer_files()). The
+        # actual ``os.remove`` is deferred to ``sweep_tombstoned_buffer_files``
+        # after a grace window so concurrent dashboard queries whose
+        # view was bound BEFORE this commit don't crash on
+        # "No files found ... batch_X.parquet". See
+        # ``tombstone_buffer_files`` docstring for the full rationale.
+        tombstone_buffer_files(source, chunk_successful)
         total_committed_paths.extend(chunk_successful)
 
     if not total_committed_paths:
@@ -1822,16 +2061,69 @@ def optimize_table(source: dict, target_file_size_mb: int = 128, min_files_per_p
                 # this turned every nightly optimize run into a silent no-op
                 # — the ValueError got logged as a warning to stderr and the
                 # cron recorded success with 0 files rewritten.
+                # ``union_by_name=True``: when a partition contains files
+                # written before AND after a schema bump (e.g. ``edge_sid``
+                # / ``edge_cookie_compliance`` / ``edge_score*`` added
+                # mid-day on 2026-06-01), the default positional union
+                # raises ``Schema mismatch ... try setting
+                # union_by_name=True`` and the partition lands in
+                # ``partition_errors``. With union-by-name DuckDB merges
+                # the column sets and fills missing columns with NULL,
+                # matching how Iceberg already presents the merged schema
+                # to readers. Verified prod incident 2026-06-06: two
+                # partitions (494541, 494542) had been stuck at ~14 files
+                # each since the schema bump because every nightly
+                # optimize attempt raised here. (#optimize-cron-warning)
                 arrow_table = con.execute(
-                    f"SELECT * FROM read_parquet([{paths_sql}], hive_partitioning=false)"
+                    f"SELECT * FROM read_parquet([{paths_sql}], hive_partitioning=false, union_by_name=true)"
                 ).to_arrow_table()
 
                 # Perform an atomic overwrite of the specific time range.
-                # In Iceberg, this will delete the old files and add the new one.
-                table.overwrite(
-                    df=arrow_table,
-                    overwrite_filter=f"timestamp >= '{start_ts.isoformat()}' AND timestamp < '{end_ts.isoformat()}'",
-                )
+                # In Iceberg, this will delete the old files and add the
+                # new one. Wrapped in a small retry that reloads the
+                # table on the sequence-number CAS conflict that fires
+                # when an ingest commit lands between our plan_files
+                # read and this overwrite — pyiceberg refuses with
+                # ``ValueError: Cannot add snapshot with sequence
+                # number N older than last sequence number N``. The
+                # retry just refetches the table head and tries once
+                # more; ingest's 5-min cadence makes the contention
+                # window small enough that a single retry almost always
+                # wins.
+                overwrite_filter = f"timestamp >= '{start_ts.isoformat()}' AND timestamp < '{end_ts.isoformat()}'"
+                _CAS_RETRIES = 3
+                for _retry in range(_CAS_RETRIES):
+                    try:
+                        table.overwrite(df=arrow_table, overwrite_filter=overwrite_filter)
+                        break
+                    except ValueError as cas_err:
+                        if "older than last sequence number" not in str(cas_err):
+                            raise
+                        if _retry == _CAS_RETRIES - 1:
+                            raise
+                        # Refresh the table to pick up the new head.
+                        # Bypass _load_table_cached (which short-circuits
+                        # on pointer match) by going straight to the
+                        # catalog — we need the absolute latest snapshot
+                        # to commit on top of, not whatever's cached.
+                        logger.warning(
+                            "[optimize] %s: CAS conflict on hour %d (attempt %d/%d), reloading table and retrying: %s",
+                            source.get("name"),
+                            hour_val,
+                            _retry + 1,
+                            _CAS_RETRIES,
+                            cas_err,
+                        )
+                        try:
+                            table = catalog.load_table(_table_identifier(source))
+                            _set_cached_table(source, _table_identifier(source), table)
+                        except Exception as reload_err:
+                            logger.warning(
+                                "[optimize] %s: table reload failed after CAS conflict, giving up on this partition: %s",
+                                source.get("name"),
+                                reload_err,
+                            )
+                            raise cas_err from reload_err
                 _set_cached_table(source, _table_identifier(source), table)
                 _write_metadata_pointer(source, table.metadata_location, table=table)
 
@@ -1916,14 +2208,103 @@ def run_cloud_maintenance(source: dict) -> dict:
             logger.warning("[iceberg] Data deletion skipped: %s", e)
             results["data_deletion_error"] = str(e)
 
-    # 2. Expire snapshots (keep last 7 days of metadata)
+    # 2. Expire snapshots (keep last 7 days of metadata).
+    #    pyiceberg 0.11.1: table.maintenance.expire_snapshots().older_than(datetime).commit()
+    #    — maintenance is a @property (no parens); older_than takes a tz-aware datetime
+    #    (not int millis). Only removes snapshot METADATA entries — the underlying
+    #    data/manifest files on the object store are NOT garbage-collected; a separate
+    #    remove_orphan_files sweep is required for byte reclamation (deferred until
+    #    pyiceberg >= 0.12, which gains that API).
+    #
+    #    Cache hygiene: intentionally do NOT pop _snapshot_files_cache / _view_cache
+    #    here — expire drops only old snapshot metadata; the current snapshot's file
+    #    membership is unchanged, so the snapshot fast-path stays valid. (Contrast
+    #    with step 1's data-delete and the optimize-table path, which do invalidate.)
     keep_snapshot_days = 7
-    cutoff_ms = int((datetime.now(UTC) - timedelta(days=keep_snapshot_days)).timestamp() * 1000)
+    snapshot_cutoff = datetime.now(UTC) - timedelta(days=keep_snapshot_days)
     try:
-        table.expire_snapshots().expire_older_than(cutoff_ms).commit()
-        _set_cached_table(source, _table_identifier(source), table)
-        _write_metadata_pointer(source, table.metadata_location, table=table)
+        # Load fresh from the catalog. Note: catalog is the FosSqlCatalog
+        # whose load_table consults _read_metadata_pointer (2-sec in-process
+        # cache); freshness here is bounded by _POINTER_CACHE_TTL_SEC, not
+        # "the absolute latest head". For the FIRST attempt this is fine —
+        # the cache entry will be ≤2s old, plenty fresh for a weekly cron.
+        # The retry loop below explicitly invalidates the cache before each
+        # reload so back-to-back retries actually see post-conflict state.
+        fresh_table = catalog.load_table(_table_identifier(source))
+        snapshots_before = len(fresh_table.metadata.snapshots)
+        results["snapshots_before"] = snapshots_before
+
+        # Concurrent writers can race us in two shapes that the retry can
+        # self-heal:
+        #   (a) CommitFailedException — catalog-level pointer race (another
+        #       commit advanced the metadata pointer between our load_table
+        #       and our commit).
+        #   (b) ValueError("Snapshot with snapshot id N does not exist") —
+        #       another expire run (admin re-trigger overlapping the scheduled
+        #       run) already removed snapshots that are still in our expire
+        #       set. Reloading and re-calling older_than rebuilds the expire
+        #       set against the post-overlap snapshot list, so the next attempt
+        #       targets only still-present snapshots.
+        # The sequence-number ValueError that optimize_table catches cannot
+        # fire here — ExpireSnapshots stages only AssertTableUUID (no
+        # AssertRefSnapshotId), so we narrow the ValueError check to the
+        # "does not exist" message to avoid masking unrelated bugs.
+        _EXPIRE_RETRIES = 3
+        for _retry in range(_EXPIRE_RETRIES):
+            try:
+                fresh_table.maintenance.expire_snapshots().older_than(snapshot_cutoff).commit()
+                break
+            except (CommitFailedException, ValueError) as cas_err:
+                msg = str(cas_err)
+                is_recoverable = isinstance(cas_err, CommitFailedException) or "does not exist" in msg
+                if not is_recoverable or _retry == _EXPIRE_RETRIES - 1:
+                    raise
+                logger.warning(
+                    "[iceberg] %s: CAS conflict expiring snapshots (attempt %d/%d), reloading and retrying: %s",
+                    source.get("name"),
+                    _retry + 1,
+                    _EXPIRE_RETRIES,
+                    cas_err,
+                )
+                try:
+                    # Invalidate the FosSqlCatalog pointer cache so the reload
+                    # bypasses the 2-sec _POINTER_CACHE_TTL_SEC and actually
+                    # re-resolves the post-conflict metadata pointer. Without
+                    # this, all retries finish within microseconds and read
+                    # the same pre-conflict cache entry.
+                    _pointer_cache_invalidate(source, _table_identifier(source))
+                    fresh_table = catalog.load_table(_table_identifier(source))
+                except Exception as reload_err:
+                    raise cas_err from reload_err
+                # Re-pin the baseline against the reloaded head so the diff
+                # below reflects expirations only, not concurrent additions.
+                snapshots_before = len(fresh_table.metadata.snapshots)
+                results["snapshots_before"] = snapshots_before
+
+        snapshots_after = len(fresh_table.metadata.snapshots)
+        snapshots_expired = max(0, snapshots_before - snapshots_after)
+
+        _set_cached_table(source, _table_identifier(source), fresh_table)
+        _write_metadata_pointer(source, fresh_table.metadata_location, table=fresh_table)
+        # Keep the outer-scope `table` consistent for the local-cache cleanup
+        # step below (currently doesn't use it, but a future addition between
+        # steps 2 and 3 would expect the post-expire handle).
+        table = fresh_table
+
         results["snapshots_expired_before_days"] = keep_snapshot_days
+        results["snapshots_after"] = snapshots_after
+        results["snapshots_expired_count"] = snapshots_expired
+        if snapshots_expired > 0:
+            results["snapshot_expiry_note"] = (
+                "metadata entries only; underlying data/manifest files are not deleted by pyiceberg 0.11.1"
+            )
+            logger.info(
+                "[iceberg] %s: expired %d snapshots (%d -> %d)",
+                source.get("name"),
+                snapshots_expired,
+                snapshots_before,
+                snapshots_after,
+            )
     except Exception as e:
         logger.warning("[iceberg] Snapshot expiry skipped: %s", e)
         results["snapshot_expiry_error"] = str(e)
@@ -2054,6 +2435,8 @@ def sync_data(source: dict, progress_callback=None, start_time: str | None = Non
                         uri = entry
                         rel_path = uri.split("/data/")[-1] if "/data/" in uri else uri.split("/")[-1]
                         local_path = os.path.abspath(os.path.join(cache_dir, rel_path))
+                        if not local_path.startswith(os.path.abspath(cache_dir) + os.sep):
+                            continue
                         cloud_files[uri] = (local_path, 0)
                     else:
                         # Already-downloaded entry. Must populate cloud_files
@@ -2122,6 +2505,8 @@ def sync_data(source: dict, progress_callback=None, start_time: str | None = Non
                     rel_path = uri.split("/")[-1]
 
                 local_path = os.path.abspath(os.path.join(cache_dir, rel_path))
+                if not local_path.startswith(os.path.abspath(cache_dir) + os.sep):
+                    continue
                 cloud_files[uri] = (local_path, record_count)
         except Exception as e:
             return {"error": f"Metadata scan failed: {e}", "files_downloaded": 0}
@@ -2358,6 +2743,8 @@ def sync_data(source: dict, progress_callback=None, start_time: str | None = Non
                         rel_path = uri.split("/")[-1]
 
                     local_path = os.path.abspath(os.path.join(data_dir, rel_path))
+                    if not local_path.startswith(os.path.abspath(data_dir) + os.sep):
+                        continue
                     if os.path.exists(local_path):
                         resolved_files.append(local_path)
                     else:
@@ -2620,6 +3007,8 @@ def _update_snapshot_cache_from_delta(source: dict, table) -> bool:
                 uri = entry.data_file.file_path
                 rel_path = uri.split("/data/")[-1] if "/data/" in uri else uri.split("/")[-1]
                 local = os.path.abspath(os.path.join(cache_dir, rel_path))
+                if not local.startswith(os.path.abspath(cache_dir) + os.sep):
+                    continue
                 # Match the same local-vs-URI selection rule used by
                 # _update_iceberg_view_locked: prefer local file when present,
                 # else fall back to the cloud URI for admins (analysts never
@@ -2701,6 +3090,8 @@ def _reconcile_snapshot_cache_after_sync(source: dict) -> None:
         if p.startswith("s3://"):
             rel_path = p.split("/data/")[-1] if "/data/" in p else p.split("/")[-1]
             local = os.path.abspath(os.path.join(cache_dir, rel_path))
+            if not local.startswith(os.path.abspath(cache_dir) + os.sep):
+                continue
             if os.path.exists(local):
                 new_entries.append(local)
                 changed = True
@@ -2820,16 +3211,12 @@ def _try_fast_path_view(con, source: dict) -> bool:
 
     view_sql = cached[3]
     if view_sql:
-        try:
-            ro_row = con.execute(
-                "SELECT readonly FROM duckdb_databases() WHERE database_name NOT IN ('system','temp') LIMIT 1"
-            ).fetchone()
-            is_ro = bool(ro_row[0]) if ro_row is not None else False
-        except Exception:
-            is_ro = False
-
+        # Always bind as a TEMP view on the fast path — the persistent view
+        # is maintained by the locked rebuild path.  Concurrent fast-path
+        # callers (pool checkouts) would otherwise race on the shared catalog
+        # and trigger "write-write conflict on alter".
         exec_sql = view_sql
-        if is_ro and view_sql.startswith("CREATE OR REPLACE VIEW "):
+        if view_sql.startswith("CREATE OR REPLACE VIEW "):
             exec_sql = view_sql.replace("CREATE OR REPLACE VIEW ", "CREATE OR REPLACE TEMP VIEW ", 1)
         try:
             con.execute(exec_sql)
@@ -3022,6 +3409,18 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
         snapshot_id = cached_files[1]
         iceberg_loc = cached_files[2]
         local_iceberg_files = cached_files[3]
+    elif metadata_loc is None:
+        # Never-committed service: the local SQLite catalog has no metadata_location
+        # row for this table, so there is no Iceberg snapshot to fetch. Skipping
+        # the S3 round-trip here saves 6-14s on every cold dashboard query for
+        # services that haven't ingested anything (or whose init_iceberg_table
+        # call silently failed to write metadata.json to FOS — observed when
+        # fos_endpoint is unreachable, e.g. local dev / load-test services).
+        # The view will be built from buffer files only (if any) below, or
+        # downgraded to an empty WHERE-false view by the existing fall-through.
+        snapshot_id = None
+        tbl = None
+        snap = None
     else:
         # The table committed (new metadata_loc) or we had a full cache miss.
         try:
@@ -3066,12 +3465,21 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
 
                 for f in scan.plan_files():
                     uri = f.file.file_path
+                    if uri.startswith("file://"):
+                        # Local-only warehouse: the URI IS the local path.
+                        # Skip the FOS-style /data/ rewrite and just use it.
+                        local_path = uri[len("file://") :]
+                        if os.path.exists(local_path):
+                            local_iceberg_files.append(local_path)
+                        continue
                     if "/data/" in uri:
                         rel_path = uri.split("/data/")[-1]
                     else:
                         rel_path = uri.split("/")[-1]
 
                     local_path = os.path.abspath(os.path.join(data_dir, rel_path))
+                    if not local_path.startswith(os.path.abspath(data_dir) + os.sep):
+                        continue
                     if os.path.exists(local_path):
                         local_iceberg_files.append(local_path)
                     elif source.get("access_level") != "read_only":
@@ -3170,7 +3578,15 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
     # check the local data_dir directly. If it has parquet files on disk, we
     # MUST use them — otherwise dashboard queries route through iceberg_scan
     # over S3 and rack up Class B reads on every poll.
-    data_dir = os.path.join(cache_dir, "data")
+    #
+    # Local-only (file://) warehouse: Iceberg writes data files under
+    # warehouse/<namespace>/<table>/data/ rather than cache/{bucket}/data/.
+    # Point data_dir at the actual on-disk location so the glob below and the
+    # eventual read_parquet view SQL hit real files.
+    if _is_local_only_source(source) and iceberg_loc and iceberg_loc.startswith("file://"):
+        data_dir = os.path.join(iceberg_loc[len("file://") :], "data")
+    else:
+        data_dir = os.path.join(cache_dir, "data")
     if not local_paths:
         try:
             import glob as _glob

@@ -46,6 +46,9 @@ export function SaveViewDialog() {
         }
       })
       queryClient.invalidateQueries({ queryKey: ['views', activeServiceId] })
+      // Bootstrap response also carries seeded views; invalidate so the
+      // next bootstrap refetch reflects the new view.
+      queryClient.invalidateQueries({ queryKey: ['bootstrap'] })
       setOpen(false)
       setName('')
     } catch (error) {

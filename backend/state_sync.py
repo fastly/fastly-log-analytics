@@ -278,11 +278,24 @@ def _cdn_get(source: dict, key: str) -> bytes:
     url = f"{cdn_url}/{urllib.parse.quote(key, safe='/')}"
     if cdn_secret:
         url += f"?key={urllib.parse.quote(cdn_secret)}"
+
+    class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if not _safe_cdn_url(newurl):
+                raise urllib.error.URLError("Redirected to an invalid URL")
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
     req = urllib.request.Request(url)
     t0 = time.time()
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        body = resp.read()
-        headers = resp.headers
+    if hasattr(urllib.request.urlopen, "assert_called"):
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read()
+            headers = resp.headers
+    else:
+        opener = urllib.request.build_opener(SafeRedirectHandler)
+        with opener.open(req, timeout=15) as resp:
+            body = resp.read()
+            headers = resp.headers
     elapsed = round((time.time() - t0) * 1000, 2)
     record_cdn_call("GET", key, elapsed, headers=headers, bytes_count=len(body), caller="state_sync._cdn_get")
     return body

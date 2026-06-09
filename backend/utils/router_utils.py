@@ -130,6 +130,32 @@ def query_errors(status_code: int = 400):
     """
 
     def decorator(fn):
+        import asyncio
+
+        if asyncio.iscoroutinefunction(fn):
+            # Async handler: await the coroutine and apply the same
+            # exception-mapping. Necessary so an ``async def`` route can
+            # still wear @query_errors and gather concurrent I/O (e.g.
+            # M4 — Fastly call parallelisation in usage.py::prefill).
+            @wraps(fn)
+            async def async_wrapper(*args, **kwargs):
+                try:
+                    return await fn(*args, **kwargs)
+                except HTTPException:
+                    raise
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail={"error": str(e)})
+                except LookupError as e:
+                    raise HTTPException(status_code=404, detail={"error": str(e)})
+                except Exception as e:
+                    logger.exception("[query_errors] unhandled exception in %s", fn.__qualname__)
+                    raise HTTPException(
+                        status_code=status_code,
+                        detail={"error": str(e)},
+                    )
+
+            return async_wrapper
+
         @wraps(fn)
         def wrapper(*args, **kwargs):
             try:
