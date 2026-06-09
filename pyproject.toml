@@ -1,6 +1,6 @@
 [project]
 name = "fastly-log-analytics"
-version = "1.1.0"
+version = "1.2.0"
 description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB"
 requires-python = ">=3.10"
 dependencies = [
@@ -26,6 +26,7 @@ dependencies = [
     "aiohttp>=3.9",
     "cryptography>=42",
     "python-multipart>=0.0.9",
+    "starlette-compress>=1.7",
 ]
 
 [dependency-groups]

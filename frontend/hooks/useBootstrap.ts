@@ -1,10 +1,11 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useEffect } from 'react'
 import { toService } from '@/types/api'
 
 export function useBootstrap() {
+  const queryClient = useQueryClient()
   const query = useQuery({
     queryKey: ['bootstrap'],
     queryFn: async () => {
@@ -30,7 +31,18 @@ export function useBootstrap() {
     if (!query.data) return
     setServices((query.data.services ?? []).map(toService))
     setInitialized(true)
-  }, [query.data, setServices, setInitialized])
+
+    // Seed the views cache from the bootstrap response so ViewSelector
+    // and useUrlFilterSync skip their own /api/views/{id} round-trip on
+    // initial load. The existing ['views', activeServiceId] query keeps
+    // its semantics for service-switch — if the user switches to a
+    // service not in this seed, the granular query fires normally.
+    const seededActive = query.data.active_service_id
+    const seededViews = (query.data as any).views
+    if (seededActive && Array.isArray(seededViews)) {
+      queryClient.setQueryData(['views', seededActive], seededViews)
+    }
+  }, [query.data, setServices, setInitialized, queryClient])
 
   useEffect(() => {
     if (!query.data) return

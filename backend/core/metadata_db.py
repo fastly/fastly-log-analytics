@@ -54,6 +54,29 @@ _ingested_filenames_cache: dict[str, set[str]] = {}
 _ingested_filenames_cache_lock = threading.Lock()
 
 
+# Pre-compiled for the per-insert file_date parse. The canonical Fastly
+# basename is `...<YYYY-MM-DD>T<HH:MM:SS>.<ms>-<rand>.log.gz`; locate the
+# first 'T' and use the 10 chars before it when they look like a date.
+# Matches the GLOB in _migration_002 / get_log_accounting_counts so legacy
+# and runtime parsing agree.
+import re as _re_metadata_db  # noqa: E402
+
+_FILE_DATE_RE = _re_metadata_db.compile(r"(\d{4}-\d{2}-\d{2})T")
+
+
+def _parse_file_date(file_name: str) -> str | None:
+    """Return 'YYYY-MM-DD' parsed from filename or None if no match.
+
+    Cheap regex on the basename — runs per-insert, called from the bulk
+    INSERT in `insert_ingested_files`. Same semantics as the SQL backfill
+    in `_migration_002_add_ingested_files_file_date`.
+    """
+    if not file_name:
+        return None
+    m = _FILE_DATE_RE.search(file_name)
+    return m.group(1) if m else None
+
+
 def _clear_ingested_filenames_cache(service_id: str | None = None) -> None:
     """Drop the dedup cache for one service or all services.
 
@@ -227,6 +250,7 @@ _SCHEMA = [
         row_count INTEGER,
         file_size_bytes INTEGER,
         error_count INTEGER DEFAULT 0,
+        file_date DATE,
         PRIMARY KEY (file_name, source_name)
     )""",
     # Covers `/usage/prefill`'s source+range narrowing
@@ -240,6 +264,13 @@ _SCHEMA = [
     # old index is redundant and dropped here. Index name matches the
     # by-name reference in `list_unbackfilled_fastly_edge_files`'s docstring.
     "CREATE INDEX IF NOT EXISTS idx_ingested_files_source_ingested_at ON ingested_files(source_name, ingested_at)",
+    # Note: idx_ingested_files_source_date (companion index for per-day
+    # usage queries) is created by _migration_002_add_ingested_files_file_date,
+    # not here — _SCHEMA runs before migrations and a legacy DB upgrading
+    # would fail on this CREATE INDEX (the file_date column doesn't exist
+    # yet at that point). The migration is idempotent + runs for fresh DBs
+    # too (apply_pending walks v1..LATEST on every init), so the index
+    # always lands without _SCHEMA carrying it.
     "DROP INDEX IF EXISTS idx_ingested_files_source",
     # Earlier in this branch a redundant `idx_ingested_files_source_ts` was
     # added under a different name before discovering the existing
@@ -462,6 +493,55 @@ _SCHEMA = [
     AFTER INSERT ON usage_log
     WHEN NEW.timestamp IS NOT NULL AND length(NEW.timestamp) >= 13 AND NEW.service_id IS NOT NULL
     BEGIN
+        INSERT INTO usage_log_hourly_summary
+            (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+        VALUES (NEW.service_id, substr(NEW.timestamp, 1, 13),
+                COALESCE(NEW.operation_class, ''), COALESCE(NEW.operation_type, ''),
+                COALESCE(NEW.count, 1), COALESCE(NEW.bytes, 0), datetime('now'))
+        ON CONFLICT(service_id, hour, operation_class, operation_type)
+        DO UPDATE SET count = count + excluded.count,
+                      bytes = bytes + excluded.bytes,
+                      last_updated = excluded.last_updated;
+    END""",
+    # AFTER DELETE trigger: pairs with the INSERT trigger so DELETE+INSERT
+    # cycles (notably reconcile_fastly_stats refreshing each RECONCILE_A/B
+    # row every hour) don't leak phantom counts into the rollup. Without
+    # this, every reconcile pass added the new gap on top of the previous
+    # one, drifting Class A counts to 30-60x reality.
+    """CREATE TRIGGER IF NOT EXISTS trg_usage_log_summary_delete
+    AFTER DELETE ON usage_log
+    WHEN OLD.timestamp IS NOT NULL AND length(OLD.timestamp) >= 13 AND OLD.service_id IS NOT NULL
+    BEGIN
+        UPDATE usage_log_hourly_summary
+        SET count = count - COALESCE(OLD.count, 1),
+            bytes = bytes - COALESCE(OLD.bytes, 0),
+            last_updated = datetime('now')
+        WHERE service_id = OLD.service_id
+          AND hour = substr(OLD.timestamp, 1, 13)
+          AND operation_class = COALESCE(OLD.operation_class, '')
+          AND operation_type = COALESCE(OLD.operation_type, '');
+    END""",
+    # AFTER UPDATE trigger: defensive. No current code path UPDATEs
+    # usage_log, but if one is added, the rollup must stay in sync. Models
+    # an UPDATE as a decrement against the OLD bucket + an upsert into the
+    # NEW bucket — correct whether the keyed columns change or not.
+    """CREATE TRIGGER IF NOT EXISTS trg_usage_log_summary_update
+    AFTER UPDATE ON usage_log
+    WHEN NEW.timestamp IS NOT NULL AND length(NEW.timestamp) >= 13 AND NEW.service_id IS NOT NULL
+      AND (OLD.count IS NOT NEW.count OR OLD.bytes IS NOT NEW.bytes
+           OR OLD.timestamp IS NOT NEW.timestamp
+           OR OLD.operation_class IS NOT NEW.operation_class
+           OR OLD.operation_type IS NOT NEW.operation_type
+           OR OLD.service_id IS NOT NEW.service_id)
+    BEGIN
+        UPDATE usage_log_hourly_summary
+        SET count = count - COALESCE(OLD.count, 1),
+            bytes = bytes - COALESCE(OLD.bytes, 0),
+            last_updated = datetime('now')
+        WHERE service_id = OLD.service_id
+          AND hour = substr(OLD.timestamp, 1, 13)
+          AND operation_class = COALESCE(OLD.operation_class, '')
+          AND operation_type = COALESCE(OLD.operation_type, '');
         INSERT INTO usage_log_hourly_summary
             (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
         VALUES (NEW.service_id, substr(NEW.timestamp, 1, 13),
@@ -1107,31 +1187,78 @@ def get_log_accounting_counts(
     full path contains a 'T' preceded by a YYYY-MM-DD prefix we slice the
     emission bucket out of the filename; otherwise we fall back to
     ``ingested_at`` (covers legacy/test files without an ISO basename).
+
+    Fast/slow split — the WHERE used to filter on ``datetime(ingested_at)``,
+    which can't use any index (the wrapping function defeats
+    ``idx_ingested_files_source_ingested_at``) and forces a full source-
+    partition scan: 1533 ms on a 24 h window on prod 2026-06-05.
+    The fast UNION arm uses ``file_date`` (populated by ``_migration_002``
+    from the canonical Fastly basename), which IS covered by the
+    composite ``idx_ingested_files_source_date`` index — range scan
+    instead of full scan. Rows whose filename doesn't match the canonical
+    pattern (``file_date IS NULL`` — legacy data, tests, ad-hoc
+    backfills) fall through to the original ``ingested_at`` scan; that
+    arm typically returns zero rows in production but keeps semantic
+    equivalence with the pre-change behavior.
     """
     con = get_con(service_id)
+    start_date = sql_start[:10]
+    end_date = sql_end[:10]
     rows = con.execute(
         """
-        SELECT
-          CASE
-            WHEN instr(file_name, 'T') >= 11
-             AND substr(file_name, instr(file_name, 'T') - 10, 10)
-                 GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
-            THEN substr(file_name, instr(file_name, 'T') - 10, ?)
-            WHEN ingested_at IS NOT NULL
-            THEN substr(replace(ingested_at, ' ', 'T'), 1, ?)
-            ELSE NULL
-          END AS bucket,
-          sum(row_count) AS rows,
-          count(*)       AS files
-        FROM ingested_files
-        WHERE source_name = ?
-          AND datetime(ingested_at) >= datetime(?)
-          AND datetime(ingested_at) <= datetime(?)
-          AND file_name != '__seeding_attempted__'
-        GROUP BY 1
+        SELECT bucket, sum(rc) AS rows, sum(fc) AS files FROM (
+            -- Fast arm: file_date index range scan. file_date IS NOT NULL
+            -- implies the basename matches the canonical Fastly pattern
+            -- per _migration_002, so the bucket substr will always succeed.
+            SELECT substr(file_name, instr(file_name, 'T') - 10, ?) AS bucket,
+                   sum(row_count) AS rc,
+                   count(*)       AS fc
+            FROM ingested_files
+            WHERE source_name = ?
+              AND file_date IS NOT NULL
+              AND file_date >= ? AND file_date <= ?
+              AND file_name != '__seeding_attempted__'
+            GROUP BY 1
+            UNION ALL
+            -- Slow arm: rows without a parseable basename (file_date NULL).
+            -- Keeps the full CASE so the ingested_at fallback continues
+            -- to count test fixtures + legacy uploads.
+            SELECT
+              CASE
+                WHEN instr(file_name, 'T') >= 11
+                 AND substr(file_name, instr(file_name, 'T') - 10, 10)
+                     GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+                THEN substr(file_name, instr(file_name, 'T') - 10, ?)
+                WHEN ingested_at IS NOT NULL
+                THEN substr(replace(ingested_at, ' ', 'T'), 1, ?)
+                ELSE NULL
+              END AS bucket,
+              sum(row_count) AS rc,
+              count(*)       AS fc
+            FROM ingested_files
+            WHERE source_name = ?
+              AND file_date IS NULL
+              AND datetime(ingested_at) >= datetime(?)
+              AND datetime(ingested_at) <= datetime(?)
+              AND file_name != '__seeding_attempted__'
+            GROUP BY 1
+        )
+        GROUP BY bucket
         HAVING bucket IS NOT NULL AND bucket >= ? AND bucket <= ?
         """,
-        (width, width, service_id, sql_start, sql_end, start_bucket, end_bucket),
+        (
+            width,
+            service_id,
+            start_date,
+            end_date,
+            width,
+            width,
+            service_id,
+            sql_start,
+            sql_end,
+            start_bucket,
+            end_bucket,
+        ),
     ).fetchall()
     return {r["bucket"]: (int(r["rows"] or 0), int(r["files"] or 0)) for r in rows}
 
@@ -1322,12 +1449,13 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
                 count_with_bytes_delta += 1
 
     con.executemany(
-        """INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes)
-           VALUES (?, ?, ?, ?)
+        """INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date)
+           VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(file_name, source_name) DO UPDATE SET
                row_count = excluded.row_count,
-               file_size_bytes = excluded.file_size_bytes""",
-        [(fn, service_id, rc, sz) for (fn, rc, sz) in rows],
+               file_size_bytes = excluded.file_size_bytes,
+               file_date = COALESCE(ingested_files.file_date, excluded.file_date)""",
+        [(fn, service_id, rc, sz, _parse_file_date(fn)) for (fn, rc, sz) in rows],
     )
     # Use the just-applied DB clock so last_ingested matches the row's
     # ingested_at default (datetime('now')) — keeps the rollup honest.
@@ -1445,20 +1573,62 @@ def get_log_activity(service_id: str, start_iso: str, end_iso: str, by: str) -> 
     width = width_map.get(by, 13)
 
     con = get_con(service_id)
-    rows = con.execute(
-        f"""
-        SELECT substr(replace(ingested_at, ' ', 'T'), 1, {width}) AS bucket,
-               sum(row_count) AS rc,
-               sum(file_size_bytes) AS bs
-        FROM ingested_files
-        WHERE source_name = ?
-          AND file_name != '__seeding_attempted__'
-          AND ingested_at >= ?
-          AND ingested_at <= ?
-        GROUP BY bucket ORDER BY bucket
-        """,
-        (service_id, start_iso, end_iso),
-    ).fetchall()
+    # Day-bucket path uses the file_date column + composite
+    # idx_ingested_files_source_date index added by _migration_002.
+    # Skips the per-row substr() on ingested_at + uses an index range
+    # scan instead of a full source-partition walk. Falls back to the
+    # substr path for rows where file_date is NULL (filenames that
+    # don't match the canonical Fastly YYYY-MM-DDTHH:MM:SS format) so
+    # legacy data without parseable basenames still counts. The non-day
+    # buckets keep the original shape because file_date has only date
+    # granularity.
+    if by == "day":
+        start_date = start_iso[:10]
+        end_date = end_iso[:10]
+        rows = con.execute(
+            """
+            SELECT bucket, sum(rc) AS rc, sum(bs) AS bs FROM (
+                SELECT file_date AS bucket,
+                       sum(row_count) AS rc,
+                       sum(file_size_bytes) AS bs
+                FROM ingested_files
+                WHERE source_name = ?
+                  AND file_date IS NOT NULL
+                  AND file_date >= ?
+                  AND file_date <= ?
+                  AND file_name != '__seeding_attempted__'
+                GROUP BY file_date
+                UNION ALL
+                SELECT substr(replace(ingested_at, ' ', 'T'), 1, 10) AS bucket,
+                       sum(row_count) AS rc,
+                       sum(file_size_bytes) AS bs
+                FROM ingested_files
+                WHERE source_name = ?
+                  AND file_date IS NULL
+                  AND file_name != '__seeding_attempted__'
+                  AND ingested_at >= ?
+                  AND ingested_at <= ?
+                GROUP BY bucket
+            )
+            GROUP BY bucket ORDER BY bucket
+            """,
+            (service_id, start_date, end_date, service_id, start_iso, end_iso),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            f"""
+            SELECT substr(replace(ingested_at, ' ', 'T'), 1, {width}) AS bucket,
+                   sum(row_count) AS rc,
+                   sum(file_size_bytes) AS bs
+            FROM ingested_files
+            WHERE source_name = ?
+              AND file_name != '__seeding_attempted__'
+              AND ingested_at >= ?
+              AND ingested_at <= ?
+            GROUP BY bucket ORDER BY bucket
+            """,
+            (service_id, start_iso, end_iso),
+        ).fetchall()
 
     def _normalize(bucket: str) -> str:
         if by == "hour":
@@ -1496,17 +1666,39 @@ def get_node_count_avg(service_id: str) -> float | None:
     (bucket/prefix segments are lowercase + numeric). Grouping by that 19-char
     substring is equivalent to the prior Python regex over file_name, but runs
     entirely in SQLite instead of dragging every row across the boundary.
+
+    Fast/slow split (mirrors ``get_log_accounting_counts``): the fast arm
+    filters on ``file_date IS NOT NULL``, which is covered by the composite
+    ``idx_ingested_files_source_date`` index — lets SQLite walk only the
+    canonical-basename rows directly via the index instead of scanning the
+    full source partition and per-row evaluating ``instr(file_name, 'T')``.
+    The slow arm keeps the ``instr`` guard for rows with NULL file_date
+    (legacy / test / ad-hoc backfills) so the average stays semantically
+    equivalent to the pre-change behavior.
     """
     con = get_con(service_id)
     row = con.execute(
         """SELECT avg(c) AS avg_c FROM (
+               -- Fast arm: file_date IS NOT NULL implies the basename matches
+               -- the canonical Fastly pattern per _migration_002, so the
+               -- substr group-by always succeeds without an instr() guard.
                SELECT count(*) AS c
                FROM ingested_files
                WHERE source_name = ?
+                 AND file_date IS NOT NULL
+               GROUP BY substr(file_name, instr(file_name, 'T') - 10, 19)
+               UNION ALL
+               -- Slow arm: rows without a parseable basename. Typically
+               -- zero rows in prod but kept so test fixtures + legacy
+               -- uploads still contribute to the average.
+               SELECT count(*) AS c
+               FROM ingested_files
+               WHERE source_name = ?
+                 AND file_date IS NULL
                  AND instr(file_name, 'T') >= 11
                GROUP BY substr(file_name, instr(file_name, 'T') - 10, 19)
            )""",
-        (service_id,),
+        (service_id, service_id),
     ).fetchone()
     if not row or row["avg_c"] is None:
         return None
@@ -1792,8 +1984,19 @@ def get_cron_runs(
     per_page: int = 50,
     sort_col: str = "started_at",
     sort_dir: str = "DESC",
+    since_id: int | None = None,
 ) -> tuple[int, list[dict]]:
-    """Paginated cron run history. Used by repositories/cron.py."""
+    """Paginated cron run history. Used by repositories/cron.py.
+
+    ``since_id`` enables delta polling: when provided, rows are returned only
+    if ``id > since_id`` OR ``status = 'running'``. The ``status = 'running'``
+    branch keeps long-lived in-progress runs visible across polls (otherwise
+    a sync that started 60 s ago would drop out once its id <= since_id),
+    AND keeps the row visible for the single poll where it transitions from
+    running to completed (so the client can observe the status change and
+    update its toast). Once a row is observed completed (id <= since_id AND
+    status != 'running'), it falls out of the response.
+    """
     con = get_con(service_id)
     where: list[str] = []
     params: list = []
@@ -1803,6 +2006,9 @@ def get_cron_runs(
     if status and status != "all":
         where.append("status = ?")
         params.append(status)
+    if since_id is not None:
+        where.append("(id > ? OR status = 'running')")
+        params.append(since_id)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
     total_row = con.execute(f"SELECT count(*) AS n FROM cron_runs {where_sql}", params).fetchone()
@@ -1848,26 +2054,28 @@ def get_cron_runs(
 def latest_cron_per_task(service_id: str) -> dict[str, dict]:
     """Return {task: latest_completed_run_dict} for the sync-status endpoint.
 
-    The original `id IN (SELECT max(id) GROUP BY task)` form forced a full
-    scan + GROUP BY across cron_runs (210ms / 44K rows on prod). This rewrite
-    pulls the distinct task list (cheap — usually <10 tasks) and does one
-    btree-seek per task into `idx_cron_task_started(task, started_at)` to find
-    the latest non-`running` row, taking ~25ms. Result is identical because
-    ids and started_at are co-monotonic for the same task.
+    Single window-function pass: ROW_NUMBER() OVER (PARTITION BY task) keeps
+    the latest non-`running` row per task in one scan of the
+    `idx_cron_task_started(task, started_at)` index. The previous
+    DISTINCT-tasks + correlated-subquery shape did a btree-seek per task,
+    taking ~12.9 ms — fast in absolute terms but per-task overhead added
+    up on services with many task types. Mirrors the same pattern used
+    by `cron_summary_for_tasks` below.
     """
     con = get_con(service_id)
     rows = con.execute(
-        """WITH tasks AS (SELECT DISTINCT task FROM cron_runs),
-                latest AS (
-                    SELECT t.task, (
-                        SELECT c2.id FROM cron_runs c2
-                        WHERE c2.task = t.task AND c2.status != 'running'
-                        ORDER BY c2.started_at DESC LIMIT 1
-                    ) AS lid
-                    FROM tasks t
-                )
-            SELECT c.task, c.started_at, c.status, c.duration_s, c.summary, c.error_message
-            FROM cron_runs c JOIN latest l ON c.id = l.lid"""
+        """
+        SELECT task, started_at, status, duration_s, summary, error_message
+        FROM (
+            SELECT task, started_at, status, duration_s, summary, error_message,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY task ORDER BY started_at DESC, id DESC
+                   ) AS rn
+            FROM cron_runs
+            WHERE status != 'running'
+        )
+        WHERE rn = 1
+        """
     ).fetchall()
     return {
         r["task"]: {
@@ -2357,8 +2565,13 @@ def _ensure_usage_log_hourly_backfilled(con: sqlite3.Connection, service_id: str
                 con.execute(
                     "INSERT OR REPLACE INTO applied_data_migrations "
                     "(name, applied_at, duration_s, status, notes) VALUES (?, ?, ?, ?, ?)",
-                    (USAGE_LOG_HOURLY_BACKFILL_NAME, iso_z_now(), time.time() - t0, "success",
-                     "rebuilt usage_log_hourly_summary from raw"),
+                    (
+                        USAGE_LOG_HOURLY_BACKFILL_NAME,
+                        iso_z_now(),
+                        time.time() - t0,
+                        "success",
+                        "rebuilt usage_log_hourly_summary from raw",
+                    ),
                 )
                 con.commit()
                 logger.info("[usage_log] hourly backfill complete for %s in %.2fs", service_id, time.time() - t0)
@@ -2464,11 +2677,14 @@ def _query_usage_log_aggregate_rollup(
         GROUP BY operation_class, operation_type
         """,
         # Interior rollup params
-        [service_id, start_hour, end_hour] + class_params
+        [service_id, start_hour, end_hour]
+        + class_params
         # Start-boundary raw params: [start, next_hour_after_start_hour)
-        + [service_id, start, start_hour_end] + class_params
+        + [service_id, start, start_hour_end]
+        + class_params
         # End-boundary raw params: [start_of_end_hour, end]
-        + [service_id, end_hour_start, end] + class_params,
+        + [service_id, end_hour_start, end]
+        + class_params,
     ).fetchall()
     return rows
 
@@ -2510,14 +2726,26 @@ def get_usage_logs(
         params.append(f"%{operation_type}%")
 
     where = " AND ".join(conditions)
-    total = con.execute(f"SELECT count(*) FROM usage_log WHERE {where}", params).fetchone()[0]
 
+    # Fold COUNT(*) into the page query via a window function so we don't
+    # do two passes over the same (service_id, [start, end]) range. The
+    # previous separate COUNT + SELECT pair added ~40-60ms per page load.
+    # COUNT(*) OVER () is constant across rows so it's computed once
+    # during plan execution rather than per-row.
     offset = (page - 1) * page_size
     cur = con.execute(
-        f"SELECT * FROM usage_log WHERE {where} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+        f"SELECT *, COUNT(*) OVER () AS _total FROM usage_log WHERE {where} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
         params + [page_size, offset],
     )
-    entries = [dict(r) for r in cur.fetchall()]
+    raw_rows = cur.fetchall()
+    if raw_rows:
+        total = int(raw_rows[0]["_total"] or 0)
+        entries = [{k: v for k, v in dict(r).items() if k != "_total"} for r in raw_rows]
+    else:
+        # Empty page (no matching rows OR past the last page): fall back
+        # to a cheap exact COUNT so totals stay correct for pagination UX.
+        total = con.execute(f"SELECT count(*) FROM usage_log WHERE {where}", params).fetchone()[0]
+        entries = []
 
     # Aggregate path: prefer the usage_log_hourly_summary rollup when only the
     # service+timestamp predicates are active (the common admin-page case). The

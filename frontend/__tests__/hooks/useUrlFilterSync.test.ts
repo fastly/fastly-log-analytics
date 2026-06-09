@@ -9,6 +9,7 @@ const mockClearFilters = vi.fn()
 const mockSetRange = vi.fn()
 const mockSetMetric = vi.fn()
 const mockClientGet = vi.fn()
+const mockGetQueryData = vi.fn()
 
 vi.mock('@/stores/filterStore', () => ({
   useFilterStore: vi.fn(() => ({
@@ -16,6 +17,14 @@ vi.mock('@/stores/filterStore', () => ({
     clearFilters: mockClearFilters,
     setRange: mockSetRange,
   })),
+}))
+
+// useUrlFilterSync calls useQueryClient() to read the bootstrap-seeded
+// views cache as a fast path before falling back to client.GET. The hook
+// no longer needs a real QueryClientProvider in tests — we just stub the
+// hook to return a query client with the methods we exercise.
+vi.mock('@tanstack/react-query', () => ({
+  useQueryClient: vi.fn(() => ({ getQueryData: mockGetQueryData })),
 }))
 
 vi.mock('@/hooks/usePageContext', () => ({

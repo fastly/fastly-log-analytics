@@ -119,14 +119,27 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   // plotly.js-cartesian-dist chunk until this chart is within 600px of
   // the viewport. `dynamic(...)` only starts fetching when <Plot/> is
   // actually rendered, so withholding the render = withholding the
-  // chunk fetch. Charts already above the fold mount immediately
-  // (the initial visible=undefined falls through to true when no
-  // IntersectionObserver exists, e.g. SSR or older browsers).
+  // chunk fetch.
+  //
+  // Initial state MUST be ``false`` on both server and client to avoid
+  // a hydration mismatch. Earlier this used ``useState(() => typeof
+  // IntersectionObserver === 'undefined')`` so SSR rendered with
+  // visible=true; once PlotlyChart started being rendered at the
+  // AppLayout level (PlotlyPrewarm), that produced a React 418
+  // hydration error on every page load — server emitted ``<div>
+  // <Plot/></div>``, client emitted ``<div></div>``. Now the effect
+  // below promotes to true on mount when no IntersectionObserver
+  // exists, which is the same effective behaviour without the SSR
+  // divergence.
   const containerRef = useRef<HTMLDivElement>(null)
-  const [visible, setVisible] = useState(() => typeof IntersectionObserver === 'undefined')
+  const [visible, setVisible] = useState(false)
 
   useEffect(() => {
-    if (visible || !containerRef.current || typeof IntersectionObserver === 'undefined') return
+    if (visible || !containerRef.current) return
+    if (typeof IntersectionObserver === 'undefined') {
+      setVisible(true)
+      return
+    }
     const node = containerRef.current
     const observer = new IntersectionObserver(
       ([entry]) => {

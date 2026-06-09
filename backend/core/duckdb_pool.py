@@ -36,9 +36,8 @@ Lifecycle:
 Concurrency:
   * Multiple connections to the same DuckDB file on the same process are safe
     — they share the in-memory database state.
-  * Read-only + read-only across pool connections is fine.
-  * Read-only pool + one read-write writer (ingest) is the project's existing
-    contract; ``get_connection`` already handles ``DBBusyError`` retries.
+  * All connections open with ``read_only=False`` (``get_connection`` forces
+    this) so cron write connections never conflict with pool connections.
 
 Failure handling:
   * If view rebind fails on checkout, we discard the connection and try a
@@ -72,12 +71,50 @@ def _pool_max_size() -> int:
         return 8
 
 
+def _pool_conn_memory_limit() -> str | None:
+    """Optional per-pool-connection memory cap.
+
+    Without this, every pool connection inherits the process-wide DuckDB
+    memory_limit derived from physical RAM (~60%), so 8 concurrent queries
+    against a large dataset can each balloon to multi-GB. Set
+    ``DUCKDB_POOL_CONN_MEMORY_LIMIT`` (e.g. ``256MB`` or ``1GB``) to enforce
+    a per-connection ceiling — DuckDB spills intermediate state to its
+    temp directory when over the limit instead of growing RSS unbounded.
+
+    Returns the env-var value (passed through verbatim — DuckDB accepts
+    ``256MB`` / ``2GB`` / ``104857600`` etc.) or ``None`` to keep the default.
+    """
+    return os.getenv("DUCKDB_POOL_CONN_MEMORY_LIMIT") or None
+
+
+def _pool_conn_threads() -> int | None:
+    """Optional per-pool-connection DuckDB thread count.
+
+    Each pool connection defaults to ``min(cpu_count, 8)`` DuckDB threads.
+    With ``DUCKDB_POOL_MAX_SIZE=8`` concurrent queries that means
+    ``8 connections × 8 threads = 64 threads`` competing for ~8 physical
+    cores — context-switching dominates and per-query latency degrades
+    well past linear queueing. Set ``DUCKDB_POOL_CONN_THREADS`` to a smaller
+    value (commonly ``cpu_count // pool_max_size``) to trade single-query
+    throughput for better tail-latency under sustained load.
+
+    Returns the int value (>=1) or ``None`` to keep the default.
+    """
+    raw = os.getenv("DUCKDB_POOL_CONN_THREADS")
+    if not raw:
+        return None
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
 # Per-connection state tracking. DuckDB connection objects are slotted
 # C types — they don't accept arbitrary attribute assignment — so we
 # keep our metadata in a module-level dict keyed by id(con). Entries are
 # cleared when the connection is closed/discarded.
 #
-# Fingerprint = id() of the ``_view_cache`` tuple at the time the view
+# Fingerprint = the ``_view_cache`` tuple at the time the view
 # was last bound to this connection. The tuple is replaced (not mutated)
 # when the cache rotates, so identity is a sufficient fresh-check.
 _conn_state: dict[int, dict] = {}
@@ -128,7 +165,7 @@ class _Pool:
         # LIFO so the most-recently-used connection (warmest in any OS / DuckDB
         # internal caches) is the next checkout.
         self._idle: queue.LifoQueue = queue.LifoQueue(maxsize=max_size)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         # ``in_use`` is the count of connections currently checked out plus
         # connections idle in the queue. Bounded by ``max_size``.
         self._in_use = 0
@@ -140,13 +177,14 @@ class _Pool:
 
     def acquire(self, src: dict, max_wait: float) -> duckdb.DuckDBPyConnection:
         deadline = time.monotonic() + max_wait
+        reused_con: duckdb.DuckDBPyConnection | None = None
         with self._cond:
             while True:
                 # Fast path: idle connection available
                 try:
-                    con = self._idle.get_nowait()
+                    reused_con = self._idle.get_nowait()
                     self._reused_total += 1
-                    return self._prepare_checkout(con, src)
+                    break  # fall through to UNLOCKED _prepare_checkout
                 except queue.Empty:
                     pass
 
@@ -159,18 +197,53 @@ class _Pool:
                 # Saturated: wait for a return
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise _PoolBusy(
-                        f"pool for {self.service_key} saturated at {self.max_size}"
-                    )
+                    raise _PoolBusy(f"pool for {self.service_key} saturated at {self.max_size}")
                 self._cond.wait(timeout=remaining)
 
-        # Outside lock: build fresh. _in_use was already incremented; if the
-        # build raises we MUST decrement and notify a waiter, hence the try.
+        # Outside lock. Both branches can call ``update_iceberg_view`` which
+        # may take seconds when an Iceberg snapshot reload or S3 manifest read
+        # is required; holding the pool's Condition lock across that call
+        # deadlocks every concurrent waiter, the ``max_wait`` cap can't fire
+        # because waiters block on the threading lock (not ``_cond.wait``),
+        # and the FastAPI thread pool then fills with stuck checkouts until
+        # the backend stops accepting new connections.
+        if reused_con is not None:
+            # _prepare_checkout calls _discard on failure (decrements in_use,
+            # notifies waiter) before re-raising — no extra cleanup needed.
+            return self._prepare_checkout(reused_con, src)
+
+        # Build fresh. _in_use was already incremented; if the build raises
+        # we MUST decrement and notify a waiter, hence the try.
         try:
             from backend.core.duckdb import get_connection
 
             con = get_connection(source=src, read_only=True, max_wait=max_wait)
             _set_conn_state(con, service_key=self.service_key)
+            # Apply per-connection overrides once at build time — DuckDB
+            # persists session settings for the connection's lifetime, so
+            # subsequent checkouts of this same connection inherit them.
+            mem_limit = _pool_conn_memory_limit()
+            if mem_limit:
+                try:
+                    con.execute(f"SET memory_limit = '{mem_limit}'")
+                except Exception as e:
+                    logger.warning(
+                        "[pool] %s: failed to apply DUCKDB_POOL_CONN_MEMORY_LIMIT=%r: %s",
+                        self.service_key,
+                        mem_limit,
+                        e,
+                    )
+            conn_threads = _pool_conn_threads()
+            if conn_threads is not None:
+                try:
+                    con.execute(f"SET threads = {conn_threads}")
+                except Exception as e:
+                    logger.warning(
+                        "[pool] %s: failed to apply DUCKDB_POOL_CONN_THREADS=%d: %s",
+                        self.service_key,
+                        conn_threads,
+                        e,
+                    )
             self._stamp_fingerprint(con, src)
             return con
         except Exception:
@@ -226,7 +299,7 @@ class _Pool:
 
         Two checks make up the fingerprint:
 
-          1. id() of the iceberg ``_view_cache`` tuple for this service.
+          1. The iceberg ``_view_cache`` tuple for this service.
              The tuple is replaced (not mutated) when the cache rotates, so
              identity is a sufficient check that the SQL we'd bind matches
              what we bound last time.
@@ -247,11 +320,7 @@ class _Pool:
             stamped_view = _get_conn_state(con, "view_fingerprint")
             stamped_buf = _get_conn_state(con, "buffer_mtime")
             current_buf = _safe_buffer_mtime(src)
-            if (
-                current is not None
-                and id(current) == stamped_view
-                and current_buf == stamped_buf
-            ):
+            if current is not None and current is stamped_view and current_buf == stamped_buf:
                 # View AND underlying buffer set match what we bound last
                 # time — nothing to do.
                 return con
@@ -271,7 +340,7 @@ class _Pool:
             buf_mtime = _safe_buffer_mtime(src) if src is not None else None
             _set_conn_state(
                 con,
-                view_fingerprint=id(current) if current is not None else None,
+                view_fingerprint=current,
                 buffer_mtime=buf_mtime,
             )
         except Exception:
@@ -283,8 +352,7 @@ class _Pool:
         itself; this is belt-and-suspenders for the failure paths."""
         try:
             rows = con.execute(
-                "SELECT table_name FROM duckdb_tables() "
-                "WHERE schema_name = 'main' AND temporary = true"
+                "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main' AND temporary = true"
             ).fetchall()
         except Exception:
             return

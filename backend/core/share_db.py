@@ -492,90 +492,10 @@ def validate_passcode_strength(passcode: str) -> None:
 
 # ── Wordphrase generator ─────────────────────────────────────────────────────
 
-_WORDS_A = [
-    "ocean",
-    "sunset",
-    "river",
-    "forest",
-    "mountain",
-    "thunder",
-    "crystal",
-    "ember",
-    "silver",
-    "amber",
-    "harbor",
-    "meadow",
-    "canyon",
-    "lantern",
-    "horizon",
-    "ranger",
-    "summit",
-    "twilight",
-    "marble",
-    "boulder",
-]
-_WORDS_B = [
-    "breeze",
-    "shadow",
-    "spark",
-    "ridge",
-    "drift",
-    "tide",
-    "ember",
-    "flame",
-    "echo",
-    "wave",
-    "stream",
-    "trail",
-    "fern",
-    "creek",
-    "field",
-    "willow",
-    "pine",
-    "cedar",
-    "moss",
-    "stone",
-]
-_WORDS_C = [
-    "cabin",
-    "harbor",
-    "pier",
-    "vault",
-    "bridge",
-    "tower",
-    "garden",
-    "alcove",
-    "lodge",
-    "valley",
-    "trail",
-    "cove",
-    "ridge",
-    "field",
-    "anchor",
-    "haven",
-    "atelier",
-    "outpost",
-    "studio",
-    "lighthouse",
-]
-
 
 def generate_wordphrase() -> str:
-    """Three random words + two digits, separated by dashes.
-
-    Approx entropy: log2(20^3 * 100) ≈ 12.97 + 6.64 ≈ 19.6 bits over the
-    fixed-vocabulary alphabet — but the resulting 15-25 char ASCII string
-    sails past the 10-char / no-digits / no-breached-list bar that the
-    validator enforces. For production raise this against a 4096-word list.
-    """
-    return "-".join(
-        [
-            secrets.choice(_WORDS_A),
-            secrets.choice(_WORDS_B),
-            secrets.choice(_WORDS_C),
-            f"{secrets.randbelow(100):02d}",
-        ]
-    )
+    """Secure random string with >100 bits of entropy."""
+    return f"{secrets.token_hex(4)}-{secrets.token_hex(4)}-{secrets.token_hex(4)}-{secrets.token_hex(4)}"
 
 
 # ── Name / email validation (XSS hardening, Section #19a) ───────────────────
@@ -1063,6 +983,16 @@ def delete_session(session_id: str, *, con: sqlite3.Connection | None = None) ->
     con = con or get_global_share_con()
     con.execute("DELETE FROM remote_sessions WHERE session_id=?", (session_id,))
     con.commit()
+
+
+def get_session(session_id: str, *, con: sqlite3.Connection | None = None) -> dict | None:
+    con = con or get_global_share_con()
+    row = con.execute("SELECT * FROM remote_sessions WHERE session_id=?", (session_id,)).fetchone()
+    if row is None:
+        return None
+    rec = dict(row)
+    rec["pii_policy"] = json.loads(rec.get("pii_policy") or "{}")
+    return rec
 
 
 def get_all_sessions(*, con: sqlite3.Connection | None = None) -> list[dict]:

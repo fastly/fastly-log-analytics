@@ -13,7 +13,7 @@ from backend.repositories._base import _compact_sql_for_debug, _get_schema, _saf
 from backend.utils.sql_validator import (
     SQLValidationError,
     apply_user_query_limits,
-    has_limit_clause,
+    is_simple_select_statement,
     validate_user_sql,
 )
 from backend.utils.telemetry import get_tracked_calls
@@ -85,16 +85,10 @@ def execute_query(
     # DESCRIBE, SHOW, PRAGMA, EXPLAIN) since they return small fixed-shape
     # result sets where the LIMIT semantics differ or aren't supported.
     exec_sql = sql
-    sql_stripped_upper = sql.strip().upper().lstrip("(")
-    # 026: ``re.search(r"\bLIMIT\b", sql)`` matches inside string
-    # literals (``WHERE name = 'WITHOUT LIMIT'``) and inside SQL
-    # comments — both false positives that cause the auto-wrap to
-    # SKIP wrapping, leaving the query unbounded. The AST-aware
-    # check inspects the parse tree so strings/comments are out of
-    # scope.
-    is_simple_select = sql_stripped_upper.startswith(
-        ("SELECT", "WITH", "FROM", "VALUES", "TABLE")
-    ) and not has_limit_clause(sql, parser_con=con)
+    # 015 / 026: Check if the statement is a simple SELECT using the AST-aware helper.
+    # String-based startswith or regex checks match inside comments or string literals,
+    # leading to bypasses. The AST-aware check ensures accuracy.
+    is_simple_select = is_simple_select_statement(sql, parser_con=con)
     if is_simple_select:
         # Strip trailing semicolon so the wrapper LIMIT lands in the same statement.
         inner = sql.rstrip().rstrip(";")

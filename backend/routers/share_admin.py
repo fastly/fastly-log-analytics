@@ -27,6 +27,24 @@ router = APIRouter(prefix="/api/admin/share", tags=["share-admin"])
 # ── Status ──────────────────────────────────────────────────────────────────
 
 
+@router.get("/banner")
+def share_banner():
+    """Tiny payload (~80B) for the global share-status banner.
+
+    Used by frontend/hooks/useShareStatusBanner.tsx — polls every 15s on
+    every page that mounts AppLayout. The full /api/admin/share/status
+    response is ~11KB and includes services + invites + sessions + audit
+    logs + telemetry that the banner never reads. Per-poll-per-page
+    multiplied across the 12+ pages with AppLayout was a meaningful
+    cumulative cost.
+    """
+    mgr = get_tunnel_manager()
+    return {
+        "sharing_active": mgr.is_sharing_active(),
+        "public_url": mgr.public_url(),
+    }
+
+
 @router.get("/status")
 def share_status():
     mgr = get_tunnel_manager()

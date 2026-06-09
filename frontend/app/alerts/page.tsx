@@ -82,7 +82,13 @@ export default function AlertsPage() {
       })
       return data as any
     },
-    enabled: !!activeServiceId
+    enabled: !!activeServiceId,
+    // M4: this endpoint chains 3 sequential Fastly calls (~200ms total)
+    // to resolve the active version + S3 endpoint + sampling condition.
+    // None of that changes between window focuses, so cache the result
+    // for 30s — eliminates the per-focus refetch on this page and on
+    // every alerts-page mount within the window.
+    staleTime: 30_000,
   })
 
   const logPeriodSeconds = (loggingSettings as any)?.period || 30

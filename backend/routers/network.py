@@ -38,6 +38,26 @@ def network_health(req: NetworkHealthRequest, deps: AnalyticsDeps = Depends()):
         top_n=req.top_n,
         map_asn=req.map_asn,
     )
+    # Phase 3 item 13 — merge shielding-analysis into the network-health
+    # response so /network gets both shapes in one round-trip. Best-effort:
+    # if the shielding query fails (missing fields, no shield logs) the
+    # network-health response still ships; the field is just null.
+    try:
+        from backend.repositories import origin as _origin
+
+        shielding = _origin.get_shielding_analysis(
+            con=deps.con,
+            src=deps.source,
+            start_time=req.start_time,
+            end_time=req.end_time,
+            filters=req.filters,
+        )
+        # Strip the per-call telemetry — the outer with_telemetry below
+        # already collects the contextvar entries.
+        shielding = {k: v for k, v in shielding.items() if not k.startswith("debug_")}
+        res["shielding_analysis"] = shielding
+    except Exception:
+        res["shielding_analysis"] = None
     return NetworkHealthResponse.with_telemetry(**res)
 
 

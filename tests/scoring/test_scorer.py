@@ -317,6 +317,32 @@ def test_score_layer2_skipgram_rescues_via_anchor():
     assert score < 10
 
 
+def test_score_layer2_skipgram_unseen_anchor_does_not_override_anomalous_transition():
+    """Finding 021: Ensure that if the skip-gram anchor is an unseen route, its Laplace-smoothed
+    uniform prior does NOT override or mask a highly anomalous direct transition."""
+    # We construct a matrix with a highly visited direct route having an anomalous transition to /checkout,
+    # and no counts or totals for the unseen anchor /never-visited-anchor.
+    m = _matrix(
+        {
+            "/about-us": {"/home": 1000},  # direct transition /about-us -> /checkout is anomalous (0 count)
+        },
+        vocab=10,
+    )
+    # The direct transition probability will be: (0 + 0.5) / (1000 + 0.5 * 10) = 0.5 / 1005 ≈ 0.000497 (very low!)
+    # The unseen anchor prior would be: (0 + 0.5) / (0 + 0.5 * 10) = 0.1, multiplied by L2_SKIPGRAM_BETA (0.7) ≈ 0.07.
+    # Without the fix, max(0.000497, 0.07) = 0.07, which is above the low-transition threshold (score ≈ 0).
+    # With the fix, the unseen anchor is ignored, trans_prob = 0.000497, triggering a high transition anomaly score.
+    score, reasons, p = score_layer2(
+        m,
+        Route("/about-us", "content"),
+        Route("/never-visited-anchor", "product"),  # Unseen anchor! Not in matrix counts.
+        Route("/checkout", "checkout"),
+    )
+    assert p < 0.001
+    assert score >= 50
+    assert "low-transition-prob" in reasons
+
+
 # ── _blend_weight ────────────────────────────────────────────────────────────
 
 

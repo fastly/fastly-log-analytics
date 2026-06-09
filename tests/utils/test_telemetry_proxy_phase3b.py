@@ -29,19 +29,17 @@ def _clear_s3fs_instance_cache():
     """fsspec caches S3FileSystem instances by kwargs hash; without clearing,
     a second S3FileSystem(...) call in the same process reuses the first
     instance and bypasses __init__ — so flag-on tests would silently leak
-    into flag-off tests. Also wipe the module-level proxy-source registry so
-    one test's source can't bleed into another's S3FileSystem construction."""
+    into flag-off tests. Also reset the per-context proxy source so one test's
+    source can't bleed into another's S3FileSystem construction."""
     from s3fs import S3FileSystem
 
     from backend.core import iceberg as _ic
 
     S3FileSystem.clear_instance_cache()
-    with _ic._PROXY_REGISTRY_LOCK:
-        _ic._PROXY_SOURCE_REGISTRY.clear()
+    _ic._PENDING_FS_SOURCE.set(None)
     yield
     S3FileSystem.clear_instance_cache()
-    with _ic._PROXY_REGISTRY_LOCK:
-        _ic._PROXY_SOURCE_REGISTRY.clear()
+    _ic._PENDING_FS_SOURCE.set(None)
 
 
 @pytest.fixture
@@ -582,13 +580,12 @@ def test_pyiceberg_through_proxy_logs_telemetry_end_to_end(tmp_path, proxy_serve
             proxy_server._bust_config_cache()
 
             # Build the SqlCatalog directly so we can point at a tmp SQLite
-            # and proxy-route via the same _PENDING_FS_SOURCE seed +
-            # endpoint-keyed registry that _get_catalog populates in
-            # production. The registry is what carries the source into
-            # PyIceberg's parquet-write thread-pool workers (where the
-            # ContextVar is empty).
+            # and proxy-route via the same _PENDING_FS_SOURCE seed that
+            # _get_catalog populates in production. The patched
+            # ThreadPoolExecutor.submit (see iceberg.py) copies the
+            # current context into worker threads so PyIceberg's
+            # parquet-write workers also see this source.
             _ic._PENDING_FS_SOURCE.set(source)
-            _ic._register_proxy_source(source)
             db_path = str(tmp_path / "phase3b_task4.db")
             catalog = SqlCatalog(
                 "fos",

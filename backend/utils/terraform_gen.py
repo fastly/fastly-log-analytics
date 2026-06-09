@@ -101,6 +101,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     cond_stmt_h = _hcl_escape(cond_stmt)
 
     fos_host = f"{region}.object.fastlystorage.app"
+    fos_host_h = _hcl_escape(fos_host)
     shield_line = (
         f'    shield                = "{cdn_shield_h}"\n' if cdn_shield and cdn_shield.lower() != "none" else ""
     )
@@ -166,11 +167,11 @@ resource "fastly_service_vcl" "cdn_proxy" {{
 
   backend {{
     name                  = "fos_origin"
-    address               = "{fos_host}"
+    address               = "{fos_host_h}"
     port                  = 443
     use_ssl               = true
-    ssl_cert_hostname     = "{fos_host}"
-    ssl_sni_hostname      = "{fos_host}"
+    ssl_cert_hostname     = "{fos_host_h}"
+    ssl_sni_hostname      = "{fos_host_h}"
     connect_timeout       = 5000
     first_byte_timeout    = 60000
     between_bytes_timeout = 30000
@@ -258,7 +259,7 @@ resource "fastly_service_vcl" "logging_service" {{
   logging_s3 {{
     name               = "{endpoint_name_h}"
     bucket_name        = aws_s3_bucket.fos_bucket.bucket
-    domain             = "{fos_host}"
+    domain             = "{fos_host_h}"
     path               = "{_hcl_escape(path)}"
     period             = {period}
     gzip_level         = 9

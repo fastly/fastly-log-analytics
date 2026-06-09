@@ -44,6 +44,18 @@ def _build_test_app() -> FastAPI:
     def _sse():
         return {"ok": True}
 
+    @app.get("/api/services/{service_id}/scoring/status")
+    def _scoring_status(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/alerts/{service_id}")
+    def _alerts_for_service(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/custom-endpoint/{service_id}/data")
+    def _custom_endpoint(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
     return app
 
 
@@ -191,6 +203,28 @@ def test_analyst_read_only_blocks_writes(client):
     assert r2.json()["error"] == "read_only"
 
 
+def test_analyst_put_patch_delete_blocked_even_on_allowed_prefix(client):
+    """Regression for audit finding 005: the analyst read-only gate previously
+    grouped PUT/PATCH/DELETE with POST and let them through whenever the path
+    matched _ANALYST_ALLOWED_WRITE_PREFIXES (POST-allowed read-shaped query
+    endpoints under /api/dashboard, etc.). PUT/PATCH/DELETE must be rejected
+    unconditionally — the allowlist only applies to POST."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    for method in ("put", "patch", "delete"):
+        r = getattr(client, method)(
+            "/api/dashboard/some-mutating-endpoint?service=svcA",
+            headers={
+                "X-Remote-Analyst": "1",
+                "Host": "testserver",
+                "Origin": "https://testserver",
+            },
+        )
+        assert r.status_code == 403, f"{method.upper()} should be 403, got {r.status_code}"
+        assert r.json()["error"] == "read_only"
+
+
 def test_analyst_service_scope_blocks_unauthorized(client):
     _start_share()
     invite = _seed_invite(service_ids=["svcA"])
@@ -212,6 +246,110 @@ def test_analyst_service_scope_allows_authorized(client):
         headers={"X-Remote-Analyst": "1", "Host": "testserver"},
     )
     assert r2.status_code == 200
+
+
+def test_analyst_service_scope_blocks_omitted(client):
+    """If service is omitted, the middleware resolves the effective service ID
+    via get_active_service_id() and validates it, blocking if unauthorized."""
+    from unittest.mock import patch
+
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    with patch("backend.config.get_active_service_id", return_value="svcB"):
+        r2 = client.get(
+            "/api/dashboard",
+            headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+        )
+    assert r2.status_code == 403
+    assert r2.json()["error"] == "service_not_authorized"
+
+
+def test_analyst_path_param_service_blocked_when_unauthorized(client):
+    """Audit finding 006: an analyst scoped only to svcA must NOT be able to
+    read /api/services/svcB/scoring/status by relying on the active-service
+    fallback to satisfy the per-request scope check while the path parameter
+    targets a different service. The middleware now extracts the service ID
+    from known path templates."""
+    from unittest.mock import patch
+
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    # Active default points at svcA (analyst's authorized service) — the
+    # pre-fix code would resolve svcA, pass the scope gate, and forward the
+    # request to the path-svcB route handler.
+    with patch("backend.config.get_active_service_id", return_value="svcA"):
+        r = client.get(
+            "/api/services/svcB/scoring/status",
+            headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+        )
+    assert r.status_code == 403
+    assert r.json()["error"] == "service_not_authorized"
+    assert r.json()["service"] == "svcB"
+
+
+def test_analyst_path_param_service_allowed_when_authorized(client):
+    """Mirror of the above: when the analyst IS authorized for the
+    path-param service, the request goes through."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA", "svcB"])
+    _login_analyst(client, invite)
+    r = client.get(
+        "/api/services/svcB/scoring/status",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r.status_code == 200
+    assert r.json()["service_id"] == "svcB"
+
+
+def test_analyst_path_alerts_service_blocked_when_unauthorized(client):
+    """Same vector via /api/alerts/{service_id}."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    r = client.get(
+        "/api/alerts/svcB",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r.status_code == 403
+    assert r.json()["error"] == "service_not_authorized"
+
+
+def test_analyst_path_and_query_service_must_both_be_authorized(client):
+    """If the request carries svcA in the query AND svcB in the path,
+    BOTH must be in the analyst's allowlist. Previously the middleware only
+    checked the query candidate."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    r = client.get(
+        "/api/services/svcB/scoring/status?service=svcA",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r.status_code == 403
+    assert r.json()["error"] == "service_not_authorized"
+
+def test_analyst_custom_un_regexed_route_desync_blocked(client):
+    """Ensure custom routes with custom un-regexed prefixes with service_id path parameters
+    are fully protected from path-to-query desync bypass attempts by route-matching."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    r = client.get(
+        "/api/custom-endpoint/svcB/data?service=svcA",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r.status_code == 403
+    assert r.json()["error"] == "service_not_authorized"
+
+    # But if authorized, it should work
+    r2 = client.get(
+        "/api/custom-endpoint/svcA/data?service=svcA",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r2.status_code == 200
+    assert r2.json()["service_id"] == "svcA"
 
 
 # ── Origin gate ────────────────────────────────────────────────────────────

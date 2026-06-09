@@ -44,7 +44,7 @@ export function PopLocationsModal({ open, onOpenChange }: PopLocationsModalProps
   const mutation = useMutation({
     mutationFn: async () => {
       const { data } = await client.POST("/api/admin/pop-locations/refresh", {
-        params: { query: { token: apiKey } }
+        body: { token: apiKey }
       })
       return data as any
     },

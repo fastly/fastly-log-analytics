@@ -17,11 +17,26 @@ def bootstrap(
     request: Request,
     service_id: str | None = Depends(get_service_id),
 ):
+    import time as _time
+
     from backend.core import duckdb as _db
     from backend.core.duckdb import STORAGE_MODE
     from backend.services.service_manager import get_enriched_services
     from backend.utils.countries import COUNTRY_MAP
     from backend.utils.pop_utils import get_pop_lat_lon_map
+
+    # Cold-path attribution: time each major phase so the harness can pin
+    # which section owns the bootstrap wall time. Each entry is
+    # {"section": str, "time_ms": float} and surfaces via
+    # BootstrapResponse._section_timings.
+    section_timings: list[dict] = []
+
+    def _timed(name: str, fn):
+        t0 = _time.monotonic()
+        try:
+            return fn()
+        finally:
+            section_timings.append({"section": name, "time_ms": round((_time.monotonic() - t0) * 1000, 2)})
 
     # /api/bootstrap is in _UNAUTH_ANALYST_PATHS so anonymous remote visitors
     # can get a stub response telling the frontend to redirect them to
@@ -35,7 +50,10 @@ def bootstrap(
         if sid:
             from backend.utils.tunnel import get_tunnel_manager
 
-            analyst_session = get_tunnel_manager().validate_session(sid)
+            def _validate():
+                return get_tunnel_manager().validate_session(sid)
+
+            analyst_session = _timed("validate_analyst_session", _validate)
             if analyst_session is not None:
                 request.state.analyst_session = analyst_session
 
@@ -49,13 +67,14 @@ def bootstrap(
                 "is_remote_analyst": True,
                 "needs_login": True,
             },
+            section_timings=section_timings,
         )
 
     src: dict | None = None
     if service_id:
-        src = _db.get_source_for_service(service_id)
+        src = _timed("get_source_for_service", lambda: _db.get_source_for_service(service_id))
 
-    services = get_enriched_services(service_id)
+    services = _timed("get_enriched_services", lambda: get_enriched_services(service_id))
 
     # Analyst path: filter services to those scoped on the invite and force
     # access_level=read_only regardless of what get_source_for_service returned.
@@ -75,10 +94,15 @@ def bootstrap(
     schema: list = []
 
     # Use cached schema from config to avoid acquiring a DB lock
-    if valid_active_id:
+    def _resolve_schema() -> list:
+        if not valid_active_id:
+            return []
         active_svc = next((s for s in services if s.get("service_id") == valid_active_id), None)
         if active_svc and active_svc.get("status"):
-            schema = active_svc["status"].get("schema", [])
+            return active_svc["status"].get("schema", []) or []
+        return []
+
+    schema = _timed("schema_lookup", _resolve_schema)
 
     # NOTE: the previous fallback opened a read-only DuckDB connection here
     # and ran get_schema() against the source on cold-cache loads. That call
@@ -90,7 +114,7 @@ def bootstrap(
     # renders without a hint banner; the user can refresh once the cron
     # has run (typically <60s after startup).
 
-    pops = get_pop_lat_lon_map()
+    pops = _timed("get_pop_lat_lon_map", get_pop_lat_lon_map)
 
     # Include custom field info so the dashboard can render custom distribution cards
     # without a separate fetch. We load the raw config here because the enriched
@@ -98,20 +122,43 @@ def bootstrap(
     custom_dashboard_cards: list[dict] = []
     custom_fields_catalog: list[dict] = []
     active_log_field_ids: list[str] = []
-    if valid_active_id:
+
+    def _resolve_custom_fields():
+        nonlocal custom_dashboard_cards, custom_fields_catalog, active_log_field_ids
+        if not valid_active_id:
+            return
         from backend import config as svcconfig
         from backend.core import log_fields as _lf
 
         active_cfg = svcconfig.load_config(valid_active_id)
-        if active_cfg:
-            lf_config = _lf.get_lf_config(active_cfg)
-            custom_fields_catalog = _lf.get_custom_fields_catalog_entries(lf_config)
-            custom_dashboard_cards = [
-                {"id": f["id"], "label": f["label"]} for f in custom_fields_catalog if f.get("show_in_dashboard")
-            ]
-            active_log_field_ids = sorted(_lf.resolve_enabled_fields(lf_config)) + [
-                cf["name"] for cf in lf_config.get("custom_fields", []) if cf.get("enabled", True)
-            ]
+        if not active_cfg:
+            return
+        lf_config = _lf.get_lf_config(active_cfg)
+        custom_fields_catalog = _lf.get_custom_fields_catalog_entries(lf_config)
+        custom_dashboard_cards = [
+            {"id": f["id"], "label": f["label"]} for f in custom_fields_catalog if f.get("show_in_dashboard")
+        ]
+        active_log_field_ids = sorted(_lf.resolve_enabled_fields(lf_config)) + [
+            cf["name"] for cf in lf_config.get("custom_fields", []) if cf.get("enabled", True)
+        ]
+
+    _timed("custom_fields_catalog", _resolve_custom_fields)
+
+    views: list[dict] = []
+
+    def _resolve_views() -> list[dict]:
+        if not valid_active_id:
+            return []
+        from backend.repositories import views as _views_repo
+
+        try:
+            return _views_repo.get_views(valid_active_id)
+        except Exception:
+            # Views are a UX nicety, not a correctness gate. A repo error
+            # must not break /api/bootstrap.
+            return []
+
+    views = _timed("views", _resolve_views)
 
     # Force read_only for analyst sessions regardless of underlying source.
     if analyst_session is not None:
@@ -137,6 +184,8 @@ def bootstrap(
         custom_dashboard_cards=custom_dashboard_cards,
         custom_fields_catalog=custom_fields_catalog,
         active_log_field_ids=active_log_field_ids,
+        views=views,
+        section_timings=section_timings,
     )
 
 
@@ -283,7 +332,24 @@ def insight_availability(
                 detail={"error": "service_not_authorized", "service": source.get("name")},
             )
 
-    actual_cols = {col["name"] for col in get_schema(con, source)}
+    # Prefer the cached schema snapshot maintained by the status-refresh
+    # cron — same source of truth the /schema endpoint and /bootstrap
+    # already use. Saves ~300 ms per /insight-availability call because
+    # we skip the per-service lock + parquet glob that get_schema would
+    # otherwise pay on cold cache, especially when /insights is in
+    # flight concurrently.
+    from backend import config as svcconfig
+
+    actual_cols: set[str] = set()
+    cached_status = svcconfig.get_status(source["name"])
+    if cached_status and "schema" in cached_status:
+        actual_cols = {col["name"] for col in cached_status["schema"]}
+    if not actual_cols:
+        # Fallback: cron hasn't populated status yet (cold-start
+        # within the first ~60s after backend boot). Do the live
+        # lookup so first-load isn't a 503 — subsequent calls hit
+        # the cron-populated cache.
+        actual_cols = {col["name"] for col in get_schema(con, source)}
     from backend.core.log_fields import INSIGHT_DEFINITIONS
 
     result = []
