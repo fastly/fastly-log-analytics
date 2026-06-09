@@ -50,8 +50,9 @@ graph TD
 
 ```python
 import asyncio
-import sqlite3
+import aiosqlite
 import aiodns
+import tenacity
 from typing import Dict, List, Tuple, Optional
 
 class AsyncRdnsResolver:
@@ -66,7 +67,6 @@ class AsyncRdnsResolver:
         self.semaphore = asyncio.Semaphore(concurrency_limit)
         self.cache_ttl = cache_ttl_seconds
         self.timeout = timeout
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._resolver: Optional[aiodns.DNSResolver] = None
 
     @property
@@ -83,8 +83,8 @@ class AsyncRdnsResolver:
         if not ips:
             return {}
 
-        # 1. Fetch from SQLite Cache
-        cached_results, missing_ips = self._get_cached_ips(ips)
+        # 1. Fetch from SQLite Cache (async)
+        cached_results, missing_ips = await self._get_cached_ips(ips)
         if not missing_ips:
             return cached_results
 
@@ -106,9 +106,9 @@ class AsyncRdnsResolver:
                 cached_results[ip] = hostname
                 valid_writes.append((ip, hostname, now))
 
-        # 4. SQLite single bulk write transaction
+        # 4. SQLite single bulk write transaction (async)
         if valid_writes:
-            self._bulk_save_to_cache(valid_writes)
+            await self._bulk_save_to_cache(valid_writes)
 
         return cached_results
 
@@ -137,7 +137,7 @@ class AsyncRdnsResolver:
                 # Catch resolver/host errors
                 return None
 
-    def _get_cached_ips(self, ips: List[str]) -> Tuple[Dict[str, str], List[str]]:
+    async def _get_cached_ips(self, ips: List[str]) -> Tuple[Dict[str, str], List[str]]:
         cached: Dict[str, str] = {}
         missing: List[str] = []
         now = int(asyncio.get_event_loop().time())
@@ -146,14 +146,13 @@ class AsyncRdnsResolver:
         placeholders = ",".join("?" for _ in ips)
         query = f"SELECT ip, hostname, resolved_at FROM rdns_cache WHERE ip IN ({placeholders})"
         
-        with sqlite3.connect(self.db_path) as con:
-            cur = con.cursor()
-            cur.execute(query, ips)
-            for ip, hostname, resolved_at in cur.fetchall():
-                if now - resolved_at < self.cache_ttl:
-                    cached[ip] = hostname
-                else:
-                    missing.append(ip)
+        async with aiosqlite.connect(self.db_path) as con:
+            async with con.execute(query, ips) as cursor:
+                async for ip, hostname, resolved_at in cursor:
+                    if now - resolved_at < self.cache_ttl:
+                        cached[ip] = hostname
+                    else:
+                        missing.append(ip)
 
         # Mark truly missing
         for ip in ips:
@@ -162,19 +161,30 @@ class AsyncRdnsResolver:
 
         return cached, missing
 
-    def _bulk_save_to_cache(self, records: List[Tuple[str, str, int]]):
+    async def _bulk_save_to_cache(self, records: List[Tuple[str, str, int]]):
         """
-        Executes a single-transaction bulk write lock to prevent WAL write lock starvation.
+        Executes a single-transaction async bulk write lock using aiosqlite.
+        Enforces a retry mechanism on operational lock/busy failures to avoid WAL starvation.
         """
-        with sqlite3.connect(self.db_path) as con:
-            con.execute("PRAGMA journal_mode=WAL;")
-            con.execute("BEGIN TRANSACTION;")
-            try:
-                con.executemany(
-                    "INSERT OR REPLACE INTO rdns_cache (ip, hostname, resolved_at) VALUES (?, ?, ?);",
-                    records
-                )
-                con.commit()
-            except Exception:
-                con.rollback()
-                raise
+        @tenacity.retry(
+            retry=tenacity.retry_if_exception_type(aiosqlite.OperationalError),
+            stop=tenacity.stop_after_attempt(5),
+            wait=tenacity.wait_exponential(multiplier=0.1, min=0.1, max=1.0),
+            reraise=True
+        )
+        async def _save():
+            async with aiosqlite.connect(self.db_path) as con:
+                await con.execute("PRAGMA journal_mode=WAL;")
+                # Open manual transaction for atomicity
+                async with con.execute("BEGIN TRANSACTION;"):
+                    try:
+                        await con.executemany(
+                            "INSERT OR REPLACE INTO rdns_cache (ip, hostname, resolved_at) VALUES (?, ?, ?);",
+                            records
+                        )
+                        await con.commit()
+                    except Exception:
+                        await con.rollback()
+                        raise
+        await _save()
+```
