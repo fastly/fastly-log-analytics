@@ -5,6 +5,12 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useTheme } from 'next-themes'
 import { DashboardMapData } from '@/types/api'
+import countryCodes from '@/lib/country-codes.json'
+
+const alpha3ToAlpha2: Record<string, string> = {}
+Object.entries(countryCodes as Record<string, string>).forEach(([a2, a3]) => {
+  alpha3ToAlpha2[a3.toUpperCase()] = a2.toUpperCase()
+})
 
 interface ChoroplethMapProps {
   data: DashboardMapData[]
@@ -124,8 +130,11 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
 
         map.current.on('click', 'countries', (e) => {
           if (e.features && e.features.length > 0) {
-            const name = e.features[0].properties.name as string
-            onCountryClickRef.current?.(name)
+            const feature = e.features[0]
+            const id = feature.id as string
+            const name = feature.properties.name as string
+            const code = id ? alpha3ToAlpha2[id.toUpperCase()] : null
+            onCountryClickRef.current?.(code || name)
           }
         })
       })
