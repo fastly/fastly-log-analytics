@@ -43,11 +43,14 @@ All screenshots and raw logs were persisted under the secure scratch workspace. 
 | **Billing / Costs** | `/api/usage/log-activity` | `403 Forbidden` | `200` | 🚨 **RBAC BYPASS (Data Leak)** |
 | **Service Config** | `/api/services/{id}/lake-info` | `403 Forbidden` | `200` | 🚨 **RBAC BYPASS (Recon Leak)** |
 | **Service Config** | `/api/cron-schedule` | `403 Forbidden` | `200` | 🚨 **RBAC BYPASS (Recon Leak)** |
+| **Service Config** | `/api/cron-runs` | `403 Forbidden` | `200` | 🚨 **RBAC BYPASS (Recon Leak)** |
+| **Service Config** | `/api/audit-logs` | `403 Forbidden` | `200` | 🚨 **RBAC BYPASS (Recon Leak)** |
 | **Service Config** | `/api/services/{id}/logging-settings` | `403 Forbidden` | `200` | 🚨 **RBAC BYPASS (Recon Leak)** |
 | **Service Config** | `/api/services/{id}/log-fields` | `403 Forbidden` | `200` | 🚨 **RBAC BYPASS (Recon Leak)** |
 | **Data Exfiltration** | `/api/download-all` | `403 Forbidden` | `200` | 🚨 **CRITICAL BYPASS (Full Exfil)** |
 | **Data Exfiltration** | `/api/download-folder` | `403 Forbidden` | `200` | 🚨 **CRITICAL BYPASS (Full Exfil)** |
 | **Data Exfiltration** | `/api/download?key=...` | `403 Forbidden` | `502` [^1] | 🚨 **CRITICAL BYPASS (Full Exfil)** |
+| **Data Exfiltration** | `/api/services/{id}/custom-fields/export` | `403 Forbidden` | `200` | 🚨 **RBAC BYPASS (Schema Leak)** |
 | **Session Scoring** | `/api/services/{id}/scoring/config` | `403 Forbidden` | `200` | 🚨 **RBAC BYPASS (Recon Leak)** |
 | **Session Scoring** | `/api/services/{id}/scoring/status` | `403 Forbidden` | `200` | 🚨 **RBAC BYPASS (Recon Leak)** |
 | **Session Scoring** | `/api/services/{id}/scoring/audit` | `403 Forbidden` | `200` | 🚨 **RBAC BYPASS (Recon Leak)** |
@@ -135,6 +138,34 @@ All screenshots and raw logs were persisted under the secure scratch workspace. 
 
 ---
 
+### 🚨 Finding H-5: Ingestion Cron Logs & Administrative Audit Logs Information Disclosure
+* **Location:** Backend Routers `backend/routers/services/cron.py` (`GET /api/cron-runs`) and `backend/routers/services/audit.py` (`GET /api/audit-logs`)
+* **Severity:** **High (Role-Based Access Control Bypass)**
+* **Description:**
+  Historical ingestion cron runs and global administrative audit logs are readable by any read-only analyst.
+* **Vulnerability Analysis:**
+  1. The cron history logs router has the prefix `/api/cron-runs`.
+  2. The administrative audit logs router has the prefix `/api/audit-logs`.
+  3. Neither prefix is included in `_ANALYST_BLOCKED_PREFIXES` in `backend/utils/remote_access.py`.
+  4. Since all request methods are `GET`, they bypass the standard mutating write block (which only blocks non-GET endpoints). Therefore, these routes are fully accessible to remote analysts.
+* **Impact:**
+  - `GET /api/cron-runs` exposes details of all background ingestion tasks, listing absolute file paths on the VM, row counts, durations, and task statuses. This leaks structural file path information and system operations.
+  - `GET /api/audit-logs` exposes system-wide administrative audit trails, detailing when service configurations were modified, credentials changed, or sharing invitations issued. This allows analysts to track administrative actions, potentially revealing timing gaps or security operations.
+
+---
+
+### 🚨 Finding H-6: Custom Fields Configuration Schema Exfiltration
+* **Location:** Backend Router `backend/routers/services/core.py` (Endpoint: `GET /api/services/{service_id}/custom-fields/export`)
+* **Severity:** **High (Information Disclosure & Schema Leak)**
+* **Description:**
+  Read-only analysts can invoke the custom fields schema export endpoint to obtain the complete custom-defined VCL schema configuration.
+* **Vulnerability Analysis:**
+  The endpoint `GET /api/services/{service_id}/custom-fields/export` is exposed on `/api` under the `services` router. Because `/api/services` is partially open to allow analysts to fetch service lists and basic metadata, any unblocked `GET` route on this path is reachable. The export endpoint does not have explicit RBAC gating.
+* **Impact:**
+  Exposes proprietary customized log parsing logic, including precise VCL capturing expressions, regular expressions, collection stages, and custom variable definitions, enabling complete extraction of administrative telemetry structure.
+
+---
+
 ## Section 2: Medium Severity Findings
 
 ### ⚠️ Finding M-1: Alerts Page Triggers Broken UI & 403 Forbidden Exceptions
@@ -190,8 +221,10 @@ graph TD
     B -- Yes --> D{Is Path Blocked?}
     D -- Starts with Blocked Prefix? -- Yes --> E[403 Forbidden]
     D -- Match GET /api/usage/*? -- Yes --> E
+    D -- Match GET /api/cron-runs or /api/audit-logs? -- Yes --> E
     D -- Match GET /api/download*? -- Yes --> E
     D -- Match GET /api/services/*/scoring/{config/audit/exclude/enforce}? -- Yes --> E
+    D -- Match GET /custom-fields/export? -- Yes --> E
     D -- Path Allowed? -- Yes --> F[Forward to Route]
 ```
 
@@ -202,28 +235,33 @@ To secure all exposed GET endpoints, we will update `backend/utils/remote_access
  # Path prefixes that are EXPLICITLY blocked for analysts even with a valid
  # session. Admin surface, anything mutating provisioning, debug.
  _ANALYST_BLOCKED_PREFIXES = (
-     "/api/admin/",  # includes /api/admin/share/*
+     "/api/admin/",  # includes /api/admin/share/* — analyst can never reach admin tooling
      "/api/provision/",
      "/api/debug/",
 +    "/api/usage/",  # Secure operational cost leakage
++    "/api/cron-runs",  # Prevent ingestion task history disclosure
++    "/api/audit-logs",  # Prevent administrative audit trail disclosure
  )
 
-+# Exact path matching for specific administrative sub-paths under allowed routers
-+_ANALYST_BLOCKED_SUBPATHS = (
-+    "/api/download-all",       # Prevent full database zip exfiltration
-+    "/api/download-folder",    # Prevent folder zip exfiltration
-+    "/api/download",           # Prevent raw file download
-+    "/cron-schedule",          # Prevent cron setup leaks
-+)
+ # Exact path matching for specific administrative sub-paths under allowed routers
+ _ANALYST_BLOCKED_SUBPATHS = (
+     "/api/download-all",       # Prevent full database zip exfiltration
+     "/api/download-folder",    # Prevent folder zip exfiltration
+     "/api/download",           # Prevent raw file download
+     "/cron-schedule",          # Prevent cron setup leaks
+ )
 ```
 
-And update `_is_blocked_path` to evaluate both prefix and subpath matches:
+And update `_is_blocked_path` to evaluate prefix, subpath, custom-fields export, and session scoring suffix matches:
 ```python
 def _is_blocked_path(path: str) -> bool:
     if any(path.startswith(p) for p in _ANALYST_BLOCKED_PREFIXES):
         return True
     if any(path == p or path.startswith(p + "?") for p in _ANALYST_BLOCKED_SUBPATHS):
         return True
++   # Secure custom fields schema export
++   if "/custom-fields/export" in path:
++       return True
     # Secure Session-Scoring sensitive admin configurations
     if "/scoring/" in path:
         admin_scoring_suffixes = ("/config", "/status", "/audit", "/threshold", "/exclude-regex", "/enforce-status-code")
