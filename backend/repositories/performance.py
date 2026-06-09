@@ -13,6 +13,7 @@ from backend.repositories._base import (
     safe_iso,
     time_bucket_select,
 )
+from backend.repositories._sql import performance as SQL
 from backend.repositories.utils.filters import build_where_clause
 
 
@@ -227,13 +228,13 @@ def get_origin_ts(
         # Seconds to Milliseconds
         val_expr = f'ROUND(COALESCE(PERCENTILE_CONT({pct_val}) WITHIN GROUP (ORDER BY "{metric_col}") * 1000.0, 0), 2)'
 
-    q = f"""
-        SELECT {time_bucket_select(interval_str)},
-               {val_expr} AS value
-        FROM {table_name}
-        WHERE {where_clause} AND "{metric_col}" IS NOT NULL
-        GROUP BY 1 ORDER BY 1
-    """
+    q = SQL.ORIGIN_TIMESERIES.format(
+        time_bucket_select=time_bucket_select(interval_str),
+        value_expr=val_expr,
+        table=table_name,
+        where_clause=where_clause,
+        metric_col=metric_col,
+    )
     res_cursor = runner.execute_with_retry(q, params)
     if res_cursor is None:
         from backend.repositories._base import empty_schema_response
