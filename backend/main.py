@@ -411,7 +411,37 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — permissive during development; tighten origins to the deployed domain in production.
+# ── Middleware stack ──────────────────────────────────────────────────────────
+#
+# Declared order (outermost → innermost). Asserted at boot below via
+# assert_middleware_order(); a divergence crashes startup rather than
+# shipping a silently-broken request pipeline. See ADR-04 for the rationale
+# behind each layer's position.
+MIDDLEWARE_ORDER = (
+    "CompressMiddleware",              # outermost — sees final response body
+    "BaseHTTPMiddleware",              # @app.middleware('http') telemetry decorator
+    "TelemetryResponseBodyMiddleware", # JSON-body backstop for debug panel
+    "RemoteAccessMiddleware",          # analyst firewall — rejects before CORS
+    "CORSMiddleware",                  # innermost — closest to FastAPI routing
+)
+
+
+def assert_middleware_order(_app: FastAPI) -> None:
+    """Boot-time assertion that middleware order matches ADR-04.
+
+    Crashes on mismatch — a reorder that compiles is no longer enough to
+    ship. ``user_middleware`` is in outermost-first order (Starlette
+    reverses the add-order internally), so the comparison is direct.
+    """
+    actual = tuple(m.cls.__name__ for m in _app.user_middleware)
+    if actual != MIDDLEWARE_ORDER:
+        raise RuntimeError(
+            f"Middleware order violation (ADR-04). "
+            f"expected={MIDDLEWARE_ORDER} actual={actual}"
+        )
+
+
+# INVARIANT: CORSMiddleware is innermost (see ADR-04).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -421,24 +451,17 @@ app.add_middleware(
 )
 
 
-# Remote-analyst firewall: classifies each request as local vs remote and
-# enforces session, fingerprint, IP-whitelist, read-only, service-scope, and
-# SSE allow-listing. Local-admin requests pass through unchanged.
-# Must run BEFORE telemetry_middleware so blocked analyst requests don't
-# pollute usage_log with admin-scoped rows.
+# INVARIANT: RemoteAccessMiddleware above CORS, below telemetry (see ADR-04).
+# Blocks analyst requests before they reach the telemetry layer so blocked
+# analyst hits don't pollute usage_log with admin-scoped rows.
 from backend.utils.remote_access import RemoteAccessMiddleware  # noqa: E402
 
 app.add_middleware(RemoteAccessMiddleware)
 
 
-# M1 — telemetry backstop. Auto-injects _debug_queries / _debug_calls /
-# _is_cached into JSON dict responses that don't already carry them, so
-# a newly-added endpoint that returns a plain dict can't accidentally
-# drop the Debug Panel for that request. MUST register INNER to Gzip
-# (i.e. via add_middleware BEFORE the GZip line below — Starlette's
-# stack treats later add_middleware calls as OUTER) so the body it
-# reads isn't already compressed. Gated on DEBUG_RESPONSES, same flag
-# BaseResponse uses; off by default in prod.
+# INVARIANT: TelemetryResponseBodyMiddleware inside Compress, outside
+# RemoteAccess (see ADR-04). Reads uncompressed JSON bodies to inject
+# debug fields; gated on DEBUG_RESPONSES.
 from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware  # noqa: E402
 
 app.add_middleware(TelemetryResponseBodyMiddleware)
@@ -485,20 +508,16 @@ async def telemetry_middleware(request: Request, call_next):
     return response
 
 
-# Brotli / zstd / gzip compression for analyst responses. CompressMiddleware
-# negotiates the best available encoding from the client's Accept-Encoding
-# header (zstd > br > gzip > identity). Skips text/event-stream (SSE) and
-# any response already carrying a Content-Encoding header, so the streaming
-# routers in routers/services/core.py and routers/provision.py pass through
-# uncompressed. Registered LAST so it is the OUTERMOST middleware — the
-# decorator-style telemetry_middleware above uses Starlette's
-# BaseHTTPMiddleware, which buffers the response and re-emits it; that
-# re-emit strips the Content-Encoding header from any inner middleware.
-# Audit on 2026-06-09 confirmed every Accept-Encoding variant came back
-# uncompressed (11490 B raw, no content-encoding) when Compress sat
-# inside BaseHTTPMiddleware. Keeping it outermost preserves the encoded
-# response all the way to the client.
+# INVARIANT: CompressMiddleware is outermost (see ADR-04). Must wrap the
+# final response body so Content-Encoding survives all the way to the
+# client; an inner placement gets stripped by BaseHTTPMiddleware's
+# buffer-and-reemit (audited 2026-06-09: 11490 B raw uncompressed when
+# Compress sat inside the telemetry decorator).
 app.add_middleware(CompressMiddleware, minimum_size=1024)
+
+# Boot-time middleware-order assertion. Crashes on violation rather than
+# shipping a silently-broken stack. See ADR-04 + assert_middleware_order().
+assert_middleware_order(app)
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
