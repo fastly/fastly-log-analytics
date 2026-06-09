@@ -19523,7 +19523,7 @@
           "use_tunnel": {
             "type": "boolean",
             "title": "Use Tunnel",
-            "default": true
+            "default": false
           },
           "public_endpoint": {
             "anyOf": [

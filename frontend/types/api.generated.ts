@@ -6336,7 +6336,7 @@ export interface components {
         ShareStartPayload: {
             /**
              * Use Tunnel
-             * @default true
+             * @default false
              */
             use_tunnel: boolean;
             /** Public Endpoint */

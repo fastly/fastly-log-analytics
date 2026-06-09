@@ -50,6 +50,7 @@ def test_apply_pending_is_idempotent(fresh_share_con):
 # ── Corruption self-heal ────────────────────────────────────────────────────
 
 
+@pytest.mark.security_regression
 def test_quarantines_corrupt_file_and_rebuilds(tmp_path, monkeypatch):
     """A garbage file at the DB path is moved aside and a fresh DB is created."""
     path = tmp_path / "system"
@@ -78,11 +79,16 @@ def test_quarantines_corrupt_file_and_rebuilds(tmp_path, monkeypatch):
 # ── Passcode hashing ────────────────────────────────────────────────────────
 
 
+@pytest.mark.security_regression
 def test_hash_then_verify_succeeds():
     h = share_db.hash_passcode("correct-horse-battery-staple")
+    # New hashes use argon2id (OWASP 2026 default). Legacy ``scrypt$...``
+    # is verify-only; see test_legacy_scrypt_hash_still_verifies below.
+    assert h.startswith("$argon2")
     assert share_db.verify_passcode("correct-horse-battery-staple", h)
 
 
+@pytest.mark.security_regression
 def test_verify_wrong_passcode_fails():
     h = share_db.hash_passcode("right-one-here")
     assert not share_db.verify_passcode("wrong-one-here", h)
@@ -94,14 +100,98 @@ def test_hash_is_unique_per_call():
     assert h1 != h2  # different salt → different ciphertext
 
 
+@pytest.mark.security_regression
 def test_verify_rejects_malformed_stored():
-    assert not share_db.verify_passcode("anything", "not-a-scrypt-hash")
+    assert not share_db.verify_passcode("anything", "not-a-recognised-hash")
     assert not share_db.verify_passcode("anything", "scrypt$bad$format")
+    assert not share_db.verify_passcode("anything", "$argon2id$broken")
+    assert not share_db.verify_passcode("anything", "")
+
+
+# ── Legacy scrypt verify + transparent rehash-on-login ──────────────────────
+
+
+def _make_legacy_scrypt_hash(passcode: str) -> str:
+    """Build a ``scrypt$N$r$p$saltHex$digestHex`` string the way the
+    pre-argon2 ``hash_passcode`` did. Used to populate the DB with a
+    legacy row so we can prove the verify branch + rehash-on-login path
+    work for users created before the cutover.
+    """
+    import hashlib
+    import secrets
+
+    salt = secrets.token_bytes(16)
+    dk = hashlib.scrypt(passcode.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32)
+    return f"scrypt$16384$8$1${salt.hex()}${dk.hex()}"
+
+
+@pytest.mark.security_regression
+def test_legacy_scrypt_hash_still_verifies():
+    """A scrypt-format stored hash continues to verify after the argon2 cutover."""
+    legacy = _make_legacy_scrypt_hash("ocean-breeze-cabin-42")
+    assert legacy.startswith("scrypt$")
+    assert share_db.verify_passcode("ocean-breeze-cabin-42", legacy)
+    assert not share_db.verify_passcode("wrong-passcode-here", legacy)
+
+
+@pytest.mark.security_regression
+def test_argon2id_hash_verifies():
+    """The current default produces an argon2id hash that round-trips."""
+    h = share_db.hash_passcode("ocean-breeze-cabin-42")
+    assert h.startswith("$argon2id$")
+    assert share_db.verify_passcode("ocean-breeze-cabin-42", h)
+
+
+@pytest.mark.security_regression
+def test_needs_rehash_flags_legacy_scrypt_but_not_argon2id():
+    legacy = _make_legacy_scrypt_hash("ocean-breeze-cabin-42")
+    current = share_db.hash_passcode("ocean-breeze-cabin-42")
+    assert share_db.needs_rehash(legacy) is True
+    assert share_db.needs_rehash(current) is False
+    assert share_db.needs_rehash("") is False
+    assert share_db.needs_rehash("garbage-not-a-hash") is False
+
+
+@pytest.mark.security_regression
+def test_login_rehashes_legacy_scrypt_in_place():
+    """A successful login against a scrypt-stored invite upgrades the row to argon2id.
+
+    The next read of the row shows the new ``$argon2id$...`` hash; the
+    next login keeps working because verify accepts both formats.
+    """
+    inv = share_db.create_remote_invite(
+        name="Drew",
+        email="legacy@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=[],
+    )
+    # Stamp the row with a legacy scrypt hash to simulate a pre-cutover
+    # invite that has not yet been logged into.
+    legacy = _make_legacy_scrypt_hash("ocean-breeze-cabin-42")
+    con = share_db.get_global_share_con()
+    con.execute("UPDATE remote_invites SET passcode=? WHERE id=?", (legacy, inv["id"]))
+    con.commit()
+    assert con.execute("SELECT passcode FROM remote_invites WHERE id=?", (inv["id"],)).fetchone()[0].startswith(
+        "scrypt$"
+    )
+
+    # Login succeeds AND the row is rehashed to argon2id in place.
+    found = share_db.get_remote_invite_by_email_passcode("legacy@example.com", "ocean-breeze-cabin-42")
+    assert found is not None
+    stored_after = con.execute("SELECT passcode FROM remote_invites WHERE id=?", (inv["id"],)).fetchone()[0]
+    assert stored_after.startswith("$argon2id$"), stored_after
+
+    # A second login still works against the now-argon2id row.
+    found2 = share_db.get_remote_invite_by_email_passcode("legacy@example.com", "ocean-breeze-cabin-42")
+    assert found2 is not None
 
 
 # ── Passcode strength validator ─────────────────────────────────────────────
 
 
+@pytest.mark.security_regression
 @pytest.mark.parametrize(
     "weak",
     [
@@ -117,6 +207,7 @@ def test_validate_passcode_rejects_weak(weak):
         share_db.validate_passcode_strength(weak)
 
 
+@pytest.mark.security_regression
 @pytest.mark.parametrize(
     "ok",
     [
@@ -214,8 +305,10 @@ def test_create_invite_round_trips():
     assert fetched["service_ids"] == ["svcA", "svcB"]
     assert fetched["pii_policy"] == {"mask_ips": False}
     assert fetched["revoked"] == 0
-    # Passcode is hashed, not stored plaintext.
-    assert fetched["passcode"].startswith("scrypt$")
+    # Passcode is hashed, not stored plaintext. New invites use argon2id;
+    # the legacy ``scrypt$...`` format is verify-only post-cutover.
+    assert fetched["passcode"].startswith("$argon2")
+    assert "ocean-breeze-cabin-42" not in fetched["passcode"]
 
 
 def test_create_invite_weak_passcode_raises():
@@ -571,16 +664,25 @@ def test_apply_pii_policy_walks_lists_and_arrays():
     assert out["nested_list"][1]["ip_address"] == "192.168.1.xxx"
 
 
+@pytest.mark.security_regression
 def test_get_remote_invite_timing_equalization():
+    """Closes the email-enumeration 2x timing side-channel.
+
+    Patched at the invites module (the actual call site) rather than the
+    share_db package re-export, because ``invites.py`` binds the symbol
+    at import time and would not see a patch applied to the package
+    namespace.
+    """
     from unittest.mock import patch
 
     # 1. Call with a non-existent email -> must equalize timing once
-    with patch("backend.core.share_db._equalize_passcode_timing") as mock_equalize:
+    with patch("backend.core.share_db.invites._equalize_passcode_timing") as mock_equalize:
         res = share_db.get_remote_invite_by_email_passcode("nonexistent@example.com", "some-passcode")
         assert res is None
         mock_equalize.assert_called_once_with("some-passcode")
 
-    # 2. Call with an existing email but wrong passcode -> must NOT equalize timing because we already paid scrypt cost in loop
+    # 2. Call with an existing email but wrong passcode -> must NOT equalize timing because we already paid
+    # verify cost in loop
     share_db.create_remote_invite(
         name="Drew",
         email="existing_timing_test@example.com",
@@ -589,7 +691,7 @@ def test_get_remote_invite_timing_equalization():
         ip_whitelist=None,
         service_ids=[],
     )
-    with patch("backend.core.share_db._equalize_passcode_timing") as mock_equalize:
+    with patch("backend.core.share_db.invites._equalize_passcode_timing") as mock_equalize:
         res = share_db.get_remote_invite_by_email_passcode("existing_timing_test@example.com", "wrong-passcode")
         assert res is None
         mock_equalize.assert_not_called()
