@@ -176,8 +176,16 @@ class _Pool:
         self._discarded_total = 0
 
     def acquire(self, src: dict, max_wait: float) -> duckdb.DuckDBPyConnection:
-        deadline = time.monotonic() + max_wait
+        # Phase 6 telemetry: time how long this checkout spends WAITING for
+        # an idle connection (the saturated path). Both fast-path (idle
+        # ready) and fresh-build paths record ~0 ms here; only contention
+        # with cron / another request shows up as non-zero. ADR-03 reads
+        # the p95 of ``app.thread_wait_ms`` to decide cron isolation
+        # strategy (separate pool vs separate process).
+        t_acquire_start = time.monotonic()
+        deadline = t_acquire_start + max_wait
         reused_con: duckdb.DuckDBPyConnection | None = None
+        waited = False
         with self._cond:
             while True:
                 # Fast path: idle connection available
@@ -197,8 +205,37 @@ class _Pool:
                 # Saturated: wait for a return
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    try:
+                        from backend.core.request_telemetry import thread_wait_histogram
+
+                        thread_wait_histogram().record(
+                            (time.monotonic() - t_acquire_start) * 1000.0,
+                            {"service": self.service_key, "outcome": "timeout"},
+                        )
+                    except Exception:
+                        pass
                     raise _PoolBusy(f"pool for {self.service_key} saturated at {self.max_size}")
+                waited = True
                 self._cond.wait(timeout=remaining)
+
+        # Record the (possibly zero) wait time so Phase 6 has a population
+        # of samples — even fast-path checkouts contribute, so the median
+        # tracks total request-path cost rather than just contention.
+        try:
+            from backend.core.request_telemetry import thread_wait_histogram
+
+            thread_wait_histogram().record(
+                (time.monotonic() - t_acquire_start) * 1000.0,
+                {
+                    "service": self.service_key,
+                    "outcome": "reused" if reused_con is not None else "created",
+                    "waited": str(waited).lower(),
+                },
+            )
+        except Exception:
+            # OTel SDK not initialised (tests) or histogram creation failed —
+            # never let telemetry instrumentation break a checkout.
+            pass
 
         # Outside lock. Both branches can call ``update_iceberg_view`` which
         # may take seconds when an Iceberg snapshot reload or S3 manifest read
