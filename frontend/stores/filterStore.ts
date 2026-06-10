@@ -112,12 +112,25 @@ export const useFilterStore = create<FilterState>((set) => ({
 
   toggleEdgeOnly: () => set((state) => ({ edgeOnly: !state.edgeOnly })),
 
-  clearFilters: () => set({ 
-    filters: [], 
-    isAutoRange: true, // Let the dashboard auto-detect the best range from available data
-    hasSyncedExtents: false, // Force a resync of bounds from the metadata API
-    compareMode: false,
-    compareStartTime: null,
-    compareEndTime: null,
-  }),
+  clearFilters: () => {
+    // Restore startTime/endTime to the store-init defaults (last 24h from
+    // now) BEFORE re-flipping the auto-snap flags. Otherwise: on fresh
+    // data the snap effect in FilterBar takes its "keep current range"
+    // branch (because ageMinutes < 15), which means Reset would leave a
+    // user-selected narrow window untouched. With this restore, fresh-
+    // data Reset always returns to the same 24h window the page showed
+    // on load, and stale-data Reset still snaps to extents via the same
+    // effect (autoSetRange overwrites these defaults when it fires).
+    const now = new Date()
+    set({
+      filters: [],
+      isAutoRange: true,
+      hasSyncedExtents: false,
+      compareMode: false,
+      compareStartTime: null,
+      compareEndTime: null,
+      startTime: formatISO(subDays(now, 1)),
+      endTime: formatISO(now),
+    })
+  },
 }))

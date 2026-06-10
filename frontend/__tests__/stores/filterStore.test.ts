@@ -181,4 +181,33 @@ describe('clearFilters', () => {
     expect(s.compareStartTime).toBeNull()
     expect(s.compareEndTime).toBeNull()
   })
+
+  it('restores startTime/endTime to last-24h-from-now defaults (Reset regression)', () => {
+    // Regression for: prod Reset was a no-op for the time range whenever
+    // data was fresh, because clearFilters only flipped flags and the
+    // FilterBar snap effect took its "keep current range" branch
+    // (ageMinutes < 15). clearFilters now restores the same defaults the
+    // store initializes with, so Reset always returns to "last 24h from
+    // now" regardless of data freshness.
+    useFilterStore.getState().setRange('2026-05-01T18:00:00.000Z', '2026-05-02T00:00:00.000Z')
+    expect(useFilterStore.getState().isAutoRange).toBe(false)
+    const before = useFilterStore.getState()
+    const spanBefore = new Date(before.endTime).getTime() - new Date(before.startTime).getTime()
+    expect(spanBefore).toBeCloseTo(6 * 3600 * 1000, -2) // 6 hours +/- small
+
+    const nowMs = Date.now()
+    useFilterStore.getState().clearFilters()
+    const after = useFilterStore.getState()
+    const startMs = new Date(after.startTime).getTime()
+    const endMs = new Date(after.endTime).getTime()
+
+    // endTime ~= now (within 1s)
+    expect(Math.abs(endMs - nowMs)).toBeLessThan(1000)
+    // span ~= 24h (within 1s)
+    expect(Math.abs((endMs - startMs) - 24 * 3600 * 1000)).toBeLessThan(1000)
+    // auto-range flipped back on so the snap effect can apply the stale-
+    // data branch when extents are old.
+    expect(after.isAutoRange).toBe(true)
+    expect(after.hasSyncedExtents).toBe(false)
+  })
 })
