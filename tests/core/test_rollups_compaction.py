@@ -202,6 +202,136 @@ def test_compact_skips_when_per_day_file_is_already_up_to_date(tmp_path):
         assert second == 0, "already-current day must be skipped"
 
 
+def test_backfill_missing_hour_rollups_rebuilds_only_gaps(tmp_path, monkeypatch):
+    """The self-healing path catches hours that fell through the
+    active-hour skip: all of an hour's data was ingested while the
+    hour was still active (so recompute_touched_hours skipped it), and
+    no later files arrived to re-trigger a rebuild after the hour
+    closed.
+
+    Setup: a base table with rows spanning several closed hours.
+    Rollup dir has hour=H-1 already (built normally) but is MISSING
+    hour=H-3 (the stranded one). Call backfill_missing_hour_rollups
+    and assert: (a) the missing hour gets a per-hour rollup file;
+    (b) the already-present hour is not rebuilt; (c) the active hour
+    is never rolled up; (d) re-calling is a no-op (idempotent).
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import duckdb
+
+    from backend.core import rollups
+
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    src = {"name": "svc-backfill-missing"}
+
+    active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    h_minus_1 = (active_dt - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
+    h_minus_3 = (active_dt - timedelta(hours=3)).strftime("%Y-%m-%d-%H")
+    h_active = active_dt.strftime("%Y-%m-%d-%H")
+
+    # Seed a base table the rollup COPY can read. Use a file-backed
+    # DuckDB so the rollup helpers (which open their own connections
+    # via get_connection) all see the same data. _get_fields will pull
+    # FIELDS from backend.repositories.dashboard; the COPY filters by
+    # WHERE timestamp ... AND strftime IN (...), so any subset of fields
+    # is fine.
+    db_path = str(tmp_path / "test.duckdb")
+    seed_con = duckdb.connect(db_path)
+    # Row timestamps placed AT THE START of each hour so they land
+    # cleanly in the bucket strftime computes. `active - 3h` falls in
+    # hour H-3 (the missing-rollup test target), `active - 1h` in H-1
+    # (the pre-existing-rollup hour), `active - 5min` in the active
+    # hour (must never be rolled up).
+    seed_con.execute(
+        "CREATE TABLE logs_svc_backfill_missing AS "
+        "SELECT "
+        f"  TIMESTAMP '{(active_dt - timedelta(hours=3)).isoformat()}' AS timestamp, "
+        "  'US' AS country, 200 AS status "
+        "UNION ALL SELECT "
+        f"  TIMESTAMP '{(active_dt - timedelta(hours=1)).isoformat()}', "
+        "  'JP', 404 "
+        "UNION ALL SELECT "
+        f"  TIMESTAMP '{(active_dt - timedelta(minutes=5)).isoformat()}', "
+        "  'DE', 500"
+    )
+    seed_con.close()  # Release the file lock before the helpers open it.
+
+    # Stub _get_fields to return only `country` (the proxy field check
+    # uses fields[0]) — avoids reaching into the full dashboard FIELDS
+    # registry and keeps the test self-contained.
+    monkeypatch.setattr("backend.core.rollups._get_fields", lambda src: ["country", "status"])
+    # Provide a cache_dir + connection factory that all helpers use.
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_connection",
+        lambda source, read_only=True: duckdb.connect(db_path, read_only=read_only),
+    )
+    # execute_with_stale_view_retry inside helpers — short-circuit to a
+    # direct execute since there's no iceberg view in the test fixture.
+    monkeypatch.setattr(
+        "backend.core.iceberg.execute_with_stale_view_retry",
+        lambda con, src, fn: fn(con),
+    )
+    # And bypass _safe_table_for to point at the test table.
+    monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_svc_backfill_missing")
+
+    # Pre-seed an existing rollup for h_minus_1 so the test can verify
+    # we don't double-build it. Write a parquet with one row.
+    pre_existing = cache_root / "rollups" / "hour" / "field=country" / f"hour={h_minus_1}"
+    pre_existing.mkdir(parents=True, exist_ok=True)
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    pq.write_table(
+        pa.table({"value": ["pre_existing"], "count": pa.array([42], type=pa.int64())}),
+        str(pre_existing / "compacted_xxx.parquet"),
+    )
+    pre_existing_mtime = (pre_existing / "compacted_xxx.parquet").stat().st_mtime
+
+    healed = rollups.backfill_missing_hour_rollups("svc-backfill-missing", src, lookback_hours=6)
+
+    # Only ONE closed hour (H-3) has data AND is missing a rollup. H-1
+    # has data + a pre-existing rollup → skipped. Other lookback hours
+    # (H-2, H-4, H-5, H-6) have no data → not in hours_with_data set →
+    # never considered missing. The active hour is excluded by the
+    # base-table WHERE bound.
+    assert healed == 1, f"expected 1 missing hour with data to be rebuilt; got {healed}"
+
+    # h_minus_3 now has a rollup file (the data-bearing closed hour we set up)
+    h_minus_3_dir = cache_root / "rollups" / "hour" / "field=country" / f"hour={h_minus_3}"
+    assert h_minus_3_dir.is_dir() and any(
+        f.name.endswith(".parquet") for f in h_minus_3_dir.iterdir()
+    ), f"missing hour {h_minus_3} should now have a rollup file"
+
+    # The active hour is NEVER rolled up (recompute_touched_hours guard).
+    h_active_dir = cache_root / "rollups" / "hour" / "field=country" / f"hour={h_active}"
+    assert not h_active_dir.exists(), (
+        f"active hour {h_active} must not be rolled up — it's still being written"
+    )
+
+    # Second call: idempotent — all closed hours in the lookback now have
+    # rollups, so nothing to do. h_minus_3 may have only been built once.
+    healed_again = rollups.backfill_missing_hour_rollups("svc-backfill-missing", src, lookback_hours=6)
+    assert healed_again == 0, f"second call should be a no-op; got {healed_again} rebuilt"
+
+
+def test_backfill_missing_hour_rollups_noop_when_no_fields(tmp_path, monkeypatch):
+    """If the service has no eligible fields (custom-fields-only and all
+    disabled), backfill returns 0 — there's nothing to roll up."""
+    from backend.core import rollups
+
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    src = {"name": "svc-backfill-nofield"}
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+    monkeypatch.setattr("backend.core.rollups._get_fields", lambda src: [])
+
+    healed = rollups.backfill_missing_hour_rollups("svc-backfill-nofield", src, lookback_hours=24)
+    assert healed == 0
+
+
 def test_compact_returns_zero_when_rollups_dir_missing(tmp_path):
     """No rollups dir → no work, returns 0. Pinned because a freshly-
     provisioned service has no rollups yet and the cron MUST be a
