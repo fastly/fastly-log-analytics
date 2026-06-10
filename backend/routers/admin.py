@@ -1085,6 +1085,17 @@ def health_snapshot():
     except Exception:
         out["compaction"] = {}
 
+    # ── DuckDB connection-pool wait stats (Phase 6 in-process sampler) ──
+    # Backs the Pool Wait card in the admin SystemHealthCard. The same
+    # samples also stream to the OTel ``app.thread_wait_ms`` histogram for
+    # off-box analysis; this in-process projection is for the UI's 1s poll.
+    try:
+        from backend.core import duckdb_pool as _pool_mod
+
+        out["pool_wait"] = _pool_mod.get_all_stats()
+    except Exception:
+        out["pool_wait"] = []
+
     return out
 
 

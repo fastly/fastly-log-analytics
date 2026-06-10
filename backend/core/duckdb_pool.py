@@ -47,6 +47,7 @@ Failure handling:
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import queue
@@ -156,6 +157,9 @@ def _safe_buffer_mtime(src: dict | None) -> float | None:
         return None
 
 
+_WAIT_SAMPLES_MAX = 1024  # ~last 17 minutes at 1 req/s; ~3.5 minutes at 5 req/s
+
+
 class _Pool:
     """Per-service pool. Not exposed directly — use ``checkout_connection``."""
 
@@ -174,6 +178,13 @@ class _Pool:
         self._created_total = 0
         self._reused_total = 0
         self._discarded_total = 0
+        # Phase 6 in-process sampler — last ``_WAIT_SAMPLES_MAX`` checkout
+        # wait times in milliseconds. Companion to the OTel histogram
+        # (``app.thread_wait_ms``) so the admin UI can render p50/p95/p99
+        # without parsing docker logs. Bounded deque so memory stays flat
+        # regardless of throughput.
+        self._wait_samples: collections.deque[float] = collections.deque(maxlen=_WAIT_SAMPLES_MAX)
+        self._wait_samples_lock = threading.Lock()
 
     def acquire(self, src: dict, max_wait: float) -> duckdb.DuckDBPyConnection:
         # Phase 6 telemetry: time how long this checkout spends WAITING for
@@ -205,15 +216,17 @@ class _Pool:
                 # Saturated: wait for a return
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    wait_ms = (time.monotonic() - t_acquire_start) * 1000.0
                     try:
                         from backend.core.request_telemetry import thread_wait_histogram
 
                         thread_wait_histogram().record(
-                            (time.monotonic() - t_acquire_start) * 1000.0,
+                            wait_ms,
                             {"service": self.service_key, "outcome": "timeout"},
                         )
                     except Exception:
                         pass
+                    self._record_wait_sample(wait_ms)
                     raise _PoolBusy(f"pool for {self.service_key} saturated at {self.max_size}")
                 waited = True
                 self._cond.wait(timeout=remaining)
@@ -221,11 +234,12 @@ class _Pool:
         # Record the (possibly zero) wait time so Phase 6 has a population
         # of samples — even fast-path checkouts contribute, so the median
         # tracks total request-path cost rather than just contention.
+        wait_ms = (time.monotonic() - t_acquire_start) * 1000.0
         try:
             from backend.core.request_telemetry import thread_wait_histogram
 
             thread_wait_histogram().record(
-                (time.monotonic() - t_acquire_start) * 1000.0,
+                wait_ms,
                 {
                     "service": self.service_key,
                     "outcome": "reused" if reused_con is not None else "created",
@@ -236,6 +250,7 @@ class _Pool:
             # OTel SDK not initialised (tests) or histogram creation failed —
             # never let telemetry instrumentation break a checkout.
             pass
+        self._record_wait_sample(wait_ms)
 
         # Outside lock. Both branches can call ``update_iceberg_view`` which
         # may take seconds when an Iceberg snapshot reload or S3 manifest read
@@ -461,9 +476,48 @@ class _Pool:
                 # Best-effort — if a single table fails to drop, keep going.
                 pass
 
+    def _record_wait_sample(self, wait_ms: float) -> None:
+        """Append a checkout wait-time sample to the bounded ring buffer.
+
+        Lock-protected so concurrent acquirers don't trample the deque's
+        internal state (CPython's deque IS thread-safe for single ops, but
+        we also read+sort it from ``_wait_stats`` which would race).
+        """
+        with self._wait_samples_lock:
+            self._wait_samples.append(wait_ms)
+
+    def _wait_stats(self) -> dict:
+        """Return percentile summary over the recent-samples ring buffer.
+
+        Computed on-read (sort a snapshot, no continuous histogram) — at
+        ~1024 samples this is well under 1 ms. Returns zeros when the
+        buffer is empty so the admin UI can render a stable shape from
+        boot (no conditional rendering churn). Counts are emitted so the
+        operator can tell whether a green p95 reflects "no contention"
+        or "no samples yet".
+        """
+        with self._wait_samples_lock:
+            snap = list(self._wait_samples)
+        n = len(snap)
+        if n == 0:
+            return {"count": 0, "p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "max_ms": 0.0, "mean_ms": 0.0}
+        snap.sort()
+        # Nearest-rank percentile — fine at this sample count.
+        def _pct(p: float) -> float:
+            idx = min(n - 1, max(0, int(round(p * (n - 1)))))
+            return round(snap[idx], 2)
+        return {
+            "count": n,
+            "p50_ms": _pct(0.50),
+            "p95_ms": _pct(0.95),
+            "p99_ms": _pct(0.99),
+            "max_ms": round(snap[-1], 2),
+            "mean_ms": round(sum(snap) / n, 2),
+        }
+
     def stats(self) -> dict:
         with self._cond:
-            return {
+            base = {
                 "service": self.service_key,
                 "max_size": self.max_size,
                 "in_use": self._in_use,
@@ -472,6 +526,11 @@ class _Pool:
                 "reused_total": self._reused_total,
                 "discarded_total": self._discarded_total,
             }
+        # Wait-stats snapshot OUTSIDE the pool lock — its own lock guards
+        # the sample deque, and the call would otherwise tie checkout
+        # waiters up behind a sort.
+        base["wait"] = self._wait_stats()
+        return base
 
 
 class _PoolBusy(Exception):
