@@ -230,15 +230,9 @@ def require_service_access(
     return service_id
 
 
-def get_meta_con(source: dict = Depends(get_source)) -> duckdb.DuckDBPyConnection:
-    """Dependency that yields a DuckDB connection, skipping the Iceberg view update.
-
-    Use this for metadata routes (e.g. cron logs, admin settings) that don't
-    need to query the main logs table, to avoid blocking on S3 manifest reads.
-
-    Security: ``read_only`` is hardcoded True for the same reason as
-    ``get_con`` above.
-    """
-    holder = _ConnectionHolder(source, skip_view_update=True, read_only=True)
-    with holder as con:
-        yield con
+# ``get_meta_con`` (skip-view-update parallel path) removed at v2.0 cut.
+# After the Phase 4 iceberg carve + duckdb_pool fingerprint check
+# (backend/core/duckdb_pool.py:299), pool checkouts skip update_iceberg_view
+# when the (view_cache identity, buffer mtime) tuple is unchanged — making
+# the skip-on-purpose path of the old helper structurally unnecessary for
+# the metadata-shaped read paths that used it.

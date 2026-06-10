@@ -52,7 +52,7 @@ def test_dashboard_custom_fields_appear_in_top10(in_memory_duckdb, test_service_
     """Custom fields with show_in_dashboard=True must appear as keys in the dashboard data response."""
     from fastapi.testclient import TestClient
 
-    from backend.deps import get_con, get_meta_con
+    from backend.deps import get_con, get_con
     from backend.repositories import dashboard as dashboard_repo
 
     # Clear module-level cache so a prior test's result doesn't shadow this one
@@ -96,7 +96,7 @@ def test_dashboard_custom_fields_appear_in_top10(in_memory_duckdb, test_service_
     in_memory_duckdb.execute(f"UPDATE {table_name} SET my_edge_field = (random() * 100)::INTEGER + 1")
 
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
-    app.dependency_overrides[get_meta_con] = lambda: in_memory_duckdb
+    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: custom_source
     try:
         with TestClient(app) as c:
@@ -107,7 +107,7 @@ def test_dashboard_custom_fields_appear_in_top10(in_memory_duckdb, test_service_
             )
     finally:
         app.dependency_overrides.pop(get_con, None)
-        app.dependency_overrides.pop(get_meta_con, None)
+        app.dependency_overrides.pop(get_con, None)
         app.dependency_overrides.pop(get_source, None)
 
     assert response.status_code == 200, response.text

@@ -214,7 +214,7 @@ def test_connection_holder_exit_with_no_open_connection_is_noop():
     holder.__exit__(None, None, None)  # must not raise
 
 
-# ── get_con / get_meta_con: generator-style dependencies ─────────────────────
+# ── get_con: generator-style dependency ──────────────────────────────────────
 
 
 def test_get_con_yields_connection_and_closes_after(disable_pool):
@@ -233,15 +233,19 @@ def test_get_con_yields_connection_and_closes_after(disable_pool):
         fake_con.close.assert_called_once()
 
 
-def test_get_meta_con_passes_skip_view_update_true():
-    """``get_meta_con`` is the metadata variant — must skip the Iceberg
-    view refresh so admin/cron pages don't block on S3 manifest reads."""
-    fake_con = MagicMock()
-
-    with patch("backend.deps.get_connection", return_value=fake_con) as mock_get:
-        gen = deps.get_meta_con(source={"name": "x"})
-        next(gen)
-        assert mock_get.call_args.kwargs["skip_view_update"] is True
+def test_get_meta_con_symbol_removed():
+    """v2.0 cut: ``get_meta_con`` was deleted. The pool fingerprint check
+    in ``duckdb_pool.checkout_connection`` skips ``update_iceberg_view``
+    when the (view-cache identity, buffer mtime) tuple is unchanged, so
+    the dedicated skip-view-update dep that bootstrap routes used is
+    no longer needed. Pin removal so a future refactor doesn't quietly
+    re-introduce it."""
+    assert not hasattr(deps, "get_meta_con"), (
+        "get_meta_con was removed at v2.0 cut — see Phase 8.3 in "
+        "pending-docs/cleanup_plan.md. Routes that used it should use "
+        "get_con instead; the pool fingerprint check makes the skip-view "
+        "optimization unnecessary."
+    )
 
 
 def test_get_con_default_is_read_only(disable_pool):

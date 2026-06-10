@@ -1092,7 +1092,7 @@ def test_download_folder_invokes_fetch_for_each_listed_object(in_memory_duckdb):
     missing logs)."""
     from fastapi.testclient import TestClient
 
-    from backend.deps import get_con, get_meta_con, get_source
+    from backend.deps import get_con, get_con, get_source
     from backend.main import app
 
     src_with_bucket = {"name": "test_service", "service_id": "tsid", "bucket": "my-bucket"}
@@ -1105,7 +1105,7 @@ def test_download_folder_invokes_fetch_for_each_listed_object(in_memory_duckdb):
     fetch_calls = []
 
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
-    app.dependency_overrides[get_meta_con] = lambda: in_memory_duckdb
+    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: src_with_bucket
     try:
         with (

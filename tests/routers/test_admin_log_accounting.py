@@ -37,11 +37,11 @@ def log_accounting_client(log_accounting_source, in_memory_duckdb):
     `logging_service_id` so the endpoint reaches the Fastly call path."""
     from fastapi.testclient import TestClient
 
-    from backend.deps import get_con, get_meta_con, get_source
+    from backend.deps import get_con, get_con, get_source
     from backend.main import app
 
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
-    app.dependency_overrides[get_meta_con] = lambda: in_memory_duckdb
+    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: log_accounting_source
     with TestClient(app) as c:
         yield c
@@ -332,12 +332,12 @@ def test_log_accounting_handles_no_logging_service_id(in_memory_duckdb):
     than a silent 500."""
     from fastapi.testclient import TestClient
 
-    from backend.deps import get_con, get_meta_con, get_source
+    from backend.deps import get_con, get_con, get_source
     from backend.main import app
 
     src_no_log = {"name": "test_service", "service_id": "test-service-id"}
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
-    app.dependency_overrides[get_meta_con] = lambda: in_memory_duckdb
+    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: src_no_log
     try:
         with patch("backend.config.get_fastly_logging_service_id", return_value=""):

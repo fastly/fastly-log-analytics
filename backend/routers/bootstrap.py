@@ -5,7 +5,7 @@ from __future__ import annotations
 import duckdb
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from backend.deps import get_meta_con, get_service_id, get_source
+from backend.deps import get_con, get_service_id, get_source
 from backend.models.common import BootstrapResponse
 from backend.utils.router_utils import query_errors
 
@@ -230,7 +230,7 @@ def sources_endpoint(request: Request):
 def schema_endpoint(
     request: Request,
     source: dict = Depends(get_source),
-    con: duckdb.DuckDBPyConnection = Depends(get_meta_con),
+    con: duckdb.DuckDBPyConnection = Depends(get_con),
 ):
     from backend import config as svcconfig
     from backend.core.duckdb import _safe_table_name, get_schema
@@ -320,7 +320,7 @@ from backend.models.dashboard import InsightsAvailabilityResponse
 def insight_availability(
     request: Request,
     source: dict = Depends(get_source),
-    con: duckdb.DuckDBPyConnection = Depends(get_meta_con),
+    con: duckdb.DuckDBPyConnection = Depends(get_con),
 ):
     from backend.core.duckdb import get_schema
 
