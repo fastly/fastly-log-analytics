@@ -1269,6 +1269,12 @@ def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
             "backend.core.iceberg.commit_buffer",
             return_value={"files_committed": 3, "rows_committed": 1500, "snapshot_id": 42},
         ),
+        # Post-commit view-refresh + pool-warm path needs a stand-in DuckDB
+        # connection and a no-op update_iceberg_view. Real get_connection
+        # would block on DB lock retries (default max_wait=300s) inside the
+        # test sandbox.
+        patch("backend.core.iceberg.update_iceberg_view"),
+        patch("backend.core.duckdb.get_connection", return_value=MagicMock()),
         patch("backend.scheduler._run_metadata_sync") as mock_sync,
         patch("backend.cron_progress.cleanup_progress"),
         patch("backend.cron_progress.start_progress"),

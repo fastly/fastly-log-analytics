@@ -251,10 +251,18 @@ def _run_service_cron(
                             try:
                                 from backend.core import iceberg as _ice
                                 from backend.core.duckdb import get_connection as _get_conn
+                                from backend.core.duckdb_pool import warm_pool_for_service as _warm
 
                                 con_v = _get_conn(source=src, read_only=False)
                                 try:
-                                    _ice.update_iceberg_view(con_v, src)
+                                    # force=True: sync KNOWS the buffer changed, so
+                                    # skip the fast-path no-op attempt and go straight
+                                    # to the slow path under the per-service lock.
+                                    _ice.update_iceberg_view(con_v, src, force=True)
+                                    # Pre-bind every idle pool connection to the now-
+                                    # current view so dashboard panel checkouts skip
+                                    # the rebuild entirely on the request path.
+                                    _warm(service_id, src)
                                 finally:
                                     con_v.close()
                             except Exception as _e:
@@ -269,7 +277,7 @@ def _run_service_cron(
                                 job_name="sync",
                                 event={
                                     "type": "status",
-                                    "message": f"{elapsed()} View refresh: {int((time.time() - _t0) * 1000)}ms",
+                                    "message": f"{elapsed()} View refresh + warm: {int((time.time() - _t0) * 1000)}ms",
                                 },
                             )
 

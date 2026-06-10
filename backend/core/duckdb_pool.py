@@ -332,6 +332,67 @@ class _Pool:
             self._discard(con)
             raise
 
+    def warm_idle(self, src: dict) -> None:
+        """Rebind every idle connection to the latest cached view.
+
+        Called by writer-side cron jobs (sync, commit) after they mutate
+        state that invalidates the per-service _view_cache fingerprint.
+        Drains the idle queue under the lock, binds the cached view DDL
+        on each conn via _try_fast_path_view (which handles the CREATE OR
+        REPLACE VIEW → TEMP VIEW translation), re-stamps the fingerprint,
+        then returns every conn to the queue. Sequential because TEMP
+        VIEWs are per-connection in DuckDB and a single connection handle
+        is not safe to call from multiple threads.
+
+        Drain-then-return rather than pop-bind-put-per-conn because _idle
+        is a LIFO queue: pop-then-put returns the same conn on the next
+        pop, so we'd just keep warming one slot.
+
+        Bookkeeping: _in_use is unchanged across drain + return because
+        drained conns are conceptually "held by warm_idle" — same slot
+        in the invariant `_in_use == checked_out + idle_count`. A
+        concurrent acquirer that arrives mid-warm either builds a new
+        conn (if _in_use < max_size) or waits on _cond, identical to
+        today's behavior.
+        """
+        from backend.core import iceberg
+
+        drained: list[duckdb.DuckDBPyConnection] = []
+        with self._cond:
+            while True:
+                try:
+                    drained.append(self._idle.get_nowait())
+                except queue.Empty:
+                    break
+        if not drained:
+            return
+
+        for con in drained:
+            try:
+                iceberg._try_fast_path_view(con, src)
+                self._stamp_fingerprint(con, src)
+            except Exception as e:
+                logger.warning(
+                    "[pool] %s: warm_idle bind failed (will rebind on next checkout): %s",
+                    self.service_key,
+                    e,
+                )
+
+        with self._cond:
+            for con in drained:
+                try:
+                    self._idle.put_nowait(con)
+                    self._cond.notify()
+                except queue.Full:
+                    # Should not happen — we drained this same queue under the
+                    # same lock with no intervening puts. Defensive close.
+                    try:
+                        con.close()
+                    except Exception:
+                        pass
+                    self._in_use -= 1
+                    self._cond.notify()
+
     def _stamp_fingerprint(self, con: duckdb.DuckDBPyConnection, src: dict | None = None) -> None:
         try:
             from backend.core import iceberg
@@ -427,6 +488,20 @@ def checkout_connection(src: dict, max_wait: float = 10.0):
         raise
     finally:
         pool.release(con, errored=errored)
+
+
+def warm_pool_for_service(service_key: str, src: dict) -> None:
+    """Warm the per-service pool's idle connections to the latest view.
+
+    Called by writer-side cron jobs (sync, commit) after they mutate state
+    that invalidates _view_cache. No-op if no pool exists yet (no readers
+    have queried this service).
+    """
+    with _pools_lock:
+        pool = _pools.get(service_key)
+    if pool is None:
+        return
+    pool.warm_idle(src)
 
 
 def get_all_stats() -> list[dict]:

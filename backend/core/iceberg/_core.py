@@ -1049,7 +1049,7 @@ def table_location(source: dict) -> str | None:
 
 
 _TOMBSTONE_SUFFIX = ".consumed-"  # Followed by an integer Unix-epoch seconds value.
-_TOMBSTONE_GRACE_SECONDS = 60  # See tombstone_buffer_files docstring for the rationale.
+_TOMBSTONE_GRACE_SECONDS = 300  # See tombstone_buffer_files docstring for the rationale.
 
 
 def _tombstone_marker_path(parquet_path: str, ts: int) -> str:
