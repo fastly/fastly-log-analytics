@@ -336,6 +336,37 @@ def record_call(
     )
     _CALLS.set(calls)
 
+    # Phase 1 telemetry bridge — when we're inside a RequestTelemetry section
+    # span (or any other start_as_current_span block), surface this call as
+    # an OTel span event so the OTel pipeline sees the same external-call
+    # attribution the debug panel renders. No-op when no span is current
+    # (which is the common case for cron-driven boto3/fsspec hooks that run
+    # off the request thread).
+    try:
+        from opentelemetry import trace as _otel_trace
+
+        _span = _otel_trace.get_current_span()
+        if _span is not None and _span.is_recording():
+            attrs: dict = {
+                "app.call.method": method,
+                "app.call.path": path,
+                "app.call.time_ms": float(time_ms),
+                "app.call.service": service,
+            }
+            if status is not None:
+                attrs["app.call.status"] = str(status)
+            if details:
+                attrs["app.call.details"] = details
+            if caller:
+                attrs["app.call.caller"] = caller
+            if bytes_count is not None:
+                attrs["app.call.bytes"] = int(bytes_count)
+            _span.add_event(name="external_call", attributes=attrs)
+    except Exception:
+        # OTel SDK import or recording failure must never fail the caller —
+        # this is best-effort telemetry, not load-bearing.
+        pass
+
 
 class track_query:
     """Context manager to execute and time a DuckDB query, yielding the cursor."""
@@ -357,6 +388,24 @@ class track_query:
         queries = get_queries()
         queries.append({"sql": self.query.strip(), "time_ms": elapsed})
         _QUERIES.set(queries)
+
+        # Phase 1 telemetry bridge — surface as a span event when inside
+        # an active section span.
+        try:
+            from opentelemetry import trace as _otel_trace
+
+            _span = _otel_trace.get_current_span()
+            if _span is not None and _span.is_recording():
+                _span.add_event(
+                    name="db.query",
+                    attributes={
+                        "db.statement": self.query.strip()[:4000],
+                        "db.elapsed_ms": float(elapsed),
+                        "db.label": self.label,
+                    },
+                )
+        except Exception:
+            pass
 
 
 def _is_full_miss(x_cache: str | None) -> bool:
