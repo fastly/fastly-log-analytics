@@ -95,10 +95,16 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 
-def _extract_log_text(run_id: int) -> str:
-    """Return a plain-text log summary for a cron run from the progress store."""
+def _extract_log_text(run_id: int | None) -> str:
+    """Return a plain-text log summary for a cron run from the progress store.
+
+    run_id can be None when start_cron_run failed to register the run; in
+    that case the progress store has nothing for it and we return "".
+    """
     from backend.cron_progress import get_progress
 
+    if run_id is None:
+        return ""
     evs = get_progress(run_id)
     if not evs:
         return ""
@@ -145,8 +151,13 @@ TYPE_ICONS = {
 
 
 def _log_and_add_progress(
-    run_id: int, service_id: str, event: dict, job_name: str = "scheduler", service_name: str | None = None
+    run_id: int | None, service_id: str, event: dict, job_name: str = "scheduler", service_name: str | None = None
 ) -> None:
+    """Log a cron event and (best-effort) add it to the progress store.
+
+    run_id can be None when start_cron_run failed to register the run; in
+    that case add_progress no-ops and only the log message is emitted.
+    """
     from backend.cron_progress import add_progress
 
     add_progress(run_id, event)

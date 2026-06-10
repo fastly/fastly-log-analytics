@@ -7,7 +7,12 @@ _run_metadata: dict[int, dict] = {}
 _lock = threading.Lock()
 
 
-def start_progress(run_id: int, service_id: str = None, task: str = None):
+def start_progress(run_id: int | None, service_id: str | None = None, task: str | None = None):
+    # run_id can be None when start_cron_run failed to register the run
+    # in per-service SQLite (e.g. table write contention). The cron job
+    # still runs; progress tracking is a no-op for that run.
+    if run_id is None:
+        return
     with _lock:
         if run_id not in _progress:
             now = time.time()
@@ -127,14 +132,19 @@ def reap_zombie_runs() -> int:
         return evicted
 
 
-def add_progress(run_id: int, event: dict):
+def add_progress(run_id: int | None, event: dict):
+    # See start_progress for why run_id can be None — no-op in that case.
+    if run_id is None:
+        return
     with _lock:
         if run_id in _progress:
             _progress[run_id].append(event)
             _last_update[run_id] = time.time()
 
 
-def get_progress(run_id: int, start_idx: int = 0, service_id: str | None = None) -> list[dict] | None:
+def get_progress(run_id: int | None, start_idx: int = 0, service_id: str | None = None) -> list[dict] | None:
+    if run_id is None:
+        return None
     with _lock:
         if run_id not in _progress:
             return None
@@ -170,7 +180,7 @@ def get_latest_progress_for_service(service_id: str) -> dict | None:
         return {"task": _run_metadata[run_id].get("task")}
 
 
-def end_progress(run_id: int, final_event: dict | None = None):
+def end_progress(run_id: int | None, final_event: dict | None = None):
     """Mark a cron run as ended.
 
     AUTO-DONE: if no ``final_event`` is provided AND the run's last
@@ -185,6 +195,9 @@ def end_progress(run_id: int, final_event: dict | None = None):
     ``final_event={"type": "done", "rows": N}`` and the same append path
     runs. The auto-emit only kicks in when the caller forgot.
     """
+    # See start_progress for why run_id can be None — no-op in that case.
+    if run_id is None:
+        return
     with _lock:
         if run_id in _progress:
             events = _progress[run_id]
