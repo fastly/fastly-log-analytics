@@ -22,7 +22,11 @@ vi.mock('next/navigation', () => ({
   useRouter: vi.fn(() => ({
     replace: vi.fn(),
     push: vi.fn(),
+    prefetch: vi.fn(),
   })),
+  // AppLayout's <RawQueryModeProbe> consumes useSearchParams; stub it so
+  // the Suspense boundary renders cleanly under jsdom.
+  useSearchParams: vi.fn(() => new URLSearchParams()),
 }))
 
 // Mock custom hooks

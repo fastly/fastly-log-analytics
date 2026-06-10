@@ -53,11 +53,11 @@ export default function RootLayout({
         {preloadChunks.map((href) => (
           <link key={href} rel="modulepreload" href={href} />
         ))}
-        {/* Preload the world choropleth's geojson (~251KB) so MapLibre's
-            addSource('world', { data: '/geo/world.geojson' }) finds it in
-            cache instead of paying a round-trip when the dashboard's
-            Requests by Country map mounts. */}
-        <link rel="preload" href="/geo/world.geojson" as="fetch" crossOrigin="anonymous" />
+        {/* world.geojson preload moved into <AppLayout> so it only emits
+            on map-using routes (/dashboard, /network). Previously this
+            was a global <link rel="preload">, which fired on every page
+            including /share-login — wasting ~251KB of bandwidth for the
+            unauthenticated share-login flow. */}
       </head>
       <body className={`${inter.className} antialiased`} suppressHydrationWarning>
         <ThemeProvider

@@ -41,6 +41,12 @@ interface AlertsListProps {
   setColumnVisibility: React.Dispatch<React.SetStateAction<VisibilityState>>
   onEdit: (alert: Alert) => void
   onDelete: (alertId: string) => void
+  /**
+   * When true, hide mutate controls (toggle, edit, delete) — backend
+   * gates the underlying PATCH/DELETE endpoints on the same role and any
+   * click would silently 403. Passed from AlertsPage.
+   */
+  isAnalyst?: boolean
 }
 
 export function AlertsList({
@@ -49,6 +55,7 @@ export function AlertsList({
   setColumnVisibility,
   onEdit,
   onDelete,
+  isAnalyst = false,
 }: AlertsListProps) {
   const { activeServiceId } = useServiceStore()
   const queryClient = useQueryClient()
@@ -229,6 +236,16 @@ export function AlertsList({
       header: 'Enabled?',
       cell: (info: any) => {
         const isPending = togglingId === info.row.original.id
+        // Analysts get a read-only display: the PATCH /enabled endpoint
+        // 403s for them, so showing an active Switch invites a click
+        // that does nothing.
+        if (isAnalyst) {
+          return (
+            <Badge variant={info.getValue() ? 'secondary' : 'outline'} className="text-[10px]">
+              {info.getValue() ? 'On' : 'Off'}
+            </Badge>
+          )
+        }
         return (
           <Switch
             checked={info.getValue()}
@@ -239,33 +256,35 @@ export function AlertsList({
         )
       }
     },
-    {
-      id: 'actions',
-      header: '',
-      cell: (info: any) => (
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-muted-foreground hover:text-primary"
-            onClick={() => onEdit(info.row.original)}
-            title="Edit alert"
-          >
-            <Pencil className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-muted-foreground hover:text-destructive"
-            onClick={() => onDelete(info.row.original.id)}
-            title="Delete alert"
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
-        </div>
-      )
-    }
-  ], [togglingId, relative, full, abbr, toggleEnabled, onEdit, onDelete])
+    ...(isAnalyst
+      ? []
+      : [{
+        id: 'actions',
+        header: '',
+        cell: (info: any) => (
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-primary"
+              onClick={() => onEdit(info.row.original)}
+              title="Edit alert"
+            >
+              <Pencil className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+              onClick={() => onDelete(info.row.original.id)}
+              title="Delete alert"
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        )
+      }])
+  ], [togglingId, relative, full, abbr, toggleEnabled, onEdit, onDelete, isAnalyst])
 
   return (
     <DataTable

@@ -53,11 +53,58 @@ _UNAUTH_ANALYST_PATHS = {
 }
 
 # Path prefixes that are EXPLICITLY blocked for analysts even with a valid
-# session. Admin surface, anything mutating provisioning, debug.
+# session. Admin surface, anything mutating provisioning, debug, and the
+# operator-only usage/cost surface (H-1).
 _ANALYST_BLOCKED_PREFIXES = (
     "/api/admin/",  # includes /api/admin/share/* — analyst can never reach admin tooling
     "/api/provision/",
     "/api/debug/",
+    "/api/usage/",  # H-1: cost/billing/usage data is operator-only
+)
+
+# Exact-path or path-with-query-string blocks for endpoints that live under an
+# otherwise-permitted router but expose admin-only surface area. Matched via
+# `path == p` OR `path.startswith(p + "?")` OR `path.startswith(p + "/")` so a
+# bare segment like "/api/download" won't accidentally swallow a sibling such
+# as "/api/download-foo". Each entry is the FULL path the route is mounted at.
+_ANALYST_BLOCKED_SUBPATHS = (
+    "/api/download",         # H-2: raw object download
+    "/api/download-all",     # H-2: bulk raw object download
+    "/api/download-folder",  # H-2: folder-level raw object download
+    "/api/cron-schedule",    # H-3: exposes per-service cron cadence config
+)
+
+# Path-parameter-bearing endpoints to block for analysts. Each entry is a
+# compiled regex matched with .fullmatch() against the URL path (no query
+# string). Keep these surgical — every regex here must NOT accidentally match
+# analyst-needed routes such as
+# /api/services/{id}/scoring/{config,status,labels,sessions/...} which are
+# handled by the scoring-suffix gate or are intentionally allowed.
+_ANALYST_BLOCKED_SUBPATH_REGEX: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^/api/services/[^/]+/lake-info$"),  # H-3: Iceberg/object-store layout
+)
+
+# Session-scoring sub-routes that are admin-only. The gate only fires for
+# paths that contain "/scoring/" AND end with one of these suffixes, so
+# analyst-needed reads like /scoring/labels, /scoring/sessions/<sid>/events,
+# /scoring/top-flagged, /scoring/score-distribution, /scoring/compliance-
+# breakdown, /scoring/health, /scoring/evaluation, /scoring/curves,
+# /scoring/matrix-versions, /scoring/threshold-preview, /scoring/analytics
+# stay reachable. (H-4)
+#
+# /threshold-preview is intentionally NOT gated: the operator's chosen
+# threshold value is supplied by the CALLER as a query param, not returned,
+# and the response payload (confusion-matrix counts at the given cutoff) is
+# equivalent in sensitivity to /score-distribution + /compliance-breakdown
+# which analysts already see. /threshold (without "-preview") IS gated
+# because it returns the operator's persisted committed value.
+_ANALYST_BLOCKED_SCORING_SUFFIXES: tuple[str, ...] = (
+    "/config",
+    "/status",
+    "/audit",
+    "/threshold",
+    "/exclude-regex",
+    "/enforce-status-code",
 )
 
 # POST/PUT/PATCH/DELETE paths that analysts CAN reach despite the read-only
@@ -256,7 +303,45 @@ def _origin_allowed(origin: str) -> bool:
 
 
 def _is_blocked_path(path: str) -> bool:
-    return any(path.startswith(p) for p in _ANALYST_BLOCKED_PREFIXES)
+    """Return True if the analyst is forbidden from reaching this path.
+
+    Three layers, in order of cost:
+      1. Prefix match against ``_ANALYST_BLOCKED_PREFIXES`` (admin/provision/
+         debug/usage entire trees).
+      2. Exact / sub-path match against ``_ANALYST_BLOCKED_SUBPATHS`` —
+         endpoints that share a router with permitted paths and must be
+         identified individually. Uses ``path == p`` OR ``startswith(p + "/")``
+         OR ``startswith(p + "?")`` so a bare "/api/download" entry won't
+         shadow a sibling like "/api/download-foo".
+      3. Session-scoring suffix gate: any path that contains "/scoring/" AND
+         ends with one of ``_ANALYST_BLOCKED_SCORING_SUFFIXES`` is admin-only.
+         The "/scoring/" containment check keeps analyst-needed reads like
+         /scoring/labels and /scoring/sessions/<sid>/events accessible.
+      4. Regex match against ``_ANALYST_BLOCKED_SUBPATH_REGEX`` for routes
+         that embed a path parameter (e.g. /api/services/{id}/lake-info).
+
+    Trailing slashes are normalized before matching so an attacker cannot
+    bypass the gate by requesting ``/api/services/{id}/scoring/config/`` or
+    ``/api/services/{id}/lake-info/``. Starlette's ``redirect_slashes=True``
+    default would issue a 307 to the canonical form, but the middleware
+    runs BEFORE routing so the redirect can't help us — we have to strip
+    the slash ourselves. Multiple trailing slashes are collapsed (rare in
+    practice, but cheap to defend against).
+    """
+    # Normalize: strip one or more trailing slashes for matching, but keep
+    # the root "/" path itself intact (it doesn't appear in any blocklist
+    # and an analyst can always reach the SPA shell).
+    normalized = path.rstrip("/") or "/"
+    if any(normalized.startswith(p) for p in _ANALYST_BLOCKED_PREFIXES):
+        return True
+    for sp in _ANALYST_BLOCKED_SUBPATHS:
+        if normalized == sp or normalized.startswith(sp + "/") or normalized.startswith(sp + "?"):
+            return True
+    if "/scoring/" in normalized and normalized.endswith(_ANALYST_BLOCKED_SCORING_SUFFIXES):
+        return True
+    if any(pat.fullmatch(normalized) for pat in _ANALYST_BLOCKED_SUBPATH_REGEX):
+        return True
+    return False
 
 
 # Path-parameter patterns that carry a service ID. The middleware extracts the

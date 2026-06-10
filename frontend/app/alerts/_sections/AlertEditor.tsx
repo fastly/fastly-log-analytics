@@ -4,6 +4,7 @@ import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
+import { useBootstrap } from '@/hooks/useBootstrap'
 import { Button } from '@/components/ui/button'
 import { Info, Loader2 } from 'lucide-react'
 import {
@@ -29,6 +30,17 @@ type Alert = components["schemas"]["Alert"]
 
 export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Alert | null, onSuccess: () => void }) {
   const { activeServiceId } = useServiceStore()
+  const services = useServiceStore(state => state.services)
+  const activeService = services.find(s => s.id === activeServiceId)
+  const { data: bootstrapData } = useBootstrap()
+  // Defensive guard: AlertsPage already hides the dialog trigger for
+  // analysts, but if the form mounts via any other path (deep-link,
+  // older code path) the POST /api/alerts/preview call would silently
+  // 403 — skip it entirely. Backend gates the same endpoint.
+  const bootstrapSettings = bootstrapData?.settings as Record<string, unknown> | undefined
+  const isAnalyst =
+    activeService?.accessLevel === 'read_only' ||
+    bootstrapSettings?.is_remote_analyst === true
   const queryClient = useQueryClient()
 
   const [name, setName] = React.useState(initialAlert?.name || '')
@@ -50,6 +62,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
   // Fetch preview data on change
   React.useEffect(() => {
     if (!activeServiceId) return
+    if (isAnalyst) return
 
     const fetchPreview = async () => {
       setIsPreviewLoading(true)
@@ -88,7 +101,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
     const timer = setTimeout(fetchPreview, 500)
     return () => clearTimeout(timer)
-  }, [activeServiceId, metric, category, evalType, evalScope, windowMin, compPeriodMin, statusCodesStr, threshold, lookbackHours])
+  }, [activeServiceId, isAnalyst, metric, category, evalType, evalScope, windowMin, compPeriodMin, statusCodesStr, threshold, lookbackHours])
 
   // Dynamic metrics based on category
   const metricsByCategory: Record<string, {value: string, label: string}[]> = {

@@ -204,10 +204,12 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       React.startTransition(() => router.replace('/share-login'))
       return
     }
-    // Analysts can't access admin pages. The backend already returns 403
-    // on /api/admin/*, but the page shells are served by Next.js — bounce
-    // them away client-side so the URL isn't reachable.
-    if (isAnalyst && pathname.startsWith('/admin')) {
+    // Analysts can't access admin pages or the Usage & Cost page. The
+    // backend returns 403 on /api/admin/* and /api/usage/*, but the page
+    // shells are served by Next.js — bounce them away client-side so the
+    // URL isn't reachable (otherwise the page mounts and silently fails
+    // its data fetches).
+    if (isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage'))) {
       React.startTransition(() =>
         router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'),
       )
@@ -227,6 +229,15 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     }
   }, [isLoading, hasServices, isAnalyst, isShareAnalyst, needsLogin, pathname, router, activeServiceId])
 
+  // Only preload world.geojson on routes that actually mount a map
+  // (dashboard's "Requests by Country" choropleth, /network's choropleth).
+  // Previously this was a global <link rel="preload"> in app/layout.tsx,
+  // which fired on every page (including /share-login) and wasted ~251KB
+  // on routes that never paint a map. React 19 hoists <link> to <head>
+  // automatically when rendered from a client component.
+  const needsGeoPreload =
+    pathname.startsWith('/dashboard') || pathname.startsWith('/network')
+
   // Hide the global filter bar on pages where it does not apply.
   // /query is a special case: Structured Mode (default) syncs with the
   // FilterBar, so we keep it visible; Raw SQL Mode (?mode=raw) owns its
@@ -237,6 +248,14 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-background">
+      {needsGeoPreload && (
+        <link
+          rel="preload"
+          href="/geo/world.geojson"
+          as="fetch"
+          crossOrigin="anonymous"
+        />
+      )}
       {shareBanner.node}
       <div className="flex flex-1 overflow-hidden min-h-0">
       {isAnalyst && disconnected && (

@@ -76,6 +76,29 @@ interface UseMapInitArgs {
  * handlers for the city-scatter and dma-fill layers. Cleans up on unmount or
  * when `isDark` changes (so the map style can be rebuilt for the new theme).
  */
+/**
+ * rAF-throttle a function so it fires at most once per animation frame.
+ * MapLibre's per-layer `mousemove` event fires on every native mousemove
+ * (~60-120 Hz on a trackpad), and each fire walks the feature index +
+ * triggers a React `setTooltip` re-render. Coalescing to one call per
+ * frame caps that at the display refresh rate without losing the latest
+ * position — we keep the most recent args and discard intermediates.
+ */
+function rafThrottle<TArgs extends any[]>(fn: (...args: TArgs) => void) {
+  let queued = false
+  let lastArgs: TArgs | null = null
+  return (...args: TArgs) => {
+    lastArgs = args
+    if (queued) return
+    queued = true
+    requestAnimationFrame(() => {
+      queued = false
+      if (lastArgs) fn(...lastArgs)
+      lastArgs = null
+    })
+  }
+}
+
 export function useMapInit({
   mapContainer,
   map,
@@ -160,7 +183,7 @@ export function useMapInit({
           })
         })
 
-        map.current.on('mousemove', 'city-scatter', (e) => {
+        map.current.on('mousemove', 'city-scatter', rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
           if (!e.features?.length) return
           const props = e.features[0].properties as Record<string, any>
           setTooltip({
@@ -170,7 +193,7 @@ export function useMapInit({
             country: props.country || undefined,
             cityData: props,
           })
-        })
+        }))
 
         map.current.on('mouseleave', 'city-scatter', () => {
           if (map.current) map.current.getCanvas().style.cursor = ''
@@ -194,7 +217,7 @@ export function useMapInit({
           })
         })
 
-        map.current.on('mousemove', 'dma-fill', (e) => {
+        map.current.on('mousemove', 'dma-fill', rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
           if (!e.features?.length) return
           const code = Number(e.features[0].properties?.dma_code)
           const cityData = dmaDataRef.current[code]
@@ -206,7 +229,7 @@ export function useMapInit({
             country: cityData.country || undefined,
             cityData,
           })
-        })
+        }))
 
         map.current.on('mouseleave', 'dma-fill', () => {
           if (map.current) map.current.getCanvas().style.cursor = ''

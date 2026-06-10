@@ -20,6 +20,26 @@ interface TooltipInfo {
   props: Record<string, any>
 }
 
+/**
+ * rAF-throttle a function so it fires at most once per animation frame.
+ * Wrapping MapLibre `mousemove` handlers caps the per-frame re-render
+ * cost to display refresh rate while preserving the latest position.
+ */
+function rafThrottle<TArgs extends any[]>(fn: (...args: TArgs) => void) {
+  let queued = false
+  let lastArgs: TArgs | null = null
+  return (...args: TArgs) => {
+    lastArgs = args
+    if (queued) return
+    queued = true
+    requestAnimationFrame(() => {
+      queued = false
+      if (lastArgs) fn(...lastArgs)
+      lastArgs = null
+    })
+  }
+}
+
 // ── Geometry helpers ──────────────────────────────────────────────────────────
 
 function greatCirclePoints(
@@ -341,11 +361,11 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
           const props = e.features[0].properties as Record<string, any>
           setTooltip({ clientX: e.originalEvent.clientX, clientY: e.originalEvent.clientY, props })
         })
-        map.current.on('mousemove', 'arc-lines', (e) => {
+        map.current.on('mousemove', 'arc-lines', rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
           if (!e.features?.length) return
           const props = e.features[0].properties as Record<string, any>
           setTooltip({ clientX: e.originalEvent.clientX, clientY: e.originalEvent.clientY, props })
-        })
+        }))
         map.current.on('mouseleave', 'arc-lines', () => {
           if (map.current) map.current.getCanvas().style.cursor = ''
           setTooltip(null)

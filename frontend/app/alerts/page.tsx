@@ -4,6 +4,7 @@ import React from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
+import { useBootstrap } from '@/hooks/useBootstrap'
 import { ReportShell } from '@/components/ReportShell'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -38,6 +39,19 @@ type Alert = components["schemas"]["Alert"]
 
 export default function AlertsPage() {
   const { activeServiceId } = useServiceStore()
+  const services = useServiceStore(state => state.services)
+  const activeService = services.find(s => s.id === activeServiceId)
+  const { data: bootstrapData } = useBootstrap()
+  // Mirrors AppLayout's analyst derivation: a user is "analyst" if their
+  // active service is read-only OR if bootstrap flagged them as a remote
+  // share-invited analyst. Backend gates POST/PUT/DELETE /api/alerts/* on
+  // the same condition (H-1 family), so any modify control would silently
+  // 403 — hide them entirely instead of letting the user click through to
+  // a failure.
+  const bootstrapSettings = bootstrapData?.settings as Record<string, unknown> | undefined
+  const isAnalyst =
+    activeService?.accessLevel === 'read_only' ||
+    bootstrapSettings?.is_remote_analyst === true
   const queryClient = useQueryClient()
   const [isFormOpen, setIsFormOpen] = React.useState(false)
   const [editingAlert, setEditingAlert] = React.useState<Alert | null>(null)
@@ -102,14 +116,16 @@ export default function AlertsPage() {
   }, [deleteTarget, queryClient])
 
   const handleEdit = React.useCallback((alert: Alert) => {
+    if (isAnalyst) return
     setEditingAlert(alert)
     setIsFormOpen(true)
-  }, [])
+  }, [isAnalyst])
 
   const handleCreate = React.useCallback(() => {
+    if (isAnalyst) return
     setEditingAlert(null)
     setIsFormOpen(true)
-  }, [])
+  }, [isAnalyst])
 
   return (
     <ReportShell
@@ -124,10 +140,12 @@ export default function AlertsPage() {
              <Loader2 className={`w-4 h-4 mr-2 ${isFetching ? 'animate-spin' : 'hidden'}`} />
             Refresh Now
           </Button>
-          <Button onClick={handleCreate}>
-            <Plus className="w-4 h-4 mr-2" />
-            Create Alert
-          </Button>
+          {!isAnalyst && (
+            <Button onClick={handleCreate}>
+              <Plus className="w-4 h-4 mr-2" />
+              Create Alert
+            </Button>
+          )}
         </div>
       }
       description={
@@ -204,6 +222,7 @@ export default function AlertsPage() {
           setColumnVisibility={setColumnVisibility}
           onEdit={handleEdit}
           onDelete={setDeleteTarget}
+          isAnalyst={isAnalyst}
         />
       </AnalyticsCard>
 
