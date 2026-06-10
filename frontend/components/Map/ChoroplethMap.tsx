@@ -230,9 +230,17 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
   const maxCount = data.length > 0 ? Math.max(...data.map(d => d.count)) : 0
 
   useEffect(() => {
-    // A trick to ensure MapLibre accurately captures its container dimensions once mounted.
-    const t = setTimeout(() => map.current?.resize(), 50)
-    return () => clearTimeout(t)
+    // MapLibre's containerSize is captured at construction time and isn't
+    // re-measured automatically when the parent layout changes (a flex
+    // child grown by sibling content, a card collapsing/expanding, etc.).
+    // ResizeObserver wakes us up on any container size change and calls
+    // map.resize() so the canvas re-sizes immediately instead of waiting
+    // for a window resize or a forced re-mount.
+    if (!mapContainer.current) return
+    const el = mapContainer.current
+    const ro = new ResizeObserver(() => map.current?.resize())
+    ro.observe(el)
+    return () => ro.disconnect()
   }, [])
 
   return (
