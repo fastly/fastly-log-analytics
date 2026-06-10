@@ -43,6 +43,13 @@ logging.basicConfig(
 logging.getLogger("pyiceberg.io").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
+# Install s3fs/botocore monkeypatches before anything else can touch s3fs.
+# Importing the fs submodule has the side-effect of patching S3FileSystem;
+# pyiceberg lazily instantiates S3FileSystem on first table access, so as
+# long as this lands before the first iceberg call we're safe — but the
+# earlier the better, since any future eager import would otherwise win.
+from backend.core.iceberg import fs as _iceberg_fs_patches  # noqa: E402, F401
+
 logger = logging.getLogger("backend.main")
 
 from fastapi import FastAPI, Request

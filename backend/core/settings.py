@@ -154,10 +154,6 @@ class Settings(BaseSettings):
     """Comma-separated hostnames treated as local-admin in
     :mod:`backend.utils.remote_access`."""
 
-    ssh_known_hosts_file: str | None = Field(default=None, alias="SSH_KNOWN_HOSTS_FILE")
-    """Optional override for the SSH known_hosts file path; used by the
-    tunnel rehydration path."""
-
     remote_share_db_dir: str | None = Field(default=None, alias="REMOTE_SHARE_DB_DIR")
     """Override for the analyst-share DB directory. Defaults to
     ``data/system/``."""
@@ -245,7 +241,6 @@ __all__ = ["Settings", "get_settings", "reset_settings", "is_strict_mode"]
 # - backend/utils/telemetry_proxy.py — FOS_PROXY_KEEPALIVE_S,
 #   FOS_PROXY_UPSTREAM_TIMEOUT_S.
 # - backend/utils/remote_access.py — LOCAL_HOSTS.
-# - backend/utils/tunnel.py — SSH_KNOWN_HOSTS_FILE.
 # - backend/core/share_db.py — REMOTE_SHARE_DB_DIR.
 # - backend/core/request_telemetry.py — OTEL_ENABLED (already structured).
 # - backend/utils/structlog_config.py — STRUCTLOG_FORMAT (already structured).

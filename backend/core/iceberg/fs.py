@@ -165,6 +165,18 @@ try:
     import botocore as _botocore
     from s3fs import S3FileSystem
 
+    # Contract guard: if s3fs renames any of these slots, our patches would
+    # silently no-op on the new name and the proxy hook would never fire.
+    # Fail loudly at import so an upgrade is caught in CI, not in prod.
+    _REQUIRED_S3FS_SLOTS = ("__init__", "set_session", "_connect", "_cat_file", "_info", "_open")
+    for _slot in _REQUIRED_S3FS_SLOTS:
+        if not hasattr(S3FileSystem, _slot):
+            raise RuntimeError(
+                f"s3fs.S3FileSystem.{_slot} missing — FOS monkeypatch contract broken. "
+                "Pin s3fs in pyproject.toml or update backend/core/iceberg/fs.py."
+            )
+    del _slot
+
     _orig_s3fs_init = S3FileSystem.__init__
     _orig_s3fs_set_session = S3FileSystem.set_session
 
