@@ -326,7 +326,14 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
     con = get_connection(source=source, read_only=True)
     try:
         try:
-            cols = {c[0] for c in con.execute(f"DESCRIBE {table_ident}").fetchall()}
+            from backend.core.iceberg import execute_with_stale_view_retry
+
+            cols = {
+                c[0]
+                for c in execute_with_stale_view_retry(
+                    con, source, lambda c: c.execute(f"DESCRIBE {table_ident}").fetchall()
+                )
+            }
         except duckdb.Error as e:
             logger.warning(
                 "[rollups] %s: cannot describe %s for time_series bundle: %s",
@@ -851,7 +858,14 @@ def _run_per_field_copy(
     con = get_connection(source=source, read_only=True)
     try:
         try:
-            cols = {c[0] for c in con.execute(f"DESCRIBE {table_ident}").fetchall()}
+            from backend.core.iceberg import execute_with_stale_view_retry
+
+            cols = {
+                c[0]
+                for c in execute_with_stale_view_retry(
+                    con, source, lambda c: c.execute(f"DESCRIBE {table_ident}").fetchall()
+                )
+            }
         except duckdb.Error as e:
             logger.warning("[rollups] %s: could not describe %s: %s", service_id, table_ident, e)
             return

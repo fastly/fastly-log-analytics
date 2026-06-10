@@ -2404,6 +2404,60 @@ _rebuild_signals: dict[str, threading.Event] = {}
 _rebuild_signals_lock = threading.Lock()
 
 
+def is_stale_view_error(exc: BaseException) -> bool:
+    """Return True when ``exc`` looks like the iceberg view referencing a
+    buffer parquet the commit cycle has already swept.
+
+    Mirror of :func:`backend.repositories._base._is_stale_view_error` —
+    promoted here so non-repository call paths (background crons /
+    discovery / rollup writers) can share the same detection without
+    importing through the repositories layer (would invert the
+    architecture). The repositories alias still resolves the same way;
+    new sites should import :func:`is_stale_view_error` directly from
+    :mod:`backend.core.iceberg`.
+    """
+    msg = str(exc)
+    return (
+        "No files found" in msg
+        or "Catalog Error: Table with name" in msg
+        or "does not exist" in msg
+        or "No such file or directory" in msg
+    )
+
+
+def execute_with_stale_view_retry(con, source: dict, fn, *args, **kwargs):
+    """Run ``fn(con, *args, **kwargs)`` with one stale-view self-heal retry.
+
+    On a :func:`is_stale_view_error`-shaped failure, bust the cached view
+    SQL via :func:`clear_source_caches` (keep_snapshot_cache=True, same
+    pattern QueryRunner.execute uses), force-rebind the view via
+    :func:`update_iceberg_view`, then re-invoke ``fn`` once.
+
+    Non-stale errors propagate immediately. Second-attempt failures
+    (including non-stale ones) propagate too — the caller decides
+    whether to log + fall through or treat as fatal.
+
+    Use this in background-job code paths that open a raw DuckDB
+    connection and don't have QueryRunner's built-in retry. Three
+    documented sites today (one in rdns_cache discovery, two in
+    rollups DESCRIBE) all surfaced the same buffer-deletion-race
+    symptom in prod on 2026-06-10 between the deploy at 06:49 UTC
+    and an external restart at 14:39 UTC.
+
+    The arguments mirror the inline retry pattern in
+    :meth:`QueryRunner.execute_with_retry` so a caller refactor can
+    swap one for the other.
+    """
+    try:
+        return fn(con, *args, **kwargs)
+    except Exception as e:
+        if not is_stale_view_error(e):
+            raise
+        clear_source_caches(source.get("name", "default"), keep_snapshot_cache=True)
+        update_iceberg_view(con, source, force=True)
+        return fn(con, *args, **kwargs)
+
+
 def clear_source_caches(source_key: str, *, keep_snapshot_cache: bool = False) -> None:
     """Remove in-memory cache entries for a service.
 

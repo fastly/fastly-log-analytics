@@ -661,6 +661,7 @@ def _discover_new_ips_gen(max_new: int = 500, days: int = 30):
             con = get_connection(src, read_only=True)
             try:
                 from backend.core.duckdb import _safe_table_name
+                from backend.core.iceberg import execute_with_stale_view_retry
 
                 # Check if this source has an ip column
                 table_name = _safe_table_name(src["name"])
@@ -673,12 +674,23 @@ def _discover_new_ips_gen(max_new: int = 500, days: int = 30):
                 if "ip" not in cols:
                     continue
 
-                rows = con.execute(
-                    f"""SELECT DISTINCT ip FROM "{table_name}"
-                        WHERE ip IS NOT NULL
-                          AND timestamp >= now() - INTERVAL '{days} days'
-                        LIMIT {remaining * 2}"""
-                ).fetchall()
+                # Wrap the DISTINCT scan in the stale-view self-heal so
+                # a buffer parquet that's been swept since this connection
+                # was opened gets recovered (clear caches + force rebind +
+                # retry once), matching QueryRunner.execute_with_retry.
+                # Pre-fix: every commit cycle that swept a buffer left the
+                # rdns discovery scan failing for 5 minutes (until next
+                # tick), spamming ERROR logs on a 100% failure pattern
+                # for hours — witnessed 2026-06-10.
+                def _scan_ips(c):
+                    return c.execute(
+                        f"""SELECT DISTINCT ip FROM "{table_name}"
+                            WHERE ip IS NOT NULL
+                              AND timestamp >= now() - INTERVAL '{days} days'
+                            LIMIT {remaining * 2}"""
+                    ).fetchall()
+
+                rows = execute_with_stale_view_retry(con, src, _scan_ips)
             finally:
                 con.close()
 
