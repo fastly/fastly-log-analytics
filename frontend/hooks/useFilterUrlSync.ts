@@ -30,10 +30,11 @@ import type { FiltersPayload } from '@/types/filters'
  */
 export function useFilterUrlSync(): void {
   const hydrated = useRef(false)
-  const { startTime, endTime, setRange, addFilter, clearFilters } = useFilterStore(
+  const { startTime, endTime, isAutoRange, setRange, addFilter, clearFilters } = useFilterStore(
     useShallow(state => ({
       startTime: state.startTime,
       endTime: state.endTime,
+      isAutoRange: state.isAutoRange,
       setRange: state.setRange,
       addFilter: state.addFilter,
       clearFilters: state.clearFilters,
@@ -89,16 +90,25 @@ export function useFilterUrlSync(): void {
     } else {
       url.searchParams.delete('filters')
     }
-    if (startTime) {
+    // Only persist start_time / end_time in the URL when the user has
+    // explicitly chosen a range. On fresh load and after Reset the store
+    // sits at its auto-range default (last 24h from now); writing those
+    // computed defaults to the URL would pollute it with values the user
+    // never picked AND make the URL look like a "specific" shareable
+    // snapshot when it's really just the rolling default. The auto-snap
+    // effect in FilterBar flips isAutoRange off as soon as a real
+    // selection (preset click, datetime input, sync-status extents)
+    // takes effect — at that point the URL fills in.
+    if (!isAutoRange && startTime) {
       url.searchParams.set('start_time', startTime)
     } else {
       url.searchParams.delete('start_time')
     }
-    if (endTime) {
+    if (!isAutoRange && endTime) {
       url.searchParams.set('end_time', endTime)
     } else {
       url.searchParams.delete('end_time')
     }
     window.history.replaceState({}, '', url.toString())
-  }, [filterPayload, startTime, endTime])
+  }, [filterPayload, startTime, endTime, isAutoRange])
 }
