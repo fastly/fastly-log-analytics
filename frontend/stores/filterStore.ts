@@ -68,7 +68,7 @@ export const useFilterStore = create<FilterState>((set) => ({
       const diff = e.getTime() - s.getTime()
       const compEnd = new Date(s.getTime())
       const compStart = new Date(compEnd.getTime() - diff)
-      return { 
+      return {
         startTime: s.toISOString(),
         endTime: e.toISOString(),
         compareMode: nextMode,
@@ -82,6 +82,21 @@ export const useFilterStore = create<FilterState>((set) => ({
   setCompareRange: (startTime, endTime) => set({ compareStartTime: startTime, compareEndTime: endTime }),
 
   addFilter: (column, value, mode) => set((state) => {
+    // Reject column names matching /_\d+$/. buildFiltersPayload uses
+    // `_<n>` as a dedup suffix when the same column needs both include
+    // and exclude buckets, and useFilterUrlSync strips that suffix on
+    // URL hydration. A column literally ending in `_<digit>` (e.g.
+    // `response_1`) would be silently corrupted on round-trip. The
+    // field catalog (source schema) is the source of truth for column
+    // names; any future field naming convention must avoid the collision.
+    if (/_\d+$/.test(column)) {
+      console.warn(
+        `[filterStore] addFilter: dropping column "${column}" — column names ending in _<digit> ` +
+        `collide with the buildFiltersPayload dedup suffix scheme.`
+      )
+      return state
+    }
+
     // If exact filter already exists, don't duplicate
     const exists = state.filters.find(f => f.column === column && f.value === value)
     if (exists) return state
@@ -104,8 +119,8 @@ export const useFilterStore = create<FilterState>((set) => ({
   })),
 
   toggleFilterMode: (id) => set((state) => ({
-    filters: state.filters.map(f => 
-      f.id === id 
+    filters: state.filters.map(f =>
+      f.id === id
         ? { ...f, mode: f.mode === 'include' ? 'exclude' : 'include' }
         : f
     )

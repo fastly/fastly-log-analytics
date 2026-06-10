@@ -8,7 +8,7 @@
  * snapshots the initial state on import, mutates the store, then resets via
  * setState() so subsequent tests aren't affected.
  */
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useFilterStore } from '@/stores/filterStore'
 
 const _initial = useFilterStore.getState()
@@ -97,6 +97,25 @@ describe('addFilter / removeFilter', () => {
     useFilterStore.getState().addFilter('status', '500', 'include')
     useFilterStore.getState().removeFilter('nonexistent-id')
     expect(useFilterStore.getState().filters).toHaveLength(1)
+  })
+})
+
+describe('addFilter — dedup-suffix guard', () => {
+  it('drops column names matching /_\\d+$/ (would corrupt on URL round-trip)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    useFilterStore.getState().addFilter('response_1', 'foo', 'include')
+    useFilterStore.getState().addFilter('field_42', 'bar', 'exclude')
+    expect(useFilterStore.getState().filters).toHaveLength(0)
+    expect(warn).toHaveBeenCalledTimes(2)
+    warn.mockRestore()
+  })
+
+  it('allows column names with embedded digits but no trailing _<digit>', () => {
+    const { addFilter } = useFilterStore.getState()
+    addFilter('status_code', '500', 'include')
+    addFilter('http2_pushes', '3', 'include')
+    addFilter('response', '200', 'include')
+    expect(useFilterStore.getState().filters).toHaveLength(3)
   })
 })
 
