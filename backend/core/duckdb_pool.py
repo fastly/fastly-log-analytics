@@ -149,7 +149,7 @@ def _safe_buffer_mtime(src: dict | None) -> float | None:
     if src is None:
         return None
     try:
-        from backend.core.iceberg import _buffer_dir
+        from backend.core.iceberg._core import _buffer_dir
 
         path = _buffer_dir(src)
         return os.path.getmtime(path)
@@ -366,9 +366,9 @@ class _Pool:
         fails, discard the connection and let the caller retry.
         """
         try:
-            from backend.core import iceberg
+            from backend.core.iceberg import view as iceberg_view
 
-            current = iceberg._view_cache.get(self.service_key)
+            current = iceberg_view._view_cache.get(self.service_key)
             stamped_view = _get_conn_state(con, "view_fingerprint")
             stamped_buf = _get_conn_state(con, "buffer_mtime")
             current_buf = _safe_buffer_mtime(src)
@@ -376,7 +376,7 @@ class _Pool:
                 # View AND underlying buffer set match what we bound last
                 # time — nothing to do.
                 return con
-            iceberg.update_iceberg_view(con, src)
+            iceberg_view.update_iceberg_view(con, src)
             self._stamp_fingerprint(con, src)
             return con
         except Exception as e:
@@ -407,7 +407,7 @@ class _Pool:
         conn (if _in_use < max_size) or waits on _cond, identical to
         today's behavior.
         """
-        from backend.core import iceberg
+        from backend.core.iceberg import view as iceberg_view
 
         drained: list[duckdb.DuckDBPyConnection] = []
         with self._cond:
@@ -421,7 +421,7 @@ class _Pool:
 
         for con in drained:
             try:
-                iceberg._try_fast_path_view(con, src)
+                iceberg_view._try_fast_path_view(con, src)
                 self._stamp_fingerprint(con, src)
             except Exception as e:
                 logger.warning(
@@ -447,9 +447,9 @@ class _Pool:
 
     def _stamp_fingerprint(self, con: duckdb.DuckDBPyConnection, src: dict | None = None) -> None:
         try:
-            from backend.core import iceberg
+            from backend.core.iceberg import view as iceberg_view
 
-            current = iceberg._view_cache.get(self.service_key)
+            current = iceberg_view._view_cache.get(self.service_key)
             buf_mtime = _safe_buffer_mtime(src) if src is not None else None
             _set_conn_state(
                 con,
@@ -502,10 +502,12 @@ class _Pool:
         if n == 0:
             return {"count": 0, "p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "max_ms": 0.0, "mean_ms": 0.0}
         snap.sort()
+
         # Nearest-rank percentile — fine at this sample count.
         def _pct(p: float) -> float:
             idx = min(n - 1, max(0, int(round(p * (n - 1)))))
             return round(snap[idx], 2)
+
         return {
             "count": n,
             "p50_ms": _pct(0.50),

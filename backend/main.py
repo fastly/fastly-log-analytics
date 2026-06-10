@@ -425,11 +425,11 @@ app = FastAPI(
 # shipping a silently-broken request pipeline. See ADR-04 for the rationale
 # behind each layer's position.
 MIDDLEWARE_ORDER = (
-    "CompressMiddleware",              # outermost — sees final response body
-    "BaseHTTPMiddleware",              # @app.middleware('http') telemetry decorator
-    "TelemetryResponseBodyMiddleware", # JSON-body backstop for debug panel
-    "RemoteAccessMiddleware",          # analyst firewall — rejects before CORS
-    "CORSMiddleware",                  # innermost — closest to FastAPI routing
+    "CompressMiddleware",  # outermost — sees final response body
+    "BaseHTTPMiddleware",  # @app.middleware('http') telemetry decorator
+    "TelemetryResponseBodyMiddleware",  # JSON-body backstop for debug panel
+    "RemoteAccessMiddleware",  # analyst firewall — rejects before CORS
+    "CORSMiddleware",  # innermost — closest to FastAPI routing
 )
 
 
@@ -440,12 +440,11 @@ def assert_middleware_order(_app: FastAPI) -> None:
     ship. ``user_middleware`` is in outermost-first order (Starlette
     reverses the add-order internally), so the comparison is direct.
     """
-    actual = tuple(m.cls.__name__ for m in _app.user_middleware)
+    # getattr fallback because starlette types `m.cls` as `_MiddlewareFactory[P]`
+    # which has no static `__name__`; at runtime middleware classes always do.
+    actual = tuple(getattr(m.cls, "__name__", repr(m.cls)) for m in _app.user_middleware)
     if actual != MIDDLEWARE_ORDER:
-        raise RuntimeError(
-            f"Middleware order violation (ADR-04). "
-            f"expected={MIDDLEWARE_ORDER} actual={actual}"
-        )
+        raise RuntimeError(f"Middleware order violation (ADR-04). expected={MIDDLEWARE_ORDER} actual={actual}")
 
 
 # INVARIANT: CORSMiddleware is innermost (see ADR-04).

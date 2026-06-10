@@ -21,8 +21,8 @@ def test_pool_does_not_deadlock_on_checkout_exception():
     # 2. Mock iceberg's view cache and update_iceberg_view to raise an exception
     # so that _prepare_checkout fails and triggers the _discard path.
     with (
-        patch("backend.core.iceberg._view_cache", {}),
-        patch("backend.core.iceberg.update_iceberg_view", side_effect=RuntimeError("Mock view rebind failed")),
+        patch("backend.core.iceberg.view._view_cache", {}),
+        patch("backend.core.iceberg.view.update_iceberg_view", side_effect=RuntimeError("Mock view rebind failed")),
     ):
         # 3. Call acquire. Since _prepare_checkout fails, it should discard the connection
         # and raise the exception, but it must NOT deadlock. We set a timeout to be safe.
@@ -67,7 +67,7 @@ def test_warm_idle_binds_every_idle_connection():
         pool._idle.put_nowait(c)
     pool._in_use = 3
 
-    with patch("backend.core.iceberg._try_fast_path_view", return_value=True) as mock_fp:
+    with patch("backend.core.iceberg.view._try_fast_path_view", return_value=True) as mock_fp:
         pool.warm_idle(src={"name": "test_warm", "bucket": "b"})
 
     # Every idle conn was warmed
@@ -83,7 +83,7 @@ def test_warm_idle_empty_pool_is_noop():
     """warm_idle on an empty pool returns immediately without error."""
     pool = _Pool(service_key="test_warm_empty", max_size=2)
 
-    with patch("backend.core.iceberg._try_fast_path_view") as mock_fp:
+    with patch("backend.core.iceberg.view._try_fast_path_view") as mock_fp:
         pool.warm_idle(src={"name": "test_warm_empty", "bucket": "b"})
 
     assert mock_fp.call_count == 0
@@ -99,7 +99,7 @@ def test_warm_idle_returns_conn_on_bind_failure():
     pool._idle.put_nowait(mock_conn)
     pool._in_use = 1
 
-    with patch("backend.core.iceberg._try_fast_path_view", side_effect=RuntimeError("bind boom")):
+    with patch("backend.core.iceberg.view._try_fast_path_view", side_effect=RuntimeError("bind boom")):
         pool.warm_idle(src={"name": "test_warm_fail", "bucket": "b"})
 
     # Connection is still in idle — not discarded
@@ -116,7 +116,7 @@ def test_warm_idle_bounded_by_max_size():
         pool._idle.put_nowait(c)
     pool._in_use = 2
 
-    with patch("backend.core.iceberg._try_fast_path_view", return_value=True) as mock_fp:
+    with patch("backend.core.iceberg.view._try_fast_path_view", return_value=True) as mock_fp:
         pool.warm_idle(src={"name": "test_warm_bound", "bucket": "b"})
 
     # Hit max_size iterations exactly — no infinite loop
