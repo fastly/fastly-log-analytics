@@ -11,6 +11,7 @@ import { useFilterStore } from '@/stores/filterStore'
 import { useFilterPayload } from '@/hooks/useFilterPayload'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
+import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Play, Search, AlertCircle, Database, ArrowUp, ArrowDown } from 'lucide-react'
@@ -132,11 +133,24 @@ function QueryPageInner() {
     } catch { /* ignore */ }
   }, [])
 
+  // fieldTypes drives unquoted IN-list literals for numeric columns
+  // (so `edge_score IN (50)` instead of `IN ('50')`). Sourced from the
+  // catalog's per-field duckdb_type. Missing catalog → falls back to
+  // all-quoted, which still works via DuckDB's implicit cast.
+  const { data: catalog } = useLogFieldsCatalog()
+  const fieldTypes = useMemo<Record<string, string>>(() => {
+    const out: Record<string, string> = {}
+    for (const f of catalog?.fields ?? []) {
+      if (f.id && f.duckdb_type) out[f.id] = f.duckdb_type
+    }
+    return out
+  }, [catalog])
+
   // The Structured-mode SQL preview/payload — recomputed whenever filter state
   // or sort changes. Raw mode ignores this entirely.
   const structuredSql = useMemo(
-    () => buildStructuredSql(filterPayload, startTime, endTime, structuredSorting, maxRows),
-    [filterPayload, startTime, endTime, structuredSorting, maxRows],
+    () => buildStructuredSql(filterPayload, startTime, endTime, structuredSorting, maxRows, fieldTypes),
+    [filterPayload, startTime, endTime, structuredSorting, maxRows, fieldTypes],
   )
 
   const effectiveSql = mode === 'structured' ? structuredSql : rawSql

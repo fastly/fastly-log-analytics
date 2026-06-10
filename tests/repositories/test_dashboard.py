@@ -94,6 +94,16 @@ def test_get_aggregates_with_data(in_memory_duckdb, test_service_source):
         assert "count" in entry
 
 
+@pytest.mark.skip(
+    reason=(
+        "Dashboard rollup fast-path disabled 2026-06-10: per-day rollup was "
+        "over-inclusive on partial-day windows (see "
+        "backend/repositories/dashboard.py:228 for full rationale). This test "
+        "pinned the perf-optimized rollup-batch shape; with use_rollups=False "
+        "the path is never taken. Unskip when the partial-day live-fallback "
+        "lands in execute_top_n_rollups."
+    )
+)
 def test_get_aggregates_rollup_path_map_data_uses_per_field_limits(in_memory_duckdb, test_service_source, monkeypatch):
     """Rollup fast-path: map_data must come from the ALREADY-RUNNING batch
     execute_top_n_rollups call via per_field_limits={"country": 500},
