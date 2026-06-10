@@ -31,6 +31,10 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+        # openapi-typescript emits openapi.json without a trailing newline;
+        # end-of-file-fixer adds one, then the next regen-openapi run
+        # strips it. Excluding the generated artifact breaks the cycle.
+        exclude: '^frontend/openapi\.json$'
       - id: check-yaml
       - id: check-json
       - id: check-merge-conflict
