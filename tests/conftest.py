@@ -149,6 +149,8 @@ def in_memory_duckdb():
 def client(in_memory_duckdb, test_service_source):
     from fastapi.testclient import TestClient
 
+    from backend.core.request_context import RequestContext, build_request_context
+    from backend.core.request_telemetry import RequestTelemetry
     from backend.deps import get_con, get_service_id, get_source
     from backend.main import app
 
@@ -160,6 +162,26 @@ def client(in_memory_duckdb, test_service_source):
     # so without this override every ``Depends(get_service_id)`` route returns
     # ``configured=False`` before the test's patches get a chance to run.
     app.dependency_overrides[get_service_id] = lambda: test_service_source["service_id"]
+
+    # Routers migrated to ``RequestContext`` (Phase 8 v2.0 cut) get their
+    # connection + source via ``build_request_context``, which inlines its
+    # own source resolution + opens its own connection — it does NOT honour
+    # the ``get_source``/``get_con`` overrides above. Provide an equivalent
+    # override that returns a RequestContext wired to the same in-memory
+    # fixtures so dashboard / query / security / etc. tests keep working.
+    def _override_build_request_context():
+        ctx = RequestContext(
+            service_id=test_service_source["service_id"],
+            source=test_service_source,
+            con=in_memory_duckdb,
+            telemetry=RequestTelemetry(request_method="POST", request_path="/test"),
+            analyst_session=None,
+            read_only=True,
+        )
+        yield ctx
+
+    app.dependency_overrides[build_request_context] = _override_build_request_context
+
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

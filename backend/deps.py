@@ -171,27 +171,12 @@ def get_con(source: dict = Depends(get_source)) -> duckdb.DuckDBPyConnection:
         yield con
 
 
-# ── Bundled analytics dependency ─────────────────────────────────────────────
-
-
-class AnalyticsDeps:
-    """Bundles the two common analytics dependencies into a single injectable.
-
-    Usage in a route::
-
-        @router.post("/api/my-endpoint")
-        @query_errors()
-        def my_endpoint(req: MyRequest, deps: AnalyticsDeps = Depends()):
-            return repo.do_stuff(con=deps.con, src=deps.source, ...)
-    """
-
-    def __init__(
-        self,
-        source: dict = Depends(get_source),
-        con: duckdb.DuckDBPyConnection = Depends(get_con),
-    ):
-        self.source = source
-        self.con = con
+# ``AnalyticsDeps`` (bundle of get_source + get_con) was removed at the
+# v2.0 cut. Routes now take :class:`backend.core.request_context.RequestContext`
+# directly via ``Depends(build_request_context)`` — same connection +
+# source surface, with structural tenancy enforcement on every route
+# (the old bundle skipped it because ``require_service_access`` was
+# never wired in as a sibling dep).
 
 
 # ── Tenant-scope enforcement (security) ─────────────

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from backend.deps import AnalyticsDeps, get_service_id
+from backend.deps import get_service_id
+from backend.core.request_context import RequestContext, build_request_context
 from backend.models.dashboard import QueryRequest
 from backend.repositories import query as repo
 
@@ -15,7 +16,7 @@ router = APIRouter(prefix="/api", tags=["query"])
 def query_endpoint(
     req: QueryRequest,
     request: Request,
-    deps: AnalyticsDeps = Depends(),
+    ctx: RequestContext = Depends(build_request_context),
     service_id: str | None = Depends(get_service_id),
 ):
     sql = req.sql.strip()
@@ -35,8 +36,8 @@ def query_endpoint(
     for attempt in (1, 2):
         try:
             return repo.execute_query(
-                con=deps.con,
-                src=deps.source,
+                con=ctx.con,
+                src=ctx.source,
                 sql=sql,
                 max_rows=req.max_rows,
                 want_explain=req.explain,

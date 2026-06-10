@@ -8,7 +8,7 @@ import time
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from backend.deps import AnalyticsDeps
+from backend.core.request_context import RequestContext, build_request_context
 from backend.models.dashboard import (
     AggregatesRequest,
     AggregatesResponse,
@@ -25,10 +25,10 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 @router.post("/aggregates", response_model=AggregatesResponse)
 @query_errors()
-def dashboard_aggregates(req: AggregatesRequest, deps: AnalyticsDeps = Depends()):
+def dashboard_aggregates(req: AggregatesRequest, ctx: RequestContext = Depends(build_request_context)):
     return repo.get_aggregates(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -39,10 +39,10 @@ def dashboard_aggregates(req: AggregatesRequest, deps: AnalyticsDeps = Depends()
 
 @router.post("/raw", response_model=RawResponse)
 @query_errors()
-def dashboard_raw(req: RawRequest, deps: AnalyticsDeps = Depends()):
+def dashboard_raw(req: RawRequest, ctx: RequestContext = Depends(build_request_context)):
     return repo.get_raw(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -56,10 +56,10 @@ def dashboard_raw(req: RawRequest, deps: AnalyticsDeps = Depends()):
 
 @router.post("/raw/csv")
 @query_errors()
-def dashboard_raw_csv(req: RawRequest, deps: AnalyticsDeps = Depends()):
+def dashboard_raw_csv(req: RawRequest, ctx: RequestContext = Depends(build_request_context)):
     df = repo.get_raw_df(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -74,7 +74,7 @@ def dashboard_raw_csv(req: RawRequest, deps: AnalyticsDeps = Depends()):
     df.to_csv(output, index=False)
     output.seek(0)
 
-    filename = f"logs_{deps.source['name']}_{int(time.time())}.csv"
+    filename = f"logs_{ctx.source['name']}_{int(time.time())}.csv"
     return StreamingResponse(
         output, media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
@@ -82,10 +82,10 @@ def dashboard_raw_csv(req: RawRequest, deps: AnalyticsDeps = Depends()):
 
 @router.post("/field-values", response_model=FieldValuesResponse)
 @query_errors()
-def dashboard_field_values(req: FieldValuesRequest, deps: AnalyticsDeps = Depends()):
+def dashboard_field_values(req: FieldValuesRequest, ctx: RequestContext = Depends(build_request_context)):
     return repo.get_field_values(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         field=req.field,
         search=req.search,
         limit=req.limit,

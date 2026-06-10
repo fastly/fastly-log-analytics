@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends
 
-from backend.deps import AnalyticsDeps
+from backend.core.request_context import RequestContext, build_request_context
 from backend.models.common import FilteredRequest
 from backend.models.performance import (
     PerformanceAggregatesResponse,
@@ -30,10 +30,10 @@ class OriginTsRequest(FilteredRequest):
 
 @router.post("/aggregates", response_model=PerformanceAggregatesResponse)
 @query_errors()
-def performance_aggregates(req: PerformanceRequest, deps: AnalyticsDeps = Depends()):
+def performance_aggregates(req: PerformanceRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_performance_aggregates(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -44,10 +44,10 @@ def performance_aggregates(req: PerformanceRequest, deps: AnalyticsDeps = Depend
 
 @router.post("/origin-ts", response_model=PerformanceOriginTsResponse)
 @query_errors()
-def performance_origin_ts(req: OriginTsRequest, deps: AnalyticsDeps = Depends()):
+def performance_origin_ts(req: OriginTsRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_origin_ts(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,

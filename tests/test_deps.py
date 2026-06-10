@@ -327,16 +327,18 @@ def test_connection_holder_pool_path_discards_on_error():
         assert called_exc_type is RuntimeError
 
 
-# ── AnalyticsDeps: bundled source + connection ───────────────────────────────
+# ── AnalyticsDeps: removed at v2.0 cut ───────────────────────────────────────
 
 
-def test_analytics_deps_bundles_source_and_con():
-    """``AnalyticsDeps`` is a thin DI bundle — the test pins that both
-    fields are stored as attributes (the routes do ``deps.source`` /
-    ``deps.con``, so the attribute names are part of the contract)."""
-    fake_src = {"name": "x"}
-    fake_con = MagicMock()
-
-    bundle = deps.AnalyticsDeps(source=fake_src, con=fake_con)
-    assert bundle.source is fake_src
-    assert bundle.con is fake_con
+def test_analytics_deps_symbol_removed():
+    """v2.0 cut Phase 8: the bundled ``AnalyticsDeps`` (get_source + get_con)
+    was replaced by :class:`backend.core.request_context.RequestContext`
+    via ``Depends(build_request_context)``. The new dep enforces analyst
+    tenancy structurally (the old bundle skipped it because
+    ``require_service_access`` was never wired as a sibling dep on any
+    route). Pin removal so a refactor doesn't quietly re-introduce it."""
+    assert not hasattr(deps, "AnalyticsDeps"), (
+        "AnalyticsDeps was removed at v2.0 cut. Routes use "
+        "RequestContext via Depends(build_request_context); access "
+        "ctx.source / ctx.con / ctx.service_id."
+    )

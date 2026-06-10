@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from backend.deps import AnalyticsDeps
+from backend.core.request_context import RequestContext, build_request_context
 from backend.models.common import FilteredRequest
 from backend.models.security import SecurityAggregatesResponse, SecurityTopBotsResponse
 from backend.repositories import security as repo
@@ -19,10 +19,10 @@ class SecurityAggregatesRequest(FilteredRequest):
 
 @router.post("/aggregates", response_model=SecurityAggregatesResponse)
 @query_errors()
-def security_aggregates(req: SecurityAggregatesRequest, deps: AnalyticsDeps = Depends()):
+def security_aggregates(req: SecurityAggregatesRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_security_aggregates(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -33,10 +33,10 @@ def security_aggregates(req: SecurityAggregatesRequest, deps: AnalyticsDeps = De
 
 @router.post("/top-bots", response_model=SecurityTopBotsResponse)
 @query_errors()
-def top_bots(req: FilteredRequest, deps: AnalyticsDeps = Depends()):
+def top_bots(req: FilteredRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_top_bots(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
