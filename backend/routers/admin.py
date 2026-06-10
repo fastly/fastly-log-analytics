@@ -18,6 +18,7 @@ from backend.models.admin import (
     LogAccountingBucket,
     LogAccountingResponse,
     LogAccountingTotals,
+    LogExtentsResponse,
     PopLocationsResponse,
     SustainedLossAlert,
     SyncStatusResponse,
@@ -737,6 +738,39 @@ def sync_status(
         raise HTTPException(status_code=503, detail={"error": str(e), "busy": True})
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.get("/log-extents", response_model=LogExtentsResponse)
+def log_extents(service_id: str | None = Depends(get_service_id)):
+    """Return only the earliest/latest log timestamps for the FilterBar.
+
+    Analyst-safe sibling of ``/api/sync-status``: same cached-status fast
+    path but projected down to the two fields the FilterBar actually
+    reads. ``/api/sync-status`` is blocked for analysts because it leaks
+    ``ngwaf_workspace_id`` and active cron-task state; this endpoint
+    drops both, so the middleware lets it through and the FilterBar's
+    snap-to-extents UX works for analysts too.
+
+    Reads only the persisted status snapshot — no DuckDB connection
+    grabbed, no contention with cron, no 503 path. The snapshot is
+    refreshed by the sync cron every minute so a freshly started
+    service sees populated extents within ~60s.
+    """
+    from backend import config as svcconfig
+    from backend.core import duckdb as _db
+
+    if not service_id:
+        return LogExtentsResponse.with_telemetry(configured=False)
+    src = _db.get_source_for_service(service_id)
+    if not src:
+        return LogExtentsResponse.with_telemetry(configured=False)
+
+    cached = svcconfig.get_status(src["name"]) or {}
+    return LogExtentsResponse.with_telemetry(
+        configured=True,
+        earliest_log_at=cached.get("earliest_log_at"),
+        latest_log_at=cached.get("latest_log_at"),
+    )
 
 
 @router.get("/admin/ingested-files", response_model=IngestedFilesResponse)

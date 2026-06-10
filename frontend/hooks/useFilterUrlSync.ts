@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef } from 'react'
+import { usePathname } from 'next/navigation'
 import { useShallow } from 'zustand/react/shallow'
 import { useFilterStore } from '@/stores/filterStore'
 import { useFilterPayload } from '@/hooks/useFilterPayload'
@@ -29,6 +30,7 @@ import type { FiltersPayload } from '@/types/filters'
  * UI; the URL is just a mirror.
  */
 export function useFilterUrlSync(): void {
+  const pathname = usePathname()
   const hydrated = useRef(false)
   const { startTime, endTime, isAutoRange, setRange, addFilter, clearFilters } = useFilterStore(
     useShallow(state => ({
@@ -79,7 +81,7 @@ export function useFilterUrlSync(): void {
     hydrated.current = true
   }, [setRange, addFilter, clearFilters])
 
-  // Write store → URL on subsequent state changes (after hydration).
+  // Write store → URL on subsequent state changes (after hydration) or when path changes
   useEffect(() => {
     if (!hydrated.current) return
     if (typeof window === 'undefined') return
@@ -110,5 +112,5 @@ export function useFilterUrlSync(): void {
       url.searchParams.delete('end_time')
     }
     window.history.replaceState({}, '', url.toString())
-  }, [filterPayload, startTime, endTime, isAutoRange])
+  }, [filterPayload, startTime, endTime, isAutoRange, pathname])
 }

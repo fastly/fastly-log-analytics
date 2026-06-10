@@ -21,6 +21,7 @@ import { downloadAsCsv } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { FiltersPayload } from '@/types/filters'
 import { buildStructuredSql, type QueryMode } from './_sql_builder'
+import { parseJsonAsync } from '@/lib/workers/parseJson'
 import { ModeToggle } from './_sections/ModeToggle'
 import { StructuredMode } from './_sections/StructuredMode'
 import { RawSqlMode } from './_sections/RawSqlMode'
@@ -175,8 +176,20 @@ function QueryPageInner() {
 
   const queryMutation = useMutation({
     mutationFn: async (params: { sql: string; max_rows: number; explain: boolean }) => {
-      const { data } = await client.POST('/api/query', { body: params })
-      return data as any
+      const { data, error } = await client.POST('/api/query', { body: params, parseAs: 'text' })
+      if (error) {
+        if (typeof error === 'string') {
+          try {
+            throw JSON.parse(error)
+          } catch (e) {
+            throw new Error(error)
+          }
+        }
+        throw error
+      }
+      if (!data) throw new Error('No data')
+      if (typeof data !== 'string') return data as any
+      return await parseJsonAsync<any>(data as string)
     },
   })
 

@@ -166,13 +166,22 @@ describe('toggleCompareMode', () => {
 })
 
 describe('clearFilters', () => {
+  it('only clears filters', () => {
+    const { addFilter } = useFilterStore.getState()
+    addFilter('country', 'US', 'include')
+    useFilterStore.getState().clearFilters()
+    expect(useFilterStore.getState().filters).toEqual([])
+  })
+})
+
+describe('resetAll', () => {
   it('wipes filters, re-enables auto-range, clears compare state', () => {
     const { addFilter, toggleCompareMode } = useFilterStore.getState()
     addFilter('country', 'US', 'include')
     toggleCompareMode()
     useFilterStore.setState({ isAutoRange: false, hasSyncedExtents: true })
 
-    useFilterStore.getState().clearFilters()
+    useFilterStore.getState().resetAll()
     const s = useFilterStore.getState()
     expect(s.filters).toEqual([])
     expect(s.isAutoRange).toBe(true)
@@ -184,9 +193,9 @@ describe('clearFilters', () => {
 
   it('restores startTime/endTime to last-24h-from-now defaults (Reset regression)', () => {
     // Regression for: prod Reset was a no-op for the time range whenever
-    // data was fresh, because clearFilters only flipped flags and the
+    // data was fresh, because resetAll only flipped flags and the
     // FilterBar snap effect took its "keep current range" branch
-    // (ageMinutes < 15). clearFilters now restores the same defaults the
+    // (ageMinutes < 15). resetAll now restores the same defaults the
     // store initializes with, so Reset always returns to "last 24h from
     // now" regardless of data freshness.
     useFilterStore.getState().setRange('2026-05-01T18:00:00.000Z', '2026-05-02T00:00:00.000Z')
@@ -196,7 +205,7 @@ describe('clearFilters', () => {
     expect(spanBefore).toBeCloseTo(6 * 3600 * 1000, -2) // 6 hours +/- small
 
     const nowMs = Date.now()
-    useFilterStore.getState().clearFilters()
+    useFilterStore.getState().resetAll()
     const after = useFilterStore.getState()
     const startMs = new Date(after.startTime).getTime()
     const endMs = new Date(after.endTime).getTime()

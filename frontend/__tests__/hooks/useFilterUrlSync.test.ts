@@ -79,7 +79,7 @@ describe('useFilterUrlSync', () => {
 
     // Then: Reset → clearFilters → isAutoRange flips back to true → URL clears.
     act(() => {
-      useFilterStore.getState().clearFilters()
+      useFilterStore.getState().resetAll()
     })
     const params = new URLSearchParams(window.location.search)
     expect(params.has('start_time')).toBe(false)
@@ -96,7 +96,7 @@ describe('useFilterUrlSync', () => {
     expect(new URLSearchParams(window.location.search).has('filters')).toBe(true)
 
     act(() => {
-      useFilterStore.getState().clearFilters()
+      useFilterStore.getState().resetAll()
     })
     expect(new URLSearchParams(window.location.search).has('filters')).toBe(false)
   })

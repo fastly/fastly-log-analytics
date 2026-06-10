@@ -31,6 +31,7 @@ def test_defaults_when_env_is_empty(monkeypatch):
         "REQUIRE_PROXY_HEADERS",
         "STRICT_DATA_DIR_CHECK",
         "OTEL_ENABLED",
+        "OTEL_EXPORTER",
         "STRUCTLOG_FORMAT",
         "DEBUG_RESPONSES",
         "DUCKDB_MEMORY_LIMIT",
@@ -47,6 +48,7 @@ def test_defaults_when_env_is_empty(monkeypatch):
     assert s.require_proxy_headers is False
     assert s.strict_data_dir_check is False
     assert s.otel_enabled is True
+    assert s.otel_exporter == "none"
     assert s.structlog_format == "console"
     assert s.debug_responses is False
     assert s.duckdb_memory_limit is None

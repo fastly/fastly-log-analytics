@@ -23,6 +23,7 @@ import {
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
+import { useFilterUrlSync } from '@/hooks/useFilterUrlSync'
 import { TimezoneSwitcher } from '@/components/TimezoneSwitcher/TimezoneSwitcher'
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle'
 import { FilterBar } from '@/components/FilterBar/FilterBar'
@@ -138,6 +139,10 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   // Populated by <RawQueryModeProbe> inside the Suspense boundary below
   // so we don't have to call useSearchParams() directly here.
   const [isRawQueryMode, setIsRawQueryMode] = React.useState(false)
+
+  // Persist filter state to URL so back-nav, refresh, and shared links
+  // all round-trip the user's current dashboard view.
+  useFilterUrlSync()
 
   // (Removed) Navigation cancel pattern was here. The intent was to
   // abort the previous route's in-flight polls on route change, but

@@ -54,6 +54,7 @@ export function ResultsTable({
       <div className="border rounded-lg bg-card overflow-hidden">
         {isStructured ? (
           <DataTable
+            tableCaption="Log Explorer Data Results"
             columns={columns}
             data={data.data || []}
             isLoading={isPending}
@@ -62,6 +63,7 @@ export function ResultsTable({
           />
         ) : (
           <DataTable
+            tableCaption="Log Explorer Data Results"
             columns={columns}
             data={data.data || []}
             isLoading={isPending}

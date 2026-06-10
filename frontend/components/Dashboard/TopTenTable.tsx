@@ -69,7 +69,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
     }
 
     return (
-      <div className="flex flex-col border rounded-lg p-4 h-full bg-card">
+      <div className="flex flex-col border rounded-lg p-4 h-full bg-card [content-visibility:auto] [contain-intrinsic-size:300px]">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-medium tracking-tight flex items-center gap-1.5">
             {icon} {title}
@@ -102,7 +102,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
   }
 
   return (
-    <div className="flex flex-col border rounded-lg p-4 h-full bg-card">
+    <div className="flex flex-col border rounded-lg p-4 h-full bg-card [content-visibility:auto] [contain-intrinsic-size:300px]">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium tracking-tight flex items-center gap-1.5">
           {icon} {title} <span className="text-muted-foreground font-normal text-xs ml-1">(Top 10)</span>

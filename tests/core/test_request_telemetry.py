@@ -42,10 +42,29 @@ def test_otel_disabled_under_pytest_by_default(monkeypatch):
     assert request_telemetry._otel_enabled() is False
 
 
-def test_otel_enabled_when_explicitly_set(monkeypatch):
+def test_otel_enabled_requires_exporter_to_be_set(monkeypatch):
+    """The default OTEL_EXPORTER ('none') keeps the SDK uninstalled even
+    when OTEL_ENABLED=1 — the old code spammed prod stdout with the
+    ConsoleSpanExporter because exporter installation wasn't gated."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("OTEL_ENABLED", "1")
+    monkeypatch.delenv("OTEL_EXPORTER", raising=False)
+    assert request_telemetry._otel_enabled() is False
+
+
+def test_otel_enabled_when_exporter_is_console(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("OTEL_ENABLED", "1")
+    monkeypatch.setenv("OTEL_EXPORTER", "console")
     assert request_telemetry._otel_enabled() is True
+
+
+def test_otel_master_switch_off_overrides_exporter(monkeypatch):
+    """OTEL_ENABLED=0 wins even if an exporter is configured."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("OTEL_ENABLED", "0")
+    monkeypatch.setenv("OTEL_EXPORTER", "console")
+    assert request_telemetry._otel_enabled() is False
 
 
 def test_get_tracer_returns_a_tracer():

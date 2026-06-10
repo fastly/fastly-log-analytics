@@ -6002,9 +6002,9 @@ export interface components {
             /** Name */
             name: string;
             /** Fos Bucket */
-            fos_bucket: string;
+            fos_bucket?: string | null;
             /** Fos Region */
-            fos_region: string;
+            fos_region?: string | null;
             /** Log Period */
             log_period?: number | null;
             /** Cdn Url */

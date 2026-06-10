@@ -73,7 +73,7 @@ export function CardGrid({
               {cat.cardIds.map((id) => (
                 <div
                   key={`skel-${cat.id}-${id}`}
-                  className="border rounded-lg p-4 h-[300px] flex items-center justify-center bg-muted/20"
+                  className="border rounded-lg p-4 h-[300px] flex items-center justify-center bg-muted/20 [content-visibility:auto] [contain-intrinsic-size:300px]"
                 >
                   <span className="text-muted-foreground text-xs animate-pulse">
                     {!isReady ? 'Initializing...' : 'Loading...'}
@@ -100,7 +100,7 @@ export function CardGrid({
   const renderCard = (card: any) => {
     if (!isReady || (isLoadingAggs && !aggregates)) {
       return (
-        <div key={card.id} className="border rounded-lg p-4 h-[300px] flex items-center justify-center bg-muted/20">
+        <div key={card.id} className="border rounded-lg p-4 h-[300px] flex items-center justify-center bg-muted/20 [content-visibility:auto] [contain-intrinsic-size:300px]">
           <span className="text-muted-foreground text-xs animate-pulse">
             {!isReady ? 'Initializing...' : 'Loading...'}
           </span>

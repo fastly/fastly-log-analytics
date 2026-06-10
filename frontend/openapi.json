@@ -18487,11 +18487,25 @@
             "title": "Name"
           },
           "fos_bucket": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Fos Bucket"
           },
           "fos_region": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Fos Region"
           },
           "log_period": {
@@ -18661,9 +18675,7 @@
         "type": "object",
         "required": [
           "service_id",
-          "name",
-          "fos_bucket",
-          "fos_region"
+          "name"
         ],
         "title": "ServiceConfig"
       },

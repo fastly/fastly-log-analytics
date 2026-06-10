@@ -14,6 +14,8 @@ import {
   useReactTable,
 } from '@tanstack/react-table'
 
+import { useVirtualizer } from '@tanstack/react-virtual'
+
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -72,6 +74,7 @@ interface DataTableProps<TData, TValue> {
   onColumnVisibilityChange?: (visibility: VisibilityState) => void
   emptyMessage?: string
   onRowClick?: (row: TData) => void
+  tableCaption?: string
 }
 
 function DataTableImpl<TData, TValue>({
@@ -93,7 +96,8 @@ function DataTableImpl<TData, TValue>({
   columnVisibility: controlledVisibility,
   onColumnVisibilityChange,
   emptyMessage = "No results.",
-  onRowClick
+  onRowClick,
+  tableCaption
 }: DataTableProps<TData, TValue>) {
   const isControlled = controlledVisibility !== undefined
   const isSortingControlled = controlledSorting !== undefined
@@ -217,6 +221,17 @@ function DataTableImpl<TData, TValue>({
     },
   })
 
+  const tableContainerRef = React.useRef<HTMLDivElement>(null)
+
+  const { rows } = table.getRowModel()
+  
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => tableContainerRef.current,
+    estimateSize: () => 40,
+    overscan: 10,
+  })
+
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } }),
@@ -278,8 +293,11 @@ function DataTableImpl<TData, TValue>({
         onDragEnd={handleDragEnd}
         sensors={sensors}
       >
-        <div className="rounded-md border overflow-x-auto w-full">
+        <div ref={tableContainerRef} className="rounded-md border overflow-auto w-full max-h-[600px]">
           <Table style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}>
+            <caption className="sr-only">
+              {tableCaption || (typeof title === 'string' ? title : 'Data Table')}
+            </caption>
             {tableHeader}
             <TableBody>
               {isLoading ? (
@@ -292,15 +310,30 @@ function DataTableImpl<TData, TValue>({
                   </TableCell>
                 </TableRow>
               ) : table.getRowModel().rows?.length ? (
-                table.getRowModel().rows.map((row) => (
-                  <MemoizedTableRow
-                    key={row.id}
-                    row={row}
-                    onRowClick={onRowClick}
-                    columnVisibility={columnVisibility}
-                    columns={columns}
-                  />
-                ))
+                <>
+                  {rowVirtualizer.getVirtualItems().length > 0 && rowVirtualizer.getVirtualItems()[0].start > 0 && (
+                    <TableRow>
+                      <TableCell colSpan={columns.length} style={{ height: rowVirtualizer.getVirtualItems()[0].start, padding: 0, border: 0 }} />
+                    </TableRow>
+                  )}
+                  {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                    const row = rows[virtualRow.index]
+                    return (
+                      <MemoizedTableRow
+                        key={row.id}
+                        row={row}
+                        onRowClick={onRowClick}
+                        columnVisibility={columnVisibility}
+                        columns={columns}
+                      />
+                    )
+                  })}
+                  {rowVirtualizer.getVirtualItems().length > 0 && rowVirtualizer.getVirtualItems()[rowVirtualizer.getVirtualItems().length - 1].end < rowVirtualizer.getTotalSize() && (
+                    <TableRow>
+                      <TableCell colSpan={columns.length} style={{ height: rowVirtualizer.getTotalSize() - rowVirtualizer.getVirtualItems()[rowVirtualizer.getVirtualItems().length - 1].end, padding: 0, border: 0 }} />
+                    </TableRow>
+                  )}
+                </>
               ) : (
                 <TableRow>
                   <TableCell

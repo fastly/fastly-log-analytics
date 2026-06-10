@@ -22,6 +22,7 @@ interface FilterState {
   setCompareRange: (start: string | null, end: string | null) => void
   toggleEdgeOnly: () => void
   clearFilters: () => void
+  resetAll: () => void
   resetRange: () => void
 }
 
@@ -112,7 +113,9 @@ export const useFilterStore = create<FilterState>((set) => ({
 
   toggleEdgeOnly: () => set((state) => ({ edgeOnly: !state.edgeOnly })),
 
-  clearFilters: () => {
+  clearFilters: () => set({ filters: [] }),
+
+  resetAll: () => {
     // Restore startTime/endTime to the store-init defaults (last 24h from
     // now) BEFORE re-flipping the auto-snap flags. Otherwise: on fresh
     // data the snap effect in FilterBar takes its "keep current range"

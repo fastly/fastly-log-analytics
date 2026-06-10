@@ -10,9 +10,14 @@ Design constraints:
 - **Lives next to the RequestContext** (ADR-02, Phase 2). `RequestContext`
   carries `RequestTelemetry` in a single attribute; routes never construct
   one directly.
-- **Console exporter only.** v2.0 ships with the OTel console exporter (logs
-  spans to stderr). Jaeger / Tempo / Honeycomb / etc. are deploy-config
-  decisions for post-v2.0 (no SaaS dep per cleanup_plan.md).
+- **Exporter is opt-in.** Default is no exporter — the SDK isn't installed,
+  spans/metrics record against the global no-op providers, nothing leaves
+  the process. Set ``OTEL_EXPORTER=console`` to install ConsoleSpan /
+  ConsoleMetric exporters (loud; useful for local dev). OTLP / Jaeger /
+  Tempo / Honeycomb are deploy-config decisions for later; wiring one in
+  means a new ``OTEL_EXPORTER`` value + the corresponding processor in
+  ``_setup_sdk``. Console-by-default was the v2.0 ship state and produced
+  a ~1 MB/min stdout dump in prod.
 - **Additive, not replacing.** Phase 1 emits OTel spans alongside the existing
   `backend.utils.telemetry` ContextVar machinery. The debug-panel renderer
   (Phase 1.5) reads both sources. Old surfaces are deleted incrementally in
@@ -49,17 +54,38 @@ _init_lock = threading.Lock()
 _initialised = False
 
 
+def _otel_exporter() -> str:
+    """Which exporter to install. Default ``none`` — see module docstring.
+
+    Returns the env var lowercased and stripped so callers don't have to
+    normalise. Unknown values fall through to ``_setup_sdk`` which logs and
+    treats them as ``none``.
+    """
+    return os.environ.get("OTEL_EXPORTER", "none").strip().lower()
+
+
 def _otel_enabled() -> bool:
-    """Whether to install the SDK exporters. Off by default in tests."""
-    return os.environ.get("OTEL_ENABLED", "1") == "1" and os.environ.get("PYTEST_CURRENT_TEST") is None
+    """Whether to install SDK providers + exporters.
+
+    Off when any of:
+      - ``OTEL_ENABLED=0`` (master off-switch; preserves the old escape hatch)
+      - Running under pytest (``PYTEST_CURRENT_TEST`` set) — keeps the test
+        suite cheap; individual tests opt in via the ``with_sdk`` pattern.
+      - ``OTEL_EXPORTER=none`` (default) — no point spinning up provider
+        machinery when nothing will be exported.
+    """
+    if os.environ.get("OTEL_ENABLED", "1") != "1":
+        return False
+    if os.environ.get("PYTEST_CURRENT_TEST") is not None:
+        return False
+    return _otel_exporter() != "none"
 
 
 def _setup_sdk() -> None:
-    """Install console-exporter tracer + meter providers (idempotent).
+    """Install tracer + meter providers with the configured exporter (idempotent).
 
-    Called lazily from get_tracer/get_meter. Skipped under pytest unless
-    OTEL_ENABLED=1 is explicitly set, so unit tests don't pay the cost of
-    a background batch-span exporter thread.
+    Called lazily from get_tracer/get_meter. No-op when ``_otel_enabled()``
+    is false, which is the production default (OTEL_EXPORTER unset → none).
     """
     global _initialised
     with _init_lock:
@@ -70,22 +96,29 @@ def _setup_sdk() -> None:
         if not _otel_enabled():
             return
 
+        exporter = _otel_exporter()
         resource = Resource.create({"service.name": _SERVICE_NAME})
 
         tracer_provider = TracerProvider(resource=resource)
-        tracer_provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
-        trace.set_tracer_provider(tracer_provider)
+        meter_readers: list[Any] = []
 
-        meter_provider = MeterProvider(
-            resource=resource,
-            metric_readers=[
+        if exporter == "console":
+            tracer_provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+            meter_readers.append(
                 PeriodicExportingMetricReader(
                     ConsoleMetricExporter(),
                     export_interval_millis=60_000,
-                ),
-            ],
-        )
-        metrics.set_meter_provider(meter_provider)
+                )
+            )
+        else:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "OTEL_EXPORTER=%r is not a recognised value; install providers without exporters",
+                exporter,
+            )
+
+        trace.set_tracer_provider(tracer_provider)
+        metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=meter_readers))
 
 
 def get_tracer() -> Tracer:

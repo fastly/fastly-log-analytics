@@ -42,6 +42,7 @@ export const FilterBar = React.memo(function FilterBar() {
     toggleFilterMode,
     toggleEdgeOnly,
     clearFilters,
+    resetAll,
     resetRange,
     compareMode,
     compareStartTime,
@@ -62,6 +63,7 @@ export const FilterBar = React.memo(function FilterBar() {
     toggleFilterMode: state.toggleFilterMode,
     toggleEdgeOnly: state.toggleEdgeOnly,
     clearFilters: state.clearFilters,
+    resetAll: state.resetAll,
     resetRange: state.resetRange,
     compareMode: state.compareMode,
     compareStartTime: state.compareStartTime,
@@ -233,9 +235,9 @@ export const FilterBar = React.memo(function FilterBar() {
 
   const handleReset = React.useCallback(() => {
     React.startTransition(() => {
-      clearFilters()
+      resetAll()
     })
-  }, [clearFilters])
+  }, [resetAll])
 
   const spanHours = React.useMemo(() => {
     if (!startTime || !endTime) return null

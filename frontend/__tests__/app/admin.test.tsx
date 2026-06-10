@@ -19,7 +19,25 @@ vi.mock('next/navigation', () => ({
   useRouter: vi.fn(() => ({ replace: vi.fn(), push: vi.fn() })),
 }))
 
-const API_BASE = 'http://127.0.0.1:8000'
+
+import { getApiBase } from '@/lib/api'
+
+const API_BASE = getApiBase()
+console.log('API_BASE IS', API_BASE)
+
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: (options: any) => ({
+    getVirtualItems: () => {
+      const count = options.count || 0
+      return Array.from({ length: count }).map((_, i) => ({
+        index: i,
+        start: i * 40,
+        size: 40,
+      }))
+    },
+    getTotalSize: () => (options.count || 0) * 40,
+  }),
+}))
 
 beforeEach(() => {
   vi.clearAllMocks()

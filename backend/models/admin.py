@@ -66,6 +66,22 @@ class SyncStatusResponse(BaseResponse, SyncStatus):
     pass
 
 
+class LogExtentsResponse(BaseResponse):
+    """Minimal extents projection for the FilterBar's time-range snap.
+
+    Sibling of ``SyncStatusResponse`` but strips every field that the
+    middleware blocks ``/api/sync-status`` for an analyst over: no
+    ``ngwaf_workspace_id``, no ``active_run``, no cron task state, no
+    DuckDB size, no storage mode. Just the two timestamps the
+    FilterBar needs to snap its range, plus a ``configured`` flag so
+    the frontend can short-circuit when a service has no source.
+    """
+
+    configured: bool = True
+    earliest_log_at: str | None = None
+    latest_log_at: str | None = None
+
+
 class BotSourceMeta(BaseModel):
     id: str
     name: str

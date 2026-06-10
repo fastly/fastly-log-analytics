@@ -76,6 +76,11 @@ compute/scorer/pkg/
 # split_per_page.py) live here for now; treat the whole tree as throwaway.
 /scratch/
 
+# Performance-audit campaign artifacts: HAR captures, per-sample telemetry,
+# aggregated p50/p95/p99 summaries, per-page reports + improvement plans.
+# Throwaway — regenerable by re-running scratch/perf_audit.mjs.
+/performance-report/
+
 # Local-only VS Code config (file-watcher / Pylance excludes for the
 # regenerating .next + cache trees). Personal to each contributor's editor
 # setup — not promoted to the repo by default.

@@ -77,10 +77,18 @@ class Settings(BaseSettings):
     # ── Telemetry / observability ────────────────────────────────────────────
 
     otel_enabled: bool = Field(default=True, alias="OTEL_ENABLED")
-    """Whether to install the OpenTelemetry SDK exporters. Default ON
-    everywhere except under pytest (the test harness sets
-    ``PYTEST_CURRENT_TEST`` which ``backend.core.request_telemetry`` reads
-    separately)."""
+    """Master OpenTelemetry SDK off-switch. When False, no providers are
+    installed regardless of ``OTEL_EXPORTER``. Default ON everywhere
+    except under pytest (the test harness sets ``PYTEST_CURRENT_TEST``
+    which ``backend.core.request_telemetry`` reads separately)."""
+
+    otel_exporter: str = Field(default="none", alias="OTEL_EXPORTER")
+    """Which OpenTelemetry exporter to install. ``"none"`` (the default)
+    keeps the SDK uninstalled so spans/metrics record against no-op
+    providers and nothing leaves the process. ``"console"`` installs the
+    ConsoleSpanExporter + ConsoleMetricExporter — useful for local dev
+    debugging, but DON'T turn on in prod: it dumps ~1 MB/min of JSON to
+    stdout. Future OTLP wiring would add another value here."""
 
     structlog_format: str = Field(default="console", alias="STRUCTLOG_FORMAT")
     """``"console"`` (dev) or ``"json"`` (production log aggregation).

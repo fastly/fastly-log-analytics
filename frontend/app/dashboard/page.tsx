@@ -17,7 +17,7 @@ import { ReportLayout } from '@/components/ReportLayout'
 import { useShallow } from 'zustand/react/shallow'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useDashboardCards } from '@/hooks/useDashboardCards'
-import { useFilterUrlSync } from '@/hooks/useFilterUrlSync'
+
 
 import { TrafficChart } from './_sections/TrafficChart'
 import { GeoMap } from './_sections/GeoMap'
@@ -328,9 +328,7 @@ function DashboardBody({
 export default function DashboardPage() {
   // Persist filter state to URL so back-nav, refresh, and shared links
   // all round-trip the user's current dashboard view. See
-  // [useFilterUrlSync](frontend/hooks/useFilterUrlSync.ts) for hydration
-  // direction and the loop-prevention pattern.
-  useFilterUrlSync()
+  // hydration happens in AppLayout
 
   const allCards = useDashboardCards()
 

@@ -27,6 +27,7 @@ export function SchemaTab({
       </div>
       <div className="overflow-x-auto">
         <Table>
+          <caption className="sr-only">DuckDB Table Schema and Statistics</caption>
           <TableHeader>
             <TableRow>
               <TableHead>Column Name</TableHead>
