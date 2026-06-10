@@ -658,6 +658,344 @@ class TestExecuteTopNBatchIntegerAggregation:
             f"active hour — must NOT be counted. The clamp regressed. Got {country_counts}"
         )
 
+    def test_execute_top_n_rollups_skips_day_file_on_partial_window(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Partial-day windows (start or end mid-day) must NOT include the
+        boundary day's per-day rollup file — it covers the full 24 hours
+        and would surface values from outside the user's window. Reader
+        must fall back to per-hour rollups for the in-window hours.
+
+        Pinned because the symptom is a phantom top-N value: user sees
+        ``edge_score=50, count=154`` on a 24h window starting at 17:36,
+        clicks it, and ``/query`` returns zero rows because the matching
+        rows are actually at 05:00 (12 hours before the window).
+        """
+        import uuid
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+
+        def _write_per_hour(field: str, hour: str, rows: list[tuple]) -> None:
+            d = cache_root / "rollups" / "hour" / f"field={field}" / f"hour={hour}"
+            d.mkdir(parents=True, exist_ok=True)
+            table = pa.table(
+                {
+                    "value": pa.array([v for v, _ in rows]),
+                    "count": pa.array([c for _, c in rows], type=pa.int64()),
+                }
+            )
+            pq.write_table(table, str(d / f"compacted_{uuid.uuid4().hex[:8]}.parquet"))
+
+        def _write_per_day(field: str, day: str, rows: list[tuple]) -> None:
+            d = cache_root / "rollups" / "day" / f"field={field}" / f"day={day}"
+            d.mkdir(parents=True, exist_ok=True)
+            table = pa.table(
+                {
+                    "field": pa.array([field for _ in rows]),
+                    "value": pa.array([v for v, _ in rows]),
+                    "count": pa.array([c for _, c in rows], type=pa.int64()),
+                }
+            )
+            pq.write_table(table, str(d / "compacted.parquet"))
+
+        # Anchor relative to the active hour so we don't have to mock
+        # datetime. Boundary day D is two days before today (so it's
+        # always closed). Window: [D 17:36, D+1 17:36).
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        day_d = (active_dt - timedelta(days=2)).date()
+        day_d_plus_1 = day_d + timedelta(days=1)
+        day_d_str = day_d.isoformat()
+        day_d_plus_1_str = day_d_plus_1.isoformat()
+
+        # Per-day file for boundary day D contains BOTH:
+        #   "in_window_val" (count=10, would be at hour 20 — inside window)
+        #   "out_of_window_val" (count=99, would be at hour 05 — outside window)
+        # If the reader uses this day file, BOTH values surface in top-N.
+        # With the fix the day file is skipped and only per-hour rollups
+        # for the in-window hours of D contribute — so out_of_window_val
+        # never appears.
+        _write_per_day(
+            "edge_score",
+            day_d_str,
+            [("in_window_val", 10), ("out_of_window_val", 99)],
+        )
+        # Per-hour rollups for D's in-window hours only have in_window_val.
+        for h in range(18, 24):
+            _write_per_hour("edge_score", f"{day_d_str}-{h:02d}", [("in_window_val", 1)])
+        # The boundary hour 17 also exists with in_window_val; the
+        # 00:00-17:36 portion of D is intentionally NOT in any per-hour
+        # file present (mirrors the user repro where out_of_window_val
+        # only lives in the early-morning hours of the day rollup).
+        _write_per_hour("edge_score", f"{day_d_str}-17", [("in_window_val", 1)])
+
+        # D+1 is the active or end-day side. Per-day must NOT cover it
+        # (active-day guard) and its per-hour files contribute in-window
+        # contents.
+        for h in range(0, 18):
+            _write_per_hour("edge_score", f"{day_d_plus_1_str}-{h:02d}", [("in_window_val", 1)])
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "edge_score"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "edge_score", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = (datetime.combine(day_d, datetime.min.time(), tzinfo=UTC) + timedelta(hours=17, minutes=36)).isoformat()
+        et = (datetime.combine(day_d_plus_1, datetime.min.time(), tzinfo=UTC) + timedelta(hours=17, minutes=36)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["edge_score"], st, et, limit=10)
+
+        values = {value: count for (field, value, count) in rows if field == "edge_score"}
+        assert "out_of_window_val" not in values, (
+            f"out_of_window_val (count=99) lives only in the boundary day's per-day rollup. "
+            f"It MUST NOT appear when the request window starts mid-day — that's the partial-day "
+            f"over-inclusion bug. Got {values}."
+        )
+        assert values.get("in_window_val", 0) > 0, (
+            f"in_window_val must be surfaced from per-hour rollups for the boundary days; got {values}"
+        )
+
+    def test_execute_top_n_rollups_uses_day_file_when_window_fully_contains_day(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Companion to the partial-window test: when the window FULLY
+        contains a closed day (hour-aligned [D 00:00, D+1 00:00)), the
+        per-day rollup IS used — preserving the ~24x file-open
+        reduction it was built for."""
+        import uuid
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        day_d = (active_dt - timedelta(days=2)).date()
+        day_d_str = day_d.isoformat()
+        day_d_plus_1_str = (day_d + timedelta(days=1)).isoformat()
+
+        # Day file says count=42; if it's not used, per-hour file (count=1)
+        # would surface instead and the count would be wrong.
+        d = cache_root / "rollups" / "day" / "field=edge_score" / f"day={day_d_str}"
+        d.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"field": ["edge_score"], "value": ["v"], "count": pa.array([42], type=pa.int64())}),
+            str(d / "compacted.parquet"),
+        )
+        # Stub per-hour to a different count so a wrong-source read would
+        # be visible.
+        h = cache_root / "rollups" / "hour" / "field=edge_score" / f"hour={day_d_str}-12"
+        h.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"value": ["v"], "count": pa.array([1], type=pa.int64())}),
+            str(h / f"compacted_{uuid.uuid4().hex[:8]}.parquet"),
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "edge_score"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "edge_score", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = f"{day_d_str}T00:00:00+00:00"
+        et = f"{day_d_plus_1_str}T00:00:00+00:00"
+        rows, _ = runner.execute_top_n_rollups(["edge_score"], st, et, limit=10)
+
+        values = {value: count for (field, value, count) in rows if field == "edge_score"}
+        assert values.get("v") == 42, (
+            f"hour-aligned window fully containing day D must use the per-day rollup (count=42), "
+            f"not the per-hour rollup (count=1). Got {values}."
+        )
+
+    def test_execute_top_n_rollups_no_day_vs_bundled_double_count(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """When both a per-day rollup AND per-hour-bundled files exist for
+        the same closed day, the reader must NOT include both — the
+        UNION ALL would sum the same data twice. The bundled-hour walk
+        should skip hours whose day is already covered by a usable
+        per-day file for at least one safe field.
+
+        Pre-fix: a 24h hour-aligned closed-day window returned 2x counts
+        because the day file aggregated the day AND each of the 24
+        bundled-hour files (containing the same data) were also UNION'd."""
+        import uuid
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        day_d = (active_dt - timedelta(days=2)).date()
+        day_d_str = day_d.isoformat()
+        day_d_plus_1_str = (day_d + timedelta(days=1)).isoformat()
+
+        # Per-day file: edge_score = "v" with count=100
+        d = cache_root / "rollups" / "day" / "field=edge_score" / f"day={day_d_str}"
+        d.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"field": ["edge_score"], "value": ["v"], "count": pa.array([100], type=pa.int64())}),
+            str(d / "compacted.parquet"),
+        )
+        # Per-hour-bundled file for one hour of D containing the same
+        # underlying counts. If the reader includes both day file AND
+        # this bundled file, we'd see >100.
+        bd = cache_root / "rollups" / "hour_bundled" / f"hour={day_d_str}-05"
+        bd.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"field": ["edge_score"], "value": ["v"], "count": pa.array([100], type=pa.int64())}),
+            str(bd / "all_fields.parquet"),
+        )
+        # And a per-field per-hour file too, to ensure the per-field walk
+        # also correctly defers to the day file (existing behavior).
+        h = cache_root / "rollups" / "hour" / "field=edge_score" / f"hour={day_d_str}-05"
+        h.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"value": ["v"], "count": pa.array([100], type=pa.int64())}),
+            str(h / f"compacted_{uuid.uuid4().hex[:8]}.parquet"),
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "edge_score"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "edge_score", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = f"{day_d_str}T00:00:00+00:00"
+        et = f"{day_d_plus_1_str}T00:00:00+00:00"
+        rows, _ = runner.execute_top_n_rollups(["edge_score"], st, et, limit=10)
+
+        values = {value: count for (field, value, count) in rows if field == "edge_score"}
+        assert values.get("v") == 100, (
+            f"hour-aligned closed-day window must return day-file count (100), not double-counted "
+            f"day+bundled (200) or day+bundled+per-field (300). Got {values}."
+        )
+
+    def test_execute_top_n_rollups_bundled_still_used_when_no_day_file_for_field(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """When a closed day has a day file for ONE field but not ANOTHER,
+        the bundled-hour file is still skipped (to avoid double-counting
+        the field with a day file) and the field WITHOUT a day file falls
+        back to per-field per-hour. Pinned because the new bundled-skip
+        check is global (any field with a day file), so the cost of
+        avoiding the double-count is per-field per-hour for the
+        uncovered field — must still produce correct counts."""
+        import uuid
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        day_d = (active_dt - timedelta(days=2)).date()
+        day_d_str = day_d.isoformat()
+        day_d_plus_1_str = (day_d + timedelta(days=1)).isoformat()
+
+        # Field A: has a per-day file (count=50)
+        da = cache_root / "rollups" / "day" / "field=field_a" / f"day={day_d_str}"
+        da.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"field": ["field_a"], "value": ["a1"], "count": pa.array([50], type=pa.int64())}),
+            str(da / "compacted.parquet"),
+        )
+        # Field B: NO day file, only per-field per-hour rollups (newly-
+        # added custom field that compaction hasn't run for yet).
+        for h_idx in range(24):
+            h = cache_root / "rollups" / "hour" / "field=field_b" / f"hour={day_d_str}-{h_idx:02d}"
+            h.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                pa.table({"value": ["b1"], "count": pa.array([3], type=pa.int64())}),
+                str(h / f"compacted_{uuid.uuid4().hex[:8]}.parquet"),
+            )
+        # Field A also has a per-field hour dir (the day file was
+        # compacted from it) — must NOT also surface or A double-counts.
+        for h_idx in range(24):
+            h = cache_root / "rollups" / "hour" / "field=field_a" / f"hour={day_d_str}-{h_idx:02d}"
+            h.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                pa.table({"value": ["a1"], "count": pa.array([2], type=pa.int64())}),
+                str(h / f"compacted_{uuid.uuid4().hex[:8]}.parquet"),
+            )
+        # Bundled hour for every hour of D (covering both fields).
+        for h_idx in range(24):
+            bd = cache_root / "rollups" / "hour_bundled" / f"hour={day_d_str}-{h_idx:02d}"
+            bd.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                pa.table(
+                    {
+                        "field": ["field_a", "field_b"],
+                        "value": ["a1", "b1"],
+                        "count": pa.array([2, 3], type=pa.int64()),
+                    }
+                ),
+                str(bd / "all_fields.parquet"),
+            )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "field_a", "field_b"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "field_a", "type": "VARCHAR"},
+                {"name": "field_b", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = f"{day_d_str}T00:00:00+00:00"
+        et = f"{day_d_plus_1_str}T00:00:00+00:00"
+        rows, _ = runner.execute_top_n_rollups(["field_a", "field_b"], st, et, limit=10)
+
+        by_field: dict[str, dict] = {}
+        for f, v, c in rows:
+            by_field.setdefault(f, {})[v] = c
+        assert by_field.get("field_a", {}).get("a1") == 50, (
+            f"field_a must use its day file (50) without double-counting bundled or per-field per-hour. "
+            f"Got {by_field.get('field_a')}."
+        )
+        assert by_field.get("field_b", {}).get("b1") == 24 * 3, (
+            f"field_b has no day file — must fall back to per-field per-hour (24 hours × 3 = 72). "
+            f"Got {by_field.get('field_b')}."
+        )
+
     def test_execute_top_n_batch_prevents_sql_injection(self, in_memory_duckdb, test_service_source):
         in_memory_duckdb.execute("CREATE TABLE logs_safe (status VARCHAR)")
         in_memory_duckdb.execute("INSERT INTO logs_safe VALUES ('200'), ('200'), ('500')")

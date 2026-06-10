@@ -697,25 +697,65 @@ class QueryRunner:
         bundled_hour_paths: list[str] = []
         bundled_hours: set[str] = set()
 
-        # KNOWN GAP (2026-06-10): per-day rollups cover [day 00:00 UTC,
-        # +24h). When the request window starts/ends mid-day, the per-day
-        # file's contribution includes hours outside the window — top-N
-        # values may appear that don't exist in the user's exact window.
-        #
-        # An earlier attempt at a partial-day live fallback (commit c3d8822)
-        # materialized a 75-column temp table over the boundary day's in-
-        # window hours and added ~3-5 seconds per dashboard load (witnessed
-        # on prod 2026-06-10). The cost was the wide temp materialization,
-        # not the aggregation. Reverted in this commit; the live path is
-        # not viable without either:
-        #   - rebuilding the rollup tier to keep per-hour granularity even
-        #     after day compaction (architectural change), or
-        #   - a narrower per-field direct-query path that doesn't go
-        #     through the wide-temp pattern execute_top_n_batch requires.
-        #
-        # Symptom this leaves in place: clicking a top-N value sourced
-        # from a boundary day's rollup may yield zero rows on /query when
-        # the value only exists outside the user's exact window.
+        # Per-day rollups cover [day 00:00 UTC, +24h). When the request
+        # window starts or ends mid-day, including the boundary day's
+        # per-day file would over-count rows outside the user's window
+        # (e.g. a request starting at 17:36 would pull in counts from
+        # 00:00-17:36 too). Only use a per-day file when its entire
+        # 24h is contained in the request window; boundary days fall
+        # back to per-hour rollups for their in-window hours.
+        def _day_fully_in_window(day_str: str) -> bool:
+            try:
+                day_start = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=UTC)
+            except ValueError:
+                return False
+            day_end = day_start + timedelta(days=1)
+            if st_dt and st_dt > day_start:
+                return False
+            if et_dt and et_dt < day_end:
+                return False
+            return True
+
+        # Pre-pass: collect days where AT LEAST ONE safe field has a
+        # usable per-day file (in-window, fully-contained, closed,
+        # parquet present). The bundled-hour walk below skips bundled
+        # files whose day is in this set, preventing the day-vs-bundled
+        # double count that fires on hour-aligned closed-day-only
+        # windows. Per-field per-hour fallback (for fields without a
+        # day file for that day) still works because the per-field walk
+        # uses its OWN per-field covered_days set, not this global one.
+        day_covered_by_any_field: set[str] = set()
+        for field in safe_fields:
+            field_day_dir = os.path.join(day_root, f"field={field}")
+            if not os.path.isdir(field_day_dir):
+                continue
+            try:
+                day_entries = os.listdir(field_day_dir)
+            except OSError:
+                continue
+            for day_entry in day_entries:
+                if not day_entry.startswith("day="):
+                    continue
+                day = day_entry[len("day=") :]
+                if len(day) != 10 or day in day_covered_by_any_field:
+                    continue
+                if day >= active_day:
+                    continue
+                if st_str_floor and day < st_str_floor[:10]:
+                    continue
+                if et_str_floor and day > et_str_floor[:10]:
+                    continue
+                if not _day_fully_in_window(day):
+                    continue
+                day_dir = os.path.join(field_day_dir, day_entry)
+                try:
+                    if any(
+                        f.endswith(".parquet") and not f.startswith(".tmp_")
+                        for f in os.listdir(day_dir)
+                    ):
+                        day_covered_by_any_field.add(day)
+                except OSError:
+                    continue
 
         if os.path.isdir(bundled_hour_root):
             try:
@@ -729,6 +769,15 @@ class QueryRunner:
                         continue
                     if hour >= active_str:
                         # Active hour served live, not from any bundle.
+                        continue
+                    if hour[:10] in day_covered_by_any_field:
+                        # Day file covers this hour for at least one
+                        # field; including the bundled file would
+                        # double-count that field via the UNION ALL.
+                        # Fields without a day file for this day fall
+                        # through to per-field per-hour in the loop
+                        # below (their covered_days won't include this
+                        # day).
                         continue
                     bundle_path = os.path.join(bundled_hour_root, hour_entry, "all_fields.parquet")
                     if os.path.isfile(bundle_path):
@@ -764,6 +813,12 @@ class QueryRunner:
                     if st_str_floor and day < st_str_floor[:10]:
                         continue
                     if et_str_floor and day > et_str_floor[:10]:
+                        continue
+                    if not _day_fully_in_window(day):
+                        # Boundary day — using the per-day file would over-
+                        # count rows outside the requested window. Fall
+                        # through to per-hour rollups for the in-window
+                        # hours of this day.
                         continue
                     day_dir = os.path.join(field_day_dir, day_entry)
                     try:
