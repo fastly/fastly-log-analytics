@@ -287,15 +287,17 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         <UrlServiceSync />
         <RawQueryModeProbe onChange={setIsRawQueryMode} />
       </React.Suspense>
-      {/* Force Plotly to parse + complete its first-plot draw during
-          app mount so the dashboard's real chart's data-arrival render
-          hits Plotly's fast react()-update path instead of the cold
-          init path. See PlotlyPrewarm.tsx for full rationale. */}
+      {/* Cold-init pre-warmers — intentional perf components, not hacks.
+          Plotly (~500-1500ms cold parse + first-plot init) and MapLibre
+          GL (~500-1200ms parse + WebGL context + first paint) both pay
+          their cold init the first time they render with non-empty data.
+          Running a 1-pixel invisible render during app mount moves that
+          cost onto the page-load wait the user is already absorbing, so
+          the dashboard's real chart/map render hits the fast
+          react()-update path. Both modules are used across most analytics
+          pages, so app-level rendering is intentional. Full per-component
+          rationale in PlotlyPrewarm.tsx + MapPrewarm.tsx. */}
       <PlotlyPrewarm />
-      {/* Same idea for MapLibre GL (used by the dashboard's
-          "Requests by Country" choropleth). ~1MB chunk + WebGL init
-          would otherwise run when the dashboard route mounts; the
-          prewarm gets it done during app mount instead. */}
       <MapPrewarm />
       {/* Desktop Sidebar */}
       <aside className="hidden md:flex w-64 flex-col border-r bg-muted/40">
