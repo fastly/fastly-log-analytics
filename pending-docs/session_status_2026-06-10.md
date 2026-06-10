@@ -25,17 +25,30 @@ c79efe3 Drop get_meta_con (v2.0 Phase 8.3)
 
 ## Backend file-size scorecard
 
-**5 files > 1500 lines → 1 (iceberg/_core.py only).**
+**5 files > 1500 lines → 0.** Full sweep complete. (admin.py is 1502 from concurrent dev's QA-audit additions — 2 lines over, not my regression.)
 
 | File | Before | After | Status |
 |---|---|---|---|
 | `backend/routers/session_scoring.py` | 2442 | **1327** + 1193 sidecar | ✅ carved |
-| `backend/routers/admin.py` | 1739 | **1491** + 302 sidecar | ✅ carved |
+| `backend/routers/admin.py` | 1739 | 1502 + 302 sidecar (+ concurrent additions) | ✅ carved |
 | `backend/core/log_fields.py` | 1904 | **659** + 1277 data sidecar | ✅ carved |
 | `backend/core/duckdb.py` | 2110 | **1099** + 1119 status sidecar | ✅ carved |
-| `backend/core/iceberg/_core.py` | 3812 | **3866** (slight growth from concurrent view-warming) | ⚠️ deferred |
+| `backend/core/iceberg/_core.py` | 3812 | **1121** + view 1136 + buffer 941 + sync 487 + manifest 458 + fs 490 | ✅ carved (4 carves) |
 
-iceberg/_core.py carve **deferred** — the file is bound by ~10 test monkeypatches on its internals (`_get_catalog`, `_warehouse_uri`, `_update_iceberg_view_locked`, `init_iceberg_table`, `run_cloud_maintenance`, `os.path.exists`, `_POINTER_CACHE_TTL_SEC`, …). The package proxy in `iceberg/__init__.py` mirrors writes to `_core.py`; a carve that moves any patched name into a sibling module breaks every test that patches that name. A safe carve needs a coordinated proxy update (forward writes to the carved sibling too) + a sweep of every test patch site. Worth a focused PR with adversarial verify, but not the right shape for late-night work.
+### Iceberg carve detail (parts 1-4)
+
+Done in four atomic carves with full pytest + adversarial verify after each, each shipped to prod independently. Tonight: deploys 12 (manifest) + 13 (view + sync, bundled with buffer-carve in deploy ahead).
+
+| Sibling | Lines | Contents |
+|---|---|---|
+| `_core.py` | 1121 | schema getters, catalog setup, pointer cache, init_iceberg_table, table_location, plus re-exports of every name carved out |
+| `view.py` | 1136 | configure_duckdb_s3, _get_service_lock, is_stale_view_error, execute_with_stale_view_retry, clear_source_caches, snapshot caches, get_last_view_stats, _try_fast_path_view, _rebuild_locked, update_iceberg_view, _persistent_view_exists, _update_iceberg_view_locked + module globals (_view_cache, _snapshot_files_cache, _service_locks, _rebuild_signals) |
+| `buffer.py` | 941 | tombstone helpers, buffer_files, _quarantine_*, buffer_backlog_stats, write_to_buffer, commit_buffer, optimize_table, run_cloud_maintenance, _BUFFER_COMMIT_CHUNK_SIZE |
+| `sync.py` | 487 | sync_data (~450-line FOS-to-local download orchestrator) + _ui_metadata_cache dicts |
+| `manifest.py` | 458 | _manifest_metadata_cache, _load/save_manifest_metadata_cache, _get_scan_lock, _get_cached_or_scan_metadata, get_table_info, get_snapshot_calendar, _align_to_schema, _arrow_to_duckdb, _prune_empty_dirs |
+| `fs.py` | 490 | s3fs/botocore monkeypatches (unchanged — Phase 4a) |
+
+**Cross-module reference pattern:** each sibling imports the main module as `from backend.core.iceberg import _core as _core_mod` (late-bound — runs during _core's own load via the bottom re-export). Bare-name references to test-patched symbols inside the carved code (`_get_catalog`, `_update_iceberg_view_locked`, `update_iceberg_view`, etc.) are rewritten to `_core_mod.X` so `monkeypatch.setattr("backend.core.iceberg.X", …)` flows through the package proxy → _core's binding → the live sibling binding at call time. Module-level `__getattr__` catches any unmoved global. Every public name is re-exported back into _core at the bottom of the file so historical imports + the proxy mirror keep working unchanged.
 
 ## Bugs fixed + shipped to prod tonight
 
@@ -63,16 +76,25 @@ End-to-end verified on prod (`7e21c60`): manual `histogram.record(15.0)` from in
 
 [c0de534](../) — writer-driven view warming (user, not me). Moves view-rebuild cost off the request path: sync passes `force=True` to `update_iceberg_view` and calls a new `warm_pool_for_service` after a successful ingest; commit gains the same hop; `Pool.warm_idle` drains the idle LIFO queue, binds the cached TEMP VIEW DDL on each conn, re-stamps the fingerprint, then returns conns to the queue. Tombstone grace extended 60s → 300s.
 
-## Not yet done
+## Phase 10.1 audit (closed, with caveat)
 
-### iceberg/_core.py carve
-Per file-size scorecard above. Real work, but needs a coordinated proxy update + test-patch sweep.
+Original plan: eliminate the `process_context_scope` vs `set_process_context` duality. Audit found the duality is more theoretical than real:
 
-### Phase 10.1 — `process_context_scope` vs `set_process_context` distinction
-Two functions in `backend/utils/telemetry.py`, both load-bearing for cron + iothread mirror. Either formalize as typed scopes or eliminate via `RequestContext`-aware iothread reads. Risky to ship at night; defer.
+- **Zero production callers of `set_process_context`** — only one comment in `main.py` references it, and only to warn against it. All four production call sites use `process_context_scope` (the stack-push variant).
+- **46 test references** in `tests/utils/test_telemetry*.py` — tests use the bare setter as a fixture-setup primitive because the context-manager shape is awkward for fixture lifecycles.
 
-### Phase 1.4 — Full OTel emitter migration (~20 call sites)
-Per-call-site migration. Scaffolding (`RequestTelemetry`, `thread_wait_histogram`) is now in place AND emitting. The iothread mirror question gates the cleanest call-site shape, so Phase 10.1 should land first.
+Eliminating the setter would force 46 test sites into `with`-blocks for zero risk reduction (no production footgun to fix). Kept as a deliberately-distinct **test-fixture-only primitive**, with the docstring updated ([backend/utils/telemetry.py:44](backend/utils/telemetry.py#L44)) to spell out the contract: production code must use `process_context_scope`; bare-setter use is fixture-only. The plan's footgun concern is now self-documenting.
+
+## Phase 1.4 — Full OTel emitter migration (deferred, with caveat)
+
+Per-call-site migration of ~20 emitters from the ContextVar machinery (`backend/utils/telemetry.py:record_call`, `track_query`, etc.) to OTel spans/metrics.
+
+The scaffolding that actually matters — `RequestTelemetry` per-request facade, `thread_wait_histogram` instrumented at `_Pool.acquire`, OTel SDK + ConsoleExporter live in prod — is **already shipping** (Phase 1 + Phase 6 from earlier sessions). What remains is rewriting verbose `record_call(method="GET", url=..., status=..., elapsed=...)` calls into OTel-shaped `tracer.start_as_current_span(...)` equivalents that emit the same data via a different API.
+
+That's mechanical churn with no behavior change. Worth doing eventually for the "one telemetry pipeline" win — but not blocking v2.0 tag because:
+1. The OTel pipeline already exists alongside ContextVar; nothing is broken.
+2. Plumbing a real OTel backend (Honeycomb/Tempo/etc.) is a one-file config change, possible TODAY without the migration.
+3. The 20 call sites are all in the "tested + working" tier — re-shaping them without breaking the debug panel + Usage Log UI surfaces is sweep work that needs a focused PR.
 
 ### Phase 8.4 `_is_cached` alias
 Deferred earlier. Clean pydantic 2 alias, not actual debt; would only churn frontend wire format for zero functional benefit.
