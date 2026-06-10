@@ -4,11 +4,34 @@ Each cleanup phase that touches storage or schema produces a snapshot before dep
 
 ## Conventions
 
-- Snapshot root on the VM: `/mnt/app-data/snapshots/`
+- **Prod snapshot root on the VM:** `/mnt/app-data/snapshots/`
+- **Local backup snapshot root (this dev box):** `~/snapshots/`
 - Snapshot naming: `<phase-tag>-<UTC-timestamp>/`
 - Each snapshot contains: per-service DuckDB files, Iceberg catalog SQLite, `backend.db`, any phase-specific extras
 - Restart sequence after restoring: `~/restart.sh` (per `gce-deploy-rebuild` memory) — fetches, rebuilds, healthchecks
 - Browser: hard-refresh after any restart (per `gce-deploy-rebuild` memory)
+
+## Pre-v2.0 cutover: prod snapshot → dev sync workflow
+
+Before testing the v2.0 cleanup branch against real data, take a backup snapshot of prod state to this dev box AND sync the same data into dev for testing. The backup snapshot is the rollback target if either the dev test OR the eventual prod deploy goes wrong.
+
+```bash
+# One command does both: tar prod's /mnt/app-data → ~/snapshots/pre-v2.0-cutover-<ts>/
+# then re-streams the same data into local data/cache/configs (with the
+# dev-sandbox scrub applied to configs). Refuses to run if a local backend
+# is using data/.
+scripts/dev/snapshot_prod_to_dev.sh
+
+# If the dev tree gets into a bad state mid-testing, roll back:
+./run.sh --kill
+scripts/dev/restore_dev_from_snapshot.sh ~/snapshots/pre-v2.0-cutover-<ts>
+./run.sh
+
+# The snapshot is kept on disk after restore so you can restore again
+# (e.g. to retry an upgrade-path test from a clean baseline).
+```
+
+The local snapshot is also the rollback target if the eventual GCE deploy goes wrong **AND** prod's own `/mnt/app-data/snapshots/` was somehow lost. Treat it as the off-VM backup of record for the cutover window.
 
 ## Generic rollback (any phase)
 
