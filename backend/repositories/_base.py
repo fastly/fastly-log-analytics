@@ -697,67 +697,25 @@ class QueryRunner:
         bundled_hour_paths: list[str] = []
         bundled_hours: set[str] = set()
 
-        # ── Partial-day boundary detection ────────────────────────────────
-        # A per-day rollup covers [day 00:00 UTC, +24h). When the request
-        # window starts/ends mid-day, blindly reading the per-day file
-        # over-counts hours outside the window. Per-hour rollups for
-        # compacted days have been deleted by day-compaction, so we can't
-        # substitute them — we live-query the in-window portion of any
-        # such partial-boundary day, after skipping its per-day rollup
-        # below.
+        # KNOWN GAP (2026-06-10): per-day rollups cover [day 00:00 UTC,
+        # +24h). When the request window starts/ends mid-day, the per-day
+        # file's contribution includes hours outside the window — top-N
+        # values may appear that don't exist in the user's exact window.
         #
-        # Witness: user reports edge_score=50 (n=154) appearing in the
-        # top-N panel for a 24h window 06-09T17:36Z → 06-10T17:36Z.
-        # Source: hour 06-09T05:00Z had 308 rows with edge_score=50, which
-        # the per-day rollup for 2026-06-09 included even though that hour
-        # was 12.5h before the window start. Clicking through to /query
-        # ran a correctly-bounded SQL query and returned 0 rows, breaking
-        # the click-to-investigate flow.
-        partial_day_live_ranges: list[tuple] = []
-        partial_day_set: set[str] = set()
-        if (st_dt or et_dt) and os.path.isdir(day_root):
-            # Walk each UTC day that overlaps the window.
-            anchor = (st_dt or active_dt).replace(hour=0, minute=0, second=0, microsecond=0)
-            stop = et_dt if et_dt else active_dt_end
-            cur_day_dt = anchor
-            while cur_day_dt < stop:
-                day_str = cur_day_dt.strftime("%Y-%m-%d")
-                next_day_dt = cur_day_dt + timedelta(days=1)
-                if day_str >= active_day:
-                    # Active day has no per-day rollup; per-hour rollups
-                    # + active-hour live query handle it.
-                    cur_day_dt = next_day_dt
-                    continue
-                fully_contains = (
-                    (st_dt is None or st_dt <= cur_day_dt)
-                    and (et_dt is None or et_dt >= next_day_dt)
-                )
-                if fully_contains:
-                    cur_day_dt = next_day_dt
-                    continue
-                # Partial day. Does ANY field have a per-day rollup file
-                # for this day? If yes, per-hour rollups are gone and we
-                # need live coverage. If no, the per-hour loop below
-                # already handles in-window hours correctly.
-                has_day_rollup = False
-                for _field in safe_fields:
-                    _f_day_dir = os.path.join(day_root, f"field={_field}", f"day={day_str}")
-                    if os.path.isdir(_f_day_dir):
-                        try:
-                            for _fname in os.listdir(_f_day_dir):
-                                if _fname.endswith(".parquet") and not _fname.startswith(".tmp_"):
-                                    has_day_rollup = True
-                                    break
-                        except OSError:
-                            pass
-                        if has_day_rollup:
-                            break
-                if has_day_rollup:
-                    partial_day_set.add(day_str)
-                    p_start = max(cur_day_dt, st_dt) if st_dt else cur_day_dt
-                    p_end = min(next_day_dt, et_dt) if et_dt else next_day_dt
-                    partial_day_live_ranges.append((p_start, p_end))
-                cur_day_dt = next_day_dt
+        # An earlier attempt at a partial-day live fallback (commit c3d8822)
+        # materialized a 75-column temp table over the boundary day's in-
+        # window hours and added ~3-5 seconds per dashboard load (witnessed
+        # on prod 2026-06-10). The cost was the wide temp materialization,
+        # not the aggregation. Reverted in this commit; the live path is
+        # not viable without either:
+        #   - rebuilding the rollup tier to keep per-hour granularity even
+        #     after day compaction (architectural change), or
+        #   - a narrower per-field direct-query path that doesn't go
+        #     through the wide-temp pattern execute_top_n_batch requires.
+        #
+        # Symptom this leaves in place: clicking a top-N value sourced
+        # from a boundary day's rollup may yield zero rows on /query when
+        # the value only exists outside the user's exact window.
 
         if os.path.isdir(bundled_hour_root):
             try:
@@ -806,11 +764,6 @@ class QueryRunner:
                     if st_str_floor and day < st_str_floor[:10]:
                         continue
                     if et_str_floor and day > et_str_floor[:10]:
-                        continue
-                    if day in partial_day_set:
-                        # Partial-day boundary — per-day rollup would over-
-                        # include hours outside the user's window. Skip; the
-                        # in-window portion is live-queried below.
                         continue
                     day_dir = os.path.join(field_day_dir, day_entry)
                     try:
@@ -961,44 +914,6 @@ class QueryRunner:
                 pass
         _phase("live_active_hour", (time.perf_counter() - _t_live) * 1000)
 
-        # Partial-day boundary live (compacted days that aren't fully
-        # contained in the window). Their per-day rollup was skipped above
-        # to avoid over-counting; live-query the in-window portion so the
-        # top-N reflects exactly what's in the user's window.
-        partial_live_res: list = []
-        if partial_day_live_ranges:
-            _t_partial = time.perf_counter()
-            try:
-                if not actual_cols:
-                    actual_cols = self.get_schema_cols()
-                if not schema_types:
-                    schema_types = {col["name"]: col["type"] for col in _get_schema(self.con, self.src)}
-                _p_limit = max([limit] + list((per_field_limits or {}).values()))
-                for p_start, p_end in partial_day_live_ranges:
-                    p_where = (
-                        f"timestamp >= '{p_start.isoformat()}' "
-                        f"AND timestamp < '{p_end.isoformat()}'"
-                    )
-                    p_tmp = self.create_filtered_temp_table(fields, actual_cols, base_table, p_where)
-                    if not p_tmp:
-                        continue
-                    try:
-                        p_res, _ = self.execute_top_n_batch(
-                            fields, p_tmp, actual_cols, schema_types, limit=_p_limit
-                        )
-                        partial_live_res.extend(p_res)
-                    finally:
-                        try:
-                            self.execute(f"DROP TABLE IF EXISTS {p_tmp}")
-                        except Exception:
-                            pass
-            except Exception:
-                # Best-effort: a failing partial-day live query just under-
-                # counts the boundary day. Worse than ideal but better than
-                # blowing up the whole dashboard.
-                pass
-            _phase("live_partial_day", (time.perf_counter() - _t_partial) * 1000)
-
         # Combine rolled and live, bucketed by field. The prior
         # implementation kept a flat (field, value) keyed dict and then
         # re-scanned the whole dict per field at sort time, making the
@@ -1013,9 +928,6 @@ class QueryRunner:
             bucket = by_field.setdefault(field, {})
             bucket[value] = bucket.get(value, 0) + count
         for field, value, count in live_res:
-            bucket = by_field.setdefault(field, {})
-            bucket[value] = bucket.get(value, 0) + count
-        for field, value, count in partial_live_res:
             bucket = by_field.setdefault(field, {})
             bucket[value] = bucket.get(value, 0) + count
 
