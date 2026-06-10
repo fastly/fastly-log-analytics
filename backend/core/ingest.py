@@ -871,7 +871,7 @@ def ingest(
             # double-count CDN GETs in the usage log. The cron's
             # process_context tags this work as `cron:sync:*`.
 
-            if delete_after and valid_rows > 0:
+            if delete_after:
                 # Clean up completed futures to avoid unbounded list growth
                 _pending_deletes = [f for f in _pending_deletes if not f.done()]
 
@@ -913,11 +913,17 @@ def ingest(
 
     finally:
         # Wait for all in-flight S3 deletions
-        for f in concurrent.futures.as_completed(_pending_deletes, timeout=60):
-            try:
-                deleted += f.result()
-            except Exception as _de:
-                logger.warning("[ingest] %s: async delete error: %s", source_name, _de)
+        try:
+            for f in concurrent.futures.as_completed(_pending_deletes, timeout=300):
+                try:
+                    deleted += f.result()
+                except Exception as _de:
+                    logger.warning("[ingest] %s: async delete error: %s", source_name, _de)
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "[ingest] %s: timed out waiting for all async deletions to complete. Some files may still be deleting in the background.",
+                source_name,
+            )
 
         _delete_executor.shutdown(wait=False)
         if mem_con:

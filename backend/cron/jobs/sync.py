@@ -520,8 +520,14 @@ def _run_full_sweep(service_id: str) -> None:
     not already in ``ingested_files``. Logged as task=``full_sync`` so users
     can distinguish catch-net runs from regular sync in the cron history.
     """
+    from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
     from backend.core.ingest import ingest
+
+    cfg = svcconfig.load_config(service_id) or {}
+    prov = cfg.get("provisioning", {})
+    sync_cfg = prov.get("cron_sync", {})
+    delete_after = sync_cfg.get("delete_after", True)
 
     src = get_source_for_service(service_id)
     if src is None or src.get("access_level") == "read_only":
@@ -550,7 +556,7 @@ def _run_full_sweep(service_id: str) -> None:
     try:
         for event in ingest(
             source=src,
-            delete_after=False,  # catch-net only ingests; regular sync handles deletion
+            delete_after=delete_after,
             max_files=20000,
             max_seconds=900,
             incremental_only=False,
