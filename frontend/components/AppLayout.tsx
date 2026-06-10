@@ -204,26 +204,34 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       React.startTransition(() => router.replace('/share-login'))
       return
     }
-    // Analysts can't access admin pages, the Usage & Cost page, or the
-    // Alerts surface. The backend returns 403 on /api/admin/*, /api/usage/*,
-    // and /api/alerts/*, but the page shells are served by Next.js — bounce
-    // them away client-side so the URL isn't reachable (otherwise the page
-    // mounts and silently fails its data fetches).
-    if (isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts'))) {
-      React.startTransition(() =>
-        router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'),
-      )
-      return
-    }
-    // Share-invited analysts can't see ingestion ops (Data Management
-    // = /logs). FOS-sharing analysts who run their own copy still can.
-    // The audit on 2026-06-10 found this redirect wasn't firing on prod —
-    // broaden to ``isAnalyst`` so both share-invited and local read-only
-    // analysts are bounced regardless of which classifier fires first.
-    if ((isAnalyst || isShareAnalyst) && pathname.startsWith('/logs')) {
-      React.startTransition(() =>
-        router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'),
-      )
+    // Analysts can't access admin pages, the Usage & Cost page, the Alerts
+    // surface, or the Data Management page. The backend returns 403 on
+    // /api/admin/*, /api/usage/*, /api/alerts/*, /api/cron-runs and friends,
+    // but the page shells are served by Next.js — bounce them away client-
+    // side so the URL isn't reachable (otherwise the page mounts and
+    // silently fails its data fetches).
+    //
+    // 2026-06-10 audit: ``router.replace`` inside ``startTransition`` was
+    // observed NOT firing on prod for /alerts and /logs even though the
+    // bundle clearly contained the redirect (verified via direct chunk
+    // fetch). The first redirect (/admin) DID work — likely because the
+    // page.tsx for /alerts and /logs themselves mount expensive client
+    // hooks (useQuery against now-403 endpoints) that race with the
+    // transition. Use ``window.location.replace`` for these blocking
+    // redirects: a full page navigation is cheap (the analyst never
+    // reaches the destination's data fetches anyway), it can't be raced
+    // by the destination route's own effects, and it preserves browser
+    // history correctly.
+    const analystBlocked =
+      isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts'))
+    const logsBlocked = (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs')
+    if (analystBlocked || logsBlocked) {
+      const target = activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'
+      if (typeof window !== 'undefined') {
+        window.location.replace(target)
+      } else {
+        React.startTransition(() => router.replace(target))
+      }
       return
     }
     // Admin-side wizard redirect — only for local admins.
