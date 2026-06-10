@@ -8,6 +8,23 @@ The big meta-finding: **most reflexive "should have done X upfront" advice faile
 
 ---
 
+## Status — end of 2026-06-10 work session
+
+| Tier | Status |
+|---|---|
+| Tier 0 (4 code changes) | ✅ all four shipped: cached_temps removed, usePageContext split, CIDR refresh CI wired, filter codec guarded. FilterBar swap to `/api/log-extents` also closed (the open follow-up from the analyst-403 session). |
+| Tier 1 (5 process rules + PR checklist) | ✅ checklist live in [CONTRIBUTING.md](../CONTRIBUTING.md) with links back to this doc and [ADR-07](../docs/adr/07-feature-budgets.md). |
+| Tier 2 (7 ops gaps → ADRs) | ✅ 7/7 ADRs landed: 07 perf/cost budgets, 08 observability, 09 error/retry/idempotency, 10 schema evolution, 11 secret rotation, 12 API versioning, 13 backup/DR. The only remaining concrete action is **service-config off-VM backup** (named in [ADR-13 §2.4](../docs/adr/13-backup-dr.md) as a deferred follow-up — the lowest-hanging-fruit item). |
+| mypy burndown (incidental) | Baseline 159 → 65 entries (60% reduction). Buckets 1+2+3+4 done; bucket 5 partial (duckdb_pool + main.py middleware-name). Remaining ~65 baseline entries concentrated in `_log_fields_data.py`, `iceberg/buffer.py`, `iceberg/fs.py`. |
+
+Active follow-ups (per the ADRs and the session note):
+- **Service-config off-VM backup** — small, low-cost, the one real gap left from Tier 2 (ADR-13).
+- **mypy bucket 5 long-tail** — `_log_fields_data.py` dict-access patterns (~30 errors), iceberg/fs.py method-assign (1 error), iceberg/buffer.py int-vs-list/str assignments (5 errors). Mostly real type debt rather than mechanical refactors.
+- **Production OTLP collector wiring** — deferred per ADR-08 §3 until there's a concrete need a usage_log query can't answer.
+- **CIDR refresh workflow first fire** — available via `gh workflow run cidr-refresh.yml --ref main` after merge to main (GH Actions only surfaces workflow_dispatch from the default branch).
+
+---
+
 ## Tier 0 — Do this week (concrete, evidence-backed)
 
 ### 0.1 Split `usePageContext` into focused hooks
