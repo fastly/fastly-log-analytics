@@ -2,15 +2,17 @@
 
 import * as React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Loader2, ShieldCheck, ShieldOff, SlidersHorizontal } from 'lucide-react'
+import { SlidersHorizontal } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { ThresholdSliderHelp } from '@/components/SessionScoring/help-content'
-import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Slider } from '@/components/ui/slider'
 import { client } from '@/lib/api'
+
+import { ThresholdMatrix } from './Matrix'
+import { ThresholdPreviewStats } from './Preview'
+import { ThresholdSliderControls } from './Slider'
 
 interface ThresholdPreviewResponse {
   threshold: number
@@ -240,141 +242,40 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
       helpTitle="About Threshold & Enforcement"
     >
       <div className="space-y-4">
-        <div className="space-y-2">
-          <div className="flex items-baseline justify-between">
-            <label className="text-xs font-medium text-muted-foreground">
-              Score threshold
-              {committed?.threshold != null && (
-                <span className="ml-2 text-[10px] text-muted-foreground">
-                  · committed: <span className="font-mono">{committed.threshold}</span>
-                </span>
-              )}
-            </label>
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-lg font-semibold tabular-nums">
-                {thresholdRaw}
-              </span>
-              <Button
-                variant={isAlreadyCommitted ? 'outline' : 'default'}
-                size="sm"
-                disabled={commitMutation.isPending || isAlreadyCommitted}
-                onClick={() => setPendingAction({ action: 'commit', threshold: thresholdRaw })}
-                className="h-7 text-xs"
-                title="Persist this as your committed threshold (preview only — does NOT push to Compute)"
-              >
-                {commitMutation.isPending ? (
-                  <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                ) : isAlreadyCommitted ? (
-                  <Check className="h-3 w-3 mr-1" />
-                ) : null}
-                {isAlreadyCommitted ? 'Committed' : 'Commit'}
-              </Button>
-              <Button
-                variant={isEnforcingThis ? 'outline' : 'destructive'}
-                size="sm"
-                disabled={enforceMutation.isPending}
-                onClick={() => {
-                  setPendingAction(
-                    isEnforcingThis
-                      ? { action: 'disable', threshold: enforce?.threshold ?? thresholdRaw }
-                      : { action: 'enforce', threshold: thresholdRaw },
-                  )
-                }}
-                className="h-7 text-xs"
-                title={
-                  isEnforcingThis
-                    ? 'Currently ENFORCING this threshold. Click to disable enforcement.'
-                    : `Push this threshold to Compute. Live requests with score >= threshold will be blocked (HTTP ${effectiveStatusCode}).`
-                }
-              >
-                {enforceMutation.isPending ? (
-                  <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                ) : isEnforcingThis ? (
-                  <ShieldOff className="h-3 w-3 mr-1" />
-                ) : (
-                  <ShieldCheck className="h-3 w-3 mr-1" />
-                )}
-                {isEnforcingThis ? 'Disable' : 'Enforce'}
-              </Button>
-            </div>
-          </div>
-          {enforce?.enforced && (
-            <div className="text-[10px] text-destructive">
-              ⚠ LIVE: enforcing at threshold{' '}
-              <span className="font-mono">{enforce.threshold}</span> — requests with score
-              ≥ threshold are returning HTTP{' '}
-              <span className="font-mono">{effectiveStatusCode}</span>.
-            </div>
-          )}
-          <div className="flex items-center gap-2 flex-wrap text-[11px]">
-            <label className="text-muted-foreground" htmlFor="enforce-status-code">
-              Enforce response code:
-            </label>
-            <input
-              id="enforce-status-code"
-              type="number"
-              min={statusCode?.min ?? 400}
-              max={statusCode?.max ?? 599}
-              step={1}
-              value={codeDraft}
-              onChange={(e) => setCodeDraft(e.target.value)}
-              disabled={statusCodeMutation.isPending}
-              className="h-6 w-16 rounded border bg-background px-1.5 text-[11px] font-mono"
-              title="Any HTTP 4xx/5xx code (e.g. 403 Forbidden, 429 Too Many Requests, 451 Legal, 503 Service Unavailable). Reason phrase auto-mapped from the HTTP standard."
-              aria-label="Enforce response code"
-            />
-            <Button
-              size="sm"
-              variant={codeDraftIsDirty ? 'default' : 'outline'}
-              className="h-6 text-[11px]"
-              disabled={!codeDraftIsDirty || statusCodeMutation.isPending}
-              onClick={() =>
-                setPendingAction({ action: 'change-status-code', statusCode: codeDraftNum })
-              }
-              title={
-                codeDraftIsDirty
-                  ? `Re-deploy the enforce snippet so flagged requests return HTTP ${codeDraftNum}`
-                  : 'No change to publish'
-              }
-            >
-              Apply
-            </Button>
-            {statusCode && !statusCode.is_default && (
-              <button
-                type="button"
-                disabled={statusCodeMutation.isPending}
-                onClick={() =>
-                  setPendingAction({ action: 'change-status-code', statusCode: statusCode.default })
-                }
-                className="text-[10px] text-muted-foreground underline hover:text-foreground"
-                title={`Reset to default (${statusCode.default})`}
-              >
-                reset
-              </button>
-            )}
-            {statusCodeMutation.isPending && (
-              <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
-            )}
-            {codeDraft !== '' && !codeDraftValid && (
-              <span className="text-[10px] text-destructive">
-                must be {statusCode?.min ?? 400}–{statusCode?.max ?? 599}
-              </span>
-            )}
-          </div>
-          <Slider
-            value={[thresholdRaw]}
-            onValueChange={(v) => setThresholdRaw(v[0] ?? 75)}
-            min={0}
-            max={100}
-            step={5}
-            className="w-full"
-          />
-          <div className="flex justify-between text-[10px] text-muted-foreground tabular-nums">
-            <span>0 (flag everything)</span>
-            <span>50</span>
-            <span>100 (flag nothing)</span>
-          </div>
-        </div>
+        <ThresholdSliderControls
+          thresholdRaw={thresholdRaw}
+          onThresholdRawChange={setThresholdRaw}
+          committed={committed}
+          enforce={enforce}
+          statusCode={statusCode}
+          effectiveStatusCode={effectiveStatusCode}
+          isAlreadyCommitted={isAlreadyCommitted}
+          isEnforcingThis={isEnforcingThis}
+          commitPending={commitMutation.isPending}
+          enforcePending={enforceMutation.isPending}
+          statusCodePending={statusCodeMutation.isPending}
+          codeDraft={codeDraft}
+          onCodeDraftChange={setCodeDraft}
+          codeDraftValid={codeDraftValid}
+          codeDraftIsDirty={codeDraftIsDirty}
+          codeDraftNum={codeDraftNum}
+          onCommitClick={() => setPendingAction({ action: 'commit', threshold: thresholdRaw })}
+          onEnforceClick={() => {
+            setPendingAction(
+              isEnforcingThis
+                ? { action: 'disable', threshold: enforce?.threshold ?? thresholdRaw }
+                : { action: 'enforce', threshold: thresholdRaw },
+            )
+          }}
+          onApplyStatusCode={() =>
+            setPendingAction({ action: 'change-status-code', statusCode: codeDraftNum })
+          }
+          onResetStatusCode={() => {
+            if (statusCode) {
+              setPendingAction({ action: 'change-status-code', statusCode: statusCode.default })
+            }
+          }}
+        />
 
         {isLoading || !data ? (
           <div className="grid grid-cols-2 gap-3">
@@ -383,43 +284,13 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-2 gap-3">
-              <Bucket
-                title="Would FLAG"
-                total={data.flagged.total}
-                good={data.flagged.good}
-                bad={data.flagged.bad}
-                unlabeled={data.flagged.unlabeled}
-                tone="warn"
-              />
-              <Bucket
-                title="Would PASS"
-                total={data.passed.good + data.passed.bad + data.passed.unlabeled}
-                good={data.passed.good}
-                bad={data.passed.bad}
-                unlabeled={data.passed.unlabeled}
-                tone="good"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 text-xs">
-              <Stat
-                label="Precision"
-                value={data.precision != null ? `${(data.precision * 100).toFixed(1)}%` : '—'}
-                hint="of labeled flagged sessions, how many are bad"
-              />
-              <Stat
-                label="Recall"
-                value={data.recall != null ? `${(data.recall * 100).toFixed(1)}%` : '—'}
-                hint="of all labeled-bad sessions, how many got flagged"
-              />
-            </div>
-
-            <p className="text-[11px] text-muted-foreground italic">
-              {data.total_scored_sessions.toLocaleString()} distinct scored sessions in the last{' '}
-              {data.since_hours}h. Precision/recall only count sessions you&apos;ve labeled —
-              the &quot;unlabeled&quot; tally is everything else.
-            </p>
+            <ThresholdMatrix flagged={data.flagged} passed={data.passed} />
+            <ThresholdPreviewStats
+              precision={data.precision}
+              recall={data.recall}
+              totalScoredSessions={data.total_scored_sessions}
+              sinceHours={data.since_hours}
+            />
           </>
         )}
       </div>
@@ -521,53 +392,5 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
         }}
       />
     </AnalyticsCard>
-  )
-}
-
-function Bucket({
-  title,
-  total,
-  good,
-  bad,
-  unlabeled,
-  tone,
-}: {
-  title: string
-  total: number
-  good: number
-  bad: number
-  unlabeled: number
-  tone: 'warn' | 'good'
-}) {
-  const tint = tone === 'warn' ? 'border-amber-300 bg-amber-50/50' : 'border-emerald-300 bg-emerald-50/40'
-  return (
-    <div className={`p-3 border rounded-md ${tint}`}>
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{title}</div>
-      <div className="text-xl font-mono font-semibold tabular-nums">{total.toLocaleString()}</div>
-      <div className="mt-1 space-y-0.5 text-[11px]">
-        <div className="flex justify-between">
-          <span className="text-emerald-700">good</span>
-          <span className="font-mono tabular-nums">{good.toLocaleString()}</span>
-        </div>
-        <div className="flex justify-between">
-          <span className="text-destructive">bad</span>
-          <span className="font-mono tabular-nums">{bad.toLocaleString()}</span>
-        </div>
-        <div className="flex justify-between text-muted-foreground">
-          <span>unlabeled</span>
-          <span className="font-mono tabular-nums">{unlabeled.toLocaleString()}</span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function Stat({ label, value, hint }: { label: string; value: string; hint: string }) {
-  return (
-    <div className="p-3 border rounded-md">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
-      <div className="text-lg font-mono font-semibold tabular-nums">{value}</div>
-      <div className="text-[10px] text-muted-foreground mt-0.5">{hint}</div>
-    </div>
   )
 }

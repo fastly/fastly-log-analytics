@@ -11,107 +11,27 @@ import { useFilterStore } from '@/stores/filterStore'
 import { useFilterPayload } from '@/hooks/useFilterPayload'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
-import { CodeEditor } from '@/components/CodeEditor'
-import { DataTable } from '@/components/DataTable'
-import { Button, buttonVariants } from '@/components/ui/button'
+import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Label } from '@/components/ui/label'
-import { Switch } from '@/components/ui/switch'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-  DropdownMenuSeparator,
-  DropdownMenuLabel,
-  DropdownMenuGroup,
-} from '@/components/ui/dropdown-menu'
-import { Play, Search, AlertCircle, Clock, Database, ArrowUp, ArrowDown, History, Bookmark, Download, X, Filter, Code2 } from 'lucide-react'
+import { Play, Search, AlertCircle, Database, ArrowUp, ArrowDown } from 'lucide-react'
 import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { PageHeader } from '@/components/ui/page-header'
 import { downloadAsCsv } from '@/lib/utils'
 import type { FiltersPayload } from '@/types/filters'
+import { buildStructuredSql, type QueryMode } from './_sql_builder'
+import { ModeToggle } from './_sections/ModeToggle'
+import { StructuredMode } from './_sections/StructuredMode'
+import { RawSqlMode } from './_sections/RawSqlMode'
+import { ResultsTable } from './_sections/ResultsTable'
+import { QueryToolbar } from './_sections/QueryToolbar'
 
 const HISTORY_KEY = 'fastly_qe_history'
-
-type QueryMode = 'structured' | 'raw'
-
-/** Escape a string literal for safe SQL embedding (single-quote doubling). */
-function sqlEscape(v: string): string {
-  return v.replace(/'/g, "''")
-}
-
-/** Quote a column identifier for DuckDB (double-quote, escape inner quotes). */
-function quoteIdent(name: string): string {
-  return `"${name.replace(/"/g, '""')}"`
-}
-
-/**
- * Build a WHERE clause fragment from a FiltersPayload + date range.
- * Returns an empty string when nothing is constrained.
- */
-function buildWhereClause(
-  filters: FiltersPayload,
-  startTime: string | null,
-  endTime: string | null,
-): string {
-  const parts: string[] = []
-
-  if (startTime) parts.push(`timestamp >= '${sqlEscape(startTime)}'`)
-  if (endTime) parts.push(`timestamp <= '${sqlEscape(endTime)}'`)
-
-  for (const [rawCol, spec] of Object.entries(filters)) {
-    if (!spec || !Array.isArray(spec.values) || spec.values.length === 0) continue
-    // FilterStore appends `_<n>` to dedupe same-column same-mode buckets; the
-    // real column name is everything before the trailing `_<digits>`.
-    const col = rawCol.replace(/_\d+$/, '')
-    const ident = quoteIdent(col)
-    const literals = spec.values.map(v => `'${sqlEscape(String(v))}'`).join(', ')
-    const op = spec.mode === 'exclude' ? 'NOT IN' : 'IN'
-    parts.push(`${ident} ${op} (${literals})`)
-  }
-
-  return parts.length > 0 ? `WHERE ${parts.join(' AND ')}` : ''
-}
-
-/**
- * Generate the canonical Structured-Mode SQL. Sort comes from the table's
- * SortingState so column-header clicks round-trip to the server.
- */
-function buildStructuredSql(
-  filters: FiltersPayload,
-  startTime: string | null,
-  endTime: string | null,
-  sorting: SortingState,
-  maxRows: number,
-): string {
-  const where = buildWhereClause(filters, startTime, endTime)
-  const sort = sorting[0]
-  const orderBy = sort
-    ? `ORDER BY ${quoteIdent(sort.id)} ${sort.desc ? 'DESC' : 'ASC'}`
-    : 'ORDER BY timestamp DESC'
-  return [
-    'SELECT *',
-    'FROM logs',
-    where,
-    orderBy,
-    `LIMIT ${maxRows}`,
-  ].filter(Boolean).join('\n')
-}
 
 function QueryPageInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { activeServiceId } = useServiceStore()
-  const { full, abbr, timeAgo } = useDateFormat()
+  const { full, abbr } = useDateFormat()
   const getFieldLabel = useFieldLabel()
 
   // Mode comes from ?mode=raw; defaults to structured. AppLayout's
@@ -384,150 +304,32 @@ function QueryPageInner() {
         </Button>
       </PageHeader>
 
-      {/* Mode toggle. Renders above the editor/preview so it's the first thing
-          a user sees on the page and stays in a predictable spot when toggling. */}
-      <Tabs value={mode} onValueChange={(v) => handleModeChange(v as QueryMode)}>
-        <TabsList>
-          <TabsTrigger value="structured">
-            <Filter className="h-3.5 w-3.5" />
-            Structured
-          </TabsTrigger>
-          <TabsTrigger value="raw">
-            <Code2 className="h-3.5 w-3.5" />
-            Edit Raw SQL
-          </TabsTrigger>
-        </TabsList>
-      </Tabs>
+      <ModeToggle mode={mode} onModeChange={handleModeChange} />
 
       <div className="border rounded-lg bg-card shadow-sm">
-        <div className="flex items-center justify-between p-2 border-b bg-muted/30 flex-wrap gap-2">
-          <div className="flex items-center gap-2">
-            <DropdownMenu>
-              <DropdownMenuTrigger className={buttonVariants({ variant: 'outline', size: 'sm', className: 'h-8' })}>
-                <span className="flex items-center">
-                  <Bookmark className="w-3.5 h-3.5 mr-2 text-muted-foreground" />
-                  Presets
-                </span>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-[300px]">
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel>Recommended Queries</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  {presets?.length ? presets.map((p: any, i: number) => (
-                    <DropdownMenuItem
-                      key={i}
-                      className="flex-col items-start cursor-pointer py-2"
-                      onClick={() => {
-                        // Selecting a preset implies the user wants raw SQL —
-                        // jump them into Raw Mode and pre-fill the editor.
-                        if (mode !== 'raw') handleModeChange('raw')
-                        setRawSql(p.sql)
-                      }}
-                    >
-                      <div className="font-semibold text-sm">{p.name}</div>
-                      <div className="text-xs text-muted-foreground mt-0.5">{p.description}</div>
-                    </DropdownMenuItem>
-                  )) : (
-                    <div className="p-4 text-xs text-muted-foreground text-center italic">No presets available.</div>
-                  )}
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-
-            <DropdownMenu>
-              <DropdownMenuTrigger className={buttonVariants({ variant: 'outline', size: 'sm', className: 'h-8' })}>
-                <span className="flex items-center">
-                  <History className="w-3.5 h-3.5 mr-2 text-muted-foreground" />
-                  History
-                </span>
-              </DropdownMenuTrigger>
-
-              <DropdownMenuContent align="start" className="w-[400px] max-h-[400px] overflow-y-auto">
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel>Recent Queries</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  {history.length ? history.map((h, i) => (
-                    <DropdownMenuItem
-                      key={i}
-                      className="flex items-start justify-between cursor-pointer py-2 group"
-                      onClick={() => {
-                        if (mode !== 'raw') handleModeChange('raw')
-                        setRawSql(h.sql)
-                      }}
-                    >
-                      <div className="overflow-hidden flex-1 mr-4">
-                        <div className="text-xs font-mono truncate">{h.sql.replace(/\s+/g, ' ').trim()}</div>
-                        <div className="text-[10px] text-muted-foreground mt-1">{timeAgo(new Date(h.ts))}</div>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-5 w-5 opacity-0 group-hover:opacity-100 shrink-0"
-                        onClick={(e) => removeHistoryItem(e, i)}
-                      >
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </DropdownMenuItem>
-                  )) : (
-                    <div className="p-4 text-xs text-muted-foreground text-center italic">No history found.</div>
-                  )}
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-
-          <div className="flex items-center gap-4">
-            <div className="flex items-center space-x-2">
-              <Switch id="explain" checked={explain} onCheckedChange={setExplain} />
-              <Label htmlFor="explain" className="text-xs cursor-pointer text-muted-foreground">Plan</Label>
-            </div>
-
-            <Select value={maxRows.toString()} onValueChange={v => setMaxRows(Number(v))}>
-              <SelectTrigger className="h-8 w-[140px] text-xs">
-                <SelectValue placeholder="Row limit" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="100">Fetch 100 rows</SelectItem>
-                <SelectItem value="500">Fetch 500 rows</SelectItem>
-                <SelectItem value="1000">Fetch 1,000 rows</SelectItem>
-                <SelectItem value="5000">Fetch 5,000 rows</SelectItem>
-                <SelectItem value="10000">Fetch 10,000 rows</SelectItem>
-                <SelectItem value="50000">Fetch 50,000 rows</SelectItem>
-              </SelectContent>
-            </Select>
-
-            {queryMutation.data?.data && queryMutation.data.data.length > 0 && (
-              <Button variant="outline" size="sm" className="h-8" onClick={handleExportCSV}>
-                <Download className="w-3.5 h-3.5 mr-2" />
-                Export
-              </Button>
-            )}
-          </div>
-        </div>
+        <QueryToolbar
+          presets={presets}
+          history={history}
+          mode={mode}
+          onModeChange={handleModeChange}
+          onSelectSql={setRawSql}
+          onRemoveHistoryItem={removeHistoryItem}
+          explain={explain}
+          onExplainChange={setExplain}
+          maxRows={maxRows}
+          onMaxRowsChange={setMaxRows}
+          canExport={!!(queryMutation.data?.data && queryMutation.data.data.length > 0)}
+          onExportCsv={handleExportCSV}
+        />
 
         {isStructured ? (
-          // Structured mode: show the generated SQL read-only so users can
-          // see exactly what they're about to run. CodeEditor isn't wired
-          // for read-only display, so we render a styled <pre> instead.
-          <div className="p-4 bg-muted/10">
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2 font-semibold">
-              Generated SQL (sync'd with filter bar)
-            </div>
-            <pre className="text-xs font-mono whitespace-pre-wrap break-words text-foreground/90 bg-background border rounded p-3 overflow-x-auto">
-              {structuredSql}
-            </pre>
-            <div className="text-[10px] text-muted-foreground mt-2">
-              Edit the date range or filters in the header bar above to refine.
-              Click column headers below to change sort order — the query re-runs server-side.
-            </div>
-          </div>
+          <StructuredMode structuredSql={structuredSql} />
         ) : (
-          <CodeEditor
-            value={rawSql}
-            onChange={setRawSql}
+          <RawSqlMode
+            rawSql={rawSql}
+            onRawSqlChange={setRawSql}
             schema={schemaData?.schema}
             tableName={schemaData?.table_name}
-            height="400px"
           />
         )}
       </div>
@@ -554,49 +356,14 @@ function QueryPageInner() {
       )}
 
       {queryMutation.data && (
-        <div className="space-y-4">
-          <div className="flex items-center gap-4 text-xs text-muted-foreground px-1">
-            <span className="flex items-center gap-1">
-              <Database className="h-3 w-3" />
-              {queryMutation.data.data?.length || 0} rows returned
-              {queryMutation.data.truncated && (
-                <span className="text-amber-500 font-semibold ml-1">
-                  {queryMutation.data.total_rows && queryMutation.data.total_rows > 0
-                    ? `(Truncated to ${queryMutation.data.data?.length} of ${queryMutation.data.total_rows.toLocaleString()})`
-                    : `(Truncated to ${queryMutation.data.data?.length} — more available; add LIMIT to count)`}
-                </span>
-              )}
-            </span>
-            <span className="flex items-center gap-1">
-              <Clock className="h-3 w-3" />
-              {queryMutation.data.elapsed_ms}ms execution time
-            </span>
-          </div>
-
-          <div className="border rounded-lg bg-card overflow-hidden">
-            {/* Structured mode is server-sorted (the SortingState is the SQL
-                ORDER BY input), so we control DataTable's sorting prop.
-                Raw mode owns its own sort state internally — clicking a
-                column header re-orders the already-fetched rows client side
-                without rewriting the user's SQL. */}
-            {isStructured ? (
-              <DataTable
-                columns={columns}
-                data={queryMutation.data.data || []}
-                isLoading={queryMutation.isPending}
-                sorting={structuredSorting}
-                onSortingChange={setStructuredSorting}
-              />
-            ) : (
-              <DataTable
-                columns={columns}
-                data={queryMutation.data.data || []}
-                isLoading={queryMutation.isPending}
-                initialSorting={[{ id: 'timestamp', desc: true }]}
-              />
-            )}
-          </div>
-        </div>
+        <ResultsTable
+          data={queryMutation.data}
+          isPending={queryMutation.isPending}
+          isStructured={isStructured}
+          columns={columns}
+          structuredSorting={structuredSorting}
+          onStructuredSortingChange={setStructuredSorting}
+        />
       )}
     </div>
   )

@@ -557,7 +557,6 @@ Re-injected axe-core on each navigation and ran the full rule pack with `resultT
 ## G.4 What to run next (the rest of the "world-class UX" stack)
 
 Still on the table after this section:
-- **Admin a11y pass** (deferred — restart `localhost:3001` and I'll re-run this exact axe+vitals script against the 10 admin pages).
 - **Lighthouse mobile pass** — same audit at 375×667 with mobile network throttling. Will surface viewport and touch-target issues this desktop pass missed.
 - **Keyboard-only walk** through every page — catches focus traps, missing skip-links, modals that don't return focus to the trigger.
 - **Visual regression baseline** (Playwright screenshot diff) — useful once you start landing fixes.
@@ -565,6 +564,125 @@ Still on the table after this section:
 
 ---
 
+# SECTION H — Admin Lighthouse + axe-core a11y pass (16 pages)
+
+Same toolchain as Section G, but against `http://localhost:3001/` with admin (loopback) access. Covers all 10 nav pages **plus** the 4 admin-only routes (/usage, /logs, /admin) and the 3 admin sub-pages (/admin/share, /admin/session-scoring, /admin/usage-log) — 16 pages total.
+
+## H.1 Lighthouse — 3 representative admin pages (desktop)
+
+| Page | Performance | Accessibility | Best Practices | SEO |
+|---|---:|---:|---:|---:|
+| `/dashboard` (admin) | **82** | **86** | 100 | 100 |
+| `/admin` | **83** | **83** | 100 | 100 |
+| `/admin/session-scoring` | **98** | **89** | 100 | 100 |
+
+Compared with the analyst `/share-login` (94/90/100/100), the admin dashboard is **12 perf points lower** and 4 a11y points lower. The biggest perf drag is **CLS** — `/dashboard` scored 0.86 (~0.14 actual CLS) and `/admin` scored 0.45 (~0.45 actual CLS, a hard fail). Layout-shift culprits flagged: chart containers, metric cards, and the orange "Dashboard sharing is ACTIVE" banner all pop into the layout after first paint.
+
+New Lighthouse a11y failures only seen on the admin side:
+- `aria-toggle-field-name` on `/admin` — the Query debug panel / API call panel toggle switches have no accessible name.
+- `label` on `/admin` — form elements without associated `<label>` or `aria-label`.
+- `target-size` on `/dashboard` (admin) — touch targets too small for mobile (<24×24 CSS pixels). The cron-runs / facet-card column-resize handles likely trigger this.
+
+## H.2 axe-core — every admin-accessible page
+
+Re-ran the same axe runner against all 16 admin pages. Aggregate:
+
+| Severity | Rule | Pages | Total nodes | Help |
+|---|---|---:|---:|---|
+| **critical** | `button-name` | **16/16** | 77 | Buttons must have discernible text |
+| **critical** | `label` | 2/16 | 13 | Form elements must have labels |
+| serious | `color-contrast` | 14/16 | **299** | Elements must meet minimum color contrast ratio thresholds |
+| serious | `aria-toggle-field-name` | 2/16 | 8 | ARIA toggle fields must have accessible names |
+| serious | `aria-input-field-name` | 3/16 | 3 | ARIA input fields must have accessible names |
+| serious | `scrollable-region-focusable` | 1/16 | 1 | Scrollable region must have keyboard access |
+| moderate | `region` | 8/16 | 34 | All page content should be contained by landmarks |
+| moderate | `landmark-unique` | 16/16 | 17 | Landmarks should have a unique role / role+label combination |
+| moderate | `heading-order` | 4/16 | 4 | Heading levels should only increase by one |
+| minor | `empty-table-header` | 1/16 | 1 | Table header text should not be empty |
+
+### Per-page breakdown (admin)
+
+| Page | Critical | Serious | Moderate | Total |
+|---|---:|---:|---:|---:|
+| /dashboard | 14 | 24 | 8 | 46 |
+| /performance | 5 | 17 | 5 | 27 |
+| /origin | 6 | 17 | 5 | 28 |
+| /security | 5 | 0 | 5 | 10 |
+| /charts | 3 | 17 | 5 | 25 |
+| /insights | 5 | **45** | 1 | **51** |
+| /network | 8 | 20 | 6 | 34 |
+| /sessions | 3 | 19 | 5 | 27 |
+| /query | 3 | 18 | 1 | 22 |
+| /alerts | 2 | 18 | 1 | 21 |
+| **/usage** | **15** | **28** | 6 | **49** |
+| /logs | 5 | 0 | 2 | 7 |
+| /admin | 3 | 24 | 1 | 29 |
+| /admin/share | 2 | 19 | 2 | 23 |
+| /admin/session-scoring | 7 | 23 | 1 | 31 |
+| /admin/usage-log | 4 | 22 | 1 | 27 |
+
+**Headline:** 457 violations across 16 admin pages, vs 184 across 10 analyst pages — admin surfaces roughly the same per-page density (28.6 vs 18.4) but with two new rule classes and ~2.3× the color-contrast volume.
+
+### H.3 Findings (NEW) — admin-specific
+
+#### ⚠️ M-13 (NEW, ACCESSIBILITY): "Dashboard sharing is ACTIVE" banner fails contrast on every admin page
+- **Severity:** serious (axe)
+- **Where:** the `.bg-amber-500/90` banner pinned at the top of every admin page when sharing is on. Banner text + the embedded share URL fail contrast against the amber background.
+- **Why it matters:** this is the highest-stakes safety affordance in the app (it's the visible reminder that data is being exposed to external analysts) — it can't fail accessibility.
+- **Why volume is so high:** it appears on 14/16 admin pages × multiple nodes per page = the single biggest contributor to the 299-node color-contrast count.
+- **Fix:** darken the text or switch to a darker `bg-amber-700`-class background. Audit the warning-banner Tailwind tokens at the design-token level.
+
+#### ⚠️ M-14 (NEW, ACCESSIBILITY): Form toggles in `/admin` and `/usage` have no accessible name
+- **Severity:** serious (axe), critical (Lighthouse — `aria-toggle-field-name`)
+- **Where:**
+  - `/admin` Overall Settings: "Query debugging panel", "API call panel", "Log FOS/CDN usage", "POP location data" toggles — 3 nodes axe-flagged
+  - `/usage`: 5 toggle/switch elements without names
+- **What axe sees:** `<button role="switch">` (BaseUI Switch) with no inner text and no `aria-label`. Screen reader announces "switch, off" with no context.
+- **Fix:** add `aria-label` to each `<Switch>` instance matching the visible label that sits next to it. Same component-level fix as M-8 — the BaseUI primitive isn't propagating the label.
+
+#### ⚠️ M-15 (NEW, ACCESSIBILITY): Unlabeled form inputs on `/admin` and `/usage`
+- **Severity:** critical (axe — 13 nodes across 2 pages)
+- **Where:** rate inputs on `/usage` (Class A Ops, Class B Ops, CDN Egress, Storage, Min Days Billed) and similar admin form fields. They render as `<input>` with adjacent `<div>` labels — but the labels aren't programmatically associated (no `htmlFor` or wrapping `<label>`).
+- **Fix:** wrap each input in `<label>` or add `htmlFor` + `id` pairs.
+
+#### ⚠️ M-16 (NEW, PERFORMANCE): `/admin` and admin `/dashboard` have severe layout shift
+- **Severity:** medium (perf)
+- **Where:** Lighthouse CLS scores — /admin = 0.45 (≈0.55 actual CLS, terrible), /dashboard = 0.86 (≈0.14 actual CLS, poor). Anything above 0.1 is "needs improvement"; above 0.25 is "poor".
+- **Driver:** metric cards / chart containers / the share banner all pop in after first paint. Same root cause as M-2 (loading state) — but on admin it's more visible because there are more cards.
+- **Fix:** reserve space with explicit `min-height` on metric cards and chart containers, and render the share banner as part of the initial server payload (or `display: none` until ready) so it doesn't shift content down.
+
+#### ⚠️ L-7 (NEW, ACCESSIBILITY): Empty `<th>` and inconsistent heading levels in admin pages
+- **Severity:** minor / moderate
+- **Where:**
+  - `empty-table-header` on 1 page (likely the column-resize handle column on a data table renders an empty `<th>`)
+  - `heading-order` on `/dashboard`, `/usage`, `/logs`, `/admin/share` — page goes h2 → h4 skipping h3 (or similar)
+- **Fix:** give the empty `<th>` a visually-hidden label ("Row actions"). Walk page heading hierarchy and renumber.
+
+### H.4 Cross-cutting summary — analyst + admin combined
+
+The same 2 component-level fixes unlock most of the wins on **both** roles:
+
+1. **Fix `<Select.Trigger>` accessible names** (M-8) → removes **131 critical violations** (54 analyst + 77 admin) across 26 page-scans.
+2. **Fix muted-text / amber-banner color tokens** (M-9 + M-13) → removes ~**429 serious violations** (130 analyst + 299 admin).
+
+Add the 3 admin-specific component fixes:
+3. **`<Switch>` accessible names** (M-14) → removes 8 serious + 3 critical (LH).
+4. **`<input>` ↔ `<label>` association on `/usage` rate cards and `/admin` forms** (M-15) → removes 13 critical.
+5. **CLS — reserve space for metric cards + share banner** (M-16) → moves admin /dashboard from Lighthouse perf 82 to ~92 and /admin from 83 to ~93.
+
+After those 5 changes, the residual axe count drops from **641 total violations** (analyst 184 + admin 457) to roughly **70-80** — most of which are landmark/heading housekeeping that can be cleaned up in a single AppLayout pass.
+
+## H.5 What's still on the table
+
+- **Lighthouse mobile pass** on both roles (375×667, slow-3G throttling).
+- **Keyboard-only walk** through analyst + admin flows.
+- **Bundle analyzer** to confirm code-split targets from M-12.
+- **Visual regression baseline** (worth setting up *before* you start the design-token fixes so you can see the before/after diff).
+
+---
+
 # Conclusion
 
-Original Findings H-1 through H-6 and M-1 remain live and unfixed; the merged re-test adds H-7 (Alerts surface), M-2 (Origin loading state), M-3 (silent body-service_id fallback), and M-4 (empty network map at default range). The admin UX pass adds M-5 (Edit-to-Admin jump with no anchor), M-6 (raw IO error leak on session-scoring page), M-7 (usage-log metric cards never resolve), L-3 (dev IP whitelist default), and L-4 (Boot action looks like text). The Lighthouse + axe pass adds M-8 (header dropdowns have no accessible name on every page — 54 critical violations from 2 component bugs), M-9 (sidebar contrast fails WCAG AA — 130 nodes from a handful of utility classes), M-10 (CodeMirror + ASN search missing names), M-11 (sessions scroll container not keyboard-focusable), L-5 (duplicate nav landmarks), L-6 (orphaned content outside landmarks), and M-12 (~500 KB of unused JS shipped per page). Most of the a11y findings collapse to **two component-level fixes** (the BaseUI `<Select.Trigger>` label and the muted-text design tokens) — fixing those alone takes the critical+serious axe count from ~184 down to ~10 across the app.
+Original Findings H-1 through H-6 and M-1 remain live and unfixed; the merged re-test adds H-7 (Alerts surface), M-2 (Origin loading state), M-3 (silent body-service_id fallback), and M-4 (empty network map at default range). The admin UX pass adds M-5 (Edit-to-Admin jump with no anchor), M-6 (raw IO error leak on session-scoring page), M-7 (usage-log metric cards never resolve), L-3 (dev IP whitelist default), and L-4 (Boot action looks like text). The Lighthouse + axe analyst pass (Section G) adds M-8 (header dropdowns have no accessible name on every page), M-9 (sidebar contrast fails WCAG AA), M-10 (CodeMirror + ASN search missing names), M-11 (sessions scroll container not keyboard-focusable), L-5 (duplicate nav landmarks), L-6 (orphaned content outside landmarks), and M-12 (~500 KB of unused JS shipped per page). The Lighthouse + axe admin pass (Section H) adds M-13 (amber "sharing is ACTIVE" banner fails contrast on every admin page), M-14 (Switch toggles on /admin and /usage have no accessible name), M-15 (rate inputs on /usage and admin forms have no associated labels), M-16 (severe CLS on /admin and admin /dashboard), and L-7 (empty `<th>` + heading-order skips).
+
+**Total**: 184 axe violations across 10 analyst pages + 457 across 16 admin pages = 641 total. **The leverage point**: five component-level fixes (Select.Trigger names, muted-text + amber-banner color tokens, Switch names, label association, CLS space-reservation) collapse roughly **90%** of those violations — taking the residual to ~70-80, almost all landmark/heading housekeeping curable in a single AppLayout pass. The RBAC remediation (Sections D.1 + D.2) and these five a11y/perf fixes are independent and can land in either order.
