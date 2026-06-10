@@ -70,6 +70,11 @@ dev = [
     "pytest-cov>=5.0",
     "httpx>=0.28",
     "mypy>=1.15",
+    # mypy-baseline pins pre-existing errors so pre-commit + CI fail only
+    # on net-new errors. Burndown plan + scoping in
+    # pending-docs/session_2026-06-10_otel_dump_and_log_extents.md.
+    "mypy-baseline>=0.7",
+    "types-python-dateutil",
     "ruff>=0.11",
     "pre-commit>=4.0",
     "moto[s3,server]>=5.0",

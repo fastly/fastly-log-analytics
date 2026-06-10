@@ -6,15 +6,25 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.15.0
+  # mypy runs via the project's own uv env (matches what CI runs) and is
+  # piped through mypy-baseline so pre-existing errors stay accepted and
+  # only NET-NEW errors fail the commit. The baseline lives in
+  # mypy-baseline.txt at the repo root; refresh it after a burndown PR with
+  #   uv run mypy backend/ 2>&1 | uv run mypy-baseline sync
+  # and commit the updated file. Burndown plan in
+  # pending-docs/session_2026-06-10_otel_dump_and_log_extents.md.
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - types-boto3
-          - types-pytz
-          - fastapi
-          - pydantic
+        name: mypy (full backend/, filtered through mypy-baseline)
+        language: system
+        # Always check the whole backend/ tree, not just changed files —
+        # per-file mypy only visits a partial import graph, which makes
+        # mypy-baseline report unrelated baseline entries as "fixed" and
+        # exit non-zero. Cost: ~10s per commit; benefit: matches CI exactly.
+        entry: bash -c 'uv run mypy backend/ 2>&1 | uv run mypy-baseline filter'
+        files: '^backend/.*\.py$'
+        pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

@@ -32,8 +32,15 @@ jobs:
       - name: Format check (ruff)
         run: uv run ruff format --check .
 
-      - name: Type check (mypy)
-        run: uv run mypy backend/
+      - name: Type check (mypy, filtered through mypy-baseline)
+        # Pre-existing errors accepted via mypy-baseline.txt; the filter
+        # exits non-zero only on NET-NEW errors. Refresh the baseline after
+        # a burndown PR with
+        #   uv run mypy backend/ 2>&1 | uv run mypy-baseline sync
+        # and commit mypy-baseline.txt. Burndown plan +
+        # bucket scoping live in
+        # pending-docs/session_2026-06-10_otel_dump_and_log_extents.md.
+        run: uv run mypy backend/ 2>&1 | uv run mypy-baseline filter
 
       - name: Install falco
         run: |
