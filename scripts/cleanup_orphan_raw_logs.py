@@ -44,9 +44,9 @@ def cleanup_orphans(service_id: str):
 
     # 2. Initialize S3 client
     session = boto3.Session(
-        aws_access_key_id=src["aws_access_key_id"],
-        aws_secret_access_key=src["aws_secret_access_key"],
-        region_name=src.get("region_name", "us-east-1")
+        aws_access_key_id=src["access_key_id"],
+        aws_secret_access_key=src["secret_access_key"],
+        region_name=src.get("region", "us-east-1"),
     )
     s3_client = session.client("s3", endpoint_url=src.get("endpoint_url"))
 
