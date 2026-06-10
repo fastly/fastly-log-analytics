@@ -7106,6 +7106,104 @@
         }
       }
     },
+    "/api/log-extents": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Log Extents",
+        "description": "Return only the earliest/latest log timestamps for the FilterBar.\n\nAnalyst-safe sibling of ``/api/sync-status``: same cached-status fast\npath but projected down to the two fields the FilterBar actually\nreads. ``/api/sync-status`` is blocked for analysts because it leaks\n``ngwaf_workspace_id`` and active cron-task state; this endpoint\ndrops both, so the middleware lets it through and the FilterBar's\nsnap-to-extents UX works for analysts too.\n\nReads only the persisted status snapshot \u2014 no DuckDB connection\ngrabbed, no contention with cron, no 503 path. The snapshot is\nrefreshed by the sync cron every minute so a freshly started\nservice sees populated extents within ~60s.",
+        "operationId": "log_extents_api_log_extents_get",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogExtentsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/ingested-files": {
       "get": {
         "tags": [
@@ -15513,6 +15611,67 @@
           "gap_pct"
         ],
         "title": "LogAccountingTotals"
+      },
+      "LogExtentsResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "configured": {
+            "type": "boolean",
+            "title": "Configured",
+            "default": true
+          },
+          "earliest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Log At"
+          },
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          }
+        },
+        "type": "object",
+        "title": "LogExtentsResponse",
+        "description": "Minimal extents projection for the FilterBar's time-range snap.\n\nSibling of ``SyncStatusResponse`` but strips every field that the\nmiddleware blocks ``/api/sync-status`` for an analyst over: no\n``ngwaf_workspace_id``, no ``active_run``, no cron task state, no\nDuckDB size, no storage mode. Just the two timestamps the\nFilterBar needs to snap its range, plus a ``configured`` flag so\nthe frontend can short-circuit when a service has no source."
       },
       "LogFieldsConfig": {
         "properties": {

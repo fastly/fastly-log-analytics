@@ -1334,6 +1334,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/log-extents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Log Extents
+         * @description Return only the earliest/latest log timestamps for the FilterBar.
+         *
+         *     Analyst-safe sibling of ``/api/sync-status``: same cached-status fast
+         *     path but projected down to the two fields the FilterBar actually
+         *     reads. ``/api/sync-status`` is blocked for analysts because it leaks
+         *     ``ngwaf_workspace_id`` and active cron-task state; this endpoint
+         *     drops both, so the middleware lets it through and the FilterBar's
+         *     snap-to-extents UX works for analysts too.
+         *
+         *     Reads only the persisted status snapshot — no DuckDB connection
+         *     grabbed, no contention with cron, no 503 path. The snapshot is
+         *     refreshed by the sync cron every minute so a freshly started
+         *     service sees populated extents within ~60s.
+         */
+        get: operations["log_extents_api_log_extents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/ingested-files": {
         parameters: {
             query?: never;
@@ -4508,6 +4540,41 @@ export interface components {
             worst_bucket_ts?: string | null;
             /** Worst Bucket Gap Pct */
             worst_bucket_gap_pct?: number | null;
+        };
+        /**
+         * LogExtentsResponse
+         * @description Minimal extents projection for the FilterBar's time-range snap.
+         *
+         *     Sibling of ``SyncStatusResponse`` but strips every field that the
+         *     middleware blocks ``/api/sync-status`` for an analyst over: no
+         *     ``ngwaf_workspace_id``, no ``active_run``, no cron task state, no
+         *     DuckDB size, no storage mode. Just the two timestamps the
+         *     FilterBar needs to snap its range, plus a ``configured`` flag so
+         *     the frontend can short-circuit when a service has no source.
+         */
+        LogExtentsResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Configured
+             * @default true
+             */
+            configured: boolean;
+            /** Earliest Log At */
+            earliest_log_at?: string | null;
+            /** Latest Log At */
+            latest_log_at?: string | null;
         };
         /** LogFieldsConfig */
         LogFieldsConfig: {
@@ -9657,6 +9724,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SyncStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    log_extents_api_log_extents_get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogExtentsResponse"];
                 };
             };
             /** @description Validation Error */
