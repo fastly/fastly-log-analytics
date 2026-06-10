@@ -506,6 +506,60 @@ def all_codes() -> frozenset[str]:
 _ALL_CODES: frozenset[str] = frozenset(f.code for f in REGISTRY)
 
 
+# ---------------------------------------------------------------------------
+# Caller-facing API shape helpers + legacy re-exports
+# ---------------------------------------------------------------------------
+#
+# Phase 7 migration step 3 (`backend/routers/bootstrap.py`) routes through
+# these names instead of importing them from `backend.core.log_fields`. The
+# helpers below intentionally delegate to the legacy module: the legacy
+# dict catalog remains authoritative (see module docstring), so the only
+# job of the registry-side names is to give callers a single import surface
+# and to keep the `@patch("backend.core.log_fields.get_catalog_for_api")`
+# regression test in `tests/routers/test_bootstrap.py` working — the
+# function lookup happens at call time on the `_lf` module reference, so
+# unittest.mock.patch on `log_fields.get_catalog_for_api` still takes
+# effect when called via this delegate.
+#
+# `PRESETS` and `INSIGHT_DEFINITIONS` are re-exported as direct references
+# to the legacy objects so a mutation through `log_fields` (rare, but a
+# stated hard constraint of the migration) is observed by callers reading
+# from the registry.
+
+
+def get_catalog_for_api(field_limits: Mapping[str, int] | None = None) -> list:
+    """API-shaped catalog for `/api/log-fields/catalog`.
+
+    Delegates to `log_fields.get_catalog_for_api` so the legacy module
+    remains the single authoritative implementation while the migration
+    is in flight. The attribute lookup is deferred to call time so the
+    bootstrap test that patches `backend.core.log_fields.get_catalog_for_api`
+    continues to exercise the 500 path.
+    """
+    from backend.core import log_fields as _lf
+
+    return _lf.get_catalog_for_api(dict(field_limits) if field_limits is not None else None)
+
+
+def get_groups_for_api() -> list:
+    """API-shaped group metadata for `/api/log-fields/catalog`.
+
+    Delegates to `log_fields.get_groups_for_api`; see `get_catalog_for_api`
+    for the rationale.
+    """
+    from backend.core import log_fields as _lf
+
+    return _lf.get_groups_for_api()
+
+
+# Re-exports: same object identity as the legacy module's globals. Any
+# mutation through `log_fields` is observed here automatically (the
+# migration doc calls this out as a hard constraint).
+from backend.core.log_fields import (  # noqa: E402
+    INSIGHT_DEFINITIONS,
+    PRESETS,
+)
+
 __all__ = (
     "Agg",
     "BY_CODE",
@@ -513,13 +567,17 @@ __all__ = (
     "DuckType",
     "FilterOp",
     "Group",
+    "INSIGHT_DEFINITIONS",
     "LogField",
+    "PRESETS",
     "REGISTRY",
     "SECURITY_HOOK_CODES",
     "WIRE_ORDER",
     "all_codes",
     "derived",
     "get",
+    "get_catalog_for_api",
+    "get_groups_for_api",
     "in_group",
     "loggable",
     "try_get",

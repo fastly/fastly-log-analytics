@@ -268,8 +268,12 @@ def log_fields_catalog(
     ``?service_id=svc-B`` and read svc-B's custom field configuration
     (including PII-related field configs).
     """
+    # Catalog/group/preset/insight reads go through the Phase 7 registry
+    # surface (see backend/core/field_registry.py). The custom-field config
+    # helpers (`get_lf_config`, `get_custom_fields_catalog_entries`) remain
+    # on `log_fields` — they're config-shaped, not registry-shaped.
+    from backend.core import field_registry as fr
     from backend.core import log_fields as lf
-    from backend.core.log_fields import INSIGHT_DEFINITIONS
 
     analyst_session = getattr(request.state, "analyst_session", None)
     if analyst_session is not None and service_id is not None:
@@ -295,15 +299,15 @@ def log_fields_catalog(
     else:
         custom_entries = []
 
-    fields = lf.get_catalog_for_api(field_limits) + custom_entries
+    fields = fr.get_catalog_for_api(field_limits) + custom_entries
 
     return {
-        "groups": lf.get_groups_for_api(),
+        "groups": fr.get_groups_for_api(),
         "fields": fields,
-        "insights": INSIGHT_DEFINITIONS,
+        "insights": fr.INSIGHT_DEFINITIONS,
         "presets": {
             name: {"label": p["label"], "description": p["description"], "groups": p["groups"]}
-            for name, p in lf.PRESETS.items()
+            for name, p in fr.PRESETS.items()
         },
     }
 
@@ -350,7 +354,7 @@ def insight_availability(
         # lookup so first-load isn't a 503 — subsequent calls hit
         # the cron-populated cache.
         actual_cols = {col["name"] for col in get_schema(con, source)}
-    from backend.core.log_fields import INSIGHT_DEFINITIONS
+    from backend.core.field_registry import INSIGHT_DEFINITIONS
 
     result = []
     for d in INSIGHT_DEFINITIONS:

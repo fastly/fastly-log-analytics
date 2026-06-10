@@ -101,12 +101,47 @@ async def prefill(source: dict = Depends(get_source)):
             result["commit_interval_mins"] = int(cron_sync.get("commit_interval_mins", 5))
             result["log_retention_days"] = int(cfg.get("log_retention_days", 90))
             try:
-                from backend.core import log_fields as lf
+                from backend.core.field_registry import BY_CODE, REGISTRY, Group
 
                 lf_cfg = cfg.get("log_fields") or prov.get("log_fields", {})
                 if not lf_cfg:
                     lf_cfg = {"groups": ["A", "B", "C", "D"], "field_overrides": {}}
-                result["estimated_bytes_per_line"] = lf.estimate_log_line_bytes(lf_cfg)
+
+                # Resolve enabled field codes from the registry. Mirrors
+                # log_fields.resolve_enabled_fields, but using registry primitives:
+                # always-on CORE + selected groups (with the E→D / G→F dependency
+                # closure) + per-field overrides. We re-encode the two dep rules
+                # here rather than importing the private _GROUP_REQS — they're
+                # stable and the alternative is importing across module
+                # boundaries for two key/value pairs.
+                enabled_groups: set[str] = set(lf_cfg.get("groups", []))
+                _GROUP_DEPS = {"E": "D", "G": "F"}
+                changed = True
+                while changed:
+                    changed = False
+                    for grp, required in _GROUP_DEPS.items():
+                        if grp in enabled_groups and required not in enabled_groups:
+                            enabled_groups.add(required)
+                            changed = True
+
+                enabled_codes: set[str] = {f.code for f in REGISTRY if f.group is Group.CORE}
+                for f in REGISTRY:
+                    if f.group is not Group.CORE and f.group.value in enabled_groups:
+                        enabled_codes.add(f.code)
+                for fid, on in lf_cfg.get("field_overrides", {}).items():
+                    if on:
+                        enabled_codes.add(fid)
+                    else:
+                        enabled_codes.discard(fid)
+
+                # Byte estimate = sum of typical_bytes for enabled fields + JSON
+                # structural overhead (braces + per-field key quotes/colon/comma).
+                # Custom fields are not part of the prefill payload, so they're
+                # not summed here (matches the prior call site shape — lf_cfg
+                # never carries custom_fields on this code path).
+                field_bytes = sum(BY_CODE[c].typical_bytes for c in enabled_codes if c in BY_CODE)
+                structural = 2 + len(enabled_codes) * 5
+                result["estimated_bytes_per_line"] = structural + field_bytes
             except Exception:
                 pass
             try:
