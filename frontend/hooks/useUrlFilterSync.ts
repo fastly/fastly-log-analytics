@@ -1,13 +1,13 @@
 import { useEffect } from 'react'
 import { useFilterStore } from '@/stores/filterStore'
 import { useReportConfig } from './useReportConfig'
-import { usePageContext } from './usePageContext'
+import { useActiveService } from './useActiveService'
 import { client } from '@/lib/api'
 import { useQueryClient } from '@tanstack/react-query'
 
 export function useUrlFilterSync() {
   const { addFilter, clearFilters, setRange } = useFilterStore()
-  const { activeServiceId } = usePageContext()
+  const { activeServiceId } = useActiveService()
   const queryClient = useQueryClient()
   const { setMetric } = useReportConfig({
     defaultMetric: 'requests',
@@ -47,7 +47,7 @@ export function useUrlFilterSync() {
         const parsedFilters = JSON.parse(view.filters_json)
         clearFilters()
         parsedFilters.forEach((f: any) => addFilter(f.column, f.value, f.mode))
-        
+
         const url = new URL(window.location.href)
         url.searchParams.delete('view')
         window.history.replaceState({}, '', url.toString())
@@ -62,7 +62,7 @@ export function useUrlFilterSync() {
     if (hasFilterParams || hasRangeParams || hasMetricParam) {
       clearFilters()
     }
-    
+
     // Support the standardized ?filter_col=val format
     params.forEach((value, key) => {
       if (key.startsWith('filter_')) {
@@ -71,7 +71,7 @@ export function useUrlFilterSync() {
         updated = true
       }
     })
-    
+
     // Support start_time/end_time
     const urlStart = params.get('start_time')
     const urlEnd = params.get('end_time')

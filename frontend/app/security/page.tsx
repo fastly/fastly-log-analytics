@@ -1,7 +1,8 @@
 'use client'
 
 import React from 'react'
-import { usePageContext } from '@/hooks/usePageContext'
+import { useTimeRange } from '@/hooks/useTimeRange'
+import { useTimezone } from '@/hooks/useTimezone'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
 import { useTimeLayout } from '@/lib/chart-helpers'
@@ -14,7 +15,8 @@ import { NetworkSection } from './_sections/NetworkSection'
 
 export default function SecurityPage() {
   const getFieldLabel = useFieldLabel()
-  const { startTime, endTime, timezone } = usePageContext()
+  const { startTime, endTime } = useTimeRange()
+  const timezone = useTimezone()
 
   const [fingerprintVisibility, setFingerprintVisibility, onFingerprintVisChange] = useColumnVisibility()
   const [topIpVisibility, setTopIpVisibility, onTopIpVisChange] = useColumnVisibility()

@@ -27,8 +27,8 @@ vi.mock('@tanstack/react-query', () => ({
   useQueryClient: vi.fn(() => ({ getQueryData: mockGetQueryData })),
 }))
 
-vi.mock('@/hooks/usePageContext', () => ({
-  usePageContext: vi.fn(() => ({ activeServiceId: 'test-service-id' })),
+vi.mock('@/hooks/useActiveService', () => ({
+  useActiveService: vi.fn(() => ({ activeServiceId: 'test-service-id', services: [] })),
 }))
 
 vi.mock('@/hooks/useReportConfig', () => ({
