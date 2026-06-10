@@ -69,6 +69,34 @@ def update_usage_logging_settings(body: dict):
     ]
     updates = {k: body[k] for k in allowed if k in body}
 
+    # N-9: reject empty / non-positive numeric writes so an admin who hits
+    # Save with empty inputs doesn't silently wipe the global rates to 0
+    # (which would zero out cost estimates across every service). Boolean
+    # toggles (enabled, track_duckdb_httpfs) are allowed through unchanged.
+    numeric_fields = (
+        "retention_days",
+        "class_a_rate_per_1k",
+        "class_b_rate_per_10k",
+        "cdn_egress_rate_per_gb",
+        "storage_rate_per_gb_month",
+        "min_billed_days",
+    )
+    for fld in numeric_fields:
+        if fld not in updates:
+            continue
+        try:
+            n = float(updates[fld])
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": f"{fld} must be a positive number", "field": fld},
+            )
+        if not (n > 0):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": f"{fld} must be a positive number", "field": fld},
+            )
+
     current = svcconfig.load_usage_logging_config()
     current.update(updates)
     svcconfig.save_usage_logging_config(current)

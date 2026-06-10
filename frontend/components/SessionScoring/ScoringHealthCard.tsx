@@ -85,6 +85,20 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
   })
 
   if (isError) {
+    // M-6: the raw DuckDB error ("IO Error: No files found that match the
+    // pattern 'cache/fos-<id>-logs/buffer/batch_<hash>.parquet'") used to
+    // be surfaced verbatim — exposing internal cache layout and reading
+    // as if the scoring system was broken. Map the common transient
+    // signatures to friendly copy; fall back to a clean message for
+    // anything else. The original payload is still in the network tab if
+    // an operator needs to dig.
+    const raw = String((error as any)?.message || 'Unknown error')
+    const friendly =
+      /No files found that match the pattern/i.test(raw) || /IO Error/i.test(raw)
+        ? 'Scoring data is still warming up — try again in a few minutes.'
+        : /timed out|timeout/i.test(raw)
+          ? 'The scoring service took too long to respond. Retry, or check the scorer Compute service is reachable.'
+          : raw
     return (
       <AnalyticsCard
         title="Scoring Health"
@@ -93,11 +107,9 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
         <div className="border border-destructive/20 bg-destructive/5 rounded-md p-4">
           <div className="flex items-center gap-2 text-destructive">
             <AlertTriangle className="h-4 w-4" />
-            <span className="text-sm font-medium">Failed to load scoring health</span>
+            <span className="text-sm font-medium">Scoring health unavailable</span>
           </div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {(error as any)?.message || 'Unknown error'}
-          </p>
+          <p className="text-xs text-muted-foreground mt-1">{friendly}</p>
           <Button
             size="sm"
             variant="outline"

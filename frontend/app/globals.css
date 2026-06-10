@@ -60,7 +60,12 @@
   --secondary: oklch(0.96 0.01 255);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.96 0.01 255);
-  --muted-foreground: oklch(0.556 0 0);
+  /* M-9 (a11y): was oklch(0.556 0 0) which measured 4.43 contrast vs sidebar
+     bg (#737373 on #f3f8fc, 11px bold) — just under WCAG AA's 4.5 floor for
+     normal text and a hard fail on the 1.9 ratio used by the v1.2.0 footer.
+     Bumping lightness from 0.556 → 0.47 raises the ratio above 5.0 on the
+     two worst offenders without darkening the rest of the UI noticeably. */
+  --muted-foreground: oklch(0.47 0 0);
   --accent: oklch(0.93 0.02 255);
   --accent-foreground: oklch(0.546 0.245 262.881);
   --destructive: oklch(0.577 0.245 27.325);

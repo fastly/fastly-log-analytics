@@ -116,21 +116,32 @@ Output columns per row: ``(url, requests, p50_ms, p95_ms, p99_ms)``
 
 STATUS_CODES = """
         SELECT
-          "ost"                                             AS status,
+          CASE
+            WHEN "ost" BETWEEN 100 AND 599 THEN "ost"
+            ELSE -1
+          END                                              AS status,
           COUNT(*)                                         AS count,
           COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()        AS pct
         FROM {table}
         WHERE {where} AND "ost" IS NOT NULL
-        GROUP BY "ost"
+        GROUP BY 1
         ORDER BY count DESC
         """
 """Origin status-code distribution.
+
+N-8: bucket any non-standard status code (anything outside the 100-599
+HTTP range) under a single ``-1`` sentinel that the frontend can map to
+"Other". Origin logs occasionally surface synthetic values like 829 from
+buggy backends or middlebox rewrites; renaming the donut to "HTTP 829"
+implies it's a valid status that the user could investigate. Frontend at
+``Timeseries.tsx`` translates -1 to "Other".
 
 Inputs:
 - ``{table}`` — quoted base-table identifier
 - ``{where}`` — pre-built WHERE clause
 
-Output columns per row: ``(status, count, pct)``
+Output columns per row: ``(status, count, pct)``. ``status == -1`` means
+"non-standard HTTP code outside 100-599; bucketed".
 """
 
 
@@ -377,12 +388,15 @@ Output columns per row: ``(url, requests, p50_ms, p95_ms, p99_ms)``
 
 TEMP_STATUS_CODES = """
         SELECT
-          "ost"                                             AS status,
+          CASE
+            WHEN "ost" BETWEEN 100 AND 599 THEN "ost"
+            ELSE -1
+          END                                               AS status,
           COUNT(*)                                          AS count,
           COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()          AS pct
         FROM {temp_table}
         WHERE "ost" IS NOT NULL
-        GROUP BY "ost"
+        GROUP BY 1
         ORDER BY count DESC
         """
 """Status-code distribution against the TEMP TABLE.

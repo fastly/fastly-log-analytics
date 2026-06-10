@@ -479,7 +479,12 @@ def get_health(
         worst_country = None
         if has_country and map_buckets:
             latest_cities = map_buckets[-1]["cities"]
-            sig_countries = [c for c in latest_cities if c["reqs"] > 10]
+            # M-4: the prior ``reqs > 10`` floor frequently left worst_country
+            # blank on low-traffic 24h windows, rendering "Worst Region: --"
+            # alongside a populated Worst ASN. Drop to 1 so the panel
+            # surfaces something whenever the data has any city signal at
+            # all — operators reading "--" assumed the page was broken.
+            sig_countries = [c for c in latest_cities if c["reqs"] >= 1]
             if sig_countries:
                 wc = min(sig_countries, key=lambda c: c["health_score"] if c["health_score"] is not None else 100)
                 label = format_city_label(wc.get("city"), wc["country"])

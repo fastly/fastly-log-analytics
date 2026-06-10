@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from backend.deps import get_service_id, get_source
@@ -16,12 +16,47 @@ from backend.utils.router_utils import sse_flush_preamble as _sse_flush
 router = APIRouter(prefix="/api", tags=["services"])
 
 
+# N-2: fields safe to surface to a remote analyst on ``GET /api/services``.
+# The full enriched dict contains operator infra strings (cdn_url,
+# cdn_service_id, fos_bucket, fos_region, ngwaf_workspace_id) plus DuckDB
+# internals (duckdb_size_bytes, cache_file_count, log_row_count) and per-
+# service cron schedules — none of which the analyst frontend renders.
+# Anything not in this set is stripped before the response leaves the
+# router for analyst sessions.
+_ANALYST_SAFE_SERVICE_FIELDS = frozenset(
+    {
+        "service_id",
+        "name",
+        "access_level",
+        "is_active",
+    }
+)
+
+
+def _trim_for_analyst(services: list[dict], allowed_ids: set[str]) -> list[dict]:
+    out: list[dict] = []
+    for svc in services:
+        sid = svc.get("service_id", "")
+        if sid not in allowed_ids:
+            continue
+        out.append({k: v for k, v in svc.items() if k in _ANALYST_SAFE_SERVICE_FIELDS})
+    return out
+
+
 @router.get("/services", response_model=ServicesListResponse)
-def api_services_list(service_id: str | None = Depends(get_service_id)):
+def api_services_list(request: Request, service_id: str | None = Depends(get_service_id)):
     from backend.services.service_manager import get_enriched_services
 
     _debug_queries: list[dict] = []
     result = get_enriched_services(service_id)
+
+    # N-2: analysts get a slim, whitelisted view scoped to their invite's
+    # service_ids. Admins (analyst_session is None) see the full enriched
+    # list, unchanged.
+    analyst_session = getattr(request.state, "analyst_session", None)
+    if analyst_session is not None:
+        allowed = set(analyst_session.service_ids or [])
+        result = _trim_for_analyst(result, allowed)
 
     return ServicesListResponse.with_telemetry(services=result, debug_queries=_debug_queries)
 

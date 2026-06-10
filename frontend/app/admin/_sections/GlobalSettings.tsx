@@ -44,38 +44,59 @@ function UsageLogRetentionInput({ initial, onSave }: { initial: number; onSave: 
   )
 }
 
+// N-9: hard defaults must match backend ``_USAGE_LOGGING_DEFAULTS`` so the
+// fields render with sensible values even before /api/admin/usage-logging
+// resolves — the prior implementation set state inside the queryFn body
+// and rendered empty strings when openapi-fetch returned ``data`` as
+// undefined (route has no declared response_model in the OpenAPI spec).
+const _PRICING_DEFAULTS = {
+  class_a_rate_per_1k: 0.005,
+  class_b_rate_per_10k: 0.01,
+  cdn_egress_rate_per_gb: 0.12,
+  storage_rate_per_gb_month: 0.02,
+  min_billed_days: 30,
+}
+
 export const PricingSettings = () => {
   const queryClient = useQueryClient()
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
-  const [rateA, setRateA] = useState('')
-  const [rateB, setRateB] = useState('')
-  const [rateCdn, setRateCdn] = useState('')
-  const [rateStorage, setRateStorage] = useState('')
-  const [minBilledDays, setMinBilledDays] = useState('')
+  const [rateA, setRateA] = useState(String(_PRICING_DEFAULTS.class_a_rate_per_1k))
+  const [rateB, setRateB] = useState(String(_PRICING_DEFAULTS.class_b_rate_per_10k))
+  const [rateCdn, setRateCdn] = useState(String(_PRICING_DEFAULTS.cdn_egress_rate_per_gb))
+  const [rateStorage, setRateStorage] = useState(String(_PRICING_DEFAULTS.storage_rate_per_gb_month))
+  const [minBilledDays, setMinBilledDays] = useState(String(_PRICING_DEFAULTS.min_billed_days))
 
   const { data: settings, isLoading } = useQuery({
     queryKey: ['usage-logging-settings'],
     queryFn: async ({ signal }) => {
       const { data } = await client.GET('/api/admin/usage-logging')
-      if (!data) return null
-      const d = data as any
-      setRateA(String(d.class_a_rate_per_1k ?? 0.005))
-      setRateB(String(d.class_b_rate_per_10k ?? 0.01))
-      setRateCdn(String(d.cdn_egress_rate_per_gb ?? 0.12))
-      setRateStorage(String(d.storage_rate_per_gb_month ?? 0.02))
-      setMinBilledDays(String(d.min_billed_days ?? 30))
-      return d
+      return data ?? null
     },
   })
 
+  // Apply server-side values whenever the query resolves. The earlier
+  // implementation set state inside the queryFn body which raced with
+  // React's batching and sometimes left the inputs empty after Edit was
+  // pressed (audit finding N-9, 2026-06-10).
+  useEffect(() => {
+    if (!settings) return
+    const d = settings as any
+    setRateA(String(d.class_a_rate_per_1k ?? _PRICING_DEFAULTS.class_a_rate_per_1k))
+    setRateB(String(d.class_b_rate_per_10k ?? _PRICING_DEFAULTS.class_b_rate_per_10k))
+    setRateCdn(String(d.cdn_egress_rate_per_gb ?? _PRICING_DEFAULTS.cdn_egress_rate_per_gb))
+    setRateStorage(String(d.storage_rate_per_gb_month ?? _PRICING_DEFAULTS.storage_rate_per_gb_month))
+    setMinBilledDays(String(d.min_billed_days ?? _PRICING_DEFAULTS.min_billed_days))
+  }, [settings])
+
   function handleCancel() {
     if (settings) {
-      setRateA(String(settings.class_a_rate_per_1k ?? 0.005))
-      setRateB(String(settings.class_b_rate_per_10k ?? 0.01))
-      setRateCdn(String(settings.cdn_egress_rate_per_gb ?? 0.12))
-      setRateStorage(String(settings.storage_rate_per_gb_month ?? 0.02))
-      setMinBilledDays(String(settings.min_billed_days ?? 30))
+      const d = settings as any
+      setRateA(String(d.class_a_rate_per_1k ?? _PRICING_DEFAULTS.class_a_rate_per_1k))
+      setRateB(String(d.class_b_rate_per_10k ?? _PRICING_DEFAULTS.class_b_rate_per_10k))
+      setRateCdn(String(d.cdn_egress_rate_per_gb ?? _PRICING_DEFAULTS.cdn_egress_rate_per_gb))
+      setRateStorage(String(d.storage_rate_per_gb_month ?? _PRICING_DEFAULTS.storage_rate_per_gb_month))
+      setMinBilledDays(String(d.min_billed_days ?? _PRICING_DEFAULTS.min_billed_days))
     }
     setEditing(false)
   }

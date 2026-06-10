@@ -54,7 +54,14 @@ export function useShareStatusBanner({ enabled }: Options) {
     <button
       type="button"
       onClick={() => router.push('/admin/share')}
-      className="w-full bg-amber-500/90 hover:bg-amber-500 text-amber-50 text-xs font-semibold py-1.5 text-center shadow shrink-0"
+      // M-13 (a11y): bg-amber-500 + text-amber-50 measured below WCAG AA
+      // contrast (~3.1 ratio) on the 12px banner text — the single largest
+      // contributor to the audit's 299-node admin color-contrast count.
+      // Darken to amber-700 background with white text → contrast jumps to
+      // ~7.0 and the banner reads as a serious operator warning, which is
+      // its actual purpose (the safety affordance reminding the admin
+      // that data is exposed to external analysts).
+      className="w-full bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold py-1.5 text-center shadow shrink-0"
       data-testid="share-active-banner"
     >
       ⚠️ Dashboard sharing is ACTIVE

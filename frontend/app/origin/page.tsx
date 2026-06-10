@@ -166,13 +166,17 @@ function OriginReportContent({
 
   const statusData = React.useMemo(() => {
     if (!statusCodes.data?.rows?.length) return []
+    // N-8: backend bucketizes any status outside 100-599 as -1; map to a
+    // single "Other" slice so the donut doesn't fabricate plausible-looking
+    // status codes like "HTTP 829" from synthetic / corrupt origin values.
     return [{
       values: statusCodes.data.rows.map((r: any) => r.count),
-      labels: statusCodes.data.rows.map((r: any) => `HTTP ${r.status}`),
+      labels: statusCodes.data.rows.map((r: any) => r.status === -1 ? 'Other' : `HTTP ${r.status}`),
       type: 'pie',
       hole: 0.4,
       marker: {
         colors: statusCodes.data.rows.map((r: any) =>
+          r.status === -1 ? '#94a3b8' :
           r.status >= 500 ? '#ef4444' :
           r.status >= 400 ? '#f59e0b' :
           r.status >= 300 ? '#3b82f6' : '#10b981'

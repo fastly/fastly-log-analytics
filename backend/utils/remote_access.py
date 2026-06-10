@@ -19,6 +19,7 @@ Per the plan:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -31,6 +32,21 @@ from backend.core import share_db
 from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
+
+# Response envelope fields that carry server-internal telemetry. Stripped
+# unconditionally from analyst-bound JSON bodies after call_next so that
+# routes which build responses as plain dicts (bypassing BaseResponse's
+# DEBUG_RESPONSES gate) cannot leak operator-side data — concrete examples
+# the QA pass surfaced: raw DuckDB SQL via _debug_queries, Fastly KV store
+# paths via _debug_calls, internal section names via _section_timings,
+# server cache state via _is_cached.
+_ANALYST_STRIPPED_ENVELOPE_KEYS = (
+    "_debug_queries",
+    "_debug_calls",
+    "_section_timings",
+    "_is_cached",
+)
+
 
 # Paths that an analyst can always reach without a session (login, the static
 # share-login bundle, heartbeat). The middleware short-circuits on these
@@ -60,6 +76,9 @@ _ANALYST_BLOCKED_PREFIXES = (
     "/api/provision/",
     "/api/debug/",
     "/api/usage/",  # H-1: cost/billing/usage data is operator-only
+    "/api/cron-runs",  # H-5: ingestion task history with absolute paths
+    "/api/audit-logs",  # H-5: admin audit trail
+    "/api/alerts",  # H-7: alerts surface is operator-only per directive
 )
 
 # Exact-path or path-with-query-string blocks for endpoints that live under an
@@ -72,6 +91,7 @@ _ANALYST_BLOCKED_SUBPATHS = (
     "/api/download-all",     # H-2: bulk raw object download
     "/api/download-folder",  # H-2: folder-level raw object download
     "/api/cron-schedule",    # H-3: exposes per-service cron cadence config
+    "/api/sync-status",      # N-3: leaks ngwaf_workspace_id + active cron task state
 )
 
 # Path-parameter-bearing endpoints to block for analysts. Each entry is a
@@ -82,6 +102,9 @@ _ANALYST_BLOCKED_SUBPATHS = (
 # handled by the scoring-suffix gate or are intentionally allowed.
 _ANALYST_BLOCKED_SUBPATH_REGEX: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/api/services/[^/]+/lake-info$"),  # H-3: Iceberg/object-store layout
+    re.compile(r"^/api/services/[^/]+/logging-settings(/.*)?$"),  # H-3: per-service logging cfg
+    re.compile(r"^/api/services/[^/]+/log-fields$"),  # H-3: per-service field map (catalog at /api/log-fields/catalog stays open)
+    re.compile(r"^/api/services/[^/]+/custom-fields(/.*)?$"),  # H-6 + N-7: VCL schema list + export
 )
 
 # Session-scoring sub-routes that are admin-only. The gate only fires for
@@ -105,6 +128,10 @@ _ANALYST_BLOCKED_SCORING_SUFFIXES: tuple[str, ...] = (
     "/threshold",
     "/exclude-regex",
     "/enforce-status-code",
+    "/enforce-threshold",  # N-5: operator's enforce decision; also a KV-ID-leak vector via outbound calls
+    "/matrix-versions",  # N-5: ML retrain history
+    "/dashboard",  # N-5: admin scoring dashboard (handler returned 400 to analyst, but block before reaching it)
+    "/evaluation/per-reason",  # N-5: per-reason evaluation breakdown (same reasoning as /dashboard)
 )
 
 # POST/PUT/PATCH/DELETE paths that analysts CAN reach despite the read-only
@@ -408,6 +435,135 @@ def apply_response_hardening(response: Response) -> Response:
     return response
 
 
+async def _strip_analyst_envelope(response: Response) -> Response:
+    """Remove server-internal telemetry keys from analyst-bound JSON bodies.
+
+    Catches both ``BaseResponse``-built payloads and ad-hoc dict responses
+    (e.g. ``return {**result, "_debug_calls": get_tracked_calls()}`` in
+    admin routers) that escape ``DEBUG_RESPONSES`` gating in
+    ``backend/models/common.py``. The strip is keyed on the four envelope
+    fields listed in ``_ANALYST_STRIPPED_ENVELOPE_KEYS``; non-JSON
+    responses and bodies that fail to parse pass through unchanged.
+
+    Operators (loopback / TestClient) never reach this helper — the
+    middleware only invokes it on the ``is_remote`` branch — so the
+    debug panel on the admin UI keeps working.
+    """
+    ct = response.headers.get("content-type", "")
+    if "application/json" not in ct:
+        return response
+    body = b""
+    async for chunk in response.body_iterator:
+        body += chunk
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=ct,
+        )
+    changed = False
+    if isinstance(data, dict):
+        for k in _ANALYST_STRIPPED_ENVELOPE_KEYS:
+            if k in data:
+                data.pop(k)
+                changed = True
+    if not changed:
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=ct,
+        )
+    new_body = json.dumps(data, separators=(",", ":")).encode()
+    new_headers = dict(response.headers)
+    new_headers["content-length"] = str(len(new_body))
+    return Response(
+        content=new_body,
+        status_code=response.status_code,
+        headers=new_headers,
+        media_type=ct,
+    )
+
+
+async def _body_service_ids(request: Request) -> list[str]:
+    """Extract ``service_id``/``service`` from a JSON POST body, if any.
+
+    Used by the service-scope gate so a forged ``service_id`` field in the
+    request body is treated as a candidate and rejected when it doesn't
+    match the analyst's authorized services. Closes M-3 (silent fallback
+    on ``POST /api/dashboard/aggregates`` when the body service_id mismatches).
+
+    Buffers the body via the raw ASGI receive callable and re-installs a
+    replay version on ``request._receive`` so downstream handlers see the
+    same bytes. We can't use ``await request.body()`` here because
+    Starlette's ``BaseHTTPMiddleware`` constructs a fresh Request for the
+    inner app whose ``_body`` cache is independent — the downstream
+    handler would then see an empty body. The replay-receive pattern is
+    the documented workaround.
+    """
+    method = request.method.upper()
+    if method != "POST":
+        return []
+    ct = request.headers.get("content-type", "")
+    if "application/json" not in ct:
+        return []
+    # Drain the receive stream once, capture the body bytes.
+    receive = request._receive  # type: ignore[attr-defined]
+    chunks: list[bytes] = []
+    try:
+        more_body = True
+        while more_body:
+            msg = await receive()
+            if msg.get("type") != "http.request":
+                # Disconnect or something unexpected — bail without replay
+                # (downstream will see the same disconnect).
+                return []
+            chunks.append(msg.get("body", b""))
+            more_body = bool(msg.get("more_body", False))
+    except Exception:
+        return []
+    body_bytes = b"".join(chunks)
+
+    # Install a single-shot replay so the downstream handler can re-read
+    # the body. Subsequent calls return http.disconnect so a misbehaving
+    # client that tries to stream more bytes doesn't hang forever.
+    sent = False
+
+    async def _replay():
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+    request._receive = _replay  # type: ignore[attr-defined]
+    # Also clear any pre-cached body on the Request object so a downstream
+    # call to ``await request.body()`` reads from our replay.
+    if hasattr(request, "_body"):
+        try:
+            del request._body  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+
+    if not body_bytes:
+        return []
+    try:
+        body = json.loads(body_bytes)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(body, dict):
+        return []
+    out: list[str] = []
+    for k in ("service_id", "service"):
+        v = body.get(k)
+        if isinstance(v, str) and v:
+            out.append(v)
+    return out
+
+
 # ── Sliding-window static-asset rate limiter (per IP) ───────────────────────
 
 
@@ -610,6 +766,12 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             ):
                 if src:
                     raw_candidates.append(src)
+            # M-3: a forged service_id in the JSON body was silently ignored
+            # before, with the handler falling back to the session-authorized
+            # service. Promote it to a candidate so the scope check below
+            # rejects mismatched bodies with the same 403 we'd return for
+            # query/path mismatches.
+            raw_candidates.extend(await _body_service_ids(request))
 
             cdn_map = svcconfig.get_cdn_service_id_map() if raw_candidates else {}
             resolved_candidates: list[str] = []
@@ -674,6 +836,15 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             )
         except Exception:
             pass
+
+        # N-1 + N-10: strip server-internal telemetry envelope from analyst
+        # responses (success AND error bodies). The handler-side
+        # ``DEBUG_RESPONSES`` gate in BaseResponse covers the Pydantic path
+        # but misses ad-hoc dict responses in admin routers and the
+        # short-circuit JSONResponse error bodies, so we do a final pass
+        # here on the buffered body. SSE responses (text/event-stream) are
+        # passed through unchanged inside the helper.
+        response = await _strip_analyst_envelope(response)
 
         # SSE-safe: don't add hardening headers to SSE streams in a way that
         # interferes; the keep-alive headers go on the route itself.

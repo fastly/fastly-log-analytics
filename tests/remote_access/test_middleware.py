@@ -387,7 +387,11 @@ def test_analyst_path_param_service_allowed_when_authorized(client):
 
 
 def test_analyst_path_alerts_service_blocked_when_unauthorized(client):
-    """Same vector via /api/alerts/{service_id}."""
+    """``/api/alerts`` is now in ``_ANALYST_BLOCKED_PREFIXES`` (H-7,
+    2026-06-10): the entire alerts surface is operator-only per directive.
+    The prefix block fires before the per-service scope check, so the
+    response code is now ``admin_only`` rather than the older
+    ``service_not_authorized``. Both are 403 from the analyst's POV."""
     _start_share()
     invite = _seed_invite(service_ids=["svcA"])
     _login_analyst(client, invite)
@@ -396,7 +400,7 @@ def test_analyst_path_alerts_service_blocked_when_unauthorized(client):
         headers={"X-Remote-Analyst": "1", "Host": "testserver"},
     )
     assert r.status_code == 403
-    assert r.json()["error"] == "service_not_authorized"
+    assert r.json()["error"] == "admin_only"
 
 
 def test_analyst_path_and_query_service_must_both_be_authorized(client):

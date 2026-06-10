@@ -191,8 +191,15 @@ def get_summary(
 
     lat_val = origin_latency_us_expr(actual_cols)
 
+    # N-8: return a ratio (0.0–1.0), NOT a percentage. The frontend at
+    # ``frontend/app/origin/_sections/Aggregates.tsx`` already multiplies
+    # the value by 100 to render; the prior ``* 100.0`` here made the
+    # display show 2181.11% on a real 21.81% error rate. Also clamp the
+    # 5xx filter to (500-599) — counting any "ost >= 500" let buggy
+    # synthetic codes leak in (origin status 829 was observed in prod).
     ost_5xx = (
-        'COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0 / NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
+        'COUNT(*) FILTER (WHERE "ost" >= 500 AND "ost" < 600) * 1.0 / '
+        'NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
         if "ost" in actual_cols
         else "NULL"
     )
@@ -753,8 +760,12 @@ def _origin_summary_from_temp(runner: QueryRunner, temp_table: str, actual_cols:
     actual_cols_set = set(actual_cols)
     lat_val = "lat_us"
 
+    # N-8: same fix as get_summary above — return ratio not percentage,
+    # clamp the 5xx filter to (500-599) so synthetic origin status codes
+    # like 829 don't inflate the count.
     ost_5xx = (
-        'COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0 / NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
+        'COUNT(*) FILTER (WHERE "ost" >= 500 AND "ost" < 600) * 1.0 / '
+        'NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
         if "ost" in actual_cols_set
         else "NULL"
     )

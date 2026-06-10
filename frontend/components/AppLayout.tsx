@@ -59,7 +59,7 @@ const SERVICE_NAVIGATION = [
   { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
   { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
-  { name: 'Alerts', href: '/alerts', icon: Bell, analystVisible: true },
+  { name: 'Alerts', href: '/alerts', icon: Bell, analystVisible: false },
   { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: false },
 ]
 
@@ -204,20 +204,23 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       React.startTransition(() => router.replace('/share-login'))
       return
     }
-    // Analysts can't access admin pages or the Usage & Cost page. The
-    // backend returns 403 on /api/admin/* and /api/usage/*, but the page
-    // shells are served by Next.js — bounce them away client-side so the
-    // URL isn't reachable (otherwise the page mounts and silently fails
-    // its data fetches).
-    if (isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage'))) {
+    // Analysts can't access admin pages, the Usage & Cost page, or the
+    // Alerts surface. The backend returns 403 on /api/admin/*, /api/usage/*,
+    // and /api/alerts/*, but the page shells are served by Next.js — bounce
+    // them away client-side so the URL isn't reachable (otherwise the page
+    // mounts and silently fails its data fetches).
+    if (isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts'))) {
       React.startTransition(() =>
         router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'),
       )
       return
     }
-    // Share-invited analysts also can't see ingestion ops (Data Management
+    // Share-invited analysts can't see ingestion ops (Data Management
     // = /logs). FOS-sharing analysts who run their own copy still can.
-    if (isShareAnalyst && pathname.startsWith('/logs')) {
+    // The audit on 2026-06-10 found this redirect wasn't firing on prod —
+    // broaden to ``isAnalyst`` so both share-invited and local read-only
+    // analysts are bounced regardless of which classifier fires first.
+    if ((isAnalyst || isShareAnalyst) && pathname.startsWith('/logs')) {
       React.startTransition(() =>
         router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'),
       )
