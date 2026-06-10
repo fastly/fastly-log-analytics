@@ -299,7 +299,7 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
     import duckdb
 
     from backend.core.duckdb import get_connection
-    from backend.core.iceberg import _get_service_lock
+    from backend.core.iceberg.view import _get_service_lock
 
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     target_hours: list[str] = []
@@ -337,14 +337,17 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
         except duckdb.Error as e:
             logger.warning(
                 "[rollups] %s: cannot describe %s for time_series bundle: %s",
-                service_id, table_ident, e,
+                service_id,
+                table_ident,
+                e,
             )
             return 0
 
         if "timestamp" not in cols:
             logger.warning(
                 "[rollups] %s: no `timestamp` column on %s; skipping time_series bundle",
-                service_id, table_ident,
+                service_id,
+                table_ident,
             )
             return 0
 
@@ -357,23 +360,15 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
             "CAST(COUNT(*) AS BIGINT) AS requests",
         ]
         if "status" in cols:
-            select_parts.append(
-                "CAST(COUNT(*) FILTER (WHERE status BETWEEN 400 AND 499) AS BIGINT) AS status_4xx"
-            )
-            select_parts.append(
-                "CAST(COUNT(*) FILTER (WHERE status >= 500) AS BIGINT) AS status_5xx"
-            )
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE status BETWEEN 400 AND 499) AS BIGINT) AS status_4xx")
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE status >= 500) AS BIGINT) AS status_5xx")
         else:
             select_parts.append("CAST(0 AS BIGINT) AS status_4xx")
             select_parts.append("CAST(0 AS BIGINT) AS status_5xx")
 
         if "cache" in cols:
-            select_parts.append(
-                "CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS hits"
-            )
-            select_parts.append(
-                "CAST(COUNT(*) FILTER (WHERE cache IS NOT NULL) AS BIGINT) AS cache_total"
-            )
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS hits")
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache IS NOT NULL) AS BIGINT) AS cache_total")
         else:
             select_parts.append("CAST(0 AS BIGINT) AS hits")
             select_parts.append("CAST(0 AS BIGINT) AS cache_total")
@@ -385,9 +380,7 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
 
         if "ttfb" in cols:
             select_parts.append("CAST(COALESCE(SUM(ttfb), 0.0) AS DOUBLE) AS ttfb_sum")
-            select_parts.append(
-                "CAST(COUNT(*) FILTER (WHERE ttfb IS NOT NULL) AS BIGINT) AS ttfb_count"
-            )
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE ttfb IS NOT NULL) AS BIGINT) AS ttfb_count")
         else:
             select_parts.append("CAST(0.0 AS DOUBLE) AS ttfb_sum")
             select_parts.append("CAST(0 AS BIGINT) AS ttfb_count")
@@ -418,7 +411,9 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
             except duckdb.Error as e:
                 logger.warning(
                     "[rollups] %s: time_series COPY failed for hour=%s: %s",
-                    service_id, hour, e,
+                    service_id,
+                    hour,
+                    e,
                 )
                 try:
                     os.remove(tmp_path)
@@ -433,7 +428,9 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
             except OSError as e:
                 logger.warning(
                     "[rollups] %s: could not publish time_series for hour=%s: %s",
-                    service_id, hour, e,
+                    service_id,
+                    hour,
+                    e,
                 )
                 try:
                     os.remove(tmp_path)
@@ -445,9 +442,7 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
         con.close()
 
 
-def backfill_time_series_bundles(
-    service_id: str, source: dict, max_hours: int | None = None
-) -> int:
+def backfill_time_series_bundles(service_id: str, source: dict, max_hours: int | None = None) -> int:
     """One-shot bulk build of time_series.parquet for closed hours that
     don't yet have one.
 
@@ -516,7 +511,7 @@ def bundle_hours(service_id: str, source: dict, hours: list[str]) -> int:
 
     import duckdb
 
-    from backend.core.iceberg import _get_service_lock
+    from backend.core.iceberg.view import _get_service_lock
 
     # _rollups_root already returns <cache>/rollups/hour — it's the
     # per-field per-hour tree root, not the rollups/ parent.
@@ -672,7 +667,8 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
     except Exception as e:
         logger.warning(
             "[rollups] %s: time_series bundle failed (raw scan will serve): %s",
-            service_id, e,
+            service_id,
+            e,
         )
 
 
@@ -737,7 +733,8 @@ def backfill_hour_bundles(service_id: str, source: dict, max_hours: int | None =
     except Exception as e:
         logger.warning(
             "[rollups] %s: time_series backfill failed (raw scan will serve): %s",
-            service_id, e,
+            service_id,
+            e,
         )
 
     return rebuilt
@@ -848,7 +845,7 @@ def _run_per_field_copy(
     import duckdb
 
     from backend.core.duckdb import _cache_dir, get_connection
-    from backend.core.iceberg import _get_service_lock
+    from backend.core.iceberg.view import _get_service_lock
 
     cache_root = _cache_dir(source)
     rollups_dir = _rollups_root(source)
@@ -932,7 +929,7 @@ def compact_closed_days_to_daily(service_id: str, source: dict) -> int:
     """
     import duckdb
 
-    from backend.core.iceberg import _get_service_lock
+    from backend.core.iceberg.view import _get_service_lock
 
     hour_root = _rollups_root(source)
     day_root = _day_rollups_root(source)

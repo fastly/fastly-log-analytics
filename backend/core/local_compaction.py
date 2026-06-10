@@ -179,7 +179,7 @@ def compact_local_partitions(source: dict, min_files_per_partition: int = 3, dry
     # phase so concurrent dashboard queries via the view-build path
     # don't race with our delete-then-rename and hit FileNotFoundError /
     # IO Error mid-glob. Architecture-review Finding #3.
-    from backend.core.iceberg import _get_service_lock
+    from backend.core.iceberg.view import _get_service_lock
 
     service_key = source.get("name", "default")
     publish_lock = _get_service_lock(service_key)
