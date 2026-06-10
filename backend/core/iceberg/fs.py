@@ -144,7 +144,7 @@ def _register_proxy_event_hook(
         request.headers["X-Telemetry-Service-Id"] = service_id
         request.headers["X-Telemetry-Caller"] = "pyiceberg.s3fs"
         # _inject typically fires on fsspec's iothread (a single process-wide
-        # asyncio loop thread), NOT the cron thread that called set_process_context.
+        # asyncio loop thread), NOT the cron thread that entered process_context_scope.
         # The ContextVar is invisible across that boundary; the fallback returns
         # the most-recently-set value process-wide so the row gets tagged.
         # If still empty (no caller ever tagged), emit the thread name so the

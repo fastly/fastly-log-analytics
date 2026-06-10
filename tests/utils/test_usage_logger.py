@@ -10,9 +10,9 @@ from unittest.mock import patch
 
 
 def test_process_context_set_and_get():
-    from backend.utils.telemetry import get_process_context, set_process_context
+    from backend.utils.telemetry import get_process_context, _set_process_context_for_tests
 
-    set_process_context("cron:sync:svc1")
+    _set_process_context_for_tests("cron:sync:svc1")
     assert get_process_context() == "cron:sync:svc1"
 
 
@@ -288,7 +288,7 @@ def test_flush_usage_log_happy_path_forwards_calls_and_context():
     from backend.utils.usage_logger import flush_usage_log
 
     telemetry.start_call_tracking()
-    telemetry.set_process_context("cron:sync:svc-flush-3")
+    telemetry._set_process_context_for_tests("cron:sync:svc-flush-3")
     telemetry.record_call("PutObject", "/x.gz", 12.0, service="FOS", bytes_count=42)
 
     fake_cfg = {"service_id": "svc-flush-3", "fos_bucket": "b", "fos_region": "us-east-1", "name": "X"}

@@ -155,12 +155,12 @@ async def test_install_boto3_proxy_hook_passes_process_context_per_request(proxy
     telemetry_proxy._bust_config_cache()
     with patch("backend.config.load_config", return_value=mock_cfg):
         with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
-            tlm.set_process_context("cron:sync:phase2-ctx-A")
+            tlm._set_process_context_for_tests("cron:sync:phase2-ctx-A")
             client.head_bucket(Bucket="test-bucket")
-            tlm.set_process_context("cron:compact:phase2-ctx-B")
+            tlm._set_process_context_for_tests("cron:compact:phase2-ctx-B")
             client.head_bucket(Bucket="test-bucket")
             telemetry_proxy._flush_log_writes_for_tests()
-            tlm.set_process_context(None)
+            tlm._set_process_context_for_tests(None)
 
     assert contexts_seen == [
         "cron:sync:phase2-ctx-A",
@@ -169,7 +169,7 @@ async def test_install_boto3_proxy_hook_passes_process_context_per_request(proxy
 
 
 async def test_install_boto3_proxy_hook_falls_back_to_thread_name_when_context_unset(proxy_server, moto_s3_server):
-    """When no caller has ever called set_process_context (or it was reset),
+    """When no caller has ever called _set_process_context_for_tests (or it was reset),
     the boto3 hook must still emit *some* context — the thread name. Untagged
     rows in usage_log block cost attribution; on 2026-05-20 we discovered
     426K rows/day landing as NULL because the boto3/s3fs hooks skipped the

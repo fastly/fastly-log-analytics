@@ -307,9 +307,9 @@ def download_folder(
     def zip_worker(q: queue.Queue):
         # Independent call-tracking scope: we run on a thread after the API
         # middleware has already flushed, so we own a fresh _CALLS list and
-        # flush it ourselves when done. process_context_scope (not
-        # set_process_context) so the fsspec iothread fallback isn't wiped
-        # out by a concurrent scope exit on another thread.
+        # flush it ourselves when done. process_context_scope (the context
+        # manager) so the fsspec iothread fallback isn't wiped out by a
+        # concurrent scope exit on another thread.
         from backend.utils.telemetry import (
             process_context_scope as _pcs,
         )
@@ -557,9 +557,9 @@ def download_all_files(
         raise HTTPException(status_code=400, detail={"error": "service_id required"})
 
     def zip_worker(q: queue.Queue):
-        # process_context_scope (not set_process_context) so the fsspec
-        # iothread fallback isn't wiped out by a concurrent scope exit
-        # on another thread — see _initialize_service for context.
+        # process_context_scope (the context manager) so the fsspec iothread
+        # fallback isn't wiped out by a concurrent scope exit on another
+        # thread — see _initialize_service for context.
         from backend.utils.telemetry import (
             process_context_scope as _pcs,
         )

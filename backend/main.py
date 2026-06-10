@@ -82,7 +82,7 @@ def _initialize_service(cfg: dict):
     # ContextVar; process_context_scope sets both the ContextVar and pushes
     # onto the global active-contexts stack so the fsspec iothread fallback
     # (get_process_context_with_fallback) attributes this worker's iceberg
-    # I/O correctly. Using set_process_context() here would race with
+    # I/O correctly. A bare ContextVar setter (no scope) would race with
     # concurrent scheduler ticks: their process_context_scope exit pops the
     # empty stack and nulls the mirror, untagging any I/O still in flight.
     from backend.utils.telemetry import process_context_scope
@@ -229,9 +229,9 @@ def _background_startup():
     """Run initialisation tasks that should not block the web server startup."""
     # Tag everything done here so the s3fs/boto3 hooks attribute their
     # telemetry rows to "startup" instead of falling back to the thread name.
-    # MUST be process_context_scope (not set_process_context): the scheduler
-    # starts below and its first cron's process_context_scope exit would pop
-    # the active-contexts stack and null the mirror, untagging any in-flight
+    # MUST be process_context_scope (the context manager): the scheduler
+    # starts below and its first cron's scope exit would pop the
+    # active-contexts stack and null the mirror, untagging any in-flight
     # iceberg I/O from the init_service workers. The scope keeps "startup" on
     # the stack as a base so the mirror falls back to "startup" instead of
     # None when nested scopes (cron, init_service) exit.
@@ -478,7 +478,7 @@ app.add_middleware(TelemetryResponseBodyMiddleware)
 async def telemetry_middleware(request: Request, call_next):
     """Initialise call tracking, set process context, and flush FOS/CDN ops after the request.
 
-    Uses process_context_scope (not set_process_context) so the global
+    Uses process_context_scope (the context manager) so the global
     _LATEST_PROCESS_CONTEXT mirror reverts when the request exits. Otherwise
     out-of-thread readers — fsspec iothread, pyiceberg pool — keep reading
     the last-completed request's context and attribute cron-driven CDN

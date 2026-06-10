@@ -41,26 +41,29 @@ _LATEST_PROCESS_CONTEXT: str | None = None
 _LATEST_PROCESS_CONTEXT_LOCK = threading.Lock()
 
 
-def set_process_context(ctx: str | None) -> None:
+def _set_process_context_for_tests(ctx: str | None) -> None:
     """Set the process-context ContextVar AND the active-stack mirror in
     one shot — WITHOUT the push/pop bookkeeping of ``process_context_scope``.
 
-    **Test-fixture / introspection helper, NOT for production call sites.**
-    Production code MUST use ``process_context_scope`` (the context
-    manager). The plain setter loses the stack semantics that keep
+    **Test-fixture / introspection helper ONLY. NEVER call from production
+    code.** The underscore prefix + name suffix are the contract: the
+    public API is ``process_context_scope`` and only that.
+
+    Why this exists at all: the test suite needs to assert what happens
+    when the ContextVar is set by a code path that doesn't use the
+    context manager (e.g. when validating the fallback's last-writer-wins
+    semantics, or simulating a thread that inherits a partial context).
+    Test code that emulates "a thread that set the context and exited"
+    without doing the work of pushing/popping the active-context stack
+    is exactly the failure mode we want to test, so this helper exists
+    to enable that test, not to be used in real code.
+
+    In production the plain setter loses the stack semantics that keep
     concurrent cron / request scopes from clobbering each other's mirror
     on exit: a setter call from one scope's body, followed by that
-    scope's exit, will null the mirror while a concurrent scope's
+    scope's exit, would null the mirror while a concurrent scope's
     in-flight iothread I/O is still draining → ``untagged:fsspecIO``
     rows in usage_log.
-
-    Phase 10.1 (v2.0 cleanup) audit (2026-06-10): every production
-    call site uses ``process_context_scope``; only test fixtures + this
-    function's own internals call ``set_process_context`` directly.
-    The duality is preserved deliberately rather than eliminated — the
-    bare setter is a useful test-fixture primitive and removing it
-    would force 46 test sites into the more verbose ``with`` shape for
-    zero risk-reduction.
     """
     global _LATEST_PROCESS_CONTEXT
     _PROCESS_CONTEXT.set(ctx)
