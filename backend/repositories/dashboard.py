@@ -56,7 +56,11 @@ _dashboard_cache: BoundedTTLCache = BoundedTTLCache(maxsize=500, ttl_seconds=max
 
 # ── aggregates ────────────────────────────────────────────────────────────────
 
-from backend.core.log_fields import LOG_FIELD_CATALOG
+# Phase 7 caller migration: read field codes from the frozen-dataclass
+# REGISTRY instead of LOG_FIELD_CATALOG. REGISTRY is derived from the
+# catalog at import time and preserves wire-order, so FIELDS comes out
+# byte-identical (Rust scorer parity invariant).
+from backend.core.field_registry import REGISTRY as _FIELD_REGISTRY
 
 # Virtual fields are catalog ids whose value is computed by exploding a
 # real backing column (CSV string) into individual rows via DuckDB's
@@ -65,7 +69,7 @@ from backend.core.log_fields import LOG_FIELD_CATALOG
 # them in batch-stats / column-need passes (their backing column is what
 # actually goes into the temp table).
 _VIRTUAL_FIELDS = ("waf_sig_ind", "edge_score_reason_ind")
-FIELDS = [f["id"] for f in LOG_FIELD_CATALOG if f["id"] != "_source_file"] + list(_VIRTUAL_FIELDS)
+FIELDS = [f.code for f in _FIELD_REGISTRY if f.code != "_source_file"] + list(_VIRTUAL_FIELDS)
 
 
 def _add_bot_columns(actual_cols: set[str], columns: list[str], select_cols: list[str]) -> tuple[bool, bool]:

@@ -434,9 +434,13 @@ def get_insights(
     except Exception:
         available_history_hours = 0.0
 
-    # Insight definitions
+    # Insight definitions — Phase 7 caller migration. The new
+    # field_registry re-exports INSIGHT_DEFINITIONS verbatim (same list
+    # of dicts) so existing patch contracts and the dict-key access shape
+    # below stay valid. Switching the import lets the registry control
+    # the source-of-truth flip in step 13 without re-editing this file.
     try:
-        from backend.core.log_fields import INSIGHT_DEFINITIONS as _defs
+        from backend.core.field_registry import INSIGHT_DEFINITIONS as _defs
 
         defs_map = {d["id"]: d for d in _defs}
     except Exception:
