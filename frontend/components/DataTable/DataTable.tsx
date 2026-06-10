@@ -121,7 +121,61 @@ function DataTableImpl<TData, TValue>({
     }
   }
 
-  const [columnOrder, setColumnOrder] = React.useState<ColumnOrderState>([])
+  // Column order: derived from the ``columns`` prop by default so it stays
+  // in lockstep with dynamic column-set changes (e.g. sessions/page.tsx
+  // adds ja4/edge/rtt cols only after data lands with has_* flags).
+  //
+  // The previous useState+useEffect pattern lagged one render — between
+  // the columns change and the effect that synced ``columnOrder``,
+  // ``columnOrder`` still held the OLD ID list. The MemoizedTableRow
+  // captured the cells in that old order while header rendering used
+  // the new columns prop, so headers and cells visibly misaligned on
+  // /sessions and any other table that ships dynamic columns (user
+  // report 2026-06-10).
+  //
+  // ``userColumnOrder`` is the drag-reorder override; it survives across
+  // re-renders only while the column SET (the set of IDs, not the order)
+  // is unchanged. Adding or removing a column invalidates the override
+  // and we fall back to the columns-array order so headers and cells
+  // can't desync.
+  const defaultColumnOrder = React.useMemo<ColumnOrderState>(() => {
+    const allIds = columns.map(
+      (column) => column.id as string || (column as any).accessorKey as string,
+    )
+    if (initialColumnOrder && initialColumnOrder.length > 0) {
+      const validInitial = initialColumnOrder.filter((id) => allIds.includes(id))
+      const remaining = allIds.filter((id) => !validInitial.includes(id))
+      return [...validInitial, ...remaining]
+    }
+    return allIds
+  }, [columns, initialColumnOrder])
+
+  const [userColumnOrder, setUserColumnOrder] = React.useState<ColumnOrderState | null>(null)
+
+  const columnOrder = React.useMemo<ColumnOrderState>(() => {
+    if (!userColumnOrder) return defaultColumnOrder
+    if (userColumnOrder.length !== defaultColumnOrder.length) return defaultColumnOrder
+    const userSet = new Set(userColumnOrder)
+    for (const id of defaultColumnOrder) {
+      if (!userSet.has(id)) return defaultColumnOrder
+    }
+    return userColumnOrder
+  }, [userColumnOrder, defaultColumnOrder])
+
+  // Adapter for TanStack's ``OnChangeFn<ColumnOrderState>`` contract — the
+  // table calls it with either a ColumnOrderState or an updater function.
+  // We collapse both forms into a concrete ColumnOrderState and store it
+  // on ``userColumnOrder`` (which is nullable; the updater needs the
+  // derived ``columnOrder`` as its "previous" basis when no user override
+  // exists yet).
+  const setColumnOrder = React.useCallback(
+    (next: ColumnOrderState | ((prev: ColumnOrderState) => ColumnOrderState)) => {
+      const resolved = typeof next === 'function' ? next(columnOrder) : next
+      setUserColumnOrder(resolved)
+    },
+    [columnOrder],
+  )
+
   const [rowSelection, setRowSelection] = React.useState({})
   const [pagination, setPagination] = React.useState({
     pageIndex: 0,
@@ -137,21 +191,6 @@ function DataTableImpl<TData, TValue>({
       setColumnVisibility(initialVisibility)
     }
   }, [initialVisibility])
-
-  // Ensure column order updates if columns array changes (e.g., dynamic queries), but respect initial order if provided initially
-  React.useEffect(() => {
-    if (initialColumnOrder && initialColumnOrder.length > 0) {
-      // Find all column IDs
-      const allIds = columns.map((column) => column.id as string || (column as any).accessorKey as string)
-      // Filter initial order to only include valid IDs
-      const validInitial = initialColumnOrder.filter(id => allIds.includes(id))
-      // Append any remaining columns not in initialColumnOrder
-      const remaining = allIds.filter(id => !validInitial.includes(id))
-      setColumnOrder([...validInitial, ...remaining])
-    } else {
-      setColumnOrder(columns.map((column) => column.id as string || (column as any).accessorKey as string))
-    }
-  }, [columns, initialColumnOrder])
 
   const table = useReactTable({
     data: tableData,
@@ -187,11 +226,14 @@ function DataTableImpl<TData, TValue>({
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
     if (active && over && active.id !== over.id) {
-      setColumnOrder((columnOrder) => {
-        const oldIndex = columnOrder.indexOf(active.id as string)
-        const newIndex = columnOrder.indexOf(over.id as string)
-        return arrayMove(columnOrder, oldIndex, newIndex)
-      })
+      // Resolve indices against the CURRENT derived ``columnOrder`` (never
+      // null) rather than the previous override state (which can be null
+      // before the user drags anything). Otherwise the first drag from a
+      // fresh table would hit ``null.indexOf``.
+      const oldIndex = columnOrder.indexOf(active.id as string)
+      const newIndex = columnOrder.indexOf(over.id as string)
+      if (oldIndex < 0 || newIndex < 0) return
+      setColumnOrder(arrayMove(columnOrder, oldIndex, newIndex))
     }
   }
 

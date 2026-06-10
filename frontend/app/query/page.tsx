@@ -17,6 +17,7 @@ import { Play, Search, AlertCircle, Database, ArrowUp, ArrowDown } from 'lucide-
 import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { PageHeader } from '@/components/ui/page-header'
 import { downloadAsCsv } from '@/lib/utils'
+import { Skeleton } from '@/components/ui/skeleton'
 import type { FiltersPayload } from '@/types/filters'
 import { buildStructuredSql, type QueryMode } from './_sql_builder'
 import { ModeToggle } from './_sections/ModeToggle'
@@ -355,15 +356,46 @@ function QueryPageInner() {
         </Alert>
       )}
 
+      {/* First-run loading state: backend returns ``elapsed_ms`` BUT the
+          browser still pays JSON parse + ColumnDef rebuild + first render
+          (perceptible on 10k-row responses). Without this skeleton the
+          results region is empty between the click and the table paint,
+          and the only loading hint is the button's spinner. */}
+      {queryMutation.isPending && !queryMutation.data && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Database className="h-3 w-3 animate-spin" />
+            <span>Running query…</span>
+          </div>
+          <Skeleton className="h-9 w-full rounded-md" />
+          {Array.from({ length: 8 }).map((_, i) => (
+            <Skeleton key={i} className="h-8 w-full rounded-md opacity-60" />
+          ))}
+        </div>
+      )}
+
       {queryMutation.data && (
-        <ResultsTable
-          data={queryMutation.data}
-          isPending={queryMutation.isPending}
-          isStructured={isStructured}
-          columns={columns}
-          structuredSorting={structuredSorting}
-          onStructuredSortingChange={setStructuredSorting}
-        />
+        <div className="relative">
+          {/* Re-run overlay: keeps the prior data visible (preserves scroll
+              + sort context) while indicating that fresh results are on
+              the way. Pointer-events-none so the user can still scroll. */}
+          {queryMutation.isPending && (
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-start justify-end p-3">
+              <div className="flex items-center gap-2 rounded-md border bg-background/90 px-3 py-1.5 text-xs text-muted-foreground shadow-sm backdrop-blur">
+                <Database className="h-3 w-3 animate-spin" />
+                <span>Re-running…</span>
+              </div>
+            </div>
+          )}
+          <ResultsTable
+            data={queryMutation.data}
+            isPending={queryMutation.isPending}
+            isStructured={isStructured}
+            columns={columns}
+            structuredSorting={structuredSorting}
+            onStructuredSortingChange={setStructuredSorting}
+          />
+        </div>
       )}
     </div>
   )
