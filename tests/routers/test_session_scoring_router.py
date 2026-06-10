@@ -361,7 +361,7 @@ def test_labels_delete_is_idempotent(client):
 def _patch_query_logs(rows: list[dict]):
     """Patch the router's _query_logs helper to return canned rows so we
     don't need a live DuckDB connection for these tests."""
-    return patch("backend.routers.session_scoring._query_logs", return_value=rows)
+    return patch("backend.repositories.session_scoring.query_logs", return_value=rows)
 
 
 def test_top_flagged_returns_query_rows(client):
@@ -503,7 +503,7 @@ def test_evaluation_returns_auc_when_min_samples_met(client, with_config):
         patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
         patch("backend.routers.session_scoring._load_matrix", return_value={"transitions": {}}),
         patch(
-            "backend.routers.session_scoring._reconstruct_labeled_sessions",
+            "backend.repositories.session_scoring.reconstruct_labeled_sessions",
             return_value=[
                 ({"session_id": lbl["sid"], "events": [], "max_edge_score": 0}, lbl["label"]) for lbl in fake_labels
             ],
@@ -564,7 +564,7 @@ def test_curves_computes_perfect_separation_correctly(client, with_config):
     with (
         patch("backend.scoring.labels.list_labels", return_value=fake_labels),
         patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
-        patch("backend.routers.session_scoring._reconstruct_labeled_sessions", return_value=reconstructed),
+        patch("backend.repositories.session_scoring.reconstruct_labeled_sessions", return_value=reconstructed),
     ):
         from backend.routers import session_scoring as _ss
 
@@ -622,7 +622,7 @@ def test_threshold_preview_buckets_sessions_correctly(client, with_config):
     fake_counts = {"good": 2, "bad": 3, "neutral": 0}
 
     with (
-        patch("backend.routers.session_scoring._query_logs", side_effect=_route_query),
+        patch("backend.repositories.session_scoring.query_logs", side_effect=_route_query),
         patch("backend.scoring.labels.list_labels", return_value=fake_labels),
         patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
         patch("backend.routers.session_scoring._bust_analytics_cache"),
@@ -668,7 +668,7 @@ def test_threshold_preview_extreme_thresholds(client, with_config):
         return agg_low if call_count["n"] == 1 else agg_high
 
     with (
-        patch("backend.routers.session_scoring._query_logs", side_effect=_route_query),
+        patch("backend.repositories.session_scoring.query_logs", side_effect=_route_query),
         patch("backend.scoring.labels.list_labels", return_value=[]),
         patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
     ):
@@ -767,7 +767,7 @@ def test_session_events_returns_event_timeline(client, with_config):
             "edge_score_reason": "",
         },
     ]
-    with patch("backend.routers.session_scoring._query_logs", return_value=canned):
+    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/sessions/abc123/events")
     assert r.status_code == 200
     body = r.json()
@@ -784,7 +784,7 @@ def test_session_events_empty_when_sid_not_in_duckdb(client, with_config):
     yet (or rotated away). Return event_count=0, NOT 404 — the UI
     surfaces a 'no events yet' message."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
-    with patch("backend.routers.session_scoring._query_logs", return_value=[]):
+    with patch("backend.repositories.session_scoring.query_logs", return_value=[]):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/sessions/nosuch/events")
     assert r.status_code == 200
     assert r.json()["event_count"] == 0
@@ -840,7 +840,7 @@ def test_scoring_health_returns_expected_shape(client, with_config):
             "l2_high_count": 5,
         }
     ]
-    with patch("backend.routers.session_scoring._query_logs", return_value=canned):
+    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
         from backend.routers import session_scoring as _ss
 
         _ss._analytics_cache.clear()
@@ -864,7 +864,7 @@ def test_scoring_dashboard_returns_all_subobjects(client, with_config):
     with (
         patch("backend.scoring.labels.list_labels", return_value=[]),
         patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
-        patch("backend.routers.session_scoring._query_logs", return_value=[]),
+        patch("backend.repositories.session_scoring.query_logs", return_value=[]),
     ):
         from backend.routers import session_scoring as _ss
 

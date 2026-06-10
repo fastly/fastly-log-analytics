@@ -285,6 +285,26 @@ def get_cron_run_status(service_id: str, run_id: int) -> str | None:
         return None
 
 
+def get_cron_run_result(service_id: str, run_id: int) -> dict | None:
+    """Return ``{status, log_output}`` for a cron_runs row, or ``None`` if
+    the row doesn't exist. Used by the SSE progress stream when the
+    in-memory progress cache has rolled off (completed/historical runs).
+
+    Distinct from ``get_cron_run_status`` because the SSE stream also
+    needs the log_output to replay the run's terminal lines."""
+    try:
+        con = get_con(service_id)
+        row = con.execute(
+            "SELECT status, log_output FROM cron_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {"status": row["status"], "log_output": row["log_output"]}
+    except sqlite3.Error as e:
+        logger.debug("[metadata_db] get_cron_run_result(%s, %s) failed: %s", service_id, run_id, e)
+        return None
+
+
 def get_cron_runs(
     service_id: str,
     *,

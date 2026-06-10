@@ -1317,18 +1317,10 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     # thresholds match the Fastly delivery promise — typical drop interval
     # is 60s, so >300s lag means we're at least 5 cycles behind. Stalled
     # means >1h (the operator should look at it).
-    con = metadata_db.get_con(service_id)
-    catchup_row = con.execute(
-        """
-        SELECT max(datetime(ingested_at)) AS latest
-        FROM ingested_files
-        WHERE source_name = ? AND file_name != '__seeding_attempted__'
-        """,
-        (service_id,),
-    ).fetchone()
+    latest_ingest_str = metadata_db.get_latest_ingest_ts(service_id)
     catchup: dict | None
-    if catchup_row and catchup_row["latest"]:
-        latest_dt = datetime.fromisoformat(catchup_row["latest"].replace(" ", "T")).replace(tzinfo=UTC)
+    if latest_ingest_str:
+        latest_dt = datetime.fromisoformat(latest_ingest_str.replace(" ", "T")).replace(tzinfo=UTC)
         lag_seconds = max(0, int((datetime.now(UTC) - latest_dt).total_seconds()))
         if lag_seconds <= 300:
             status_str = "caught_up"

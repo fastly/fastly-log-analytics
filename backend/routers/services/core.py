@@ -184,10 +184,7 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                         from backend.core import metadata_db
 
                         if service_id:
-                            con = metadata_db.get_con(service_id)
-                            row = con.execute(
-                                "SELECT status, log_output FROM cron_runs WHERE id = ?", (run_id,)
-                            ).fetchone()
+                            row = metadata_db.get_cron_run_result(service_id, run_id)
                             if row:
                                 status = row["status"]
                                 log_output = row["log_output"]

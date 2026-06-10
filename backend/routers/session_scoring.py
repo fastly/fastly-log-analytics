@@ -263,129 +263,30 @@ def _load_matrix(service_id: str | None = None) -> dict | None:
     return None
 
 
+from backend.repositories import session_scoring as _scoring_repo
+
+
+# Convenience wrappers — exist so unit tests can monkey-patch
+# ``backend.repositories.session_scoring.query_logs`` (etc.) and have the
+# patches intercept calls from this module. Plain ``from X import Y as _Y``
+# binds ``_Y`` to the function object at import time and ignores later
+# attribute rebinding on the source module; going through the module
+# attribute each call sidesteps that.
+def _query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:
+    return _scoring_repo.query_logs(service_id, sql, params)
+
+
 def _fetch_session_events(
     service_id: str,
     sids: list[str],
     since_days: int = 30,
     limit_per_sid: int = 500,
 ) -> dict[str, list[dict]]:
-    """Return ``{sid: [{ts, url, status, ip, ua, edge_score, edge_cookie_compliance, edge_score_reason}, ...]}``
-    for every sid in ``sids`` whose events landed in DuckDB within the
-    last ``since_days`` days.
-
-    Sids that have no rows in the window are dropped from the result
-    (not present in the returned dict). The per-sid event cap is a
-    safety bound — a runaway session with 10k+ requests would otherwise
-    bloat the response; 500 events covers any realistic browsing pattern.
-    """
-    if not sids:
-        return {}
-
-    from backend.core.duckdb import _safe_table_name
-
-    table = _safe_table_name(service_id)
-    placeholders = ",".join("?" for _ in sids)
-    # 010: push the per-sid LIMIT into SQL via ``row_number() OVER
-    # (PARTITION BY edge_sid ORDER BY timestamp)``. The previous shape
-    # let DuckDB materialise the full result set in Python before the
-    # ``len(bucket) >= limit_per_sid`` guard ran — a single attacker
-    # session with millions of events could OOM the backend before any
-    # Python code saw a row. The CTE caps at ``limit_per_sid`` rows
-    # per sid AT THE STORAGE LAYER so the worst-case memory footprint
-    # is ``len(sids) × limit_per_sid`` regardless of attacker volume.
-    per_sid_cap = int(limit_per_sid)
-    sql = f"""
-        WITH ranked AS (
-            SELECT edge_sid, timestamp AS ts, url, status, ip, ua,
-                   edge_score, edge_cookie_compliance, edge_score_reason,
-                   row_number() OVER (PARTITION BY edge_sid ORDER BY timestamp) AS _rn
-            FROM {table}
-            WHERE edge_sid IN ({placeholders})
-              AND timestamp >= now() - INTERVAL {int(since_days)} DAY
-        )
-        SELECT edge_sid, ts, url, status, ip, ua,
-               edge_score, edge_cookie_compliance, edge_score_reason
-        FROM ranked
-        WHERE _rn <= {per_sid_cap}
-        ORDER BY edge_sid, ts
-    """
-    rows = _query_logs(service_id, sql, tuple(sids))
-
-    grouped: dict[str, list[dict]] = {}
-    for r in rows:
-        sid = r.get("edge_sid")
-        if not sid:
-            continue
-        bucket = grouped.setdefault(sid, [])
-        if len(bucket) >= limit_per_sid:
-            continue
-        # Stringify the timestamp for JSON serialization. DuckDB returns
-        # datetime objects which FastAPI's default JSON encoder rejects
-        # in nested arrays (only the top-level Pydantic model serializer
-        # handles them).
-        ts = r.get("ts")
-        bucket.append(
-            {
-                "ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts) if ts is not None else None,
-                "url": r.get("url") or "/",
-                "status": r.get("status"),
-                "ip": r.get("ip"),
-                "ua": r.get("ua"),
-                "edge_score": r.get("edge_score"),
-                "edge_cookie_compliance": r.get("edge_cookie_compliance"),
-                "edge_score_reason": r.get("edge_score_reason"),
-            }
-        )
-    return grouped
+    return _scoring_repo.fetch_session_events(service_id, sids, since_days, limit_per_sid)
 
 
 def _reconstruct_labeled_sessions(service_id: str, labels: list[dict]) -> list[tuple[dict, str]]:
-    """Replay each labeled sid into the {session_id, events:[{ts,url}]}
-    shape that ``evaluate()`` expects.
-
-    Each label stores only ``sid`` + sample fields. The actual event
-    sequence lives in DuckDB as one row per request. We issue ONE query
-    grouped by edge_sid + ordered by timestamp, then bucket rows into
-    sessions in Python (DuckDB's ``list()`` aggregate would also work
-    but the Python side is clearer and the volume is small — at most
-    ``len(labels)`` sids).
-
-    Returns (session_dict, label) tuples ready to pass to evaluate().
-    Sids that don't appear in DuckDB (haven't been ingested yet, or were
-    rotated away) are dropped silently — they contribute nothing to AUC
-    either way.
-    """
-    if not labels:
-        return []
-    sid_to_label = {row["sid"]: row["label"] for row in labels if row.get("sid")}
-    if not sid_to_label:
-        return []
-    grouped = _fetch_session_events(service_id, list(sid_to_label.keys()), since_days=30)
-    out: list[tuple[dict, str]] = []
-    for sid, label in sid_to_label.items():
-        events = grouped.get(sid, [])
-        if not events:
-            continue  # sid never landed in DuckDB; can't evaluate
-        # max_edge_score is what `evaluate_from_persisted_scores` consumes:
-        # the actual score the live scorer returned (L1 + L2 + compliance
-        # combined). Taking the MAX across the session matches the
-        # production VCL behavior — a session is operationally caught at
-        # its worst single transition, not its average. None-valued
-        # rows are excluded so a sid with only un-scored events doesn't
-        # collapse to max_edge_score=0.
-        scored_values = [e.get("edge_score") for e in events if e.get("edge_score") is not None]
-        max_score = max(scored_values) if scored_values else None
-        out.append(
-            (
-                {
-                    "session_id": sid,
-                    "events": events,
-                    "max_edge_score": max_score,
-                },
-                label,
-            )
-        )
-    return out
+    return _scoring_repo.reconstruct_labeled_sessions(service_id, labels)
 
 
 def _resolve_token(service_id: str, override_token: str = "") -> str:
@@ -673,59 +574,11 @@ def scoring_labels_delete(
 
 
 # ── Summary queries (top-flagged, distributions) ────────────────────────────
-
-
-def _query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:
-    """Tiny helper — run a SELECT against the per-service logs view and
-    return list[dict].
-
-    Why the try/finally + explicit close: get_connection() opens a fresh
-    DuckDB connection per call by design (independent connections beat
-    shared-cursor serialization under load — see backend/core/duckdb.py).
-    Leaving them open here was the root cause of constant .duckdb-wal /
-    .duckdb-shm file churn that ate ~1.5GB of mds_stores + VS Code
-    extension-host RAM during the 2026-06-01 admin-page polling crash.
-    Mirrors the canonical pattern from backend/routers/query.py.
-
-    ``params`` is passed through to ``con.execute`` so callers can use
-    parametrized queries (e.g. ``WHERE edge_sid IN (?, ?, ?)``) without
-    string-formatting user-controlled values into the SQL."""
-    from backend.core.duckdb import get_connection, get_source_for_service
-    from backend.repositories._base import _compact_sql_for_debug
-    from backend.utils.telemetry import get_queries
-
-    src = get_source_for_service(service_id)
-    if src is None:
-        raise HTTPException(status_code=404, detail={"error": f"No service {service_id}"})
-    con = None
-    t0 = _time.monotonic()
-    try:
-        con = get_connection(source=src, max_wait=3, skip_view_update=True, read_only=True)
-        rows = con.execute(sql, params).fetchall() if params else con.execute(sql).fetchall()
-        cols = [d[0] for d in con.description] if con.description else []
-        result = [dict(zip(cols, r)) for r in rows]
-        # Append to the request-scoped query log so `_cached` can attribute
-        # this query (and anything called transitively through
-        # `_reconstruct_labeled_sessions` / `_fetch_session_events`) to the
-        # producer that invoked it.
-        get_queries().append(
-            {
-                "sql": _compact_sql_for_debug(sql.strip()),
-                "time_ms": round((_time.monotonic() - t0) * 1000, 2),
-                "rows": len(result),
-            }
-        )
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"error": str(e)})
-    finally:
-        if con is not None:
-            try:
-                con.close()
-            except Exception:
-                pass
+#
+# SQL execution lives in backend/repositories/session_scoring.py (imported
+# above as _query_logs / _fetch_session_events / _reconstruct_labeled_sessions).
+# Route handlers build SQL strings (table-name validated via
+# _safe_table_name) and delegate execution + telemetry attribution there.
 
 
 @router.get("/{service_id}/scoring/top-flagged")

@@ -362,6 +362,28 @@ def list_unbackfilled_fastly_edge_files(
     return [(r["file_name"], r["ingested_at"], r["row_count"], r["file_size_bytes"]) for r in rows]
 
 
+def get_latest_ingest_ts(service_id: str) -> str | None:
+    """Return the ISO string for the most recent successful ingest
+    (``max(ingested_at)`` on ``ingested_files``), or ``None`` if the
+    service has never ingested. Powers the dashboard catch-up indicator.
+
+    Filters out the sentinel ``__seeding_attempted__`` row so a
+    never-actually-ingested service reads as ``None`` rather than as
+    "caught up at the moment we tried to seed"."""
+    con = get_con(service_id)
+    row = con.execute(
+        """
+        SELECT max(datetime(ingested_at)) AS latest
+        FROM ingested_files
+        WHERE source_name = ? AND file_name != '__seeding_attempted__'
+        """,
+        (service_id,),
+    ).fetchone()
+    if not row or not row["latest"]:
+        return None
+    return row["latest"]
+
+
 def get_latest_reconciliation_ts(service_id: str) -> str | None:
     """Return ISO timestamp of the most recent ``fastly.reconciliation`` row
     for the service, or ``None`` if none exist. Used by
