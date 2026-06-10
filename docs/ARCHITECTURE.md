@@ -3,7 +3,7 @@
 
 This document provides a detailed technical overview of how the dashboard and ingest system are architected, how data flows through the application, and the internal design patterns used to maintain high performance, atomic crash safety, and strong security.
 
-> ⚠️ **v2.0 rewrite in progress.** Sections marked `[v2.0-pending]` are being rewritten as part of the architecture cleanup. Target state is described in the ADRs under `pending-docs/adr/` (01: storage model; 02: request lifecycle; 03: tenancy; 04: middleware order; 05: frontend rendering boundary). The banner is removed section-by-section as each phase ships and confirms the new shape in production. Tracking issue: `pending-docs/cleanup_plan.md`.
+Architectural decisions are recorded under [`docs/adr/`](adr/) — ADR-01 storage model, ADR-02 request lifecycle, ADR-06 view warming.
 
 ---
 
