@@ -9,13 +9,17 @@ import { useIsDataReady } from '@/hooks/useIsDataReady'
 import { useScoringLabels } from '@/hooks/useScoringLabels'
 import { ReportLayout } from '@/components/ReportLayout'
 import { UpdatingBadge } from '@/components/UpdatingBadge'
+import type { components } from '@/types/api.generated'
 
 import { ScoringControls } from './_sections/ScoringControls'
 import { SessionsTable } from './_sections/SessionsTable'
 import { SessionDetail } from './_sections/SessionDetail'
 
+type SessionRow = components['schemas']['Session']
+type SessionsResponse = components['schemas']['SessionsResponse']
+
 export default function SessionsPage() {
-  const [selectedSession, setSelectedSession] = useState<any | null>(null)
+  const [selectedSession, setSelectedSession] = useState<SessionRow | null>(null)
 
   // ── Filter state ─────────────────────────────────────────────────────────
   const [flaggedOnly, setFlaggedOnly] = useState(false)
@@ -62,7 +66,7 @@ export default function SessionsPage() {
                 min_4xx_pct_flag: min4xxPct !== '' ? min4xxPct : undefined,
               }
             })
-            return data as any
+            return data as SessionsResponse | undefined
           },
           enabled: isReady
         })

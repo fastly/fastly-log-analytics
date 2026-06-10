@@ -402,10 +402,13 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
 
     # SigV4 requires SHA256 of the body, which forces buffering when we
     # sign. botocore.auth.SigV4Auth doesn't support the streaming signed-
-    # payload variant out of the box.
-    # TODO(proxy-mem): large PUTs (multi-GB compacted commits) are an OOM
-    # risk under this approach. Track upgrade to chunked signing if/when
-    # those flows go through the proxy.
+    # payload variant out of the box, so large PUTs (multi-GB compacted
+    # commits) would buffer fully in memory if routed through the proxy.
+    # Today's compaction flow uploads directly to FOS — only metadata.json
+    # and small avro manifests transit the proxy (kilobytes each), so the
+    # buffering is bounded. If a future flow routes bulk payloads through
+    # here, switch to STREAMING-AWS4-HMAC-SHA256-PAYLOAD chunked signing
+    # before increasing the request-body size limit.
     if service_id and request.can_read_body:
         body = await request.read()
         data = body

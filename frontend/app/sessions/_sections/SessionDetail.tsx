@@ -29,12 +29,16 @@ import { useDateFormat } from '@/hooks/useDateFormat'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
 import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
 import { buildSessionDashboardUrl } from '@/lib/session-urls'
+import type { components } from '@/types/api.generated'
+
+type SessionRow = components['schemas']['Session']
+type SessionsResponse = components['schemas']['SessionsResponse']
 
 interface SessionDetailProps {
-  selectedSession: any | null
-  setSelectedSession: (s: any | null) => void
+  selectedSession: SessionRow | null
+  setSelectedSession: (s: SessionRow | null) => void
   activeServiceId: string | null
-  data: any
+  data: SessionsResponse | undefined
   labels: LabelRow[]
   labelBySid: Map<string, LabelValue>
   onFlagged: () => void
@@ -56,6 +60,7 @@ export function SessionDetail({
   const { data: detailData, isLoading: isLoadingDetail } = useQuery({
     queryKey: ['sessions', 'detail', activeServiceId, selectedSession?.ip, selectedSession?.ja4, selectedSession?.session_start],
     queryFn: async ({ signal }) => {
+      if (!selectedSession) return undefined
       const { data } = await client.POST("/api/sessions/detail", {
         signal,
         body: {
@@ -129,16 +134,15 @@ export function SessionDetail({
             <Users className="h-4 w-4" />
             Session: {selectedSession?.ip}
             {selectedSession?.flagged && <AlertTriangle className="h-4 w-4 text-yellow-500" />}
-            {/* TODO: drop `as any` cast once openapi types include edge_sid. */}
-            {(selectedSession as any)?.edge_sid && (
+            {selectedSession?.edge_sid && (
               <FlagSessionPopover
                 serviceId={activeServiceId || ''}
-                sid={(selectedSession as any).edge_sid}
-                sampleIp={selectedSession?.ip}
-                sampleUa={selectedSession?.ua}
-                currentLabel={labelBySid.get((selectedSession as any).edge_sid) ?? null}
+                sid={selectedSession.edge_sid}
+                sampleIp={selectedSession.ip}
+                sampleUa={selectedSession.ua ?? undefined}
+                currentLabel={labelBySid.get(selectedSession.edge_sid) ?? null}
                 currentLabelId={
-                  labels.find((l) => l.sid === (selectedSession as any).edge_sid)?.id ?? null
+                  labels.find((l) => l.sid === selectedSession.edge_sid)?.id ?? null
                 }
                 onFlagged={onFlagged}
               />

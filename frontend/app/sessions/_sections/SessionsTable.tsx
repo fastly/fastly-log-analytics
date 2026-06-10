@@ -15,16 +15,20 @@ import {
 import { useDateFormat } from '@/hooks/useDateFormat'
 import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
 import { cn } from '@/lib/utils'
+import type { components } from '@/types/api.generated'
+
+type SessionsResponse = components['schemas']['SessionsResponse']
+type SessionRow = components['schemas']['Session']
 
 interface SessionsTableProps {
-  data: any
+  data: SessionsResponse | undefined
   activeServiceId: string | null
   isLoadingInitial: boolean
   isFetching: boolean
   labels: LabelRow[]
   labelBySid: Map<string, LabelValue>
   onFlagged: () => void
-  onRowClick: (row: any) => void
+  onRowClick: (row: SessionRow) => void
 }
 
 export function SessionsTable({
@@ -39,8 +43,8 @@ export function SessionsTable({
 }: SessionsTableProps) {
   const { full, relative, abbr } = useDateFormat()
 
-  const columns: ColumnDef<any>[] = React.useMemo(() => {
-    const cols: ColumnDef<any>[] = [
+  const columns: ColumnDef<SessionRow>[] = React.useMemo(() => {
+    const cols: ColumnDef<SessionRow>[] = [
       {
         accessorKey: 'ip',
         header: 'IP Address',
@@ -147,13 +151,12 @@ export function SessionsTable({
       },
     })
 
-    // TODO: drop `as any` once openapi types regenerate to include has_edge_sid/edge_sid.
-    if ((data as any)?.has_edge_sid) {
+    if (data?.has_edge_sid) {
       cols.push({
         id: '__flag',
         header: 'Flag',
         cell: ({ row }) => {
-          const sid = (row.original as any).edge_sid as string | undefined
+          const sid = row.original.edge_sid ?? undefined
           if (!sid) return null
           const labelRow = labels.find((l) => l.sid === sid)
           return (
@@ -161,7 +164,7 @@ export function SessionsTable({
               serviceId={activeServiceId || ''}
               sid={sid}
               sampleIp={row.original.ip}
-              sampleUa={row.original.ua}
+              sampleUa={row.original.ua ?? undefined}
               currentLabel={labelBySid.get(sid) ?? null}
               currentLabelId={labelRow?.id ?? null}
               onFlagged={onFlagged}
