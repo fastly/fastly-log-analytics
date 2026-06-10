@@ -19,7 +19,7 @@ from backend.core.duckdb import (
     _get_fos_client,
     _load_httpfs,  # noqa: F401  re-exported for test monkey-patching
 )
-from backend.core.log_fields import LOG_FIELD_CATALOG
+from backend.core.field_registry import LOG_FIELD_CATALOG
 from backend.utils import field_codes as fc
 from backend.utils.sql_validator import escape_sql_literal
 

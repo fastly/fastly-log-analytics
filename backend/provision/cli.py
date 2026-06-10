@@ -289,7 +289,7 @@ def handle_update_logs(args):
         fail(f"Config for {service_id} not found.")
         sys.exit(1)
 
-    from backend.core import log_fields as lf
+    from backend.core import field_registry as lf
 
     new_lf_config = (
         _build_log_fields_config(args)
@@ -391,7 +391,7 @@ def handle_update_cdn(args):
 
 def handle_list_groups(args):
     from backend import config as svcconfig
-    from backend.core import log_fields as lf
+    from backend.core import field_registry as lf
 
     existing_cfg = (
         svcconfig.load_config(args.service_id).get("log_fields", {}) if getattr(args, "service_id", None) else {}
@@ -406,7 +406,7 @@ def handle_list_groups(args):
 
 
 def handle_list_fields(args):
-    from backend.core import log_fields as lf
+    from backend.core import field_registry as lf
 
     print(f"\n  {'Field':<20} {'Group':<6} {'Type':<12} {'Bytes':>6}    Description")
     for f in lf.LOG_FIELD_CATALOG:

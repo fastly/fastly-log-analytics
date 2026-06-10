@@ -492,7 +492,7 @@ def api_service_log_fields_get(service_id: str):
 
     from backend import config as svcconfig
     from backend.core import duckdb as _db
-    from backend.core import log_fields as lf
+    from backend.core import field_registry as lf
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -558,7 +558,7 @@ def api_service_log_fields_set(service_id: str, body: LogFieldsUpdateRequest):
     from datetime import datetime
 
     from backend import config as svcconfig
-    from backend.core import log_fields as lf
+    from backend.core import field_registry as lf
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -867,7 +867,7 @@ def api_list_custom_fields(service_id: str):
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         raise HTTPException(status_code=404, detail={"error": "Service not found"})
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     lf = lf_module.get_lf_config(cfg)
     return CustomFieldsListResponse(fields=lf.get("custom_fields", []))
@@ -915,7 +915,7 @@ def api_create_custom_field(service_id: str, body: CustomFieldCreate):
 
     from backend import config as svcconfig
     from backend import provision
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -963,7 +963,7 @@ def api_update_custom_field(service_id: str, field_name: str, body: CustomFieldU
     from backend import config as svcconfig
     from backend import provision
     from backend.core import duckdb as _db
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -1038,7 +1038,7 @@ def api_delete_custom_field(service_id: str, field_name: str):
     from datetime import UTC, datetime
 
     from backend import config as svcconfig
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -1070,7 +1070,7 @@ def api_delete_custom_field(service_id: str, field_name: str):
 def api_validate_custom_vcl(service_id: str, body: VclLintRequest):
     from backend import config as svcconfig
     from backend import provision
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -1109,7 +1109,7 @@ def api_export_custom_fields(service_id: str):
     import json
 
     from backend import config as svcconfig
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -1128,7 +1128,7 @@ def api_import_custom_fields(service_id: str, body: dict):
 
     from backend import config as svcconfig
     from backend import provision
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:

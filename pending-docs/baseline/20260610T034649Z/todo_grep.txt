@@ -1,0 +1,3 @@
+backend/utils/telemetry_proxy.py:406:    # TODO(proxy-mem): large PUTs (multi-GB compacted commits) are an OOM
+frontend/app/sessions/_sections/SessionDetail.tsx:132:            {/* TODO: drop `as any` cast once openapi types include edge_sid. */}
+frontend/app/sessions/_sections/SessionsTable.tsx:150:    // TODO: drop `as any` once openapi types regenerate to include has_edge_sid/edge_sid.

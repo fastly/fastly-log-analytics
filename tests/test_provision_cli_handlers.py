@@ -321,7 +321,7 @@ def test_handle_update_logs_dry_run_prints_format_and_returns(capsys):
     with (
         patch("backend.config.list_service_ids", return_value=["svc"]),
         patch("backend.config.load_config", return_value={"log_fields": {"groups": ["A"]}}),
-        patch("backend.core.log_fields.generate_log_format", return_value="EXPECTED_LOG_FORMAT"),
+        patch("backend.core.field_registry.generate_log_format", return_value="EXPECTED_LOG_FORMAT"),
         patch("backend.provision.cli.update_logging_endpoint") as mock_update,
     ):
         cli.handle_update_logs(_args(service_id="svc", dry_run=True))
@@ -354,7 +354,7 @@ def test_handle_update_logs_pushes_to_fastly_and_persists_config():
         ),
         patch("backend.provision.cli.write_service_config", side_effect=lambda c: write_calls.append(c)),
         patch("backend.provision.cli.update_logging_endpoint", side_effect=_record_update),
-        patch("backend.core.log_fields.format_hash", return_value="hash123"),
+        patch("backend.core.field_registry.format_hash", return_value="hash123"),
     ):
         cli.handle_update_logs(_args(service_id="svc"))
 
@@ -401,7 +401,7 @@ def test_handle_update_logs_preserves_scoring_custom_fields_on_preset_swap():
         ),
         patch("backend.provision.cli.write_service_config", side_effect=lambda c: write_calls.append(c)),
         patch("backend.provision.cli.update_logging_endpoint", side_effect=_record_update),
-        patch("backend.core.log_fields.format_hash", return_value="h"),
+        patch("backend.core.field_registry.format_hash", return_value="h"),
     ):
         # --preset triggers the rebuild path (the bug-bait branch). Without
         # the merge guard, the persisted cfg's custom_fields would be empty.

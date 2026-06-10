@@ -1009,7 +1009,7 @@ def test_validate_custom_vcl_returns_valid_true_for_clean_expression(client, tmp
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
 
     with (
-        patch("backend.core.log_fields.validate_custom_field", return_value=[]),
+        patch("backend.core.field_registry.validate_custom_field", return_value=[]),
         patch("backend.provision.validate_log_format", return_value=[]),
         patch("backend.provision.load_log_format", return_value="format string"),
     ):
@@ -1038,7 +1038,7 @@ def test_validate_custom_vcl_routes_warn_prefix_to_warnings_not_errors(client, t
 
     with (
         patch(
-            "backend.core.log_fields.validate_custom_field",
+            "backend.core.field_registry.validate_custom_field",
             return_value=["WARN: deprecated VCL function used", "Real syntax error"],
         ),
         patch("backend.provision.validate_log_format", return_value=[]),
@@ -1068,7 +1068,7 @@ def test_validate_custom_vcl_omits_format_length_when_invalid(client, tmp_path, 
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
 
     with (
-        patch("backend.core.log_fields.validate_custom_field", return_value=["Hard error"]),
+        patch("backend.core.field_registry.validate_custom_field", return_value=["Hard error"]),
         patch("backend.provision.validate_log_format", return_value=[]),
         patch("backend.provision.load_log_format") as mock_load,
     ):

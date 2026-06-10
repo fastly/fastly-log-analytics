@@ -241,7 +241,7 @@ def export_admin_state(service_id: str):
         # Export custom_fields from the service config file
         cfg = svcconfig.load_config(service_id)
         if cfg:
-            from backend.core import log_fields as _lf
+            from backend.core import field_registry as _lf
 
             lf = _lf.get_lf_config(cfg)
             state["custom_fields"] = lf.get("custom_fields", [])
@@ -366,7 +366,7 @@ def import_admin_state(service_id: str):
         if "custom_fields" in state:
             cfg = svcconfig.load_config(service_id)
             if cfg is not None:
-                from backend.core import log_fields as _lf
+                from backend.core import field_registry as _lf
 
                 lf = _lf.get_lf_config(cfg)
                 remote_fields = list(state["custom_fields"])

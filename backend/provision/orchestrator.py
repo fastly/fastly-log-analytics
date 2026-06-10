@@ -8,7 +8,7 @@ import time
 
 logger = logging.getLogger(__name__)
 
-from backend.core import log_fields as lf
+from backend.core import field_registry as lf
 from backend.core.fastly.client import fastly
 from backend.core.fastly.utils import (
     region_endpoint,

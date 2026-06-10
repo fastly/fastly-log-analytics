@@ -345,3 +345,62 @@ def test_insight_required_fields_exist_in_registry() -> None:
             assert fr.try_get(code) is not None, (
                 f"insight {insight['id']!r} requires unknown field {code!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# 9. Re-export parity: every helper + constant on the registry is the same
+#    object as the legacy module's name. Lets callers flip imports without
+#    behavior drift; guards against an accidental shadow / re-implementation.
+# ---------------------------------------------------------------------------
+
+# Helpers re-exported from `backend.core.log_fields`. Identity equality is
+# the strong invariant: same function object, not just same return value.
+_RE_EXPORTED_HELPERS = (
+    "generate_log_format",
+    "format_hash",
+    "get_lf_config",
+    "estimate_log_line_bytes",
+    "resolve_enabled_fields",
+    "check_log_line_budget",
+    "validate_custom_field",
+    "get_required_edge_headers",
+    "get_catalog_for_api",
+    "get_groups_for_api",
+)
+
+# Constants/objects re-exported from `backend.core.log_fields`. Same object
+# identity ensures a mutation through `log_fields` is observed by registry
+# callers — a hard constraint of the migration plan.
+_RE_EXPORTED_CONSTANTS = (
+    "LOG_FIELD_CATALOG",
+    "GROUP_INFO",
+    "PRESETS",
+    "INSIGHT_DEFINITIONS",
+    "VALID_NAME_RE",
+)
+
+
+@pytest.mark.parametrize("name", _RE_EXPORTED_HELPERS)
+def test_helper_is_same_object_as_log_fields(name: str) -> None:
+    """`field_registry.HELPER is log_fields.HELPER` for every re-exported helper."""
+    from backend.core import log_fields as lf
+
+    assert hasattr(fr, name), f"field_registry is missing helper {name!r}"
+    assert hasattr(lf, name), f"log_fields is missing helper {name!r}"
+    assert getattr(fr, name) is getattr(lf, name), (
+        f"{name!r} on field_registry is not the same object as on log_fields — "
+        "re-export drift will break the @patch('backend.core.log_fields.X') pattern"
+    )
+
+
+@pytest.mark.parametrize("name", _RE_EXPORTED_CONSTANTS)
+def test_constant_is_same_object_as_log_fields(name: str) -> None:
+    """`field_registry.CONSTANT is log_fields.CONSTANT` for every re-exported constant."""
+    from backend.core import log_fields as lf
+
+    assert hasattr(fr, name), f"field_registry is missing constant {name!r}"
+    assert hasattr(lf, name), f"log_fields is missing constant {name!r}"
+    assert getattr(fr, name) is getattr(lf, name), (
+        f"{name!r} on field_registry is not the same object as on log_fields — "
+        "callers reading through the registry will miss mutations on log_fields"
+    )

@@ -59,6 +59,26 @@ User-facing pitch + features list lives in [README.md](README.md). This file doc
 
 The DuckDB `logs` view stitches the Iceberg table and the local Parquet buffer so queries always see all data without callers caring which layer holds which row.
 
+### Package layout (post v2.0 carve-ups)
+
+Several historical monoliths were split into cohesive packages with thin re-export shims at the old paths so existing imports keep working:
+
+| Old path | New package | Shim status |
+|---|---|---|
+| `backend/core/iceberg.py` | [`backend/core/iceberg/`](backend/core/iceberg/) (`_core.py` + `fs.py`) | package `__init__.py` re-exports the historical public surface; the monkeypatched s3fs methods are now `FosS3FileSystem` / `CachedS3FileSystem` subclasses in `fs.py` |
+| `backend/core/metadata_db.py` | [`backend/core/metadata/`](backend/core/metadata/) (`base`, `alerts`, `views`, `ingest_log`, `cron_log`, `asn_cache`, `usage_log`, `reconciliation`, `state`) | thin shim at [`backend/core/metadata_db.py`](backend/core/metadata_db.py) re-exports the full surface plus a `_ShimModule` proxy so `monkeypatch.setattr(metadata_db, "_DATA_DIR", ...)` still flips the live binding inside `metadata.base` |
+| `backend/core/share_db.py` | [`backend/core/share_db/`](backend/core/share_db/) (`connection`, `schema`, `invites`, `sessions`, `audit`, `passcode`, `tos`, `settings`, `validation`) | package `__init__.py` re-exports the historical public surface; passcode hashing is argon2id (legacy scrypt verify branch stays for transparent rehash-on-login) |
+| `backend/utils/tunnel.py` | [`backend/utils/tunnel/`](backend/utils/tunnel/) (`manager`, `session`, `rate_limiter`, `state`, `fingerprint`) | package `__init__.py` re-exports `get_tunnel_manager`, `AnalystSession`, etc. SSH-to-localhost.run code path (`_TUNNEL_URL_RE`, sleep listener, reconnect logic, `use_tunnel=True` branches) was deleted in v2.0 — only direct-mode (HTTPS public_endpoint) is supported. The `use_tunnel=True` kwarg still exists as a back-compat keyword that raises a clear error |
+| `backend/scheduler.py` | [`backend/cron/`](backend/cron/) (`scheduler.py`, `decorators.py`, `jobs/{sync,commit,compaction,optimize,expire,metadata}.py`) | thin shim at [`backend/scheduler.py`](backend/scheduler.py) re-exports `get_scheduler`, `Scheduler`, `cron_task`, every `_run_*` job body, and the watchdog constants |
+
+Other new modules introduced by the cleanup:
+
+- [`backend/repositories/_sql/`](backend/repositories/_sql/) — named, parameterized SQL templates extracted out of inline repo strings (one file per repo concern: `dashboard`, `security`, `network`, `origin`, etc.). Repository functions keep their names and signatures; they call into the templates instead of carrying SQL inline.
+- [`backend/core/field_registry.py`](backend/core/field_registry.py) — Phase 7 (in progress) typed registry that owns per-field declarations (code, display name, type, valid aggregations, valid filter ops, derivations, security-regex hooks). Migration of readers (dashboard CTE generator, rollup spec builder, top_n logic, SQL validator, scoring matrix labels) is incremental.
+- [`backend/core/request_context.py`](backend/core/request_context.py) — Phase 2 single FastAPI dependency that bundles `service_id`, `source`, `con`, `telemetry`, `analyst_session`, `cached_temps`. Replaces the `AnalyticsDeps` bundle and folds `require_service_access` into context construction (there is no path that builds a context without enforcing tenancy).
+- [`backend/core/request_telemetry.py`](backend/core/request_telemetry.py) — Phase 1 thin wrapper around the OTel tracer that owns section spans, query attribution, call log, cache state, and the `app.thread_wait_ms` custom metric instrumented at `_Pool.acquire`. Lives on `RequestContext`.
+- [`backend/core/settings.py`](backend/core/settings.py) — Phase 3.5 `Settings(BaseSettings)` class (pydantic-settings) that owns every env var. Required-in-prod settings are pydantic validators.
+
 ### Personas (where the two onboarding paths live)
 
 The README explains the two collaboration modes for end users. Implementation pointers:
@@ -154,8 +174,8 @@ lf = cfg.get("log_fields") or {"schema_version": 2, "custom_fields": []}
 
 Brief summaries; click through to source for details.
 
-### Scheduler ([backend/scheduler.py](backend/scheduler.py))
-Single `BackgroundScheduler`. `_sync_jobs()` adds/removes per-service jobs on `reload()`. Per-run progress events tracked in [backend/cron_progress.py](backend/cron_progress.py) and streamed via SSE.
+### Scheduler ([backend/cron/](backend/cron/))
+Single `BackgroundScheduler` owned by [backend/cron/scheduler.py](backend/cron/scheduler.py). `_sync_jobs()` adds/removes per-service jobs on `reload()`. The `@cron_task` decorator (telemetry context + usage-log flush + watchdog hard-cap) lives in [backend/cron/decorators.py](backend/cron/decorators.py). Per-job bodies live under [backend/cron/jobs/](backend/cron/jobs/) (`sync`, `commit`, `compaction`, `optimize`, `expire`, `metadata`). Per-run progress events tracked in [backend/cron_progress.py](backend/cron_progress.py) and streamed via SSE. [backend/scheduler.py](backend/scheduler.py) is a thin compat shim that re-exports the same public symbols.
 
 ### NGWAF Bot Detection ([backend/utils/ngwaf.py](backend/utils/ngwaf.py), [backend/utils/ngwaf_bot_cache.py](backend/utils/ngwaf_bot_cache.py))
 Syncs VERIFIED-BOT requests from `GET https://api.fastly.com/ngwaf/v1/workspaces/{id}/requests`. JSON:API pagination via `meta.next_cursor`. Shared SQLite cache at `data/ngwaf/ngwaf_bot_cache.db`. Enriches log rows with `waf_req_id` + `waf_sig LIKE '%VERIFIED-BOT%'`.
@@ -168,7 +188,7 @@ Both stored in per-service `metadata.db` (SQLite). Alerts are threshold-based wi
 ### State Sync ([backend/state_sync.py](backend/state_sync.py))
 `export_admin_state` writes `audit_logs` + `views` from per-service SQLite, plus `log_format_history` + `custom_fields` from the config JSON, to `{prefix}/iceberg/meta/admin_state.json`. **Alerts are not synced** — each instance maintains its own. Only `read_write` services export.
 
-### FOS Usage Logging ([backend/utils/usage_logger.py](backend/utils/usage_logger.py), [backend/core/metadata_db.py](backend/core/metadata_db.py))
+### FOS Usage Logging ([backend/utils/usage_logger.py](backend/utils/usage_logger.py), [backend/core/metadata/usage_log.py](backend/core/metadata/usage_log.py))
 Every FOS Class A/B op and CDN download recorded to per-service `usage_log` SQLite for cost analysis.
 - Global toggle: `data/system/usage_logging.json`
 - Process-context tagging via `set_process_context()` in [backend/utils/telemetry.py](backend/utils/telemetry.py) — tags entries with `cron:sync:svc1` or `api:GET /api/...`
@@ -183,7 +203,7 @@ Per-bucket reconciliation between Fastly's `/stats/service/{id}` log-emission co
 - Sustained-loss alert: ≥2 consecutive completed buckets with `gap_pct ≥ 0.05`.
 - Frontend cadence: `staleTime 30s`, `refetchInterval 60s` → ≤1 Fastly Stats call/min per open admin tab.
 
-### Iceberg Pointer + Summary Hash-Throttle ([backend/core/iceberg.py](backend/core/iceberg.py))
+### Iceberg Pointer + Summary Hash-Throttle ([backend/core/iceberg/_core.py](backend/core/iceberg/_core.py))
 Every commit writes `metadata_location.txt` (unavoidable) and `table_summary.json` (skippable). The latter is content-hashed against `_table_summary_hash_cache`; identical payloads skip the PUT. Saves one FOS PUT per no-op commit in steady state. Cache is module-scope, process-lifetime.
 
 ### DuckDB Connection Pool ([backend/core/duckdb_pool.py](backend/core/duckdb_pool.py))
@@ -199,19 +219,18 @@ Backstop for endpoints that return a plain `dict` instead of going through `Base
 FOS reads are fronted by a Fastly CDN VCL service (`cdn_service_id`, `cdn_url`, `cdn_secret`). The CDN validates a shared-secret query param to gate access; rate-limited to blunt brute-force. Separate from the logging service ID.
 
 ### Live Dashboard Sharing
-Components for the live-shared-instance remote-analyst feature (Path B). Three sharing modes are exposed to the admin:
+Components for the live-shared-instance remote-analyst feature (Path B). Two direct-mode sharing modes are exposed to the admin (the SSH-reverse-tunnel via localhost.run was deleted in v2.0):
 
-1. **SSH reverse tunnel** via localhost.run (default, easiest)
-2. **Admin-provided hostname** (e.g. `https://logs.example.com`) — no third-party relay
-3. **Admin-provided IP** (e.g. `https://203.0.113.42:8443`) — no relay, no DNS
+1. **Admin-provided hostname** (e.g. `https://logs.example.com`)
+2. **Admin-provided IP** (e.g. `https://203.0.113.42:8443`)
 
-Modes 2 and 3 share a single backend code path: `ShareStartPayload.use_tunnel=False` + `public_endpoint=<https URL>`. The mode selector in the UI is presentational — the backend only cares whether `use_tunnel` is set and (when false) that `public_endpoint` starts with `https://` (cookies need `secure=true`).
+Both share a single backend code path: `ShareStartPayload.use_tunnel=False` + `public_endpoint=<https URL>`. The mode selector in the UI is presentational — the backend only cares that `public_endpoint` starts with `https://` (cookies need `secure=true`). `use_tunnel=True` still exists as a back-compat keyword and now raises a clear error.
 
 Components:
 
-- [backend/utils/tunnel.py](backend/utils/tunnel.py) — `TunnelManager` owns `ssh -R 80:localhost:8000 nokey@localhost.run` in tunnel mode, parses assigned `https://*.lhrun.dev` hostname, tracks `TunnelState`. In direct mode (hostname / IP), no subprocess is spawned — the admin-supplied `public_endpoint` is stored and `public_url()` returns it verbatim. Process singleton via `get_tunnel_manager()`; `reset_for_tests()` for pytest.
+- [backend/utils/tunnel/](backend/utils/tunnel/) — package split: `manager.py` owns the `TunnelManager` singleton (direct-mode lifecycle, sever-all panic), `session.py` holds `AnalystSession`, `rate_limiter.py` is the sliding-window `_LoginRateLimiter`, `state.py` persists `tunnel_state.json`, `fingerprint.py` computes the session fingerprint hash. Process singleton via `get_tunnel_manager()`; `reset_for_tests()` for pytest.
 - [backend/utils/remote_access.py](backend/utils/remote_access.py) — `RemoteAccessMiddleware` does DNS-rebinding gate (Host/Origin allow-lists, including `testclient`/`testserver` for pytest), blocks admin paths on remote requests, applies response hardening (CSP, X-Frame-Options DENY, no-store, no-referrer). `_StaticAssetLimiter` rate-limits static assets to blunt scrapes.
-- [backend/core/share_db.py](backend/core/share_db.py) — singleton SQLite at `data/system/remote_share.db`: `remote_invites`, `invite_services`, `remote_sessions`, `remote_share_audit_logs`, `share_settings`, `remote_invite_claim_tokens`, `share_tos_versions`. WAL mode, numbered migrations, bcrypt passcodes, per-IP/per-email lockout.
+- [backend/core/share_db/](backend/core/share_db/) — package split: `connection.py` (pool + corruption self-heal with quarantine), `schema.py` (own MIGRATIONS dict + `apply_pending` + `PRAGMA user_version`), `invites.py`, `sessions.py`, `audit.py`, `passcode.py` (argon2id current default; scrypt verify branch stays for transparent rehash-on-login upgrade), `tos.py`, `settings.py`, `validation.py`. Singleton SQLite at `data/system/remote_share.db`: `remote_invites`, `invite_services`, `remote_sessions`, `remote_share_audit_logs`, `share_settings`, `remote_invite_claim_tokens`, `share_tos_versions`. WAL mode, per-IP/per-email lockout.
 - [backend/routers/share_auth.py](backend/routers/share_auth.py) (`/api/share/*`) — analyst-facing: `login`, `logout`, `acknowledge`, `heartbeat`, `claim/{token}`. Tagged so middleware lets them through the tunnel.
 - [backend/routers/share_admin.py](backend/routers/share_admin.py) (`/api/admin/share/*`, **blocked over tunnel**) — admin-facing: tunnel lifecycle, invite CRUD, session evict, panic/sever-all, backup export/import, GDPR erase, settings.
 - Frontend: [ShareDashboardDialog](frontend/components/ShareDashboardDialog/), [/share-login](frontend/app/share-login/) (TOS-gated), [useAnalystHeartbeat](frontend/hooks/useAnalystHeartbeat.ts), [useShareStatusBanner](frontend/hooks/useShareStatusBanner.tsx). Watermark mounts in `AppLayout` when `bootstrap.settings.is_remote_analyst === true`.
@@ -270,9 +289,9 @@ A global middleware in [frontend/lib/api.ts](frontend/lib/api.ts) checks `respon
 3. **`ReportLayout`** for analytics pages — bundles `usePageContext + useReportConfig + useFilterPayload + useUrlFilterSync + useServiceQuery + ChartIntervalButtons + ReportShell`. Fall back to `ReportShell` only for multi-query or non-standard chrome pages.
 4. **`HelpDialog`** from [components/ui/help-dialog.tsx](frontend/components/ui/help-dialog.tsx) — don't compose `Dialog + DialogHeader + DialogTitle` by hand for help content.
 5. **`useBaseMap`** for any MapLibre setup. Don't duplicate the world-layer + theming inline.
-6. **`metadata_db.record_audit(service_id, event_type=..., details=...)`** — direct. The `duckdb.log_audit_event` shim and `repositories/audit.py` pass-through were removed.
+6. **`metadata.record_audit(service_id, event_type=..., details=...)`** — direct (or via the `metadata_db` shim; both resolve to the same `metadata.audit` impl). The `duckdb.log_audit_event` shim and `repositories/audit.py` pass-through were removed.
 7. **`date_utils.parse_iso_utc` / `iso_z` / `iso_z_now`** — don't hand-roll `datetime.fromisoformat(s.replace("Z", "+00:00"))`.
-8. **`@cron_task` decorator** in [backend/scheduler.py](backend/scheduler.py) — handles `start_call_tracking`, `set_process_context`, `flush_usage_log` finally-block.
+8. **`@cron_task` decorator** in [backend/cron/decorators.py](backend/cron/decorators.py) — handles `start_call_tracking`, `set_process_context`, `flush_usage_log` finally-block, watchdog hard-cap. Re-exported from [backend/scheduler.py](backend/scheduler.py) for compat.
 9. **`empty_schema_response(runner)`** in [_base.py](backend/repositories/_base.py) — return this when a repo function hits a service with no logs.
 10. **`origin_latency_us_expr(actual_cols)`** in `_base.py` — don't hand-roll the `COALESCE("ottfb", "ttfb" * 1000000.0)` fragment.
 
@@ -375,7 +394,7 @@ re-renders triggered by store subscriptions. The trace shows which.
 - `backend/utils/audit_helpers.py` (referenced the long-removed DuckDB `_ingested_files` table)
 - `backend/repositories/audit.py` (was a 27-line pass-through)
 - `scripts/validate_logs.py` / `.sh` (depended on removed bits)
-- `backend/core/duckdb.log_audit_event` shim (call `metadata_db.record_audit` directly; test patches must target `backend.core.metadata_db.record_audit`)
+- `backend/core/duckdb.log_audit_event` shim (call `metadata.record_audit` directly; test patches must target `backend.core.metadata.audit.record_audit` — or `backend.core.metadata_db.record_audit` via the shim, which the `_ShimModule` proxy mirrors onto the live binding)
 - `QueryRunner.safe_select` / `safe_select_list` (use `actual_cols` directly)
 
 ## Testing
@@ -457,10 +476,10 @@ A job fired after the config was deleted. The next `reload()` evicts the stale j
 The RHS of `~` or `!~` must be a literal. No variables, no concatenation. Use `regsub()` / `regsuball()` for dynamic logic.
 
 ### 15. Operational metadata lives in per-service SQLite, not DuckDB
-Alerts, views, audit, cron history, ingested-file dedup, ASN names, source registration, usage telemetry → `data/services/{id}.metadata.db` (WAL). Read/write via [backend/core/metadata_db.py](backend/core/metadata_db.py) — never via DuckDB. JOINs against log data: ATTACH the SQLite read-only as `meta` via `attach_metadata_db()`, or pre-fetch and inline as a parameterised IN list (see `dashboard.py` ASN search).
+Alerts, views, audit, cron history, ingested-file dedup, ASN names, source registration, usage telemetry → `data/services/{id}.metadata.db` (WAL). Read/write via [backend/core/metadata/](backend/core/metadata/) (or the [backend/core/metadata_db.py](backend/core/metadata_db.py) shim for old import paths) — never via DuckDB. JOINs against log data: ATTACH the SQLite read-only as `meta` via `attach_metadata_db()`, or pre-fetch and inline as a parameterised IN list (see `dashboard.py` ASN search). New write paths use the `@sync_db_retry` (tenacity-backed) decorator to handle SQLite `OperationalError` busy/locked under WAL contention.
 
 ### 16. Monkeypatches → catalog in [MONKEYPATCHES.md](MONKEYPATCHES.md)
-We patch six s3fs methods + one PyIceberg `SqlCatalog.load_table` at import time for telemetry-proxy routing, immutable-bytes caching, and table-object reuse. Every patch is documented in MONKEYPATCHES.md with site, motivating incident, and cleanup path. Update that file in the same commit when you add/modify/remove a patch.
+Historically we patched six s3fs methods + one PyIceberg `SqlCatalog.load_table` at import time. Phase 4 of the v2.0 carve-up replaced the s3fs patches with `FosS3FileSystem` / `CachedS3FileSystem` subclasses in [backend/core/iceberg/fs.py](backend/core/iceberg/fs.py) registered as a pyiceberg `FileIO`. Whatever remains is documented in MONKEYPATCHES.md with site, motivating incident, and cleanup path. Update that file in the same commit when you add/modify/remove a patch.
 
 ### 17. MSW + openapi-fetch ordering — `server.listen()` must run at module load
 `openapi-fetch` captures `globalThis.fetch` at `createClient` time. [frontend/lib/api.ts](frontend/lib/api.ts) creates its client at module load, so MSW's `server.listen()` MUST execute at the top of [frontend/vitest.setup.ts](frontend/vitest.setup.ts) — **not inside `beforeAll`**. If listen runs after lib/api.ts is imported, the captured fetch is the unpatched original and every test silently bypasses MSW. Symptom: handlers never fire, requests hit real loopback. Don't move that call into a hook.
@@ -475,7 +494,7 @@ Our [frontend/vitest.config.ts](frontend/vitest.config.ts) sets `globals: false`
 The tunnel exposes the same FastAPI app to the public internet. Middleware classifies by `Host` and blocks remote requests from admin paths — including `/api/admin/share/*`. When you add an endpoint analysts must reach, register under `/api/share/*` or update `_is_blocked_path()`. Don't remove the `testclient`/`testserver` allow-list entries — they're what let pytest hit admin routes.
 
 ### 21. `sync_data` orphan-cleanup vs local-compaction outputs
-Local compaction writes merged rollups to three places: `<cache>/data/daily/`, `<cache>/data/weekly/`, and `<cache>/data/timestamp_hour=*/compacted_*.parquet`. None of these are tracked by the iceberg snapshot, so they are NOT in `cloud_files`/`active_paths`. The orphan-cleanup loop in [backend/core/iceberg.py](backend/core/iceberg.py) `sync_data()` walks the cache and deletes anything not in `active_paths`; without explicit allow-rules it nukes every compacted output, and the [`local_compacted_files` registry](backend/core/metadata_db.py) then blocks re-download of the source files — silently dropping rows from the view (production: 1.65M → 302K on 2026-05-31, then 1.66M → 1.62M on 2026-06-01 from the per-partition `compacted_*` variant). The fix is two-pronged: orphan-cleanup restricts its walk to `timestamp_hour=*` dirs AND skips `compacted_*.parquet` filenames. **If you add a new local-only output pattern, add it to both the dir skip and the file skip.** Integration coverage in [tests/core/test_local_compaction.py](tests/core/test_local_compaction.py)::`test_compaction_outputs_survive_iceberg_sync_orphan_cleanup` exercises the round-trip with real `compact_local_partitions` + real `sync_data`.
+Local compaction writes merged rollups to three places: `<cache>/data/daily/`, `<cache>/data/weekly/`, and `<cache>/data/timestamp_hour=*/compacted_*.parquet`. None of these are tracked by the iceberg snapshot, so they are NOT in `cloud_files`/`active_paths`. The orphan-cleanup loop in [backend/core/iceberg/_core.py](backend/core/iceberg/_core.py) `sync_data()` walks the cache and deletes anything not in `active_paths`; without explicit allow-rules it nukes every compacted output, and the [`local_compacted_files` registry](backend/core/metadata/ingest_log.py) then blocks re-download of the source files — silently dropping rows from the view (production: 1.65M → 302K on 2026-05-31, then 1.66M → 1.62M on 2026-06-01 from the per-partition `compacted_*` variant). The fix is two-pronged: orphan-cleanup restricts its walk to `timestamp_hour=*` dirs AND skips `compacted_*.parquet` filenames. **If you add a new local-only output pattern, add it to both the dir skip and the file skip.** Integration coverage in [tests/core/test_local_compaction.py](tests/core/test_local_compaction.py)::`test_compaction_outputs_survive_iceberg_sync_orphan_cleanup` exercises the round-trip with real `compact_local_partitions` + real `sync_data`.
 
 ### 22. `unattended-upgrades` can OOM a memory-tight VM
 A 16 GB Linux VM running backend + frontend + caddy holds a steady-state working set in the 10-13 GB range. The Debian/Ubuntu nightly `apt-daily-upgrade.timer` forks a transient 1-2 GB downloader on top of that, which can trip an OOM kill that wedges the kernel (sshd dies; needs a VM reset). The mitigation is to `systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service` on the host and re-assert it on every restart so a re-image / apt-reinstall can't silently re-enable them. Trade-off: no automatic security patching — patch manually on a planned maintenance window with the backend container stopped. **If you provision a VM with more RAM, you may safely re-enable upgrades.**
