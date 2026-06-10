@@ -1,8 +1,30 @@
+"""Provision CLI — typer subcommands that wrap the original
+``handle_*`` / ``wizard`` functions.
+
+Phase 10.5 adopts typer for arg parsing and rich for output. The
+handler functions below keep their original signature
+(``def handle_foo(args) -> ...``) because:
+
+  - tests/test_provision_cli_handlers.py drives them by constructing
+    ``SimpleNamespace`` instances and calling the handler directly;
+  - patches like ``patch("backend.provision.cli.perform_teardown")``
+    rely on the handler doing its real work in this module's
+    namespace.
+
+Typer commands at the bottom build a ``SimpleNamespace`` from their
+typed options and call the corresponding handler, so
+``python -m backend.provision.cli teardown --bucket foo`` works
+end-to-end while the handler logic stays unit-testable.
+"""
+
 import datetime
 import os
 import re
 import secrets
 import sys
+from types import SimpleNamespace
+
+import typer
 
 from backend.core.fastly.client import fastly
 from backend.core.fastly.service import find_service_by_name
@@ -33,6 +55,15 @@ from backend.provision.utils import (
     ok,
     warn,
 )
+
+# ────────────────────────────────────────────────────────────────────────────
+# Handler functions — driven directly by the unit tests; the typer
+# commands at the bottom call into these via a SimpleNamespace.
+# Patching contracts (the test file pokes ``backend.provision.cli.<name>``):
+#   perform_teardown, cleanup_local_data, generate_analyst_invite,
+#   update_logging_endpoint, write_service_config, validate_log_format,
+#   redeploy_cdn_vcl, find_service_by_name, fastly, ask, ask_yes, ask_int
+# ────────────────────────────────────────────────────────────────────────────
 
 
 def wizard(args) -> dict:
@@ -382,3 +413,165 @@ def handle_list_fields(args):
         print(
             f"  {f['id']:<20} {(f['group'] or '(core)'):<6} {f['duckdb_type']:<12} {f['typical_bytes']:>6}    {f['description'][:60]}"
         )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Typer surface — each subcommand collects typed options, packs them
+# into a SimpleNamespace, and delegates to the matching handler.
+# ────────────────────────────────────────────────────────────────────────────
+
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help="Fastly Log Analysis — provisioning CLI.",
+    rich_markup_mode="rich",
+)
+
+
+@app.command("provision", help="Run the guided provisioning wizard.")
+def cmd_provision(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip prompts, accept defaults."),
+    token: str | None = typer.Option(None, "--token", help="Fastly API token."),
+    service_id: str | None = typer.Option(None, "--service-id", help="Target Fastly service ID."),
+    endpoint_name: str | None = typer.Option(None, "--endpoint-name"),
+    region: str | None = typer.Option(None, "--region", help="FOS region (e.g. us-east-1)."),
+    bucket: str | None = typer.Option(None, "--bucket", help="FOS bucket name."),
+    prefix: str | None = typer.Option(None, "--prefix", help="Base log prefix inside bucket."),
+    sample_rate: int | None = typer.Option(None, "--sample-rate", min=1, max=100),
+    edge_only: bool | None = typer.Option(None, "--edge-only/--no-edge-only"),
+    period: str | None = typer.Option(None, "--period", help="Log rotation period (e.g. '1 minute')."),
+    cdn_name: str | None = typer.Option(None, "--cdn-name"),
+    cdn_prefix: str | None = typer.Option(None, "--cdn-prefix"),
+    shield: str | None = typer.Option(None, "--shield"),
+    disable_delete_after: bool = typer.Option(False, "--disable-delete-after"),
+    disable_cron_sync: bool = typer.Option(False, "--disable-cron-sync"),
+    commit_interval_mins: int = typer.Option(5, "--commit-interval-mins"),
+    disable_cron_compact: bool = typer.Option(False, "--disable-cron-compact"),
+    log_retention_days: int = typer.Option(30, "--log-retention-days"),
+    preset: str | None = typer.Option(None, "--preset"),
+    enable_group: list[str] | None = typer.Option(None, "--enable-group"),
+    disable_group: list[str] | None = typer.Option(None, "--disable-group"),
+    enable_field: list[str] | None = typer.Option(None, "--enable-field"),
+    disable_field: list[str] | None = typer.Option(None, "--disable-field"),
+):
+    args = SimpleNamespace(
+        yes=yes,
+        token=token,
+        service_id=service_id,
+        endpoint_name=endpoint_name,
+        region=region,
+        bucket=bucket,
+        prefix=prefix,
+        sample_rate=sample_rate,
+        edge_only=edge_only,
+        period=period,
+        cdn_name=cdn_name,
+        cdn_prefix=cdn_prefix,
+        shield=shield,
+        disable_delete_after=disable_delete_after,
+        disable_cron_sync=disable_cron_sync,
+        commit_interval_mins=commit_interval_mins,
+        disable_cron_compact=disable_cron_compact,
+        log_retention_days=log_retention_days,
+        preset=preset,
+        enable_group=enable_group,
+        disable_group=disable_group,
+        enable_field=enable_field,
+        disable_field=disable_field,
+    )
+    wizard(args)
+
+
+@app.command("teardown", help="Tear down a provisioned service.")
+def cmd_teardown(
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    service_id: str | None = typer.Option(None, "--service-id"),
+    token: str | None = typer.Option(None, "--token"),
+    bucket: str | None = typer.Option(None, "--bucket"),
+    region: str | None = typer.Option(None, "--region"),
+    endpoint_name: str | None = typer.Option(None, "--endpoint-name"),
+    remove_data: bool = typer.Option(False, "--remove-data"),
+    no_remove_logging: bool = typer.Option(False, "--no-remove-logging"),
+    no_remove_cdn: bool = typer.Option(False, "--no-remove-cdn"),
+    no_remove_bucket: bool = typer.Option(False, "--no-remove-bucket"),
+):
+    args = SimpleNamespace(
+        yes=yes,
+        service_id=service_id,
+        token=token,
+        bucket=bucket,
+        region=region,
+        endpoint_name=endpoint_name,
+        remove_data=remove_data,
+        no_remove_logging=no_remove_logging,
+        no_remove_cdn=no_remove_cdn,
+        no_remove_bucket=no_remove_bucket,
+    )
+    handle_teardown(args)
+
+
+@app.command("invite-analyst", help="Generate a read-only analyst invite.")
+def cmd_invite_analyst(
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    service_id: str | None = typer.Option(None, "--service-id"),
+):
+    args = SimpleNamespace(yes=yes, service_id=service_id)
+    handle_invite_analyst(args)
+
+
+@app.command("update-logs", help="Push a refreshed log_fields config.")
+def cmd_update_logs(
+    service_id: str | None = typer.Option(None, "--service-id"),
+    token: str | None = typer.Option(None, "--token"),
+    endpoint_name: str | None = typer.Option(None, "--endpoint-name"),
+    sample_rate: int | None = typer.Option(None, "--sample-rate"),
+    edge_only: bool | None = typer.Option(None, "--edge-only/--no-edge-only"),
+    period: str | None = typer.Option(None, "--period"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    preset: str | None = typer.Option(None, "--preset"),
+    enable_group: list[str] | None = typer.Option(None, "--enable-group"),
+    disable_group: list[str] | None = typer.Option(None, "--disable-group"),
+    enable_field: list[str] | None = typer.Option(None, "--enable-field"),
+    disable_field: list[str] | None = typer.Option(None, "--disable-field"),
+):
+    args = SimpleNamespace(
+        service_id=service_id,
+        token=token,
+        endpoint_name=endpoint_name,
+        sample_rate=sample_rate,
+        edge_only=edge_only,
+        period=period,
+        dry_run=dry_run,
+        preset=preset,
+        enable_group=enable_group,
+        disable_group=disable_group,
+        enable_field=enable_field,
+        disable_field=disable_field,
+    )
+    handle_update_logs(args)
+
+
+@app.command("update-cdn", help="Re-deploy the CDN VCL snippet.")
+def cmd_update_cdn(
+    service_id: str | None = typer.Option(None, "--service-id"),
+    token: str | None = typer.Option(None, "--token"),
+):
+    args = SimpleNamespace(service_id=service_id, token=token)
+    handle_update_cdn(args)
+
+
+@app.command("list-groups", help="List log-field groups (diagnostic).")
+def cmd_list_groups(
+    service_id: str | None = typer.Option(None, "--service-id"),
+):
+    args = SimpleNamespace(service_id=service_id)
+    handle_list_groups(args)
+
+
+@app.command("list-fields", help="List the log-field catalog (diagnostic).")
+def cmd_list_fields():
+    handle_list_fields(SimpleNamespace())
+
+
+if __name__ == "__main__":
+    app()

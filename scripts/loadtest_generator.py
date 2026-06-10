@@ -34,7 +34,7 @@ import os
 import resource
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 import pyarrow as pa
@@ -219,7 +219,7 @@ def main() -> int:
 
     hour_start_dt = datetime.fromisoformat(args.hour_start.replace("Z", "+00:00"))
     if hour_start_dt.tzinfo is None:
-        hour_start_dt = hour_start_dt.replace(tzinfo=timezone.utc)
+        hour_start_dt = hour_start_dt.replace(tzinfo=UTC)
     hour_start_ms = int(hour_start_dt.timestamp() * 1000)
     hour_end_ms = hour_start_ms + 3600 * 1000
 

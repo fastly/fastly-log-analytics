@@ -59,3 +59,14 @@ The runbooks are pure documentation — they all reference the same code paths. 
 - Non-Fastly object storage backends (GCS, S3, ADLS). Storage stays Fastly per the v2.0 decision.
 - Multi-region deploy. Single-region per the plan's "out of scope" list.
 - Kubernetes / Nomad / other orchestrators. Single-host docker compose stays the deploy model.
+
+## Phase 10.8 deliverables — per-platform runbooks
+
+The four runbooks shipped under `docs/deploy/`:
+
+- [`docs/deploy/aws_ec2.md`](../docs/deploy/aws_ec2.md) — Amazon Linux 2023 + Docker, IMDSv2 session-token note, SG rules, EBS at `/mnt/app-data`, optional systemd unit.
+- [`docs/deploy/gce.md`](../docs/deploy/gce.md) — Debian/Ubuntu + Docker, formalized `~/restart.sh` flow, persistent disk at `/mnt/app-data`.
+- [`docs/deploy/azure_vm.md`](../docs/deploy/azure_vm.md) — Ubuntu 22.04 + Docker, NSG rules, managed-identity-preferred secrets pattern with Key Vault.
+- [`docs/deploy/generic_linux.md`](../docs/deploy/generic_linux.md) — Linode / DigitalOcean / Hetzner / bare metal, env-file secrets pattern, provider-specific firewall gotchas.
+
+Each runbook covers the same seven sections (host provisioning, Docker install, volume mount, Caddy/SSL, first-deploy + `restart.sh`, secrets management, post-deploy verification) so a reader switching platforms can diff them side-by-side. The cloud-agnostic pieces (Caddy config, docker compose file, `restart.sh` body, post-deploy curl commands) are identical across all four — only the host-provisioning, firewall, and secrets-source steps differ.

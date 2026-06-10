@@ -55,6 +55,13 @@ dependencies = [
     # pre-cutover hashes keep working until each user next logs in
     # (transparent rehash-on-login upgrades them to argon2id).
     "argon2-cffi>=23.1",
+    # Phase 10.5: rich + typer power the provision CLI. rich.console
+    # owns the ANSI emit + colour markup for backend/provision/utils.py
+    # (the public info/ok/warn/fail helpers); typer wraps the handler
+    # functions in backend/provision/cli.py as subcommands so
+    # `python -m backend.provision.cli` exposes a real --help.
+    "rich>=13.7",
+    "typer>=0.12",
 ]
 
 [dependency-groups]
