@@ -28,14 +28,14 @@ export const FilterBar = React.memo(function FilterBar() {
   const pathname = usePathname()
   const [mounted, setMounted] = React.useState(false)
   const { activeServiceId } = useServiceStore()
-  const { 
-    startTime, 
-    endTime, 
-    filters, 
-    edgeOnly, 
+  const {
+    startTime,
+    endTime,
+    filters,
+    edgeOnly,
     hasSyncedExtents,
     isAutoRange,
-    setRange, 
+    setRange,
     autoSetRange,
     setHasSyncedExtents,
     removeFilter,
@@ -50,13 +50,13 @@ export const FilterBar = React.memo(function FilterBar() {
     toggleCompareMode,
     setCompareRange
   } = useFilterStore(useShallow(state => ({
-    startTime: state.startTime, 
-    endTime: state.endTime, 
-    filters: state.filters, 
-    edgeOnly: state.edgeOnly, 
+    startTime: state.startTime,
+    endTime: state.endTime,
+    filters: state.filters,
+    edgeOnly: state.edgeOnly,
     hasSyncedExtents: state.hasSyncedExtents,
     isAutoRange: state.isAutoRange,
-    setRange: state.setRange, 
+    setRange: state.setRange,
     autoSetRange: state.autoSetRange,
     setHasSyncedExtents: state.setHasSyncedExtents,
     removeFilter: state.removeFilter,
@@ -114,13 +114,17 @@ export const FilterBar = React.memo(function FilterBar() {
     return id.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
   }
 
-  // Auto-sync bounds from API when changing service
+  // Auto-sync bounds from API when changing service.
+  // Uses /api/log-extents — an analyst-safe sibling of /api/sync-status that
+  // returns only {configured, earliest_log_at, latest_log_at} with none of
+  // the admin-only fields (ngwaf_workspace_id, active_run, cron task state)
+  // that get the admin endpoint 403'd for remote analysts. Swapping here
+  // closes the analyst-403-every-3s polling loop documented in
+  // pending-docs/session_2026-06-10_otel_dump_and_log_extents.md.
   const { data: status } = useQuery({
-    queryKey: ['admin', 'status', activeServiceId],
+    queryKey: ['log-extents', activeServiceId],
     queryFn: async () => {
-      const { data } = await client.GET("/api/sync-status", {
-        params: { query: { skip_fos: true } },
-      })
+      const { data } = await client.GET("/api/log-extents")
       return data
     },
     enabled: !!activeServiceId,
@@ -147,14 +151,14 @@ export const FilterBar = React.memo(function FilterBar() {
         const earliestLog = toUTCDate(status.earliest_log_at.length === 10 ? status.earliest_log_at + "T00:00:00.000Z" : status.earliest_log_at)
         const latestLog = toUTCDate(status.latest_log_at.length === 10 ? status.latest_log_at + "T23:59:59.999Z" : status.latest_log_at)
 
-        // Requirement: 
+        // Requirement:
         // 1. If we have 1 day of data or less, default to the full available range.
         // 2. If we have more than 1 day, default to the most recent 24 hours of data.
         // This ensures the dashboard is never empty on load if data exists, while prioritizing recent traffic.
         // To prevent double-fetching on every page load, only snap the range if
         // the available data is stale (>15 mins old). If data is actively flowing,
         // the default "last 24h from now" is correct and captures everything.
-        
+
         const spanDays = (latestLog.getTime() - earliestLog.getTime()) / (1000 * 3600 * 24)
         const ageMinutes = (new Date().getTime() - latestLog.getTime()) / (1000 * 60)
 
@@ -417,7 +421,7 @@ export const FilterBar = React.memo(function FilterBar() {
               </Button>
             </Badge>
           ))}
-          
+
           <AddFilterDialog />
         </div>
       )}
