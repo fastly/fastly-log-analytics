@@ -1,35 +1,31 @@
-"""Phase 7 FieldRegistry — frozen-dataclass single source of truth for log fields.
+"""FieldRegistry — frozen-dataclass read view over the log-field catalog.
 
-This module is the chosen Phase 7 design (FrozenDataclassFieldRegistry, picked
-unanimously by all three judges on the maintainability, mypy-strict, and
-migration-cost lenses). It re-expresses the existing `LOG_FIELD_CATALOG`
-list-of-dicts in `log_fields.py` as a tuple of immutable `LogField`
-dataclasses, with aggregations / filter ops / security-hook detection derived
-from the column's DuckDB type and VCL expression instead of being repeated
-per-field.
+Adds typed, immutable LogField rows on top of the dict-literal catalog in
+`backend/core/_log_fields_data.py`. Read paths (validators, scoring matrix
+labels, debug-panel renderers, SQL-shape inference) use the registry;
+authoring stays in dict form because the dict literal is the most readable
+shape for declaring ~80 fields with descriptions and VCL expressions.
 
-SCAFFOLDING ONLY — callers still read `LOG_FIELD_CATALOG` in `log_fields.py`.
-This module is published so the migration can land one caller at a time per
-the order in `pending-docs/phase_7_field_registry_migration.md`. The existing
-constants (`LOG_FIELD_CATALOG`, `GROUP_INFO`, `PRESETS`, `INSIGHT_DEFINITIONS`,
-`_BUILTIN_FIELD_NAMES`) remain authoritative until each caller migrates.
+The duality is intentional, not in-flight migration:
+
+- **Authoring view** (`_log_fields_data.LOG_FIELD_CATALOG`) — dict literals
+  grouped by section comments. Optimised for human review of new fields.
+- **Read view** (`field_registry.REGISTRY`) — frozen LogField tuple +
+  BY_CODE map. Optimised for typed access (`f.duck_type`,
+  `f.has_security_hook`) without per-call dict lookups.
+
+`_field_from_dict` is the stable adapter that produces one LogField per dict
+entry at import time. Both views must stay byte-for-byte equivalent — the
+boot-time test
+(`tests/core/test_field_registry.py::test_registry_codes_match_log_fields`)
+asserts equality, so any drift fails CI before deploy.
 
 Wire-order invariant
 --------------------
-The order of `REGISTRY` is byte-for-byte identical to `LOG_FIELD_CATALOG`,
+The order of `REGISTRY` is byte-for-byte identical to `LOG_FIELD_CATALOG`
 because the Rust scorer in `compute/` reads emitted JSON keys positionally
 when streaming. Reordering rows here without a coordinated change in
-`compute/` will silently break scorer parity. A boot-time test
-(`tests/core/test_field_registry.py::test_registry_codes_match_log_fields`)
-asserts equality with the existing catalog so reordering shows up loudly in
-CI before any deploy.
-
-Discoverability
----------------
-A fresh reader opening this file sees one tuple, one dataclass, two enums,
-two derivation helpers. No second file to chase, no decorator side-effects,
-no import-time freeze ritual. Adding a field is one literal at the bottom
-of `REGISTRY`.
+`compute/` will silently break scorer parity.
 """
 
 from __future__ import annotations
@@ -41,16 +37,15 @@ from enum import StrEnum
 from types import MappingProxyType
 
 # ---------------------------------------------------------------------------
-# Enums (replace stringly-typed columns in the legacy catalog)
+# Enums (typed counterparts for the stringly-typed columns in the catalog)
 # ---------------------------------------------------------------------------
 
 
 class DuckType(StrEnum):
     """DuckDB column types in use across the field catalog.
 
-    Values are kept identical to the strings that appear in the legacy
-    `LOG_FIELD_CATALOG`'s `duckdb_type` key so cross-referencing diffs is
-    trivial.
+    Values are kept identical to the strings that appear in the catalog's
+    `duckdb_type` key so cross-referencing diffs is trivial.
     """
 
     TIMESTAMP = "TIMESTAMP"
@@ -239,10 +234,9 @@ class LogField:
 
     Frozen + slotted: mutation throws at runtime, instances are hashable
     (usable as dict keys), per-instance memory is minimised. Constructed
-    via the legacy dict at module init time (`_from_legacy_dict`); the
-    `kw_only=True` ergonomics are deferred until callers migrate, so the
-    legacy `LOG_FIELD_CATALOG` literals don't need to be rewritten in this
-    scaffolding PR.
+    via the catalog adapter at module init time (`_field_from_dict`); the
+    dict-authored catalog is the maintained source, this is the typed read
+    view over it.
 
     Notes on field semantics that the dataclass shape captures:
 
@@ -362,14 +356,12 @@ def _detect_substr_cap(vcl: str | None) -> int | None:
         return None
 
 
-def _from_legacy_dict(d: Mapping[str, object]) -> LogField:
-    """Build a `LogField` from a legacy `LOG_FIELD_CATALOG` entry.
+def _field_from_dict(d: Mapping[str, object]) -> LogField:
+    """Build a `LogField` from a `LOG_FIELD_CATALOG` dict entry.
 
-    Keeps the scaffolding loader trivial: the existing dict literals don't
-    move, and the registry construction stays a single comprehension over
-    `LOG_FIELD_CATALOG`. When callers migrate to the registry, individual
-    rows can be hand-rewritten as `LogField(...)` literals and this helper
-    can shrink.
+    Stable adapter — runs once per field at module init time. The dict-
+    literal authoring format and the LogField read view both stay; this
+    function is the single bridge that derives the latter from the former.
     """
     code = str(d["id"])
     raw_group = d.get("group")
@@ -414,14 +406,13 @@ def _opt_int(v: object) -> int | None:
 # Registry construction
 # ---------------------------------------------------------------------------
 
-# Import the legacy catalog at module init. This is deliberate: while
-# callers are mid-migration, both views must agree byte-for-byte, and the
-# cheapest way to guarantee that is to derive the new view from the old.
-# When the last caller migrates (Phase 8), the legacy dict literals get
-# rewritten in-place as `LogField(...)` calls and this import flips.
-from backend.core.log_fields import LOG_FIELD_CATALOG as _LEGACY_CATALOG  # noqa: E402
+# Import the catalog at module init. The dict literals are the authoring
+# format and the LogField tuple is the read view. Both must agree byte-
+# for-byte; the cheapest way to guarantee that is to derive one from the
+# other, with a boot-time test asserting the equivalence.
+from backend.core.log_fields import LOG_FIELD_CATALOG as _CATALOG  # noqa: E402
 
-REGISTRY: tuple[LogField, ...] = tuple(_from_legacy_dict(entry) for entry in _LEGACY_CATALOG)
+REGISTRY: tuple[LogField, ...] = tuple(_field_from_dict(entry) for entry in _CATALOG)
 """Tuple of every known log field, in wire order (matches Rust scorer)."""
 
 

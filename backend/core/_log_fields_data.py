@@ -1,13 +1,14 @@
 """Module-private catalog/preset/insight data for log_fields.py.
 
-Carved out of ``backend/core/log_fields.py`` (v2.0 file-size sweep). The
-file holds only DATA — no behaviour — so the carve is risk-free: callers
-that imported these names from ``backend.core.log_fields`` continue to
-work via the re-exports in that module.
+Holds only DATA — no behaviour. Callers import these names through
+``backend.core.log_fields``, which re-exports everything here.
 
 Contents:
 - LOG_FIELD_CATALOG: list of every Fastly log field with VCL emission
   template, DuckDB type, typical bytes, and group/dependency metadata.
+  The dict-literal form is the chosen authoring format; the typed
+  read view (``LogField`` tuple) lives in ``field_registry.py`` and
+  is derived from this list at import time.
 - GROUP_INFO: per-group labels, descriptions, and required-by-fields
   graph.
 - GROUP_DEPENDENCIES: derived from GROUP_INFO above.
