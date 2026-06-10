@@ -16,10 +16,6 @@ Design constraints (ADR-02):
   converts primitive-typed dep params into query params, which would
   expose ``read_only=False`` to attackers (the documented "private
   attribute trick" we're now eliminating structurally).
-- **``cached_temps`` is request-scoped.** First repository that builds a
-  per-window temp inserts; subsequent repositories in the same request
-  reuse via the shared dict. Removes the recurring
-  "share live-hour temp between dashboard CTEs and top_n_rollups" rework.
 
 Backward compat (Phase 2.7):
 
@@ -60,7 +56,6 @@ class RequestContext:
     con: duckdb.DuckDBPyConnection
     telemetry: RequestTelemetry
     analyst_session: object | None = None
-    cached_temps: dict[str, str] = field(default_factory=dict)
     read_only: bool = True
 
     # The connection holder is kept on the context so the dependency
