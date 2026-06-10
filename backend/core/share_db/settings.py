@@ -12,6 +12,12 @@ import sqlite3
 
 from backend.core.share_db.connection import get_global_share_con
 
+# Known share_settings keys. Constants instead of magic strings so callers
+# (admin payloads, scheduler crons, migrations) all reference the same name.
+MAX_CONCURRENT_ANALYST_SESSIONS_KEY = "max_concurrent_analyst_sessions"
+SHARE_AUDIT_RETENTION_DAYS_KEY = "share_audit_retention_days"
+PASSCODE_DEFAULT_ALGO_KEY = "passcode_default_algo"
+
 
 def get_setting(key: str, default: str | None = None, *, con: sqlite3.Connection | None = None) -> str | None:
     con = con or get_global_share_con()
@@ -29,7 +35,7 @@ def set_setting(key: str, value: str, *, con: sqlite3.Connection | None = None) 
 
 
 def get_max_concurrent_sessions(*, con: sqlite3.Connection | None = None) -> int:
-    raw = get_setting("max_concurrent_analyst_sessions", "10", con=con)
+    raw = get_setting(MAX_CONCURRENT_ANALYST_SESSIONS_KEY, "10", con=con)
     try:
         return max(1, int(raw or "10"))
     except (TypeError, ValueError):

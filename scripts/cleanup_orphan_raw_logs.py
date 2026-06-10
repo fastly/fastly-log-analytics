@@ -9,8 +9,6 @@ import logging
 import os
 import sys
 
-import boto3
-
 # Add project root to python path to ensure backend imports work correctly when run from the root directory
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -42,13 +40,9 @@ def cleanup_orphans(service_id: str):
     logger.info(f"Connecting to metadata database for service '{service_id}'...")
     con = metadata_db.get_con(service_id)
 
-    # 2. Initialize S3 client
-    session = boto3.Session(
-        aws_access_key_id=src["access_key_id"],
-        aws_secret_access_key=src["secret_access_key"],
-        region_name=src.get("region", "us-east-1"),
-    )
-    s3_client = session.client("s3", endpoint_url=src.get("endpoint_url"))
+    # 2. Initialize S3 client via backend's proxy-enabled helper
+    from backend.core.duckdb import _get_fos_client
+    s3_client = _get_fos_client(src)
 
     logger.info(f"Listing raw files in bucket '{bucket}' with prefix '{prefix}'...")
 
