@@ -21,18 +21,13 @@ from __future__ import annotations
 
 import json
 import logging
-import multiprocessing
 import os
 import re
-import threading
 import time
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any
-import boto3
+
 import duckdb
-from botocore import UNSIGNED
-from botocore.config import Config
+
 from backend import config as svcconfig
 from backend.utils.date_utils import safe_iso as _safe_iso  # noqa: E402
 
@@ -44,15 +39,45 @@ logger = logging.getLogger(__name__.replace("_duckdb_status", "duckdb"))
 # helper defined in lines 1..1071 of the original file).
 from backend.core import duckdb as _db_main
 
-_cache_dir = lambda *a, **kw: _db_main._cache_dir(*a, **kw)
-_safe_table_name = lambda *a, **kw: _db_main._safe_table_name(*a, **kw)
-_data_stats_fingerprint = lambda *a, **kw: _db_main._data_stats_fingerprint(*a, **kw)
-_execute_query_with_retry = lambda *a, **kw: _db_main._execute_query_with_retry(*a, **kw)
-_fos_glob = lambda *a, **kw: _db_main._fos_glob(*a, **kw)
-_get_fos_client = lambda *a, **kw: _db_main._get_fos_client(*a, **kw)
-get_connection = lambda *a, **kw: _db_main.get_connection(*a, **kw)
-is_configured = lambda *a, **kw: _db_main.is_configured(*a, **kw)
-log_cron_run = lambda *a, **kw: _db_main.log_cron_run(*a, **kw)
+
+# These are passthrough wrappers around backend.core.duckdb helpers,
+# deferred-binding via _db_main so the lookup happens at call-time (avoids
+# circular-import issues since this module is imported BY duckdb.py at the
+# bottom of its own load).
+def _cache_dir(*a, **kw):
+    return _db_main._cache_dir(*a, **kw)
+
+
+def _safe_table_name(*a, **kw):
+    return _db_main._safe_table_name(*a, **kw)
+
+
+def _data_stats_fingerprint(*a, **kw):
+    return _db_main._data_stats_fingerprint(*a, **kw)
+
+
+def _execute_query_with_retry(*a, **kw):
+    return _db_main._execute_query_with_retry(*a, **kw)
+
+
+def _fos_glob(*a, **kw):
+    return _db_main._fos_glob(*a, **kw)
+
+
+def _get_fos_client(*a, **kw):
+    return _db_main._get_fos_client(*a, **kw)
+
+
+def get_connection(*a, **kw):
+    return _db_main.get_connection(*a, **kw)
+
+
+def is_configured(*a, **kw):
+    return _db_main.is_configured(*a, **kw)
+
+
+def log_cron_run(*a, **kw):
+    return _db_main.log_cron_run(*a, **kw)
 
 
 # Module-level constants the carved code reads with bare names.
@@ -100,7 +125,6 @@ def get_sync_status(
         }
 
     # Attempt to return cached status from config if possible
-    from backend import config as svcconfig
 
     cached_status = svcconfig.get_status(src["name"])
     if cached_status and not force:
@@ -184,8 +208,8 @@ def get_sync_status(
         cache_key = src["name"]
         if data_fp is not None:
             try:
-                with _data_stats_cache_lock:
-                    cached = _data_stats_cache.get(cache_key)
+                with _db_main._data_stats_cache_lock:
+                    cached = _db_main._data_stats_cache.get(cache_key)
                 if cached is not None and cached[0] == data_fp:
                     d_count, d_min, d_max = cached[1], cached[2], cached[3]
                 else:
@@ -197,8 +221,8 @@ def get_sync_status(
                     d_count = (d_row[0] or 0) if d_row else 0
                     d_min = d_row[1] if d_row else None
                     d_max = d_row[2] if d_row else None
-                    with _data_stats_cache_lock:
-                        _data_stats_cache[cache_key] = (data_fp, d_count, d_min, d_max)
+                    with _db_main._data_stats_cache_lock:
+                        _db_main._data_stats_cache[cache_key] = (data_fp, d_count, d_min, d_max)
 
                 from backend.core import iceberg as _ice
 
@@ -224,8 +248,8 @@ def get_sync_status(
                 )
             except Exception as split_err:
                 # Bust the data cache so we don't pin a half-built result.
-                with _data_stats_cache_lock:
-                    _data_stats_cache.pop(cache_key, None)
+                with _db_main._data_stats_cache_lock:
+                    _db_main._data_stats_cache.pop(cache_key, None)
                 # Stale-cache failure modes ("No files found", missing
                 # catalog entries) must flow to the outer view-rebuild
                 # handler below — the cure is the same. Re-raise here
@@ -319,7 +343,7 @@ def get_sync_status(
     try:
         cron_stats = {}
         time_cutoff = (
-            (datetime.now(UTC) - timedelta(minutes=_ORPHAN_THRESHOLD_MINS))
+            (datetime.now(UTC) - timedelta(minutes=_db_main._ORPHAN_THRESHOLD_MINS))
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z")
         )
@@ -391,7 +415,6 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
     cadence cron path (1s log_period → 5s tick) should pass False on most
     ticks and True every ~60s.
     """
-    from backend import config as svcconfig
 
     src = svcconfig.load_config(service_id)
     if not src:
@@ -475,8 +498,8 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
     cached_top_values_path = os.path.join(_cache_dir(source), "top_values.json")
     data_fp = _data_stats_fingerprint(source)
     if data_fp is not None and os.path.exists(cached_top_values_path):
-        with _top_values_cache_lock:
-            prior_fp = _top_values_cache.get(service_id)
+        with _db_main._top_values_cache_lock:
+            prior_fp = _db_main._top_values_cache.get(service_id)
         if prior_fp == data_fp:
             return
 
@@ -611,8 +634,8 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
         # cache to a stale value. _data_stats_fingerprint is ~0.5 ms.
         post_fp = _data_stats_fingerprint(source)
         if post_fp is not None:
-            with _top_values_cache_lock:
-                _top_values_cache[service_id] = post_fp
+            with _db_main._top_values_cache_lock:
+                _db_main._top_values_cache[service_id] = post_fp
 
 
 def get_ingested_files(con: duckdb.DuckDBPyConnection, source: dict | None = None) -> list[dict]:
@@ -934,7 +957,6 @@ def log_usage_calls(source: dict, calls: list[dict], process_context: str | None
     Only writes when usage_logging is enabled globally.
     Skips gracefully on any error so it never breaks the calling path.
     """
-    from backend import config as svcconfig
 
     if not svcconfig.is_usage_logging_enabled():
         return
@@ -954,7 +976,6 @@ def backfill_fastly_edge_writes(source: dict) -> int:
     Class A op the user pays for, but we never observe it directly. Idempotent:
     deduplicates against existing 'fastly.edge' rows by URL.
     """
-    from backend import config as svcconfig
 
     if not svcconfig.is_usage_logging_enabled():
         return 0
@@ -1031,7 +1052,6 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
     estimate is documented as inflated by the /stats/aggregate note already
     surfaced on the Usage Operations chart.
     """
-    from backend import config as svcconfig
 
     if not svcconfig.is_usage_logging_enabled():
         return 0
@@ -1105,7 +1125,6 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
 
 def purge_usage_log(source: dict):
     """Delete usage logs older than the retention period via metadata_db."""
-    from backend import config as svcconfig
 
     ul_cfg = svcconfig.load_usage_logging_config()
     retention_days = int(ul_cfg.get("retention_days", 30))

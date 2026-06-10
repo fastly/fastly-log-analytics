@@ -1,6 +1,10 @@
 repos:
+  # Pinned ruff version must stay reasonably close to the version in
+  # pyproject.toml (currently ruff>=0.11) — drift triggers pre-existing
+  # rule changes (UP038, E731 strictness) that the project's actual ruff
+  # has already retired. Bump together when bumping either side.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.0
+    rev: v0.15.15
     hooks:
       - id: ruff
         args: [--fix]

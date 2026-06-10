@@ -66,7 +66,11 @@ def _patched_submit(self, fn, /, *args, **kwargs):
     return _orig_submit(self, ctx.run, fn, *args, **kwargs)
 
 
-_futures.ThreadPoolExecutor.submit = _patched_submit
+# method-assign on a stdlib class — the load-bearing pattern is documented
+# in MONKEYPATCHES.md §6 (cross-tenant ContextVar propagation, 2026-06-06
+# security audit finding). mypy's method-assign warning is correct in the
+# general case but not the right call here.
+_futures.ThreadPoolExecutor.submit = _patched_submit  # type: ignore[method-assign]
 
 
 def _proxy_targets_from_endpoint(endpoint_url: str, source: dict | None) -> tuple[str | None, str]:
