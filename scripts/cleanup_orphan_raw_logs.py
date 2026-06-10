@@ -26,9 +26,9 @@ def cleanup_orphans(service_id: str):
         logger.error(f"Config for service {service_id} not found.")
         sys.exit(1)
 
-    src = cfg.get("source")
-    if not src or src.get("type") != "fos":
-        logger.error(f"Service {service_id} is not configured to use Fastly Object Storage.")
+    src = svcconfig.config_to_source(cfg)
+    if not src.get("bucket"):
+        logger.error(f"Service {service_id} is not configured to use Fastly Object Storage (missing bucket config).")
         sys.exit(1)
 
     bucket = src["bucket"]
