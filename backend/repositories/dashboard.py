@@ -225,38 +225,20 @@ def get_aggregates(
     from backend.core.duckdb import _cache_dir as _cache_dir_for_rollups
 
     rollup_dir = os.path.join(_cache_dir_for_rollups(src), "rollups", "hour")
-    # Disabled (2026-06-10): the per-day compacted rollup is over-inclusive
-    # on partial-day windows. day=YYYY-MM-DD covers [00:00 UTC, +24h) but
-    # the day-rollup inclusion in execute_top_n_rollups
-    # (backend/repositories/_base.py:743-746) only checks day-string
-    # equality vs the window's date floor — a 24h window like 17:36Z→17:36Z
-    # straddles two day boundaries and pulls in 17.6h of out-of-window data
-    # from each end. When per-hour rollups for those days have been
-    # compacted into the per-day file, there is no cheap way to subtract
-    # the out-of-window portion. Per-day rollup compaction also DELETES
-    # the per-hour files, so we can't just skip the day rollup and rely on
-    # per-hour for compacted days.
-    #
-    # Concrete user-facing bug this prevents: clicking a top-N value
-    # (e.g. edge_score=50) in a panel and getting zero rows on the linked
-    # /query page because the value only exists in the out-of-window
-    # portion of the day rollup.
-    #
-    # Fix is "always query live for top-N". Costs ~hundreds of ms per
-    # dashboard load vs the rollup path. The writer-driven view warming
-    # (c0de534) makes the live path much cheaper than it used to be, so
-    # the trade is acceptable. To re-enable safely we'd need partial-day
-    # live fallback in execute_top_n_rollups.
-    _ = rollup_dir  # kept for the existence check pattern if/when re-enabled
-    use_rollups = False
-    # Note (pre-disable, kept for context): the per-field top-N WAS
-    # current via execute_top_n_rollups
-    # (backend/repositories/_base.py:432) — it excluded the active hour
-    # from rollup enumeration AND ran a separate execute_top_n_batch
-    # query on the live base table for the active hour, merging the two.
-    # The narrow live_temp built below is for OTHER queries
-    # (time_series, signal unnests, conn_requests histogram) that don't
-    # go through the rollup path.
+    use_rollups = not filters and os.path.isdir(rollup_dir)
+    # Freshness contract on the rollup path: execute_top_n_rollups
+    # (backend/repositories/_base.py:563) is window-correct.
+    #   - Fully-contained UTC days: served from the per-day compacted rollup.
+    #   - Partial-day boundary days (window cuts through midnight): the
+    #     per-day rollup is SKIPPED (it covers [00:00, +24h) and would
+    #     over-count hours outside the window); the in-window portion of
+    #     such days is live-queried from the base table. Per-hour rollups
+    #     for compacted days have already been deleted, so live is the
+    #     only correct source.
+    #   - Active hour: live-queried, intersected with the window.
+    # All three sources are merged before truncation. The narrow live_temp
+    # built below is for OTHER queries (time_series, signal unnests,
+    # conn_requests histogram) that don't go through the rollup path.
 
     # `temp_table` ends up holding the per-request materialization (if
     # any) so the `finally` cleanup at the bottom of the function can
