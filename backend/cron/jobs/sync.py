@@ -304,39 +304,6 @@ def _run_service_cron(
                                     _re,
                                 )
 
-                        # Self-healing backstop for the active-hour rollup
-                        # gap: when an hour's files all land while that
-                        # hour is still active, recompute_touched_hours
-                        # skips it (active-hour exclusion is correct —
-                        # the hour is still being written), and if no
-                        # later files arrive for that hour after it
-                        # closes, no subsequent tick has it in
-                        # touched_hours and it never gets a rollup. This
-                        # walks the last 24 closed hours and rebuilds
-                        # any that lack a per-hour rollup. Cheap when
-                        # there's nothing to do (one listdir).
-                        _t_heal = time.time()
-                        try:
-                            from backend.core.rollups import backfill_missing_hour_rollups
-
-                            healed = backfill_missing_hour_rollups(service_id, src, lookback_hours=24)
-                            if healed:
-                                _log_and_add_progress(
-                                    run_id,
-                                    service_id,
-                                    job_name="sync",
-                                    event={
-                                        "type": "status",
-                                        "message": f"{elapsed()} Backfilled {healed} missing hour rollup(s): {int((time.time() - _t_heal) * 1000)}ms",
-                                    },
-                                )
-                        except Exception as _be:
-                            logger.warning(
-                                "[scheduler] %s: missing-hour rollup backfill failed: %s",
-                                service_id,
-                                _be,
-                            )
-
         except Exception as e:
             log_text = _extract_log_text(run_id)
             summary = "Ingestion crashed"
