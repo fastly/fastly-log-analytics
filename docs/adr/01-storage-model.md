@@ -29,13 +29,13 @@ Storage backend is **Fastly Object Storage** (S3-compatible). Storage portabilit
 
 ## Local-warehouse fallback rule
 
-For local development (per `dev-sandbox-scrub` memory), Iceberg writes go to a `file://` warehouse on the dev machine when `cdn_url` is cleared on a service config. The same Iceberg code paths run in both modes — only the warehouse URL changes. This guarantees dev exercises the same commit semantics as prod.
+For local development, Iceberg writes go to a `file://` warehouse on the dev machine when `cdn_url` is cleared on a service config. The same Iceberg code paths run in both modes — only the warehouse URL changes. This guarantees dev exercises the same commit semantics as prod.
 
 ## Consequences
 
 - Phase 4 carves `backend/core/iceberg.py` along this decision: separate `view`, `catalog`, `warehouse`, `manifest`, `fs` modules. The "what tier" confusion goes away because there are only two tiers.
 - `local-compaction outputs survive Iceberg orphan-cleanup` (existing trap, verified by `tests/core/test_local_compaction.py::test_compaction_outputs_survive_iceberg_sync_orphan_cleanup`) stays a load-bearing invariant. Phase 4.6 re-asserts it after the carve-up.
-- Orphan-file cleanup for Iceberg/FOS stays out of scope (per `orphan-files-defer` memory — wait for pyiceberg PR #3361).
+- Orphan-file cleanup for Iceberg/FOS stays out of scope pending the upstream pyiceberg work (PR #3361).
 - Rollup catch-up is a query-rewrite concern, not a tier-promotion concern.
 
 ## Out of scope

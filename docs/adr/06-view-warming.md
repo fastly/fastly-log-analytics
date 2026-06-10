@@ -1,4 +1,7 @@
-# Architectural Design Specification: Writer-Driven View Warming
+# ADR-06 — Writer-Driven View Warming
+
+**Status:** Accepted (v2.0 Phase 4)
+**Decided by:** v2.0 cleanup planning
 
 ## 1. Context & Motivation
 
@@ -193,9 +196,9 @@ No freshness impact. Trade-off: ~5 minutes of disk retention for tombstoned buff
 - Sync tick that lands files calls `warm_pool_for_service` exactly once with the right service id
 - Commit tick that commits files calls `warm_pool_for_service` exactly once
 
-**Local dev validation** (per `memory/verify-dev-first.md`):
+**Local dev validation:**
 
-1. Run dev stack (13002 / 18002) with a service that has an active sync cron
+1. Run dev stack with a service that has an active sync cron
 2. Open dashboard with browser devtools network tab visible
 3. Capture pre-change p95 panel latency across a sync tick boundary on `main`
 4. Apply changes, repeat capture, compare
