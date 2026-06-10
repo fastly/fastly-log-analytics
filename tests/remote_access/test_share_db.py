@@ -47,6 +47,25 @@ def test_apply_pending_is_idempotent(fresh_share_con):
     assert n == 0  # nothing applied second time
 
 
+def test_publish_tos_version_appends_and_is_idempotent(fresh_share_con):
+    share_db.publish_tos_version("v2", "Updated terms.", con=fresh_share_con)
+    tos = share_db.get_latest_tos(con=fresh_share_con)
+    assert tos["version"] == "v2"
+    assert tos["text"] == "Updated terms."
+
+    # Re-publishing the same version is a no-op (doesn't append a duplicate row).
+    share_db.publish_tos_version("v2", "Anything.", con=fresh_share_con)
+    rows = fresh_share_con.execute("SELECT COUNT(*) FROM share_tos_versions WHERE version=?", ("v2",)).fetchone()
+    assert rows[0] == 1
+
+
+def test_share_setting_constants_match_seeded_keys(fresh_share_con):
+    """Module constants stay aligned with the keys migrations seed into the table."""
+    keys = {r[0] for r in fresh_share_con.execute("SELECT key FROM share_settings").fetchall()}
+    assert share_db.MAX_CONCURRENT_ANALYST_SESSIONS_KEY in keys
+    assert share_db.PASSCODE_DEFAULT_ALGO_KEY in keys
+
+
 # ── Corruption self-heal ────────────────────────────────────────────────────
 
 

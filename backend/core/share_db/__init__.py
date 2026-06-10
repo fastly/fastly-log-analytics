@@ -80,11 +80,14 @@ from backend.core.share_db.sessions import (
     upsert_session,
 )
 from backend.core.share_db.settings import (
+    MAX_CONCURRENT_ANALYST_SESSIONS_KEY,
+    PASSCODE_DEFAULT_ALGO_KEY,
+    SHARE_AUDIT_RETENTION_DAYS_KEY,
     get_max_concurrent_sessions,
     get_setting,
     set_setting,
 )
-from backend.core.share_db.tos import get_latest_tos
+from backend.core.share_db.tos import get_latest_tos, publish_tos_version
 from backend.core.share_db.validation import (
     InvalidEmailError,
     InvalidNameError,
@@ -165,8 +168,12 @@ __all__ = [
     "purge_old_audit_logs",
     # TOS.
     "get_latest_tos",
+    "publish_tos_version",
     # Settings.
     "get_setting",
     "set_setting",
     "get_max_concurrent_sessions",
+    "MAX_CONCURRENT_ANALYST_SESSIONS_KEY",
+    "SHARE_AUDIT_RETENTION_DAYS_KEY",
+    "PASSCODE_DEFAULT_ALGO_KEY",
 ]

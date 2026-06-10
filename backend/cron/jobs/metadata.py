@@ -475,7 +475,7 @@ def _run_share_audit_purge() -> None:
     logger.info("▶️  \x1b[35m[share_audit_purge]\x1b[0m Share audit purge job started.")
     start = time.monotonic()
     try:
-        raw = share_db.get_setting("share_audit_retention_days", "90")
+        raw = share_db.get_setting(share_db.SHARE_AUDIT_RETENTION_DAYS_KEY, "90")
         try:
             retention = max(1, int(raw or "90"))
         except (TypeError, ValueError):

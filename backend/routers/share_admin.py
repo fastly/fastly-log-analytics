@@ -369,7 +369,7 @@ def update_settings(payload: SettingsPayload):
     if payload.max_concurrent_analyst_sessions is not None:
         if payload.max_concurrent_analyst_sessions < 1:
             raise HTTPException(status_code=400, detail={"error": "invalid_value"})
-        share_db.set_setting("max_concurrent_analyst_sessions", str(payload.max_concurrent_analyst_sessions))
+        share_db.set_setting(share_db.MAX_CONCURRENT_ANALYST_SESSIONS_KEY, str(payload.max_concurrent_analyst_sessions))
     return {"max_concurrent_analyst_sessions": share_db.get_max_concurrent_sessions()}
 
 
