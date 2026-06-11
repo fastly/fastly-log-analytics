@@ -19,6 +19,53 @@ import duckdb
 _PARQUET_LIST_RE = re.compile(r"read_parquet\(\[\s*('[^']+'\s*(?:,\s*'[^']+'\s*)*)\]")
 
 
+# Cache for ``QueryRunner.get_schema_cols``, keyed on
+# ``(service_id, log_format_hash)``. The schema only changes when an
+# admin edits the log format (which mints a new ``format_hash`` on the
+# saved config — see ``backend.routers.services.core``); a new
+# ``format_hash`` produces a cache miss naturally, so no explicit
+# invalidation hook is needed. Cap at 64 entries to bound memory in the
+# pathological case where format_hash churns (e.g., test fixtures).
+#
+# Why this exists: SUMMARIZE-over-the-Iceberg-view walks the manifest
+# list, which sits on FOS in production. The perf audit clocked
+# ``get_schema_cols`` at 2.8s p50 on a cold prod connection vs <1ms on
+# warm local — the same SUMMARIZE that takes <1ms once the manifests
+# are in-process burns seconds per request when it isn't cached.
+_schema_cols_cache: dict[tuple[str, str], list[str]] = {}
+_SCHEMA_COLS_CACHE_MAX_ENTRIES = 64
+
+
+def _schema_cols_cache_key(src: dict) -> tuple[str, str] | None:
+    """Return the cache key for ``src``, or ``None`` if we shouldn't cache.
+
+    We need BOTH a stable service id AND a format_hash. Missing either
+    means the source dict is malformed or pre-dates the format_hash
+    field — fall through to the uncached path rather than risk caching
+    under a key we can't invalidate.
+    """
+    sid = src.get("service_id") or src.get("name")
+    fmt = (src.get("log_fields") or {}).get("format_hash")
+    if not sid or not fmt:
+        return None
+    return (sid, fmt)
+
+
+def clear_schema_cols_cache(service_id: str | None = None) -> None:
+    """Drop cached schema columns.
+
+    With ``service_id=None``, clears everything. With a specific id,
+    drops entries for that service across all format_hashes (useful in
+    tests). Production code shouldn't need to call this — the
+    format_hash-keyed cache invalidates itself on log_format changes.
+    """
+    global _schema_cols_cache
+    if service_id is None:
+        _schema_cols_cache.clear()
+    else:
+        _schema_cols_cache = {k: v for k, v in _schema_cols_cache.items() if k[0] != service_id}
+
+
 def _compact_sql_for_debug(sql: str) -> str:
     """Replace explicit ``read_parquet([...long file list...])`` literals
     with ``read_parquet([N files])`` for transport in the debug-panel
@@ -333,7 +380,19 @@ class QueryRunner:
         return res
 
     def get_schema_cols(self) -> list[str]:
-        """Get schema columns, retrying and refreshing the view if needed."""
+        """Get schema columns, retrying and refreshing the view if needed.
+
+        Result is cached per ``(service_id, log_format_hash)`` so the
+        SUMMARIZE-over-Iceberg-view cost is paid once per format
+        revision instead of per request. See ``_schema_cols_cache``
+        above for the rationale (2.8s p50 cold on prod).
+        """
+        cache_key = _schema_cols_cache_key(self.src)
+        if cache_key is not None and cache_key in _schema_cols_cache:
+            cached = _schema_cols_cache[cache_key]
+            self.actual_cols = set(cached)
+            return cached
+
         actual_cols = [col["name"] for col in _get_schema(self.con, self.src)]
         if not actual_cols:
             # The connection's bound view is stale — most likely the sync
@@ -370,6 +429,14 @@ class QueryRunner:
             except Exception:
                 pass
         self.actual_cols = set(actual_cols)
+        # Only cache non-empty results. An empty result here means the
+        # self-heal path also failed — caching empty would pin the
+        # "no schema" answer until the next format_hash change, which
+        # is exactly the prod incident the self-heal exists to prevent.
+        if actual_cols and cache_key is not None:
+            if len(_schema_cols_cache) >= _SCHEMA_COLS_CACHE_MAX_ENTRIES:
+                _schema_cols_cache.clear()
+            _schema_cols_cache[cache_key] = actual_cols
         return actual_cols
 
     def execute_with_retry(self, sql: str, params: list | None = None):
@@ -749,10 +816,7 @@ class QueryRunner:
                     continue
                 day_dir = os.path.join(field_day_dir, day_entry)
                 try:
-                    if any(
-                        f.endswith(".parquet") and not f.startswith(".tmp_")
-                        for f in os.listdir(day_dir)
-                    ):
+                    if any(f.endswith(".parquet") and not f.startswith(".tmp_") for f in os.listdir(day_dir)):
                         day_covered_by_any_field.add(day)
                 except OSError:
                     continue
@@ -1182,9 +1246,7 @@ class QueryRunner:
             # debug — the caller will produce a working result anyway.
             import logging as _logging
 
-            _logging.getLogger(__name__).debug(
-                "[time_series_rollup] read failed, falling back to raw: %s", e
-            )
+            _logging.getLogger(__name__).debug("[time_series_rollup] read failed, falling back to raw: %s", e)
             return None
 
         out: list[dict] = []
