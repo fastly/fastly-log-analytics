@@ -10,7 +10,7 @@ Contributions are welcome — bug reports, feature requests, and pull requests a
 
 ### PR checklist
 
-A few habits the project leans on to keep complexity from accumulating. Rationale is in [pending-docs/velocity_improvements.md](pending-docs/velocity_improvements.md).
+A few habits the project leans on to keep complexity from accumulating.
 
 - [ ] **Mutable operational config + drift detection in the same PR.** Anything that can drift over time (IP allowlists, public-key pins, third-party API surfaces, version locks) should ship with either a CI check or a scheduled refresh job in the same commit. Don't defer the automation — see [.github/workflows/cidr-refresh.yml](.github/workflows/cidr-refresh.yml) for the pattern.
 - [ ] **Placeholder fields have a delete-by date.** If you add a field, stub, or scaffolding "for future use," leave a `# delete by <YYYY-MM-DD>` comment. Unused scaffolding gets deleted on a 7-day clock unless a real consumer lands first.

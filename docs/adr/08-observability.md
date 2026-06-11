@@ -1,7 +1,7 @@
 # ADR-08 — Observability Strategy
 
 **Status:** Accepted (2026-06-10)
-**Decided by:** v2.0 cleanup retrospective ([pending-docs/velocity_improvements.md](../../pending-docs/velocity_improvements.md) Tier 2)
+**Decided by:** v2.0 cleanup retrospective (2026-06-10)
 
 ## 1. Context & Motivation
 
@@ -86,7 +86,7 @@ Minimum bar for "good citizen" instrumentation. Reviewer enforces at PR time:
 - **Per-user cost attribution.** `usage_log.function_caller` is process-side; user-level billing is a different problem and is not implied by this ADR.
 - **Distributed tracing across services.** Single backend, no service mesh. Not applicable.
 - **Frontend perf budgets (LCP, TBT, bundle size).** Owned by [ADR-05](05-frontend-rendering-boundary.md).
-- **Cache-coherence state-machine abstractions.** Explicitly rejected by velocity_improvements.md based on the 2026-06-09 incident analysis.
+- **Cache-coherence state-machine abstractions.** Explicitly rejected by the v2.0 retrospective based on the 2026-06-09 incident analysis — the bottleneck is DuckDB view rebuild time, not cache policy.
 
 ## 4. Failure Modes & Recovery
 

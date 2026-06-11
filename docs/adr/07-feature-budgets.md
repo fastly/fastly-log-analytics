@@ -1,11 +1,11 @@
 # ADR-07 — Per-Feature Performance & Cost Budgets
 
 **Status:** Accepted (2026-06-10)
-**Decided by:** v2.0 cleanup retrospective (pending-docs/velocity_improvements.md)
+**Decided by:** v2.0 cleanup retrospective (2026-06-10)
 
 ## 1. Context & Motivation
 
-The v1.2.0 dashboard performance overhaul (connection pool, rollup precompute, view warming per ADR-06) was driven by post-release telemetry rather than upfront design — by the time perf showed up as a problem, the fix touched eight files and two architecture layers. The retrospective ([pending-docs/velocity_improvements.md](../../pending-docs/velocity_improvements.md)) named this as the highest-leverage gap remaining: every new analytics endpoint that ships without a stated budget is a candidate for the same reactive cycle.
+The v1.2.0 dashboard performance overhaul (connection pool, rollup precompute, view warming per ADR-06) was driven by post-release telemetry rather than upfront design — by the time perf showed up as a problem, the fix touched eight files and two architecture layers. The retrospective named this as the highest-leverage gap remaining: every new analytics endpoint that ships without a stated budget is a candidate for the same reactive cycle.
 
 The cost of catching debt at PR time is roughly zero — five minutes of self-questioning per route. The cost of catching it after merge is hours of refactoring once the slow query is in production and users have noticed. This ADR captures the discipline that turns the post-hoc cleanup pattern into a pre-commit pattern.
 
@@ -76,7 +76,7 @@ A budget miss is not a bug to fire-drill — it's a signal that the scale model 
 
 ## 3. Out of Scope
 
-- **Global SLOs.** This ADR is per-feature, not service-wide. Service SLOs (uptime, error rate) belong in a future observability ADR (see [pending-docs/velocity_improvements.md](../../pending-docs/velocity_improvements.md) Tier 2 — "Observability strategy").
+- **Global SLOs.** This ADR is per-feature, not service-wide. Service SLOs (uptime, error rate) belong in [ADR-08 — Observability Strategy](08-observability.md).
 - **CI enforcement.** No linter checks for the budget block. The cost of enforcement (lint rule, parser, escape hatches) outweighs the benefit for a solo-dev project where every PR has a human reviewer (the author). Re-evaluate if/when the project grows beyond one regular contributor.
 - **Cost-per-request accounting.** Real-time cost attribution per endpoint (FOS Class A/B ops, CDN egress, DuckDB compute time) is a separate problem. The `storage_growth` and `scale_boundary` fields here are coarse-grained estimates for design-time reasoning, not finance-grade.
 - **Frontend perf budgets.** Bundle size, route-level LCP/TBT, and chart render time live in [docs/adr/05-frontend-rendering-boundary.md](05-frontend-rendering-boundary.md). This ADR is backend/API only.

@@ -552,6 +552,33 @@ These apply to every change, regardless of scope.
 17. All new endpoints get at least one test in `tests/routers/`.
 18. Regenerate OpenAPI types after the endpoint lands: `cd frontend && npm run gen:types`.
 
+### Architectural choices to preserve
+
+The 2026-06 retrospective surfaced several structural decisions the audit specifically validated. Don't rewrite these in a future reimagining:
+
+- **ADR-driven architecture with decisions captured AFTER the lesson lands.** This is the velocity strategy, not a debt. Continue the cadence — write the ADR after a phase ships, not before.
+- **[MONKEYPATCHES.md](MONKEYPATCHES.md) as a living inventory** with root-cause attribution per patch (incident date, why upstream can't fix, removal criteria).
+- **Property-based testing** (Hypothesis) for filter/query roundtrips. Catches drift without hand-written matrices.
+- **RequestContext** making tenancy structurally impossible to bypass — can't construct without `_enforce_service_access`.
+- **Modular package carves with re-export shims** for backward compat during refactor (the `metadata_db.py` / `scheduler.py` pattern).
+- **Named exception classes + explicit retry policies** (vs. generic `except Exception`).
+- **Three-tier docs scheme** (pending-docs / local-docs / docs) — intentional and works for a public-repo solo project.
+- **MVP-then-iterate cadence with phase-based cleanup.** Don't propose "spike before shipping" rewrites — solo bandwidth and information-unavailability at v1.0 time make iterate-then-cleanup the right trade-off.
+
+### Anti-patterns explicitly rejected
+
+If a refactor proposal matches one of these, push back. Each was investigated and rejected during the 2026-06 audit; the rationale is preserved here so future-you / future-agent doesn't relitigate:
+
+- **Generic "schema codegen" infrastructure** for FilterSpec — `openapi-typescript` already handles the 80% case; codegen can't express the procedural collision-handling logic that's the actual duplication.
+- **Premature `usePagination` / `PaginationConfig` context** when there are only 2 paginated endpoints with genuinely different sort semantics.
+- **Centralized `RoleProvider` context** — role is 2 orthogonal flags (`analyst_session` × `is_remote_analyst`), not a hierarchy; an enum would have locked in a false model when SHARE-INVITED was added.
+- **Multi-language scoring codegen** (Python ↔ Rust) — parity is enforced cheaply by fixture tests; codegen adds versioned-schema overhead and constrains schema evolution.
+- **Pre-formatted server-side response values** — `TopTenTable` needs raw values for click handlers and map ops; pre-formatting forces double payload and locks display format into the API contract.
+- **Cache-coherence "state machine" abstractions** — the bottleneck is DuckDB view rebuild time, not cache layer policy; a state machine wouldn't have prevented the 2026-06-09 transient-empty-result incident.
+- **Unified `QueryExecutor`** for retry — stale-view and compaction-race are different error classes with different recovery costs; collapsing them creates a leaky abstraction.
+- **Tentacle-parameter threading** through repository signatures (e.g., passing `RequestContext.cached_temps` to every repo function) — couples request scope to data layer.
+- **Custom `FsspecFileIO` subclass to "fix" the s3fs monkeypatches** — investigated 2026-05-21 and rejected; pyiceberg instantiates `S3FileSystem` directly inside its `_s3()` builder, bypassing the FileIO layer entirely. Wait for upstream `supply-your-own-FileSystem-class` hook (tracked in [MONKEYPATCHES.md](MONKEYPATCHES.md)).
+
 ## Keeping This File Current
 
 Update this file in the same commit that introduces:

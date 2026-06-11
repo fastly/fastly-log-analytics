@@ -1,7 +1,7 @@
 # ADR-10 — Schema Evolution Contract
 
 **Status:** Accepted (2026-06-10)
-**Decided by:** v2.0 cleanup retrospective ([pending-docs/velocity_improvements.md](../../pending-docs/velocity_improvements.md) Tier 2)
+**Decided by:** v2.0 cleanup retrospective (2026-06-10)
 
 ## 1. Context & Motivation
 
