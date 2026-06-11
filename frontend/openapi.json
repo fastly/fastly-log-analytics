@@ -113,6 +113,112 @@
         }
       }
     },
+    "/api/dashboard/bundle": {
+      "post": {
+        "tags": [
+          "dashboard"
+        ],
+        "summary": "Dashboard Bundle",
+        "description": "Composite endpoint returning the two queries the dashboard page\nfires on every mount: /api/dashboard/aggregates + /api/security/top-bots.\n\nSaves one RTT per cold load \u2014 the frontend's useDashboardBundle\nhook fetches this once and seeds the existing\n``['dashboard', 'aggregates', ...]`` and ``['dashboard',\n'top-bots', ...]`` React Query caches so the dedicated hooks\nreturn cached data without firing their own POSTs.\n\nSequential execution (not parallel): the two queries share the\nsame DuckDB connection from RequestContext, and DuckDB\nconnections aren't thread-safe \u2014 running concurrently would\nrequire separate connections, which the connection-pool\naccounting on this endpoint isn't sized for. Sequential is\ncorrect + safe; the saving is the RTT, not backend wall-clock.\n\nResponse shape is intentionally untyped (no response_model) so\nthe existing dedicated endpoints stay the source of truth for\nAggregatesResponse / SecurityTopBotsResponse schemas \u2014 this\ncomposite passes through whatever those return.",
+        "operationId": "dashboard_bundle_api_dashboard_bundle_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AggregatesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/dashboard/raw": {
       "post": {
         "tags": [

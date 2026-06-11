@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation'
 import { useCardVisibility } from '@/hooks/useCardVisibility'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
+import { useDashboardBundle } from '@/hooks/useDashboardBundle'
+import { useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates } from '@/lib/staleViewRetry'
 import { useFilterStore } from '@/stores/filterStore'
@@ -111,6 +113,25 @@ function DashboardBody({
   }, [metric])
 
   const isReady = useIsDataReady()
+  const queryClient = useQueryClient()
+
+  // Perf audit Phase D-4: composite endpoint fetches aggregates +
+  // security/top-bots in one round-trip and seeds the existing cache
+  // keys. The two dedicated useQuery calls below gate on this
+  // being pending so the dashboard's cold load fires ONE backend
+  // request instead of THREE (it was 3 — aggregates + compare-mode
+  // aggregates + top-bots; compare-mode is still independent
+  // because it only fires when the user enables it).
+  const bundleQuery = useDashboardBundle({
+    startTime,
+    endTime,
+    filterPayload,
+    metric,
+    interval: config.effectiveInterval,
+    enabled: isReady,
+  })
+  const bundlePending =
+    bundleQuery.fetchStatus === 'fetching' && bundleQuery.data === undefined
 
   const { data: aggregates, isLoading: isLoadingAggs, isFetching: isFetchingAggs } = useServiceQuery(
     ['dashboard', 'aggregates', activeServiceId, startTime, endTime, filterPayload, metric, config.effectiveInterval],
@@ -126,7 +147,7 @@ function DashboardBody({
       })
       return throwIfStaleAggregates(data)
     },
-    STALE_VIEW_RETRY_OPTIONS,
+    { ...STALE_VIEW_RETRY_OPTIONS, enabled: !bundlePending },
   )
 
   const { data: compareAggregates } = useQuery({
@@ -159,7 +180,9 @@ function DashboardBody({
       })
       return data
     },
-    enabled: isReady,
+    // Gated on the bundle fetch so cold load reads from the seeded
+    // cache instead of firing its own request (perf audit D-4).
+    enabled: isReady && !bundlePending,
     placeholderData: keepPreviousData,
   })
 

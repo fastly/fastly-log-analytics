@@ -37,6 +37,54 @@ def dashboard_aggregates(req: AggregatesRequest, ctx: RequestContext = Depends(b
     )
 
 
+@router.post("/bundle")
+@query_errors()
+def dashboard_bundle(req: AggregatesRequest, ctx: RequestContext = Depends(build_request_context)):
+    """Composite endpoint returning the two queries the dashboard page
+    fires on every mount: /api/dashboard/aggregates + /api/security/top-bots.
+
+    Saves one RTT per cold load — the frontend's useDashboardBundle
+    hook fetches this once and seeds the existing
+    ``['dashboard', 'aggregates', ...]`` and ``['dashboard',
+    'top-bots', ...]`` React Query caches so the dedicated hooks
+    return cached data without firing their own POSTs.
+
+    Sequential execution (not parallel): the two queries share the
+    same DuckDB connection from RequestContext, and DuckDB
+    connections aren't thread-safe — running concurrently would
+    require separate connections, which the connection-pool
+    accounting on this endpoint isn't sized for. Sequential is
+    correct + safe; the saving is the RTT, not backend wall-clock.
+
+    Response shape is intentionally untyped (no response_model) so
+    the existing dedicated endpoints stay the source of truth for
+    AggregatesResponse / SecurityTopBotsResponse schemas — this
+    composite passes through whatever those return.
+    """
+    from backend.repositories import security as security_repo
+
+    aggregates = repo.get_aggregates(
+        con=ctx.con,
+        src=ctx.source,
+        start_time=req.start_time,
+        end_time=req.end_time,
+        filters=req.filters,
+        chart_interval=req.chart_interval,
+        chart_metric=req.chart_metric,
+    )
+    top_bots = security_repo.get_top_bots(
+        con=ctx.con,
+        src=ctx.source,
+        start_time=req.start_time,
+        end_time=req.end_time,
+        filters=req.filters,
+    )
+    return {
+        "aggregates": aggregates,
+        "top_bots": top_bots,
+    }
+
+
 @router.post("/raw", response_model=RawResponse)
 @query_errors()
 def dashboard_raw(req: RawRequest, ctx: RequestContext = Depends(build_request_context)):

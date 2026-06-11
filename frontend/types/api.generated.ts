@@ -21,6 +21,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboard/bundle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dashboard Bundle
+         * @description Composite endpoint returning the two queries the dashboard page
+         *     fires on every mount: /api/dashboard/aggregates + /api/security/top-bots.
+         *
+         *     Saves one RTT per cold load — the frontend's useDashboardBundle
+         *     hook fetches this once and seeds the existing
+         *     ``['dashboard', 'aggregates', ...]`` and ``['dashboard',
+         *     'top-bots', ...]`` React Query caches so the dedicated hooks
+         *     return cached data without firing their own POSTs.
+         *
+         *     Sequential execution (not parallel): the two queries share the
+         *     same DuckDB connection from RequestContext, and DuckDB
+         *     connections aren't thread-safe — running concurrently would
+         *     require separate connections, which the connection-pool
+         *     accounting on this endpoint isn't sized for. Sequential is
+         *     correct + safe; the saving is the RTT, not backend wall-clock.
+         *
+         *     Response shape is intentionally untyped (no response_model) so
+         *     the existing dedicated endpoints stay the source of truth for
+         *     AggregatesResponse / SecurityTopBotsResponse schemas — this
+         *     composite passes through whatever those return.
+         */
+        post: operations["dashboard_bundle_api_dashboard_bundle_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/dashboard/raw": {
         parameters: {
             query?: never;
@@ -6953,6 +6992,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AggregatesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dashboard_bundle_api_dashboard_bundle_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AggregatesRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
