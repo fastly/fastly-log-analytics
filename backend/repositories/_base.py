@@ -1166,6 +1166,7 @@ class QueryRunner:
             _hour_bundled_root,
             _rollups_root,
         )
+        from backend.utils.date_utils import parse_iso_utc
 
         if chart_metric not in self._TS_ROLLUP_METRIC_SQL:
             return None
@@ -1173,15 +1174,17 @@ class QueryRunner:
             return None
         if not start_time or not end_time:
             return None
-        try:
-            st = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-            et = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
-        except ValueError:
+        # parse_iso_utc is the project-standard helper — it always returns
+        # tz-aware UTC, which is what the bundle directory names and the
+        # active_hour_str comparison below both assume. Using raw
+        # datetime.fromisoformat here is what caused the 2026-06-11 missing-
+        # tail bug: cursor kept the request's input tz (CDT for a FE in
+        # Central) and looked up bundles by CDT-named hours, missing the
+        # last 5 hours of a 24h window.
+        st = parse_iso_utc(start_time)
+        et = parse_iso_utc(end_time)
+        if st is None or et is None:
             return None
-        if st.tzinfo is None:
-            st = st.replace(tzinfo=UTC)
-        if et.tzinfo is None:
-            et = et.replace(tzinfo=UTC)
         if et <= st:
             return None
 
@@ -1211,16 +1214,11 @@ class QueryRunner:
         active_hour_dt = datetime.strptime(active_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
 
         rollup_paths: list[str] = []
-        # Cursor MUST iterate in UTC — the bundle directory names are
-        # keyed by UTC hours and active_hour_str (above) is computed in
-        # UTC. ``st`` carries the request's input timezone (e.g. -05:00
-        # when the FE sends CDT-offset strings); leaving cursor in that
-        # zone makes ``cursor.strftime("%Y-%m-%d-%H")`` produce local-hour
-        # names that accidentally collide with earlier UTC bundles, so
-        # a 24-hour window served only 20 hours of data and the
-        # active-hour comparison silently never crossed (no live branch
-        # for the current hour either). Normalize once here.
-        cursor = st.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+        # st is UTC (parse_iso_utc guarantees it) so cursor's strftime
+        # produces UTC hour strings that match the on-disk bundle names
+        # and the UTC active_hour_str comparison above. See the comment
+        # at the parse site for the bug history.
+        cursor = st.replace(minute=0, second=0, microsecond=0)
         crosses_active = False
         while cursor < et:
             hour_str = cursor.strftime("%Y-%m-%d-%H")
