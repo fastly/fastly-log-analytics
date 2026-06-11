@@ -46,113 +46,137 @@ def get_top_bots(
     _phase("top_bots:build_where_clause", _t)
 
     arcjet_bots: list[dict] = []
-    # ── Single filtered TEMP TABLE shared across arcjet UA + NGWAF JOIN ─────
-    # Previously the function ran TWO independent scans over the same
-    # filtered window: a UA TopN (LIMIT 2000) for arcjet classification
-    # then a SECOND scan with an NGWAF JOIN for waf bot names. With the
-    # dashboard's security panel mounted, both ran on every request.
-    # Materializing one filtered temp table with the columns BOTH passes
-    # need (ua + waf_req_id) collapses the scan to one Iceberg manifest
-    # walk and keeps both downstream queries reading from memory.
-    cols_needed: list[str] = []
-    if "ua" in actual_cols:
-        cols_needed.append("ua")
+    ngwaf_bots: list[dict] = []
+
+    use_rollups = not filters
+
+    # ── Arcjet UA matching ──────────────────────────────────────────
+    # Rollup-served when no filters apply. The hour bundles already
+    # carry top-500 UAs per hour; UNION + GROUP-BY across the window
+    # is sub-second even on 30d (vs ~1.1s for the ua column scan via
+    # the iceberg view on prod). Real bots send enough traffic that
+    # their UAs almost always land in top-500 for at least some hours,
+    # so the rollup gives equivalent arcjet matches to the raw scan.
+    # Filtered requests bypass this path (rollup is filter-free) and
+    # fall through to the temp-scan branch below.
+    ua_rollup_rows: list[tuple[str, int]] | None = None
+    if use_rollups and "ua" in actual_cols:
+        try:
+            _t = _time.perf_counter()
+            rolled, _ = runner.execute_top_n_rollups(
+                ["ua"],
+                start_time,
+                end_time,
+                limit=50000,
+                per_field_limits={"ua": 50000},
+            )
+            _phase("top_bots:ua_rollup_query", _t)
+            ua_rollup_rows = [(v, int(c)) for _f, v, c in rolled if v and v != "__other__"]
+            if not ua_rollup_rows:
+                # Rollup is empty (cold service, no backfill yet) —
+                # fall back to the raw temp scan so we still produce
+                # bot matches on first dashboard load.
+                ua_rollup_rows = None
+        except Exception as e:
+            logging.getLogger(__name__).warning("[security] UA rollup read failed, falling back: %s", e)
+            ua_rollup_rows = None
+
+    def _classify(rows: list[tuple[str, int]]) -> list[dict]:
+        from backend.utils.bot_sources import build_matcher
+
+        match_ua = build_matcher()
+        bot_counts: dict[str, dict] = {}
+        for ua_val, cnt in rows:
+            for entry in match_ua(ua_val):
+                bot_id = entry.get("id", "unknown")
+                if bot_id not in bot_counts:
+                    cats = entry.get("categories", [])
+                    bot_counts[bot_id] = {
+                        "id": bot_id,
+                        "name": bot_id.replace("-", " ").title(),
+                        "category": cats[0] if cats else "unknown",
+                        "request_count": 0,
+                    }
+                bot_counts[bot_id]["request_count"] += cnt
+        return sorted(bot_counts.values(), key=lambda x: x["request_count"], reverse=True)[:n]
+
+    if ua_rollup_rows is not None:
+        _t = _time.perf_counter()
+        try:
+            arcjet_bots = _classify(ua_rollup_rows)
+        except Exception as e:
+            logging.getLogger(__name__).error("[security] arcjet rollup match failed: %s", e)
+        _phase("top_bots:arcjet_match", _t)
+
+    # ── NGWAF cache bot names + filtered-UA fallback ────────────────
+    # NGWAF JOIN needs raw waf_req_id (high-cardinality, no rollup),
+    # so it still builds a temp. When the rollup-served UA path
+    # didn't run (filters present, or "ua" not in schema), the temp
+    # also carries `ua` so the filtered-UA branch can scan it.
+    ngwaf_attached = False
     if "waf_req_id" in actual_cols:
+        try:
+            from backend import config as svcconfig
+
+            ngwaf_db = svcconfig.ngwaf_db_path()
+            if ngwaf_db:
+                existing = con.execute(
+                    "SELECT path FROM duckdb_databases() WHERE database_name='ngwaf_top' LIMIT 1"
+                ).fetchone()
+                already_path = existing[0] if existing else None
+                if already_path == ngwaf_db:
+                    ngwaf_attached = True
+                elif os.path.exists(ngwaf_db):
+                    if already_path is not None:
+                        try:
+                            con.execute("DETACH ngwaf_top")
+                        except Exception:
+                            pass
+                    ngwaf_db_escaped = ngwaf_db.replace("'", "''")
+                    con.execute(f"ATTACH '{ngwaf_db_escaped}' AS ngwaf_top (TYPE SQLITE, READ_ONLY)")
+                    ngwaf_attached = True
+        except Exception:
+            pass  # ATTACH failed — fall back gracefully
+
+    needs_filtered_ua_scan = ua_rollup_rows is None and "ua" in actual_cols
+    cols_needed: list[str] = []
+    if needs_filtered_ua_scan:
+        cols_needed.append("ua")
+    if ngwaf_attached and "waf_req_id" in actual_cols:
         cols_needed.append("waf_req_id")
-    # If the schema has neither (very minimal log_fields preset), skip
-    # both passes — there's nothing to classify.
-    if not cols_needed:
-        return {"bots": [], "ngwaf_bots": [], "section_timings": section_timings}
 
-    # Use QueryRunner.temp_table context manager so the DROP runs even
-    # if an intermediate query raises (was a manual try/finally before).
-    _t = _time.perf_counter()
-    with runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params) as temp_table:
-        _phase("top_bots:temp_table_create", _t)
-        if temp_table is None:
-            return {"bots": [], "ngwaf_bots": [], "section_timings": section_timings}
-        if "ua" in actual_cols:
-            try:
-                from backend.utils.bot_sources import build_matcher
+    if cols_needed:
+        _t = _time.perf_counter()
+        with runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params) as temp_table:
+            _phase("top_bots:temp_table_create", _t)
+            if temp_table is None:
+                return {
+                    "bots": arcjet_bots,
+                    "ngwaf_bots": ngwaf_bots,
+                    "section_timings": section_timings,
+                    **runner.telemetry(),
+                }
+            if needs_filtered_ua_scan:
+                try:
+                    _t = _time.perf_counter()
+                    q = SQL.TOP_UAS_BY_COUNT.format(temp_table=temp_table)
+                    rows = runner.execute(q).fetchall()
+                    _phase("top_bots:top_uas_query", _t)
+                    _t = _time.perf_counter()
+                    arcjet_bots = _classify(rows)
+                    _phase("top_bots:arcjet_match", _t)
+                except Exception as e:
+                    logging.getLogger(__name__).error("[security] arcjet top bots failed: %s", e)
 
-                # Item 41 — the inline regexp_matches(ua, '<200-pattern OR-chain>')
-                # cost ~353 ms on prod / week (per dashboard telemetry) because
-                # DuckDB has to evaluate the alternation per row. The Python
-                # matcher below is already what we use to classify each UA's
-                # bot_id, so move the regex out of SQL: pull the top 50,000
-                # distinct UAs by count (cheap GROUP BY + ORDER BY) then run
-                # build_matcher() on them in Python where the per-UA result
-                # is lru_cached and most lookups are sub-microsecond.
-                _t = _time.perf_counter()
-                q = SQL.TOP_UAS_BY_COUNT.format(temp_table=temp_table)
-                rows = runner.execute(q).fetchall()
-                _phase("top_bots:top_uas_query", _t)
-
-                _t = _time.perf_counter()
-                match_ua = build_matcher()
-                bot_counts: dict[str, dict] = {}
-                for ua_val, cnt in rows:
-                    for entry in match_ua(ua_val):
-                        bot_id = entry.get("id", "unknown")
-                        if bot_id not in bot_counts:
-                            cats = entry.get("categories", [])
-                            bot_counts[bot_id] = {
-                                "id": bot_id,
-                                "name": bot_id.replace("-", " ").title(),
-                                "category": cats[0] if cats else "unknown",
-                                "request_count": 0,
-                            }
-                        bot_counts[bot_id]["request_count"] += cnt
-
-                arcjet_bots = sorted(bot_counts.values(), key=lambda x: x["request_count"], reverse=True)[:n]
-                _phase("top_bots:arcjet_match", _t)
-            except Exception as e:
-                logging.getLogger(__name__).error("[security] arcjet top bots failed: %s", e)
-
-        # ── NGWAF cache bot names ─────────────────────────────────────────────
-        # Memoize ATTACH per-connection the same way get_security_aggregates
-        # does for `ngwaf_cache`. The previous attach_ngwaf_cache context
-        # manager DETACHed on exit, so every /dashboard cold load paid the
-        # ~22 ms ATTACH cost on /api/security/top-bots even when the file
-        # was already attached. The duckdb_databases() catalog query is
-        # ~90 us — fast enough to run unconditionally.
-        ngwaf_bots: list[dict] = []
-        ngwaf_attached = False
-        if "waf_req_id" in actual_cols:
-            try:
-                from backend import config as svcconfig
-
-                ngwaf_db = svcconfig.ngwaf_db_path()
-                if ngwaf_db:
-                    existing = con.execute(
-                        "SELECT path FROM duckdb_databases() WHERE database_name='ngwaf_top' LIMIT 1"
-                    ).fetchone()
-                    already_path = existing[0] if existing else None
-                    if already_path == ngwaf_db:
-                        ngwaf_attached = True
-                    elif os.path.exists(ngwaf_db):
-                        if already_path is not None:
-                            try:
-                                con.execute("DETACH ngwaf_top")
-                            except Exception:
-                                pass
-                        ngwaf_db_escaped = ngwaf_db.replace("'", "''")
-                        con.execute(f"ATTACH '{ngwaf_db_escaped}' AS ngwaf_top (TYPE SQLITE, READ_ONLY)")
-                        ngwaf_attached = True
-            except Exception:
-                pass  # ATTACH failed — fall back gracefully
-
-        if ngwaf_attached:
-            try:
-                # Join against the temp table instead of re-scanning the
-                # source view — same filter window, no second manifest walk.
-                _t = _time.perf_counter()
-                q = SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table=temp_table, n=n)
-                res = runner.execute(q).fetchall()
-                ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
-                _phase("top_bots:ngwaf_join", _t)
-            except Exception as e:
-                logging.getLogger(__name__).error("[security] NGWAF top bots failed: %s", e)
+            if ngwaf_attached:
+                try:
+                    _t = _time.perf_counter()
+                    q = SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table=temp_table, n=n)
+                    res = runner.execute(q).fetchall()
+                    ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
+                    _phase("top_bots:ngwaf_join", _t)
+                except Exception as e:
+                    logging.getLogger(__name__).error("[security] NGWAF top bots failed: %s", e)
 
     return {
         "bots": arcjet_bots,
