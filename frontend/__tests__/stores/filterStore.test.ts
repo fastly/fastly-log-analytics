@@ -44,10 +44,11 @@ describe('autoSetRange', () => {
     // Default (isAutoRange = true)
     useFilterStore.getState().autoSetRange('2026-06-01T00:00:00Z', '2026-06-02T00:00:00Z')
     expect(useFilterStore.getState().startTime).toBe('2026-06-01T00:00:00Z')
-    // After autoSetRange, isAutoRange flips to false (so it doesn't reapply on every datum)
-    expect(useFilterStore.getState().isAutoRange).toBe(false)
+    // After autoSetRange, isAutoRange remains true (to prevent URL-sync writing absolute timestamps)
+    expect(useFilterStore.getState().isAutoRange).toBe(true)
 
-    // Second autoSetRange should be a no-op
+    // If isAutoRange is false, autoSetRange should be a no-op
+    useFilterStore.setState({ isAutoRange: false })
     useFilterStore.getState().autoSetRange('2099-01-01T00:00:00Z', '2099-01-02T00:00:00Z')
     expect(useFilterStore.getState().startTime).toBe('2026-06-01T00:00:00Z')
   })
