@@ -119,6 +119,7 @@ export function FlagSessionPopover({
               {...props}
               variant="ghost"
               size="icon"
+              aria-label={disabled ? 'No session id (cookieless request)' : 'Flag this session'}
               className="h-7 w-7"
               disabled={disabled}
               title={disabled ? 'No session id (cookieless request)' : 'Flag this session'}

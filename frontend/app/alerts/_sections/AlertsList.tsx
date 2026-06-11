@@ -266,6 +266,7 @@ export function AlertsList({
             <Button
               variant="ghost"
               size="icon"
+              aria-label="Edit alert"
               className="h-8 w-8 text-muted-foreground hover:text-primary"
               onClick={() => onEdit(info.row.original)}
               title="Edit alert"
@@ -275,6 +276,7 @@ export function AlertsList({
             <Button
               variant="ghost"
               size="icon"
+              aria-label="Delete alert"
               className="h-8 w-8 text-muted-foreground hover:text-destructive"
               onClick={() => onDelete(info.row.original.id)}
               title="Delete alert"

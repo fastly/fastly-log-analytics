@@ -128,6 +128,7 @@ export function QueryToolbar({
                   <Button
                     variant="ghost"
                     size="icon"
+                    aria-label="Remove from query history"
                     className="h-5 w-5 opacity-0 group-hover:opacity-100 shrink-0"
                     onClick={(e) => onRemoveHistoryItem(e, i)}
                   >

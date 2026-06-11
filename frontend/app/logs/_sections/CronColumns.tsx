@@ -146,6 +146,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
               <Button
                 variant="ghost"
                 size="icon"
+                aria-label="Copy full error message"
                 className="h-6 w-6 text-muted-foreground hover:text-foreground"
                 onClick={handleCopy}
                 title="Copy full error message"
@@ -282,6 +283,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
                   <Button
                     variant="ghost"
                     size="icon"
+                    aria-label="Copy corrupt-line details"
                     className="h-5 w-5 text-muted-foreground hover:text-foreground opacity-0 group-hover/corrupt:opacity-100 transition-opacity"
                     onClick={(e) => {
                       e.stopPropagation()

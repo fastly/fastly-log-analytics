@@ -97,6 +97,7 @@ export function TrafficChart({
                     variant={metric === m.id ? 'default' : 'ghost'}
                     size="sm"
                     onClick={() => React.startTransition(() => setMetric(m.id))}
+                    aria-pressed={metric === m.id}
                     className={cn(
                       "h-6 text-[10px] px-2 shadow-none transition-colors",
                       metric === m.id ? "bg-primary text-primary-foreground hover:bg-primary/90" : "hover:text-primary hover:bg-muted"
@@ -225,6 +226,7 @@ export function TrafficChart({
               size="sm"
               onClick={() => React.startTransition(() => setTrend(t.value))}
               disabled={!config.validTrends.has(t.value)}
+              aria-pressed={trend === t.value}
               className="h-6 text-[10px] px-2 shadow-none disabled:opacity-30"
             >
               {t.label}

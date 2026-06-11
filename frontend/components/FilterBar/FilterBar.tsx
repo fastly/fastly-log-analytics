@@ -315,6 +315,7 @@ export const FilterBar = React.memo(function FilterBar() {
               variant={activePreset === preset.label ? 'secondary' : 'ghost'}
               size="sm"
               onClick={preset.value}
+              aria-pressed={activePreset === preset.label}
               className={cn("h-6.5 px-2 text-[11px]", activePreset === preset.label ? "bg-background shadow-sm text-foreground" : "")}
             >
               {preset.label}

@@ -26,6 +26,7 @@ export function ChartIntervalButtons({
           size="sm"
           onClick={() => React.startTransition(() => onIntervalChange(i.value))}
           disabled={!validIntervals.has(i.value)}
+          aria-pressed={effectiveInterval === i.value}
           className={cn(
             'h-6 text-[10px] px-2 shadow-none transition-colors disabled:opacity-30',
             effectiveInterval === i.value

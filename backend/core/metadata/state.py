@@ -8,10 +8,14 @@ migration sweep on boot.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import time
 
 from backend.core.metadata.base import get_con
 from backend.utils.date_utils import iso_z_now
+
+logger = logging.getLogger(__name__)
 
 # ── audit_logs ────────────────────────────────────────────────────────────────
 
@@ -186,11 +190,37 @@ def record_applied_data_migration(
     status: str = "success",
     notes: str | None = None,
 ) -> None:
-    """Persist a successful (or failed) migration completion."""
-    con = get_con(service_id)
-    con.execute(
-        "INSERT OR REPLACE INTO applied_data_migrations (name, applied_at, duration_s, status, notes) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (name, iso_z_now(), float(duration_s), status, notes),
-    )
-    con.commit()
+    """Persist a successful (or failed) migration completion.
+
+    Retries on ``database is locked``: the migration framework calls this
+    right after a long-running backfill commits, and the cron writer may
+    still be holding the WAL writer lock for an unrelated table on the
+    same db. ``busy_timeout=30000`` (see ``metadata/base.py``) already
+    handles transient contention, but in practice we observed boot-time
+    bursts where back-to-back ``record_applied_data_migration`` calls
+    raced past the kernel-level wait. The 3-attempt application-level
+    retry (200ms, 800ms, 2s) backstops that without changing the
+    connection-level PRAGMA contract. ``INSERT OR REPLACE`` is already
+    idempotent on the ``name`` PRIMARY KEY, so retry is safe.
+    """
+    backoffs = (0.2, 0.8, 2.0)
+    last_exc: sqlite3.OperationalError | None = None
+    for attempt, wait_s in enumerate(backoffs):
+        try:
+            con = get_con(service_id)
+            con.execute(
+                "INSERT OR REPLACE INTO applied_data_migrations (name, applied_at, duration_s, status, notes) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (name, iso_z_now(), float(duration_s), status, notes),
+            )
+            con.commit()
+            if attempt > 0:
+                logger.info("[migrations] %s/%s: recorded on retry %d", service_id, name, attempt)
+            return
+        except sqlite3.OperationalError as e:
+            if "database is locked" not in str(e):
+                raise
+            last_exc = e
+            time.sleep(wait_s)
+    assert last_exc is not None
+    raise last_exc

@@ -51,7 +51,7 @@ export function InsightCard({ insight }: InsightCardProps) {
   const [isHelpOpen, setIsHelpOpen] = useState(false)
   const [isDataModalOpen, setIsDataModalOpen] = useState(false)
   const [selectedMapItem, setSelectedMapItem] = useState<ImpossibleDistanceData | null>(null)
-  
+
   const Icon = SEVERITY_ICON[insight.severity as keyof typeof SEVERITY_ICON] || AlertCircle
   const iconColor = SEVERITY_ICON_COLOR[insight.severity as keyof typeof SEVERITY_ICON_COLOR] || 'text-muted-foreground'
   const badgeClass = SEVERITY_BADGE_CLASS[insight.severity as keyof typeof SEVERITY_BADGE_CLASS] || ''
@@ -75,6 +75,7 @@ export function InsightCard({ insight }: InsightCardProps) {
               <Button
                 variant="ghost"
                 size="icon"
+                aria-label="How this insight works"
                 className="h-6 w-6 text-muted-foreground hover:text-foreground"
                 onClick={() => setIsHelpOpen(true)}
                 title="How this works"
@@ -103,9 +104,9 @@ export function InsightCard({ insight }: InsightCardProps) {
               ))}
               {insight.items.length > 5 && (
                 <div className="flex justify-center py-1">
-                  <Button 
-                    variant="ghost" 
-                    size="sm" 
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     className="text-[10px] h-6 px-2 text-muted-foreground hover:text-foreground"
                     onClick={() => setIsDataModalOpen(true)}
                   >
@@ -117,7 +118,7 @@ export function InsightCard({ insight }: InsightCardProps) {
           )}
         </CardContent>
       </Card>
-      
+
       <InsightHelpModal
         insightId={insight.id}
         isOpen={isHelpOpen}

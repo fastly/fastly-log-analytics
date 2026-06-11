@@ -32,9 +32,12 @@ export type SyncStatus = components['schemas']['SyncStatusResponse']
  *   always 403. The badge degrades gracefully when status is null,
  *   so a one-shot failure (analyst permanent, admin transient) is
  *   fine.
+ * - `enabled` also skips the fetch for analyst sessions entirely.
+ *   The endpoint is admin-only and the analyst dashboard never used
+ *   the data — it was just a 403 per page load in DevTools.
  */
 export function useSyncStatus() {
-  const { activeServiceId } = useServiceStore()
+  const { activeServiceId, services } = useServiceStore()
   const queryClient = useQueryClient()
 
   // Perf audit Phase D-2: useBootstrap now seeds the
@@ -44,6 +47,17 @@ export function useSyncStatus() {
   // fetch and beat the seed on every cold page load.
   const bootstrapState = queryClient.getQueryState(['bootstrap'])
   const bootstrapPending = bootstrapState !== undefined && bootstrapState.status === 'pending'
+
+  // Mirrors the analyst-detection used in app/alerts/page.tsx: a user is
+  // "analyst" if their active service is read_only OR if bootstrap flagged
+  // them as a remote share-invited analyst. /api/sync-status is in
+  // _ANALYST_BLOCKED_SUBPATHS server-side, so any analyst fetch is a
+  // guaranteed 403 — skip it.
+  const bootstrapData = queryClient.getQueryData<{ settings?: Record<string, unknown> }>(['bootstrap'])
+  const activeService = services.find(s => s.id === activeServiceId)
+  const isAnalyst =
+    activeService?.accessLevel === 'read_only' ||
+    bootstrapData?.settings?.is_remote_analyst === true
 
   return useQuery({
     queryKey: ['sync-status', activeServiceId],
@@ -55,7 +69,7 @@ export function useSyncStatus() {
       if (error) throw error
       return data as SyncStatus
     },
-    enabled: !!activeServiceId && !bootstrapPending,
+    enabled: !!activeServiceId && !bootstrapPending && !isAnalyst,
     staleTime: 60_000,
     refetchInterval: 30_000,
     refetchOnWindowFocus: false,

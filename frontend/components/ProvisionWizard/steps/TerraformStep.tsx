@@ -129,6 +129,7 @@ export function TerraformStep({ s }: { s: WizardState }) {
                     <Button
                       variant="ghost"
                       size="icon"
+                      aria-label={`Copy ${selectedTfFile} to clipboard`}
                       className="h-6 w-6 hover:bg-muted-foreground/10"
                       onClick={() => {
                         navigator.clipboard.writeText(

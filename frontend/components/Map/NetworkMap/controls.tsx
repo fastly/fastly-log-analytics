@@ -81,6 +81,7 @@ export function PlaybackControls({
         <Button
           variant="outline"
           size="icon"
+          aria-label={playing ? 'Pause map playback' : 'Play map playback'}
           className="shrink-0 h-8 w-8"
           onClick={() => setPlaying(!playing)}
         >

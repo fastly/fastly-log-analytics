@@ -153,6 +153,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
                   <Button
                     variant="ghost"
                     size="icon"
+                    aria-label="Download local cache as ZIP"
                     className="h-4 w-4 p-0 ml-0.5 hover:bg-transparent text-muted-foreground hover:text-primary transition-colors"
                     onClick={(e) => {
                       e.stopPropagation()
@@ -196,6 +197,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
             <Button
               variant="ghost"
               size="icon"
+              aria-label="Cron sync settings"
               className="h-6 w-6 hover:bg-muted cursor-pointer"
               onClick={() => setCronService(service)}
               title="Cron Sync Settings"

@@ -26,6 +26,7 @@ export function InsightItemRow({ item, insightId, onMapClick }: InsightItemRowPr
             <Button
               variant="ghost"
               size="icon"
+              aria-label={`Show ${item.label} on map`}
               className="h-4 w-4 text-primary hover:text-primary/80 shrink-0"
               onClick={() => {
                 if (!item.meta) return

@@ -101,7 +101,19 @@ def _initialize_service(cfg: dict):
                 if n:
                     logging.info("[fastapi] Service %s: reaped %d orphaned cron run(s).", sid, n)
             except Exception as e:
-                logging.warning("[fastapi] Could not reap orphaned cron runs for %s: %s", sid, e)
+                # Transient on the first boot after an unclean shutdown — SQLite
+                # WAL recovery rolls the file forward on the next connection, so
+                # subsequent calls succeed. Log INFO if it's the recoverable
+                # malformed-image case, WARN otherwise.
+                msg = str(e)
+                if "malformed" in msg or "is locked" in msg:
+                    logging.info(
+                        "[fastapi] Service %s: orphan-cron reap deferred (%s); WAL recovery will resolve on the next connection.",
+                        sid,
+                        msg,
+                    )
+                else:
+                    logging.warning("[fastapi] Could not reap orphaned cron runs for %s: %s", sid, e)
 
             src = _db.get_source_for_service(sid)
             if src:
@@ -451,7 +463,8 @@ def assert_middleware_order(_app: FastAPI) -> None:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.environ.get(
-        "CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,http://localhost:13002,http://127.0.0.1:13002",
     ).split(","),
     allow_credentials=True,
     allow_methods=["*"],

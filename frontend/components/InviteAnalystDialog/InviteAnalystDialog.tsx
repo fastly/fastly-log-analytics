@@ -68,6 +68,7 @@ function CopyField({ label, value, secret, multiline = false }: { label: string;
             <Button
               variant="ghost"
               size="icon"
+              aria-label={revealed ? 'Hide value' : 'Reveal value'}
               className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
               onClick={() => setRevealed(r => !r)}
               title={revealed ? 'Hide' : 'Reveal'}
@@ -78,6 +79,7 @@ function CopyField({ label, value, secret, multiline = false }: { label: string;
           <Button
             variant="ghost"
             size="icon"
+            aria-label="Copy to clipboard"
             className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
             onClick={copy}
             title="Copy"

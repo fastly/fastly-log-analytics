@@ -221,6 +221,7 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
               <Button
                 variant="ghost"
                 size="icon"
+                aria-label={copied ? 'Copied deploy command' : 'Copy deploy command'}
                 className="h-6 w-6 hover:bg-muted-foreground/10"
                 onClick={onCopyHint}
                 title={copied ? 'Copied!' : 'Copy to clipboard'}

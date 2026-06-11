@@ -175,7 +175,7 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
                     >
                       <PopoverTrigger
                         render={(props: React.ComponentPropsWithRef<'button'>) => (
-                          <Button {...props} variant="ghost" size="icon" className="h-7 w-7" title="Edit label">
+                          <Button {...props} variant="ghost" size="icon" aria-label="Edit label" className="h-7 w-7" title="Edit label">
                             <Pencil className="h-3.5 w-3.5" />
                           </Button>
                         )}
@@ -213,6 +213,7 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
                     <Button
                       variant="ghost"
                       size="icon"
+                      aria-label="Delete label"
                       className="h-7 w-7 text-rose-600 hover:text-rose-700"
                       title="Delete label"
                       onClick={() => {
