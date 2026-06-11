@@ -95,7 +95,7 @@ Each failure mode has a named procedure. Operators consult these instead of impr
 
 The ADR's job is to make the current state explicit, not to commit to new infrastructure. These are the deferred decisions:
 
-- **Service config off-VM backup.** Lowest-hanging fruit; small files; could be `gsutil cp configs/*.json gs://backup-bucket/$(date +%F)/` on a weekly cron. Decision deferred until someone explicitly asks for it.
+- ~~**Service config off-VM backup.**~~ **Done 2026-06-10.** Operator-workstation script at [scripts/backup_service_configs.sh](../../scripts/backup_service_configs.sh) tars `/mnt/app-data/configs/` via `gcloud compute ssh + sudo tar` and uploads a timestamped tarball to a GCS bucket. Bucket has a 30-day delete lifecycle. Configuration (bucket, instance, zone, configs path) lives in env vars — no infra-specific values in the repo. Automation source not wired yet (operator-laptop cron, GH Actions workload-identity, or VM-side cron after SA attachment); the script itself works from any of the three.
 - **metadata.db nightly snapshot.** Single-file SQLite; cheap to snapshot. Decision: would shorten recovery time for usage_log + cron history. Not yet a real requirement.
 - **FOS bucket cross-region replication.** Cost-significant; only matters if FOS itself fails (which the provider's SLA covers). Defer until that's a measured risk.
 - **Compliance-grade audit log retention.** When/if compliance becomes a real requirement, audit_log needs a real backup strategy. Today it doesn't.
