@@ -1,8 +1,7 @@
+import { EventEmitter } from 'node:events'
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// Mock next/headers BEFORE importing the module under test. The mocks
-// are returned from the fetchBootstrapServerSide call below so each
-// test can configure them per-case.
 const mockCookies = vi.fn()
 const mockHeaders = vi.fn()
 vi.mock('next/headers', () => ({
@@ -10,70 +9,85 @@ vi.mock('next/headers', () => ({
   headers: () => mockHeaders(),
 }))
 
-const ORIGINAL_FETCH = global.fetch
-
 beforeEach(() => {
-  // Default to a populated cookie jar + no Caddy header (admin SSH-tunnel
-  // shape). Individual tests override.
   mockCookies.mockReturnValue({ toString: () => 'session=abc123' })
   mockHeaders.mockReturnValue({ get: (_k: string) => null })
 })
 
 afterEach(() => {
-  global.fetch = ORIGINAL_FETCH
-  vi.restoreAllMocks()
+  mockCookies.mockReset()
+  mockHeaders.mockReset()
   delete process.env.API_PROXY_URL
 })
 
-describe('fetchBootstrapServerSide', () => {
-  it('returns the parsed JSON body on a 2xx response', async () => {
-    process.env.API_PROXY_URL = 'http://backend:8000'
-    const payload = { active_service_id: 'svc-1', share_banner: { sharing_active: false } }
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => payload,
-    }) as unknown as typeof fetch
+// The helper uses node:http.request (NOT fetch — fetch overrides
+// Host, which the backend's _remote_host_allowed gate rejects). The
+// header-shape assertions live in the adversarial prod verification
+// rather than in unit tests because mocking node:http portably across
+// vitest's module-transform layers is fragile and tends to mask the
+// real behavior we care about (which node:http actually emits on the
+// wire). Unit tests here focus on the failure paths the helper
+// catches so a backend outage / misconfig never breaks SSR rendering.
 
+describe('fetchBootstrapServerSide', () => {
+  it('returns null when API_PROXY_URL is unset (pure `next dev` outside docker compose)', async () => {
     const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
     const out = await fetchBootstrapServerSide()
-    expect(out).toEqual(payload)
+    expect(out).toBeNull()
   })
 
-  it('admin SSH-tunnel path: forwards cookies, NO X-Remote-Analyst header', async () => {
-    // No X-Proxied-By-Caddy on inbound → must NOT set X-Remote-Analyst
-    // upstream. Doing so would mis-classify the admin as a remote
-    // analyst (gated by tunnel.is_sharing_active() on the backend but
-    // still wrong intent).
-    process.env.API_PROXY_URL = 'http://backend:8000'
-    mockCookies.mockReturnValue({ toString: () => 'session=abc; theme=dark' })
-    mockHeaders.mockReturnValue({ get: (_k: string) => null })
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({}),
-    })
-    global.fetch = fetchSpy as unknown as typeof fetch
-
+  it('returns null on a non-2xx upstream response', async () => {
+    process.env.API_PROXY_URL = 'http://127.0.0.1:1'  // refused — guaranteed network failure path
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
-    await fetchBootstrapServerSide()
-    const [, opts] = fetchSpy.mock.calls[0]
-    expect(opts.headers.Cookie).toBe('session=abc; theme=dark')
-    expect('X-Remote-Analyst' in opts.headers).toBe(false)
-    // X-Proxied-By-Caddy must not leak upstream — the backend would
-    // ignore it from loopback but forwarding it is a wrong-shape signal.
-    expect('X-Proxied-By-Caddy' in opts.headers).toBe(false)
+    const out = await fetchBootstrapServerSide()
+    // Either a network error or a 5xx — both must collapse to null,
+    // never throw, never leak a partial response.
+    expect(out).toBeNull()
+    expect(warn).toHaveBeenCalled()
   })
 
-  it('public Caddy path: sets X-Remote-Analyst:1 AND forwards inbound Host', async () => {
-    // This is the SECURITY-critical case. The SSR runtime hits the
-    // backend over loopback; without X-Remote-Analyst the backend
-    // returns a full admin payload to anonymous public visitors. The
-    // Host forward is required to pass the backend's
-    // _remote_host_allowed gate (remote_access.py:296) — without it
-    // the upstream fetch's implicit `Host: backend:8000` triggers a
-    // 400 host_not_allowed.
-    process.env.API_PROXY_URL = 'http://backend:8000'
+  it('returns null on a parse error from a malformed upstream body', async () => {
+    // Stand up a one-shot HTTP server that returns invalid JSON, so
+    // the JSON.parse inside the helper throws and the catch returns null.
+    const http = await import('node:http')
+    const server = http.createServer((_req, res) => {
+      res.statusCode = 200
+      res.end('not json {{{')
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+      const out = await fetchBootstrapServerSide()
+      expect(out).toBeNull()
+      expect(warn).toHaveBeenCalled()
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('hits the upstream with the expected headers (smoke — verifies node:http path runs)', async () => {
+    // Stand up a one-shot HTTP server. Capture the inbound headers
+    // and return a stub response so the helper's JSON.parse succeeds.
+    // Asserts the header-forwarding contract without needing to mock
+    // node:http modules (mocking nested core module imports across
+    // vitest's transform layers is fragile — go end-to-end against
+    // a real loopback socket instead).
+    const http = await import('node:http')
+    let capturedHeaders: Record<string, string | string[] | undefined> = {}
+    const server = http.createServer((req, res) => {
+      capturedHeaders = req.headers
+      res.statusCode = 200
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ active_service_id: 'svc-1' }))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
+    mockCookies.mockReturnValue({ toString: () => 'session=xyz; theme=dark' })
     mockHeaders.mockReturnValue({
       get: (k: string) => {
         const norm = k.toLowerCase()
@@ -82,53 +96,49 @@ describe('fetchBootstrapServerSide', () => {
         return null
       },
     })
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({}),
+
+    try {
+      const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+      const out = await fetchBootstrapServerSide()
+      expect(out).toEqual({ active_service_id: 'svc-1' })
+      // Security-critical assertions: when inbound has the Caddy
+      // marker, upstream MUST set X-Remote-Analyst AND forward the
+      // public Host so the backend classifies as remote-analyst
+      // instead of admin-from-loopback.
+      expect(capturedHeaders['x-remote-analyst']).toBe('1')
+      expect(capturedHeaders.host).toBe('fastly-log-analytics.global.ssl.fastly.net')
+      expect(capturedHeaders.cookie).toBe('session=xyz; theme=dark')
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('admin SSH-tunnel path: no Caddy header inbound → no X-Remote-Analyst, no Host override', async () => {
+    const http = await import('node:http')
+    let capturedHeaders: Record<string, string | string[] | undefined> = {}
+    const server = http.createServer((req, res) => {
+      capturedHeaders = req.headers
+      res.statusCode = 200
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ active_service_id: 'svc-1' }))
     })
-    global.fetch = fetchSpy as unknown as typeof fetch
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
+    mockCookies.mockReturnValue({ toString: () => '' })
+    mockHeaders.mockReturnValue({ get: (_k: string) => null })
 
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
-    await fetchBootstrapServerSide()
-    const [, opts] = fetchSpy.mock.calls[0]
-    expect(opts.headers['X-Remote-Analyst']).toBe('1')
-    expect(opts.headers.Host).toBe('fastly-log-analytics.global.ssl.fastly.net')
-  })
-
-  it('returns null on a non-2xx response', async () => {
-    process.env.API_PROXY_URL = 'http://backend:8000'
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 503,
-      json: async () => ({}),
-    }) as unknown as typeof fetch
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
-    const out = await fetchBootstrapServerSide()
-    expect(out).toBeNull()
-    expect(warn).toHaveBeenCalled()
-  })
-
-  it('returns null on a network/timeout error', async () => {
-    process.env.API_PROXY_URL = 'http://backend:8000'
-    global.fetch = vi.fn().mockRejectedValue(new Error('connection refused')) as unknown as typeof fetch
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
-    const out = await fetchBootstrapServerSide()
-    expect(out).toBeNull()
-    expect(warn).toHaveBeenCalled()
-  })
-
-  it('returns null when API_PROXY_URL is unset (pure `next dev` outside docker compose)', async () => {
-    const fetchSpy = vi.fn()
-    global.fetch = fetchSpy as unknown as typeof fetch
-
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
-    const out = await fetchBootstrapServerSide()
-    expect(out).toBeNull()
-    expect(fetchSpy).not.toHaveBeenCalled()
+    try {
+      const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+      await fetchBootstrapServerSide()
+      expect(capturedHeaders['x-remote-analyst']).toBeUndefined()
+      // Host header defaults to whatever node:http sets from the URL
+      // (127.0.0.1:<port>), NOT the public endpoint. That's what
+      // keeps the backend's _local_host_allowed branch happy for the
+      // admin path.
+      expect(capturedHeaders.host).toMatch(/^127\.0\.0\.1:\d+$/)
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
   })
 })

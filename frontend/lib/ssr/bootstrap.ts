@@ -1,6 +1,9 @@
 // Server-only by virtue of `cookies()` / `headers()` from next/headers,
 // which throw if imported from a client component or browser bundle.
 // Avoids adding the `server-only` package as a hard dep.
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+
 import { cookies, headers } from 'next/headers'
 
 import type { components } from '@/types/api.generated'
@@ -38,8 +41,53 @@ type BootstrapResponse = components['schemas']['BootstrapResponse']
 // analyst_session_id cookie identifies the session; for admin SSH
 // tunnel, there's no cookie to forward and the loopback peer alone
 // is enough for the admin classification.
+//
+// Why node:http instead of fetch(): Node's `fetch()` always
+// overrides the `Host` header from the URL, ignoring any user-
+// provided value. That defeats the inbound-Host forwarding the
+// backend's `_remote_host_allowed` gate needs to accept the
+// X-Remote-Analyst path. node:http preserves arbitrary headers
+// verbatim, which is exactly what we want here.
 
 const TIMEOUT_MS = 2000
+
+interface RawResponse {
+  statusCode: number
+  body: string
+}
+
+function rawRequest(
+  urlStr: string,
+  reqHeaders: Record<string, string>,
+  timeoutMs: number,
+): Promise<RawResponse> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlStr)
+    const lib = url.protocol === 'https:' ? httpsRequest : httpRequest
+    const req = lib(
+      {
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: `${url.pathname}${url.search}`,
+        method: 'GET',
+        headers: reqHeaders,
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (c: Buffer) => chunks.push(c))
+        res.on('end', () =>
+          resolve({ statusCode: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }),
+        )
+      },
+    )
+    req.on('error', reject)
+    req.on('timeout', () => {
+      req.destroy(new Error(`SSR upstream timeout after ${timeoutMs}ms`))
+    })
+    req.end()
+  })
+}
 
 export async function fetchBootstrapServerSide(): Promise<BootstrapResponse | null> {
   const base = process.env.API_PROXY_URL
@@ -75,19 +123,12 @@ export async function fetchBootstrapServerSide(): Promise<BootstrapResponse | nu
       if (inboundHost) upstreamHeaders.Host = inboundHost
     }
 
-    const res = await fetch(`${base}/api/bootstrap`, {
-      method: 'GET',
-      headers: upstreamHeaders,
-      cache: 'no-store',
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    })
-
-    if (!res.ok) {
-      console.warn(`[ssr/bootstrap] upstream returned ${res.status}; falling back to client fetch`)
+    const { statusCode, body } = await rawRequest(`${base}/api/bootstrap`, upstreamHeaders, TIMEOUT_MS)
+    if (statusCode < 200 || statusCode >= 300) {
+      console.warn(`[ssr/bootstrap] upstream returned ${statusCode}; falling back to client fetch`)
       return null
     }
-
-    return (await res.json()) as BootstrapResponse
+    return JSON.parse(body) as BootstrapResponse
   } catch (err) {
     console.warn('[ssr/bootstrap] fetch failed; falling back to client fetch:', err)
     return null
