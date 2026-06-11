@@ -62,6 +62,8 @@ EDGE_DATA_MAPPING = {
     "data_segs": 'if(client.socket.tcpi_data_segs_out > 0, "" + client.socket.tcpi_data_segs_out, "null")',
     # Group H — Security: TLS Fingerprinting (TLS state only valid at true edge PoP)
     "tls_csha": "tls.client.ciphers_list_sha",
+    "h2fp": "fastly_info.h2.fingerprint",
+    "ohfp": "fastly_info.oh_fingerprint",
 }
 
 
