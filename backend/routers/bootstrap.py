@@ -202,9 +202,16 @@ def bootstrap(
         nonlocal header_badge_payload
         if not valid_active_id:
             return
+        # svcconfig.get_status is keyed on the service NAME, not the
+        # service_id. They're often identical, but resolving via the
+        # source dict matches the dedicated /api/sync-status handler
+        # exactly so analyst/admin both look in the same place.
+        active_src = _db.get_source_for_service(valid_active_id)
+        if not active_src:
+            return
         from backend import config as svcconfig
 
-        cached_status = svcconfig.get_status(valid_active_id) or {}
+        cached_status = svcconfig.get_status(active_src["name"]) or {}
         latest = (
             cached_status.get("latest_log_at")
             or cached_status.get("latest_available_file_at")
