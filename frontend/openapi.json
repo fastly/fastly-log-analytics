@@ -9279,6 +9279,197 @@
         }
       }
     },
+    "/api/admin/queries": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "List Queries",
+        "operationId": "list_queries_api_admin_queries_get",
+        "parameters": [
+          {
+            "name": "since_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Since Seq"
+            }
+          },
+          {
+            "name": "include_completed",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Completed"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/queries/summary": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "Queries Summary",
+        "operationId": "queries_summary_api_admin_queries_summary_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SummaryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/queries/{qid}": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "Get Query",
+        "description": "Fetch the full SQL + attribution for a single in-flight query.\n\nLooks up the active row only \u2014 completed queries are returned via the\nsnapshot endpoint with ``include_completed=true``.",
+        "operationId": "get_query_api_admin_queries__qid__get",
+        "parameters": [
+          {
+            "name": "qid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Qid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Query Api Admin Queries  Qid  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/queries/{qid}/cancel": {
+      "post": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "Cancel Query",
+        "operationId": "cancel_query_api_admin_queries__qid__cancel_post",
+        "parameters": [
+          {
+            "name": "qid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Qid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/app-config/query-monitor": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "Query Monitor Config",
+        "description": "Tiny config endpoint the frontend hits on mount to decide whether to\nrender the Live Query Monitor tab. Returns enabled=False (not 404) so\nthe nav can render a stable shape regardless of the flag state.",
+        "operationId": "query_monitor_config_api_admin_app_config_query_monitor_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Query Monitor Config Api Admin App Config Query Monitor Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/provision/services": {
       "get": {
         "tags": [
@@ -13892,6 +14083,24 @@
           "rdns"
         ],
         "title": "BotSourcesResponse"
+      },
+      "CancelResponse": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "query_id": {
+            "type": "integer",
+            "title": "Query Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state",
+          "query_id"
+        ],
+        "title": "CancelResponse"
       },
       "CheckFosRequest": {
         "properties": {
@@ -19920,6 +20129,37 @@
         "type": "object",
         "title": "ShareStartPayload"
       },
+      "SnapshotResponse": {
+        "properties": {
+          "last_seq": {
+            "type": "integer",
+            "title": "Last Seq"
+          },
+          "active": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Active"
+          },
+          "completed": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Completed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "last_seq",
+          "active",
+          "completed"
+        ],
+        "title": "SnapshotResponse"
+      },
       "SqliteProfilerEntry": {
         "properties": {
           "seq": {
@@ -19967,6 +20207,32 @@
           "op"
         ],
         "title": "SqliteProfilerEntry"
+      },
+      "SummaryResponse": {
+        "properties": {
+          "active_total": {
+            "type": "integer",
+            "title": "Active Total"
+          },
+          "by_db_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "By Db Type"
+          },
+          "longest_ms": {
+            "type": "number",
+            "title": "Longest Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "active_total",
+          "by_db_type",
+          "longest_ms"
+        ],
+        "title": "SummaryResponse"
       },
       "SustainedLossAlert": {
         "properties": {

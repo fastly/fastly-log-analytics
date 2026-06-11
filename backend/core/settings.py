@@ -46,10 +46,10 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=None,                # we read process env, not .env files
-        env_prefix="",                # env var names are uppercase exact
-        case_sensitive=False,         # OTEL_ENABLED / otel_enabled both work
-        extra="ignore",               # don't error on unrelated env vars
+        env_file=None,  # we read process env, not .env files
+        env_prefix="",  # env var names are uppercase exact
+        case_sensitive=False,  # OTEL_ENABLED / otel_enabled both work
+        extra="ignore",  # don't error on unrelated env vars
         validate_default=False,
         frozen=False,
     )
@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     debug_responses: bool = Field(default=False, alias="DEBUG_RESPONSES")
     """Inject ``_debug_queries`` / ``_debug_calls`` / ``_is_cached`` into
     response bodies. Off in prod; on locally for the debug panel."""
+
+    query_monitor_enabled: bool = Field(default=True, alias="QUERY_MONITOR_ENABLED")
+    """Live admin query-monitor surface. When False, the in-memory active
+    registry still runs (cost is ~5-10us per query, same as the sqlite
+    profiler) but the ``/api/admin/queries`` router returns 404 and the
+    frontend tab hides itself via ``/api/admin/app-config``. Kill switch
+    for ops if the registry ever causes pressure."""
 
     # ── DuckDB engine tuning ─────────────────────────────────────────────────
 

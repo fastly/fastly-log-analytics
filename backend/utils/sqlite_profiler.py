@@ -29,6 +29,8 @@ from collections import deque
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
+
 logger = logging.getLogger(__name__)
 
 # Ring buffer cap. ~500B per entry × 1000 = ~500KB worst case — bounded.
@@ -91,6 +93,39 @@ def _describe_params(params: Any) -> str:
     return type(params).__name__
 
 
+def _live_register(db_type: str, sql: Any, con: Any) -> int:
+    """Register the executing statement with the Live Query Monitor's
+    registry and bind ``query_id`` into the structlog context. Mirrors the
+    profiler's contract: any failure here is swallowed at DEBUG and the SQL
+    path continues unaffected."""
+    try:
+        from backend.core.query_registry import query_registry
+
+        qid = query_registry.register(db_type, str(sql), con=con)
+        if qid >= 0:
+            structlog.contextvars.bind_contextvars(query_id=qid)
+        return qid
+    except Exception:
+        logger.debug("live-registry register failed", exc_info=True)
+        return -1
+
+
+def _live_deregister(qid: int, error: BaseException | None) -> None:
+    if qid < 0:
+        return
+    try:
+        from backend.core.query_registry import query_registry
+
+        query_registry.deregister(qid, error=error)
+    except Exception:
+        logger.debug("live-registry deregister failed", exc_info=True)
+    finally:
+        try:
+            structlog.contextvars.unbind_contextvars("query_id")
+        except Exception:
+            pass
+
+
 class InstrumentedCursor(sqlite3.Cursor):
     """Cursor subclass that times every execute/executemany/executescript.
 
@@ -102,16 +137,28 @@ class InstrumentedCursor(sqlite3.Cursor):
 
     def execute(self, sql, parameters=(), /):  # type: ignore[override]
         t0 = time.perf_counter()
+        qid = _live_register("SQLite", sql, self.connection)
+        err: BaseException | None = None
         try:
             return super().execute(sql, parameters)
+        except BaseException as e:
+            err = e
+            raise
         finally:
+            _live_deregister(qid, err)
             _record(sql, parameters, (time.perf_counter() - t0) * 1000.0, self.rowcount, "execute")
 
     def executemany(self, sql, seq_of_parameters, /):  # type: ignore[override]
         t0 = time.perf_counter()
+        qid = _live_register("SQLite", sql, self.connection)
+        err: BaseException | None = None
         try:
             return super().executemany(sql, seq_of_parameters)
+        except BaseException as e:
+            err = e
+            raise
         finally:
+            _live_deregister(qid, err)
             _record(
                 sql,
                 seq_of_parameters,
@@ -122,9 +169,15 @@ class InstrumentedCursor(sqlite3.Cursor):
 
     def executescript(self, sql_script, /):  # type: ignore[override]
         t0 = time.perf_counter()
+        qid = _live_register("SQLite", sql_script, self.connection)
+        err: BaseException | None = None
         try:
             return super().executescript(sql_script)
+        except BaseException as e:
+            err = e
+            raise
         finally:
+            _live_deregister(qid, err)
             _record(sql_script, None, (time.perf_counter() - t0) * 1000.0, self.rowcount, "executescript")
 
 

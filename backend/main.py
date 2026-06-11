@@ -530,12 +530,59 @@ async def telemetry_middleware(request: Request, call_next):
     reads to whichever API request happened most recently (observed in
     the 2026-05-24 audit: dashboard's cdn.miss rows landed tagged as
     `api:GET /api/debug/recent-sqlite` because the debug poller ran last).
+
+    Also sets the Live Query Monitor's :data:`current_attribution`
+    ContextVar here (NOT in :func:`build_request_context`) so the value
+    propagates to sync dependencies and the route handler via FastAPI's
+    ``run_in_threadpool`` — each threadpool call copies the parent
+    context, and a ContextVar set INSIDE a dep doesn't flow forward to
+    the route's separate threadpool call. Setting from the middleware
+    avoids that gap.
     """
     from backend import config as svcconfig
+    from backend.core.query_attribution import (
+        Attribution as _Attribution,
+    )
+    from backend.core.query_attribution import (
+        current_attribution as _current_attribution,
+    )
     from backend.utils.telemetry import process_context_scope, start_call_tracking
 
     start_call_tracking()
     ctx_name = f"api:{request.method} {request.url.path}"
+
+    # Best-effort attribution: analyst_session is only on request.state
+    # once RemoteAccessMiddleware has run (which is the case here since
+    # we sit inside it). Derive admin from client host as the fallback.
+    analyst_session = getattr(request.state, "analyst_session", None)
+    request_path = request.url.path
+    try:
+        from opentelemetry import trace as _otel_trace
+
+        _span = _otel_trace.get_current_span()
+        _sctx = _span.get_span_context() if _span is not None else None
+        request_id = format(_sctx.trace_id, "032x") if _sctx and _sctx.is_valid else None
+    except Exception:
+        request_id = None
+    if analyst_session is not None:
+        attr = _Attribution.analyst(
+            analyst_id=getattr(analyst_session, "session_id", None) or "unknown",
+            analyst_name=getattr(analyst_session, "name", None) or None,
+            request_path=request_path,
+            request_id=request_id,
+        )
+    else:
+        client_host = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
+            request.client.host if request.client else "unknown"
+        )
+        attr = _Attribution.admin(
+            admin_id=client_host or "admin",
+            request_path=request_path,
+            request_id=request_id,
+        )
+    _prev_attr = _current_attribution.get()
+    _current_attribution.set(attr)
+
     with process_context_scope(ctx_name):
         try:
             response = await call_next(request)
@@ -557,6 +604,14 @@ async def telemetry_middleware(request: Request, call_next):
                     flush_usage_log(sid)
             except Exception:
                 pass
+    # Restore the prior attribution value AFTER process_context_scope has
+    # popped — so any final iothread drain still sees this request's
+    # attribution, mirroring the rationale documented above for
+    # _LATEST_PROCESS_CONTEXT.
+    try:
+        _current_attribution.set(_prev_attr)
+    except Exception:
+        pass
     return response
 
 
@@ -589,6 +644,7 @@ app.include_router(origin.router)
 
 from backend.routers import (
     admin,
+    admin_queries,
     bootstrap,
     debug,
     provision,
@@ -603,6 +659,7 @@ app.include_router(bootstrap.router)
 app.include_router(services.router)
 app.include_router(usage.router)
 app.include_router(admin.router)
+app.include_router(admin_queries.router)
 app.include_router(provision.router)
 app.include_router(session_scoring.router)
 app.include_router(debug.router)

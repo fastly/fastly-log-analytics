@@ -561,31 +561,58 @@ def checkout_connection(src: dict, max_wait: float = 10.0):
     Falls back to the legacy always-fresh path when ``DUCKDB_CONNECTION_POOL``
     is disabled. Returns the connection to the pool on clean exit; discards
     it on any exception so a poisoned connection doesn't get reused.
+
+    The yielded value is an :class:`InstrumentedDuckDBConnection` proxy that
+    records every ``execute()``/``sql()``/``query()`` in the Live Query
+    Monitor registry. The proxy is local to this contextmanager — the raw
+    connection is what flows into/out of the pool — so the pool's
+    ``id(con)``-keyed state ([_conn_state]) and ``pool.release(raw_con, ...)``
+    bookkeeping are untouched.
     """
     if not _pool_enabled():
         from backend.core.duckdb import get_connection
 
-        con = get_connection(source=src, read_only=True, max_wait=max_wait)
+        raw_con = get_connection(source=src, read_only=True, max_wait=max_wait)
+        wrapped = _instrument(raw_con, service_key=src.get("name") or src.get("service_id"))
         try:
-            yield con
+            yield wrapped
         finally:
             try:
-                con.close()
+                raw_con.close()
             except Exception:
                 pass
         return
 
     service_key = src.get("name") or src.get("service_id") or "default"
     pool = _get_pool(service_key)
-    con = pool.acquire(src, max_wait=max_wait)
+    raw_con = pool.acquire(src, max_wait=max_wait)
+    wrapped = _instrument(raw_con, service_key=service_key)
     errored = False
     try:
-        yield con
+        yield wrapped
     except Exception:
         errored = True
         raise
     finally:
-        pool.release(con, errored=errored)
+        # Always release the RAW connection — pool internals key on id(raw)
+        # and _conn_state lookups would miss if we passed the proxy in.
+        pool.release(raw_con, errored=errored)
+
+
+def _instrument(raw_con, *, service_key: str | None):
+    """Wrap a raw DuckDB connection in the live-query monitor proxy.
+
+    Lazy import so the duckdb_pool module stays importable in tests that
+    don't pull in the registry. Returns the raw connection unchanged if
+    instrumentation construction fails — instrumentation must never block
+    a checkout."""
+    try:
+        from backend.core.query_instrumentation import InstrumentedDuckDBConnection
+
+        return InstrumentedDuckDBConnection(raw_con, service_id=service_key)
+    except Exception:
+        logger.debug("DuckDB live-instrumentation skipped", exc_info=True)
+        return raw_con
 
 
 def warm_pool_for_service(service_key: str, src: dict) -> None:

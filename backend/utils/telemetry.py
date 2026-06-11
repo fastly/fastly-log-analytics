@@ -126,6 +126,27 @@ def process_context_scope(name: str):
     """
     global _LATEST_PROCESS_CONTEXT
     token = _PROCESS_CONTEXT.set(name)
+    # Mirror into the Live Query Monitor attribution ContextVar so cron
+    # queries get a kind="cron" row instead of "system". Use snapshot-and-
+    # restore rather than token-reset because the cron scope can be entered
+    # and exited across context boundaries (asyncio.to_thread, fsspec
+    # iothread) which would make ContextVar.reset() raise.
+    prev_attribution = None
+    attribution_set = False
+    try:
+        from backend.core.query_attribution import (
+            current_attribution,
+            derive_from_process_context,
+        )
+
+        attribution = derive_from_process_context(name)
+        if attribution is not None:
+            prev_attribution = current_attribution.get()
+            current_attribution.set(attribution)
+            attribution_set = True
+    except Exception:
+        # Attribution wiring is observability, not control flow.
+        attribution_set = False
     with _LATEST_PROCESS_CONTEXT_LOCK:
         _ACTIVE_CONTEXTS.append(name)
         _LATEST_PROCESS_CONTEXT = name
@@ -133,6 +154,13 @@ def process_context_scope(name: str):
         yield
     finally:
         _PROCESS_CONTEXT.reset(token)
+        if attribution_set:
+            try:
+                from backend.core.query_attribution import current_attribution
+
+                current_attribution.set(prev_attribution)
+            except Exception:
+                pass
         with _LATEST_PROCESS_CONTEXT_LOCK:
             try:
                 # Remove the *last* occurrence so nested scopes with the

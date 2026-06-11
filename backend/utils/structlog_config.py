@@ -86,3 +86,17 @@ def get_logger(name: str | None = None) -> Any:
     """Convenience re-export so callers don't import both structlog and
     this module."""
     return structlog.get_logger(name) if name else structlog.get_logger()
+
+
+# Dedicated audit-action logger. Same processor chain as the rest of
+# structlog (so OTel trace_id + structured kv pairs survive), but a stable
+# logger name (``audit``) that downstream log routing can grep for or split
+# into a dedicated stream. Today it routes through the same sink as every
+# other log; promoting to a separate file is a one-line change in whichever
+# infra layer (loki, vector, fluent-bit) ingests the JSON.
+#
+# Use for actions an operator may need to reconstruct post-incident:
+# query cancellations, share-passcode revocations, manual cron triggers,
+# etc. Always pass structured kwargs (``actor``, ``target``, identifying
+# ids); never embed the same info in a free-text message.
+audit_log = structlog.get_logger("audit")

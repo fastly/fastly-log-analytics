@@ -135,6 +135,7 @@ def build_request_context(
     telemetry.start_request()
 
     holder = _ConnectionHolder(source, read_only=True)
+    analyst_session = getattr(request.state, "analyst_session", None)
     try:
         with holder as con:
             ctx = RequestContext(
@@ -142,7 +143,7 @@ def build_request_context(
                 source=source,
                 con=con,
                 telemetry=telemetry,
-                analyst_session=getattr(request.state, "analyst_session", None),
+                analyst_session=analyst_session,
                 read_only=True,
                 _holder=holder,
             )
@@ -156,6 +157,14 @@ def build_request_context(
     except HTTPException:
         telemetry.end_request(status_code=400)
         raise
+    # Note on Live Query Monitor attribution: the attribution ContextVar is
+    # set/restored by ``telemetry_middleware`` in backend/main.py, NOT here.
+    # FastAPI runs sync deps and the route handler in separate
+    # ``run_in_threadpool`` calls — each copies the parent context at
+    # submit time, so a ContextVar set inside this dep doesn't propagate
+    # to the route's threadpool call. Setting it at the middleware layer
+    # (which runs in the event loop's context that both copies share)
+    # makes it visible everywhere downstream.
 
 
 def _resolve_source(service_id: str) -> dict:

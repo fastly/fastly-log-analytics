@@ -1875,6 +1875,102 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/queries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Queries */
+        get: operations["list_queries_api_admin_queries_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/queries/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Queries Summary */
+        get: operations["queries_summary_api_admin_queries_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/queries/{qid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Query
+         * @description Fetch the full SQL + attribution for a single in-flight query.
+         *
+         *     Looks up the active row only — completed queries are returned via the
+         *     snapshot endpoint with ``include_completed=true``.
+         */
+        get: operations["get_query_api_admin_queries__qid__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/queries/{qid}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Query */
+        post: operations["cancel_query_api_admin_queries__qid__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/app-config/query-monitor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Query Monitor Config
+         * @description Tiny config endpoint the frontend hits on mount to decide whether to
+         *     render the Live Query Monitor tab. Returns enabled=False (not 404) so
+         *     the nav can render a stable shape regardless of the flag state.
+         */
+        get: operations["query_monitor_config_api_admin_app_config_query_monitor_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/provision/services": {
         parameters: {
             query?: never;
@@ -3893,6 +3989,13 @@ export interface components {
             /** Sources */
             sources: components["schemas"]["BotSourceMeta"][];
             rdns: components["schemas"]["RdnsStats"];
+        };
+        /** CancelResponse */
+        CancelResponse: {
+            /** State */
+            state: string;
+            /** Query Id */
+            query_id: number;
         };
         /** CheckFosRequest */
         CheckFosRequest: {
@@ -6534,6 +6637,19 @@ export interface components {
              */
             forward_port: number;
         };
+        /** SnapshotResponse */
+        SnapshotResponse: {
+            /** Last Seq */
+            last_seq: number;
+            /** Active */
+            active: {
+                [key: string]: unknown;
+            }[];
+            /** Completed */
+            completed: {
+                [key: string]: unknown;
+            }[];
+        };
         /** SqliteProfilerEntry */
         SqliteProfilerEntry: {
             /** Seq */
@@ -6553,6 +6669,17 @@ export interface components {
              * @enum {string}
              */
             op: "execute" | "executemany" | "executescript";
+        };
+        /** SummaryResponse */
+        SummaryResponse: {
+            /** Active Total */
+            active_total: number;
+            /** By Db Type */
+            by_db_type: {
+                [key: string]: number;
+            };
+            /** Longest Ms */
+            longest_ms: number;
         };
         /** SustainedLossAlert */
         SustainedLossAlert: {
@@ -10698,6 +10825,144 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SystemJobsResponse"];
+                };
+            };
+        };
+    };
+    list_queries_api_admin_queries_get: {
+        parameters: {
+            query?: {
+                since_seq?: number;
+                include_completed?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnapshotResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    queries_summary_api_admin_queries_summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SummaryResponse"];
+                };
+            };
+        };
+    };
+    get_query_api_admin_queries__qid__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                qid: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_query_api_admin_queries__qid__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                qid: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CancelResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    query_monitor_config_api_admin_app_config_query_monitor_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };
