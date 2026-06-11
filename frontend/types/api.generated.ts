@@ -3793,6 +3793,10 @@ export interface components {
             views?: {
                 [key: string]: unknown;
             }[];
+            /** Log Fields Catalog */
+            log_fields_catalog?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** BootstrapService */
         BootstrapService: {

@@ -147,6 +147,24 @@ def bootstrap(
 
     _timed("custom_fields_catalog", _resolve_custom_fields)
 
+    # Perf audit Phase D: fold the log-fields catalog into the
+    # bootstrap response so the frontend can seed its
+    # ['log-fields-catalog', service_id] React Query cache from the
+    # same payload (mirrors how `views` is already seeded). Saves one
+    # HTTP round-trip + ~35 KB transfer on every cold page load
+    # without changing the dedicated /api/log-fields/catalog endpoint
+    # (other consumers / direct callers still work). Analyst-scope is
+    # already enforced for valid_active_id above.
+    log_fields_catalog_payload: dict | None = None
+
+    def _resolve_log_fields_catalog():
+        nonlocal log_fields_catalog_payload
+        if not valid_active_id:
+            return
+        log_fields_catalog_payload = _compute_log_fields_catalog(valid_active_id)
+
+    _timed("log_fields_catalog", _resolve_log_fields_catalog)
+
     views: list[dict] = []
 
     def _resolve_views() -> list[dict]:
@@ -187,6 +205,7 @@ def bootstrap(
         custom_dashboard_cards=custom_dashboard_cards,
         active_log_field_ids=active_log_field_ids,
         views=views,
+        log_fields_catalog=log_fields_catalog_payload,
         section_timings=section_timings,
     )
 
@@ -257,6 +276,43 @@ def schema_endpoint(
     return {"schema": get_schema(con, source), "table_name": _safe_table_name(source["name"])}
 
 
+def _compute_log_fields_catalog(service_id: str | None) -> dict:
+    """Build the log-fields catalog payload for ``service_id``.
+
+    Extracted so /api/bootstrap can fold the catalog into its response
+    (page-shell composite, perf audit Phase D) without paying a second
+    HTTP round-trip on every cold page load.
+
+    Caller is responsible for analyst-scope enforcement on ``service_id``
+    before invoking — this helper trusts the caller.
+    """
+    from backend.core import field_registry as fr
+    from backend.core import log_fields as lf
+
+    field_limits: dict = {}
+    custom_entries: list = []
+    if service_id:
+        from backend import config as svcconfig
+
+        cfg = svcconfig.load_config(service_id)
+        if cfg:
+            lf_config = lf.get_lf_config(cfg)
+            field_limits = lf_config.get("field_limits", {})
+            custom_entries = lf.get_custom_fields_catalog_entries(lf_config)
+
+    fields = fr.get_catalog_for_api(field_limits) + custom_entries
+
+    return {
+        "groups": fr.get_groups_for_api(),
+        "fields": fields,
+        "insights": fr.INSIGHT_DEFINITIONS,
+        "presets": {
+            name: {"label": p["label"], "description": p["description"], "groups": p["groups"]}
+            for name, p in fr.PRESETS.items()
+        },
+    }
+
+
 @router.get("/log-fields/catalog")
 @query_errors(status_code=500)
 def log_fields_catalog(
@@ -270,13 +326,6 @@ def log_fields_catalog(
     ``?service_id=svc-B`` and read svc-B's custom field configuration
     (including PII-related field configs).
     """
-    # Catalog/group/preset/insight reads go through the Phase 7 registry
-    # surface (see backend/core/field_registry.py). The custom-field config
-    # helpers (`get_lf_config`, `get_custom_fields_catalog_entries`) remain
-    # on `log_fields` — they're config-shaped, not registry-shaped.
-    from backend.core import field_registry as fr
-    from backend.core import log_fields as lf
-
     analyst_session = getattr(request.state, "analyst_session", None)
     if analyst_session is not None and service_id is not None:
         allowed = set(analyst_session.service_ids or [])
@@ -286,32 +335,7 @@ def log_fields_catalog(
                 detail={"error": "service_not_authorized", "service": service_id},
             )
 
-    # Try to load existing limits
-    field_limits = {}
-    if service_id:
-        from backend import config as svcconfig
-
-        cfg = svcconfig.load_config(service_id)
-        if cfg:
-            lf_config = lf.get_lf_config(cfg)
-            field_limits = lf_config.get("field_limits", {})
-            custom_entries = lf.get_custom_fields_catalog_entries(lf_config)
-        else:
-            custom_entries = []
-    else:
-        custom_entries = []
-
-    fields = fr.get_catalog_for_api(field_limits) + custom_entries
-
-    return {
-        "groups": fr.get_groups_for_api(),
-        "fields": fields,
-        "insights": fr.INSIGHT_DEFINITIONS,
-        "presets": {
-            name: {"label": p["label"], "description": p["description"], "groups": p["groups"]}
-            for name, p in fr.PRESETS.items()
-        },
-    }
+    return _compute_log_fields_catalog(service_id)
 
 
 from backend.models.dashboard import InsightsAvailabilityResponse

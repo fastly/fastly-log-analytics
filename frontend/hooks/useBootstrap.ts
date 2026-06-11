@@ -42,6 +42,17 @@ export function useBootstrap() {
     if (seededActive && Array.isArray(seededViews)) {
       queryClient.setQueryData(['views', seededActive], seededViews)
     }
+
+    // Seed the log-fields catalog cache from the bootstrap response so
+    // useLogFieldsCatalog hits cache on first call instead of paying a
+    // ~35 KB / 200 ms /api/log-fields/catalog round-trip on every cold
+    // page load (perf audit Phase D). The dedicated endpoint stays for
+    // any caller that bypasses the bootstrap seed (e.g. logging-out
+    // analyst flows). Query key matches queryKeys.logFieldsCatalog().
+    const seededCatalog = (query.data as any).log_fields_catalog
+    if (seededActive && seededCatalog) {
+      queryClient.setQueryData(['log-fields-catalog', seededActive], seededCatalog)
+    }
   }, [query.data, setServices, setInitialized, queryClient])
 
   useEffect(() => {
@@ -51,13 +62,13 @@ export function useBootstrap() {
 
     if (!activeServiceId && services.length > 0) {
       const defaultId = query.data.active_service_id && services.some(s => s.id === query.data!.active_service_id)
-        ? query.data.active_service_id 
+        ? query.data.active_service_id
         : services[0]?.id
       if (defaultId) setActiveServiceId(defaultId)
     } else if (activeServiceId && !currentServiceExists) {
       const defaultId = services.length > 0 ? (
         (query.data.active_service_id && services.some(s => s.id === query.data!.active_service_id))
-          ? query.data.active_service_id 
+          ? query.data.active_service_id
           : services[0]?.id
       ) : null
       if (activeServiceId !== defaultId) setActiveServiceId(defaultId)

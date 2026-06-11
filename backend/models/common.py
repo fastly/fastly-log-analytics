@@ -222,4 +222,10 @@ class BootstrapResponse(BaseResponse):
     # render ViewSelector and rehydrate from URL view params without a
     # second /api/views/{service_id} round-trip on every page nav.
     views: list[dict] = Field(default_factory=list)
+    # Full log-fields catalog (same payload as /api/log-fields/catalog)
+    # for the active service. Folded in so the frontend can seed its
+    # ['log-fields-catalog', service_id] React Query cache and skip the
+    # 35-KB round-trip on every cold page load (perf audit Phase D).
+    # None when no active service.
+    log_fields_catalog: dict | None = None
     # section_timings is inherited from BaseResponse.

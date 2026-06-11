@@ -13667,6 +13667,18 @@
             },
             "type": "array",
             "title": "Views"
+          },
+          "log_fields_catalog": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Fields Catalog"
           }
         },
         "type": "object",
