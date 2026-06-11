@@ -5973,6 +5973,20 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /**
+             * H2 Fingerprints
+             * @default []
+             */
+            h2_fingerprints: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Oh Fingerprints
+             * @default []
+             */
+            oh_fingerprints: {
+                [key: string]: unknown;
+            }[];
+            /**
              * Req Size Dist
              * @default []
              */

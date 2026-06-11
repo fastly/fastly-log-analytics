@@ -175,6 +175,8 @@ def get_security_aggregates(
         "timestamp",
         "ip",
         "tls_ciphers_sha",
+        "h2_fingerprint",
+        "oh_fingerprint",
         "req_header_bytes",
         "is_ipv6",
         "p_type",
@@ -293,6 +295,22 @@ def _build_security_response(
         results["tls_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
     else:
         results["tls_fingerprints"] = []
+
+    # 1.1 H2 Fingerprints
+    if "h2_fingerprint" in actual_cols and "ip" in actual_cols:
+        q = SQL.H2_FINGERPRINTS.format(temp_table=temp_table)
+        res = runner.execute(q).fetchall()
+        results["h2_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
+    else:
+        results["h2_fingerprints"] = []
+
+    # 1.2 OH Fingerprints
+    if "oh_fingerprint" in actual_cols and "ip" in actual_cols:
+        q = SQL.OH_FINGERPRINTS.format(temp_table=temp_table)
+        res = runner.execute(q).fetchall()
+        results["oh_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
+    else:
+        results["oh_fingerprints"] = []
 
     # 3. Request Header Size Distribution
     if "req_header_bytes" in actual_cols:

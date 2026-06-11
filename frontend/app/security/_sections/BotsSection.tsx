@@ -33,6 +33,12 @@ type Props = {
   fingerprintVisibility: VisibilityState
   setFingerprintVisibility: Dispatch<SetStateAction<VisibilityState>>
   onFingerprintVisChange: (id: string, vis: boolean) => void
+  h2FingerprintVisibility: VisibilityState
+  setH2FingerprintVisibility: Dispatch<SetStateAction<VisibilityState>>
+  onH2FingerprintVisChange: (id: string, vis: boolean) => void
+  ohFingerprintVisibility: VisibilityState
+  setOhFingerprintVisibility: Dispatch<SetStateAction<VisibilityState>>
+  onOhFingerprintVisChange: (id: string, vis: boolean) => void
 }
 
 export function BotsSection({
@@ -53,6 +59,12 @@ export function BotsSection({
   fingerprintVisibility,
   setFingerprintVisibility,
   onFingerprintVisChange,
+  h2FingerprintVisibility,
+  setH2FingerprintVisibility,
+  onH2FingerprintVisChange,
+  ohFingerprintVisibility,
+  setOhFingerprintVisibility,
+  onOhFingerprintVisChange,
 }: Props) {
   const ngwafBotsData = React.useMemo(() => {
     const timeseries = (data as any)?.ngwaf_verified_bots_ts
@@ -192,6 +204,40 @@ export function BotsSection({
     { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => info.getValue().toLocaleString() },
   ]
 
+  const h2FingerprintColumns = [
+    {
+      accessorKey: 'fingerprint',
+      header: 'HTTP/2 Fingerprint',
+      cell: (info: any) => (
+        <DashboardLinkCell
+          value={info.getValue()}
+          href={`/dashboard?filter_h2_fingerprint=${encodeURIComponent(info.getValue())}`}
+          className="font-mono text-[10px]"
+          containerClassName="max-w-[200px]"
+        />
+      )
+    },
+    { accessorKey: 'ip_count', header: 'Unique IPs', cell: (info: any) => info.getValue().toLocaleString() },
+    { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => info.getValue().toLocaleString() },
+  ]
+
+  const ohFingerprintColumns = [
+    {
+      accessorKey: 'fingerprint',
+      header: 'Original Header Fingerprint',
+      cell: (info: any) => (
+        <DashboardLinkCell
+          value={info.getValue()}
+          href={`/dashboard?filter_oh_fingerprint=${encodeURIComponent(info.getValue())}`}
+          className="font-mono text-[10px]"
+          containerClassName="max-w-[200px]"
+        />
+      )
+    },
+    { accessorKey: 'ip_count', header: 'Unique IPs', cell: (info: any) => info.getValue().toLocaleString() },
+    { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => info.getValue().toLocaleString() },
+  ]
+
   return (
     <>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
@@ -294,6 +340,54 @@ export function BotsSection({
             hideToolbar
             columnVisibility={fingerprintVisibility}
             onColumnVisibilityChange={setFingerprintVisibility}
+          />
+        </AnalyticsCard>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <AnalyticsCard
+          title="Top HTTP/2 Fingerprints"
+          icon={<Fingerprint className="h-4 w-4" />}
+          headerAction={
+            <ColumnVisibilityDropdown columns={FINGERPRINT_COLUMN_IDS.map(id => ({ id, label: getFieldLabel(id) }))} visibility={h2FingerprintVisibility} onChange={onH2FingerprintVisChange} />
+          }
+          isLoading={isLoading}
+          isFetching={isFetching}
+          className="min-h-[300px]"
+          contentClassName="p-0"
+          helpTitle={SECURITY_INFO.h2_fingerprints.title}
+          helpContent={SECURITY_INFO.h2_fingerprints.body}
+        >
+          <DataTable
+            columns={h2FingerprintColumns}
+            data={(data as any)?.h2_fingerprints || []}
+            emptyMessage={isLoading ? "" : "Requires Group H fields to be enabled in Fastly logging."}
+            hideToolbar
+            columnVisibility={h2FingerprintVisibility}
+            onColumnVisibilityChange={setH2FingerprintVisibility}
+          />
+        </AnalyticsCard>
+
+        <AnalyticsCard
+          title="Top Original Header (OH) Fingerprints"
+          icon={<Fingerprint className="h-4 w-4" />}
+          headerAction={
+            <ColumnVisibilityDropdown columns={FINGERPRINT_COLUMN_IDS.map(id => ({ id, label: getFieldLabel(id) }))} visibility={ohFingerprintVisibility} onChange={onOhFingerprintVisChange} />
+          }
+          isLoading={isLoading}
+          isFetching={isFetching}
+          className="min-h-[300px]"
+          contentClassName="p-0"
+          helpTitle={SECURITY_INFO.oh_fingerprints.title}
+          helpContent={SECURITY_INFO.oh_fingerprints.body}
+        >
+          <DataTable
+            columns={ohFingerprintColumns}
+            data={(data as any)?.oh_fingerprints || []}
+            emptyMessage={isLoading ? "" : "Requires Group H fields to be enabled in Fastly logging."}
+            hideToolbar
+            columnVisibility={ohFingerprintVisibility}
+            onColumnVisibilityChange={setOhFingerprintVisibility}
           />
         </AnalyticsCard>
       </div>

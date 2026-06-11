@@ -19,6 +19,8 @@ export default function SecurityPage() {
   const timezone = useTimezone()
 
   const [fingerprintVisibility, setFingerprintVisibility, onFingerprintVisChange] = useColumnVisibility()
+  const [h2FingerprintVisibility, setH2FingerprintVisibility, onH2FingerprintVisChange] = useColumnVisibility()
+  const [ohFingerprintVisibility, setOhFingerprintVisibility, onOhFingerprintVisChange] = useColumnVisibility()
   const [topIpVisibility, setTopIpVisibility, onTopIpVisChange] = useColumnVisibility()
   const [botVisibility, setBotVisibility, onBotVisChange] = useColumnVisibility()
   const [ngwafBotVisibility, setNgwafBotVisibility, onNgwafBotVisChange] = useColumnVisibility()
@@ -63,6 +65,12 @@ export default function SecurityPage() {
             fingerprintVisibility={fingerprintVisibility}
             setFingerprintVisibility={setFingerprintVisibility}
             onFingerprintVisChange={onFingerprintVisChange}
+            h2FingerprintVisibility={h2FingerprintVisibility}
+            setH2FingerprintVisibility={setH2FingerprintVisibility}
+            onH2FingerprintVisChange={onH2FingerprintVisChange}
+            ohFingerprintVisibility={ohFingerprintVisibility}
+            setOhFingerprintVisibility={setOhFingerprintVisibility}
+            onOhFingerprintVisChange={onOhFingerprintVisChange}
           />
           <HeaderAnomaliesSection
             data={data}

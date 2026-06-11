@@ -54,6 +54,34 @@ export const SECURITY_INFO = {
       </div>
     )
   },
+  h2_fingerprints: {
+    title: 'Top HTTP/2 Fingerprints',
+    body: (
+      <div className="space-y-4 text-sm text-muted-foreground">
+        <p>Identifies clients sharing identical HTTP/2 settings and frame characteristics.</p>
+        <ul className="space-y-3 list-none pl-0">
+          <li className="flex gap-3">
+            <Fingerprint className="h-5 w-5 shrink-0 text-green-500" />
+            <span><strong>Advanced Evasion Detection:</strong> HTTP/2 fingerprinting goes beyond TLS to analyze the structure of HTTP/2 multiplexing and stream settings, making it highly effective at identifying sophisticated bots that disguise their TLS parameters.</span>
+          </li>
+        </ul>
+      </div>
+    )
+  },
+  oh_fingerprints: {
+    title: 'Top Original Header (OH) Fingerprints',
+    body: (
+      <div className="space-y-4 text-sm text-muted-foreground">
+        <p>Analyzes the exact order and casing of HTTP headers sent by the client.</p>
+        <ul className="space-y-3 list-none pl-0">
+          <li className="flex gap-3">
+            <Fingerprint className="h-5 w-5 shrink-0 text-purple-500" />
+            <span><strong>Impersonation Detection:</strong> Most HTTP clients enforce a strict, unique ordering of headers. An Original Header fingerprint helps detect when a script sends a standard browser User-Agent but fails to mimic the exact header arrangement of that browser.</span>
+          </li>
+        </ul>
+      </div>
+    )
+  },
   req_size: {
     title: 'Request Header Size Distribution',
     body: (

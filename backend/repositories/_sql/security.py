@@ -140,6 +140,38 @@ Inputs (trusted-identifier substitutions only):
 Output rows: ``(tls_ciphers_sha: str, ip_count: int, req_count: int)``.
 """
 
+H2_FINGERPRINTS = """
+            SELECT h2_fingerprint,
+                   count(DISTINCT ip) as ip_count,
+                   count(*) as req_count
+            FROM {temp_table}
+            WHERE h2_fingerprint IS NOT NULL
+            GROUP BY 1 ORDER BY 3 DESC LIMIT 20
+        """
+"""Top-20 HTTP/2 fingerprints by request volume, with IP spread.
+
+Inputs (trusted-identifier substitutions only):
+- ``{temp_table}`` — filtered TEMP TABLE name.
+
+Output rows: ``(h2_fingerprint: str, ip_count: int, req_count: int)``.
+"""
+
+OH_FINGERPRINTS = """
+            SELECT oh_fingerprint,
+                   count(DISTINCT ip) as ip_count,
+                   count(*) as req_count
+            FROM {temp_table}
+            WHERE oh_fingerprint IS NOT NULL
+            GROUP BY 1 ORDER BY 3 DESC LIMIT 20
+        """
+"""Top-20 Original Header fingerprints by request volume, with IP spread.
+
+Inputs (trusted-identifier substitutions only):
+- ``{temp_table}`` — filtered TEMP TABLE name.
+
+Output rows: ``(oh_fingerprint: str, ip_count: int, req_count: int)``.
+"""
+
 # ── Request header size distribution ──────────────────────────────────────────
 
 REQ_HEADER_SIZE_DIST = """
@@ -278,6 +310,8 @@ __all__ = [
     "NGWAF_VERIFIED_BOTS",
     "NGWAF_VERIFIED_BOTS_TS",
     "TLS_FINGERPRINTS",
+    "H2_FINGERPRINTS",
+    "OH_FINGERPRINTS",
     "REQ_HEADER_SIZE_DIST",
     "TOP_IPS_BY_MAX_HEADER",
     "IPV6_ADOPTION_TS",

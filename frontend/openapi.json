@@ -18505,6 +18505,24 @@
             "title": "Tls Fingerprints",
             "default": []
           },
+          "h2_fingerprints": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "H2 Fingerprints",
+            "default": []
+          },
+          "oh_fingerprints": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Oh Fingerprints",
+            "default": []
+          },
           "req_size_dist": {
             "items": {
               "additionalProperties": true,

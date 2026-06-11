@@ -7,6 +7,8 @@ from backend.models.common import BaseResponse
 
 class SecurityAggregatesResponse(BaseResponse):
     tls_fingerprints: list[dict[str, Any]] = []
+    h2_fingerprints: list[dict[str, Any]] = []
+    oh_fingerprints: list[dict[str, Any]] = []
     req_size_dist: list[dict[str, Any]] = []
     top_ips_header: list[dict[str, Any]] = []
     ipv6_adoption: list[dict[str, Any]] = []
