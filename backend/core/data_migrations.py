@@ -120,6 +120,34 @@ def _rollups_time_series_backfill(service_id: str, source: dict) -> str | None:
     return f"rollups: built time_series.parquet for {n} historical hour(s)"
 
 
+def _rollups_sessions_backfill(service_id: str, source: dict) -> str | None:
+    """Build the per-hour sessions.parquet rollup for every closed hour
+    that doesn't yet have one.
+
+    The ``/api/sessions`` rollup-served path (rolled out alongside this
+    migration) requires a ``sessions.parquet`` for every closed hour in
+    the requested window. The writer is wired into the cron tick, so
+    new hours land automatically — this migration catches up the
+    historical hours that pre-date the rollup.
+
+    Idempotent: ``backfill_session_bundles`` only builds for hours that
+    don't already have a ``sessions.parquet``, so re-running after a
+    partial failure is cheap.
+
+    Hot-path safety: the empty-hour reader tolerance from F1 already
+    differentiates "no rollup file because the hour had no data" from
+    "no rollup file because the writer hasn't covered it." For the
+    sessions reader to apply that same tolerance, this migration's
+    completion isn't a strict prerequisite — but until it runs, every
+    sessions request whose window touches an un-rolled-up data hour
+    falls back to the raw 14+ s scan.
+    """
+    from backend.core import rollups
+
+    n = rollups.backfill_session_bundles(service_id, source)
+    return f"rollups: built sessions.parquet for {n} historical hour(s)"
+
+
 # Ordered registry. Append-only — never remove or reorder entries.
 # Names must be globally unique and stable; the DB matches by name.
 MIGRATIONS: list[Migration] = [
@@ -137,6 +165,11 @@ MIGRATIONS: list[Migration] = [
         name="2026-06-10_rollups_time_series_backfill",
         description="Backfill time_series.parquet for all closed hours so the dashboard chart's rollup fast-path covers 7d/30d",
         fn=_rollups_time_series_backfill,
+    ),
+    Migration(
+        name="2026-06-10_rollups_sessions_backfill",
+        description="Backfill sessions.parquet for all closed hours so /api/sessions can serve 7d windows from the rollup instead of a 14+ s raw window-function scan",
+        fn=_rollups_sessions_backfill,
     ),
 ]
 
