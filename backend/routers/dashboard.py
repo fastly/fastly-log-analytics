@@ -63,6 +63,8 @@ def dashboard_bundle(req: AggregatesRequest, ctx: RequestContext = Depends(build
     """
     from backend.repositories import security as security_repo
 
+    section_timings: list[dict] = []
+    t0 = time.perf_counter()
     aggregates = repo.get_aggregates(
         con=ctx.con,
         src=ctx.source,
@@ -72,6 +74,8 @@ def dashboard_bundle(req: AggregatesRequest, ctx: RequestContext = Depends(build
         chart_interval=req.chart_interval,
         chart_metric=req.chart_metric,
     )
+    section_timings.append({"section": "bundle:aggregates", "time_ms": round((time.perf_counter() - t0) * 1000, 2)})
+    t1 = time.perf_counter()
     top_bots = security_repo.get_top_bots(
         con=ctx.con,
         src=ctx.source,
@@ -79,9 +83,20 @@ def dashboard_bundle(req: AggregatesRequest, ctx: RequestContext = Depends(build
         end_time=req.end_time,
         filters=req.filters,
     )
+    section_timings.append({"section": "bundle:top_bots", "time_ms": round((time.perf_counter() - t1) * 1000, 2)})
+    # Rename nested `section_timings` → `_section_timings` so the bundle
+    # response mirrors what the dedicated /aggregates and /top-bots
+    # endpoints emit (those go through Pydantic with
+    # serialization_alias="_section_timings"). The composite has no
+    # response_model so the rename has to happen here. Same for the
+    # top-level bundle timings the perf harness reads from the root.
+    for sub in (aggregates, top_bots):
+        if isinstance(sub, dict) and "section_timings" in sub:
+            sub["_section_timings"] = sub.pop("section_timings")
     return {
         "aggregates": aggregates,
         "top_bots": top_bots,
+        "_section_timings": section_timings,
     }
 
 
