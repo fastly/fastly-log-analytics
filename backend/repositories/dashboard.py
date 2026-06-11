@@ -204,6 +204,8 @@ def get_aggregates(
         "ttfb",
         "server_region",
         "tls_ciphers_sha",
+        "h2_fingerprint",
+        "oh_fingerprint",
         "is_ipv6",
         "conn_requests",
     ]:

@@ -48,6 +48,7 @@ export const CARD_CATEGORIES: CardCategory[] = [
       'waf', 'waf_resp', 'waf_ms',
       'p_type', 'p_desc',
       'ja3', 'ja4', 'tls_ciphers_sha',
+      'h2_fingerprint', 'oh_fingerprint',
     ],
     tint: { bg: 'bg-rose-50/60 dark:bg-rose-950/40', border: 'border-rose-200/70 dark:border-rose-900/60', dot: 'bg-rose-500' },
   },
