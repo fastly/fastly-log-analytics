@@ -1,7 +1,5 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
-import { QueryClient, dehydrate } from "@tanstack/react-query";
-import type { DehydratedState } from "@tanstack/react-query";
 import "./globals.css";
 import QueryProvider from "@/components/QueryProvider";
 import ThemeProvider from "@/components/ThemeProvider";
@@ -9,7 +7,6 @@ import { AppLayout } from "@/components/AppLayout";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { getPreloadChunks } from "@/lib/preload-manifest";
-import { fetchBootstrapServerSide } from "@/lib/ssr/bootstrap";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -42,7 +39,7 @@ export const metadata: Metadata = {
 // could restore the preload benefit without re-introducing the
 // navigation lag.
 
-export default async function RootLayout({
+export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
@@ -50,46 +47,6 @@ export default async function RootLayout({
   // Modulepreload links from the build-time manifest (returns [] at
   // SSG-time since the manifest is generated AFTER next build).
   const preloadChunks = getPreloadChunks();
-
-  // Per-request SSR fetch of /api/bootstrap. Pre-seeds React Query so
-  // useBootstrap (and every dependent hook that reads bootstrap.* via
-  // queryClient.getQueryData) finds data already cached on first
-  // render — the cold-load /api/bootstrap RTT (300-600ms on prod
-  // tunnel) drops off the client wait stack entirely, and the share
-  // banner renders in the initial HTML paint instead of after a beat.
-  //
-  // fetchBootstrapServerSide returns null on any failure (network
-  // blip, 5xx, timeout, missing API_PROXY_URL in pure `next dev`).
-  // In that case we render the same tree as before and the client
-  // useBootstrap falls back to its own fetch — never a broken page.
-  const bootstrap = await fetchBootstrapServerSide();
-  let dehydratedState: DehydratedState | null = null;
-  if (bootstrap) {
-    const client = new QueryClient();
-    client.setQueryData(["bootstrap"], bootstrap);
-    // Mirror the dependent seeds from useBootstrap.queryFn so hooks
-    // that gate on bootstrap-pending find their slice in cache too.
-    // Source of truth for the key shapes:
-    // frontend/hooks/useBootstrap.ts:21-41.
-    const sid = (bootstrap as { active_service_id?: string | null })?.active_service_id;
-    if (sid) {
-      const b = bootstrap as Record<string, unknown>;
-      if (Array.isArray(b.views)) {
-        client.setQueryData(["views", sid], b.views);
-      }
-      if (b.log_fields_catalog) {
-        client.setQueryData(["log-fields-catalog", sid], b.log_fields_catalog);
-      }
-      if (b.sync_status) {
-        client.setQueryData(["sync-status", sid], b.sync_status);
-      }
-      if (b.log_extents) {
-        client.setQueryData(["log-extents", sid], b.log_extents);
-      }
-    }
-    dehydratedState = dehydrate(client);
-  }
-
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
@@ -109,7 +66,7 @@ export default async function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <QueryProvider dehydratedState={dehydratedState}>
+          <QueryProvider>
             <TooltipProvider delay={0} closeDelay={0}>
               <AppLayout>
                 <ErrorBoundary>{children}</ErrorBoundary>

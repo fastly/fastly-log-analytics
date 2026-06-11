@@ -1,7 +1,6 @@
 'use client'
 
-import { HydrationBoundary, QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import type { DehydratedState } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { useState } from 'react'
 import dynamic from 'next/dynamic'
 
@@ -10,16 +9,7 @@ const ReactQueryDevtools = dynamic(
   { ssr: false }
 )
 
-interface QueryProviderProps {
-  children: React.ReactNode
-  // Optional React Query dehydrated state from a server component
-  // (typically app/layout.tsx). When present, the client cache is
-  // seeded on first mount so hooks like useBootstrap find data
-  // already cached and skip their first network fetch entirely.
-  dehydratedState?: DehydratedState | null
-}
-
-export default function QueryProvider({ children, dehydratedState }: QueryProviderProps) {
+export default function QueryProvider({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient({
     defaultOptions: {
       queries: {
@@ -62,9 +52,7 @@ export default function QueryProvider({ children, dehydratedState }: QueryProvid
 
   return (
     <QueryClientProvider client={queryClient}>
-      <HydrationBoundary state={dehydratedState}>
-        {children}
-      </HydrationBoundary>
+      {children}
       {process.env.NODE_ENV === 'development' && <ReactQueryDevtools initialIsOpen={false} />}
     </QueryClientProvider>
   )
