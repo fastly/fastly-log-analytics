@@ -147,11 +147,23 @@ def get_security_aggregates(
     filters: FiltersDict,
     bucket_seconds: int = 300,
 ) -> dict:
+    import time as _time
+
+    # Per-phase timings for /api/security/aggregates so the perf
+    # harness can attribute wall time across the ~14 sub-queries
+    # _build_security_response runs without ad-hoc instrumentation.
+    section_timings: list[dict] = []
+
+    def _phase(name: str, t0: float) -> None:
+        section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
+
     source_name = src["name"]
     table_name = _safe_table(source_name)
     runner = QueryRunner(con, src)
 
+    _t = _time.perf_counter()
     actual_cols = runner.get_schema_cols()
+    _phase("get_schema_cols", _t)
     if not actual_cols:
         from backend.repositories._base import empty_schema_response
 
@@ -162,10 +174,13 @@ def get_security_aggregates(
             proxy_dist=[],
             conn_reuse_dist=[],
             http_versions=[],
+            section_timings=section_timings,
             **runner.telemetry(),
         )
 
+    _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
+    _phase("build_where_clause", _t)
 
     # Projection narrowed: asn / req_bytes / ja3 / ja4 are not consumed
     # by _build_security_response (audited 2026-06-05) so they're dropped
@@ -185,12 +200,14 @@ def get_security_aggregates(
         "ua",
         "waf_req_id",
     ]
+    _t = _time.perf_counter()
     temp_table = runner.create_filtered_temp_table(cols, actual_cols, table_name, where_clause, params)
+    _phase("temp_table_create", _t)
     if temp_table is None:
-        return {**runner.telemetry()}
+        return {"section_timings": section_timings, **runner.telemetry()}
 
     try:
-        return _build_security_response(runner, src, con, actual_cols, temp_table, bucket_seconds)
+        return _build_security_response(runner, src, con, actual_cols, temp_table, bucket_seconds, section_timings)
     finally:
         try:
             runner.execute(f"DROP TABLE IF EXISTS {temp_table}")
@@ -205,7 +222,16 @@ def _build_security_response(
     actual_cols: list[str],
     temp_table: str,
     bucket_seconds: int,
+    section_timings: list[dict] | None = None,
 ) -> dict:
+    import time as _time
+
+    if section_timings is None:
+        section_timings = []
+
+    def _phase(name: str, t0: float) -> None:
+        section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
+
     results = {**runner.telemetry()}
 
     # Surface whether NGWAF is configured so the frontend can distinguish
@@ -253,7 +279,9 @@ def _build_security_response(
     # 0. Verified Bots Time Series (waf_sig fallback — category-level, no bot names)
     if "waf_sig" in actual_cols:
         q = SQL.VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
+        _t = _time.perf_counter()
         res = runner.execute(q).fetchall()
+        _phase("verified_bots_ts", _t)
         results["verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in res]
     else:
         results["verified_bots_ts"] = []
@@ -263,7 +291,9 @@ def _build_security_response(
         try:
             # Table: group by bot_name + wellknown_bot_name + category
             q = SQL.NGWAF_VERIFIED_BOTS.format(temp_table=temp_table)
+            _t = _time.perf_counter()
             res = runner.execute(q).fetchall()
+            _phase("ngwaf_verified_bots", _t)
             results["ngwaf_verified_bots"] = [
                 {
                     "bot_name": r[0],
@@ -276,7 +306,9 @@ def _build_security_response(
 
             # Time series: bucketed counts by bot_name
             q = SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
+            _t = _time.perf_counter()
             res = runner.execute(q).fetchall()
+            _phase("ngwaf_verified_bots_ts", _t)
             results["ngwaf_verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]} for r in res]
         except Exception as e:
             import logging
@@ -291,7 +323,9 @@ def _build_security_response(
     # 1. TLS Fingerprints (Cipher SHA + IP Spread)
     if "tls_ciphers_sha" in actual_cols and "ip" in actual_cols:
         q = SQL.TLS_FINGERPRINTS.format(temp_table=temp_table)
+        _t = _time.perf_counter()
         res = runner.execute(q).fetchall()
+        _phase("tls_fingerprints", _t)
         results["tls_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
     else:
         results["tls_fingerprints"] = []
@@ -299,7 +333,9 @@ def _build_security_response(
     # 1.1 H2 Fingerprints
     if "h2_fingerprint" in actual_cols and "ip" in actual_cols:
         q = SQL.H2_FINGERPRINTS.format(temp_table=temp_table)
+        _t = _time.perf_counter()
         res = runner.execute(q).fetchall()
+        _phase("h2_fingerprints", _t)
         results["h2_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
     else:
         results["h2_fingerprints"] = []
@@ -307,7 +343,9 @@ def _build_security_response(
     # 1.2 OH Fingerprints
     if "oh_fingerprint" in actual_cols and "ip" in actual_cols:
         q = SQL.OH_FINGERPRINTS.format(temp_table=temp_table)
+        _t = _time.perf_counter()
         res = runner.execute(q).fetchall()
+        _phase("oh_fingerprints", _t)
         results["oh_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
     else:
         results["oh_fingerprints"] = []
@@ -315,12 +353,16 @@ def _build_security_response(
     # 3. Request Header Size Distribution
     if "req_header_bytes" in actual_cols:
         q = SQL.REQ_HEADER_SIZE_DIST.format(temp_table=temp_table)
+        _t = _time.perf_counter()
         res = runner.execute(q).fetchall()
+        _phase("req_size_dist", _t)
         results["req_size_dist"] = [{"bucket": r[0], "count": r[1]} for r in res]
 
         # Top IPs by Max Header Size
         q = SQL.TOP_IPS_BY_MAX_HEADER.format(temp_table=temp_table)
+        _t = _time.perf_counter()
         res = runner.execute(q).fetchall()
+        _phase("top_ips_by_header", _t)
         results["top_ips_header"] = [{"ip": r[0], "max_header": r[1]} for r in res]
     else:
         results["req_size_dist"] = []
@@ -332,7 +374,9 @@ def _build_security_response(
             time_bucket_select=time_bucket_select("1 hour"),
             temp_table=temp_table,
         )
+        _t = _time.perf_counter()
         res = runner.execute(q).fetchall()
+        _phase("ipv6_adoption", _t)
         results["ipv6_adoption"] = [{"time": safe_iso(r[0]), "pct": r[1]} for r in res]
     else:
         results["ipv6_adoption"] = []
@@ -340,7 +384,9 @@ def _build_security_response(
     # 5. Proxy/Anonymizer Breakdown
     if "p_type" in actual_cols:
         q = SQL.PROXY_TYPE_DIST.format(temp_table=temp_table)
+        _t = _time.perf_counter()
         res = runner.execute(q).fetchall()
+        _phase("proxy_dist", _t)
         results["proxy_dist"] = [{"type": r[0], "count": r[1]} for r in res]
     else:
         results["proxy_dist"] = []
@@ -348,7 +394,9 @@ def _build_security_response(
     # 6. Connection Reuse Distribution
     if "conn_requests" in actual_cols:
         q = SQL.CONN_REUSE_DIST.format(temp_table=temp_table)
+        _t = _time.perf_counter()
         res = runner.execute(q).fetchall()
+        _phase("conn_reuse_dist", _t)
         results["conn_reuse_dist"] = [{"bucket": r[0], "count": r[1]} for r in res]
     else:
         results["conn_reuse_dist"] = []
@@ -369,7 +417,9 @@ def _build_security_response(
                 prefilter = "WHERE ua IS NOT NULL AND ip IS NOT NULL"
 
             q = SQL.WELLKNOWN_BOTS_UA_IP.format(temp_table=temp_table, prefilter=prefilter)
+            _t = _time.perf_counter()
             ua_ip_rows = runner.execute(q).fetchall()
+            _phase("wellknown_bots_query", _t)
 
             match_ua = build_matcher()
             bot_agg: dict[str, dict] = {}
@@ -436,4 +486,5 @@ def _build_security_response(
     else:
         results["wellknown_bots"] = []
 
+    results["section_timings"] = section_timings
     return results

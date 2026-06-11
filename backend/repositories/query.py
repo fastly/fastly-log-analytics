@@ -30,22 +30,20 @@ def execute_query(
     session_id: str | None = None,
     service_id: str | None = None,
 ) -> dict:
+    # Per-phase wall-clock timings — complements the existing
+    # _debug_queries (per-SQL granularity) with a higher-level view of
+    # where validate / explain / execute / serialize each contribute.
+    section_timings: list[dict] = []
+
+    def _phase(name: str, t0: float) -> None:
+        section_timings.append({"section": name, "time_ms": round((time.monotonic() - t0) * 1000, 2)})
+
     if src:
         table_name = _safe_table(src["name"])
         if table_name != "logs":
             sql = re.sub(r"\blogs\b", table_name, sql, flags=re.IGNORECASE)
 
-    # Security (Decision B): run the user SQL through the
-    # parse-tree validator. The previous regex-based ``_BLOCKED_KEYWORDS``
-    # check missed:
-    #   - read_csv_auto / read_parquet / iceberg_scan family (arbitrary
-    #     file/S3 read via table functions)
-    #   - getenv / current_setting / duckdb_secrets (env/secret exfil)
-    #   - information_schema.* (introspection bypass via non-prefix name)
-    #   - INSTALL / LOAD (which don't contain any blocked keyword)
-    # The validator runs ``json_serialize_sql`` and walks the resulting
-    # parse tree so every nested subquery / CTE / table-function is
-    # inspected. See backend/utils/sql_validator.py for the policy.
+    _t = time.monotonic()
     try:
         validate_user_sql(
             sql,
@@ -56,6 +54,7 @@ def execute_query(
     except SQLValidationError as exc:
         # PermissionError is what the route handler maps to HTTP 403.
         raise PermissionError(exc.message) from exc
+    _phase("validate_user_sql", _t)
 
     # Execution-side defense-in-depth: cap memory and timeout on the
     # connection before running the user query. Independent of parse
@@ -77,6 +76,7 @@ def execute_query(
         _debug_queries.append(
             {"sql": _compact_sql_for_debug(explain_sql), "time_ms": round((time.monotonic() - t_exp) * 1000, 2)}
         )
+        _phase("explain", t_exp)
 
     # Auto-apply LIMIT max_rows+1 when the query doesn't already have one.
     # Without this, `SELECT * FROM logs ORDER BY timestamp DESC` materializes
@@ -98,7 +98,10 @@ def execute_query(
 
     t0 = time.monotonic()
     result = con.execute(exec_sql)
+    _t_fetch = time.monotonic()
+    _phase("execute", t0)
     df = result.fetchdf()
+    _phase("fetchdf", _t_fetch)
     elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
     _debug_queries.append({"sql": _compact_sql_for_debug(exec_sql.strip()), "time_ms": elapsed_ms})
 
@@ -119,8 +122,10 @@ def execute_query(
             df = df.head(max_rows)
         total_rows = fetched_rows
 
+    _t_serialize = time.monotonic()
     columns = list(df.columns)
     records: list[dict[str, Any]] = json.loads(df.to_json(orient="records", date_format="iso"))
+    _phase("serialize_json", _t_serialize)
 
     resp: dict[str, Any] = {
         "columns": columns,
@@ -131,6 +136,7 @@ def execute_query(
         "elapsed_ms": int(elapsed_ms),
         "debug_queries": _debug_queries,
         "debug_calls": get_tracked_calls(),
+        "section_timings": section_timings,
     }
     if explain_plan is not None:
         resp["explain_plan"] = explain_plan

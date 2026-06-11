@@ -446,9 +446,20 @@ from backend.models.services import LoggingSettingsResponse
 @router.get("/services/{service_id}/logging-settings", response_model=LoggingSettingsResponse)
 def api_service_logging_settings(service_id: str):
     import re
+    import time as _time
     import urllib.parse
 
     from backend import config as svcconfig
+
+    # Per-phase wall-clock for the two-three Fastly API round-trips this
+    # endpoint makes. Per perf audit /api/services/{service_id}/logging-
+    # settings is ~742 ms on the alerts page; section_timings tells us
+    # how that splits between get_active_version / GET endpoint /
+    # find_condition so the caching work targets the right call.
+    section_timings: list[dict] = []
+
+    def _phase(name: str, t0: float) -> None:
+        section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -459,17 +470,23 @@ def api_service_logging_settings(service_id: str):
         from backend.core.fastly.client import fastly
         from backend.core.fastly.service import find_condition, get_active_version
 
+        _t = _time.perf_counter()
         active_ver = get_active_version(service_id, token)
+        _phase("get_active_version", _t)
         if not active_ver:
             raise HTTPException(status_code=400, detail={"error": "No active version found"})
         encoded_name = urllib.parse.quote(endpoint_name, safe="")
+        _t = _time.perf_counter()
         ep = fastly("GET", f"/service/{service_id}/version/{active_ver}/logging/s3/{encoded_name}", token=token)
+        _phase("get_logging_endpoint", _t)
         sample_rate = 100
         edge_only = False
         custom_condition = ""
         cond_name = ep.get("response_condition")
         if cond_name:
+            _t = _time.perf_counter()
             cond = find_condition(cond_name, service_id, active_ver, token)
+            _phase("find_condition", _t)
             stmt = cond.get("statement", "") if cond else ""
             m = re.search("randombool\\((\\d+),", stmt)
             if m:
@@ -509,6 +526,7 @@ def api_service_logging_settings(service_id: str):
             custom_condition=custom_condition,
             format_match=format_match,
             version=active_ver,
+            section_timings=section_timings,
         )
     except HTTPException:
         raise

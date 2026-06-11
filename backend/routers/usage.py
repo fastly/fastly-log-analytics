@@ -60,9 +60,18 @@ def _extract_fos_ops(record: dict) -> tuple[int, int]:
 @query_errors()
 async def prefill(source: dict = Depends(get_source)):
     import asyncio
+    import time as _time
 
     from backend import config as svcconfig
     from backend.config import get_fastly_api_key, get_fastly_logging_service_id
+
+    # Per-phase timings — /api/usage/prefill clocks ~1.4 s p50 per perf
+    # audit; section_timings shows whether the cost is in the Fastly
+    # endpoint chain, the /stats fetch, or the DuckDB edge-ratio hop.
+    section_timings: list[dict] = []
+
+    def _phase(name: str, t0: float) -> None:
+        section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
 
     global_rates = svcconfig.load_usage_logging_config()
 
@@ -250,7 +259,9 @@ async def prefill(source: dict = Depends(get_source)):
                 return None
 
         try:
+            _t = _time.perf_counter()
             chain_updates, payload = await asyncio.gather(_resolve_endpoint_chain(), _fetch_stats())
+            _phase("fastly_chain_and_stats", _t)
             # Chain updates feed into the response shape's existing keys
             # — overrides any defaults set above and any cron_sync values
             # set from the local config, matching the prior precedence
@@ -299,7 +310,9 @@ async def prefill(source: dict = Depends(get_source)):
                 finally:
                     con.close()
 
+            _t = _time.perf_counter()
             edge_ratio, debug_queries = await asyncio.to_thread(_edge_ratio_blocking)
+            _phase("edge_ratio_query", _t)
             if edge_ratio is not None:
                 result["edge_ratio"] = edge_ratio
         except Exception:
@@ -315,7 +328,7 @@ async def prefill(source: dict = Depends(get_source)):
     except Exception:
         pass
 
-    return PrefillResponse.with_telemetry(debug_queries=debug_queries, **result)
+    return PrefillResponse.with_telemetry(debug_queries=debug_queries, section_timings=section_timings, **result)
 
 
 @router.get("/current-storage", response_model=CurrentStorageResponse)
