@@ -1211,7 +1211,16 @@ class QueryRunner:
         active_hour_dt = datetime.strptime(active_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
 
         rollup_paths: list[str] = []
-        cursor = st.replace(minute=0, second=0, microsecond=0)
+        # Cursor MUST iterate in UTC — the bundle directory names are
+        # keyed by UTC hours and active_hour_str (above) is computed in
+        # UTC. ``st`` carries the request's input timezone (e.g. -05:00
+        # when the FE sends CDT-offset strings); leaving cursor in that
+        # zone makes ``cursor.strftime("%Y-%m-%d-%H")`` produce local-hour
+        # names that accidentally collide with earlier UTC bundles, so
+        # a 24-hour window served only 20 hours of data and the
+        # active-hour comparison silently never crossed (no live branch
+        # for the current hour either). Normalize once here.
+        cursor = st.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
         crosses_active = False
         while cursor < et:
             hour_str = cursor.strftime("%Y-%m-%d-%H")
@@ -1246,11 +1255,14 @@ class QueryRunner:
             return None
 
         metric_sql = self._TS_ROLLUP_METRIC_SQL[chart_metric]
-        # The rollup stores `bucket` as naive TIMESTAMP (UTC-implied) since
-        # time_bucket() returns the bucketing column's type. Compare without
-        # the tz suffix so DuckDB doesn't choke on TIMESTAMP vs TIMESTAMPTZ.
-        st_naive = st.astimezone(UTC).replace(tzinfo=None).isoformat()
-        et_naive = et.astimezone(UTC).replace(tzinfo=None).isoformat()
+        # Bucket is TIMESTAMPTZ in the bundle parquets (older notes about
+        # "naive TIMESTAMP" referred to a since-removed schema). Use
+        # TIMESTAMPTZ literals so the comparison is unambiguous regardless
+        # of DuckDB's session timezone — without the explicit offset, a
+        # session tz like CDT silently shifts the filter by 5 hours and
+        # drops bundles at the window's edges.
+        st_tz = st.astimezone(UTC).isoformat()
+        et_tz = et.astimezone(UTC).isoformat()
 
         select_clauses: list[str] = []
         if rollup_paths:
@@ -1259,8 +1271,8 @@ class QueryRunner:
                 f"SELECT time_bucket(INTERVAL '{interval}', bucket) AS out_bucket, "
                 f"       {metric_sql} AS value "
                 f"FROM read_parquet([{paths_sql}]) "
-                f"WHERE bucket >= TIMESTAMP '{st_naive}' "
-                f"  AND bucket < TIMESTAMP '{et_naive}' "
+                f"WHERE bucket >= TIMESTAMPTZ '{st_tz}' "
+                f"  AND bucket < TIMESTAMPTZ '{et_tz}' "
                 f"GROUP BY 1"
             )
 
@@ -1272,8 +1284,8 @@ class QueryRunner:
             # filter — we further constrain by the live-slice timestamps.
             live_start = max(st, active_hour_dt)
             live_end = et
-            live_st_naive = live_start.astimezone(UTC).replace(tzinfo=None).isoformat()
-            live_et_naive = live_end.astimezone(UTC).replace(tzinfo=None).isoformat()
+            live_st_tz = live_start.astimezone(UTC).isoformat()
+            live_et_tz = live_end.astimezone(UTC).isoformat()
 
             metric_for_live = _live_metric_sql_from_raw(chart_metric)
             if metric_for_live is None:
@@ -1286,8 +1298,8 @@ class QueryRunner:
                 f"       {metric_for_live} AS value "
                 f"FROM {table_name} "
                 f"WHERE {where_clause} "
-                f"  AND timestamp >= TIMESTAMPTZ '{live_st_naive}+00:00' "
-                f"  AND timestamp <  TIMESTAMPTZ '{live_et_naive}+00:00' "
+                f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
+                f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}' "
                 f"GROUP BY 1"
             )
             select_clauses.append(live_clause)
