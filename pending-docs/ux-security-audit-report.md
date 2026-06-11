@@ -1,7 +1,30 @@
 # Fastly Log Analytics: Production-Grade UX, Security, & Accessibility Audit Report
-**Evaluator:** Senior Principal QA Automation Engineer & UX/Accessibility Researcher  
-**Date:** June 10, 2026  
+**Evaluator:** Senior Principal QA Automation Engineer & UX/Accessibility Researcher
+**Date:** June 10, 2026
 **Target Environments:** Staging (`https://fastly-log-analytics.global.ssl.fastly.net/`) & Localhost (`http://localhost:3001/`)
+
+## Status (2026-06-11 audit pass against the current tree)
+
+| Item | Status | Notes |
+|---|---|---|
+| UX-001 (Logs grid main-thread blocking) | ✅ shipped | `@tanstack/react-virtual` in [DataTable.tsx](../frontend/components/DataTable/DataTable.tsx) |
+| UX-002 (Filters cleared on time-range change) | ✅ shipped | `setRange` / `setRelativeRange` in [filterStore.ts](../frontend/stores/filterStore.ts) only touch range fields; filters preserved |
+| UX-003 (Custom Field Drawer focus loss) | ✅ shipped | [CustomFieldDrawer.tsx](../frontend/components/CustomFields/CustomFieldDrawer.tsx) renders inside `Dialog`, which wraps `@radix-ui/react-focus-scope` (see [dialog.tsx](../frontend/components/ui/dialog.tsx)) |
+| UX-004 (Timeseries chart label overlap < 1024px) | ⚠️ not addressed | Plotly's default legend doesn't reflow at narrow widths. Fix would be a ResizeObserver in [PlotlyChart.tsx](../frontend/components/PlotlyChart/PlotlyChart.tsx) that swaps `legend.orientation` to `'h'` below a breakpoint. UX call — needs design input on placement |
+| UX-005 (Service Dropdown keyboard) | ✅ shipped | [ServiceSwitcher.tsx](../frontend/components/ServiceSwitcher/ServiceSwitcher.tsx) uses `cmdk` Command, which handles Escape + Arrow keys natively |
+| A11Y Task 1 (Focus traps) | ✅ shipped | `@radix-ui/react-focus-scope` in [dialog.tsx](../frontend/components/ui/dialog.tsx) + [InviteAnalystDialog.tsx](../frontend/components/InviteAnalystDialog/InviteAnalystDialog.tsx) |
+| A11Y Task 2 (ARIA chart screen-reader tables) | ❌ not addressed | Substantial accessibility design work — every chart needs a `<table class="sr-only">` companion with the same data. Defer to a dedicated workstream |
+| A11Y Task 3 (Color contrast — amber-700) | ✅ shipped | [useShareStatusBanner.tsx:85](../frontend/hooks/useShareStatusBanner.tsx#L85) — `bg-amber-700 text-white` (was `bg-amber-500 text-amber-50` per the audit, contrast ~3.1; now ~7.0) |
+| Perf Task 1 (DOM virtualization) | ✅ shipped (= UX-001) | |
+| Perf Task 2 (Web Worker chart compilation) | ❌ not addressed — high risk | Plotly doesn't natively support OffscreenCanvas; moving chart compile to a worker requires Plotly forks or custom rendering. Treat as research, not work |
+| Perf Task 3 (CSS containment on hidden tab panels) | ✅ N/A by design | Base UI `Tabs.Panel` unmounts inactive panels (default `keepMounted=false`), so there are no hidden-but-mounted panels to contain |
+| Section 5 (FullStory / Hotjar telemetry) | ❌ REJECTED | Violates [cleanup_plan.md](cleanup_plan.md)'s "No SaaS dependencies" rule — explicitly enumerates "No Sentry, no LogRocket, no Bugsnag" alongside FullStory/Hotjar. Do NOT implement |
+
+**Net:** 7 of 11 actionable items shipped. Section 5 should be struck. The 3 remaining items (UX-004, A11Y-2, Perf-2) are each substantial design/research workstreams in their own right — not quick wins.
+
+---
+
+## Original audit report
 
 ---
 
@@ -71,11 +94,11 @@ Automating audits via simulated Lighthouse and axe DevTools highlights specific 
 graph TD
     A[Dashboard Optimization] --> B[Performance Enhancements]
     A --> C[Accessibility Fixes]
-    
+
     B --> B1[DOM Virtualization for Logs Table]
     B --> B2[Web Worker Chart Serialization]
     B --> B3[CSS contain: strict on hidden tab panels]
-    
+
     C --> C1[Focus Trap & Keyboard Trap Controls]
     C --> C2[ARIA Labeling of Graphical Chart Objects]
     C --> C3[Light/Dark Chart Color Contrast Scaling]
@@ -88,21 +111,21 @@ graph TD
 *   **Resolution:** Implement an accessible focus wrapper on all drawers and overlays using `@radix-ui/react-focus-scope` or a lightweight custom hook:
     ```tsx
     import { useEffect, useRef } from "react";
-    
+
     export function useFocusTrap(isActive: boolean) {
       const containerRef = useRef<HTMLDivElement>(null);
-    
+
       useEffect(() => {
         if (!isActive) return;
         const container = containerRef.current;
         if (!container) return;
-    
+
         const focusableElements = container.querySelectorAll(
           'button, [href], input, select, textarea, [tabindex="0"]'
         );
         const first = focusableElements[0] as HTMLElement;
         const last = focusableElements[focusableElements.length - 1] as HTMLElement;
-    
+
         function handleKeyDown(e: KeyboardEvent) {
           if (e.key !== "Tab") return;
           if (e.shiftKey) {
@@ -117,13 +140,13 @@ graph TD
             }
           }
         }
-    
+
         container.addEventListener("keydown", handleKeyDown);
         first?.focus();
-    
+
         return () => container.removeEventListener("keydown", handleKeyDown);
       }, [isActive]);
-    
+
       return containerRef;
     }
     ```
@@ -173,17 +196,17 @@ graph TD
     ```tsx
     import { useVirtualizer } from '@tanstack/react-virtual';
     import { useRef } from 'react';
-    
+
     export function VirtualizedLogsGrid({ rows }) {
       const parentRef = useRef<HTMLDivElement>(null);
-    
+
       const rowVirtualizer = useVirtualizer({
         count: rows.length,
         getScrollElement: () => parentRef.current,
         estimateSize: () => 40,
         overscan: 5,
       });
-    
+
       return (
         <div ref={parentRef} className="h-[600px] overflow-auto border rounded-md">
           <div
