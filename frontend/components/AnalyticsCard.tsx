@@ -80,7 +80,7 @@ export function AnalyticsCard({
           // `isFetching && !isLoading` opacity-40 branch on the children below.
           <div className="absolute inset-0 flex items-center justify-center bg-background z-10">
             <div className="flex flex-col items-center gap-2">
-              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+              <Loader2 className="h-6 w-6 animate-spin text-primary" aria-hidden="true" />
               <span className="text-xs text-muted-foreground animate-pulse font-medium">Loading data...</span>
             </div>
           </div>

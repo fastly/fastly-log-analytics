@@ -39,6 +39,21 @@ const NUMERIC_LITERAL_RE = /^-?\d+(\.\d+)?$/
  * Falls back to quoted strings when the map is absent or the value isn't
  * a parseable number — implicit casts handle the latter.
  */
+/**
+ * Normalise an ISO timestamp to canonical UTC ``Z`` form for SQL display.
+ * Range presets call ``.toISOString()`` (UTC ``Z``); the custom datetime-local
+ * picker writes local-offset strings like ``2026-06-10T13:08:35-05:00``. The
+ * generated SQL displayed numbers in both formats depending on which path
+ * populated the range — confusing when an analyst copies the SQL out and the
+ * timezone marker changes between two clicks. Normalising here makes the
+ * displayed SQL consistently UTC. DuckDB interprets either form identically,
+ * so the query semantics are unchanged.
+ */
+function toCanonicalSqlTs(ts: string): string {
+  const d = new Date(ts)
+  return isNaN(d.getTime()) ? ts : d.toISOString()
+}
+
 export function buildWhereClause(
   filters: FiltersPayload,
   startTime: string | null,
@@ -47,8 +62,8 @@ export function buildWhereClause(
 ): string {
   const parts: string[] = []
 
-  if (startTime) parts.push(`timestamp >= '${sqlEscape(startTime)}'`)
-  if (endTime) parts.push(`timestamp <= '${sqlEscape(endTime)}'`)
+  if (startTime) parts.push(`timestamp >= '${sqlEscape(toCanonicalSqlTs(startTime))}'`)
+  if (endTime) parts.push(`timestamp <= '${sqlEscape(toCanonicalSqlTs(endTime))}'`)
 
   for (const [rawCol, spec] of Object.entries(filters)) {
     if (!spec || !Array.isArray(spec.values) || spec.values.length === 0) continue

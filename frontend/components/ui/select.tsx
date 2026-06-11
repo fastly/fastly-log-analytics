@@ -20,22 +20,22 @@ function extractText(children: React.ReactNode): string {
 
 function getLabelsFromChildren(children: React.ReactNode): Record<string, string> {
   const labels: Record<string, string> = {};
-  
+
   function traverse(node: React.ReactNode) {
     React.Children.forEach(node, (child) => {
       if (!React.isValidElement(child)) return;
-      
+
       const element = child as React.ReactElement<any>;
       if (element.props && element.props.value !== undefined) {
         labels[String(element.props.value)] = extractText(element.props.children);
       }
-      
+
       if (element.props && element.props.children) {
         traverse(element.props.children);
       }
     });
   }
-  
+
   traverse(children);
   return labels;
 }
@@ -49,11 +49,11 @@ const SelectContext = React.createContext<{
 const Select = <Value extends string = string>({ children, ...props }: React.ComponentProps<typeof SelectPrimitive.Root<Value>> & { children?: React.ReactNode }) => {
   const initialLabels = React.useMemo(() => getLabelsFromChildren(children), [children]);
   const [dynamicLabels, setDynamicLabels] = React.useState<Record<string, string>>({});
-  
+
   const registerLabel = React.useCallback((value: string, label: string) => {
     setDynamicLabels(prev => prev[value] === label ? prev : { ...prev, [value]: label });
   }, []);
-  
+
   const unregisterLabel = React.useCallback((value: string) => {
     setDynamicLabels(prev => {
       const next = { ...prev };
@@ -138,7 +138,7 @@ const SelectTrigger = React.forwardRef<
       {children}
       <SelectPrimitive.Icon
         render={
-          <ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground" />
+          <ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground" aria-hidden="true" />
         }
       />
     </SelectPrimitive.Trigger>
@@ -216,7 +216,7 @@ const SelectItem = React.forwardRef<
   const ctx = React.useContext(SelectContext);
   const registerLabel = ctx?.registerLabel;
   const unregisterLabel = ctx?.unregisterLabel;
-  
+
   // Extract text and memoize to ensure it's a stable primitive dependency
   const text = React.useMemo(() => extractText(children), [children]);
 
@@ -277,7 +277,7 @@ const SelectScrollUpButton = React.forwardRef<
     )}
     {...props}
   >
-    <ChevronUpIcon />
+    <ChevronUpIcon aria-hidden="true" />
   </SelectPrimitive.ScrollUpArrow>
 ))
 SelectScrollUpButton.displayName = "SelectScrollUpButton"
@@ -295,7 +295,7 @@ const SelectScrollDownButton = React.forwardRef<
     )}
     {...props}
   >
-    <ChevronDownIcon />
+    <ChevronDownIcon aria-hidden="true" />
   </SelectPrimitive.ScrollDownArrow>
 ))
 SelectScrollDownButton.displayName = "SelectScrollDownButton"

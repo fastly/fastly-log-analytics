@@ -125,7 +125,7 @@ function NavLink({ href, icon: Icon, name, isActive, disabled, activeServiceId, 
         !disabled && isActive ? "bg-primary text-primary-foreground shadow-sm" : !disabled ? "text-muted-foreground" : ""
       )}
     >
-      <Icon className="h-4 w-4" />
+      <Icon className="h-4 w-4" aria-hidden="true" />
       {name}
     </Link>
   )
@@ -373,7 +373,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         </header>
         {!hideFilterBar && <FilterBar />}
 
-        <main className="flex-1 overflow-auto p-6">
+        <main id="main" className="flex-1 overflow-auto p-6">
           {/* Render children IMMEDIATELY on navigation. The previous
               ``isLoading ? <Spinner /> : children`` gate held every
               route hostage to /api/bootstrap, which has no staleTime —

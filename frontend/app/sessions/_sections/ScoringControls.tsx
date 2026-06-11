@@ -53,8 +53,12 @@ export function ScoringControls({
           min={0}
           value={minReqs}
           onChange={e => setMinReqs(e.target.value === '' ? '' : Number(e.target.value))}
-          placeholder={data?.min_reqs_flag?.toString() ?? "1000"}
-          className="h-8 w-20 text-sm text-right"
+          // Prefix with "≥" so the placeholder reads as a hint (the scoring
+          // system's default flag threshold) rather than a value already set
+          // on this filter — the input itself starts empty and rows are
+          // unfiltered until a value is typed.
+          placeholder={`≥ ${data?.min_reqs_flag ?? 1000}`}
+          className="h-8 w-24 text-sm text-right"
         />
       </div>
 
@@ -66,8 +70,8 @@ export function ScoringControls({
           max={100}
           value={min4xxPct}
           onChange={e => setMin4xxPct(e.target.value === '' ? '' : Number(e.target.value))}
-          placeholder={data?.min_4xx_pct_flag?.toString() ?? "20"}
-          className="h-8 w-20 text-sm text-right"
+          placeholder={`≥ ${data?.min_4xx_pct_flag ?? 20}`}
+          className="h-8 w-24 text-sm text-right"
         />
       </div>
 
