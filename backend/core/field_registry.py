@@ -35,6 +35,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Enums (typed counterparts for the stringly-typed columns in the catalog)
@@ -356,12 +357,17 @@ def _detect_substr_cap(vcl: str | None) -> int | None:
         return None
 
 
-def _field_from_dict(d: Mapping[str, object]) -> LogField:
+def _field_from_dict(d: Mapping[str, Any]) -> LogField:
     """Build a `LogField` from a `LOG_FIELD_CATALOG` dict entry.
 
     Stable adapter — runs once per field at module init time. The dict-
     literal authoring format and the LogField read view both stay; this
     function is the single bridge that derives the latter from the former.
+
+    ``d`` is typed ``Mapping[str, Any]`` (not ``Mapping[str, object]``) to
+    match the catalog literal's annotation in _log_fields_data.py — the
+    heterogeneous value types (str / int / bool / list / None) are
+    discriminated per-key here rather than at the type-system level.
     """
     code = str(d["id"])
     raw_group = d.get("group")
@@ -370,7 +376,7 @@ def _field_from_dict(d: Mapping[str, object]) -> LogField:
     vcl_raw = d.get("vcl")
     vcl: str | None = None if vcl_raw is None else str(vcl_raw)
     required_by_raw = d.get("required_by") or ()
-    required_by = tuple(str(x) for x in required_by_raw)  # type: ignore[arg-type]
+    required_by = tuple(str(x) for x in required_by_raw)
     return LogField(
         code=code,
         label=str(d.get("label", code)),
@@ -378,7 +384,7 @@ def _field_from_dict(d: Mapping[str, object]) -> LogField:
         duck_type=duck_type,
         description=str(d.get("description", "")),
         vcl=vcl,
-        typical_bytes=int(d.get("typical_bytes", 0) or 0),  # type: ignore[arg-type]
+        typical_bytes=int(d.get("typical_bytes", 0) or 0),
         required_by=required_by,
         substr_cap=_detect_substr_cap(vcl),
         individually_toggleable=bool(d.get("individually_toggleable", False)),
@@ -393,11 +399,11 @@ def _opt_str(v: object) -> str | None:
     return None if v is None else str(v)
 
 
-def _opt_int(v: object) -> int | None:
+def _opt_int(v: Any) -> int | None:
     if v is None:
         return None
     try:
-        return int(v)  # type: ignore[arg-type]
+        return int(v)
     except (TypeError, ValueError):  # pragma: no cover — catalog uses ints
         return None
 

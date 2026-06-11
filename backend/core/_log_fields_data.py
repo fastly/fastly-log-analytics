@@ -19,7 +19,13 @@ Contents:
 
 from __future__ import annotations
 
-LOG_FIELD_CATALOG = [
+from typing import Any
+
+# Heterogeneous-value dicts (str / bool / list / None / nested dict) — annotate
+# as ``dict[str, Any]`` so downstream readers (field_registry._field_from_dict,
+# group-dependency map at the bottom of this file) typecheck cleanly instead
+# of mypy widening to ``object``.
+LOG_FIELD_CATALOG: list[dict[str, Any]] = [
     # ── Always-on ─────────────────────────────────────────────────────────
     {
         "id": "timestamp",
@@ -991,7 +997,7 @@ LOG_FIELD_CATALOG = [
 # Group metadata
 # ---------------------------------------------------------------------------
 
-GROUP_INFO = {
+GROUP_INFO: dict[str | None, dict[str, Any]] = {
     None: {
         "label": "Core Delivery",
         "description": "Always-on fields required for basic metrics: error rates, latency, hit rates, throughput.",
@@ -1274,5 +1280,3 @@ INSIGHT_DEFINITIONS = [
 # ---------------------------------------------------------------------------
 # Core functions
 # ---------------------------------------------------------------------------
-
-

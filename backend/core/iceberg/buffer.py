@@ -23,16 +23,12 @@ flow through.
 from __future__ import annotations
 
 import glob as _glob
-import json
 import logging
 import os
-import shutil
-import threading
 import time
-import uuid
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-import duckdb
 import pyarrow as pa
 
 logger = logging.getLogger("backend.core.iceberg._core")
@@ -41,20 +37,19 @@ logger = logging.getLogger("backend.core.iceberg._core")
 # Library + util imports the carved code references. Some pyiceberg
 # names also appear as inline imports inside specific functions; we
 # add the top-level ones here so the bare-name lookup works.
+import pyarrow.parquet as pq
 from pyiceberg.exceptions import CommitFailedException
 from pyiceberg.table.name_mapping import create_mapping_from_schema
-from backend.utils.sql_validator import escape_sql_literal
-import pyarrow.parquet as pq
 
 # Late-bind helpers from the main _core module (it's mid-load when this
 # file imports). __getattr__ catches any bare-name resolution that
 # falls through manifest.py's pattern.
 from backend.core.iceberg import _core as _core_mod
+from backend.utils.sql_validator import escape_sql_literal
 
 
 def __getattr__(name: str):
     return getattr(_core_mod, name)
-
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +745,7 @@ def optimize_table(source: dict, target_file_size_mb: int = 128, min_files_per_p
     finally:
         con.close()
 
-    result = {"files_rewritten": total_rewritten, "files_added": total_added}
+    result: dict[str, Any] = {"files_rewritten": total_rewritten, "files_added": total_added}
     # Surface partial failures so the cron wrapper can flag them — silent
     # per-partition warnings turned a real regression (pyiceberg rejecting
     # DuckDB's RecordBatchReader from .arrow()) into a week of "Rewrote 0
@@ -781,16 +776,16 @@ def run_cloud_maintenance(source: dict) -> dict:
     except Exception as e:
         return {"error": str(e)}
 
-    results = {}
+    results: dict[str, Any] = {}
 
     # 1. Delete old data from Iceberg table
     if data_retention_days > 0:
         data_cutoff_ms = int((datetime.now(UTC) - timedelta(days=data_retention_days)).timestamp() * 1000)
         try:
             # Delete directly from the table using the timestamp column
-            from pyiceberg.expressions import LessThan
+            from backend.utils.iceberg_expr import lt
 
-            table.delete(LessThan("timestamp", (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()))
+            table.delete(lt("timestamp", (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()))
             _core_mod._set_cached_table(source, _core_mod._table_identifier(source), table)
             results["data_deleted_before_days"] = data_retention_days
             # Retention delete removes files from the snapshot — the cache's
@@ -937,5 +932,3 @@ def run_cloud_maintenance(source: dict) -> dict:
 # ---------------------------------------------------------------------------
 # DuckDB integration
 # ---------------------------------------------------------------------------
-
-

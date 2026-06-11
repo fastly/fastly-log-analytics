@@ -25,6 +25,7 @@ import os
 import re
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import duckdb
 
@@ -627,8 +628,11 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
     if top_values:
         cache_dir = _cache_dir(source)
         os.makedirs(cache_dir, exist_ok=True)
-        with open(os.path.join(cache_dir, "top_values.json"), "w") as f:
-            json.dump(top_values, f)
+        # Don't reuse the name ``f`` — an earlier loop binding in this
+        # function already typed ``f`` as ``str``, so reusing it here
+        # trips mypy's narrow assignment check on the file handle.
+        with open(os.path.join(cache_dir, "top_values.json"), "w") as fp:
+            json.dump(top_values, fp)
         # Re-read the fingerprint AFTER the write — using the pre-work
         # fingerprint would let a commit that landed mid-sample lock the
         # cache to a stale value. _data_stats_fingerprint is ~0.5 ms.
@@ -760,7 +764,8 @@ def delete_ingested_files(
     }
 
 
-_schema_cache = {}  # (source_name, table_name) -> (timestamp, schema_list)
+_schema_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+# (source_name, table_name) -> (timestamp, schema_list)
 # The heavy refresh_config_status path fires SUMMARIZE every 60 s. With the
 # previous 60 s TTL the cache aged out at exactly the heavy-tick interval —
 # now-ts hit 60.0 right when the next call landed, so we missed every time
@@ -798,13 +803,15 @@ def get_schema(con: duckdb.DuckDBPyConnection, source: dict | None = None) -> li
             return schema
 
     try:
-        table_exists = (
-            con.execute(
-                "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
-                [table_name],
-            ).fetchone()[0]
-            > 0
-        )
+        # COUNT(*) always returns one row — fetchone is None-typed in the
+        # DuckDB stubs because the generic shape is row-or-none, but a count
+        # query is guaranteed to produce a row. Assert to narrow.
+        row = con.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
+            [table_name],
+        ).fetchone()
+        assert row is not None
+        table_exists = row[0] > 0
         if not table_exists:
             return []
 

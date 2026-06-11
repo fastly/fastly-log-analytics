@@ -31,23 +31,19 @@ import logging
 import os
 import threading
 import time
-from datetime import UTC, datetime, timedelta, timezone
-
-import duckdb
+from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger("backend.core.iceberg._core")
 
 # Library + util imports the carved code references at module scope.
-from backend.utils.sql_validator import escape_sql_literal
-
 # Late-bind helpers from the main _core module — bare-name resolution
 # for any unmoved global falls through __getattr__ to _core.
 from backend.core.iceberg import _core as _core_mod
+from backend.utils.sql_validator import escape_sql_literal
 
 
 def __getattr__(name: str):
     return getattr(_core_mod, name)
-
 
 
 def configure_duckdb_s3(con) -> None:
@@ -67,8 +63,6 @@ def configure_duckdb_s3(con) -> None:
         except Exception:
             pass
 
-
-import threading
 
 # Per-service locks to avoid global bottleneck during S3 manifest scans
 _service_locks: dict[str, threading.RLock] = {}
@@ -185,8 +179,6 @@ def _load_persistent_cache(source: dict):
     if source_key in _snapshot_files_cache:
         return
 
-    import json
-
     cache_file = _get_cache_file(source, "snapshot_files_cache.json")
     if os.path.exists(cache_file):
         try:
@@ -207,8 +199,6 @@ def _save_persistent_cache(source: dict):
     source_key = source.get("name", "default")
     if source_key not in _snapshot_files_cache:
         return
-
-    import json
 
     cache_file = _get_cache_file(source, "snapshot_files_cache.json")
     data = {
@@ -478,7 +468,6 @@ def _try_fast_path_view(con, source: dict) -> bool:
     holds during buffer commits.
     """
     import sqlite3
-    import time
 
     from backend.core.duckdb import _cache_dir
 
@@ -679,7 +668,6 @@ def _persistent_view_exists(con, source: dict) -> bool:
 
 def _update_iceberg_view_locked(con, source: dict) -> None:
     import sqlite3
-    import time
 
     from backend.core.duckdb import _cache_dir, _safe_table_name
 
@@ -760,8 +748,6 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
 
         if tbl is not None and snap is not None:
             try:
-                from pyiceberg.expressions import GreaterThanOrEqual, LessThanOrEqual
-
                 iceberg_loc = tbl.location()
                 data_dir = os.path.join(cache_dir, "data")
 
@@ -771,10 +757,12 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
                     import dateutil.parser
 
                     if tr.get("start"):
+                        from backend.utils.iceberg_expr import gte
+
                         st_dt = dateutil.parser.isoparse(tr["start"])
                         if st_dt.tzinfo is None:
                             st_dt = st_dt.replace(tzinfo=UTC)
-                        scan = scan.filter(GreaterThanOrEqual("timestamp", st_dt.isoformat()))
+                        scan = scan.filter(gte("timestamp", st_dt.isoformat()))
 
                     # For Analysts (read_only), we always honor end_time to bound their manual imports.
                     # For Admins, we usually don't filter by end_time to allow new logs to stream in,
@@ -783,10 +771,12 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
                     if tr.get("end") and (
                         is_analyst or not source.get("provisioning", {}).get("cron_sync", {}).get("enabled", True)
                     ):
+                        from backend.utils.iceberg_expr import lte
+
                         et_dt = dateutil.parser.isoparse(tr["end"])
                         if et_dt.tzinfo is None:
                             et_dt = et_dt.replace(tzinfo=UTC)
-                        scan = scan.filter(LessThanOrEqual("timestamp", et_dt.isoformat()))
+                        scan = scan.filter(lte("timestamp", et_dt.isoformat()))
 
                 for f in scan.plan_files():
                     uri = f.file.file_path

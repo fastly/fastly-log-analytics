@@ -536,6 +536,9 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
         log_cron_run(src, task_name, time.monotonic() - start, "skipped", summary="No alerts configured")
         logger.info("⏹️  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job finished.", _display)
         return
+    # Past this point enabled_alerts is non-empty, so con_ro was opened
+    # on line 532 — narrow for mypy.
+    assert con_ro is not None
     run_id = None
     try:
         run_id = start_cron_run(src, task_name)

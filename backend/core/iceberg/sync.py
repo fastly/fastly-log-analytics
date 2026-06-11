@@ -20,14 +20,11 @@ import logging
 import os
 import threading
 import time
-from datetime import UTC, datetime, timedelta, timezone
-
-import duckdb
+from datetime import UTC, datetime
 
 logger = logging.getLogger("backend.core.iceberg._core")
 
 # Library imports the carved function references.
-from backend.utils.sql_validator import escape_sql_literal
 
 # Late-bind helpers from the main _core module.
 from backend.core.iceberg import _core as _core_mod
@@ -158,7 +155,8 @@ def sync_data(source: dict, progress_callback=None, start_time: str | None = Non
     if not fast_path_used:
         try:
             import dateutil.parser
-            from pyiceberg.expressions import GreaterThanOrEqual, LessThanOrEqual
+
+            from backend.utils.iceberg_expr import gte, lte
 
             scan = table.scan()
 
@@ -182,9 +180,12 @@ def sync_data(source: dict, progress_callback=None, start_time: str | None = Non
                 return {"files_downloaded": 0, "rows_downloaded": 0, "message": "Invalid time range: start after end."}
 
             if start_time:
-                scan = scan.filter(GreaterThanOrEqual("timestamp", st_dt.isoformat()))
+                # start_time truthy ⇒ st_dt was set above; narrow for mypy.
+                assert st_dt is not None
+                scan = scan.filter(gte("timestamp", st_dt.isoformat()))
             if end_time:
-                scan = scan.filter(LessThanOrEqual("timestamp", et_dt.isoformat()))
+                assert et_dt is not None
+                scan = scan.filter(lte("timestamp", et_dt.isoformat()))
 
             for f in scan.plan_files():
                 uri = f.file.file_path
@@ -484,4 +485,3 @@ _ui_metadata_scan_locks_lock = threading.Lock()
 # commit; only manifests new to the current snapshot trigger an .avro GET.
 # Persisted to disk per-service so restarts don't pay a ~1250-manifest cold
 # scan (~12 MB FOS GETs) on the first cron_compact tick.
-
