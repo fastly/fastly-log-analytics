@@ -116,15 +116,18 @@ def bootstrap(
 
     pops = _timed("get_pop_lat_lon_map", get_pop_lat_lon_map)
 
-    # Include custom field info so the dashboard can render custom distribution cards
-    # without a separate fetch. We load the raw config here because the enriched
-    # services list above strips log_fields out.
+    # Per the perf audit (F6): bootstrap's custom_fields_catalog was a
+    # ~10-15 KB duplicate of what every chart page already fetches
+    # separately from /api/log-fields/catalog. No frontend code reads
+    # bootstrap.custom_fields_catalog (the dashboard card hook only
+    # uses custom_dashboard_cards and active_log_field_ids — both
+    # derived from the catalog and shipped here). Keep the field on the
+    # response model for API back-compat but emit it empty.
     custom_dashboard_cards: list[dict] = []
-    custom_fields_catalog: list[dict] = []
     active_log_field_ids: list[str] = []
 
     def _resolve_custom_fields():
-        nonlocal custom_dashboard_cards, custom_fields_catalog, active_log_field_ids
+        nonlocal custom_dashboard_cards, active_log_field_ids
         if not valid_active_id:
             return
         from backend import config as svcconfig
@@ -134,9 +137,9 @@ def bootstrap(
         if not active_cfg:
             return
         lf_config = _lf.get_lf_config(active_cfg)
-        custom_fields_catalog = _lf.get_custom_fields_catalog_entries(lf_config)
+        catalog_entries = _lf.get_custom_fields_catalog_entries(lf_config)
         custom_dashboard_cards = [
-            {"id": f["id"], "label": f["label"]} for f in custom_fields_catalog if f.get("show_in_dashboard")
+            {"id": f["id"], "label": f["label"]} for f in catalog_entries if f.get("show_in_dashboard")
         ]
         active_log_field_ids = sorted(_lf.resolve_enabled_fields(lf_config)) + [
             cf["name"] for cf in lf_config.get("custom_fields", []) if cf.get("enabled", True)
@@ -182,7 +185,6 @@ def bootstrap(
             "analyst_name": analyst_session.name if analyst_session else None,
         },
         custom_dashboard_cards=custom_dashboard_cards,
-        custom_fields_catalog=custom_fields_catalog,
         active_log_field_ids=active_log_field_ids,
         views=views,
         section_timings=section_timings,
