@@ -13715,6 +13715,18 @@
               }
             ],
             "title": "Header Badge"
+          },
+          "log_extents": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Extents"
           }
         },
         "type": "object",

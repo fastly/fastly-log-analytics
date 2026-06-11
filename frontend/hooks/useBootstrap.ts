@@ -33,6 +33,11 @@ export function useBootstrap() {
         if (seededSyncStatus) {
           queryClient.setQueryData(['sync-status', sid], seededSyncStatus)
         }
+        // Available to both admin and analyst.
+        const seededLogExtents = (data as any).log_extents
+        if (seededLogExtents) {
+          queryClient.setQueryData(['log-extents', sid], seededLogExtents)
+        }
       }
       return data
     },

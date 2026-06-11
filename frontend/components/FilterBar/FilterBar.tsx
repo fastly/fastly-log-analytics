@@ -11,7 +11,7 @@ import { useFilterStore } from '@/stores/filterStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { formatForInput, parseFromInput, toUTCDate } from '@/lib/date'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { usePathname } from 'next/navigation'
@@ -121,13 +121,20 @@ export const FilterBar = React.memo(function FilterBar() {
   // that get the admin endpoint 403'd for remote analysts. Swapping here
   // closes the analyst-403-every-3s polling loop documented in
   // pending-docs/session_2026-06-10_otel_dump_and_log_extents.md.
+  //
+  // Perf audit Phase D: useBootstrap seeds ['log-extents', sid] in its
+  // queryFn from bootstrap's log_extents field. Gate on bootstrap
+  // pending so this query hits the seeded cache on cold load.
+  const queryClient = useQueryClient()
+  const bootstrapState = queryClient.getQueryState(['bootstrap'])
+  const bootstrapPending = bootstrapState !== undefined && bootstrapState.status === 'pending'
   const { data: status } = useQuery({
     queryKey: ['log-extents', activeServiceId],
     queryFn: async () => {
       const { data } = await client.GET("/api/log-extents")
       return data
     },
-    enabled: !!activeServiceId,
+    enabled: !!activeServiceId && !bootstrapPending,
     refetchInterval: (query) => {
       // Keep polling if we haven't seen valid log extents yet
       const data = query.state.data;

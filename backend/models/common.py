@@ -243,4 +243,11 @@ class BootstrapResponse(BaseResponse):
     # local_rows). Available to BOTH admin AND analyst sessions so the
     # badge shows on prod for analyst-shared instances too.
     header_badge: dict | None = None
+    # Analyst-safe log extents (same shape as /api/log-extents): the
+    # earliest + latest log timestamps the FilterBar uses for its
+    # auto-range snap-to-extents. Folded in so the FilterBar's first
+    # render skips the dedicated round-trip; the existing 3-s
+    # not-yet-populated poll continues from useFilterBar for new
+    # services where extents land later.
+    log_extents: dict | None = None
     # section_timings is inherited from BaseResponse.

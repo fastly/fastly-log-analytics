@@ -3809,6 +3809,10 @@ export interface components {
             header_badge?: {
                 [key: string]: unknown;
             } | null;
+            /** Log Extents */
+            log_extents?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** BootstrapService */
         BootstrapService: {

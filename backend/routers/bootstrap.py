@@ -216,16 +216,20 @@ def bootstrap(
 
     _timed("share_banner", _resolve_share_banner)
 
-    # Header badge: analyst-safe sibling of sync_status, projected
-    # down to the two fields the global SyncStatusBadge renders
-    # (Latest Log: timestamp, Total Logs: row count). Emitted for
-    # BOTH admin and analyst so analysts see the badge on prod the
-    # same way admins do — previously they got null because
-    # /api/sync-status is admin-only and the badge fell through.
+    # Header badge + log extents: analyst-safe payloads projected
+    # from the cached sync-status snapshot. Both available to BOTH
+    # admin AND analyst.
+    #   - header_badge: {latest_log_at, local_rows} — what
+    #     SyncStatusBadge renders in the global header (closes the
+    #     missing-header-for-analyst gap).
+    #   - log_extents: {earliest_log_at, latest_log_at, configured} —
+    #     what the FilterBar's auto-range snap-to-extents UX needs.
+    #     Same shape /api/log-extents returns.
     header_badge_payload: dict | None = None
+    log_extents_payload: dict | None = None
 
-    def _resolve_header_badge():
-        nonlocal header_badge_payload
+    def _resolve_header_badge_and_extents():
+        nonlocal header_badge_payload, log_extents_payload
         if not valid_active_id:
             return
         # svcconfig.get_status is keyed on the service NAME, not the
@@ -243,15 +247,23 @@ def bootstrap(
             or cached_status.get("latest_available_file_at")
             or cached_status.get("latest_ingested_file_at")
         )
+        earliest = cached_status.get("earliest_log_at")
         local_rows = cached_status.get("local_rows")
-        if latest is None and local_rows is None:
-            return
-        header_badge_payload = {
-            "latest_log_at": latest,
-            "local_rows": local_rows,
+        if latest is not None or local_rows is not None:
+            header_badge_payload = {
+                "latest_log_at": latest,
+                "local_rows": local_rows,
+            }
+        # log_extents: emit even when both are None (with configured=True)
+        # so the frontend can distinguish "no extents yet, keep polling"
+        # from "service not configured" — matches the dedicated endpoint.
+        log_extents_payload = {
+            "configured": True,
+            "earliest_log_at": earliest,
+            "latest_log_at": cached_status.get("latest_log_at"),
         }
 
-    _timed("header_badge", _resolve_header_badge)
+    _timed("header_badge_and_extents", _resolve_header_badge_and_extents)
 
     views: list[dict] = []
 
@@ -297,6 +309,7 @@ def bootstrap(
         sync_status=sync_status_payload,
         share_banner=share_banner_payload,
         header_badge=header_badge_payload,
+        log_extents=log_extents_payload,
         section_timings=section_timings,
     )
 
