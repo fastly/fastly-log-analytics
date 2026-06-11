@@ -1092,7 +1092,7 @@ def test_download_folder_invokes_fetch_for_each_listed_object(in_memory_duckdb):
     missing logs)."""
     from fastapi.testclient import TestClient
 
-    from backend.deps import get_con, get_con, get_source
+    from backend.deps import get_con, get_source
     from backend.main import app
 
     src_with_bucket = {"name": "test_service", "service_id": "tsid", "bucket": "my-bucket"}
@@ -1368,9 +1368,8 @@ def test_stream_from_worker_disconnect_closes_worker_thread():
     the background thread is notified via ClientDisconnected and exits cleanly
     instead of blocking indefinitely on a full queue.
     """
-    import time
-
     from backend.routers.admin import ClientDisconnected, _stream_from_worker
+    from tests.utils.polling import wait_until
 
     thread_failed = []
     thread_success = []
@@ -1392,8 +1391,7 @@ def test_stream_from_worker_disconnect_closes_worker_thread():
     # Simulate client disconnect by closing the generator
     gen.close()
 
-    # Give the thread a moment to execute its next put and catch ClientDisconnected
-    time.sleep(0.1)
+    wait_until(lambda: bool(thread_success or thread_failed), timeout=1.0)
 
     assert thread_success == [True]
     assert thread_failed == []

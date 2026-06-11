@@ -292,8 +292,6 @@ def test_data_stats_fingerprint_changes_when_partition_added(tmp_path):
     cached COUNT is invalidated. Pinned because stale COUNT after
     optimize or post-commit would surface as the dashboard pinning
     to the pre-compaction row total forever."""
-    import time
-
     from backend.core.duckdb import _data_stats_fingerprint
 
     cache_root = tmp_path / "cache"
@@ -302,8 +300,8 @@ def test_data_stats_fingerprint_changes_when_partition_added(tmp_path):
     src = {"_cache_dir_override": str(cache_root)}
 
     fp_before = _data_stats_fingerprint(src)
-    # Ensure mtime moves forward even on coarse FS timers
-    time.sleep(0.01)
+    # Count differs (1 → 2) so the fingerprint tuple must differ regardless
+    # of mtime — no need to sleep past the FS timer.
     (data_dir / "ts=2").mkdir()
     fp_after = _data_stats_fingerprint(src)
     assert fp_before is not None
@@ -320,8 +318,6 @@ def test_data_stats_fingerprint_ignores_buffer_changes(tmp_path):
     pure waste. Pinned because the previous combined-fingerprint design
     blew up the cache hit rate to ~0% on busy services (see
     update_iceberg_view_clears_schema_cache memory)."""
-    import time
-
     from backend.core.duckdb import _data_stats_fingerprint
 
     cache_root = tmp_path / "cache"
@@ -331,7 +327,6 @@ def test_data_stats_fingerprint_ignores_buffer_changes(tmp_path):
     src = {"_cache_dir_override": str(cache_root)}
 
     fp_before = _data_stats_fingerprint(src)
-    time.sleep(0.01)
     (buf_dir / "batch_001.parquet").write_bytes(b"x")
     fp_after_add = _data_stats_fingerprint(src)
     (buf_dir / "batch_001.parquet").unlink()

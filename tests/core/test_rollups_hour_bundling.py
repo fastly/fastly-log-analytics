@@ -132,7 +132,6 @@ def test_bundle_hours_skips_when_bundle_is_up_to_date(tmp_path):
 
         # Re-run with no source changes. Bundle must NOT be rebuilt
         # (mtime would jump if it were).
-        time.sleep(0.01)
         n2 = rollups.bundle_hours("svc-bundle-skip", src, ["2026-05-15-10"])
         assert n2 == 0, f"second run with no source changes should rebuild 0; got {n2}"
         assert os.path.getmtime(bundle) == mtime_first
@@ -152,10 +151,13 @@ def test_bundle_hours_rebuilds_when_source_files_newer(tmp_path):
         _write_per_field_hour(str(cache_root), "url", "2026-05-15-10", [{"value": "/x", "count": 1}])
         rollups.bundle_hours("svc-bundle-stale", src, ["2026-05-15-10"])
 
-        # Write a NEW per-field parquet for the SAME (field, hour) with
-        # newer mtime — simulating a sync re-running the rebuild.
-        time.sleep(0.05)
-        _write_per_field_hour(str(cache_root), "url", "2026-05-15-10", [{"value": "/y", "count": 2}])
+        # Write a NEW per-field parquet for the SAME (field, hour) — must
+        # have a strictly newer mtime than the bundle so bundle_hours'
+        # freshness check (bundle_mtime >= max_src_mtime) re-runs. Force
+        # mtime forward explicitly rather than sleeping past the FS timer.
+        new_p = _write_per_field_hour(str(cache_root), "url", "2026-05-15-10", [{"value": "/y", "count": 2}])
+        future = time.time() + 10
+        os.utime(new_p, (future, future))
 
         n = rollups.bundle_hours("svc-bundle-stale", src, ["2026-05-15-10"])
 
