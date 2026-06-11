@@ -28,7 +28,13 @@ export function SyncStatusBadge() {
     },
     enabled: !!activeServiceId,
     refetchInterval: 15000, // Poll every 15s to keep status fresh
-    staleTime: 15000 // Prevent immediate refetch on route navigation
+    staleTime: 15000, // Prevent immediate refetch on route navigation
+    // sync-status is admin-only — analyst sessions always 403. Without
+    // this, React Query's default retry=3 burns 3 wasted round-trips
+    // per page load × every 15 s refetch. The badge degrades gracefully
+    // when status is null, so a one-shot failure (admin transient or
+    // analyst permanent) is fine.
+    retry: false,
   })
 
   // Pre-fix this had a 1-second setState ticker so the "Xs ago" label

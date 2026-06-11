@@ -66,7 +66,10 @@ export function useLogsPageState() {
     },
     enabled: !!activeServiceId,
     refetchInterval: 30000,
-    staleTime: 0
+    staleTime: 0,
+    // sync-status is admin-only — analyst sessions always 403. Default
+    // retry=3 burns 3 wasted round-trips per page load on analyst.
+    retry: false,
   })
 
   const { data: cronLogs, isLoading: isLoadingCron, isFetching: isFetchingCron } = useQuery({
