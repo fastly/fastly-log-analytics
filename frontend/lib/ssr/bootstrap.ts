@@ -49,7 +49,11 @@ type BootstrapResponse = components['schemas']['BootstrapResponse']
 // X-Remote-Analyst path. node:http preserves arbitrary headers
 // verbatim, which is exactly what we want here.
 
-const TIMEOUT_MS = 2000
+// Bootstrap can take 1-3s under cron contention on prod (full FOS
+// scan + iceberg manifest walk). 5s is generous but bounded — past
+// that we'd rather fall through to client fetch and let the page
+// paint with a loading skeleton than block SSR indefinitely.
+const TIMEOUT_MS = 5000
 
 interface RawResponse {
   statusCode: number
