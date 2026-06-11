@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -17,10 +18,19 @@ if FALCO_REQUIRED and not FALCO_INSTALLED:
         "FALCO_REQUIRED=1 but the falco binary is not on PATH. Install falco or unset FALCO_REQUIRED to allow skipping."
     )
 
+_FASTLY_STUBS = Path(__file__).resolve().parent.parent / "fixtures" / "fastly_stubs.vcl"
+
 
 @pytest.fixture
 def run_falco_test():
-    """Fixture that generates a temporary workspace, writes VCL and tests, and runs falco."""
+    """Generate a temporary workspace, wrap the generated snippets in the
+    shared Fastly stubs template, and run falco against the result.
+
+    The wrapper VCL (backend declaration + vcl_recv / vcl_fetch / vcl_deliver
+    subroutines, plus any proprietary-variable injection stubs) lives in
+    tests/fixtures/fastly_stubs.vcl so every falco test inherits it.
+    """
+    template = _FASTLY_STUBS.read_text()
 
     def _run(cfg: dict, test_assertions: str) -> subprocess.CompletedProcess:
         snippets = generate_capture_vcl(cfg)
@@ -29,37 +39,16 @@ def run_falco_test():
             main_vcl_path = os.path.join(tmpdir, "main.vcl")
             test_vcl_path = os.path.join(tmpdir, "suite.test.vcl")
 
-            # Wrap the generated snippets in standard Fastly VCL boilerplate
-            # We declare variables here that the generated code relies on
-            # but which are normally provided by Fastly automatically.
             with open(main_vcl_path, "w") as f:
-                f.write("""
-backend F_origin {
-    .connect_timeout = 1s;
-    .dynamic = true;
-    .port = "80";
-    .host = "localhost";
-}
+                f.write(
+                    template.replace("//<INJECT_FETCH_SNIPPET>", snippets.get("fetch", "")).replace(
+                        "//<INJECT_DELIVER_SNIPPET>", snippets.get("deliver", "")
+                    )
+                )
 
-sub vcl_fetch {
-    set req.backend = F_origin;
-""")
-                f.write(snippets.get("fetch", ""))
-                f.write("""
-}
-
-sub vcl_deliver {
-""")
-                f.write(snippets.get("deliver", ""))
-                f.write("""
-}
-                """)
-
-            # Write the Falco test assertions
             with open(test_vcl_path, "w") as f:
                 f.write(test_assertions)
 
-            # Execute Falco
             result = subprocess.run(["falco", "test", main_vcl_path], cwd=tmpdir, capture_output=True, text=True)
             return result
 
