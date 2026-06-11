@@ -129,7 +129,7 @@ TLS_FINGERPRINTS = """
                    count(DISTINCT ip) as ip_count,
                    count(*) as req_count
             FROM {temp_table}
-            WHERE tls_ciphers_sha IS NOT NULL
+            WHERE tls_ciphers_sha IS NOT NULL AND tls_ciphers_sha != ''
             GROUP BY 1 ORDER BY 3 DESC LIMIT 20
         """
 """Top-20 TLS cipher fingerprints by request volume, with IP spread.
@@ -138,6 +138,13 @@ Inputs (trusted-identifier substitutions only):
 - ``{temp_table}`` — filtered TEMP TABLE name.
 
 Output rows: ``(tls_ciphers_sha: str, ip_count: int, req_count: int)``.
+
+The empty-string filter (``!= ''``) is load-bearing: the VCL emits
+``""`` (not NULL) for requests whose fingerprint isn't applicable
+(e.g. ``fastly_info.h2.fingerprint`` returns empty for non-HTTP/2
+connections). Without this filter the top-N's #1 row would be an
+empty-string fingerprint with the bulk of request volume — useless
+for analyst-facing leaderboards.
 """
 
 H2_FINGERPRINTS = """
@@ -145,7 +152,7 @@ H2_FINGERPRINTS = """
                    count(DISTINCT ip) as ip_count,
                    count(*) as req_count
             FROM {temp_table}
-            WHERE h2_fingerprint IS NOT NULL
+            WHERE h2_fingerprint IS NOT NULL AND h2_fingerprint != ''
             GROUP BY 1 ORDER BY 3 DESC LIMIT 20
         """
 """Top-20 HTTP/2 fingerprints by request volume, with IP spread.
@@ -154,6 +161,8 @@ Inputs (trusted-identifier substitutions only):
 - ``{temp_table}`` — filtered TEMP TABLE name.
 
 Output rows: ``(h2_fingerprint: str, ip_count: int, req_count: int)``.
+
+See ``TLS_FINGERPRINTS`` for why the empty-string filter matters.
 """
 
 OH_FINGERPRINTS = """
@@ -161,7 +170,7 @@ OH_FINGERPRINTS = """
                    count(DISTINCT ip) as ip_count,
                    count(*) as req_count
             FROM {temp_table}
-            WHERE oh_fingerprint IS NOT NULL
+            WHERE oh_fingerprint IS NOT NULL AND oh_fingerprint != ''
             GROUP BY 1 ORDER BY 3 DESC LIMIT 20
         """
 """Top-20 Original Header fingerprints by request volume, with IP spread.
@@ -170,6 +179,28 @@ Inputs (trusted-identifier substitutions only):
 - ``{temp_table}`` — filtered TEMP TABLE name.
 
 Output rows: ``(oh_fingerprint: str, ip_count: int, req_count: int)``.
+
+See ``TLS_FINGERPRINTS`` for why the empty-string filter matters.
+"""
+
+# Coverage check used to drive the FE "low coverage" hint per fingerprint card.
+# Returns (total_rows, populated_rows) for a single column in the temp table —
+# the FE uses this to decide whether to render a "<N% of requests have this
+# fingerprint" banner when the leaderboard is sparse-by-design (e.g. HTTP/2
+# fingerprints on a service with <1% HTTP/2 traffic). Cheaper to ship one
+# template + call it three times than to fan three near-identical templates.
+FINGERPRINT_COVERAGE = """
+            SELECT count(*) AS total_rows,
+                   count(*) FILTER (WHERE "{col}" IS NOT NULL AND "{col}" != '') AS populated_rows
+            FROM {temp_table}
+        """
+"""Total + populated row counts for a single fingerprint column.
+
+Inputs:
+- ``{temp_table}`` — filtered TEMP TABLE name.
+- ``{col}`` — column name (pre-validated; substituted via the safelist).
+
+Output: one row ``(total_rows: int, populated_rows: int)``.
 """
 
 # ── Request header size distribution ──────────────────────────────────────────
@@ -312,6 +343,7 @@ __all__ = [
     "TLS_FINGERPRINTS",
     "H2_FINGERPRINTS",
     "OH_FINGERPRINTS",
+    "FINGERPRINT_COVERAGE",
     "REQ_HEADER_SIZE_DIST",
     "TOP_IPS_BY_MAX_HEADER",
     "IPV6_ADOPTION_TS",

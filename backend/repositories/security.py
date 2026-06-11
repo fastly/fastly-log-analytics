@@ -320,6 +320,22 @@ def _build_security_response(
         results["ngwaf_verified_bots"] = []
         results["ngwaf_verified_bots_ts"] = []
 
+    # Fingerprint cards: TLS + H2 + OH. Each card returns top-20 + a coverage
+    # fraction (populated rows / total rows) so the FE can render a low-
+    # coverage hint when a leaderboard is legitimately sparse for the current
+    # traffic mix (e.g. h2 fingerprints on a ~99.99% HTTP/1.1 service).
+    fingerprint_coverage: dict[str, float] = {}
+
+    def _coverage_for(col: str) -> float:
+        # Returns 0.0 on any error or empty temp_table; the FE treats 0.0 as
+        # "no signal, show the existing emptyMessage" rather than the hint.
+        try:
+            q = SQL.FINGERPRINT_COVERAGE.format(col=col, temp_table=temp_table)
+            total, populated = runner.execute(q).fetchone() or (0, 0)
+            return float(populated) / float(total) if total else 0.0
+        except Exception:
+            return 0.0
+
     # 1. TLS Fingerprints (Cipher SHA + IP Spread)
     if "tls_ciphers_sha" in actual_cols and "ip" in actual_cols:
         q = SQL.TLS_FINGERPRINTS.format(temp_table=temp_table)
@@ -327,6 +343,7 @@ def _build_security_response(
         res = runner.execute(q).fetchall()
         _phase("tls_fingerprints", _t)
         results["tls_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
+        fingerprint_coverage["tls_ciphers_sha"] = _coverage_for("tls_ciphers_sha")
     else:
         results["tls_fingerprints"] = []
 
@@ -337,6 +354,7 @@ def _build_security_response(
         res = runner.execute(q).fetchall()
         _phase("h2_fingerprints", _t)
         results["h2_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
+        fingerprint_coverage["h2_fingerprint"] = _coverage_for("h2_fingerprint")
     else:
         results["h2_fingerprints"] = []
 
@@ -347,8 +365,11 @@ def _build_security_response(
         res = runner.execute(q).fetchall()
         _phase("oh_fingerprints", _t)
         results["oh_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
+        fingerprint_coverage["oh_fingerprint"] = _coverage_for("oh_fingerprint")
     else:
         results["oh_fingerprints"] = []
+
+    results["fingerprint_coverage"] = fingerprint_coverage
 
     # 3. Request Header Size Distribution
     if "req_header_bytes" in actual_cols:

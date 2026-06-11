@@ -1,5 +1,5 @@
 import React from 'react'
-import { Bot, Fingerprint, CheckCircle2, AlertTriangle, Clock, HelpCircle } from 'lucide-react'
+import { Bot, Fingerprint, CheckCircle2, AlertTriangle, Clock, HelpCircle, Info } from 'lucide-react'
 import type { Dispatch, SetStateAction } from 'react'
 import type { VisibilityState } from '@tanstack/react-table'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
@@ -39,6 +39,41 @@ type Props = {
   ohFingerprintVisibility: VisibilityState
   setOhFingerprintVisibility: Dispatch<SetStateAction<VisibilityState>>
   onOhFingerprintVisChange: (id: string, vis: boolean) => void
+}
+
+// Threshold below which we render a "low coverage" hint instead of letting
+// an analyst stare at a 1-row leaderboard wondering whether the field is
+// broken. 1% chosen because it's the floor below which a top-N is
+// effectively unactionable (the visible rows represent <1 in 100 requests).
+// Tuned for backend `fingerprint_coverage` values which are 0..1.
+const LOW_COVERAGE_THRESHOLD = 0.01
+
+// Per-field hint message: explains WHY a field is sparse so the analyst
+// reads "h2 fingerprints aren't there because your traffic is mostly HTTP/1.1"
+// instead of "h2 fingerprints are broken." Field-specific because the cause
+// of sparseness differs per field — h2 needs HTTP/2, tls needs the request
+// to land at the true edge PoP, etc.
+const COVERAGE_HINT_MESSAGE: Record<string, string> = {
+  h2_fingerprint: 'HTTP/2 fingerprints are only captured for HTTP/2 connections. Add a `proto=2` filter to scope the page to HTTP/2 traffic.',
+  oh_fingerprint: 'Original Header fingerprints depend on the edge VCL having been re-deployed recently and on the request landing at a Fastly edge PoP (not shielded). Sparse coverage usually means the most recent provisioning hasn\'t propagated yet, or shielding is in effect.',
+  tls_ciphers_sha: 'TLS fingerprints are only captured when the request lands at the true edge PoP (not shielded). Sparse coverage typically means most traffic is shielded.',
+}
+
+function FingerprintCoverageHint({ coverage, field }: { coverage: number | undefined, field: string }) {
+  // Undefined coverage = backend didn't return a value (older backend, or
+  // field-not-in-schema branch). Don't render a hint we can't ground.
+  if (coverage === undefined || coverage === null) return null
+  if (coverage >= LOW_COVERAGE_THRESHOLD) return null
+  const pct = coverage === 0 ? '0%' : coverage < 0.001 ? '<0.1%' : `${(coverage * 100).toFixed(2)}%`
+  const msg = COVERAGE_HINT_MESSAGE[field] || `This field is populated for only a small fraction of requests in the current window.`
+  return (
+    <div className="flex items-start gap-2 px-3 py-2 text-[11px] text-muted-foreground bg-muted/30 border-b">
+      <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+      <span>
+        <span className="font-medium text-foreground">Low coverage ({pct}).</span> {msg}
+      </span>
+    </div>
+  )
 }
 
 export function BotsSection({
@@ -333,6 +368,10 @@ export function BotsSection({
           helpTitle={SECURITY_INFO.fingerprints.title}
           helpContent={SECURITY_INFO.fingerprints.body}
         >
+          <FingerprintCoverageHint
+            coverage={(data as any)?.fingerprint_coverage?.tls_ciphers_sha}
+            field="tls_ciphers_sha"
+          />
           <DataTable
             columns={fingerprintColumns}
             data={(data as any)?.tls_fingerprints || []}
@@ -358,6 +397,10 @@ export function BotsSection({
           helpTitle={SECURITY_INFO.h2_fingerprints.title}
           helpContent={SECURITY_INFO.h2_fingerprints.body}
         >
+          <FingerprintCoverageHint
+            coverage={(data as any)?.fingerprint_coverage?.h2_fingerprint}
+            field="h2_fingerprint"
+          />
           <DataTable
             columns={h2FingerprintColumns}
             data={(data as any)?.h2_fingerprints || []}
@@ -381,6 +424,10 @@ export function BotsSection({
           helpTitle={SECURITY_INFO.oh_fingerprints.title}
           helpContent={SECURITY_INFO.oh_fingerprints.body}
         >
+          <FingerprintCoverageHint
+            coverage={(data as any)?.fingerprint_coverage?.oh_fingerprint}
+            field="oh_fingerprint"
+          />
           <DataTable
             columns={ohFingerprintColumns}
             data={(data as any)?.oh_fingerprints || []}

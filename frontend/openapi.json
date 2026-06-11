@@ -18523,6 +18523,14 @@
             "title": "Oh Fingerprints",
             "default": []
           },
+          "fingerprint_coverage": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Fingerprint Coverage",
+            "default": {}
+          },
           "req_size_dist": {
             "items": {
               "additionalProperties": true,

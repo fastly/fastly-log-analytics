@@ -5987,6 +5987,13 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /**
+             * Fingerprint Coverage
+             * @default {}
+             */
+            fingerprint_coverage: {
+                [key: string]: number;
+            };
+            /**
              * Req Size Dist
              * @default []
              */
