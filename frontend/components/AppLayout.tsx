@@ -245,18 +245,18 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     }
   }, [isLoading, hasServices, isAnalyst, isShareAnalyst, needsLogin, pathname, router, activeServiceId])
 
-  // Only preload world.geojson on routes that actually mount a map
-  // (dashboard's "Requests by Country" choropleth, /network's choropleth).
-  // Previously this was a global <link rel="preload"> in app/layout.tsx,
-  // which fired on every page (including /share-login) and wasted ~251KB
-  // on routes that never paint a map. React 19 hoists <link> to <head>
-  // automatically when rendered from a client component.
+  // Hint the browser to fetch world.geojson early on routes that actually
+  // mount a map (dashboard's "Requests by Country" choropleth, /network's
+  // choropleth). Previously this was a global <link rel="preload"> in
+  // app/layout.tsx, which fired on every page (including /share-login)
+  // and wasted ~251KB on routes that never paint a map. React 19 hoists
+  // <link> to <head> automatically when rendered from a client component.
   //
-  // No `crossOrigin` attribute: world.geojson is same-origin, and MapLibre's
-  // GeoJSON source calls plain `fetch()` (no `mode`/`credentials` override).
-  // Adding crossOrigin="anonymous" would make the preload a CORS request
-  // that fails to match MapLibre's same-origin fetch, leaving the preloaded
-  // bytes unused and tripping the "preloaded but not used" console warning.
+  // `rel="prefetch"` (not `preload`): the map is dynamic-imported, so
+  // MapLibre's actual fetch lands several seconds after page load — past
+  // Chrome's "preloaded but not used within a few seconds" timer. Prefetch
+  // is a low-priority hint without that heuristic; the bytes are still
+  // cached for MapLibre's later request, just not flagged as urgent.
   const needsGeoPreload =
     pathname.startsWith('/dashboard') || pathname.startsWith('/network')
 
@@ -272,7 +272,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     <div className="flex flex-col h-screen overflow-hidden bg-background">
       {needsGeoPreload && (
         <link
-          rel="preload"
+          rel="prefetch"
           href="/geo/world.geojson"
           as="fetch"
         />
