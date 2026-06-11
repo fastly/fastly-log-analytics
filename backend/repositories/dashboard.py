@@ -256,41 +256,59 @@ def get_aggregates(
         # scan + manifest read across all of them. `execute_top_n_rollups`
         # below reads from disk directly and is unaffected.
         #
-        # NARROW projection: on the rollup path the per-field top-N
-        # comes from execute_top_n_rollups (reads rollup parquet
-        # directly), so the live TEMP TABLE only needs the columns
-        # consumed by the four window-scan branches: waf_sig +
-        # edge_score_reason for signal unnest, conn_requests for the
-        # connection-reuse histogram, timestamp for time_series, plus
-        # the chart_metric helper cols. A WIDE projection (matching
-        # cols_str) made TEMP TABLE materialization itself the
-        # bottleneck (~1.4s on a populated 24h window) and erased the
-        # savings. The narrow set keeps materialization under ~400ms.
-        narrow: list[str] = []
-        for c in (
+        # NARROW projection: only the columns the temp consumers
+        # actually use. The unconditional base set covers everything
+        # except the time_series chart:
+        #   - waf_sig             → waf_sig_ind_explode
+        #   - edge_score_reason   → edge_score_reason_ind_explode
+        #   - conn_requests       → conn_requests bucket
+        #   - country             → map_data fallback
+        #   - timestamp           → time_series raw fallback
+        #
+        # The time_series chart usually serves from the per-hour rollup
+        # (F1 — try_time_series_from_rollup), so the chart-metric
+        # helper columns (cache/elapsed/status/resp_bytes/...) are
+        # almost never needed in the temp. We add ONLY the helper(s)
+        # for the SPECIFIC chart_metric being requested — that way the
+        # rare rollup-returns-None fallback still runs against the
+        # temp, but the typical (chart_metric=requests) case keeps the
+        # temp at 5 columns instead of 13. On prod 30d this drops
+        # live_temp_create from ~5 s to ~1.5 s. (Per perf audit
+        # post-F5 the temp was the dashboard 30d bottleneck after
+        # top_n_rollups.)
+        narrow_col_set: list[str] = [
             "waf_sig",
             "edge_score_reason",
             "conn_requests",
-            "timestamp",
-            "cache",
-            "elapsed",
-            "status",
-            "resp_bytes",
-            "req_header_bytes",
-            "req_bytes",
-            "ttfb",
-            "resp_state",
-            # `country` is consumed by the map_data fallback below
-            # (line ~564). The rollup derives map_data from all_top_res
-            # when country is in the top-N field set AND has rows for
-            # the window, but if either condition fails it falls back
-            # to a `SELECT "country" ... FROM table_name` against the
-            # narrow temp. Without `country` here, that fallback raises
-            # BinderException and the dashboard renders empty.
             "country",
-        ):
-            if c in actual_cols:
-                narrow.append(f'"{c}"')
+            "timestamp",
+        ]
+        # chart_metric → columns the raw time_series fallback would
+        # touch if the rollup returns None. Default ('requests') only
+        # needs timestamp which is already included above.
+        if chart_metric in ("5xx", "4xx"):
+            narrow_col_set.append("status")
+        elif chart_metric == "hit_rate":
+            # `cache` is primary; `resp_state` is the fallback when cache
+            # is missing from the service schema.
+            narrow_col_set.extend(["cache", "resp_state"])
+        elif chart_metric.endswith("_latency"):
+            narrow_col_set.append("elapsed")
+        elif chart_metric == "throughput":
+            narrow_col_set.extend(["cache", "elapsed", "resp_bytes"])
+        elif chart_metric == "req_size":
+            narrow_col_set.extend(["req_header_bytes", "req_bytes"])
+        elif chart_metric == "ttfb":
+            narrow_col_set.append("ttfb")
+        # Dedupe while preserving order; filter to columns the service
+        # actually has.
+        seen: set[str] = set()
+        narrow: list[str] = []
+        for c in narrow_col_set:
+            if c in seen or c not in actual_cols:
+                continue
+            seen.add(c)
+            narrow.append(f'"{c}"')
         narrow_cols_str = ", ".join(narrow) if narrow else "*"
         live_temp = f"t_live_hour_{uuid.uuid4().hex}"
         sql = f"CREATE TEMP TABLE {live_temp} AS SELECT {narrow_cols_str} FROM {table_name} WHERE {where_clause}"
