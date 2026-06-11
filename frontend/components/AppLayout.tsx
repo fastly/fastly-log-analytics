@@ -3,12 +3,12 @@
 import * as React from 'react'
 import Link from 'next/link'
 import { usePathname, useSearchParams } from 'next/navigation'
-import { 
-  LayoutDashboard, 
-  BarChart3, 
-  Network, 
-  Users, 
-  Settings, 
+import {
+  LayoutDashboard,
+  BarChart3,
+  Network,
+  Users,
+  Settings,
   Database,
   Search,
   Activity,
@@ -251,6 +251,12 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   // which fired on every page (including /share-login) and wasted ~251KB
   // on routes that never paint a map. React 19 hoists <link> to <head>
   // automatically when rendered from a client component.
+  //
+  // No `crossOrigin` attribute: world.geojson is same-origin, and MapLibre's
+  // GeoJSON source calls plain `fetch()` (no `mode`/`credentials` override).
+  // Adding crossOrigin="anonymous" would make the preload a CORS request
+  // that fails to match MapLibre's same-origin fetch, leaving the preloaded
+  // bytes unused and tripping the "preloaded but not used" console warning.
   const needsGeoPreload =
     pathname.startsWith('/dashboard') || pathname.startsWith('/network')
 
@@ -269,7 +275,6 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           rel="preload"
           href="/geo/world.geojson"
           as="fetch"
-          crossOrigin="anonymous"
         />
       )}
       {shareBanner.node}
@@ -307,8 +312,8 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       {/* Desktop Sidebar */}
       <aside className="hidden md:flex w-64 flex-col border-r bg-muted/40">
         <div className="flex h-14 items-center justify-center border-b px-4 py-2 shrink-0">
-          <Link 
-            href={hasServices ? (activeServiceId ? `/dashboard?service=${activeServiceId}` : "/dashboard") : "/admin"} 
+          <Link
+            href={hasServices ? (activeServiceId ? `/dashboard?service=${activeServiceId}` : "/dashboard") : "/admin"}
             className="flex flex-col items-center justify-center hover:opacity-80 transition-opacity mt-1"
           >
              <img src="/fastly.svg" alt="Fastly" className="h-5 dark:invert" />
@@ -365,7 +370,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
             <TimezoneSwitcher />
             <ThemeToggle />
           </div>
-        </header>        
+        </header>
         {!hideFilterBar && <FilterBar />}
 
         <main className="flex-1 overflow-auto p-6">
