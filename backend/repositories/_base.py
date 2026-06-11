@@ -1131,7 +1131,11 @@ class QueryRunner:
         import os
         from datetime import UTC, datetime, timedelta
 
-        from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME, _hour_bundled_root
+        from backend.core.rollups import (
+            TIME_SERIES_BUNDLE_FILENAME,
+            _hour_bundled_root,
+            _rollups_root,
+        )
 
         if chart_metric not in self._TS_ROLLUP_METRIC_SQL:
             return None
@@ -1155,6 +1159,24 @@ class QueryRunner:
         if not os.path.isdir(bundled_root):
             return None
 
+        # Per-field rollup root, used to distinguish "hour had no data"
+        # (per-field tree is empty for that hour → safe to skip) from
+        # "rollup writer hasn't covered this hour yet" (per-field tree
+        # HAS data → can't skip without undercounting → fall back to raw).
+        # Listing fields once and caching cuts the per-missing-hour cost
+        # from N×listdir to N×isdir.
+        hour_per_field_root = _rollups_root(self.src)
+        try:
+            field_dirs = [f for f in os.listdir(hour_per_field_root) if f.startswith("field=")]
+        except OSError:
+            field_dirs = []
+
+        def _hour_had_any_data(h: str) -> bool:
+            for f in field_dirs:
+                if os.path.isdir(os.path.join(hour_per_field_root, f, f"hour={h}")):
+                    return True
+            return False
+
         active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
         active_hour_dt = datetime.strptime(active_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
 
@@ -1171,9 +1193,20 @@ class QueryRunner:
                 break
             path = os.path.join(bundled_root, f"hour={hour_str}", TIME_SERIES_BUNDLE_FILENAME)
             if not os.path.isfile(path):
-                # Hole in the rollup coverage for a closed hour. Fall back
-                # to raw — partial-window rollup serving would undercount.
-                return None
+                # No bundle for this hour. Two cases:
+                #   (a) Hour genuinely had no logs — the per-field rollup
+                #       tree is also empty for that hour. Safe to skip;
+                #       contributes 0 to the chart for this bucket. This
+                #       is the common case for low-traffic services or
+                #       brief gaps between hours of activity.
+                #   (b) Hour had data but the time_series writer hasn't
+                #       covered it (the bundle is missing while per-field
+                #       rollups exist). Can't skip without undercounting
+                #       — fall back to raw.
+                if _hour_had_any_data(hour_str):
+                    return None
+                cursor += timedelta(hours=1)
+                continue
             rollup_paths.append(path)
             cursor += timedelta(hours=1)
 
