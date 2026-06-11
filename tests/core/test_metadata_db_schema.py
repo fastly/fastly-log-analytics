@@ -199,3 +199,45 @@ def test_get_con_rejects_non_string_service_id():
     """
     with pytest.raises(TypeError):
         metadata_db.get_con(object())
+
+
+@pytest.mark.parametrize(
+    "bad_sid",
+    [
+        "../etc/passwd",  # path traversal via segment
+        "foo/bar",  # embedded separator
+        "foo\x00bar",  # null byte (truncates fopen on POSIX)
+        "",  # empty produces ".metadata.db" (hidden junk file)
+        "x" * 65,  # over 64-char cap
+        "with space",  # whitespace
+        "foo.bar",  # periods (not in Fastly's documented format)
+        "\U00018d1f",  # plane-1 codepoint APFS rejects with Errno 92
+        "café",  # any non-ASCII Unicode
+    ],
+    ids=["traversal", "slash", "null_byte", "empty", "too_long", "space", "period", "apfs_illegal", "non_ascii"],
+)
+def test_db_path_rejects_malformed_service_id(bad_sid):
+    """The pattern guard rejects any string that could traverse the data
+    directory or hit ``OSError(Errno 92): Illegal byte sequence`` on APFS /
+    strict Linux. Pinned because losing this regresses the FastAPI 422
+    contract — schemathesis fuzzing surfaced the path with %F0%98%B4%9F
+    producing an opaque sqlite3.OperationalError 500.
+    """
+    from backend.core.metadata.base import InvalidServiceIdError
+
+    with pytest.raises(InvalidServiceIdError):
+        metadata_db.db_path(bad_sid)
+
+
+def test_invalid_service_id_in_path_returns_422(client):
+    """A malformed ``service_id`` in a path parameter must surface as 422
+    (validation error) rather than 500 (sqlite OperationalError). The
+    backend exception handler in main.py converts InvalidServiceIdError
+    to JSON {"error": "invalid_service_id", ...}.
+    """
+    # Use a route that takes service_id as a Path parameter and reaches
+    # the metadata_db layer. /scoring/labels exercises this surface.
+    resp = client.get("/api/services/foo.bar/scoring/labels")
+    assert resp.status_code == 422, f"expected 422, got {resp.status_code}: {resp.text[:200]}"
+    body = resp.json()
+    assert body.get("error") == "invalid_service_id"

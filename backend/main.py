@@ -488,6 +488,23 @@ from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMid
 app.add_middleware(TelemetryResponseBodyMiddleware)
 
 
+from fastapi.responses import JSONResponse  # noqa: E402
+
+from backend.core.metadata.base import InvalidServiceIdError  # noqa: E402
+
+
+@app.exception_handler(InvalidServiceIdError)
+async def _invalid_service_id_handler(request: Request, exc: InvalidServiceIdError) -> JSONResponse:
+    """Convert ``InvalidServiceIdError`` raised by ``metadata.base.db_path`` into
+    a 422 instead of letting it bubble as an opaque 500 ``sqlite3.OperationalError:
+    unable to open database file``. Triggered by routes whose ``service_id`` path
+    parameter contains characters that would traverse the data directory or that
+    APFS / strict Linux filesystems reject (e.g. unassigned-plane Unicode
+    codepoints surfacing as ``OSError(Errno 92): Illegal byte sequence``).
+    """
+    return JSONResponse(status_code=422, content={"error": "invalid_service_id", "detail": str(exc)})
+
+
 @app.middleware("http")
 async def telemetry_middleware(request: Request, call_next):
     """Initialise call tracking, set process context, and flush FOS/CDN ops after the request.

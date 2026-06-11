@@ -85,6 +85,28 @@ def _clear_ingested_filenames_cache(service_id: str | None = None) -> None:
 _ORPHAN_THRESHOLD_MINS = 60
 
 
+class InvalidServiceIdError(ValueError):
+    """Raised by ``db_path`` when ``service_id`` fails format validation.
+
+    Fastly service IDs are 22-character lowercase alphanumeric strings, but
+    legacy fixtures and Admin-provisioned identifiers also use hyphens and
+    mixed case, so we accept the union (``[A-Za-z0-9_-]{1,64}``). Anything
+    outside that — non-ASCII characters, path separators, null bytes — would
+    either traverse the data directory or hit macOS APFS / strict Linux
+    filesystems with ``OSError(Errno 92): Illegal byte sequence`` and bubble
+    up as an opaque ``sqlite3.OperationalError: unable to open database
+    file``. Reject at the data-layer chokepoint so every caller is safe.
+    The shared FastAPI exception handler in ``backend.main`` converts this
+    into a 422 instead of a 500.
+    """
+
+
+# Anchored, length-bounded. Hyphens and underscores allowed for legacy
+# fixtures (e.g. "test-service-id"). 1-64 chars covers Fastly's 22-char
+# native IDs with headroom for Admin-assigned suffixes.
+_SERVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
 # ── Connection management ─────────────────────────────────────────────────────
 
 
@@ -94,10 +116,14 @@ def db_path(service_id: str) -> str:
     A non-string ``service_id`` would silently produce a junk path
     containing the object's repr (e.g. ``<...0x...>.metadata.db``) and
     leak files on disk. Reject at the boundary so the bad caller is
-    pinpointed immediately.
+    pinpointed immediately. A malformed-string ``service_id`` raises
+    :class:`InvalidServiceIdError` for the same reason — see that class's
+    docstring for the threat model.
     """
     if not isinstance(service_id, str):
         raise TypeError(f"service_id must be a string, got {type(service_id).__name__}: {service_id!r}")
+    if not _SERVICE_ID_RE.match(service_id):
+        raise InvalidServiceIdError(f"service_id must match {_SERVICE_ID_RE.pattern!r}; got {service_id!r}")
     return os.path.join(_DATA_DIR, f"{service_id}.metadata.db")
 
 
