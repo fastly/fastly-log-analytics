@@ -501,8 +501,22 @@ async def _invalid_service_id_handler(request: Request, exc: InvalidServiceIdErr
     parameter contains characters that would traverse the data directory or that
     APFS / strict Linux filesystems reject (e.g. unassigned-plane Unicode
     codepoints surfacing as ``OSError(Errno 92): Illegal byte sequence``).
+
+    Body shape matches FastAPI's own ``HTTPValidationError`` schema so the
+    response stays conformant to the OpenAPI spec.
     """
-    return JSONResponse(status_code=422, content={"error": "invalid_service_id", "detail": str(exc)})
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {
+                    "loc": ["path", "service_id"],
+                    "msg": str(exc),
+                    "type": "value_error.invalid_service_id",
+                }
+            ],
+        },
+    )
 
 
 @app.middleware("http")

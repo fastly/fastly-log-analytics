@@ -233,11 +233,16 @@ def test_invalid_service_id_in_path_returns_422(client):
     """A malformed ``service_id`` in a path parameter must surface as 422
     (validation error) rather than 500 (sqlite OperationalError). The
     backend exception handler in main.py converts InvalidServiceIdError
-    to JSON {"error": "invalid_service_id", ...}.
+    to a body matching FastAPI's ``HTTPValidationError`` schema so the
+    response stays OpenAPI-conformant (schemathesis verified).
     """
     # Use a route that takes service_id as a Path parameter and reaches
     # the metadata_db layer. /scoring/labels exercises this surface.
     resp = client.get("/api/services/foo.bar/scoring/labels")
     assert resp.status_code == 422, f"expected 422, got {resp.status_code}: {resp.text[:200]}"
     body = resp.json()
-    assert body.get("error") == "invalid_service_id"
+    assert isinstance(body.get("detail"), list), "detail must be a list per HTTPValidationError"
+    err = body["detail"][0]
+    assert err["loc"] == ["path", "service_id"]
+    assert "service_id must match" in err["msg"]
+    assert err["type"] == "value_error.invalid_service_id"
