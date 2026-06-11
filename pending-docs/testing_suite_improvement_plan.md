@@ -4,6 +4,45 @@ This document outlines the architectural blueprint and execution roadmap to elev
 
 ---
 
+## 0. Execution status (2026-06-11)
+
+Working pass on `refactor/cleanup`. Items below are scored against what actually ships in the repo today, not the plan's nominal phase boundaries.
+
+### Done
+
+| Plan item | Where it landed | Notes |
+|---|---|---|
+| §2 — `wait_until` helper + sleep cleanup | `tests/utils/polling.py`; sites in `test_admin_mutation_endpoints.py:1396`, `test_rollups_hour_bundling.py:135/157`, `test_duckdb_helpers.py:306/334` | Plan misclassified 4 of 5 sites as polling waits — they were FS-mtime bumps. Replaced with `os.utime()` or deleted (count-differs invariant made the sleep redundant). |
+| §4.B.1 — MagicMock S3 overhaul | `tests/core/test_iceberg.py` (4 sites at L287/L322/L349/L372), `tests/routers/test_usage_endpoints.py:38` | Cache-TTL tests use `patch.object(s3_mock, "get_object", wraps=...)` to keep wire-call counting while running against real moto S3. |
+| §3 Gap A — VCL stubs fixture | `tests/fixtures/fastly_stubs.vcl`; runner updated in `tests/core/test_vcl_semantics.py` | Uses `//<INJECT_FETCH_SNIPPET>` / `//<INJECT_DELIVER_SNIPPET>` marker comments (valid VCL on its own — IDE-friendly) instead of `{}` str.format escapes. Header doc points future authors at where to add `testing.inject_variable(...)` stubs for `fastly.ff.visits_this_service` / `fastly_info.state`. |
+| §6 Custom Fields — SQL injection fuzzing | `tests/core/test_custom_field_fuzz.py` | 7 hypothesis property tests on `validate_custom_field` covering name regex (positive + negative), VCL injection-char guards, length cap, bytes_estimate range. Hypothesis surfaced one precedence quirk (empty-check fires before forbidden-char check) — documented inline. |
+| §5 Pillar 3 — DuckDB pool stress (partial) | `tests/core/test_duckdb_pool.py` (3 new tests appended) | Covers saturation → `_PoolBusy` after `max_wait`, empty `_wait_stats` zero-shape, populated nearest-rank percentiles. |
+
+### Skipped or deferred (with rationale)
+
+| Plan item | Status | Why |
+|---|---|---|
+| §5 Pillar 4 — In-flight recovery regression | Already covered | `tests/core/test_ingest_in_flight.py` has 11 tests covering the recover paths the plan asks for. Plan's "crash after `write_to_buffer` but before SQLite tracking entry" misreads the mark-before-write protocol — SQLite tracking is *first*, then buffer write; existing tests already pin both halves of the actual race window. |
+| §3 Gap B — FOS negative-cache wrapper | Skipped — premature | `backend/utils/retry.py` defines `http_api_retry` / `generic_network_retry` / `sqlite_busy_retry`, but the module docstring lists call sites as TODO. No FOS read-path currently retries (`_read_metadata_pointer` does a single `s3.get_object` with `except: continue`). Adding a 404-caching emulator before retry adoption tests nothing. Revisit once the retry decorators are wired into real call sites. |
+| §3 Gap C / §7 Phase 1 — Schemathesis | POC complete; deferred | Installed schemathesis 4.21.5, wired `from_asgi` against `/openapi.json`, scoped to GET-only with `unsupported_method` check disabled (RFC 9110 `Allow`-header complaint). 79 GET endpoints collected; **~30 failed** on real findings — including `sqlite3.OperationalError: unable to open database file` triggered by a URL-encoded UTF-8 service_id (looks like a path-handling bug worth chasing). Each finding needs a scoped fix PR; shipping a broadly-failing test to a shared branch would be loud. The dep + the test file were reverted; pick this up as its own ticket. |
+| §4.A — Pruning audit (`test_endpoints.py`, `test_admin_get_endpoints.py`, `AppLayout.test.tsx`) | Collapsed | The plan's "superseded by Schemathesis / Playwright" argument doesn't apply until those two are landed. Re-audit each candidate file after Schemathesis fuzz lands; check that the existing test catches something the fuzz doesn't before deleting. |
+
+### Not started (need explicit signoff before starting)
+
+| Plan item | Blast radius | What's needed first |
+|---|---|---|
+| §5 Pillar 1 / §7 Phase 2 — Playwright browser tests | Adds Chromium / Firefox / WebKit binaries (~500 MB), a new test runner config, a new CI step. Touches `frontend/` where other devs are actively committing. | Cut a dedicated branch (`tests/playwright-setup`) and confirm coordination with whoever owns the dashboard / map / filter-bar UI work. Start with a single smoke test (load `/dashboard`, screenshot, assert no console errors) before expanding to the four targets in §5 Pillar 1. |
+| §5 Pillar 2 — Live-share lifecycle E2E | Depends on Playwright. Also requires understanding the `/api/remote-share/login` rate-limit/lockout semantics for the brute-force test. | After Playwright is in. Read `backend/access/remote_share.py` for the actual lockout contract, then write Playwright tests that drive a real invite → login → query flow against the in-process app. |
+| §4.A — AppLayout pruning | Depends on Playwright covering the same layout assertions. | After Playwright is in. Diff the JSDOM assertions in `AppLayout.test.tsx` against what the equivalent Playwright test catches; delete only the overlap. |
+| §6 — LocalStack + Terraform validation (Phase 3) | Adds a docker-compose profile, the `localstack/localstack` image (~200 MB), per-test setup/teardown via `tflocal`. | Confirm against the `infra-stays-local` memory which fixtures may hold real service IDs vs need scrubbing into local-only files. Then add a `test` profile to `docker-compose.yml` and a `tests/terraform_tests/test_localstack_apply.py` that runs `init` + `validate` + `apply` against the generated HCL. |
+| §6 — VCL stubs: re-enable miss_pass test | Single test currently `pytest.skip`'d in `test_vcl_semantics.py:114` | Needs a `testing.inject_variable("fastly_info.state", ...)` stub in `tests/fixtures/fastly_stubs.vcl` once Falco fixes the `!~`-operator binding bug. Track Falco upstream rather than working around it locally. |
+
+### Commits on `refactor/cleanup` this pass
+
+`7a278fe` sleep cleanup → `4d23079` moto S3 migration → `9dd2294` VCL stubs fixture → `8c553e3` custom-field hypothesis fuzz → `e7efc7b` pool saturation + wait-stats.
+
+---
+
 ## 1. Executive Summary & Core Philosophy
 
 To support rapid iteration on log ingestion, analytical queries, and UI components without introducing flakiness or slow test pipelines, we adopt a tiered testing approach:
