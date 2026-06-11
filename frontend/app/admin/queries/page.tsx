@@ -155,6 +155,11 @@ export default function QueryMonitorPage() {
 
   const enabled = cfg?.enabled !== false
 
+  // 300ms while the page is open. The snapshot endpoint returns in <1ms
+  // server-side; real analyst/cron queries finish in 0.2-30ms (verified on
+  // prod 2026-06-11), so anything slower than 300ms polling means the
+  // Active list reads empty even when the system is busy. The cost is one
+  // tiny GET every 300ms per admin tab — order of nothing.
   const snapshotQuery = useQuery<SnapshotResponse>({
     queryKey: ['admin', 'query-monitor', 'snapshot'],
     queryFn: async ({ signal }) => {
@@ -163,8 +168,7 @@ export default function QueryMonitorPage() {
       return r.json()
     },
     enabled: visible && enabled,
-    refetchInterval: (q) =>
-      (q.state.data?.active?.length ?? 0) > 0 ? 1000 : 2000,
+    refetchInterval: 300,
     refetchIntervalInBackground: false,
   })
 
@@ -189,11 +193,46 @@ export default function QueryMonitorPage() {
     onError: (err: Error) => setActionError(extractApiError(err) || err.message),
   })
 
-  // Filter / search the active list.
+  // "Just finished" — anything that completed in the last 3 seconds. Promoted
+  // into the Active section as a faded row with the outcome pill so the user
+  // gets visual feedback even when real queries are sub-300ms. Without this
+  // the Active list reads empty on typical traffic (verified on prod 2026-
+  // 06-11: p50 query duration 0.2ms, max 29ms — far below any poll cadence).
+  const JUST_FINISHED_WINDOW_S = 3
+  const justFinished = React.useMemo(() => {
+    const completed = snapshotQuery.data?.completed ?? []
+    const cutoff = Date.now() / 1000 - JUST_FINISHED_WINDOW_S
+    return completed.filter((c) => c.ended_at_utc >= cutoff)
+  }, [snapshotQuery.data])
+
+  // Filter / search the active list (active rows + just-finished promotions).
   const filteredActive = React.useMemo(() => {
-    const rows = snapshotQuery.data?.active ?? []
+    type Row = ActiveRow & { _completed?: CompletedRow }
+    const active: Row[] = (snapshotQuery.data?.active ?? []).map((r) => ({ ...r }))
+    const justRows: Row[] = justFinished.map((c) => ({
+      query_id: c.query_id,
+      db_type: c.db_type,
+      sql_preview: c.sql_preview,
+      sql: c.sql,
+      sql_len: c.sql_len,
+      attribution: c.attribution,
+      service_id: c.service_id,
+      started_at_utc: c.started_at_utc,
+      duration_ms: c.duration_ms,
+      cancellable: false,
+      cancelled_at: null,
+      _completed: c,
+    }))
+    // Newest first, no dupes (a row could theoretically appear in both).
+    const seen = new Set<number>()
+    const combined: Row[] = []
+    for (const r of [...active, ...justRows]) {
+      if (seen.has(r.query_id)) continue
+      seen.add(r.query_id)
+      combined.push(r)
+    }
     const q = search.trim().toLowerCase()
-    return rows.filter((r) => {
+    return combined.filter((r) => {
       if (kindFilter !== 'all' && r.attribution.kind !== kindFilter) return false
       if (!q) return true
       return (
@@ -203,7 +242,7 @@ export default function QueryMonitorPage() {
         r.attribution.label.toLowerCase().includes(q)
       )
     })
-  }, [snapshotQuery.data, search, kindFilter])
+  }, [snapshotQuery.data, justFinished, search, kindFilter])
 
   const completed = snapshotQuery.data?.completed ?? []
 
@@ -251,8 +290,11 @@ export default function QueryMonitorPage() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
               <CardTitle className="text-base flex items-center gap-2">
-                Active Queries
-                <Badge variant="secondary">{snapshotQuery.data?.active?.length ?? 0}</Badge>
+                Active &amp; Just-Finished
+                <Badge variant="secondary">
+                  {(snapshotQuery.data?.active?.length ?? 0)} active
+                  {justFinished.length > 0 && ` + ${justFinished.length} just-finished`}
+                </Badge>
                 <PollingIndicator
                   visible={visible}
                   isFetching={snapshotQuery.isFetching}
@@ -331,7 +373,9 @@ function SummaryStrip() {
       return r.json()
     },
     enabled: visible,
-    refetchInterval: 2000,
+    // Same 300ms cadence as the snapshot — without it the badge lags the
+    // table and the page feels inconsistent.
+    refetchInterval: 300,
     refetchIntervalInBackground: false,
   })
   if (!data) return null
@@ -398,6 +442,8 @@ function PollingIndicator({
   )
 }
 
+type ActiveOrPromotedRow = ActiveRow & { _completed?: CompletedRow }
+
 function ActiveTable({
   rows,
   expandedQid,
@@ -405,7 +451,7 @@ function ActiveTable({
   onKill,
   cancellingQid,
 }: {
-  rows: ActiveRow[]
+  rows: ActiveOrPromotedRow[]
   expandedQid: number | null
   onToggleRow: (qid: number) => void
   onKill: (row: ActiveRow) => void
@@ -438,10 +484,11 @@ function ActiveTable({
             const expanded = expandedQid === row.query_id
             const cancelling = cancellingQid === row.query_id
             const isCancelled = row.cancelled_at !== null
+            const promoted = !!row._completed
             return (
               <React.Fragment key={row.query_id}>
                 <tr
-                  className={`border-b hover:bg-muted/30 cursor-pointer ${isCancelled ? 'opacity-60' : ''}`}
+                  className={`border-b hover:bg-muted/30 cursor-pointer ${isCancelled ? 'opacity-60' : ''} ${promoted ? 'opacity-60 bg-muted/10' : ''}`}
                   onClick={() => onToggleRow(row.query_id)}
                 >
                   <td className="px-3 py-2">
@@ -471,7 +518,20 @@ function ActiveTable({
                     {formatDuration(row.duration_ms)}
                   </td>
                   <td className="px-3 py-2 text-right">
-                    {row.cancellable && !isCancelled ? (
+                    {promoted ? (
+                      <Badge
+                        variant={
+                          row._completed!.outcome === 'ok'
+                            ? 'outline'
+                            : row._completed!.outcome === 'cancelled'
+                            ? 'secondary'
+                            : 'destructive'
+                        }
+                        className="capitalize"
+                      >
+                        {row._completed!.outcome === 'ok' ? '✓ done' : row._completed!.outcome}
+                      </Badge>
+                    ) : row.cancellable && !isCancelled ? (
                       <Button
                         variant="destructive"
                         size="sm"
