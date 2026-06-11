@@ -66,6 +66,54 @@ def clear_schema_cols_cache(service_id: str | None = None) -> None:
         _schema_cols_cache = {k: v for k, v in _schema_cols_cache.items() if k[0] != service_id}
 
 
+# Cache for ``os.listdir`` on the rollup directory tree. The dir_enum
+# pass inside ``QueryRunner.execute_top_n_rollups`` calls listdir once
+# per (field) at the field-hour and field-day roots, plus once at the
+# bundled-hour root. On prod that's ~80 listdirs returning ~375 entries
+# each per request and lands at 1.3-3 s of pure stat work — sometimes
+# the bulk of the request — per the perf audit (F5).
+#
+# The cron sync rebuilds the rollup tree at most every minute, so a
+# 60 s TTL captures changes without ever serving rollup output that's
+# more than one tick stale. Bounded by entry count so unbounded service
+# / hour churn can't blow the cache.
+_listdir_cache: dict[str, tuple[float, list[str]]] = {}
+_LISTDIR_CACHE_TTL_S = 60.0
+_LISTDIR_CACHE_MAX_ENTRIES = 4096
+
+
+def _cached_listdir(path: str) -> list[str]:
+    """Return ``os.listdir(path)`` cached for ``_LISTDIR_CACHE_TTL_S``.
+
+    Returns ``[]`` on any OSError (matching the existing call-site
+    behaviour around the rollup tree — callers treat missing/empty
+    directories the same). The cache is intentionally simple: no
+    per-entry expiry sweep, just a flat-clear when full.
+    """
+    import time as _time
+
+    now = _time.monotonic()
+    cached = _listdir_cache.get(path)
+    if cached is not None and (now - cached[0]) < _LISTDIR_CACHE_TTL_S:
+        return cached[1]
+    try:
+        import os as _os
+
+        entries = _os.listdir(path)
+    except OSError:
+        entries = []
+    if len(_listdir_cache) >= _LISTDIR_CACHE_MAX_ENTRIES:
+        _listdir_cache.clear()
+    _listdir_cache[path] = (now, entries)
+    return entries
+
+
+def clear_listdir_cache() -> None:
+    """Drop the cached rollup listdir entries. Used by tests + the
+    sync writer's commit hook when fresh files have been written."""
+    _listdir_cache.clear()
+
+
 def _compact_sql_for_debug(sql: str) -> str:
     """Replace explicit ``read_parquet([...long file list...])`` literals
     with ``read_parquet([N files])`` for transport in the debug-panel
@@ -796,10 +844,7 @@ class QueryRunner:
             field_day_dir = os.path.join(day_root, f"field={field}")
             if not os.path.isdir(field_day_dir):
                 continue
-            try:
-                day_entries = os.listdir(field_day_dir)
-            except OSError:
-                continue
+            day_entries = _cached_listdir(field_day_dir)
             for day_entry in day_entries:
                 if not day_entry.startswith("day="):
                     continue
@@ -822,33 +867,30 @@ class QueryRunner:
                     continue
 
         if os.path.isdir(bundled_hour_root):
-            try:
-                for hour_entry in os.listdir(bundled_hour_root):
-                    if not hour_entry.startswith("hour="):
-                        continue
-                    hour = hour_entry[len("hour=") :]
-                    if st_str_floor and hour < st_str_floor:
-                        continue
-                    if et_str_floor and hour > et_str_floor:
-                        continue
-                    if hour >= active_str:
-                        # Active hour served live, not from any bundle.
-                        continue
-                    if hour[:10] in day_covered_by_any_field:
-                        # Day file covers this hour for at least one
-                        # field; including the bundled file would
-                        # double-count that field via the UNION ALL.
-                        # Fields without a day file for this day fall
-                        # through to per-field per-hour in the loop
-                        # below (their covered_days won't include this
-                        # day).
-                        continue
-                    bundle_path = os.path.join(bundled_hour_root, hour_entry, "all_fields.parquet")
-                    if os.path.isfile(bundle_path):
-                        bundled_hour_paths.append(bundle_path)
-                        bundled_hours.add(hour)
-            except OSError:
-                pass
+            for hour_entry in _cached_listdir(bundled_hour_root):
+                if not hour_entry.startswith("hour="):
+                    continue
+                hour = hour_entry[len("hour=") :]
+                if st_str_floor and hour < st_str_floor:
+                    continue
+                if et_str_floor and hour > et_str_floor:
+                    continue
+                if hour >= active_str:
+                    # Active hour served live, not from any bundle.
+                    continue
+                if hour[:10] in day_covered_by_any_field:
+                    # Day file covers this hour for at least one
+                    # field; including the bundled file would
+                    # double-count that field via the UNION ALL.
+                    # Fields without a day file for this day fall
+                    # through to per-field per-hour in the loop
+                    # below (their covered_days won't include this
+                    # day).
+                    continue
+                bundle_path = os.path.join(bundled_hour_root, hour_entry, "all_fields.parquet")
+                if os.path.isfile(bundle_path):
+                    bundled_hour_paths.append(bundle_path)
+                    bundled_hours.add(hour)
 
         _t_dir_enum = time.perf_counter()
         for field in safe_fields:
@@ -861,10 +903,7 @@ class QueryRunner:
             # those hours.
             covered_days: set[str] = set()
             if os.path.isdir(field_day_dir):
-                try:
-                    day_entries = os.listdir(field_day_dir)
-                except OSError:
-                    day_entries = []
+                day_entries = _cached_listdir(field_day_dir)
                 for day_entry in day_entries:
                     if not day_entry.startswith("day="):
                         continue
@@ -885,17 +924,11 @@ class QueryRunner:
                         # hours of this day.
                         continue
                     day_dir = os.path.join(field_day_dir, day_entry)
-                    try:
-                        for fname in os.listdir(day_dir):
-                            if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
-                                day_paths.append(os.path.join(day_dir, fname))
-                                covered_days.add(day)
-                    except OSError:
-                        continue
-            try:
-                hour_entries = os.listdir(field_hour_dir)
-            except OSError:
-                continue
+                    for fname in _cached_listdir(day_dir):
+                        if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
+                            day_paths.append(os.path.join(day_dir, fname))
+                            covered_days.add(day)
+            hour_entries = _cached_listdir(field_hour_dir)
             for hour_entry in hour_entries:
                 if not hour_entry.startswith("hour="):
                     continue
@@ -916,12 +949,9 @@ class QueryRunner:
                     # Per-hour bundle already covers this (field, hour).
                     continue
                 hour_dir = os.path.join(field_hour_dir, hour_entry)
-                try:
-                    for fname in os.listdir(hour_dir):
-                        if fname.endswith(".parquet"):
-                            hour_paths.append(os.path.join(hour_dir, fname))
-                except OSError:
-                    continue
+                for fname in _cached_listdir(hour_dir):
+                    if fname.endswith(".parquet"):
+                        hour_paths.append(os.path.join(hour_dir, fname))
 
         _phase("dir_enum", (time.perf_counter() - _t_dir_enum) * 1000)
         _phase("dir_enum:n_day_files", float(len(day_paths)))
