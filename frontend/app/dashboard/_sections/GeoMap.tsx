@@ -44,7 +44,7 @@ export function GeoMap({
   return (
     <div className={cn("border rounded-lg p-4 flex flex-col transition-opacity duration-100", isFetchingAggs && "opacity-40 pointer-events-none")}>
       <h3 className="text-sm font-medium mb-4">Requests by Country</h3>
-      {(!isReady || (isLoadingAggs && !aggregates)) || (isFetchingAggs && (!aggregates?.map_data || aggregates.map_data.length === 0)) ? (
+      {(!isReady || !aggregates) || (isFetchingAggs && (!aggregates?.map_data || aggregates.map_data.length === 0)) ? (
         <div className="flex-1 min-h-[300px] flex items-center justify-center bg-muted/20 rounded-md">
           <span className="text-muted-foreground text-sm animate-pulse">
             {!isReady ? 'Initializing...' : 'Mapping traffic...'}

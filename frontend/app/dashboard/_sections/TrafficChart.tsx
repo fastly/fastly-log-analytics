@@ -177,7 +177,7 @@ export function TrafficChart({
       )}
 
       <div className="relative flex-1 mb-4">
-        {(!isReady || (isLoadingAggs && !aggregates)) || (isFetchingAggs && trafficData.length === 0) ? (
+        {(!isReady || !aggregates) || (isFetchingAggs && trafficData.length === 0) ? (
           <div className="h-[300px] flex items-center justify-center bg-muted/20 rounded-md">
             <span className="text-muted-foreground text-sm animate-pulse">
               {!isReady ? 'Initializing...' : 'Crunching logs...'}

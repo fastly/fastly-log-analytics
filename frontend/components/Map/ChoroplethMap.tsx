@@ -25,7 +25,7 @@ const NORMALIZE_COUNTRY: Record<string, string> = {
   'South Korea': 'South Korea',
   'Vietnam': 'Vietnam',
   'Taiwan': 'Taiwan',
-  // Fastly usually returns plain names like 'United States', 
+  // Fastly usually returns plain names like 'United States',
   // GeoJSON from johan/world.geo.json uses full names for some.
 }
 
@@ -77,9 +77,15 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
   const { theme } = useTheme()
-  
+
   const [tooltip, setTooltip] = useState<TooltipState | null>(null)
   const dataMapRef = useRef<Map<string, number>>(new Map())
+  // Reverse lookup: GeoJSON-feature name → alpha-2 country code. Built from
+  // the data array (whose .country IS the alpha-2 code), so it stays in sync
+  // with whatever the backend actually returns. Avoids depending on the
+  // GeoJSON feature id (MapLibre can drop string ids in click events) or on
+  // country-codes.json being complete (it has 168 codes vs 180 features).
+  const nameToCodeRef = useRef<Map<string, string>>(new Map())
   const onCountryClickRef = useRef(onCountryClick)
   useEffect(() => { onCountryClickRef.current = onCountryClick }, [onCountryClick])
 
@@ -153,9 +159,13 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
         map.current.on('click', 'countries', (e) => {
           if (e.features && e.features.length > 0) {
             const feature = e.features[0]
-            const id = feature.id as string
             const name = feature.properties.name as string
-            const code = id ? alpha3ToAlpha2[id.toUpperCase()] : null
+            // Prefer the data-derived name→code map (always alpha-2 matching
+            // what the backend filter expects); fall back to the GeoJSON
+            // feature id's alpha-3 lookup, then to the name as a last resort.
+            const id = feature.id as string | undefined
+            const code = nameToCodeRef.current.get(name)
+              || (id ? alpha3ToAlpha2[id.toUpperCase()] : null)
             onCountryClickRef.current?.(code || name)
           }
         })
@@ -171,14 +181,17 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
   useEffect(() => {
     if (!map.current || !data) return
 
-    // Update data map for hover lookups
+    // Update data map for hover lookups + reverse map for click-to-code.
     const newDataMap = new Map<string, number>()
+    const newNameToCode = new Map<string, string>()
     data.forEach(d => {
       const englishName = getCountryName(d.country)
       const countryName = NORMALIZE_COUNTRY[englishName] || englishName
       newDataMap.set(countryName, d.count)
+      if (d.country) newNameToCode.set(countryName, d.country.toUpperCase())
     })
     dataMapRef.current = newDataMap
+    nameToCodeRef.current = newNameToCode
 
     const updateData = () => {
       if (!map.current?.getLayer('countries')) {
@@ -246,13 +259,13 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
   return (
     <div className={`relative min-h-[300px] w-full h-full rounded-lg overflow-hidden bg-background ${className}`}>
       <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
-      
+
       {/* Tooltip */}
       {tooltip && (
-        <div 
+        <div
           className="absolute z-50 pointer-events-none bg-popover/95 backdrop-blur-sm border shadow-lg rounded-md px-3 py-2 text-sm transition-opacity"
-          style={{ 
-            left: Math.min(tooltip.x + 15, (mapContainer.current?.clientWidth || 500) - 160), 
+          style={{
+            left: Math.min(tooltip.x + 15, (mapContainer.current?.clientWidth || 500) - 160),
             top: Math.min(tooltip.y + 15, (mapContainer.current?.clientHeight || 300) - 80)
           }}
         >

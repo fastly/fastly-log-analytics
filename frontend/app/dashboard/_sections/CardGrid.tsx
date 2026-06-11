@@ -98,7 +98,12 @@ export function CardGrid({
   // placeholder branch is NOT wrapped — it's already cheap
   // and we want every "Initializing..." tile visible.
   const renderCard = (card: any) => {
-    if (!isReady || (isLoadingAggs && !aggregates)) {
+    // Show "Loading…" whenever aggregates haven't arrived yet — covers the
+    // gap between catalog-loaded (visibleCardList populated) and the aggs
+    // query actually firing (isLoadingAggs is false but data is still
+    // undefined). Without this, individual cards flash "No data available"
+    // for a beat before the real data lands.
+    if (!isReady || !aggregates) {
       return (
         <div key={card.id} className="border rounded-lg p-4 h-[300px] flex items-center justify-center bg-muted/20 [content-visibility:auto] [contain-intrinsic-size:300px]">
           <span className="text-muted-foreground text-xs animate-pulse">
