@@ -37,9 +37,24 @@ Working pass on `refactor/cleanup`. Items below are scored against what actually
 | §6 — LocalStack + Terraform validation (Phase 3) | Adds a docker-compose profile, the `localstack/localstack` image (~200 MB), per-test setup/teardown via `tflocal`. | Confirm against the `infra-stays-local` memory which fixtures may hold real service IDs vs need scrubbing into local-only files. Then add a `test` profile to `docker-compose.yml` and a `tests/terraform_tests/test_localstack_apply.py` that runs `init` + `validate` + `apply` against the generated HCL. |
 | §6 — VCL stubs: re-enable miss_pass test | Single test currently `pytest.skip`'d in `test_vcl_semantics.py:114` | Needs a `testing.inject_variable("fastly_info.state", ...)` stub in `tests/fixtures/fastly_stubs.vcl` once Falco fixes the `!~`-operator binding bug. Track Falco upstream rather than working around it locally. |
 
+### Bug fixes surfaced this pass
+
+The schemathesis POC was reverted, but its findings stayed actionable. Three real bugs got committed back to the branch:
+
+| Commit | Bug | How it surfaced |
+|---|---|---|
+| `acf81f0` | `service_id` path parameter containing a 4-byte UTF-8 codepoint (or null byte / path traversal / over-cap length) crashed `sqlite3.connect` with `OSError(Errno 92): Illegal byte sequence` on APFS, surfaced as opaque 500 `unable to open database file`. | Schemathesis `curl -X GET '/api/services/%F0%B8%95%95%C2%A0d.../...'` — reduced manually to identify the codepoint class. |
+| `b5b31dc` | The 422 body emitted by the new `_invalid_service_id_handler` had `detail` as a string, but FastAPI's `HTTPValidationError` schema says `detail` is an array of `ValidationError`. The fix from `acf81f0` itself violated the OpenAPI spec. | Re-running schemathesis after `acf81f0` shipped — `JsonSchemaError: "..." is not of type "array"`. |
+| `abf3a61` | `test_usage_current_storage_success` was non-deterministically failing on the branch HEAD under `-n4` xdist with `DBBusyError` 500. The moto migration in `4d23079` had dropped `@patch("backend.core.duckdb.get_connection")`, exposing the test to a real DuckDB file lock race with peer xdist workers. | Pre-existing flakiness flagged in my own earlier session; root-caused by walking the migration's diff. |
+
+### Not fixed this pass (catalogued, scoped for follow-up)
+
+- **RFC 9110 — 405 responses lack `Allow` header**. FastAPI/Starlette default behavior; schemathesis's `unsupported_method` check flags it. Real but minor — Fastly often rewrites response headers anyway. Fix is a small middleware that traverses `app.routes` to populate the `Allow` header on 405s.
+- **Schemathesis bulk audit** — both POC runs of the categorizer script crashed inside `schemathesis.openapi.from_asgi` startup before reaching the per-operation loop (FastAPI startup tracebacks about scheduler-already-running + interpreter-shutdown ExecutorPool flooded stdout; exit 0 but no summary printed). The audit needs a cleaner harness (probably an actual pytest test with the autouse sandbox + a per-op subtest) rather than a standalone script. The two findings above were extracted manually from the partial output.
+
 ### Commits on `refactor/cleanup` this pass
 
-`7a278fe` sleep cleanup → `4d23079` moto S3 migration → `9dd2294` VCL stubs fixture → `8c553e3` custom-field hypothesis fuzz → `e7efc7b` pool saturation + wait-stats.
+`7a278fe` sleep cleanup → `4d23079` moto S3 migration → `9dd2294` VCL stubs fixture → `8c553e3` custom-field hypothesis fuzz → `e7efc7b` pool saturation + wait-stats → `acf81f0` service_id 422 guard → `abf3a61` usage_endpoints xdist mock → `b5b31dc` 422 body matches HTTPValidationError schema.
 
 ---
 
