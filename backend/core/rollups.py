@@ -83,6 +83,12 @@ def _get_fields(src: dict) -> list[str]:
 
     Custom-field names are validated against ``_SAFE_IDENT_RE`` — anything
     failing the check is skipped with a warning rather than fed into SQL.
+
+    Includes virtual fields (waf_sig_ind, edge_score_reason_ind) — those
+    used to be excluded because they require unnesting a CSV column, but
+    we now have a dedicated SQL builder (``_build_virtual_field_copy_query``)
+    that does the unnest at write time so the dashboard reader doesn't
+    have to rescan + unnest the raw window at query time.
     """
     from backend.repositories.dashboard import _VIRTUAL_FIELDS, FIELDS
 
@@ -96,10 +102,9 @@ def _get_fields(src: dict) -> list[str]:
             logger.warning("[rollups] skipping custom field with unsafe name: %r", name)
             continue
         custom_field_names.append(name)
-    # Virtual fields (e.g. waf_sig_ind) are computed views over CSV columns
-    # — they aren't column names, so they can't be rolled up directly.
     actual_fields = [f for f in FIELDS if f not in _VIRTUAL_FIELDS and _is_safe_ident(f)]
-    return actual_fields + custom_field_names
+    virtual_fields = [f for f in _VIRTUAL_FIELDS if f in _VIRTUAL_FIELD_BACKING and _is_safe_ident(f)]
+    return actual_fields + virtual_fields + custom_field_names
 
 
 def _rollups_root(source: dict) -> str:
@@ -235,6 +240,62 @@ def _build_copy_query(table_ident: str, field: str, where_sql: str) -> str:
             FROM {table_ident}
             WHERE {where_sql}
             GROUP BY 1, 2, 3
+        ) WHERE rn <= {TOP_K}
+    """
+
+
+# Virtual fields are dashboard panels whose values come from
+# unnesting a comma-separated CSV column at query time
+# (``backend.repositories.dashboard._VIRTUAL_FIELDS``). Pre-aggregating
+# them into the rollup tree eliminates the runtime-unnest cost that
+# dominates dashboard 30d (per the perf audit: waf_sig_ind_explode
+# ~1.2 s + edge_score_reason_ind_explode ~0.7 s on prod 30d).
+#
+# Map: <virtual_field_name> → <backing_column_name>.
+# Mirrors the call sites in dashboard.py:_exploded_top_n.
+_VIRTUAL_FIELD_BACKING: dict[str, str] = {
+    "waf_sig_ind": "waf_sig",
+    "edge_score_reason_ind": "edge_score_reason",
+}
+
+
+def _build_virtual_field_copy_query(table_ident: str, virtual_field: str, backing_col: str, where_sql: str) -> str:
+    """COPY SQL for a virtual (unnest-based) field rollup.
+
+    Same output shape as :func:`_build_copy_query` (field/hour/value/count)
+    so the per-field rollup tree, hour bundling, day bundling, and
+    reader path all work unchanged. The only difference is the inner
+    SELECT does the CSV unnest before grouping.
+
+    Same input-validation contract: callers gate via ``_is_safe_ident``
+    on both the virtual field name and the backing column name.
+    """
+    return f"""
+        SELECT field, hour, value, count FROM (
+            SELECT
+                '{virtual_field}' AS field,
+                hour,
+                value,
+                count,
+                ROW_NUMBER() OVER (
+                    PARTITION BY hour
+                    ORDER BY count DESC
+                ) AS rn
+            FROM (
+                SELECT
+                    strftime(timestamp, '%Y-%m-%d-%H') AS hour,
+                    trim(signal) AS value,
+                    COUNT(*) AS count
+                FROM (
+                    SELECT timestamp, unnest(string_split("{backing_col}", ',')) AS signal
+                    FROM {table_ident}
+                    WHERE {where_sql}
+                      AND "{backing_col}" IS NOT NULL
+                      AND "{backing_col}" != ''
+                )
+                WHERE trim(signal) != ''
+                GROUP BY 1, 2
+            )
         ) WHERE rn <= {TOP_K}
     """
 
@@ -1367,14 +1428,24 @@ def _run_per_field_copy(
                 # defend against direct callers passing raw names.
                 logger.warning("[rollups] skipping unsafe field name: %r", field)
                 continue
-            if field not in cols:
+            # Virtual fields rollup the unnested CSV column instead of the
+            # column itself — skip-test on the BACKING column, not the
+            # virtual name (which never exists in the table schema).
+            backing_col = _VIRTUAL_FIELD_BACKING.get(field)
+            if backing_col is not None:
+                if backing_col not in cols or not _is_safe_ident(backing_col):
+                    continue
+            elif field not in cols:
                 continue
 
             tmp_field_dir = os.path.join(cache_root, "rollups", "tmp", field)
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
             os.makedirs(tmp_field_dir, exist_ok=True)
 
-            inner = _build_copy_query(table_ident, field, where_sql)
+            if backing_col is not None:
+                inner = _build_virtual_field_copy_query(table_ident, field, backing_col, where_sql)
+            else:
+                inner = _build_copy_query(table_ident, field, where_sql)
             query = (
                 f"COPY ({inner}) TO '{tmp_field_dir}' "
                 "(FORMAT PARQUET, PARTITION_BY (field, hour), OVERWRITE_OR_IGNORE, COMPRESSION ZSTD)"

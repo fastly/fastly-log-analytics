@@ -140,6 +140,28 @@ def _rollups_day_bundling_backfill(service_id: str, source: dict) -> str | None:
     return f"rollups: bundled {n} day(s) into day_bundled/"
 
 
+def _rollups_virtual_field_backfill(service_id: str, source: dict) -> str | None:
+    """Backfill rollups for virtual (CSV-unnest) fields.
+
+    waf_sig_ind / edge_score_reason_ind used to be computed at query
+    time via ``unnest(string_split(...))`` over the live window — costing
+    ~1.2 s + ~0.7 s on prod 30d (per the perf audit). The rollup writer
+    now pre-aggregates them at hour granularity via
+    ``_build_virtual_field_copy_query``; this migration backfills the
+    historical hours so the dashboard reader picks them up immediately
+    instead of waiting for new traffic.
+
+    Idempotent: ``ensure_field_backfills`` checks per-field markers in
+    ``<cache>/rollups/backfill_markers.json`` and only re-runs COPY for
+    fields without a marker. Virtual fields lack markers from before
+    this commit shipped, so they're backfilled on first run.
+    """
+    from backend.core import rollups
+
+    rollups.ensure_field_backfills(service_id, source)
+    return "rollups: virtual-field backfill complete"
+
+
 def _rollups_sessions_backfill(service_id: str, source: dict) -> str | None:
     """Build the per-hour sessions.parquet rollup for every closed hour
     that doesn't yet have one.
@@ -195,6 +217,11 @@ MIGRATIONS: list[Migration] = [
         name="2026-06-11_rollups_day_bundling_backfill",
         description="Bundle per-field per-day rollup parquets into one parquet per day so the dashboard reader opens 1 file per day instead of ~40 (drops top_n_rollups:rolled_res ~4 s on 30d)",
         fn=_rollups_day_bundling_backfill,
+    ),
+    Migration(
+        name="2026-06-11_rollups_virtual_field_backfill",
+        description="Backfill rollups for virtual (CSV-unnest) fields (waf_sig_ind, edge_score_reason_ind) so the dashboard skips the runtime unnest scan",
+        fn=_rollups_virtual_field_backfill,
     ),
 ]
 

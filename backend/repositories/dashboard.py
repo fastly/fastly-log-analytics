@@ -411,9 +411,33 @@ def get_aggregates(
         # below from the rollup query results. Use the full eligible field
         # list (anything non-virtual + in schema) as batch_fields; the
         # rollup helper silently skips fields it has no data for.
+        #
+        # Virtual fields (waf_sig_ind, edge_score_reason_ind) now also
+        # have their own rollup entries (rollups/hour/field=waf_sig_ind/...
+        # — see _build_virtual_field_copy_query in core/rollups.py).
+        # Include them when their BACKING column is in actual_cols so
+        # the rollup reader picks them up via the same path as regular
+        # fields. Saves the runtime-unnest cost in _exploded_top_n
+        # (was ~1.2s + ~0.7s on prod 30d for the two CSV fields).
+        from backend.core.rollups import _VIRTUAL_FIELD_BACKING as _VFB
+
+        def _virtuals_with_backing(in_set) -> list[str]:
+            return [v for v in _VIRTUAL_FIELDS if v in fields and _VFB.get(v) in in_set]
+
         if use_rollups:
             batch_fields = [f for f in fields if f not in _VIRTUAL_FIELDS and f in actual_cols]
+            # Virtual fields go through the rollup reader too — they
+            # have dedicated per-hour entries on disk and the reader
+            # silently skips fields with no data, so a service that
+            # hasn't backfilled yet just falls through to the runtime
+            # explode below.
+            batch_fields += _virtuals_with_backing(actual_cols)
         else:
+            # Non-rollup path uses execute_top_n_batch which COUNT(...)s
+            # the field as a real column. Virtual fields aren't real
+            # columns, so they'd raise a BinderException — keep them on
+            # the existing runtime-explode path (_exploded_top_n
+            # below).
             batch_fields = [f for f in fields if f not in _VIRTUAL_FIELDS and f in field_totals]
         if use_rollups:
             # Bump country's per-field limit to 500 so the map_data path
@@ -500,8 +524,20 @@ def get_aggregates(
         # rows via unnest(string_split(...)). Generalized helper handles both
         # waf_sig_ind (backed by waf_sig) and edge_score_reason_ind (backed
         # by edge_score_reason) — same pattern, different backing columns.
+        #
+        # Fast path: if the rollup already populated results[virtual_id]
+        # via the top_n_rollups call above (the rollup writer now
+        # pre-aggregates virtual fields, see
+        # core/rollups._build_virtual_field_copy_query), skip the
+        # runtime unnest entirely. The runtime fallback only fires
+        # when the rollup is empty for this virtual field (cold start,
+        # writer behind, etc.).
         def _exploded_top_n(virtual_id: str, backing_col: str) -> None:
             if virtual_id not in fields:
+                return
+            existing = results.get(virtual_id)
+            if existing and existing.get("top"):
+                # Rollup already produced rows — keep them, no runtime scan.
                 return
             if backing_col not in actual_cols:
                 results[virtual_id] = {"top": [], "total": 0}
