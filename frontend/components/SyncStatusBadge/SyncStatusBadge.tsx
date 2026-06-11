@@ -1,9 +1,8 @@
 'use client'
 
 import React from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
-import { client } from '@/lib/api'
+import { useSyncStatus } from '@/hooks/useSyncStatus'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { formatTimeAgo } from '@/lib/date'
 import { Badge } from '@/components/ui/badge'
@@ -18,24 +17,7 @@ export function SyncStatusBadge() {
   const { activeServiceId } = useServiceStore()
   const { full, abbr } = useDateFormat()
 
-  const { data: status } = useQuery({
-    queryKey: ['admin', 'status', activeServiceId],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/sync-status", {
-        params: { query: { skip_fos: true } },
-      })
-      return data
-    },
-    enabled: !!activeServiceId,
-    refetchInterval: 15000, // Poll every 15s to keep status fresh
-    staleTime: 15000, // Prevent immediate refetch on route navigation
-    // sync-status is admin-only — analyst sessions always 403. Without
-    // this, React Query's default retry=3 burns 3 wasted round-trips
-    // per page load × every 15 s refetch. The badge degrades gracefully
-    // when status is null, so a one-shot failure (admin transient or
-    // analyst permanent) is fine.
-    retry: false,
-  })
+  const { data: status } = useSyncStatus()
 
   // Pre-fix this had a 1-second setState ticker so the "Xs ago" label
   // advanced between the 15s polls. That ticker re-rendered the entire

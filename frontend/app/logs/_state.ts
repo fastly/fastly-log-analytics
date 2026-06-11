@@ -6,6 +6,7 @@ import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
+import { useSyncStatus } from '@/hooks/useSyncStatus'
 import { useSSE } from '@/hooks/useSSE'
 
 export type BackgroundCronToast = {
@@ -55,22 +56,7 @@ export function useLogsPageState() {
 
   const { setHasSyncedExtents } = useFilterStore()
 
-  const { data: status } = useQuery({
-    queryKey: ['admin', 'status', activeServiceId],
-    queryFn: async ({ signal }) => {
-      const { data, error } = await client.GET("/api/sync-status", { signal,
-        params: { query: { skip_fos: true } },
-      })
-      if (error) throw error
-      return data
-    },
-    enabled: !!activeServiceId,
-    refetchInterval: 30000,
-    staleTime: 0,
-    // sync-status is admin-only — analyst sessions always 403. Default
-    // retry=3 burns 3 wasted round-trips per page load on analyst.
-    retry: false,
-  })
+  const { data: status } = useSyncStatus()
 
   const { data: cronLogs, isLoading: isLoadingCron, isFetching: isFetchingCron } = useQuery({
     queryKey: ['admin', 'cron-logs', activeServiceId, taskFilter, statusFilter],
