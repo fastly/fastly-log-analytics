@@ -113,10 +113,30 @@ async function main() {
   }
 
   const serialized = JSON.stringify(manifest, null, 2) + '\n'
-  // Runtime location (unchanged for backwards compat).
+  // Runtime location (unchanged for backwards compat). Always written
+  // so the in-image copy reflects this build's chunk hashes.
   await fs.writeFile(RUNTIME_MANIFEST_PATH, serialized, 'utf8')
-  // Committed location — the source of truth for the next build's SSG.
-  await fs.writeFile(COMMITTED_MANIFEST_PATH, serialized, 'utf8')
+  // Committed location — the source of truth for the NEXT build's SSG.
+  // Only rewrite when the chunk list actually changed; otherwise the
+  // `generatedAt` timestamp alone would dirty the working tree every
+  // single `npm run build`, polluting git status without changing
+  // anything functional. Plotly's chunk hash is content-derived and
+  // stable across builds until plotly itself is upgraded, so the
+  // common case is a no-op write that we skip.
+  const newChunks = JSON.stringify(manifest.preload)
+  let existingChunks = null
+  try {
+    const prior = JSON.parse(await fs.readFile(COMMITTED_MANIFEST_PATH, 'utf8'))
+    existingChunks = JSON.stringify(prior.preload || [])
+  } catch (_) {
+    // File missing or unreadable — write it.
+  }
+  if (newChunks !== existingChunks) {
+    await fs.writeFile(COMMITTED_MANIFEST_PATH, serialized, 'utf8')
+    if (existingChunks !== null) {
+      console.log(`[preload-manifest] chunk list changed — rewrote ${COMMITTED_MANIFEST_PATH}; commit the diff`)
+    }
+  }
 
   if (matches.length === 0) {
     console.warn(
