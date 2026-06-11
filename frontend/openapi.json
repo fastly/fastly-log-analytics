@@ -13679,6 +13679,30 @@
               }
             ],
             "title": "Log Fields Catalog"
+          },
+          "sync_status": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Status"
+          },
+          "header_badge": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Badge"
           }
         },
         "type": "object",

@@ -3797,6 +3797,14 @@ export interface components {
             log_fields_catalog?: {
                 [key: string]: unknown;
             } | null;
+            /** Sync Status */
+            sync_status?: {
+                [key: string]: unknown;
+            } | null;
+            /** Header Badge */
+            header_badge?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** BootstrapService */
         BootstrapService: {

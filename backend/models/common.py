@@ -228,4 +228,14 @@ class BootstrapResponse(BaseResponse):
     # 35-KB round-trip on every cold page load (perf audit Phase D).
     # None when no active service.
     log_fields_catalog: dict | None = None
+    # Cached sync-status (same fast-path payload /api/sync-status?skip_fos=true
+    # returns). Folded in so SyncStatusBadge / logs page hit cache on
+    # first mount. ADMIN ONLY — None for analyst sessions (matches the
+    # dedicated endpoint's 403 for analysts).
+    sync_status: dict | None = None
+    # Analyst-safe sibling of sync_status, projected down to the two
+    # fields the global SyncStatusBadge renders (latest_log_at,
+    # local_rows). Available to BOTH admin AND analyst sessions so the
+    # badge shows on prod for analyst-shared instances too.
+    header_badge: dict | None = None
     # section_timings is inherited from BaseResponse.

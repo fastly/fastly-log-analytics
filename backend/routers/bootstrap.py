@@ -165,6 +165,61 @@ def bootstrap(
 
     _timed("log_fields_catalog", _resolve_log_fields_catalog)
 
+    # Phase D-2: fold the cached sync-status into bootstrap for admin
+    # callers. The dedicated /api/sync-status endpoint is admin-only
+    # (RemoteAccessMiddleware blocks analysts) — same restriction
+    # applies here. Frontend seeds its ['sync-status', service_id]
+    # React Query cache so SyncStatusBadge / useLogsPageState hit
+    # cache on first call instead of paying a round-trip.
+    #
+    # Only emit when the analyst gate would let the dedicated endpoint
+    # return data: admin caller AND a valid_active_id with cached
+    # status persisted. Analyst sessions get None, matching their 403
+    # on the dedicated endpoint.
+    sync_status_payload: dict | None = None
+
+    def _resolve_sync_status():
+        nonlocal sync_status_payload
+        if analyst_session is not None:
+            return
+        if not valid_active_id:
+            return
+        from backend.routers.admin import compute_sync_status_cached
+
+        sync_status_payload = compute_sync_status_cached(valid_active_id)
+
+    _timed("sync_status", _resolve_sync_status)
+
+    # Header badge: analyst-safe sibling of sync_status, projected
+    # down to the two fields the global SyncStatusBadge renders
+    # (Latest Log: timestamp, Total Logs: row count). Emitted for
+    # BOTH admin and analyst so analysts see the badge on prod the
+    # same way admins do — previously they got null because
+    # /api/sync-status is admin-only and the badge fell through.
+    header_badge_payload: dict | None = None
+
+    def _resolve_header_badge():
+        nonlocal header_badge_payload
+        if not valid_active_id:
+            return
+        from backend import config as svcconfig
+
+        cached_status = svcconfig.get_status(valid_active_id) or {}
+        latest = (
+            cached_status.get("latest_log_at")
+            or cached_status.get("latest_available_file_at")
+            or cached_status.get("latest_ingested_file_at")
+        )
+        local_rows = cached_status.get("local_rows")
+        if latest is None and local_rows is None:
+            return
+        header_badge_payload = {
+            "latest_log_at": latest,
+            "local_rows": local_rows,
+        }
+
+    _timed("header_badge", _resolve_header_badge)
+
     views: list[dict] = []
 
     def _resolve_views() -> list[dict]:
@@ -206,6 +261,8 @@ def bootstrap(
         active_log_field_ids=active_log_field_ids,
         views=views,
         log_fields_catalog=log_fields_catalog_payload,
+        sync_status=sync_status_payload,
+        header_badge=header_badge_payload,
         section_timings=section_timings,
     )
 

@@ -22,11 +22,7 @@ from backend.models.admin import (
     PopLocationsResponse,
     SustainedLossAlert,
     SyncStatusResponse,
-    SystemJobsResponse,
     TreeResponse,
-    UsageLogAggregate,
-    UsageLogEntry,
-    UsageLogResponse,
 )
 from backend.utils.router_utils import query_errors
 
@@ -671,6 +667,55 @@ def _scan_dir_size(path: str) -> int:
 # for their scoped service. The endpoint returns per-service timestamps and
 # row counts — no admin-specific info. Service-scope is still enforced by
 # RemoteAccessMiddleware via the x-service-id check on the request.
+def compute_sync_status_cached(service_id: str | None) -> dict | None:
+    """Return the cached sync-status payload for ``service_id`` without
+    grabbing a DuckDB connection.
+
+    Mirrors the ``skip_fos=true`` fast path of /api/sync-status:
+    same shape, no DB hop, returns ``None`` when no cached status has
+    been persisted yet (caller falls back to the dedicated endpoint).
+    Extracted so /api/bootstrap can fold the status into its response
+    (perf audit Phase D-2) and the dedicated endpoint can stay
+    authoritative for explicit / force / non-cached paths.
+
+    Caller is responsible for analyst-scope enforcement — the dedicated
+    endpoint is admin-only via RemoteAccessMiddleware; this helper
+    trusts the caller.
+    """
+    from backend import config as svcconfig
+    from backend.core import duckdb as _db
+
+    if not service_id:
+        return None
+    src = _db.get_source_for_service(service_id)
+    if not src:
+        return None
+    cached_status = svcconfig.get_status(src["name"])
+    if not cached_status:
+        return None  # fall through to dedicated endpoint
+    cached_status["access_level"] = src.get("access_level", "read_write")
+    cached_status["storage_mode"] = _db.STORAGE_MODE
+    cached_status["configured"] = True
+
+    db_path = src.get("duckdb_path") or svcconfig.duckdb_path(service_id)
+    db_exists = os.path.exists(db_path)
+    db_size = os.path.getsize(db_path) if db_exists else 0
+    cache_size = _get_dir_size(_db._cache_dir(src))
+    cached_status["duckdb_size_bytes"] = db_size + cache_size
+    cached_status["duckdb_exists"] = db_exists
+
+    from backend.cron_progress import get_latest_progress_for_service
+
+    active_run = get_latest_progress_for_service(service_id)
+    if active_run:
+        cached_status["active_run"] = active_run
+        cached_status["busy"] = True
+
+    cfg = svcconfig.load_config(service_id) or {}
+    cached_status["ngwaf_workspace_id"] = cfg.get("ngwaf_workspace_id")
+    return cached_status
+
+
 @router.get("/sync-status", response_model=SyncStatusResponse)
 def sync_status(
     service_id: str | None = Depends(get_service_id),
@@ -697,22 +742,18 @@ def sync_status(
         # DuckDB connection, so that a busy dashboard load — agg/raw/
         # bots all racing for connections — doesn't starve sync-status
         # and trigger 503s when its max_wait expires.
-        cached_status = svcconfig.get_status(src["name"]) if skip_fos and not force else None
-        # get_status returns {} (not None) when no status has been
-        # persisted yet — fall through to the DB path in that case.
-        if cached_status:
-            cached_status["access_level"] = src.get("access_level", "read_write")
-            cached_status["storage_mode"] = _db.STORAGE_MODE
-            cached_status["configured"] = True
-            status = cached_status
-        else:
-            from backend.core.duckdb import get_connection
+        if skip_fos and not force:
+            cached = compute_sync_status_cached(service_id)
+            if cached is not None:
+                return SyncStatusResponse.with_telemetry(**cached)
 
-            _con = get_connection(source=src, max_wait=5, skip_view_update=True)
-            try:
-                status = get_sync_status(_con, src, skip_fos=skip_fos, force=force)
-            finally:
-                _con.close()
+        from backend.core.duckdb import get_connection
+
+        _con = get_connection(source=src, max_wait=5, skip_view_update=True)
+        try:
+            status = get_sync_status(_con, src, skip_fos=skip_fos, force=force)
+        finally:
+            _con.close()
 
         db_path = src.get("duckdb_path") or svcconfig.duckdb_path(service_id)
         db_exists = os.path.exists(db_path)
@@ -1516,8 +1557,6 @@ def refresh_bot_source_endpoint(source_id: str):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to fetch bot source: {e}")
     return {"ok": True, "source": meta}
-
-
 
 
 # ── Usage-logging endpoints (carved out for file-size budget) ──────────────

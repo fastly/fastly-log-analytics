@@ -10,14 +10,14 @@ export function useBootstrap() {
     queryKey: ['bootstrap'],
     queryFn: async () => {
       const { data } = await client.GET("/api/bootstrap")
-      // Seed the views + log-fields catalog caches INSIDE the queryFn
-      // so subscribers that gate on `bootstrap === 'pending' → fire
-      // own fetch` find data already in their target cache by the
-      // time React Query unblocks them. Doing this in a useEffect
-      // outside the queryFn races: bootstrap status transitions
-      // pending→success and the dependent hook re-renders BEFORE
-      // useEffect runs, so its `enabled` flips true and it queries
-      // an empty cache. Seeding here closes that race.
+      // Seed dependent caches INSIDE the queryFn so subscribers that
+      // gate on `bootstrap === 'pending' → fire own fetch` find data
+      // already in their target cache by the time React Query unblocks
+      // them. Doing this in a useEffect outside the queryFn races:
+      // bootstrap status transitions pending→success and the
+      // dependent hook re-renders BEFORE useEffect runs, so its
+      // `enabled` flips true and it queries an empty cache. Seeding
+      // here closes that race.
       if (data?.active_service_id) {
         const sid = data.active_service_id
         const seededViews = (data as any).views
@@ -27,6 +27,11 @@ export function useBootstrap() {
         const seededCatalog = (data as any).log_fields_catalog
         if (seededCatalog) {
           queryClient.setQueryData(['log-fields-catalog', sid], seededCatalog)
+        }
+        // Admin-only; analyst sessions get null from the backend.
+        const seededSyncStatus = (data as any).sync_status
+        if (seededSyncStatus) {
+          queryClient.setQueryData(['sync-status', sid], seededSyncStatus)
         }
       }
       return data

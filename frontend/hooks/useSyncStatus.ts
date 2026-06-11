@@ -1,6 +1,6 @@
 'use client'
 
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
@@ -35,6 +35,16 @@ export type SyncStatus = components['schemas']['SyncStatusResponse']
  */
 export function useSyncStatus() {
   const { activeServiceId } = useServiceStore()
+  const queryClient = useQueryClient()
+
+  // Perf audit Phase D-2: useBootstrap now seeds the
+  // ['sync-status', service_id] cache from the bootstrap response on
+  // admin sessions. Same race fix as useLogFieldsCatalog — gate on
+  // bootstrap being in-flight so this hook doesn't fire its own
+  // fetch and beat the seed on every cold page load.
+  const bootstrapState = queryClient.getQueryState(['bootstrap'])
+  const bootstrapPending = bootstrapState !== undefined && bootstrapState.status === 'pending'
+
   return useQuery({
     queryKey: ['sync-status', activeServiceId],
     queryFn: async ({ signal }) => {
@@ -45,7 +55,7 @@ export function useSyncStatus() {
       if (error) throw error
       return data as SyncStatus
     },
-    enabled: !!activeServiceId,
+    enabled: !!activeServiceId && !bootstrapPending,
     staleTime: 60_000,
     refetchInterval: 30_000,
     refetchOnWindowFocus: false,
