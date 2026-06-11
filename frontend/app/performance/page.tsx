@@ -13,7 +13,6 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import { makeLatencyColumns } from '@/lib/table-utils'
 import { useFieldLabel } from '@/hooks/useFieldLabel';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 const URL_COLUMN_IDS = ['url', 'requests', 'avg', 'p50', 'p95', 'p99']
 const ASN_COLUMN_IDS = ['label', 'requests', 'avg', 'p50', 'p95', 'p99']
 
@@ -25,7 +24,6 @@ export default function PerformancePage() {
 
   const [urlVisibility, setUrlVisibility, onUrlVisChange] = useColumnVisibility()
   const [asnVisibility, setAsnVisibility, onAsnVisChange] = useColumnVisibility()
-  const [waterfallMetric, setWaterfallMetric] = React.useState<"avg" | "p50" | "p95" | "p99">("p99")
 
   return (
     <ReportLayout
@@ -89,52 +87,20 @@ export default function PerformancePage() {
       }
     ]
   }, [data?.scatter])
+  // Stack of AVERAGES — averages are additive across components so the bar
+  // length corresponds to an actual mean request budget. Stacking percentiles
+  // here would mix values from different requests (p99 origin_wait and p99
+  // edge_processing rarely come from the same request) and produce a total
+  // that doesn't represent anything real.
   const waterfallData = React.useMemo(() => {
-    if (!data?.waterfall?.avg) return []
-
-    const metricLabels = {
-      p99: 'P99',
-      p95: 'P95',
-      p50: 'P50',
-      avg: 'Average'
-    }
-
-    const yAxis = [metricLabels[waterfallMetric]]
-    const getMetric = (metricName: string) => [(data.waterfall as any)[waterfallMetric]?.[metricName] || 0]
-
+    const avg = data?.waterfall?.avg
+    if (!avg) return []
+    const yAxis = ['Average']
     return [
-      {
-        x: getMetric('edge_processing'),
-        y: yAxis,
-        name: 'Edge Processing',
-        type: 'bar',
-        orientation: 'h',
-        marker: { color: '#8b5cf6' } // indigo
-      },
-      {
-        x: getMetric('origin_wait'),
-        y: yAxis,
-        name: 'Origin TTFB Wait',
-        type: 'bar',
-        orientation: 'h',
-        marker: { color: '#f59e0b' } // amber
-      },
-      {
-        x: getMetric('origin_download'),
-        y: yAxis,
-        name: 'Origin Download',
-        type: 'bar',
-        orientation: 'h',
-        marker: { color: '#ec4899' } // pink
-      },
-      {
-        x: getMetric('client_download'),
-        y: yAxis,
-        name: 'Client Download',
-        type: 'bar',
-        orientation: 'h',
-        marker: { color: '#10b981' } // emerald
-      }
+      { x: [avg.edge_processing || 0], y: yAxis, name: 'Edge Processing', type: 'bar', orientation: 'h', marker: { color: '#8b5cf6' } },
+      { x: [avg.origin_wait || 0],     y: yAxis, name: 'Origin TTFB Wait', type: 'bar', orientation: 'h', marker: { color: '#f59e0b' } },
+      { x: [avg.origin_download || 0], y: yAxis, name: 'Origin Download',  type: 'bar', orientation: 'h', marker: { color: '#ec4899' } },
+      { x: [avg.client_download || 0], y: yAxis, name: 'Client Download',  type: 'bar', orientation: 'h', marker: { color: '#10b981' } },
     ]
   }, [data?.waterfall])
 
@@ -142,21 +108,8 @@ export default function PerformancePage() {
     <>
       <div className="mb-6">
         <AnalyticsCard
-          title="End-to-End Latency Waterfall"
+          title="End-to-End Latency Waterfall (Average)"
           icon={<Network className="h-4 w-4" />}
-          headerAction={
-            <Select value={waterfallMetric} onValueChange={(val) => setWaterfallMetric(val as any)}>
-              <SelectTrigger className="h-8 w-[120px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="avg">Average</SelectItem>
-                <SelectItem value="p50">p50</SelectItem>
-                <SelectItem value="p95">p95</SelectItem>
-                <SelectItem value="p99">p99</SelectItem>
-              </SelectContent>
-            </Select>
-          }
           isLoading={isLoading}
           isFetching={isFetching}
           className="h-[300px]"

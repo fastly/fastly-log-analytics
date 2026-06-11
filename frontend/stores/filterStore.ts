@@ -9,10 +9,17 @@ interface FilterState {
   edgeOnly: boolean
   hasSyncedExtents: boolean
   isAutoRange: boolean
+  // When a quick-preset pill is active, holds its label ("24h", "3d", ...).
+  // Null means custom range (datetime inputs, chart zoom, saved view) or
+  // implicit default. The URL-sync hook persists this as ?range=<label> and
+  // re-derives [now-duration, now] on hydrate so reloads track the rolling
+  // window instead of pinning the absolute timestamps from the click moment.
+  relativeRange: string | null
   compareMode: boolean
   compareStartTime: string | null
   compareEndTime: string | null
   setRange: (start: string, end: string) => void
+  setRelativeRange: (range: string, start: string, end: string) => void
   autoSetRange: (start: string, end: string) => void
   setHasSyncedExtents: (synced: boolean) => void
   addFilter: (column: string, value: string, mode: FilterMode) => void
@@ -39,19 +46,33 @@ export const useFilterStore = create<FilterState>((set) => ({
   edgeOnly: false,
   hasSyncedExtents: false,
   isAutoRange: true, // Start with auto-range enabled for first data discovery
+  relativeRange: null,
   compareMode: false,
   compareStartTime: null,
   compareEndTime: null,
 
   setHasSyncedExtents: (synced) => set({ hasSyncedExtents: synced }),
 
-  setRange: (startTime, endTime) => set({ startTime, endTime, isAutoRange: false }),
+  // Explicit absolute-range selection (custom datetime, chart zoom, saved
+  // view). Clears relativeRange — this range no longer corresponds to a
+  // rolling preset.
+  setRange: (startTime, endTime) =>
+    set({ startTime, endTime, isAutoRange: false, relativeRange: null }),
 
-  resetRange: () => set({ isAutoRange: true, hasSyncedExtents: false }),
+  // Preset pill click. Records the label so the URL persists as
+  // ?range=<label> and reload re-derives [now-duration, now].
+  setRelativeRange: (relativeRange, startTime, endTime) =>
+    set({ startTime, endTime, isAutoRange: false, relativeRange }),
 
+  resetRange: () => set({ isAutoRange: true, hasSyncedExtents: false, relativeRange: null }),
+
+  // Snap to discovered extents on cold load. Keeps isAutoRange=true so the
+  // URL-sync hook doesn't write the snapped timestamps as if the user had
+  // picked them. hasSyncedExtents (flipped by the caller) is what gates
+  // re-snap, not isAutoRange.
   autoSetRange: (startTime, endTime) => set((state) => {
     if (!state.isAutoRange) return state
-    return { startTime, endTime, isAutoRange: false }
+    return { startTime, endTime }
   }),
 
   toggleCompareMode: () => set((state) => {
@@ -144,6 +165,7 @@ export const useFilterStore = create<FilterState>((set) => ({
       filters: [],
       isAutoRange: true,
       hasSyncedExtents: false,
+      relativeRange: null,
       compareMode: false,
       compareStartTime: null,
       compareEndTime: null,

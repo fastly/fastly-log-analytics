@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { X, Plus, Bot } from 'lucide-react'
-import { subHours, subDays } from 'date-fns'
+import { subDays } from 'date-fns'
 
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -35,7 +35,9 @@ export const FilterBar = React.memo(function FilterBar() {
     edgeOnly,
     hasSyncedExtents,
     isAutoRange,
+    relativeRange,
     setRange,
+    setRelativeRange,
     autoSetRange,
     setHasSyncedExtents,
     removeFilter,
@@ -56,7 +58,9 @@ export const FilterBar = React.memo(function FilterBar() {
     edgeOnly: state.edgeOnly,
     hasSyncedExtents: state.hasSyncedExtents,
     isAutoRange: state.isAutoRange,
+    relativeRange: state.relativeRange,
     setRange: state.setRange,
+    setRelativeRange: state.setRelativeRange,
     autoSetRange: state.autoSetRange,
     setHasSyncedExtents: state.setHasSyncedExtents,
     removeFilter: state.removeFilter,
@@ -255,17 +259,16 @@ export const FilterBar = React.memo(function FilterBar() {
     return (new Date(endTime).getTime() - new Date(startTime).getTime()) / (1000 * 3600)
   }, [startTime, endTime])
 
+  // Prefer the explicit `relativeRange` flag (set by pill click) over
+  // duration-derivation. Derivation is the fallback for legacy bookmarks
+  // and saved views whose absolute timestamps happen to match a pill.
   const activePreset = React.useMemo(() => {
+    if (relativeRange) return relativeRange
     if (!spanHours || !endTime) return null
-    // If end is not near "now", it's a custom range
     if (Math.abs(new Date(endTime).getTime() - new Date().getTime()) > 60000) {
       return null
     }
-
-    // Calculate rounded hours to account for millisecond differences between
-    // preset generation time and the current selected bounds
     const h = Math.round(spanHours * 10) / 10
-
     if (h === 1) return '1h'
     if (h === 3) return '3h'
     if (h === 6) return '6h'
@@ -275,18 +278,27 @@ export const FilterBar = React.memo(function FilterBar() {
     if (h === 168) return '7d'
     if (h === 720) return '30d'
     return null
-  }, [spanHours, endTime])
+  }, [relativeRange, spanHours, endTime])
+
+  // Pills call setRelativeRange so the URL persists as ?range=<label>
+  // instead of ?start_time=&end_time=. Reload re-derives [now-duration, now]
+  // from the label, so "last 24h" stays rolling.
+  const pickRelative = React.useCallback((label: string, hours: number) => {
+    const now = new Date()
+    const start = new Date(now.getTime() - hours * 3600 * 1000).toISOString()
+    React.startTransition(() => setRelativeRange(label, start, now.toISOString()))
+  }, [setRelativeRange])
 
   const quickPresets = React.useMemo(() => [
-    { label: '1h', value: () => React.startTransition(() => setRange(subHours(new Date(), 1).toISOString(), new Date().toISOString())) },
-    { label: '3h', value: () => React.startTransition(() => setRange(subHours(new Date(), 3).toISOString(), new Date().toISOString())) },
-    { label: '6h', value: () => React.startTransition(() => setRange(subHours(new Date(), 6).toISOString(), new Date().toISOString())) },
-    { label: '12h', value: () => React.startTransition(() => setRange(subHours(new Date(), 12).toISOString(), new Date().toISOString())) },
-    { label: '24h', value: () => React.startTransition(() => setRange(subHours(new Date(), 24).toISOString(), new Date().toISOString())) },
-    { label: '3d', value: () => React.startTransition(() => setRange(subDays(new Date(), 3).toISOString(), new Date().toISOString())) },
-    { label: '7d', value: () => React.startTransition(() => setRange(subDays(new Date(), 7).toISOString(), new Date().toISOString())) },
-    { label: '30d', value: () => React.startTransition(() => setRange(subDays(new Date(), 30).toISOString(), new Date().toISOString())) },
-  ], [setRange])
+    { label: '1h',  value: () => pickRelative('1h', 1) },
+    { label: '3h',  value: () => pickRelative('3h', 3) },
+    { label: '6h',  value: () => pickRelative('6h', 6) },
+    { label: '12h', value: () => pickRelative('12h', 12) },
+    { label: '24h', value: () => pickRelative('24h', 24) },
+    { label: '3d',  value: () => pickRelative('3d', 72) },
+    { label: '7d',  value: () => pickRelative('7d', 168) },
+    { label: '30d', value: () => pickRelative('30d', 720) },
+  ], [pickRelative])
 
   // Prevent hydration mismatch on date rendering
   if (!mounted) {

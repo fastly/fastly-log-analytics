@@ -29,15 +29,28 @@ import type { FiltersPayload } from '@/types/filters'
  * sub-trees). replaceState updates the URL silently — React state owns the
  * UI; the URL is just a mirror.
  */
+// Map a pill label like "24h" / "3d" to its duration in hours. Returns null
+// for anything that doesn't match — the hook then falls back to absolute
+// start_time/end_time params (or to the store default).
+function rangeLabelToHours(label: string): number | null {
+  const m = /^(\d+)([hd])$/.exec(label)
+  if (!m) return null
+  const n = parseInt(m[1], 10)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return m[2] === 'd' ? n * 24 : n
+}
+
 export function useFilterUrlSync(): void {
   const pathname = usePathname()
   const hydrated = useRef(false)
-  const { startTime, endTime, isAutoRange, setRange, addFilter, clearFilters } = useFilterStore(
+  const { startTime, endTime, isAutoRange, relativeRange, setRange, setRelativeRange, addFilter, clearFilters } = useFilterStore(
     useShallow(state => ({
       startTime: state.startTime,
       endTime: state.endTime,
       isAutoRange: state.isAutoRange,
+      relativeRange: state.relativeRange,
       setRange: state.setRange,
+      setRelativeRange: state.setRelativeRange,
       addFilter: state.addFilter,
       clearFilters: state.clearFilters,
     })),
@@ -50,11 +63,20 @@ export function useFilterUrlSync(): void {
     if (typeof window === 'undefined') return
 
     const params = new URLSearchParams(window.location.search)
+    const qsRange = params.get('range')
     const qsStart = params.get('start_time')
     const qsEnd = params.get('end_time')
     const qsFilters = params.get('filters')
 
-    if (qsStart && qsEnd) {
+    // ?range= wins over ?start_time/?end_time so a bookmarked "rolling
+    // last 24h" stays rolling. Absolute timestamps are only honored when
+    // no relative range is present (saved views, chart-zoom links).
+    const rangeHours = qsRange ? rangeLabelToHours(qsRange) : null
+    if (qsRange && rangeHours !== null) {
+      const now = new Date()
+      const start = new Date(now.getTime() - rangeHours * 3600 * 1000).toISOString()
+      setRelativeRange(qsRange, start, now.toISOString())
+    } else if (qsStart && qsEnd) {
       setRange(qsStart, qsEnd)
     }
 
@@ -79,7 +101,7 @@ export function useFilterUrlSync(): void {
     }
 
     hydrated.current = true
-  }, [setRange, addFilter, clearFilters])
+  }, [setRange, setRelativeRange, addFilter, clearFilters])
 
   // Write store → URL on subsequent state changes (after hydration) or when path changes
   useEffect(() => {
@@ -92,25 +114,27 @@ export function useFilterUrlSync(): void {
     } else {
       url.searchParams.delete('filters')
     }
-    // Only persist start_time / end_time in the URL when the user has
-    // explicitly chosen a range. On fresh load and after Reset the store
-    // sits at its auto-range default (last 24h from now); writing those
-    // computed defaults to the URL would pollute it with values the user
-    // never picked AND make the URL look like a "specific" shareable
-    // snapshot when it's really just the rolling default. The auto-snap
-    // effect in FilterBar flips isAutoRange off as soon as a real
-    // selection (preset click, datetime input, sync-status extents)
-    // takes effect — at that point the URL fills in.
-    if (!isAutoRange && startTime) {
+    // Three modes:
+    //   1. relativeRange set (pill click)        → ?range=<label>, no absolute times.
+    //      Bookmarks track a rolling window: reload re-derives [now-d, now].
+    //   2. !isAutoRange + no relativeRange       → ?start_time=&end_time= (absolute).
+    //      Custom datetime, chart zoom, applied saved view — user pinned a window.
+    //   3. isAutoRange (cold load, post-Reset)   → no time params.
+    //      Store defaults to last 24h from page-load time; URL stays clean so
+    //      reload picks up the new "now".
+    if (relativeRange) {
+      url.searchParams.set('range', relativeRange)
+      url.searchParams.delete('start_time')
+      url.searchParams.delete('end_time')
+    } else if (!isAutoRange && startTime && endTime) {
       url.searchParams.set('start_time', startTime)
+      url.searchParams.set('end_time', endTime)
+      url.searchParams.delete('range')
     } else {
       url.searchParams.delete('start_time')
-    }
-    if (!isAutoRange && endTime) {
-      url.searchParams.set('end_time', endTime)
-    } else {
       url.searchParams.delete('end_time')
+      url.searchParams.delete('range')
     }
     window.history.replaceState({}, '', url.toString())
-  }, [filterPayload, startTime, endTime, isAutoRange, pathname])
+  }, [filterPayload, startTime, endTime, isAutoRange, relativeRange, pathname])
 }
