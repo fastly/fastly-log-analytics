@@ -5542,6 +5542,15 @@ export interface components {
             scatter: {
                 [key: string]: unknown;
             }[];
+            /**
+             * Waterfall
+             * @default {}
+             */
+            waterfall: {
+                [key: string]: {
+                    [key: string]: number;
+                };
+            };
         };
         /** PerformanceOriginTsResponse */
         PerformanceOriginTsResponse: {

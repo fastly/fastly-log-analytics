@@ -26,15 +26,12 @@ DuckDB iceberg_scan path = {table.location()}
 
 from __future__ import annotations
 
-import glob as _glob
 import logging
 import os
 import time
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 _C = "\x1b[36m"  # Cyan — iceberg operations
 _C2 = "\x1b[94m"  # Bright Blue — sync_data operations
@@ -88,7 +85,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-from pyiceberg.exceptions import CommitFailedException
 from pyiceberg.io.pyarrow import schema_to_pyarrow
 from pyiceberg.schema import Schema
 from pyiceberg.table.name_mapping import create_mapping_from_schema
@@ -104,7 +100,6 @@ from pyiceberg.types import (
 )
 
 from backend.core.field_registry import LOG_FIELD_CATALOG
-from backend.utils.sql_validator import escape_sql_literal
 
 # ---------------------------------------------------------------------------
 # Iceberg Schema — derived from LOG_FIELD_CATALOG (single source of truth).
@@ -219,7 +214,9 @@ _FIELD_ORDER = [
     "oretries",
     "rid",
     "prid",
-    # Internal fields (IDs 67+)
+    "h2_fingerprint",
+    "oh_fingerprint",
+    # Internal fields (IDs 69+)
     "_source_file",
 ]
 
@@ -1042,48 +1039,56 @@ def table_location(source: dict) -> str | None:
     except Exception:
         return None
 
+
 # ── Manifest cache + table-info (carved out for file-size budget) ──
 # Names defined in backend.core.iceberg.manifest; re-imported here so
 # (a) other code in _core.py that references them by bare name still
 # resolves via _core's globals, and (b) the package proxy's mirror
 # treats _core as the canonical home for monkeypatch.setattr targets.
-from backend.core.iceberg.manifest import (  # noqa: F401, E402
-    _manifest_metadata_cache,
-    _manifest_metadata_cache_lock,
-    _manifest_metadata_loaded,
-    _manifest_metadata_loaded_lock,
-    _load_manifest_metadata_cache,
-    _save_manifest_metadata_cache,
-    _get_scan_lock,
-    _get_cached_or_scan_metadata,
-    get_table_info,
-    get_snapshot_calendar,
-    _align_to_schema,
-    _arrow_to_duckdb,
-    _prune_empty_dirs,
-)
-
 # ── Buffer / commit / optimize / cloud-maintenance (carved out) ──
 # Defined in backend.core.iceberg.buffer; re-imported here so other
 # code in _core.py + the package proxy + test monkeypatch sites
 # resolve the same canonical binding.
 from backend.core.iceberg.buffer import (  # noqa: F401, E402
-    _TOMBSTONE_SUFFIX,
+    _BUFFER_COMMIT_CHUNK_SIZE,
     _TOMBSTONE_GRACE_SECONDS,
-    _tombstone_marker_path,
+    _TOMBSTONE_SUFFIX,
     _is_tombstone_marker,
-    _tombstoned_parquet_paths,
-    tombstone_buffer_files,
-    sweep_tombstoned_buffer_files,
-    buffer_files,
-    _quarantine_dir,
     _quarantine_buffer_file,
+    _quarantine_dir,
+    _tombstone_marker_path,
+    _tombstoned_parquet_paths,
     buffer_backlog_stats,
-    write_to_buffer,
+    buffer_files,
     commit_buffer,
     optimize_table,
     run_cloud_maintenance,
-    _BUFFER_COMMIT_CHUNK_SIZE,
+    sweep_tombstoned_buffer_files,
+    tombstone_buffer_files,
+    write_to_buffer,
+)
+from backend.core.iceberg.manifest import (  # noqa: F401, E402
+    _align_to_schema,
+    _arrow_to_duckdb,
+    _get_cached_or_scan_metadata,
+    _get_scan_lock,
+    _load_manifest_metadata_cache,
+    _manifest_metadata_cache,
+    _manifest_metadata_cache_lock,
+    _manifest_metadata_loaded,
+    _manifest_metadata_loaded_lock,
+    _prune_empty_dirs,
+    _save_manifest_metadata_cache,
+    get_snapshot_calendar,
+    get_table_info,
+)
+
+# ── sync_data (carved out for file-size budget) ──
+from backend.core.iceberg.sync import (  # noqa: F401, E402
+    _ui_metadata_cache,
+    _ui_metadata_scan_locks,
+    _ui_metadata_scan_locks_lock,
+    sync_data,
 )
 
 # ── View binding + snapshot cache + stale-view self-heal (carved) ──
@@ -1092,35 +1097,27 @@ from backend.core.iceberg.buffer import (  # noqa: F401, E402
 # canonical binding (tests patch e.g. update_iceberg_view,
 # clear_source_caches, _update_iceberg_view_locked).
 from backend.core.iceberg.view import (  # noqa: F401, E402
-    _service_locks,
-    _service_locks_lock,
-    _view_cache,
-    _snapshot_files_cache,
+    _get_cache_file,
+    _get_service_lock,
+    _load_persistent_cache,
+    _persistent_view_exists,
+    _rebuild_locked,
     _rebuild_signals,
     _rebuild_signals_lock,
-    configure_duckdb_s3,
-    _get_service_lock,
-    is_stale_view_error,
-    execute_with_stale_view_retry,
-    clear_source_caches,
-    _get_cache_file,
-    _load_persistent_cache,
-    _save_persistent_cache,
-    _update_snapshot_cache_from_delta,
     _reconcile_snapshot_cache_after_sync,
+    _save_persistent_cache,
+    _service_locks,
+    _service_locks_lock,
+    _snapshot_files_cache,
+    _try_fast_path_view,
+    _update_iceberg_view_locked,
+    _update_snapshot_cache_from_delta,
+    _view_cache,
+    clear_source_caches,
+    configure_duckdb_s3,
+    execute_with_stale_view_retry,
     get_last_view_stats,
     inject_view_debug,
-    _try_fast_path_view,
-    _rebuild_locked,
+    is_stale_view_error,
     update_iceberg_view,
-    _persistent_view_exists,
-    _update_iceberg_view_locked,
-)
-
-# ── sync_data (carved out for file-size budget) ──
-from backend.core.iceberg.sync import (  # noqa: F401, E402
-    sync_data,
-    _ui_metadata_cache,
-    _ui_metadata_scan_locks,
-    _ui_metadata_scan_locks_lock,
 )

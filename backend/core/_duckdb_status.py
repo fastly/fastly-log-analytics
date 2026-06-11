@@ -527,6 +527,8 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
         "waf_sig_ind",
         "ja3",
         "ja4",
+        "h2_fingerprint",
+        "oh_fingerprint",
         "asn",
         "edge",
         "proto",

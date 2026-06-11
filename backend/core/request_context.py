@@ -57,6 +57,7 @@ class RequestContext:
     telemetry: RequestTelemetry
     analyst_session: object | None = None
     read_only: bool = True
+    cached_temps: dict = field(default_factory=dict)
 
     # The connection holder is kept on the context so the dependency
     # generator can hand it back to the pool on request end. Not part

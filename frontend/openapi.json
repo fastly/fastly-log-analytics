@@ -17498,6 +17498,17 @@
             "type": "array",
             "title": "Scatter",
             "default": []
+          },
+          "waterfall": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": "object"
+            },
+            "type": "object",
+            "title": "Waterfall",
+            "default": {}
           }
         },
         "type": "object",

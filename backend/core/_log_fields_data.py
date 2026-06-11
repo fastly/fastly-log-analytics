@@ -588,6 +588,28 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "individually_toggleable": True,
         "required_by": ["cipher_spread"],
     },
+    {
+        "id": "h2_fingerprint",
+        "group": "H",
+        "label": "HTTP/2 Fingerprint",
+        "description": "Fingerprint of HTTP/2 settings and frames. Useful for identifying specific client implementations.",
+        "vcl": '"h2_fingerprint":"%{json.escape(if(req.http.x-fos-edge-data:h2fp != "", req.http.x-fos-edge-data:h2fp, fastly_info.h2.fingerprint))}V"',
+        "duckdb_type": "VARCHAR",
+        "typical_bytes": 64,
+        "individually_toggleable": True,
+        "required_by": ["botnet_grouping"],
+    },
+    {
+        "id": "oh_fingerprint",
+        "group": "H",
+        "label": "Origin Header Fingerprint",
+        "description": "Fingerprint of the headers sent by the client. Useful for bot detection.",
+        "vcl": '"oh_fingerprint":"%{json.escape(if(req.http.x-fos-edge-data:ohfp != "", req.http.x-fos-edge-data:ohfp, fastly_info.oh_fingerprint))}V"',
+        "duckdb_type": "VARCHAR",
+        "typical_bytes": 64,
+        "individually_toggleable": True,
+        "required_by": ["botnet_grouping"],
+    },
     # ── Group I — Security: Proxy & Anonymization ─────────────────────────
     {
         "id": "p_type",
