@@ -4,6 +4,9 @@ import React, { useRef, useEffect, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { useTheme } from 'next-themes'
 
+import { ChartA11yTable } from './ChartA11yTable'
+import { tracesToTable } from './tracesToTable'
+
 // Use the cartesian-only Plotly distribution via react-plotly.js's factory
 // API. The default `import 'react-plotly.js'` pulls full plotly.js (~4.7 MB
 // minified) — we only render scatter / line / bar / pie / heatmap (see the
@@ -36,6 +39,13 @@ interface PlotlyChartProps {
   onRelayout?: (event: any) => void
   onSelected?: (event: any) => void
   onUpdate?: (event: any) => void
+  /**
+   * Optional caption for the screen-reader-only data table emitted
+   * alongside the chart. Defaults to "Chart data". Pass something
+   * descriptive (e.g., "Requests over the last 24 hours") so assistive
+   * tech announces useful context before reading the data.
+   */
+  a11yTitle?: string
 }
 
 export const PlotlyChart = React.memo(function PlotlyChart({
@@ -46,7 +56,8 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   height = 300,
   onRelayout,
   onSelected,
-  onUpdate
+  onUpdate,
+  a11yTitle = 'Chart data'
 }: PlotlyChartProps) {
   const { theme } = useTheme()
   const isDark = theme === 'dark'
@@ -198,6 +209,13 @@ export const PlotlyChart = React.memo(function PlotlyChart({
     return () => ro.disconnect()
   }, [])
 
+  // Screen-reader companion. Computed from `data`, NOT from the
+  // rendered Plotly figure, so it's available even before the chart
+  // visibility gate flips and even when Plotly fails to render.
+  // Memoized on the array reference — callers almost always
+  // recompute `data` only on real changes, so the memo is cheap.
+  const a11yShape = React.useMemo(() => tracesToTable(data, a11yTitle), [data, a11yTitle])
+
   return (
     <div ref={containerRef} className={className} style={{ height }}>
       {visible ? (
@@ -212,6 +230,7 @@ export const PlotlyChart = React.memo(function PlotlyChart({
           onSelected={handleSelected}
         />
       ) : null}
+      <ChartA11yTable shape={a11yShape} />
     </div>
   )
 })

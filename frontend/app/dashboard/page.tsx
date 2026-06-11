@@ -25,6 +25,7 @@ import { TrafficChart } from './_sections/TrafficChart'
 import { GeoMap } from './_sections/GeoMap'
 import { CardGrid } from './_sections/CardGrid'
 import { buildTrafficData, buildChartLayout } from './_sections/chartHelpers'
+import { buildTrafficDataAsync } from '@/lib/workers/buildTrafficData'
 import { COLLAPSED_SECTIONS_KEY } from './_sections/categories'
 import type { DashboardBodyProps } from './_sections/types'
 
@@ -187,9 +188,22 @@ function DashboardBody({
   })
 
   // ── Chart data ────────────────────────────────────────────────────────────
+  //
+  // Two paths:
+  //   - Small datasets (24h @ 1-min ≈ 1440 points, default): sync via
+  //     useMemo. Cheap. Render path unchanged.
+  //   - Large datasets (7d/30d, especially with trend windowing which
+  //     is O(n²)): async via Web Worker so the transform doesn't block
+  //     React's render loop. buildTrafficDataAsync() picks the right
+  //     path based on n.
+  //
+  // The useState + effect is the smallest change that lets the same
+  // render tree consume both sync and async results. Initial value is
+  // [] so the chart shows the existing skeleton/empty state during
+  // the first worker round-trip, then re-renders with traces.
 
-  const trafficData = React.useMemo(
-    () => buildTrafficData({
+  const trafficParams = React.useMemo(
+    () => ({
       aggregates,
       compareAggregates,
       compareMode,
@@ -204,6 +218,28 @@ function DashboardBody({
     }),
     [aggregates, compareAggregates, compareMode, compareStartTime, startTime, trend, timezone, metric, config.effectiveInterval, hiddenCategories, catalog],
   )
+
+  const [trafficData, setTrafficData] = React.useState<any[]>(() => buildTrafficData(trafficParams))
+
+  React.useEffect(() => {
+    let cancelled = false
+    buildTrafficDataAsync(trafficParams)
+      .then((traces) => {
+        // Avoid landing a stale result after a fast user filter
+        // change: only commit if this effect's params are still the
+        // active ones.
+        if (!cancelled) setTrafficData(traces)
+      })
+      .catch(() => {
+        // Async failure path falls back to sync (matches the
+        // worker-construction fallback inside buildTrafficDataAsync
+        // for the case where the promise rejected for a real reason).
+        if (!cancelled) setTrafficData(buildTrafficData(trafficParams))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [trafficParams])
 
   const chartLayout = React.useMemo(
     () => buildChartLayout({

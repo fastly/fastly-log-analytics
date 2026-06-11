@@ -4,6 +4,7 @@ import { HydrationBoundary, QueryClient, QueryClientProvider } from '@tanstack/r
 import type { DehydratedState } from '@tanstack/react-query'
 import { useState } from 'react'
 import dynamic from 'next/dynamic'
+import { NuqsAdapter } from 'nuqs/adapters/next/app'
 
 const ReactQueryDevtools = dynamic(
   () => import('@tanstack/react-query-devtools').then(m => ({ default: m.ReactQueryDevtools })),
@@ -62,9 +63,11 @@ export default function QueryProvider({ children, dehydratedState }: QueryProvid
 
   return (
     <QueryClientProvider client={queryClient}>
-      <HydrationBoundary state={dehydratedState}>
-        {children}
-      </HydrationBoundary>
+      <NuqsAdapter>
+        <HydrationBoundary state={dehydratedState}>
+          {children}
+        </HydrationBoundary>
+      </NuqsAdapter>
       {process.env.NODE_ENV === 'development' && <ReactQueryDevtools initialIsOpen={false} />}
     </QueryClientProvider>
   )
