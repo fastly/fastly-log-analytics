@@ -94,6 +94,32 @@ def _rollups_hour_bundling_backfill(service_id: str, source: dict) -> str | None
     return f"rollups: bundled {n} hour(s) into hour_bundled/"
 
 
+def _rollups_time_series_backfill(service_id: str, source: dict) -> str | None:
+    """Build the per-hour 1-minute time_series.parquet bundles for every
+    closed hour that doesn't yet have one.
+
+    The dashboard chart's rollup fast-path
+    (``QueryRunner.try_time_series_from_rollup``) requires a
+    ``time_series.parquet`` for EVERY closed hour in the requested
+    window — one missing hour disqualifies the whole range and falls
+    back to a raw Iceberg scan that costs ~16-19 s for 30d.
+
+    The writer ``build_time_series_bundles`` only ever runs against
+    hours TOUCHED by the most recent sync tick, so services that
+    pre-date the time_series feature (added late) have a giant gap of
+    historical hours with no time_series.parquet. This migration
+    closes the gap once per service.
+
+    Idempotent: ``backfill_time_series_bundles`` only builds for hours
+    that don't already have a ``time_series.parquet``, so re-running
+    after a partial failure is cheap.
+    """
+    from backend.core import rollups
+
+    n = rollups.backfill_time_series_bundles(service_id, source)
+    return f"rollups: built time_series.parquet for {n} historical hour(s)"
+
+
 # Ordered registry. Append-only — never remove or reorder entries.
 # Names must be globally unique and stable; the DB matches by name.
 MIGRATIONS: list[Migration] = [
@@ -106,6 +132,11 @@ MIGRATIONS: list[Migration] = [
         name="2026-06-08_rollups_hour_bundling",
         description="Bundle per-field hour rollups into one parquet per hour (40x fewer file opens)",
         fn=_rollups_hour_bundling_backfill,
+    ),
+    Migration(
+        name="2026-06-10_rollups_time_series_backfill",
+        description="Backfill time_series.parquet for all closed hours so the dashboard chart's rollup fast-path covers 7d/30d",
+        fn=_rollups_time_series_backfill,
     ),
 ]
 
