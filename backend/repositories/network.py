@@ -51,11 +51,23 @@ def get_health(
     map_asn: str = "all",
 ) -> dict[str, Any]:
     """Return ASN × time heatmap, world map buckets, metro leaderboard, and ASN leaderboard."""
+    import time as _time
+
+    # Per-phase wall-clock timings surface in the response under
+    # _section_timings so the perf harness can attribute /api/network-health
+    # without ad-hoc instrumentation. Mirrors dashboard.py.
+    section_timings: list[dict] = []
+
+    def _phase(name: str, t0: float) -> None:
+        section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
+
     table_name = _safe_table(src["name"])
 
     runner = QueryRunner(con, src)
 
+    _t = _time.perf_counter()
     actual_cols = set(runner.get_schema_cols())
+    _phase("get_schema_cols", _t)
 
     if not {"tcp_rtt", "asn"}.issubset(actual_cols):
         return {
@@ -77,9 +89,11 @@ def get_health(
     if map_asn != "all" and "asn" in effective_filters:
         del effective_filters["asn"]
 
+    _t = _time.perf_counter()
     params, where_clause = build_where_clause(
         start_time, end_time, effective_filters, list(actual_cols), inline_params=True
     )
+    _phase("build_where_clause", _t)
 
     all_net_cols = [
         "timestamp",
@@ -102,7 +116,9 @@ def get_health(
         "resp_bytes",
         "c_speed",
     ]
+    _t = _time.perf_counter()
     temp_table = runner.create_filtered_temp_table(all_net_cols, list(actual_cols), table_name, where_clause, params)
+    _phase("temp_table_create", _t)
     if temp_table is None:
         return {
             "available": False,
@@ -143,7 +159,9 @@ def get_health(
             where=w,
             row_limit=top_n * 200,
         )
+        _t = _time.perf_counter()
         heatmap_rows = runner.execute(heatmap_sql, p).fetchall()
+        _phase("heatmap_query", _t)
 
         # ── Map (country × bucket) ─────────────────────────────────────────
         map_rows: list[Any] = []
@@ -176,7 +194,9 @@ def get_health(
                 table=t,
                 where=map_where,
             )
+            _t = _time.perf_counter()
             map_rows = runner.execute(map_sql, map_params).fetchall()
+            _phase("map_query", _t)
 
         # ── Metro leaderboard ──────────────────────────────────────────────
         metro_rows: list[Any] = []
@@ -192,7 +212,9 @@ def get_health(
                 table=t,
                 where=w,
             )
+            _t = _time.perf_counter()
             metro_rows = runner.execute(metro_sql, p).fetchall()
+            _phase("metro_query", _t)
 
         # ── Derive top ASNs ────────────────────────────────────────────────
         all_asns_seen: dict[int, int] = {}
@@ -213,6 +235,7 @@ def get_health(
         asn_speed_mix: dict[int, dict[str, float]] = {}
         if has_c_speed and top_asns:
             placeholders = ",".join(["?"] * len(top_asns))
+            _t = _time.perf_counter()
             speed_rows = runner.execute(
                 SQL.SPEED_DISTRIBUTION_BY_ASN.format(
                     table=t,
@@ -221,6 +244,7 @@ def get_health(
                 ),
                 p + top_asns,
             ).fetchall()
+            _phase("speed_distribution_query", _t)
             asn_speed_rows: dict[int, list[tuple]] = {}
             for r in speed_rows:
                 asn_v = int(r[0])
@@ -508,6 +532,7 @@ def get_health(
             },
             "countries": countries,
             "has_metro": has_metro,
+            "section_timings": section_timings,
             **runner.telemetry(),
         }
 
@@ -527,11 +552,20 @@ def get_quality(
     region_country: str = "US",
 ) -> dict[str, Any]:
     """Return TCP RTT metrics aggregated by country, ASN, region, PoP, and a scatter sample."""
+    import time as _time
+
+    section_timings: list[dict] = []
+
+    def _phase(name: str, t0: float) -> None:
+        section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
+
     table_name = _safe_table(src["name"])
 
     runner = QueryRunner(con, src)
 
+    _t = _time.perf_counter()
     actual_cols = set(runner.get_schema_cols())
+    _phase("get_schema_cols", _t)
 
     if not actual_cols or "tcp_rtt" not in actual_cols:
         return {
@@ -571,14 +605,18 @@ def get_quality(
             rtt_filter=rtt_filter,
             extra_where=extra_where,
         )
+        _t = _time.perf_counter()
         rows = runner.execute(sql, params + (extra_params or [])).fetchall()
+        _phase(f"quality_bar:{group_col}", _t)
         return [{"label": str(r[0]), "rtt_ms": round(float(r[1]), 2), "reqs": int(r[2])} for r in rows]
 
     countries_sql = SQL.QUALITY_COUNTRIES_DISTINCT.format(
         table=table_name,
         where_clause=where_clause,
     )
+    _t = _time.perf_counter()
     countries = [r[0] for r in runner.execute(countries_sql, params).fetchall()]
+    _phase("countries_distinct", _t)
 
     by_country = run_bar("country")
     by_asn = run_bar("asn") if "asn" in actual_cols else []
@@ -595,10 +633,12 @@ def get_quality(
             table=table_name,
             rtt_filter=rtt_filter,
         )
+        _t = _time.perf_counter()
         scatter = [
             {"rtt_ms": round(float(r[0]), 2), "ttfb_ms": round(float(r[1]), 2), "cache": str(r[2])}
             for r in runner.execute(scatter_sql, params).fetchall()
         ]
+        _phase("scatter_query", _t)
 
     return {
         "available": True,
@@ -609,5 +649,6 @@ def get_quality(
         "by_pop": by_pop,
         "scatter": scatter,
         "countries": countries,
+        "section_timings": section_timings,
         **runner.telemetry(),
     }
