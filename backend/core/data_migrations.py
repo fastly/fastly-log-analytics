@@ -120,6 +120,26 @@ def _rollups_time_series_backfill(service_id: str, source: dict) -> str | None:
     return f"rollups: built time_series.parquet for {n} historical hour(s)"
 
 
+def _rollups_day_bundling_backfill(service_id: str, source: dict) -> str | None:
+    """Bundle per-field per-day rollup parquets into one parquet per day.
+
+    Same pattern as :func:`_rollups_hour_bundling_backfill` but one
+    tier coarser. Reduces the dashboard reader's per-day file opens
+    from ``~fields_count`` per day to 1. On a 30-day window
+    pre-bundling this dropped opens from ~1,200 to ~30 and cut
+    ``top_n_rollups:rolled_res`` from ~4 s to <1 s on prod (per the
+    perf audit).
+
+    Idempotent: bundle_days skips up-to-date bundles via mtime.
+    Non-destructive: the per-field per-day tree stays in place, and
+    the reader falls back to it when a day bundle is missing.
+    """
+    from backend.core import rollups
+
+    n = rollups.backfill_day_bundles(service_id, source)
+    return f"rollups: bundled {n} day(s) into day_bundled/"
+
+
 def _rollups_sessions_backfill(service_id: str, source: dict) -> str | None:
     """Build the per-hour sessions.parquet rollup for every closed hour
     that doesn't yet have one.
@@ -170,6 +190,11 @@ MIGRATIONS: list[Migration] = [
         name="2026-06-10_rollups_sessions_backfill",
         description="Backfill sessions.parquet for all closed hours so /api/sessions can serve 7d windows from the rollup instead of a 14+ s raw window-function scan",
         fn=_rollups_sessions_backfill,
+    ),
+    Migration(
+        name="2026-06-11_rollups_day_bundling_backfill",
+        description="Bundle per-field per-day rollup parquets into one parquet per day so the dashboard reader opens 1 file per day instead of ~40 (drops top_n_rollups:rolled_res ~4 s on 30d)",
+        fn=_rollups_day_bundling_backfill,
     ),
 ]
 

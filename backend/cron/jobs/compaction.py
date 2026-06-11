@@ -1,11 +1,11 @@
 """Local + rollup compaction crons.
 
-  * ``_run_local_compact`` — frequent merge of small parquet files in the
-    LOCAL CACHE only (does NOT touch FOS). Free in terms of cloud cost, so
-    we run it on a 2 min interval.
-  * ``_run_rollup_compact_daily`` — consolidates per-hour rollup parquet
-    into per-day files for closed days, slashing file-open overhead on
-    7-day dashboard queries.
+* ``_run_local_compact`` — frequent merge of small parquet files in the
+  LOCAL CACHE only (does NOT touch FOS). Free in terms of cloud cost, so
+  we run it on a 2 min interval.
+* ``_run_rollup_compact_daily`` — consolidates per-hour rollup parquet
+  into per-day files for closed days, slashing file-open overhead on
+  7-day dashboard queries.
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def _run_rollup_compact_daily(service_id: str) -> None:
     missing, so this is purely additive.
     """
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
-    from backend.core.rollups import compact_closed_days_to_daily
+    from backend.core.rollups import backfill_day_bundles, compact_closed_days_to_daily
 
     src = get_source_for_service(service_id)
     if src is None:
@@ -146,6 +146,22 @@ def _run_rollup_compact_daily(service_id: str) -> None:
     start_time = time.time()
     try:
         rebuilt = compact_closed_days_to_daily(service_id, src)
+        # After per-field per-day files are fresh, bundle them across
+        # fields so the dashboard reader opens 1 file per day instead
+        # of ~40. backfill_day_bundles is idempotent (skips up-to-date
+        # bundles via mtime) so running it on every compact tick is
+        # cheap when no new per-field days landed. Best-effort —
+        # bundle failure degrades to per-field reading, which still
+        # works correctly.
+        try:
+            bundled = backfill_day_bundles(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: day-bundle backfill failed (per-field still serves): %s",
+                _display,
+                e,
+            )
+            bundled = 0
         duration = time.time() - start_time
         # Pass run_id so log_cron_run UPDATEs the 'running' row that
         # start_cron_run inserted (instead of orphaning it and inserting
@@ -157,13 +173,14 @@ def _run_rollup_compact_daily(service_id: str) -> None:
             "rollup_compact_daily",
             duration,
             "success",
-            summary=f"Rebuilt {rebuilt} (field, day) parquet file(s).",
+            summary=f"Rebuilt {rebuilt} (field, day) file(s); bundled {bundled} day(s).",
             run_id=run_id,
         )
         logger.info(
-            "⏹️  [rollup-compact] %s: Compacted %d (field, day) file(s) in %.1fs.",
+            "⏹️  [rollup-compact] %s: Compacted %d (field, day) file(s), bundled %d day(s) in %.1fs.",
             _display,
             rebuilt,
+            bundled,
             duration,
         )
     except Exception as e:

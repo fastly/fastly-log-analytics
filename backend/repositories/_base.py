@@ -798,6 +798,7 @@ class QueryRunner:
         # the dashboard top-N tabs went blank.
         day_root = os.path.join(cache_dir, "rollups", "day")
         bundled_hour_root = os.path.join(cache_dir, "rollups", "hour_bundled")
+        bundled_day_root = os.path.join(cache_dir, "rollups", "day_bundled")
         active_day = active_str[:10]
         day_paths: list[str] = []
         hour_paths: list[str] = []
@@ -811,6 +812,15 @@ class QueryRunner:
         # errors when UNION ALL'd with the per-field branch.
         bundled_hour_paths: list[str] = []
         bundled_hours: set[str] = set()
+        # Per-day bundled files: one parquet per closed day containing
+        # all fields' top-N. When present, replaces ~40 per-field-day
+        # files (or 24 per-field-hour files) for that day. Built by the
+        # daily rollup_compact_daily cron via backend.core.rollups.
+        # bundle_days(); reader prefers it over per-field-day files.
+        # Same schema as bundled_hour (field/value/count as columns,
+        # no hive partitioning on the projection).
+        bundled_day_paths: list[str] = []
+        bundled_days_set: set[str] = set()
 
         # Per-day rollups cover [day 00:00 UTC, +24h). When the request
         # window starts or ends mid-day, including the boundary day's
@@ -866,6 +876,32 @@ class QueryRunner:
                 except OSError:
                     continue
 
+        # Bundled-day walk (preferred over per-field-day for windows
+        # where the whole day fits). When present, replaces ~40 per-
+        # field-day file opens with 1. Active day skipped — bundling
+        # only runs for closed days. Days NOT fully contained in the
+        # window fall through to per-field-hour for the in-window
+        # portion (same fall-through as per-field-day).
+        if os.path.isdir(bundled_day_root):
+            for day_entry in _cached_listdir(bundled_day_root):
+                if not day_entry.startswith("day="):
+                    continue
+                day = day_entry[len("day=") :]
+                if len(day) != 10:
+                    continue
+                if day >= active_day:
+                    continue
+                if st_str_floor and day < st_str_floor[:10]:
+                    continue
+                if et_str_floor and day > et_str_floor[:10]:
+                    continue
+                if not _day_fully_in_window(day):
+                    continue
+                bundle_path = os.path.join(bundled_day_root, day_entry, "all_fields.parquet")
+                if os.path.isfile(bundle_path):
+                    bundled_day_paths.append(bundle_path)
+                    bundled_days_set.add(day)
+
         if os.path.isdir(bundled_hour_root):
             for hour_entry in _cached_listdir(bundled_hour_root):
                 if not hour_entry.startswith("hour="):
@@ -877,6 +913,11 @@ class QueryRunner:
                     continue
                 if hour >= active_str:
                     # Active hour served live, not from any bundle.
+                    continue
+                if hour[:10] in bundled_days_set:
+                    # Day bundle covers this hour (and every field for
+                    # this day). Including the hour bundle would
+                    # double-count via UNION ALL.
                     continue
                 if hour[:10] in day_covered_by_any_field:
                     # Day file covers this hour for at least one
@@ -901,7 +942,12 @@ class QueryRunner:
             # Track which (field, day) tuples we satisfied from the
             # per-day compacted file; the per-hour walk below skips
             # those hours.
-            covered_days: set[str] = set()
+            # Track which days are covered for this field. Seeded by
+            # `bundled_days_set` so the per-day-bundle suppresses both
+            # the per-field-day file AND the per-field-hour fallback
+            # for that day (the bundle's one row per (field, value)
+            # already aggregates the field's whole day).
+            covered_days: set[str] = set(bundled_days_set)
             if os.path.isdir(field_day_dir):
                 day_entries = _cached_listdir(field_day_dir)
                 for day_entry in day_entries:
@@ -909,6 +955,9 @@ class QueryRunner:
                         continue
                     day = day_entry[len("day=") :]
                     if len(day) != 10:
+                        continue
+                    if day in bundled_days_set:
+                        # Already served by the bundled-day file.
                         continue
                     if day >= active_day:
                         # Active day is still being written — read per-hour.
@@ -957,9 +1006,10 @@ class QueryRunner:
         _phase("dir_enum:n_day_files", float(len(day_paths)))
         _phase("dir_enum:n_hour_files", float(len(hour_paths)))
         _phase("dir_enum:n_bundled_hour_files", float(len(bundled_hour_paths)))
+        _phase("dir_enum:n_bundled_day_files", float(len(bundled_day_paths)))
 
         _t_rolled = time.perf_counter()
-        if not day_paths and not hour_paths and not bundled_hour_paths:
+        if not day_paths and not hour_paths and not bundled_hour_paths and not bundled_day_paths:
             rolled_res: list = []
         else:
             # Inline each path list as its OWN read_parquet call and
@@ -988,6 +1038,14 @@ class QueryRunner:
                 # hive_partitioning=0 because the only hive segment here
                 # is `hour=...` which we don't need for the projection.
                 paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in bundled_hour_paths)
+                branches.append(
+                    f"SELECT field, value, CAST(count AS BIGINT) AS count "
+                    f"FROM read_parquet([{paths_sql}], hive_partitioning=0)"
+                )
+            if bundled_day_paths:
+                # Same shape as bundled_hour (field/value/count as
+                # columns, no hive partitioning on the projection).
+                paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in bundled_day_paths)
                 branches.append(
                     f"SELECT field, value, CAST(count AS BIGINT) AS count "
                     f"FROM read_parquet([{paths_sql}], hive_partitioning=0)"

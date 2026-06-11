@@ -255,6 +255,29 @@ def _hour_bundled_root(source: dict) -> str:
     return os.path.join(_cache_dir(source), "rollups", "hour_bundled")
 
 
+def _day_bundled_root(source: dict) -> str:
+    """Return the per-day bundled rollup root.
+
+    Layout: cache/<svc>/rollups/day_bundled/day=YYYY-MM-DD/all_fields.parquet
+    Each bundle contains rows for ALL fields for that day with the same
+    (field, value, count) schema as the per-field day parquets. Reading
+    one bundle replaces opening ~40 per-field files for that day; on a
+    30-day window this cuts file opens from ~1,200 to ~30. Per the perf
+    audit, ``top_n_rollups:rolled_res`` was the dominant cost
+    (4 s on prod 30d) entirely because of per-file open overhead on
+    the per-field-day tree.
+    """
+    from backend.core.duckdb import _cache_dir
+
+    return os.path.join(_cache_dir(source), "rollups", "day_bundled")
+
+
+# Filename for the per-day bundled rollup (same as the per-hour
+# bundled). Kept identical so future tooling can treat the two trees
+# uniformly when needed.
+DAY_BUNDLE_FILENAME = "all_fields.parquet"
+
+
 # Filename for the per-hour 1-minute time-series rollup. Kept as a constant
 # so the writer + reader can never drift on the name.
 TIME_SERIES_BUNDLE_FILENAME = "time_series.parquet"
@@ -873,6 +896,163 @@ def bundle_hours(service_id: str, source: dict, hours: list[str]) -> int:
         con.close()
 
     return rebuilt
+
+
+def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
+    """Combine per-field day parquets into one bundled parquet per day.
+
+    For each day token, reads every per-field parquet under
+    ``rollups/day/field=*/day=DAY/*.parquet`` and writes a single
+    bundled file at
+    ``rollups/day_bundled/day=DAY/all_fields.parquet``.
+
+    Skips days where:
+      - No per-field files exist (nothing to bundle).
+      - A bundled file already exists and is fresh enough to skip
+        rebuild (per-field mtime <= bundle mtime).
+
+    Returns the count of days that were rebuilt.
+
+    Skip the active day — per-field day files for in-progress days
+    don't exist yet (compact_closed_days_to_daily skips them too).
+    Mirrors :func:`bundle_hours` in structure / lock semantics.
+    """
+    if not days:
+        return 0
+
+    import duckdb
+
+    from backend.core.iceberg.view import _get_service_lock
+
+    day_per_field_root = _day_rollups_root(source)
+    bundled_root = _day_bundled_root(source)
+    if not os.path.isdir(day_per_field_root):
+        return 0
+    os.makedirs(bundled_root, exist_ok=True)
+    lock_key = source.get("name", "default")
+    active_day = datetime.now(UTC).strftime("%Y-%m-%d")
+
+    rebuilt = 0
+    # :memory: DuckDB — see bundle_hours for the rationale (avoid
+    # contention on the per-service .duckdb file held by uvicorn).
+    con = duckdb.connect(":memory:")
+    try:
+        for day in days:
+            if day == active_day:
+                continue
+            # Defensive: validate day token format.
+            try:
+                datetime.strptime(day, "%Y-%m-%d")
+            except ValueError:
+                continue
+
+            per_field_paths: list[str] = []
+            max_src_mtime = 0.0
+            try:
+                for field_entry in os.listdir(day_per_field_root):
+                    if not field_entry.startswith("field="):
+                        continue
+                    day_dir = os.path.join(day_per_field_root, field_entry, f"day={day}")
+                    if not os.path.isdir(day_dir):
+                        continue
+                    for fname in os.listdir(day_dir):
+                        if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
+                            continue
+                        p = os.path.join(day_dir, fname)
+                        per_field_paths.append(p)
+                        try:
+                            mt = os.path.getmtime(p)
+                            if mt > max_src_mtime:
+                                max_src_mtime = mt
+                        except OSError:
+                            pass
+            except OSError:
+                continue
+
+            if not per_field_paths:
+                continue
+
+            bundle_dir = os.path.join(bundled_root, f"day={day}")
+            bundle_path = os.path.join(bundle_dir, DAY_BUNDLE_FILENAME)
+            if os.path.exists(bundle_path):
+                try:
+                    if os.path.getmtime(bundle_path) >= max_src_mtime:
+                        continue
+                except OSError:
+                    pass
+
+            os.makedirs(bundle_dir, exist_ok=True)
+            tmp_path = os.path.join(bundle_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
+            paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in per_field_paths)
+            query = (
+                f"COPY (SELECT field, value, CAST(count AS BIGINT) AS count "
+                f"FROM read_parquet([{paths_sql}])) "
+                f"TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            )
+            try:
+                con.execute(query)
+            except duckdb.Error as e:
+                logger.warning("[rollups] %s: day-bundle COPY failed for day=%s: %s", service_id, day, e)
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                continue
+
+            with _get_service_lock(lock_key):
+                os.replace(tmp_path, bundle_path)
+            rebuilt += 1
+    finally:
+        con.close()
+
+    return rebuilt
+
+
+def backfill_day_bundles(service_id: str, source: dict, max_days: int | None = None) -> int:
+    """One-shot bulk bundling for all closed days that don't yet have a
+    per-day bundled file (or whose bundle is older than its source per-
+    field files).
+
+    Walks ``rollups/day/field=*/day=*/`` to discover candidate days and
+    calls :func:`bundle_days` on the subset that needs rebuilding.
+    Idempotent — bundle_days skips up-to-date days via mtime comparison.
+    """
+    day_per_field_root = _day_rollups_root(source)
+    bundled_root = _day_bundled_root(source)
+    if not os.path.isdir(day_per_field_root):
+        return 0
+
+    active_day = datetime.now(UTC).strftime("%Y-%m-%d")
+    all_days: set[str] = set()
+    try:
+        for field_entry in os.listdir(day_per_field_root):
+            if not field_entry.startswith("field="):
+                continue
+            field_dir = os.path.join(day_per_field_root, field_entry)
+            try:
+                for day_entry in os.listdir(field_dir):
+                    if not day_entry.startswith("day="):
+                        continue
+                    day = day_entry[len("day=") :]
+                    if day >= active_day:
+                        continue
+                    all_days.add(day)
+            except OSError:
+                continue
+    except OSError:
+        return 0
+
+    to_bundle: list[str] = []
+    for day in sorted(all_days):
+        bundle_path = os.path.join(bundled_root, f"day={day}", DAY_BUNDLE_FILENAME)
+        if not os.path.exists(bundle_path):
+            to_bundle.append(day)
+        if max_days and len(to_bundle) >= max_days:
+            break
+
+    if not to_bundle:
+        return 0
+    return bundle_days(service_id, source, to_bundle)
 
 
 def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> None:
