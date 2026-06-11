@@ -193,17 +193,31 @@ export default function QueryMonitorPage() {
     onError: (err: Error) => setActionError(extractApiError(err) || err.message),
   })
 
-  // "Just finished" — anything that completed in the last 3 seconds. Promoted
+  // "Just finished" — anything that completed in the last 10 seconds. Promoted
   // into the Active section as a faded row with the outcome pill so the user
   // gets visual feedback even when real queries are sub-300ms. Without this
   // the Active list reads empty on typical traffic (verified on prod 2026-
   // 06-11: p50 query duration 0.2ms, max 29ms — far below any poll cadence).
-  const JUST_FINISHED_WINDOW_S = 3
+  const JUST_FINISHED_WINDOW_S = 10
   const justFinished = React.useMemo(() => {
     const completed = snapshotQuery.data?.completed ?? []
     const cutoff = Date.now() / 1000 - JUST_FINISHED_WINDOW_S
     return completed.filter((c) => c.ended_at_utc >= cutoff)
   }, [snapshotQuery.data])
+
+  // Notable slow queries — anything that took longer than the threshold,
+  // regardless of how long ago it finished. The most-investigated case in
+  // ops: "I saw the dashboard get slow a minute ago, what was running?".
+  // The history ring buffer caps at 200 rows (server-side), so the lookback
+  // window in practice is "as far back as the buffer goes".
+  const [slowThresholdMs, setSlowThresholdMs] = React.useState(500)
+  const slowQueries = React.useMemo(() => {
+    const completed = snapshotQuery.data?.completed ?? []
+    return [...completed]
+      .filter((c) => c.duration_ms >= slowThresholdMs)
+      .sort((a, b) => b.duration_ms - a.duration_ms)
+      .slice(0, 30)
+  }, [snapshotQuery.data, slowThresholdMs])
 
   // Filter / search the active list (active rows + just-finished promotions).
   const filteredActive = React.useMemo(() => {
@@ -322,6 +336,34 @@ export default function QueryMonitorPage() {
                 onKill={requestKill}
                 cancellingQid={cancelMutation.variables ?? null}
               />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                Notable Slow Queries
+                <Badge variant="outline">{slowQueries.length}</Badge>
+                <span className="text-xs text-muted-foreground font-normal">
+                  ≥ {slowThresholdMs < 1000 ? `${slowThresholdMs} ms` : `${slowThresholdMs / 1000}s`}, sorted slowest first
+                </span>
+              </CardTitle>
+              <div className="flex items-center gap-1">
+                {[100, 500, 1000, 2000, 5000].map((ms) => (
+                  <Button
+                    key={ms}
+                    variant={slowThresholdMs === ms ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => setSlowThresholdMs(ms)}
+                  >
+                    {ms < 1000 ? `${ms}ms` : `${ms / 1000}s`}
+                  </Button>
+                ))}
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              <CompletedTable rows={slowQueries} preserveOrder emptyMessage={`No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`} />
             </CardContent>
           </Card>
 
@@ -485,10 +527,19 @@ function ActiveTable({
             const cancelling = cancellingQid === row.query_id
             const isCancelled = row.cancelled_at !== null
             const promoted = !!row._completed
+            // Visual hierarchy:
+            //   active (live): bright background tint, pulsing dot, left accent
+            //   promoted (just-finished): faded, outcome badge
+            //   cancelled: dim
+            const rowClass = promoted
+              ? 'opacity-60 bg-muted/10'
+              : isCancelled
+                ? 'opacity-60'
+                : 'bg-primary/5 border-l-2 border-l-primary/60'
             return (
               <React.Fragment key={row.query_id}>
                 <tr
-                  className={`border-b hover:bg-muted/30 cursor-pointer ${isCancelled ? 'opacity-60' : ''} ${promoted ? 'opacity-60 bg-muted/10' : ''}`}
+                  className={`border-b hover:bg-muted/30 cursor-pointer ${rowClass}`}
                   onClick={() => onToggleRow(row.query_id)}
                 >
                   <td className="px-3 py-2">
@@ -515,7 +566,15 @@ function ActiveTable({
                   <td className="px-3 py-2 text-xs">{row.service_id ?? '—'}</td>
                   <td className="px-3 py-2 text-xs font-mono">{row.attribution.pool_slot ?? '—'}</td>
                   <td className={`px-3 py-2 text-right font-mono ${durationColor(row.duration_ms)}`}>
-                    {formatDuration(row.duration_ms)}
+                    <span className="inline-flex items-center gap-1.5">
+                      {!promoted && !isCancelled && (
+                        <span className="relative flex h-2 w-2" aria-hidden="true">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-current opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-current"></span>
+                        </span>
+                      )}
+                      {formatDuration(row.duration_ms)}
+                    </span>
                   </td>
                   <td className="px-3 py-2 text-right">
                     {promoted ? (
@@ -561,16 +620,25 @@ function ActiveTable({
   )
 }
 
-function CompletedTable({ rows }: { rows: CompletedRow[] }) {
+function CompletedTable({
+  rows,
+  emptyMessage = 'No completed queries yet.',
+  preserveOrder = false,
+}: {
+  rows: CompletedRow[]
+  emptyMessage?: string
+  preserveOrder?: boolean
+}) {
   if (rows.length === 0) {
     return (
       <div className="p-6 text-center text-sm text-muted-foreground">
-        No completed queries yet.
+        {emptyMessage}
       </div>
     )
   }
-  // Show newest first
-  const sorted = [...rows].sort((a, b) => b.query_id - a.query_id).slice(0, 50)
+  // Default: newest first. Pass preserveOrder=true to keep caller's order
+  // (e.g. slow-queries panel sorts by duration desc).
+  const sorted = preserveOrder ? rows.slice(0, 50) : [...rows].sort((a, b) => b.query_id - a.query_id).slice(0, 50)
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
