@@ -13692,6 +13692,18 @@
             ],
             "title": "Sync Status"
           },
+          "share_banner": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Share Banner"
+          },
           "header_badge": {
             "anyOf": [
               {

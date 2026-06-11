@@ -190,6 +190,32 @@ def bootstrap(
 
     _timed("sync_status", _resolve_sync_status)
 
+    # Phase D-3: fold the lean share-status banner into bootstrap so
+    # the header banner has its initial state on first render and
+    # skips the first ~80 B / 1-RTT poll. Polling continues on its
+    # 15-s cadence inside useShareStatusBanner for ongoing updates.
+    # Admin-only — analyst sessions don't manage sharing.
+    share_banner_payload: dict | None = None
+
+    def _resolve_share_banner():
+        nonlocal share_banner_payload
+        if analyst_session is not None:
+            return
+        try:
+            from backend.utils.tunnel import get_tunnel_manager
+
+            mgr = get_tunnel_manager()
+            share_banner_payload = {
+                "sharing_active": mgr.is_sharing_active(),
+                "public_url": mgr.public_url(),
+            }
+        except Exception:
+            # Banner is non-essential UX; never break /api/bootstrap
+            # if the tunnel manager is in a transient state.
+            pass
+
+    _timed("share_banner", _resolve_share_banner)
+
     # Header badge: analyst-safe sibling of sync_status, projected
     # down to the two fields the global SyncStatusBadge renders
     # (Latest Log: timestamp, Total Logs: row count). Emitted for
@@ -269,6 +295,7 @@ def bootstrap(
         views=views,
         log_fields_catalog=log_fields_catalog_payload,
         sync_status=sync_status_payload,
+        share_banner=share_banner_payload,
         header_badge=header_badge_payload,
         section_timings=section_timings,
     )

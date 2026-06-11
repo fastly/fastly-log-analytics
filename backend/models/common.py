@@ -233,6 +233,11 @@ class BootstrapResponse(BaseResponse):
     # first mount. ADMIN ONLY — None for analyst sessions (matches the
     # dedicated endpoint's 403 for analysts).
     sync_status: dict | None = None
+    # Lean share-status banner ({sharing_active, public_url}). Folded
+    # in so the global share banner has its initial state on first
+    # render and skips the first /api/admin/share/banner poll.
+    # ADMIN ONLY — analysts don't manage sharing.
+    share_banner: dict | None = None
     # Analyst-safe sibling of sync_status, projected down to the two
     # fields the global SyncStatusBadge renders (latest_log_at,
     # local_rows). Available to BOTH admin AND analyst sessions so the

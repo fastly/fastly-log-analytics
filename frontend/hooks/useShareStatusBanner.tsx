@@ -2,6 +2,7 @@
 
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
+import { useQueryClient } from '@tanstack/react-query'
 
 import { client } from '@/lib/api'
 
@@ -18,7 +19,21 @@ const POLL_MS = 15_000
 
 export function useShareStatusBanner({ enabled }: Options) {
   const router = useRouter()
-  const [status, setStatus] = React.useState<ShareStatus | null>(null)
+  const queryClient = useQueryClient()
+  // Seed initial state from bootstrap's share_banner field if it has
+  // landed already (perf audit Phase D-3). Skips the first poll +
+  // RTT on cold load. Polling still runs on the 15s cadence below
+  // for ongoing updates (admin starting/stopping sharing should
+  // reflect in the banner within ~15s, regardless of how stale the
+  // bootstrap entry is).
+  const bootstrapData = queryClient.getQueryData(['bootstrap']) as any
+  const seeded: ShareStatus | null = bootstrapData?.share_banner
+    ? {
+        sharing_active: !!bootstrapData.share_banner.sharing_active,
+        public_url: bootstrapData.share_banner.public_url ?? null,
+      }
+    : null
+  const [status, setStatus] = React.useState<ShareStatus | null>(seeded)
 
   React.useEffect(() => {
     if (!enabled) return
@@ -42,7 +57,13 @@ export function useShareStatusBanner({ enabled }: Options) {
         /* swallow — banner is non-essential UX */
       }
     }
-    tick()
+    // Don't fire the immediate poll if we already seeded from
+    // bootstrap — bootstrap's share_banner is at most as stale as
+    // bootstrap's 5-min cache. The 15-s setInterval below picks up
+    // changes within one poll window either way.
+    if (seeded === null) {
+      tick()
+    }
     const id = setInterval(tick, POLL_MS)
     return () => {
       cancelled = true

@@ -3801,6 +3801,10 @@ export interface components {
             sync_status?: {
                 [key: string]: unknown;
             } | null;
+            /** Share Banner */
+            share_banner?: {
+                [key: string]: unknown;
+            } | null;
             /** Header Badge */
             header_badge?: {
                 [key: string]: unknown;
