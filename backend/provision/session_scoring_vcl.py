@@ -89,12 +89,12 @@ DEFAULT_ASSET_EXT_REGEX = (
     # scoring entirely, letting an attacker bypass session scoring on
     # any dynamic endpoint by appending an asset extension to the
     # query string. The fix bounds the match to the URL path.
-    r"^[^?]*"
+    r"^[^?#]*"
     r"\.(aif|aiff|au|avi|bin|bmp|cab|carb|cct|cdf|class|css|dcr|doc|"
     r"dtd|exe|flv|gcf|gff|gif|grv|hdml|hqx|ico|ini|jpeg|jpg|js|mov|"
     r"mp3|mp4|nc|pct|pdf|png|ppc|pws|svg|swa|swf|txt|vbs|w32|wav|"
     r"wbmp|wml|wmlc|wmls|wmlsc|xsd|zip|webp|woff|woff2|ttf|bz2|gz|"
-    r"tgz|tar|lzma|rar|war|bz|7z|ts|m3u8)($|\?)"
+    r"tgz|tar|lzma|rar|war|bz|7z|ts|m3u8)($|\?|#)"
 )
 
 # Backwards-compat alias for tests / external callers that referenced

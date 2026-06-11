@@ -148,7 +148,7 @@ def client(app):
 
 
 def _seed_invite(service_ids=None, ip_whitelist=None) -> dict:
-    return share_db.create_remote_invite(
+    invite = share_db.create_remote_invite(
         name="Drew",
         email="drew@example.com",
         passcode="ocean-breeze-cabin-42",
@@ -156,6 +156,10 @@ def _seed_invite(service_ids=None, ip_whitelist=None) -> dict:
         ip_whitelist=ip_whitelist,
         service_ids=service_ids or ["svcA", "svcB"],
     )
+    tos = share_db.get_latest_tos()
+    if tos:
+        share_db.mark_tos_accepted(invite["id"], tos["version"])
+    return share_db.get_remote_invite(invite["id"])
 
 
 def _start_share():
@@ -418,6 +422,7 @@ def test_analyst_path_and_query_service_must_both_be_authorized(client):
     )
     assert r.status_code == 403
     assert r.json()["error"] == "service_not_authorized"
+
 
 def test_analyst_custom_un_regexed_route_desync_blocked(client):
     """Ensure custom routes with custom un-regexed prefixes with service_id path parameters

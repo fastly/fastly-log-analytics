@@ -9407,51 +9407,23 @@
       }
     },
     "/api/provision/check-fos": {
-      "get": {
+      "post": {
         "tags": [
           "provision"
         ],
         "summary": "Provision Check Fos",
         "description": "Validate FOS credentials by attempting to list objects.",
-        "operationId": "provision_check_fos_api_provision_check_fos_get",
-        "parameters": [
-          {
-            "name": "bucket",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Bucket"
+        "operationId": "provision_check_fos_api_provision_check_fos_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckFosRequest"
+              }
             }
           },
-          {
-            "name": "region",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Region"
-            }
-          },
-          {
-            "name": "access_key",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Access Key"
-            }
-          },
-          {
-            "name": "secret_key",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Secret Key"
-            }
-          }
-        ],
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -9523,93 +9495,23 @@
       }
     },
     "/api/provision/lake-info": {
-      "get": {
+      "post": {
         "tags": [
           "provision"
         ],
         "summary": "Provision Lake Info",
         "description": "Return Iceberg table range and calendar for a given bucket/credentials without registering it.",
-        "operationId": "provision_lake_info_api_provision_lake_info_get",
-        "parameters": [
-          {
-            "name": "bucket",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Bucket"
+        "operationId": "provision_lake_info_api_provision_lake_info_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LakeInfoRequest"
+              }
             }
           },
-          {
-            "name": "region",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Region"
-            }
-          },
-          {
-            "name": "access_key",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Access Key"
-            }
-          },
-          {
-            "name": "secret_key",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Secret Key"
-            }
-          },
-          {
-            "name": "prefix",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Prefix"
-            }
-          },
-          {
-            "name": "endpoint",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Endpoint"
-            }
-          },
-          {
-            "name": "iceberg_metadata_location",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Iceberg Metadata Location"
-            }
-          }
-        ],
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -10027,18 +9929,26 @@
               "title": "Service Id"
             },
             "description": "Logging service ID to enable scoring on"
-          },
-          {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
-            }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -10080,18 +9990,26 @@
               "title": "Service Id"
             },
             "description": "Logging service ID to disable scoring on"
-          },
-          {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
-            }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -13975,6 +13893,34 @@
         ],
         "title": "BotSourcesResponse"
       },
+      "CheckFosRequest": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "region": {
+            "type": "string",
+            "title": "Region"
+          },
+          "access_key": {
+            "type": "string",
+            "title": "Access Key"
+          },
+          "secret_key": {
+            "type": "string",
+            "title": "Secret Key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bucket",
+          "region",
+          "access_key",
+          "secret_key"
+        ],
+        "title": "CheckFosRequest"
+      },
       "ClearSqliteResponse": {
         "properties": {
           "ok": {
@@ -15592,6 +15538,61 @@
           "passcode"
         ],
         "title": "InvitePayload"
+      },
+      "LakeInfoRequest": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "region": {
+            "type": "string",
+            "title": "Region"
+          },
+          "access_key": {
+            "type": "string",
+            "title": "Access Key"
+          },
+          "secret_key": {
+            "type": "string",
+            "title": "Secret Key"
+          },
+          "prefix": {
+            "type": "string",
+            "title": "Prefix",
+            "default": ""
+          },
+          "endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
+          },
+          "iceberg_metadata_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iceberg Metadata Location"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bucket",
+          "region",
+          "access_key",
+          "secret_key"
+        ],
+        "title": "LakeInfoRequest"
       },
       "LogAccountingBucket": {
         "properties": {

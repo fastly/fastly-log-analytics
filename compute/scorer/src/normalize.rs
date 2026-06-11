@@ -151,7 +151,16 @@ pub fn normalize(url: &str) -> Route {
             category: "home".to_string(),
         };
     }
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut segments: Vec<&str> = Vec::new();
+    for s in path.split('/').filter(|s| !s.is_empty()) {
+        if s == "." {
+            continue;
+        } else if s == ".." {
+            segments.pop();
+        } else {
+            segments.push(s);
+        }
+    }
     if segments.is_empty() {
         return Route {
             path: "/".to_string(),
@@ -197,6 +206,13 @@ mod tests {
         assert_eq!(normalize("/").path, "/");
         assert_eq!(normalize("").path, "/");
         assert_eq!(normalize("/home").path, "/home");
+    }
+
+    #[test]
+    fn dot_segment_collapse() {
+        assert_eq!(normalize("/static/../admin").path, "/admin");
+        assert_eq!(normalize("/static/../admin").category, "admin");
+        assert_eq!(normalize("/a/./b/../c").path, "/a/c");
     }
 
     #[test]

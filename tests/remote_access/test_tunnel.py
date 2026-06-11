@@ -450,3 +450,50 @@ def test_get_share_audit_logs_filters_by_time_window():
     # `until` before window excludes everything.
     rows = share_db.get_share_audit_logs(until=before, email_substr="t@example.com")
     assert not rows
+
+
+# ── LRU Eviction Under Capacity ────────────────────────────────────────────
+
+
+def test_rate_limiter_lru_eviction(monkeypatch):
+    from backend.utils.tunnel import rate_limiter
+
+    # Set MAX_TRACKED_IPS to 3 for testing.
+    monkeypatch.setattr(rate_limiter, "MAX_TRACKED_IPS", 3)
+
+    rl = rate_limiter._LoginRateLimiter()
+
+    # Record 1 failure for 3 different IPs.
+    rl.record_failure("1.1.1.1")
+    rl.record_failure("2.2.2.2")
+    rl.record_failure("3.3.3.3")
+
+    # Order of self._failures should be: "1.1.1.1", "2.2.2.2", "3.3.3.3"
+    assert list(rl._failures.keys()) == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+
+    # Touch "1.1.1.1" again (moves it to the end/MRU).
+    rl.record_failure("1.1.1.1")
+    assert list(rl._failures.keys()) == ["2.2.2.2", "3.3.3.3", "1.1.1.1"]
+
+    # Record failure for a 4th IP. "2.2.2.2" (oldest/LRU) should be evicted.
+    rl.record_failure("4.4.4.4")
+    assert list(rl._failures.keys()) == ["3.3.3.3", "1.1.1.1", "4.4.4.4"]
+    assert "2.2.2.2" not in rl._failures
+
+    # Trigger lockout for 3 different IPs.
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("3.3.3.3")
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("1.1.1.1")
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("4.4.4.4")
+
+    # Order of lockouts should be: "3.3.3.3", "1.1.1.1", "4.4.4.4"
+    assert list(rl._lockouts.keys()) == ["3.3.3.3", "1.1.1.1", "4.4.4.4"]
+
+    # Trigger a lockout for "5.5.5.5". "3.3.3.3" (oldest lockout) should be evicted.
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("5.5.5.5")
+
+    assert list(rl._lockouts.keys()) == ["1.1.1.1", "4.4.4.4", "5.5.5.5"]
+    assert "3.3.3.3" not in rl._lockouts

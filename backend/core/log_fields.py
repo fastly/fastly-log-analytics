@@ -164,12 +164,13 @@ _DUCKDB_TYPE_VALUE_TYPE_COMPAT: dict[str, set[str]] = {
 # v2.0 file-size sweep — LOG_FIELD_CATALOG alone is ~970 lines).
 # ──────────────────────────────────────────────────────────────────────────
 from backend.core._log_fields_data import (  # noqa: F401
-    LOG_FIELD_CATALOG,
-    GROUP_INFO,
     GROUP_DEPENDENCIES,
-    PRESETS,
+    GROUP_INFO,
     INSIGHT_DEFINITIONS,
+    LOG_FIELD_CATALOG,
+    PRESETS,
 )
+
 
 def resolve_enabled_fields(cfg: dict) -> set:
     """Expand group selections and per-field overrides into a flat set of enabled field IDs."""
@@ -288,6 +289,7 @@ def generate_log_format(log_fields_config: dict) -> str:
             # rejects ("if() condition must be a simple expression, not a
             # function call").
             raw_expr = cf.get("vcl_log_expression") or f"req.http.x-fos-edge-data:{name}"
+            cf_limit = int(cf.get("byte_limit") or limits.get(name) or 2000)
             if value_type in ("numeric", "boolean"):
                 # 014: ``!= ""`` only rejects empty strings — any other
                 # text (`"true"`, ``"abc"``, ``"]"``) flows straight into
@@ -297,7 +299,7 @@ def generate_log_format(log_fields_config: dict) -> str:
                 # so non-digit values fall through to ``"null"``.
                 vcl_macro = (
                     f"if(fastly.ff.visits_this_service == 0 && "
-                    f'{raw_expr} ~ "^-?[0-9]+(\\.[0-9]+)?$", {raw_expr}, "null")'
+                    f'{raw_expr} ~ "^-?[0-9]+(\\.[0-9]+)?$", substr({raw_expr}, 0, {cf_limit}), "null")'
                 )
                 entry = f'"{name}":%{{{vcl_macro}}}V'
             else:
@@ -307,7 +309,6 @@ def generate_log_format(log_fields_config: dict) -> str:
                 # line past Fastly's 16 KB limit and silently drop the
                 # whole entry. The substr is INSIDE json.escape so the
                 # encoded length stays bounded.
-                cf_limit = int(cf.get("byte_limit") or limits.get(name) or 2000)
                 vcl_macro = (
                     f'json.escape(if(fastly.ff.visits_this_service == 0, substr({raw_expr}, 0, {cf_limit}), ""))'
                 )
@@ -323,17 +324,17 @@ def generate_log_format(log_fields_config: dict) -> str:
             # Fallback if there's old data
             expr = f"req.http.x-fos-edge-data:{name}"
 
+        cf_limit = int(cf.get("byte_limit") or limits.get(name) or 2000)
         if value_type in ("numeric", "boolean"):
             # 014: see deliver-stage comment above — strict numeric
             # regex instead of ``!= ""`` so a custom-field header value
             # like ``"]"`` cannot break out of the JSON log line.
-            vcl_macro = f'if({expr} ~ "^-?[0-9]+(\\.[0-9]+)?$", {expr}, "null")'
+            vcl_macro = f'if({expr} ~ "^-?[0-9]+(\\.[0-9]+)?$", substr({expr}, 0, {cf_limit}), "null")'
             entry = f'"{name}":%{{{vcl_macro}}}V'
         else:
             # 016: substr-clamp the value before json.escape so an
             # oversized custom string field cannot push the line past
             # Fastly's 16 KB log-line limit.
-            cf_limit = int(cf.get("byte_limit") or limits.get(name) or 2000)
             vcl_macro = f"json.escape(substr({expr}, 0, {cf_limit}))"
             entry = f'"{name}":"%{{{vcl_macro}}}V"'
 

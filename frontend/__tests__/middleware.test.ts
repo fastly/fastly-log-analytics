@@ -91,4 +91,37 @@ describe('middleware /admin gate (security)', () => {
     const res: any = middleware(req)
     expect(res.status).toBe(200)
   })
+
+  it('blocks Next.js data requests targeting admin paths with a 403 status when from Caddy', () => {
+    const req1 = makeReq('http://localhost/_next/data/build-id/admin.json', { 'x-proxied-by-caddy': 'true' })
+    const res1: any = middleware(req1)
+    expect(res1.status).toBe(403)
+
+    const req2 = makeReq('http://localhost/_next/data/build-id/admin/settings.json', { 'x-proxied-by-caddy': 'true' })
+    const res2: any = middleware(req2)
+    expect(res2.status).toBe(403)
+  })
+
+  it('allows Next.js data requests targeting admin paths when local', () => {
+    const req = makeReq('http://localhost/_next/data/build-id/admin.json')
+    const res: any = middleware(req)
+    expect(res.status).toBe(200)
+  })
+
+  it('blocks Server Actions with a 403 status when from Caddy', () => {
+    const req = makeReq('http://localhost/', {
+      'x-proxied-by-caddy': 'true',
+      'next-action': 'some-action-id',
+    })
+    const res: any = middleware(req)
+    expect(res.status).toBe(403)
+  })
+
+  it('allows Server Actions when local', () => {
+    const req = makeReq('http://localhost/', {
+      'next-action': 'some-action-id',
+    })
+    const res: any = middleware(req)
+    expect(res.status).toBe(200)
+  })
 })

@@ -21,7 +21,6 @@ so the dashboard can render a progress UI later."""
 from __future__ import annotations
 
 import logging
-import os
 
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import StreamingResponse
@@ -306,18 +305,19 @@ def _resolve_token(service_id: str, override_token: str = "") -> str:
 @router.post("/{service_id}/scoring/enable")
 def scoring_enable(
     service_id: str = Path(..., description="Logging service ID to enable scoring on"),
-    token: str = Query(default=""),
+    body: dict | None = None,
 ):
     """Enable session scoring for the given logging service.
 
     Streams SSE status events while the orchestrator runs through:
     Compute service provisioning → Wasm deploy → VCL clone → backend +
     snippets + custom fields + format update → validate → activate."""
+    token = (body or {}).get("token", "")
     resolved_token = _resolve_token(service_id, token)
     if not resolved_token:
         raise HTTPException(
             status_code=400,
-            detail={"error": "Fastly API token required (pass ?token= or set in service config)"},
+            detail={"error": "Fastly API token required (pass in JSON body or set in service config)"},
         )
 
     from backend.provision.orchestrator import run_with_events
@@ -376,9 +376,10 @@ def scoring_enable(
 @router.post("/{service_id}/scoring/disable")
 def scoring_disable(
     service_id: str = Path(..., description="Logging service ID to disable scoring on"),
-    token: str = Query(default=""),
+    body: dict | None = None,
 ):
     """Disable session scoring. Reverse of enable_scoring."""
+    token = (body or {}).get("token", "")
     resolved_token = _resolve_token(service_id, token)
     if not resolved_token:
         raise HTTPException(
@@ -436,6 +437,8 @@ def scoring_analytics_composite(
     # Cast params to plain ints — FastAPI resolves Query() objects when
     # called via HTTP, but direct Python calls receive the Query wrapper.
     sh = int(since_hours)
+    from backend.routers.session_scoring_admin import scoring_evaluation_per_reason
+
     return {
         "top_flagged": scoring_top_flagged(service_id=service_id, since_hours=sh, limit=200),
         "score_distribution": scoring_score_distribution(service_id=service_id, since_hours=sh),
@@ -464,6 +467,12 @@ def scoring_config_composite(
     Granular endpoints unchanged so the frontend can keep using them
     individually during a rollback.
     """
+    from backend.routers.session_scoring_admin import (
+        scoring_enforce_status_code_get,
+        scoring_exclude_regex_get,
+        scoring_threshold_get,
+    )
+
     return {
         "status": scoring_status(service_id),
         "threshold": scoring_threshold_get(service_id),
@@ -1167,8 +1176,6 @@ def scoring_threshold_preview(
 
 
 # ── Retrain pipeline ────────────────────────────────────────────────────────
-
-
 
 
 # ── Admin / training endpoints (carved out for file-size budget) ────────────

@@ -350,7 +350,7 @@ def test_deliver_stage_field_appears_in_log_format():
         '"edge_score":%{if('
         "fastly.ff.visits_this_service == 0 && "
         'req.http.x-edge-score ~ "^-?[0-9]+(\\.[0-9]+)?$"'
-        ', req.http.x-edge-score, "null")}V'
+        ', substr(req.http.x-edge-score, 0, 2000), "null")}V'
     ) in fmt
     # String field: json.escape wraps a single if() that gates on the
     # shield-vs-edge check and substr-clamps the value (016) so an

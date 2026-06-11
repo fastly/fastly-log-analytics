@@ -87,11 +87,11 @@ _ANALYST_BLOCKED_PREFIXES = (
 # bare segment like "/api/download" won't accidentally swallow a sibling such
 # as "/api/download-foo". Each entry is the FULL path the route is mounted at.
 _ANALYST_BLOCKED_SUBPATHS = (
-    "/api/download",         # H-2: raw object download
-    "/api/download-all",     # H-2: bulk raw object download
+    "/api/download",  # H-2: raw object download
+    "/api/download-all",  # H-2: bulk raw object download
     "/api/download-folder",  # H-2: folder-level raw object download
-    "/api/cron-schedule",    # H-3: exposes per-service cron cadence config
-    "/api/sync-status",      # N-3: leaks ngwaf_workspace_id + active cron task state
+    "/api/cron-schedule",  # H-3: exposes per-service cron cadence config
+    "/api/sync-status",  # N-3: leaks ngwaf_workspace_id + active cron task state
 )
 
 # Path-parameter-bearing endpoints to block for analysts. Each entry is a
@@ -103,7 +103,9 @@ _ANALYST_BLOCKED_SUBPATHS = (
 _ANALYST_BLOCKED_SUBPATH_REGEX: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/api/services/[^/]+/lake-info$"),  # H-3: Iceberg/object-store layout
     re.compile(r"^/api/services/[^/]+/logging-settings(/.*)?$"),  # H-3: per-service logging cfg
-    re.compile(r"^/api/services/[^/]+/log-fields$"),  # H-3: per-service field map (catalog at /api/log-fields/catalog stays open)
+    re.compile(
+        r"^/api/services/[^/]+/log-fields$"
+    ),  # H-3: per-service field map (catalog at /api/log-fields/catalog stays open)
     re.compile(r"^/api/services/[^/]+/custom-fields(/.*)?$"),  # H-6 + N-7: VCL schema list + export
 )
 
@@ -713,6 +715,8 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         session = mgr.validate_session(sid)
         if session is None:
             return JSONResponse(status_code=401, content={"error": "unauthenticated"})
+        if getattr(session, "tos_pending", False):
+            return JSONResponse(status_code=403, content={"error": "tos_pending"})
 
         # Fingerprint match.
         headers_lc = {k.lower(): v for k, v in request.headers.items()}

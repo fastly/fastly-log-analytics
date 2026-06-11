@@ -25,13 +25,20 @@ const PROXIED_BY_CADDY_HEADER = 'x-proxied-by-caddy'
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
-  const isAdminPath = ADMIN_PREFIXES.some(p => pathname === p || pathname.startsWith(`${p}/`))
+
+  const isServerAction = request.headers.has('next-action')
+  const isDataRequest = pathname.startsWith('/_next/data/') && ADMIN_PREFIXES.some(p => pathname.endsWith(`${p}.json`) || pathname.includes(`${p}/`))
+
+  const isAdminPath = ADMIN_PREFIXES.some(p => pathname === p || pathname.startsWith(`${p}/`)) || isServerAction || isDataRequest
   if (!isAdminPath) return NextResponse.next()
 
   // If the Caddy marker is present, this request came in through the
   // public path → remote visitor → block.
   const proxiedByCaddy = request.headers.get(PROXIED_BY_CADDY_HEADER)
   if (proxiedByCaddy === 'true') {
+    if (isServerAction || isDataRequest) {
+      return new NextResponse(null, { status: 403 })
+    }
     const url = request.nextUrl.clone()
     url.pathname = '/'
     return NextResponse.redirect(url, 307)
@@ -40,8 +47,19 @@ export function proxy(request: NextRequest) {
   return NextResponse.next()
 }
 
-// Limit proxy to admin paths only. Everything else passes through with
-// zero overhead.
+// Limit proxy to admin paths, Next.js data requests for admin paths,
+// and Server Actions. Everything else passes through with zero overhead.
 export const config = {
-  matcher: ['/admin/:path*', '/admin'],
+  matcher: [
+    '/admin/:path*',
+    '/admin',
+    '/_next/data/:path*/admin/:path*',
+    '/_next/data/:path*/admin.json',
+    {
+      source: '/:path*',
+      has: [
+        { type: 'header', key: 'next-action' }
+      ]
+    }
+  ],
 }

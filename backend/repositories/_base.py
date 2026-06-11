@@ -1246,6 +1246,9 @@ class QueryRunner:
         if et <= st:
             return None
 
+        if (et - st) > timedelta(days=366):
+            return None
+
         bundled_root = _hour_bundled_root(self.src)
         if not os.path.isdir(bundled_root):
             return None

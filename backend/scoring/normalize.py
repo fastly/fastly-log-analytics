@@ -133,7 +133,7 @@ def normalize(url: str) -> Route:
         /api/v2/orders/00000abc-...        → Route('/api/v2/orders/*',  'api')
         /search?q=red+shoes&page=2         → Route('/search',           'browse')
     """
-    path = posixpath.normpath(_strip_query(url))
+    path = posixpath.normpath(unquote(_strip_query(url)))
     # Treat the root specially — there's no segment to inspect, and the
     # category is unambiguously 'home'.
     if path in ("", "/"):
@@ -142,7 +142,7 @@ def normalize(url: str) -> Route:
     # Split, normalize each segment, rejoin. Empty strings between
     # consecutive '/' or at the leading position drop out cleanly via the
     # filter; we re-prepend the leading '/' below.
-    raw_segments = [unquote(s) for s in path.split("/") if s != ""]
+    raw_segments = [s for s in path.split("/") if s != ""]
     if not raw_segments:
         return Route(path="/", category="home")
 

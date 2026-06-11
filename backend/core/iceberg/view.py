@@ -1081,8 +1081,8 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
 
         con.execute(create_stmt)
 
+        view_sql_created = create_stmt
         if not is_read_only:
-            view_sql_created = create_stmt
             # Clear the schema cache only when the column set actually
             # changed. Previously this was unconditional, but the post-ingest
             # view refresh runs on a writer connection every cron tick where

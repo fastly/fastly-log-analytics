@@ -1933,13 +1933,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        get?: never;
+        put?: never;
         /**
          * Provision Check Fos
          * @description Validate FOS credentials by attempting to list objects.
          */
-        get: operations["provision_check_fos_api_provision_check_fos_get"];
-        put?: never;
-        post?: never;
+        post: operations["provision_check_fos_api_provision_check_fos_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1986,13 +1986,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        get?: never;
+        put?: never;
         /**
          * Provision Lake Info
          * @description Return Iceberg table range and calendar for a given bucket/credentials without registering it.
          */
-        get: operations["provision_lake_info_api_provision_lake_info_get"];
-        put?: never;
-        post?: never;
+        post: operations["provision_lake_info_api_provision_lake_info_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3894,6 +3894,17 @@ export interface components {
             sources: components["schemas"]["BotSourceMeta"][];
             rdns: components["schemas"]["RdnsStats"];
         };
+        /** CheckFosRequest */
+        CheckFosRequest: {
+            /** Bucket */
+            bucket: string;
+            /** Region */
+            region: string;
+            /** Access Key */
+            access_key: string;
+            /** Secret Key */
+            secret_key: string;
+        };
         /** ClearSqliteResponse */
         ClearSqliteResponse: {
             /**
@@ -4537,6 +4548,26 @@ export interface components {
             query_start_time?: string | null;
             /** Query End Time */
             query_end_time?: string | null;
+        };
+        /** LakeInfoRequest */
+        LakeInfoRequest: {
+            /** Bucket */
+            bucket: string;
+            /** Region */
+            region: string;
+            /** Access Key */
+            access_key: string;
+            /** Secret Key */
+            secret_key: string;
+            /**
+             * Prefix
+             * @default
+             */
+            prefix: string;
+            /** Endpoint */
+            endpoint?: string | null;
+            /** Iceberg Metadata Location */
+            iceberg_metadata_location?: string | null;
         };
         /** LogAccountingBucket */
         LogAccountingBucket: {
@@ -10768,19 +10799,18 @@ export interface operations {
             };
         };
     };
-    provision_check_fos_api_provision_check_fos_get: {
+    provision_check_fos_api_provision_check_fos_post: {
         parameters: {
-            query: {
-                bucket: string;
-                region: string;
-                access_key: string;
-                secret_key: string;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CheckFosRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -10837,22 +10867,18 @@ export interface operations {
             };
         };
     };
-    provision_lake_info_api_provision_lake_info_get: {
+    provision_lake_info_api_provision_lake_info_post: {
         parameters: {
-            query: {
-                bucket: string;
-                region: string;
-                access_key: string;
-                secret_key: string;
-                prefix?: string;
-                endpoint?: string | null;
-                iceberg_metadata_location?: string | null;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LakeInfoRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -11123,9 +11149,7 @@ export interface operations {
     };
     scoring_enable_api_services__service_id__scoring_enable_post: {
         parameters: {
-            query?: {
-                token?: string;
-            };
+            query?: never;
             header?: never;
             path: {
                 /** @description Logging service ID to enable scoring on */
@@ -11133,7 +11157,13 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                } | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -11157,9 +11187,7 @@ export interface operations {
     };
     scoring_disable_api_services__service_id__scoring_disable_post: {
         parameters: {
-            query?: {
-                token?: string;
-            };
+            query?: never;
             header?: never;
             path: {
                 /** @description Logging service ID to disable scoring on */
@@ -11167,7 +11195,13 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                } | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

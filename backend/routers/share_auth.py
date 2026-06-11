@@ -103,7 +103,6 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         )
 
     # Success.
-    mgr.clear_login_failures(ip)
     session = mgr.create_session(invite=invite, ip_address=ip, user_agent=user_agent, headers=headers)
     share_db.log_share_audit_event(
         event_type="LOGIN_SUCCESS",
@@ -117,31 +116,16 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         tos and (invite.get("tos_accepted_at") is None or (invite.get("tos_version") or "") != tos["version"])
     )
 
-    # Cookie contract — see Section #4. secure=True is non-negotiable.
-    # In test mode (TestClient defaults to http://testserver), uvicorn won't
-    # send secure cookies; we tag it anyway because tests can read Set-Cookie.
-    if tos_pending:
-        response.set_cookie(
-            key=PENDING_COOKIE_NAME,
-            value=session.session_id,
-            httponly=True,
-            secure=True,
-            samesite="strict",
-            max_age=share_db.iso_z_now() and 24 * 60 * 60,
-            path="/",
-        )
-        response.delete_cookie(COOKIE_NAME, path="/")
-    else:
-        response.set_cookie(
-            key=COOKIE_NAME,
-            value=session.session_id,
-            httponly=True,
-            secure=True,
-            samesite="strict",
-            max_age=share_db.iso_z_now() and 24 * 60 * 60,
-            path="/",
-        )
-        response.delete_cookie(PENDING_COOKIE_NAME, path="/")
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=session.session_id,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=share_db.iso_z_now() and 24 * 60 * 60,
+        path="/",
+    )
+    response.delete_cookie(PENDING_COOKIE_NAME, path="/")
 
     return ShareLoginResponse(
         ok=True,

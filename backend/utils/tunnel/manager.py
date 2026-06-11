@@ -263,6 +263,11 @@ class TunnelManager:
             fresh_service_ids = invite.get("service_ids")
             if fresh_service_ids is not None:
                 session.service_ids = list(fresh_service_ids)
+
+            tos = share_db.get_latest_tos()
+            session.tos_pending = bool(
+                tos and (invite.get("tos_accepted_at") is None or (invite.get("tos_version") or "") != tos["version"])
+            )
             return session
 
     def boot_session(self, session_id: str, *, reason: str = "admin boot") -> bool:

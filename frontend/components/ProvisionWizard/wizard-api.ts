@@ -127,8 +127,8 @@ export async function runCheckFos(args: CheckFosArgs) {
   setFosStatus("checking");
   setFosError("");
   try {
-    const { data } = await client.GET("/api/provision/check-fos", {
-      params: { query: { bucket, region, access_key, secret_key } as any },
+    const { data } = await client.POST("/api/provision/check-fos", {
+      body: { bucket, region, access_key, secret_key } as any,
     });
     if ((data as any)?.ok) {
       setFosStatus("success");
@@ -196,18 +196,16 @@ export async function runAnalyzeLake(args: AnalyzeLakeArgs) {
   } = args;
   setIsAnalyzing(true);
   try {
-    const { data } = await client.GET("/api/provision/lake-info", {
-      params: {
-        query: {
-          bucket: config.fos_bucket_name,
-          region: config.fos_region,
-          access_key: config.fos_access_key,
-          secret_key: config.fos_secret_key,
-          prefix: config.fos_prefix,
-          endpoint: config.fos_endpoint || undefined,
-          iceberg_metadata_location: icebergMetadataLocation || undefined,
-        },
-      },
+    const { data } = await client.POST("/api/provision/lake-info", {
+      body: {
+        bucket: config.fos_bucket_name,
+        region: config.fos_region,
+        access_key: config.fos_access_key,
+        secret_key: config.fos_secret_key,
+        prefix: config.fos_prefix,
+        endpoint: config.fos_endpoint || undefined,
+        iceberg_metadata_location: icebergMetadataLocation || undefined,
+      } as any,
     });
     if ((data as any)?.ok) {
       setLakeInfo(data as any);

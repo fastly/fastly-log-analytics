@@ -11,6 +11,7 @@ import urllib.request
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from backend.utils.router_utils import SSE_HEADERS as _SSE_HEADERS
 from backend.utils.router_utils import sse_flush_preamble as _sse_flush
@@ -132,14 +133,20 @@ def provision_check_domain(prefix: str = Query(...)):
     return result
 
 
-@router.get("/check-fos")
-def provision_check_fos(
-    bucket: str = Query(...),
-    region: str = Query(...),
-    access_key: str = Query(...),
-    secret_key: str = Query(...),
-):
+class CheckFosRequest(BaseModel):
+    bucket: str
+    region: str
+    access_key: str
+    secret_key: str
+
+
+@router.post("/check-fos")
+def provision_check_fos(req: CheckFosRequest):
     """Validate FOS credentials by attempting to list objects."""
+    bucket = req.bucket
+    region = req.region
+    access_key = req.access_key
+    secret_key = req.secret_key
     import botocore.exceptions
 
     from backend.core.duckdb import _get_fos_client
@@ -375,17 +382,26 @@ def provision_teardown(req: Request, body: dict | None = None):
     return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
-@router.get("/lake-info")
-def provision_lake_info(
-    bucket: str = Query(...),
-    region: str = Query(...),
-    access_key: str = Query(...),
-    secret_key: str = Query(...),
-    prefix: str = Query(default=""),
-    endpoint: str | None = Query(default=None),
-    iceberg_metadata_location: str | None = Query(default=None),
-):
+class LakeInfoRequest(BaseModel):
+    bucket: str
+    region: str
+    access_key: str
+    secret_key: str
+    prefix: str = ""
+    endpoint: str | None = None
+    iceberg_metadata_location: str | None = None
+
+
+@router.post("/lake-info")
+def provision_lake_info(req: LakeInfoRequest):
     """Return Iceberg table range and calendar for a given bucket/credentials without registering it."""
+    bucket = req.bucket
+    region = req.region
+    access_key = req.access_key
+    secret_key = req.secret_key
+    prefix = req.prefix
+    endpoint = req.endpoint
+    iceberg_metadata_location = req.iceberg_metadata_location
     import hashlib
 
     from backend.models.lake import fetch_lake_info

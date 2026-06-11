@@ -17,6 +17,9 @@ LOGIN_FAILURE_THRESHOLD = 5
 LOGIN_LOCKOUT_S = 5 * 60
 
 
+MAX_TRACKED_IPS = 10000
+
+
 class _LoginRateLimiter:
     """Thread-safe sliding-window failure tracker per client IP."""
 
@@ -76,9 +79,15 @@ class _LoginRateLimiter:
             window_start = now - LOGIN_FAILURE_WINDOW_S
             history = [t for t in self._failures.get(ip, []) if t >= window_start]
             history.append(now)
+            self._failures.pop(ip, None)
             self._failures[ip] = history
+            if len(self._failures) > MAX_TRACKED_IPS:
+                self._failures.pop(next(iter(self._failures)))
+
             if len(history) >= LOGIN_FAILURE_THRESHOLD and ip not in self._lockouts:
                 self._lockouts[ip] = now + LOGIN_LOCKOUT_S
+                if len(self._lockouts) > MAX_TRACKED_IPS:
+                    self._lockouts.pop(next(iter(self._lockouts)))
                 return True
             return False
 

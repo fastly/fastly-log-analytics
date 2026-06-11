@@ -158,18 +158,14 @@ def test_normalize_canonicalizes_percent_encoding_and_dot_segments():
 
 
 def test_normalize_encoded_dot_segments_do_not_traverse():
-    """Regression for audit finding 017: an early unconditional unquote()
-    let a caller smuggle ``..`` via ``%2e%2e`` and escape the route. With
-    unquote applied per-segment AFTER normpath, ``%2e%2e`` survives as a
-    literal segment name and the route stays anchored to its real prefix."""
+    """Unquote before normpath to evaluate percent-encoded traversals
+    like ``%2e%2e`` and prevent category bypasses."""
     r = normalize("/admin/%2e%2e/items/foo")
-    # path stays under /admin (no traversal); the original encoded segment
-    # is decoded in place, not collapsed away
-    assert r.path.startswith("/admin/")
-    assert r.category == "admin"
+    assert r.path == "/items/foo"
+    assert r.category == "product"
     r = normalize("/admin/%2e%2e/%2e%2e/etc/passwd")
-    assert r.path.startswith("/admin/")
-    assert r.category == "admin"
+    assert r.path == "/etc/passwd"
+    assert r.category == "other"
 
 
 def test_normalize_double_slash_path_is_not_authority():

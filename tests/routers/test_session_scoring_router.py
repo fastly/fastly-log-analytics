@@ -150,7 +150,7 @@ def test_enable_query_token_overrides_config_token(client, with_config):
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable?token=FROM_QUERY")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "FROM_QUERY"})
     assert r.status_code == 200
     assert captured_token["t"] == "FROM_QUERY"
 
@@ -185,7 +185,7 @@ def test_enable_streams_status_events_then_done(client, with_config):
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable?token=TOKEN")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "TOKEN"})
 
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
@@ -214,7 +214,7 @@ def test_enable_streams_error_event_on_orchestrator_failure(client, with_config)
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable?token=TOKEN")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "TOKEN"})
 
     assert r.status_code == 200  # streaming endpoint always 200; error is in the body
     events = [json.loads(line[len("data: ") :]) for line in r.text.splitlines() if line.startswith("data: ")]
@@ -242,7 +242,7 @@ def test_disable_streams_status_events_then_done(client, with_config):
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/disable?token=TOKEN")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/disable", json={"token": "TOKEN"})
 
     assert r.status_code == 200
     events = [json.loads(line[len("data: ") :]) for line in r.text.splitlines() if line.startswith("data: ")]

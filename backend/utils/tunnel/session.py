@@ -34,6 +34,7 @@ class AnalystSession:
     login_time: str
     last_active_time: str
     last_activity: str | None = None
+    tos_pending: bool = False
     service_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
