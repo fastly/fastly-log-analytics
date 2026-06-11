@@ -163,6 +163,49 @@ def _build_active_hour_session_sql(
     return sql, []
 
 
+def _build_rollup_filter_sql(rollup_filters: FiltersDict | None) -> str:
+    """Build a SQL WHERE clause fragment from the subset of filter pills
+    that the sessions rollup can serve (country, asn).
+
+    Values are inlined as SQL literals (with quote-escaping) rather than
+    parameterised because the surrounding rollup query uses inlined
+    file paths too — keeping the inline pattern uniform avoids a separate
+    params list threading through the UNION ALL.
+    """
+    if not rollup_filters:
+        return ""
+    parts: list[str] = []
+    for col, spec in rollup_filters.items():
+        if col not in ("country", "asn"):
+            # Caller's eligibility gate is supposed to enforce this;
+            # the check here is defense-in-depth.
+            return ""
+        values = spec.values if hasattr(spec, "values") else spec.get("values", [])
+        mode = spec.mode if hasattr(spec, "mode") else spec.get("mode", "include")
+        if not values:
+            continue
+        if col == "asn":
+            # asn is INTEGER in the rollup; cast user-supplied values.
+            literals = []
+            for v in values:
+                try:
+                    literals.append(str(int(v)))
+                except (TypeError, ValueError):
+                    continue
+            if not literals:
+                continue
+            in_list = ", ".join(literals)
+            op = "NOT IN" if mode == "exclude" else "IN"
+            parts.append(f'"asn" {op} ({in_list})')
+        else:  # country: VARCHAR
+            literals = ", ".join("'" + str(v).replace("'", "''") + "'" for v in values)
+            op = "NOT IN" if mode == "exclude" else "IN"
+            parts.append(f'"country" {op} ({literals})')
+    if not parts:
+        return ""
+    return " AND " + " AND ".join(parts)
+
+
 def _get_sessions_from_rollup(
     runner: QueryRunner,
     con: duckdb.DuckDBPyConnection,
@@ -183,6 +226,7 @@ def _get_sessions_from_rollup(
     has_edge: bool,
     has_edge_sid: bool,
     section_timings: list,
+    rollup_filters: FiltersDict | None = None,
 ) -> dict | None:
     """Rollup-served version of get_sessions for the unfiltered case.
 
@@ -268,12 +312,21 @@ def _get_sessions_from_rollup(
     # unique_urls is NULL on the rollup path — the rollup grain is
     # hourly and we don't pre-aggregate URL sets. Frontend renders
     # NULL as a dash.
+    # Push filter pills into the rollup CTE so we skip stitching rows
+    # the user filtered out. Country / asn are MIN-aggregated in the
+    # rollup row, so the filter semantics match raw-path for any IP
+    # whose country/asn is stable across the hour (the common case).
+    rollup_filter_sql = _build_rollup_filter_sql(rollup_filters)
+
     stitch_sql = f"""
         WITH src AS ({union_sql}),
+        filtered AS (
+            SELECT * FROM src WHERE 1=1 {rollup_filter_sql}
+        ),
         ordered AS (
             SELECT *,
                    LAG(last_ts) OVER (PARTITION BY ip, ja4 ORDER BY first_ts) AS prev_last_ts
-            FROM src
+            FROM filtered
         ),
         marks AS (
             SELECT *,
@@ -445,19 +498,23 @@ def get_sessions(
     has_edge = "edge" in actual_cols
     has_edge_sid = "edge_sid" in actual_cols
 
-    # Sessions-rollup fast path: when no filter pills are active and
-    # the window is > 1h, serve from per-hour sessions.parquet rollups
-    # (built by backend.core.rollups.build_session_bundles) instead of
-    # the multi-second raw window-function scan. Returns None if the
-    # rollup can't serve this query (writer behind, no bundled root,
-    # active-hour only, etc.); we fall back to the raw path below.
+    # Sessions-rollup fast path: serve from per-hour sessions.parquet
+    # rollups (built by backend.core.rollups.build_session_bundles)
+    # instead of the multi-second raw window-function scan.
     #
-    # The filter-pill restriction is the conservative first cut. The
-    # rollup schema does include country/asn (MIN-aggregated), so a
-    # follow-up could allow country/asn pills to push down — but exact
-    # filter semantics on aggregated rows need design work (MIN(country)
-    # over a multi-country IP doesn't match raw-path WHERE country=X).
-    if not filters and start_time and end_time:
+    # Eligibility:
+    #   - Window > 1 h (rollup grain is hourly; raw is fast at <= 1 h).
+    #   - All filter pills are rollup-compatible. The rollup schema has
+    #     ``country`` and ``asn`` as MIN-aggregated columns per
+    #     (ip, ja4, hour). For a given IP the MIN is deterministic and
+    #     matches the raw-path filter value in practice (an IP rarely
+    #     changes country mid-hour). Other filter columns (url, ua,
+    #     custom fields, status) aren't in the rollup → fall back to raw.
+    #
+    # Returns None if the rollup can't serve (writer behind, no bundled
+    # root, active-hour only, etc.); we fall back to the raw path below.
+    _ROLLUP_FILTERABLE = {"country", "asn"}
+    if start_time and end_time and all(k in _ROLLUP_FILTERABLE for k in filters):
         try:
             from backend.utils.date_utils import parse_iso_utc
 
@@ -487,6 +544,7 @@ def get_sessions(
                 has_edge=has_edge,
                 has_edge_sid=has_edge_sid,
                 section_timings=section_timings,
+                rollup_filters=filters,
             )
             _phase("sessions_rollup_attempt", _t)
             if rollup_result is not None:
