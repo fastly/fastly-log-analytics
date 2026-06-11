@@ -22,18 +22,28 @@ def get_top_bots(
 ) -> dict:
     """Return top N bots from UA matching and (if available) the NGWAF bot cache."""
     import logging
+    import time as _time
+
+    section_timings: list[dict] = []
+
+    def _phase(name: str, t0: float) -> None:
+        section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
 
     source_name = src["name"]
     table_name = _safe_table(source_name)
     runner = QueryRunner(con, src)
 
+    _t = _time.perf_counter()
     actual_cols = runner.get_schema_cols()
+    _phase("top_bots:get_schema_cols", _t)
     if not actual_cols:
         from backend.repositories._base import empty_schema_response
 
         return empty_schema_response(bots=[], ngwaf_bots=[])
 
+    _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
+    _phase("top_bots:build_where_clause", _t)
 
     arcjet_bots: list[dict] = []
     # ── Single filtered TEMP TABLE shared across arcjet UA + NGWAF JOIN ─────
@@ -52,13 +62,15 @@ def get_top_bots(
     # If the schema has neither (very minimal log_fields preset), skip
     # both passes — there's nothing to classify.
     if not cols_needed:
-        return {"bots": [], "ngwaf_bots": []}
+        return {"bots": [], "ngwaf_bots": [], "section_timings": section_timings}
 
     # Use QueryRunner.temp_table context manager so the DROP runs even
     # if an intermediate query raises (was a manual try/finally before).
+    _t = _time.perf_counter()
     with runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params) as temp_table:
+        _phase("top_bots:temp_table_create", _t)
         if temp_table is None:
-            return {"bots": [], "ngwaf_bots": []}
+            return {"bots": [], "ngwaf_bots": [], "section_timings": section_timings}
         if "ua" in actual_cols:
             try:
                 from backend.utils.bot_sources import build_matcher
@@ -71,9 +83,12 @@ def get_top_bots(
                 # distinct UAs by count (cheap GROUP BY + ORDER BY) then run
                 # build_matcher() on them in Python where the per-UA result
                 # is lru_cached and most lookups are sub-microsecond.
+                _t = _time.perf_counter()
                 q = SQL.TOP_UAS_BY_COUNT.format(temp_table=temp_table)
                 rows = runner.execute(q).fetchall()
+                _phase("top_bots:top_uas_query", _t)
 
+                _t = _time.perf_counter()
                 match_ua = build_matcher()
                 bot_counts: dict[str, dict] = {}
                 for ua_val, cnt in rows:
@@ -90,6 +105,7 @@ def get_top_bots(
                         bot_counts[bot_id]["request_count"] += cnt
 
                 arcjet_bots = sorted(bot_counts.values(), key=lambda x: x["request_count"], reverse=True)[:n]
+                _phase("top_bots:arcjet_match", _t)
             except Exception as e:
                 logging.getLogger(__name__).error("[security] arcjet top bots failed: %s", e)
 
@@ -130,13 +146,20 @@ def get_top_bots(
             try:
                 # Join against the temp table instead of re-scanning the
                 # source view — same filter window, no second manifest walk.
+                _t = _time.perf_counter()
                 q = SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table=temp_table, n=n)
                 res = runner.execute(q).fetchall()
                 ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
+                _phase("top_bots:ngwaf_join", _t)
             except Exception as e:
                 logging.getLogger(__name__).error("[security] NGWAF top bots failed: %s", e)
 
-    return {"bots": arcjet_bots, "ngwaf_bots": ngwaf_bots, **runner.telemetry()}
+    return {
+        "bots": arcjet_bots,
+        "ngwaf_bots": ngwaf_bots,
+        "section_timings": section_timings,
+        **runner.telemetry(),
+    }
 
 
 def get_security_aggregates(
