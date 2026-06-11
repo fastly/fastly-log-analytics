@@ -246,6 +246,13 @@ def get_aggregates(
     # any) so the `finally` cleanup at the bottom of the function can
     # DROP it regardless of which branch built it.
     temp_table: str | None = None
+    # Stash the originals so fallback paths (e.g. the runtime CSV
+    # explode for virtual fields when the rollup is missing rows) can
+    # query the base table directly even after live_temp creation has
+    # rewritten table_name/where_clause/params to point at the temp.
+    orig_table_name = _safe_table(source_name)
+    orig_where_clause = where_clause
+    orig_params = list(params) if params is not None else []
     if use_rollups:
         table_name = _safe_table(source_name)
         # Plan item 14 — live-hour TEMP TABLE on the rollup path.
@@ -259,13 +266,18 @@ def get_aggregates(
         # below reads from disk directly and is unaffected.
         #
         # NARROW projection: only the columns the temp consumers
-        # actually use. The unconditional base set covers everything
-        # except the time_series chart:
-        #   - waf_sig             → waf_sig_ind_explode
-        #   - edge_score_reason   → edge_score_reason_ind_explode
+        # actually use. The unconditional base set covers:
         #   - conn_requests       → conn_requests bucket
-        #   - country             → map_data fallback
         #   - timestamp           → time_series raw fallback
+        #
+        # Previously the set also included country (for the map_data
+        # fallback), waf_sig (for waf_sig_ind_explode), and
+        # edge_score_reason (for edge_score_reason_ind_explode). The
+        # use_rollups path no longer needs ANY of them: map_data is
+        # derived from all_top_res (per_field_limits country=500), and
+        # the virtual-field rollup serves waf_sig_ind /
+        # edge_score_reason_ind on the hot path. Misses fall back to
+        # base-table scans inside _exploded_top_n.
         #
         # The time_series chart usually serves from the per-hour rollup
         # (F1 — try_time_series_from_rollup), so the chart-metric
@@ -274,15 +286,9 @@ def get_aggregates(
         # for the SPECIFIC chart_metric being requested — that way the
         # rare rollup-returns-None fallback still runs against the
         # temp, but the typical (chart_metric=requests) case keeps the
-        # temp at 5 columns instead of 13. On prod 30d this drops
-        # live_temp_create from ~5 s to ~1.5 s. (Per perf audit
-        # post-F5 the temp was the dashboard 30d bottleneck after
-        # top_n_rollups.)
+        # temp at 2 columns instead of 13.
         narrow_col_set: list[str] = [
-            "waf_sig",
-            "edge_score_reason",
             "conn_requests",
-            "country",
             "timestamp",
         ]
         # chart_metric → columns the raw time_series fallback would
@@ -400,7 +406,6 @@ def get_aggregates(
                 for i, field in enumerate(valid_fields):
                     field_totals[field] = count_res[i + 1]
 
-        orig_table_name = _safe_table(source_name)
         total_rows_total, earliest_log_at, latest_log_at = _timed(
             "source_extent", lambda: get_source_extent(runner, src, orig_table_name)
         )
@@ -542,13 +547,19 @@ def get_aggregates(
             if backing_col not in actual_cols:
                 results[virtual_id] = {"top": [], "total": 0}
                 return
+            # Query the BASE table, not the temp: the temp's narrow
+            # projection no longer carries waf_sig / edge_score_reason
+            # (the virtual-field rollup serves them on the hot path).
+            # Direct base-table scan keeps this fallback functional
+            # when the rollup is missing rows — paid only on the rare
+            # cold-rollup path.
             q = SQL.VIRTUAL_FIELD_EXPLODED_TOP_N.format(
                 backing_col=backing_col,
-                table_name=table_name,
-                where_clause=where_clause,
+                table_name=orig_table_name,
+                where_clause=orig_where_clause,
                 requests_metric=CANONICAL_METRICS["requests"],
             )
-            res = runner.execute(q).fetchall()
+            res = runner.execute(q, orig_params).fetchall()
             if res:
                 results[virtual_id] = {
                     "top": [{"value": r[0], "count": r[1]} for r in res],

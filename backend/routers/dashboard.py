@@ -90,13 +90,29 @@ def dashboard_bundle(req: AggregatesRequest, ctx: RequestContext = Depends(build
     # serialization_alias="_section_timings"). The composite has no
     # response_model so the rename has to happen here. Same for the
     # top-level bundle timings the perf harness reads from the root.
+    #
+    # Lift `debug_queries` / `debug_calls` from each sub-response into
+    # top-level `_debug_queries` / `_debug_calls` so the frontend
+    # DebugPanel (which reads response.data._debug_queries) sees the
+    # queries from both endpoints aggregated. Without this, the panel
+    # shows 0 queries / 0.00ms even with DEBUG_RESPONSES on, because
+    # the telemetry sits one level deep under the bare field name.
+    all_debug_queries: list = []
+    all_debug_calls: list = []
     for sub in (aggregates, top_bots):
-        if isinstance(sub, dict) and "section_timings" in sub:
-            sub["_section_timings"] = sub.pop("section_timings")
+        if isinstance(sub, dict):
+            if "section_timings" in sub:
+                sub["_section_timings"] = sub.pop("section_timings")
+            all_debug_queries.extend(sub.pop("debug_queries", []) or [])
+            all_debug_queries.extend(sub.pop("_debug_queries", []) or [])
+            all_debug_calls.extend(sub.pop("debug_calls", []) or [])
+            all_debug_calls.extend(sub.pop("_debug_calls", []) or [])
     return {
         "aggregates": aggregates,
         "top_bots": top_bots,
         "_section_timings": section_timings,
+        "_debug_queries": all_debug_queries,
+        "_debug_calls": all_debug_calls,
     }
 
 
