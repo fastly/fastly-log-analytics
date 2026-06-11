@@ -1109,9 +1109,18 @@ class QueryRunner:
                     tmp_name = self.create_filtered_temp_table(fields, actual_cols, base_table, live_where)
                 if tmp_name:
                     try:
-                        live_res, _ = self.execute_top_n_batch(
-                            fields, tmp_name, actual_cols, schema_types, limit=_live_limit
-                        )
+                        # Filter to columns present in the temp's projection.
+                        # Virtual fields (waf_sig_ind, edge_score_reason_ind)
+                        # have rollup parquets but no live column — including
+                        # them here would build SQL referencing a missing
+                        # column and BinderException out the entire UNION
+                        # ALL, silently dropping the live-hour merge for
+                        # the real fields too.
+                        live_fields = [f for f in fields if f in actual_cols]
+                        if live_fields:
+                            live_res, _ = self.execute_top_n_batch(
+                                live_fields, tmp_name, actual_cols, schema_types, limit=_live_limit
+                            )
                     finally:
                         try:
                             self.execute(f"DROP TABLE IF EXISTS {tmp_name}")
