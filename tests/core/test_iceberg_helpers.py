@@ -833,7 +833,7 @@ def test_write_to_buffer_creates_buffer_dir_if_missing(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(target)),
         patch("backend.core.iceberg._align_to_schema", return_value=fake_table),
-        patch("backend.core.iceberg.pq.write_table") as mock_write,
+        patch("backend.core.iceberg.buffer.pq.write_table") as mock_write,
     ):
         out = write_to_buffer({"name": "svc"}, fake_table, "x.parquet")
 
@@ -857,7 +857,7 @@ def test_write_to_buffer_uses_zstd_compression_level_1():
     with (
         patch("backend.core.duckdb._cache_dir", return_value="/tmp/x"),
         patch("backend.core.iceberg._align_to_schema", return_value=fake_table),
-        patch("backend.core.iceberg.pq.write_table") as mock_write,
+        patch("backend.core.iceberg.buffer.pq.write_table") as mock_write,
         patch("os.makedirs"),
     ):
         write_to_buffer({"name": "svc"}, fake_table, "x.parquet")
