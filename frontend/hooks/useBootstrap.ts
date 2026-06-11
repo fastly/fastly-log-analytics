@@ -10,6 +10,25 @@ export function useBootstrap() {
     queryKey: ['bootstrap'],
     queryFn: async () => {
       const { data } = await client.GET("/api/bootstrap")
+      // Seed the views + log-fields catalog caches INSIDE the queryFn
+      // so subscribers that gate on `bootstrap === 'pending' → fire
+      // own fetch` find data already in their target cache by the
+      // time React Query unblocks them. Doing this in a useEffect
+      // outside the queryFn races: bootstrap status transitions
+      // pending→success and the dependent hook re-renders BEFORE
+      // useEffect runs, so its `enabled` flips true and it queries
+      // an empty cache. Seeding here closes that race.
+      if (data?.active_service_id) {
+        const sid = data.active_service_id
+        const seededViews = (data as any).views
+        if (Array.isArray(seededViews)) {
+          queryClient.setQueryData(['views', sid], seededViews)
+        }
+        const seededCatalog = (data as any).log_fields_catalog
+        if (seededCatalog) {
+          queryClient.setQueryData(['log-fields-catalog', sid], seededCatalog)
+        }
+      }
       return data
     },
     // Bootstrap returns the services list + role flags + analyst session
@@ -32,27 +51,11 @@ export function useBootstrap() {
     setServices((query.data.services ?? []).map(toService))
     setInitialized(true)
 
-    // Seed the views cache from the bootstrap response so ViewSelector
-    // and useUrlFilterSync skip their own /api/views/{id} round-trip on
-    // initial load. The existing ['views', activeServiceId] query keeps
-    // its semantics for service-switch — if the user switches to a
-    // service not in this seed, the granular query fires normally.
-    const seededActive = query.data.active_service_id
-    const seededViews = (query.data as any).views
-    if (seededActive && Array.isArray(seededViews)) {
-      queryClient.setQueryData(['views', seededActive], seededViews)
-    }
-
-    // Seed the log-fields catalog cache from the bootstrap response so
-    // useLogFieldsCatalog hits cache on first call instead of paying a
-    // ~35 KB / 200 ms /api/log-fields/catalog round-trip on every cold
-    // page load (perf audit Phase D). The dedicated endpoint stays for
-    // any caller that bypasses the bootstrap seed (e.g. logging-out
-    // analyst flows). Query key matches queryKeys.logFieldsCatalog().
-    const seededCatalog = (query.data as any).log_fields_catalog
-    if (seededActive && seededCatalog) {
-      queryClient.setQueryData(['log-fields-catalog', seededActive], seededCatalog)
-    }
+    // Note: views + log-fields-catalog cache seeding now happens
+    // inside the queryFn (synchronously after the fetch resolves) so
+    // dependent hooks gated on bootstrap status find data already in
+    // their target cache. Moving it here would re-introduce the race
+    // where dependent hooks re-render before useEffect runs.
   }, [query.data, setServices, setInitialized, queryClient])
 
   useEffect(() => {
