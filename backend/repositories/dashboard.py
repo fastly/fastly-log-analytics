@@ -471,9 +471,19 @@ def get_aggregates(
             # than 10 for fields with per_field_limits (e.g. country=500
             # for the choropleth); the panel UI only renders 10, so cap
             # the append here. Other fields stay at <=10 naturally.
+            #
+            # __other__ filter: the per-day bundle (rollups/day_bundled)
+            # truncates to top-DAY_BUNDLE_TOP_K per (field, day) and
+            # emits an aggregated ``__other__`` synthetic row carrying
+            # the tail count. Skip it for the displayed top-N panel
+            # (its `value` is the literal sentinel, not a real value to
+            # render) but DO count it in field_totals so the panel's
+            # "Total" stays correct.
             _PANEL_LIMIT = 10
             _panel_count: dict[str, int] = {}
             for f_name, f_val, f_count in all_top_res:
+                if f_val == "__other__":
+                    continue
                 if _panel_count.get(f_name, 0) >= _PANEL_LIMIT:
                     continue
                 entry = {"value": f_val, "count": f_count}

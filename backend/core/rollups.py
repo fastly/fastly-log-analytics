@@ -277,6 +277,14 @@ def _day_bundled_root(source: dict) -> str:
 # uniformly when needed.
 DAY_BUNDLE_FILENAME = "all_fields.parquet"
 
+# Per-(field, day) row cap inside the bundled-day parquet. The
+# dashboard top-N panel renders 10 values; 100 gives generous headroom
+# for the global top-10 to be visible in at least one day across a
+# 30-day window. Anything beyond rank 100 in a single day is
+# aggregated into a single synthetic ``__other__`` row so
+# field totals stay correct.
+DAY_BUNDLE_TOP_K = 100
+
 
 # Filename for the per-hour 1-minute time-series rollup. Kept as a constant
 # so the writer + reader can never drift on the name.
@@ -984,9 +992,35 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
             os.makedirs(bundle_dir, exist_ok=True)
             tmp_path = os.path.join(bundle_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
             paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in per_field_paths)
+            # Truncate to top-K per field at bundle-write time, plus an
+            # ``__other__`` synthetic row that aggregates everything
+            # beyond the cut. The dashboard top-N panel renders 10
+            # values; keeping top-100 per (field, day) gives generous
+            # headroom for the global top-10 across a 30-day window
+            # while cutting bundle row count by ~10x — most of the
+            # ``top_n_rollups:rolled_res`` cost on prod 30d.
+            #
+            # __other__ keeps ``field_totals[field]`` correct (the
+            # dashboard derives it via SUM across all rollup rows for
+            # the field; without __other__ the dashboard's "total"
+            # would undercount by ~90% for high-cardinality fields).
+            # The reader filters ``value = '__other__'`` from the
+            # displayed top-N rows but includes its count in the
+            # field totals — see execute_top_n_rollups.
             query = (
-                f"COPY (SELECT field, value, CAST(count AS BIGINT) AS count "
-                f"FROM read_parquet([{paths_sql}])) "
+                f"COPY ("
+                f"  WITH src AS (SELECT field, value, CAST(count AS BIGINT) AS count "
+                f"               FROM read_parquet([{paths_sql}])), "
+                f"       ranked AS (SELECT field, value, count, "
+                f"                  ROW_NUMBER() OVER (PARTITION BY field ORDER BY count DESC) AS rn "
+                f"                  FROM src) "
+                f"  SELECT field, value, count FROM ranked WHERE rn <= {DAY_BUNDLE_TOP_K} "
+                f"  UNION ALL "
+                f"  SELECT field, '__other__' AS value, SUM(count) AS count "
+                f"  FROM ranked WHERE rn > {DAY_BUNDLE_TOP_K} "
+                f"  GROUP BY field "
+                f"  HAVING SUM(count) > 0"
+                f") "
                 f"TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
             )
             try:
