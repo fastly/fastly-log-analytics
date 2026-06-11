@@ -3,14 +3,18 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useEffectiveServiceId } from '@/hooks/useIsDataReady'
 
 /** Returns the log fields catalog, optionally scoped to a service ID to include custom fields.
- * If no serviceId is provided, it defaults to the active service from the store.
+ * If no serviceId is provided, it defaults to the active service from the store —
+ * falling back to bootstrap.active_service_id when the persisted Zustand store
+ * hasn't been populated yet (cold load + SSR-hydrated bootstrap cache). Without
+ * that fallback the cache key would be ['log-fields-catalog'] (length-1) instead
+ * of ['log-fields-catalog', sid] (length-2), missing the SSR seed.
  */
 export function useLogFieldsCatalog(serviceId?: string) {
-  const { activeServiceId } = useServiceStore()
-  const sid = serviceId ?? activeServiceId ?? undefined
+  const effectiveSid = useEffectiveServiceId()
+  const sid = serviceId ?? effectiveSid ?? undefined
   const queryClient = useQueryClient()
 
   // Perf audit Phase D: useBootstrap seeds this query's cache with
