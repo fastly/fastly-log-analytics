@@ -7,7 +7,7 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { SystemHealthCard } from "@/components/SystemHealthCard"
 import { buttonVariants } from '@/components/ui/button'
 import { PageHeader } from '@/components/ui/page-header'
-import { UserPlus, ShieldCheck } from 'lucide-react'
+import { UserPlus, ShieldCheck, Activity } from 'lucide-react'
 
 import { ServicesTable } from './_sections/ServicesTable'
 import { GlobalSettings, PricingSettings } from './_sections/GlobalSettings'
@@ -106,6 +106,13 @@ export default function AdminPage() {
           className={buttonVariants({ variant: 'secondary', size: 'sm' })}
         >
           <ShieldCheck className="h-4 w-4 mr-1" /> Session Scoring
+        </Link>
+        <Link
+          href="/admin/queries"
+          prefetch={true}
+          className={buttonVariants({ variant: 'secondary', size: 'sm' })}
+        >
+          <Activity className="h-4 w-4 mr-1" /> Live Queries
         </Link>
       </PageHeader>
 
