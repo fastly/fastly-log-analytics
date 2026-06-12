@@ -163,7 +163,8 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Tests (vitest with coverage)
-        # Gate ratcheted as milestones land:
+        # Gate ratcheted as milestones land (convention: current actual − 2pp):
         #   end Milestone A: 40% (baseline 42.7%, -2pp buffer)
-        #   end Milestone E: 44% (current 46.55% — keeps the 2pp buffer)
-        run: npx vitest run --coverage --coverage.thresholds.lines=44
+        #   end Milestone E: 44% (current 46.55%)
+        #   post live-query-monitor (2026-06-11): 53% (current 55.19%)
+        run: npx vitest run --coverage --coverage.thresholds.lines=53

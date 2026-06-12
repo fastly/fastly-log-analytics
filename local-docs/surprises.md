@@ -124,3 +124,26 @@ The s3fs block was investigated in 2026-05-21 for replacement via a `CachedFosS3
 **Corrected mental model:** the plan's "today: 4 files > 2,500" wording was off-by-one. The success criterion "0 backend files > 2,500 lines at v2.0 cut" is met by the three carve-ups already in the plan. `session_scoring.py` may still warrant splitting if Phase 7 review finds clear concern boundaries inside it; tag for re-evaluation at Phase 7.1.
 
 **Resolves in:** Phase 7.1 review (decide whether to add `session_scoring.py` carve to Phase 7 scope). No plan change required yet.
+
+---
+
+### 2026-06-11 — Phase 5b.3a Terraform JSON migration is larger than planned
+
+**Surprised by:** the cleanup plan flags Phase 5b.3a as a "200 LOC delete" win that eliminates a custom-HCL escaping injection vector. Walking the code, the actual conversion of [`backend/utils/terraform_gen.py`](../backend/utils/terraform_gen.py) (324 lines) is closer to 3–4 hours, not the 1–2 hours implied. Reasons the scope estimate was off:
+
+- The file is mostly intricate HCL templating with multi-block resources (`fastly_service_vcl`, nested `domain`/`backend`/`vcl`/`dictionary`/`snippet` blocks), HCL function calls (`file("${path.module}/X")`), and HCL expressions (`{ for d in fastly_service_vcl.cdn_proxy.dictionary : d.name => d.dictionary_id }`). All of these can be expressed in `.tf.json` but each requires careful translation into JSON-with-HCL-interpolation strings.
+- HCL has comments; JSON doesn't. The current generator emits multi-line comment banners that document customer-facing intent — those need to move into the generated `instructions` README (already exists in the output map), not just disappear.
+- The companion test file [`tests/utils/test_terraform_gen.py`](../tests/utils/test_terraform_gen.py) (319 lines) gates on `terraform fmt -check` of HCL output. Every assertion needs rewriting to compare JSON structures instead, and the `tests/utils/terraform_tests/` fixture directory's `.tf` reference files become `.tf.json`.
+- Customer impact: the generator output drives a real `terraform apply` against Fastly + AWS. A single mis-translated block shape breaks customer infra deploys silently — the test suite is the only safety net and it needs to come along.
+- Realistic LOC delta: ~100 lines saved (dropping `_hcl_escape` + collapsing the f-string blocks), not the 200+ the plan claimed.
+
+**What it broke:** nothing — caught before attempting. Avoided shipping a half-finished migration that would have either (a) broken customer terraform applies on next provision or (b) left both code paths around indefinitely.
+
+**Corrected mental model:** Phase 5b.3a is a 3–4 hour focused session, not a side-quest in a larger cleanup batch. Its security value is real (deletes the regex-based escaping primitive entirely) but the risk profile demands its own session with full local + CI validation against the existing `tests/utils/test_terraform_gen.py` shape, then a careful re-deploy verification.
+
+**Re-open trigger:** any of —
+- A customer-reported terraform-apply failure that root-causes to a missing escape in `_hcl_escape`
+- A pre-v2.0 dedicated session with the explicit goal of running this end-to-end
+- A new HCL block needs adding (cheaper to add in JSON shape from the start than to add to the f-string templates and then migrate later)
+
+**Resolves in:** Phase 5b.3a — re-scope to a dedicated session.
