@@ -1621,8 +1621,16 @@ def recompute_wellknown_bots_rollup(
             return 0
 
         for hour in parsed:
-            tmp_dir = os.path.join(bots_root, f".tmp_{uuid.uuid4().hex[:12]}")
-            os.makedirs(tmp_dir, exist_ok=True)
+            # COPY ... TO '<path>' targets a SINGLE FILE when no
+            # PARTITION_BY clause is present (a directory target only
+            # works alongside PARTITION_BY — observed 2026-06-12: an
+            # earlier draft used a tmp directory and DuckDB raised
+            # "Cannot open file: Is a directory"). Write to a unique
+            # tmp file under the final hour-partition dir, then rename
+            # to the canonical compacted_ name under the iceberg lock.
+            hour_dir = os.path.join(bots_root, f"hour={hour}")
+            os.makedirs(hour_dir, exist_ok=True)
+            tmp_path = os.path.join(hour_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
             try:
                 con.execute(
                     f"COPY ("
@@ -1635,23 +1643,24 @@ def recompute_wellknown_bots_rollup(
                     f"  GROUP BY ua, ip "
                     f"  ORDER BY request_count DESC "
                     f"  LIMIT 50000"
-                    f") TO '{tmp_dir}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                    f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
                 )
             except duckdb.Error as e:
                 logger.warning("[rollups] %s: bot-rollup COPY failed for hour=%s: %s", service_id, hour, e)
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
                 continue
 
-            # DuckDB writes a single file to the tmp directory; promote
-            # it to the canonical hour-partition path via atomic
-            # rename. Use the per-service iceberg lock to serialize
-            # concurrent rebuilds (e.g. backfill + post-sync overlap).
+            # Atomic publish under the per-service iceberg lock.
+            # Serializes against concurrent rebuilds (backfill +
+            # post-sync overlap). Sweep any pre-existing parquets
+            # for the hour FIRST so a reader scanning the dir can't
+            # see a stale-version row alongside the freshly-written
+            # one (the version check on read would catch it, but
+            # eliminating the window is cheaper).
             with _get_service_lock(lock_key):
-                hour_dir = os.path.join(bots_root, f"hour={hour}")
-                os.makedirs(hour_dir, exist_ok=True)
-                # Sweep any pre-existing parquets for this hour so the
-                # reader's enumeration doesn't see a stale-version row
-                # mixed with the freshly-written one.
                 try:
                     for fname in os.listdir(hour_dir):
                         if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
@@ -1661,14 +1670,9 @@ def recompute_wellknown_bots_rollup(
                                 pass
                 except OSError:
                     pass
-                # Move every file the COPY produced (usually 1) into
-                # place under a stable compacted_ name.
+                final_path = os.path.join(hour_dir, f"compacted_{uuid.uuid4().hex[:12]}.parquet")
                 try:
-                    for fname in os.listdir(tmp_dir):
-                        if not fname.endswith(".parquet"):
-                            continue
-                        dst = os.path.join(hour_dir, f"compacted_{uuid.uuid4().hex[:12]}.parquet")
-                        os.replace(os.path.join(tmp_dir, fname), dst)
+                    os.replace(tmp_path, final_path)
                 except OSError as e:
                     logger.warning(
                         "[rollups] %s: bot-rollup publish failed for hour=%s: %s",
@@ -1676,7 +1680,11 @@ def recompute_wellknown_bots_rollup(
                         hour,
                         e,
                     )
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+                    continue
             rebuilt += 1
     finally:
         con.close()
