@@ -7536,12 +7536,12 @@
             "required": false,
             "schema": {
               "type": "integer",
-              "minimum": 1,
-              "description": "Compact partitions with strictly more files than this.",
+              "minimum": 0,
+              "description": "Compact partitions with strictly more files than this. Default 3 = normal cron behaviour. Pass 1 to dedupe the 2-3-file orphan pattern. Pass 0 to force-rewrite every partition through the dedup pipeline (one-shot historical cleanup of intra-file dups in single-parquet partitions).",
               "default": 3,
               "title": "Min Files"
             },
-            "description": "Compact partitions with strictly more files than this."
+            "description": "Compact partitions with strictly more files than this. Default 3 = normal cron behaviour. Pass 1 to dedupe the 2-3-file orphan pattern. Pass 0 to force-rewrite every partition through the dedup pipeline (one-shot historical cleanup of intra-file dups in single-parquet partitions)."
           },
           {
             "name": "dry_run",
