@@ -166,6 +166,14 @@ def get_con(service_id: str) -> sqlite3.Connection:
         from backend.utils.sqlite_profiler import InstrumentedConnection
 
         con = sqlite3.connect(path, timeout=30.0, factory=InstrumentedConnection)
+        # Stash the service_id on the connection so the Live Query Monitor's
+        # sqlite_profiler can surface it in the `service` column. The C-typed
+        # ``sqlite3.Connection`` base rejects arbitrary attribute assignment,
+        # but the ``InstrumentedConnection`` subclass allows it. Read back
+        # in ``_live_register`` via ``getattr(con, "_service_id", None)`` so
+        # any caller that bypasses ``get_con`` (test fixtures, etc.) gracefully
+        # falls back to no service tag rather than KeyError.
+        con._service_id = service_id  # type: ignore[attr-defined]
         # Register the raw connection IMMEDIATELY so any exception below
         # (e.g. a concurrent teardown deletes the file mid-PRAGMA) doesn't
         # leak an unclosed SQLite handle. Production sees this rarely; the
