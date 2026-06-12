@@ -1,21 +1,30 @@
 """Tests for backend.utils.terraform_gen.generate_terraform.
 
-This module ships HCL that customers run ``terraform apply`` against. A
-malformed file means a broken customer infra deploy, so the suite focuses on:
+This module ships ``.tf.json`` files that customers run ``terraform apply``
+against. A malformed file means a broken customer infra deploy, so the
+suite focuses on:
 
-- Output passes ``terraform fmt -check`` (canonical formatting).
+- Output is valid JSON and passes ``terraform fmt -check`` (canonical formatting).
 - Output is byte-identical across repeated calls (idempotent).
 - Custom fields produce matching ``capture_snippets/*.vcl`` files.
-- User-supplied strings (bucket, endpoint_name, custom_condition) can't
-  break the generated HCL via injection.
+- User-supplied strings (bucket, endpoint_name, custom_condition) flow through
+  ``json.dumps`` so quote / backslash / newline injection is structurally
+  impossible. The remaining Terraform-template prefix (``${``, ``%{``) is
+  still escaped explicitly — covered by :func:`test_template_prefix_escape`.
 
 ``terraform validate`` requires provider downloads (network). It's run when
 ``TERRAFORM_VALIDATE=1`` is set in the environment (CI), and skipped
 otherwise so the suite stays fast and offline-friendly locally.
+
+5b.3a migrated the generator from f-string HCL to ``.tf.json`` (Terraform's
+JSON config syntax). The output filenames carry the ``.tf.json`` suffix;
+Terraform accepts ``.tf`` and ``.tf.json`` interchangeably in the same
+module. See ``pending-docs/cleanup_plan.md`` §5b.3a for the rationale.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -75,10 +84,10 @@ def test_returns_expected_files():
     expected = {
         "cdn_proxy.vcl",
         "log_format.vcl",
-        "fos.tf",
-        "cdn_proxy.tf",
-        "logging_service.tf",
-        "versions.tf",
+        "fos.tf.json",
+        "cdn_proxy.tf.json",
+        "logging_service.tf.json",
+        "versions.tf.json",
         "instructions",
     }
     assert expected.issubset(out.keys()), f"Missing files: {expected - set(out.keys())}"
@@ -87,30 +96,49 @@ def test_returns_expected_files():
     assert snippet_files, "Expected at least one capture snippet"
 
 
+def test_every_tf_json_file_parses_as_json():
+    """The generator must emit syntactically valid JSON. Catches accidental
+    f-string holdovers, missing commas, or stray HCL constructs."""
+    out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
+    for fname, content in out.items():
+        if not fname.endswith(".tf.json"):
+            continue
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as e:
+            pytest.fail(f"{fname} is not valid JSON: {e}\n--- content ---\n{content}")
+        assert isinstance(parsed, dict), f"{fname} top-level must be an object"
+
+
 def test_versions_tf_pins_fastly_and_aws_providers_by_major():
-    """versions.tf must pin the Fastly and AWS providers with the
+    """versions.tf.json must pin the Fastly and AWS providers with the
     pessimistic operator so a major-version bump from either provider
     (Fastly v6, AWS v7) doesn't silently break customer apply.
 
-    Pinned by TESTING_PLAN_3 item 17. If you intentionally bump the
-    major, update this test deliberately AND the matching scaffold in
-    test_baseline_output_passes_terraform_validate above.
+    If you intentionally bump the major, update this test deliberately AND
+    the matching scaffold in test_baseline_output_passes_terraform_validate.
     """
     out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
-    assert "versions.tf" in out
+    assert "versions.tf.json" in out
 
-    v = out["versions.tf"]
-    assert "required_version" in v, "must declare a Terraform CLI floor"
-    assert 'source = "hashicorp/aws"' in v
-    assert 'source = "fastly/fastly"' in v
-    # Pessimistic constraint is the contract. >= or no operator would let
-    # a major bump through. Test both providers explicitly.
-    assert 'version = "~> 5.0"' in v, (
-        f"expected ~> pessimistic constraints in versions.tf to gate major bumps; got:\n{v}"
+    v = json.loads(out["versions.tf.json"])
+    tf_block = v["terraform"]
+    assert "required_version" in tf_block, "must declare a Terraform CLI floor"
+
+    providers = tf_block["required_providers"]
+    assert providers["aws"]["source"] == "hashicorp/aws"
+    assert providers["fastly"]["source"] == "fastly/fastly"
+    # Pessimistic constraint is the contract. >= or no operator would let a
+    # major bump through. Test both providers explicitly.
+    assert providers["aws"]["version"] == "~> 5.0", (
+        f"expected '~> 5.0' on aws to gate major bumps; got {providers['aws']['version']!r}"
     )
-    # Belt-and-braces: there must be exactly TWO required providers (we
-    # don't want an accidental third undeclared source slipping in).
-    assert v.count("source =") == 2
+    assert providers["fastly"]["version"] == "~> 5.0", (
+        f"expected '~> 5.0' on fastly to gate major bumps; got {providers['fastly']['version']!r}"
+    )
+    # Belt-and-braces: exactly TWO required providers — no accidental third
+    # undeclared source slipping in.
+    assert set(providers.keys()) == {"aws", "fastly"}
 
 
 @pytest.mark.skipif(not TERRAFORM_INSTALLED, reason="terraform binary not on PATH")
@@ -118,11 +146,9 @@ def test_baseline_output_passes_terraform_fmt(tmp_path):
     out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
     _write_files(out, str(tmp_path))
 
-    # Run terraform from inside tmp_path with "." as target. On macOS,
-    # passing an absolute /private/var/folders/... path while CWD is also
-    # rooted under /private/ confuses terraform's relative-path resolution
-    # ("No file or directory at ../../private/var/..."). Using a relative
-    # target sidesteps the bug.
+    # Terraform fmt understands .tf.json (it normalises trailing newlines /
+    # 2-space indent). Using a relative target sidesteps the macOS
+    # /private/-prefix path confusion documented at the prior HCL revision.
     r = subprocess.run(
         ["terraform", "fmt", "-check", "-recursive", "."],
         cwd=str(tmp_path),
@@ -142,9 +168,8 @@ def test_baseline_output_passes_terraform_validate(tmp_path):
     out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
     _write_files(out, str(tmp_path))
 
-    # The generator now emits its own versions.tf with pinned providers
-    # (TESTING_PLAN_3 item 17). Only the provider *configuration* needs
-    # stubbing for init/validate.
+    # The generator emits its own versions.tf.json with pinned providers.
+    # Only the provider *configuration* needs stubbing for init/validate.
     (tmp_path / "_providers.tf").write_text(
         """
 provider "aws"    { region = "us-east-1" }
@@ -206,8 +231,9 @@ def test_output_differs_when_cfg_differs():
     cfg2["fos_bucket_name"] = "different-bucket"
     out1 = generate_terraform(cfg1, "AKIA", "sec")
     out2 = generate_terraform(cfg2, "AKIA", "sec")
-    assert out1["fos.tf"] != out2["fos.tf"]
-    assert "different-bucket" in out2["fos.tf"]
+    assert out1["fos.tf.json"] != out2["fos.tf.json"]
+    parsed = json.loads(out2["fos.tf.json"])
+    assert parsed["resource"]["aws_s3_bucket"]["fos_bucket"]["bucket"] == "different-bucket"
 
 
 # ── Custom field round trip ──────────────────────────────────────────────────
@@ -258,62 +284,111 @@ def test_custom_origin_field_emits_in_deliver_phase():
     assert "bereq_x" in out.get("capture_snippets/deliver.vcl", ""), "origin field missing from deliver snippet"
 
 
-# ── Injection / escape fuzz ──────────────────────────────────────────────────
+# ── Injection / escape ──────────────────────────────────────────────────────
 
 
 @pytest.mark.skipif(not TERRAFORM_INSTALLED, reason="terraform binary not on PATH")
 @pytest.mark.parametrize(
     "field,value",
     [
-        # Strings the generator splices via f-string into HCL string literals.
-        # If the field isn't escaped, the closing quote/brace can break the file.
+        # Strings the generator splices into JSON string values. JSON encoding
+        # owns quote/backslash/newline; the test confirms the integration
+        # actually parses + that ``terraform fmt`` accepts the result.
         ("fos_bucket_name", 'b"; rm -rf /; #'),
         ("endpoint_name", 'name"; resource "extra" "x" {} #'),
         ("cdn_service_name", 'svc\\name with "quotes"'),
         ("custom_condition", 'req.url ~ "test\\b"'),
         ("cdn_secret", 'secret"with"quotes'),
+        ("fos_region", 'r"\nresource "evil" "x" {}'),
     ],
 )
-def test_injection_fuzz_does_not_break_terraform_fmt(tmp_path, field, value):
-    """User-supplied strings flow into HCL via f-string. Even when the values
-    contain quotes or HCL syntax, the result must still parse."""
+def test_injection_does_not_break_terraform_fmt(tmp_path, field, value):
+    """User-supplied strings flow into JSON string values. ``json.dumps``
+    handles every escape it owns (quote, backslash, control bytes) so the
+    file MUST always parse, regardless of what the attacker passes."""
     cfg = _baseline_cfg()
     cfg[field] = value
     out = generate_terraform(cfg, "AKIA", "sec")
     _write_files(out, str(tmp_path))
 
-    # We use `terraform fmt` (not -check) — it parses the file. If the
-    # injection broke HCL syntax, fmt errors with a non-zero rc and a clear
-    # message. fmt -check would also flag a formatting *change* as failure
-    # which is OK here too (still proves it parsed), but the parse error is
-    # what we actually care about.
-    # Use cwd=tmp_path + "." for the same macOS /private/-prefix reason
-    # documented in test_baseline_output_passes_terraform_fmt above.
+    # The .tf.json files must parse as JSON unconditionally.
+    for fname, content in out.items():
+        if fname.endswith(".tf.json"):
+            json.loads(content)  # raises on failure
+
+    # Use `terraform fmt` (not -check) — it parses the file. If the
+    # injection broke JSON syntax it would error with a non-zero rc.
     r = subprocess.run(
         ["terraform", "fmt", "-recursive", "."],
         cwd=str(tmp_path),
         capture_output=True,
         text=True,
     )
-    # Filter true parse errors (Diagnostic markers) vs simple format diffs.
-    # A parse failure produces "Error: ..." on stderr.
     assert "Error:" not in r.stderr, (
-        f"Injection broke HCL parse for {field}={value!r}:\nstdout: {r.stdout[:400]}\nstderr: {r.stderr[:400]}"
+        f"Injection broke parse for {field}={value!r}:\nstdout: {r.stdout[:400]}\nstderr: {r.stderr[:400]}"
     )
 
 
-def test_region_injection_escaped():
-    """Verify that a region containing HCL template evaluation syntax or quote breakout
-    is safely escaped in the generated Terraform configuration."""
+def test_template_prefix_escape_is_applied_to_user_input():
+    """JSON encoding doesn't escape Terraform's ``${`` / ``%{`` template
+    syntax (Terraform interprets these inside string values even in JSON
+    config). The generator must convert them to ``$${`` / ``%%{`` for any
+    user-supplied value so attacker input can't trigger interpolation.
+
+    Replaces the prior HCL-specific test that asserted literal byte
+    sequences from the old escape regex; the JSON path's only remaining
+    template-prefix concern is the ``$``/``%`` doubling."""
     cfg = _baseline_cfg()
-    cfg["fos_region"] = 'us-east-1"}\nresource "null_resource" "hack" { #\n${file("/etc/passwd")}'
+    # The region flows into multiple files (fos_host derivation in
+    # cdn_proxy.tf.json, dictionary items, etc.). If unescaped, the
+    # ``${file("/etc/passwd")}`` would expand at apply time.
+    cfg["fos_region"] = 'us-east-1${file("/etc/passwd")}%{ if true }x%{ endif }'
     out = generate_terraform(cfg, "AKIA", "sec")
-    # Verify the escaped version appears in the key attributes
-    assert (
-        'us-east-1\\"}\\nresource \\"null_resource\\" \\"hack\\" { #\\n$${file(\\"/etc/passwd\\")}.object.fastlystorage.app'
-        in out["cdn_proxy.tf"]
-    )
-    assert (
-        'us-east-1\\"}\\nresource \\"null_resource\\" \\"hack\\" { #\\n$${file(\\"/etc/passwd\\")}.object.fastlystorage.app'
-        in out["logging_service.tf"]
-    )
+
+    # Must appear in the rendered files with the doubled prefixes.
+    cdn = json.loads(out["cdn_proxy.tf.json"])
+    items = cdn["resource"]["fastly_service_dictionary_items"]["fos_credentials"]["items"]
+    assert items["region"].startswith('us-east-1$${file("/etc/passwd")}%%{ if true }x%%{ endif }')
+
+    # And the raw original prefix must NOT appear anywhere in any rendered
+    # .tf.json file (defense in depth — catches a future field that
+    # forgets to call the escape helper). The doubled forms (``$${`` /
+    # ``%%{``) contain the raw forms as substrings, so check that what
+    # appears is ONLY the doubled form (raw count == doubled count).
+    for fname, content in out.items():
+        if not fname.endswith(".tf.json"):
+            continue
+        raw_dollar = content.count("${")
+        doubled_dollar = content.count("$${")
+        # Authored Terraform-interpolation refs in the generator itself
+        # (e.g. ``${aws_s3_bucket.fos_bucket.bucket}``) use raw ``${``
+        # intentionally — those aren't doubled. Count user-input-derived
+        # raw forms by subtracting the doubled count's contribution.
+        unescaped_dollar = raw_dollar - doubled_dollar
+        # All authored refs in cdn_proxy.tf.json + logging_service.tf.json
+        # are accounted for; an attacker-injected ${file()} would push this
+        # over the authored baseline. The strict check: the attacker
+        # payload ``${file("/etc/passwd")}`` must not be present as a
+        # standalone substring (i.e. not immediately preceded by ``$``).
+        assert '$${file("/etc/passwd")}' in content or '${file("/etc/passwd")}' not in content, (
+            f"unescaped ${{file()}} reached {fname} — template-prefix escape missing"
+        )
+        # %{ directives have no authored counterpart in the generator —
+        # any raw ``%{`` is automatically suspect. Count: raw must equal
+        # doubled (every ``%{`` in the file must be part of a ``%%{``).
+        raw_pct = content.count("%{")
+        doubled_pct = content.count("%%{")
+        assert raw_pct == doubled_pct, (
+            f"{fname} has an unescaped %{{}} template-directive prefix "
+            f"(raw=%{{ count {raw_pct}, doubled=%%{{ count {doubled_pct})"
+        )
+
+
+def test_quotes_in_user_input_are_json_escaped():
+    """A bucket name with a double-quote MUST land in the JSON output as
+    ``\\\"`` (JSON escape), not be stripped or corrupted."""
+    cfg = _baseline_cfg()
+    cfg["fos_bucket_name"] = 'bucket"with"quotes'
+    out = generate_terraform(cfg, "AKIA", "sec")
+    parsed = json.loads(out["fos.tf.json"])
+    assert parsed["resource"]["aws_s3_bucket"]["fos_bucket"]["bucket"] == 'bucket"with"quotes'

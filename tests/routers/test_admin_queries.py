@@ -201,18 +201,25 @@ class TestCancelEndpoint:
         query_registry.deregister(qid)
 
     def test_cancel_rate_limit_kicks_in_after_10_per_second(self, client):
-        # Reset rate-limit history for this test's admin id.
+        # Reset rate-limit history before AND after — the bucket is
+        # process-global keyed on admin id, and the test client uses the
+        # default testserver client.host, so without the post-test reset
+        # the next test in the same xdist worker would inherit a primed
+        # bucket and see a spurious 429.
         from backend.routers import admin_queries as mod
 
         mod._cancel_history.clear()
-        # Fire 11 requests in rapid succession to one qid (which won't exist
-        # — irrelevant, the rate-limiter runs before the registry).
-        last_status = None
-        for _ in range(11):
-            resp = client.post("/api/admin/queries/9999999/cancel")
-            last_status = resp.status_code
-        # The 11th should trip the limiter (10 per second per admin id).
-        assert last_status == 429
+        try:
+            # Fire 11 requests in rapid succession to one qid (which won't
+            # exist — irrelevant, the rate-limiter runs before the registry).
+            last_status = None
+            for _ in range(11):
+                resp = client.post("/api/admin/queries/9999999/cancel")
+                last_status = resp.status_code
+            # The 11th should trip the limiter (10 per second per admin id).
+            assert last_status == 429
+        finally:
+            mod._cancel_history.clear()
 
 
 # ── Admin-id derivation ────────────────────────────────────────────────────
