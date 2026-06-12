@@ -20,7 +20,7 @@
 
 import * as React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ArrowLeft, Keyboard, Search } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Group, Keyboard, Search } from 'lucide-react'
 import Link from 'next/link'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -71,13 +71,18 @@ export default function QueryMonitorPage() {
   const [actionError, setActionError] = React.useState<string>('')
   const [viewMode, setViewMode] = React.useState<ViewMode>('all')
   const [slowThresholdMs, setSlowThresholdMs] = React.useState(DEFAULT_SLOW_THRESHOLD_MS)
+  // Cron-grouping collapses rows from the same cron run into a single
+  // representative row with a ×N badge — default on because a single tick
+  // can spawn dozens of identical queries that otherwise drown out the
+  // user's own activity.
+  const [groupCrons, setGroupCrons] = React.useState(true)
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
   const [detailRow, setDetailRow] = React.useState<DetailRow | null>(null)
   const searchInputRef = React.useRef<HTMLInputElement>(null)
 
   useQueryMonitorUrlSync(
-    { search, kindFilter, dbFilter, viewMode, slowThresholdMs },
-    { setSearch, setKindFilter, setDbFilter, setViewMode, setSlowThresholdMs },
+    { search, kindFilter, dbFilter, viewMode, slowThresholdMs, groupCrons },
+    { setSearch, setKindFilter, setDbFilter, setViewMode, setSlowThresholdMs, setGroupCrons },
     DEFAULT_SLOW_THRESHOLD_MS,
   )
 
@@ -135,6 +140,7 @@ export default function QueryMonitorPage() {
     kindFilter,
     dbFilter,
     slowThresholdMs,
+    groupCrons,
   })
 
   const requestKill = React.useCallback(
@@ -275,6 +281,20 @@ export default function QueryMonitorPage() {
                 <div className="flex items-center gap-2">
                   <DbFilterChips value={dbFilter} onChange={setDbFilter} />
                   <FilterChips value={kindFilter} onChange={setKindFilter} />
+                  <Button
+                    variant={groupCrons ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => setGroupCrons((v) => !v)}
+                    title={
+                      groupCrons
+                        ? 'Cron rows from the same run are collapsed. Click to expand.'
+                        : 'Cron rows are shown individually. Click to group by run.'
+                    }
+                  >
+                    <Group className="h-3 w-3 mr-1" />
+                    Group crons
+                  </Button>
                   <div className="relative">
                     <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                     <Input

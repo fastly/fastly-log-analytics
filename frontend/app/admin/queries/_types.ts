@@ -78,5 +78,16 @@ export type DbFilter = 'all' | 'DuckDB' | 'SQLite'
 
 /** Active row plus an optional `_completed` field for rows promoted from
  *  the just-finished window. The table component renders these as faded
- *  rows with an outcome badge instead of a Kill button. */
-export type ActiveOrPromotedRow = ActiveRow & { _completed?: CompletedRow }
+ *  rows with an outcome badge instead of a Kill button.
+ *
+ *  ``_groupedCount`` is set when cron-grouping is on and this row stands in
+ *  for N siblings sharing the same ``cron_run_id``. The Source cell shows
+ *  a ``×N`` badge so the user knows extras are hidden; toggling off groups
+ *  shows the full set. */
+export type ActiveOrPromotedRow = ActiveRow & {
+  _completed?: CompletedRow
+  _groupedCount?: number
+}
+
+/** CompletedRow extended with the same cron-grouping marker. */
+export type GroupedCompletedRow = CompletedRow & { _groupedCount?: number }

@@ -18,7 +18,7 @@ import * as React from 'react'
 import { DataTable } from '@/components/DataTable'
 
 import { buildCompletedColumns } from './queryColumns'
-import type { CompletedRow } from '../_types'
+import type { GroupedCompletedRow } from '../_types'
 
 export function CompletedTable({
   rows,
@@ -26,8 +26,8 @@ export function CompletedTable({
   emptyMessage = 'No completed queries yet.',
   initialSorting,
 }: {
-  rows: CompletedRow[]
-  onRowClick: (row: CompletedRow) => void
+  rows: GroupedCompletedRow[]
+  onRowClick: (row: GroupedCompletedRow) => void
   emptyMessage?: string
   initialSorting?: { id: string; desc: boolean }[]
 }) {
@@ -38,7 +38,7 @@ export function CompletedTable({
     [showMemory, showService],
   )
   return (
-    <DataTable<CompletedRow, unknown>
+    <DataTable<GroupedCompletedRow, unknown>
       columns={columns}
       data={rows}
       onRowClick={onRowClick}

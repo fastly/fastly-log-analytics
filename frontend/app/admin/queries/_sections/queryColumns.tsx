@@ -24,7 +24,12 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 
 import { durationColor, formatDuration, formatMemoryMb, kindBadgeVariant } from '../_helpers'
-import type { ActiveOrPromotedRow, ActiveRow, CompletedRow } from '../_types'
+import type {
+  ActiveOrPromotedRow,
+  ActiveRow,
+  CompletedRow,
+  GroupedCompletedRow,
+} from '../_types'
 
 // ── Header helper ──────────────────────────────────────────────────────────
 
@@ -43,9 +48,13 @@ function SortHeader({ label }: { label: string }) {
 
 // ── Shared cell renderers ─────────────────────────────────────────────────
 
-/** Source cell: kind badge + attribution label, truncated. */
+/** Source cell: kind badge + attribution label, truncated. When the row
+ *  stands in for a cron-group of N siblings, append a ``×N`` badge so the
+ *  user knows extras are folded under this row (toggle off groups to see
+ *  them). */
 function sourceCell({ row }: { row: any }) {
   const attr = row.original.attribution
+  const groupCount: number | undefined = row.original._groupedCount
   return (
     <div className="flex items-center gap-2 min-w-0">
       <Badge variant={kindBadgeVariant(attr.kind)} className="capitalize shrink-0">
@@ -54,6 +63,15 @@ function sourceCell({ row }: { row: any }) {
       <span className="truncate text-xs" title={attr.label}>
         {attr.label}
       </span>
+      {groupCount && groupCount > 1 ? (
+        <Badge
+          variant="secondary"
+          className="shrink-0 font-mono text-[10px] px-1.5"
+          title={`${groupCount} queries in this cron run — toggle "Group crons" off to expand`}
+        >
+          ×{groupCount}
+        </Badge>
+      ) : null}
     </div>
   )
 }
@@ -223,8 +241,8 @@ export function buildActiveColumns(deps: {
 export function buildCompletedColumns(opts: {
   showMemory: boolean
   showService: boolean
-}): ColumnDef<CompletedRow>[] {
-  const cols: ColumnDef<CompletedRow>[] = [
+}): ColumnDef<GroupedCompletedRow>[] {
+  const cols: ColumnDef<GroupedCompletedRow>[] = [
     {
       id: 'outcome',
       accessorKey: 'outcome',

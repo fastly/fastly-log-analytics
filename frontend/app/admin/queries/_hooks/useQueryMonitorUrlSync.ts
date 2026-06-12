@@ -24,6 +24,7 @@ export type QueryMonitorUrlState = {
   dbFilter: DbFilter
   viewMode: ViewMode
   slowThresholdMs: number
+  groupCrons: boolean
 }
 
 export type QueryMonitorUrlSetters = {
@@ -32,6 +33,7 @@ export type QueryMonitorUrlSetters = {
   setDbFilter: (v: DbFilter) => void
   setViewMode: (v: ViewMode) => void
   setSlowThresholdMs: (n: number) => void
+  setGroupCrons: (v: boolean) => void
 }
 
 export function useQueryMonitorUrlSync(
@@ -63,6 +65,9 @@ export function useQueryMonitorUrlSync(
       if (Number.isFinite(n) && n > 0) setters.setSlowThresholdMs(n)
     }
     if (db === 'DuckDB' || db === 'SQLite') setters.setDbFilter(db)
+    // ``nogroup=1`` turns off cron-grouping (default is on). Stored as the
+    // negative so the default URL stays clean.
+    if (p.get('nogroup') === '1') setters.setGroupCrons(false)
     hydratedRef.current = true
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -83,6 +88,7 @@ export function useQueryMonitorUrlSync(
     set('view', state.viewMode !== 'all' ? state.viewMode : null)
     set('slow', state.slowThresholdMs !== defaultSlowMs ? String(state.slowThresholdMs) : null)
     set('db', state.dbFilter !== 'all' ? state.dbFilter : null)
+    set('nogroup', state.groupCrons ? null : '1')
     window.history.replaceState({}, '', url.toString())
   }, [
     state.search,
@@ -90,6 +96,7 @@ export function useQueryMonitorUrlSync(
     state.viewMode,
     state.slowThresholdMs,
     state.dbFilter,
+    state.groupCrons,
     defaultSlowMs,
   ])
 }
