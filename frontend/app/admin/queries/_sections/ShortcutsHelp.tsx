@@ -22,20 +22,11 @@ export function ShortcutsHelp({
         <Kbd>/</Kbd>
         <dd>Focus the search field</dd>
 
-        <Kbd>j</Kbd>
-        <dd>Move focus to the next active row</dd>
-
-        <Kbd>k</Kbd>
-        <dd>Move focus to the previous active row</dd>
-
-        <Kbd>Enter</Kbd>
-        <dd>Expand / collapse the focused row</dd>
-
-        <Kbd>x</Kbd>
-        <dd>Cancel the focused query (admins only — same kind-aware confirm as the Kill button)</dd>
+        <Kbd>.</Kbd>
+        <dd>Pause / resume the snapshot poll (stops rows from shifting under you)</dd>
 
         <Kbd>Esc</Kbd>
-        <dd>Close the expanded row, the kill confirm dialog, or this help overlay</dd>
+        <dd>Close the row detail dialog, kill confirm, or this help overlay</dd>
 
         <Kbd>?</Kbd>
         <dd>Show this help overlay</dd>
