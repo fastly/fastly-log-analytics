@@ -121,7 +121,18 @@ export function useFilteredActive({
         r.attribution.label.toLowerCase().includes(q)
       )
     })
-    return groupCrons ? collapseCronRunsActive(filtered, expandedRunIds) : filtered
+    // Default order: live rows first (longest-running at top), then
+    // promoted/just-finished, then cancelled. Sorting by duration alone
+    // let a 5 s just-finished row outrank a 50 ms live row, which hid the
+    // very thing the admin was probably looking for. Users can still
+    // click any column header to re-sort via TanStack.
+    const ordered = [...filtered].sort((a, b) => {
+      const pa = activeRowPriority(a)
+      const pb = activeRowPriority(b)
+      if (pa !== pb) return pa - pb
+      return b.duration_ms - a.duration_ms
+    })
+    return groupCrons ? collapseCronRunsActive(ordered, expandedRunIds) : ordered
   }, [snapshot, justFinished, search, kindFilter, dbFilter, groupCrons, expandedRunIds])
 
   const completed = React.useMemo<GroupedCompletedRow[]>(() => {
@@ -131,6 +142,14 @@ export function useFilteredActive({
   }, [snapshot, dbFilter, groupCrons, expandedRunIds])
 
   return { justFinished, filteredActive, completed, slowQueries }
+}
+
+/** Default ordering priority — lower sorts first.
+ *  0 = live, 1 = promoted/just-finished, 2 = cancelled. */
+function activeRowPriority(r: ActiveOrPromotedRow): number {
+  if (r.cancelled_at !== null) return 2
+  if (r._completed) return 1
+  return 0
 }
 
 /** Collapse Active rows by ``cron_run_id``: keep the longest-running row in

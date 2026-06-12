@@ -108,14 +108,25 @@ function callerCell({ row }: { row: any }) {
 
 // ── Active-table-specific cells ───────────────────────────────────────────
 
+/** A live row this old gets the whole duration cell pulsing red — a
+ *  noticeably stronger signal than the existing red text colour above
+ *  10 s. 30 s is the "this is probably stuck" cutoff: legitimate cron
+ *  scans can hit 10–25 s, so going lower would burn the alarm. */
+const STUCK_LIVE_MS = 30_000
+
 /** Duration cell that shows a pulsing dot for live rows + the outcome
- *  text for promoted (just-finished) rows. */
+ *  text for promoted (just-finished) rows. Live rows past STUCK_LIVE_MS
+ *  pulse red across the whole cell, not just the dot. */
 function activeDurationCell({ row }: { row: any }) {
   const r: ActiveOrPromotedRow = row.original
   const isCancelled = r.cancelled_at !== null
   const promoted = !!r._completed
+  const stuck = !promoted && !isCancelled && r.duration_ms >= STUCK_LIVE_MS
   return (
-    <span className={`inline-flex items-center gap-1.5 font-mono ${durationColor(r.duration_ms)} ${promoted ? 'opacity-60' : ''}`}>
+    <span
+      className={`inline-flex items-center gap-1.5 font-mono ${durationColor(r.duration_ms)} ${promoted ? 'opacity-60' : ''} ${stuck ? 'animate-pulse font-bold' : ''}`}
+      title={stuck ? `Live query running for ${formatDuration(r.duration_ms)} — investigate` : undefined}
+    >
       {!promoted && !isCancelled && (
         <span className="relative flex h-2 w-2" aria-hidden="true">
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-current opacity-75"></span>

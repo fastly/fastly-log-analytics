@@ -57,7 +57,6 @@ export function ActiveTable({
       hideToolbar
       showPagination={false}
       emptyMessage="No active queries. Long-running queries will appear here in real time."
-      initialSorting={[{ id: 'duration_ms', desc: true }]}
       tableCaption="Active and just-finished queries"
     />
   )
