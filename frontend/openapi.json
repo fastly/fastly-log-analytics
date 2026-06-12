@@ -8051,7 +8051,11 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Health Snapshot Api Admin Health Snapshot Get"
+                }
               }
             }
           }

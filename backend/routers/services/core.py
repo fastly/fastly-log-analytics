@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -855,7 +856,7 @@ def api_ngwaf_sync(service_id: str):
     from backend.utils.ngwaf import fetch_verified_bots_paged
     from backend.utils.ngwaf_bot_cache import cleanup_old_bots, upsert_bots
 
-    def stream():
+    def stream() -> Iterator[str]:
         yield from _sse_flush()
         cfg = svcconfig.load_config(service_id)
         if not cfg:
@@ -975,7 +976,11 @@ def _check_iceberg_type_lock(
     if not src:
         return
     try:
-        from backend.core.iceberg import _DUCKDB_TO_ICEBERG, _get_catalog, _table_identifier
+        from backend.core.iceberg import (  # type: ignore[attr-defined]
+            _DUCKDB_TO_ICEBERG,
+            _get_catalog,
+            _table_identifier,
+        )
 
         catalog = _get_catalog(src)
         identifier = _table_identifier(src)
@@ -1074,7 +1079,10 @@ def api_update_custom_field(service_id: str, field_name: str, body: CustomFieldU
         src = _db.get_source_for_service(service_id)
         if src:
             try:
-                from backend.core.iceberg import _get_catalog, _table_identifier
+                from backend.core.iceberg import (  # type: ignore[attr-defined]
+                    _get_catalog,
+                    _table_identifier,
+                )
 
                 catalog = _get_catalog(src)
                 identifier = _table_identifier(src)
@@ -1232,7 +1240,10 @@ def api_import_custom_fields(service_id: str, body: dict):
     locked_field_names: set[str] = set()
     try:
         from backend.core import duckdb as _db
-        from backend.core.iceberg import _get_catalog, _table_identifier
+        from backend.core.iceberg import (  # type: ignore[attr-defined]
+            _get_catalog,
+            _table_identifier,
+        )
 
         src = _db.get_source_for_service(service_id)
         if src:

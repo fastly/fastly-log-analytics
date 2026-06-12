@@ -240,7 +240,7 @@ def _recover_in_flight(source: dict) -> dict:
     if not pending:
         return {"promoted": 0, "dropped": 0, "rows_recovered": 0}
 
-    buf_dir = iceberg._buffer_dir(source)
+    buf_dir = iceberg._buffer_dir(source)  # type: ignore[attr-defined]
     promoted = 0
     dropped = 0
     rows_recovered = 0
@@ -460,16 +460,16 @@ def ingest(
     chunk_size = INGEST_CHUNK_SIZE
     total_inserted = 0
     total_corrupt = 0
-    total_corrupt_details = []
+    total_corrupt_details: list[str] = []
     processed_count = 0
     deleted = 0
-    successfully_processed_files = []
+    successfully_processed_files: list[str] = []
     touched_hours: set[str] = set()
 
     mem_con = None
     # Increase parallelism for S3 deletions
     _delete_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="ingest_delete")
-    _pending_deletes = []
+    _pending_deletes: list = []
     from backend import config as svcconfig
 
     cfg = svcconfig.load_config(source.get("service_id") or source.get("name")) if source else None
@@ -700,7 +700,8 @@ def ingest(
                     }
                     touched_hours.update(chunk_hours)
 
-                total_rows_batch = mem_con.execute("SELECT count(*) FROM _ingest_staging").fetchone()[0]
+                _row = mem_con.execute("SELECT count(*) FROM _ingest_staging").fetchone()
+                total_rows_batch = _row[0] if _row else 0
                 corrupt_in_batch = total_rows_batch - valid_rows
 
                 repairs_made = False
@@ -731,8 +732,8 @@ def ingest(
                             bad_rows = _execute_query_with_retry(mem_con, q).fetchall()
 
                             _EMPTY_VALUE_RE = re.compile(r":(?=[,}])")
-                            repaired_by_fname = {}
-                            truly_corrupt = []
+                            repaired_by_fname: dict[str, list] = {}
+                            truly_corrupt: list = []
                             for fname, raw_line in bad_rows:
                                 # DuckDB filenames here are local paths; translate
                                 # back so all downstream attribution stays s3://.
@@ -825,12 +826,14 @@ def ingest(
 
                                 # Force re-calculation of counts and re-fetch of arrow_table
                                 repairs_made = True
-                                valid_rows = mem_con.execute(
+                                _valid_row = mem_con.execute(
                                     "SELECT count(*) FROM _ingest_staging WHERE timestamp IS NOT NULL"
-                                ).fetchone()[0]
-                                corrupt_in_batch = mem_con.execute(
+                                ).fetchone()
+                                valid_rows = _valid_row[0] if _valid_row else 0
+                                _corrupt_row = mem_con.execute(
                                     "SELECT count(*) FROM _ingest_staging WHERE timestamp IS NULL"
-                                ).fetchone()[0]
+                                ).fetchone()
+                                corrupt_in_batch = _corrupt_row[0] if _corrupt_row else 0
                         else:
                             total_corrupt_details.append(f"[Error extracting lines: {e}]")
 

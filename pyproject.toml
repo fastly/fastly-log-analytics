@@ -178,23 +178,13 @@ exclude = ["frontend/", "docs/", "scripts/"]
 #   2. Run `uv run mypy backend/` — fix or annotate the errors.
 #   3. Run `make test` to make sure no behavior changed.
 #   4. Commit the fix + the override removal in the same commit.
+# NOTE: per the v2.0 zero-tech-debt goal (cleanup_plan §10.13), this
+# block is intentionally empty — every backend module now type-checks
+# under the default settings. Re-add a module here ONLY as a last resort
+# when a fix is genuinely impractical, and document why in a comment
+# alongside the entry.
 [[tool.mypy.overrides]]
-module = [
-    # Singleton modules whose errors are not yet annotated.
-    "backend.core.ingest",
-    # Per-file list inside previously-wildcarded packages. Anything not
-    # listed here is now type-checked — adding a new module to one of
-    # those packages does NOT silently inherit ignore_errors anymore.
-    "backend.provision.fastly_api",
-    "backend.provision.orchestrator",
-    "backend.repositories.origin",
-    "backend.routers.admin",
-    "backend.routers.provision",
-    "backend.routers.services.core",
-    "backend.routers.session_scoring_admin",
-    "backend.utils.remote_access",
-    "backend.utils.telemetry_proxy",
-]
+module = []
 ignore_errors = true
 
 [tool.ruff]

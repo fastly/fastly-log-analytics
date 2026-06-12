@@ -36,33 +36,39 @@ from fastapi import Header, HTTPException, Path, Query
 # Importing the module (not the names) avoids a circular-import trap:
 # session_scoring's own bottom-of-file import of this module runs after
 # its top-level definitions, so by that point router/helpers are bound.
+#
+# The ``# type: ignore[has-type]`` markers below sidestep a mypy
+# limitation: under the circular import (this file ↔ session_scoring),
+# mypy can't resolve the right-hand side type when it analyses this
+# module first. The ignores are scoped per-line so any genuine error
+# (typo, removed export) still surfaces as a separate diagnostic.
 from backend.routers import session_scoring as _ss
 
-router = _ss.router
-logger = _ss.logger
-_bust_analytics_cache = _ss._bust_analytics_cache
-_cached = _ss._cached
-_load_matrix = _ss._load_matrix
-_fetch_session_events = _ss._fetch_session_events
-_reconstruct_labeled_sessions = _ss._reconstruct_labeled_sessions
-_resolve_token = _ss._resolve_token
-_query_logs = _ss._query_logs
-_finalize_cached = _ss._finalize_cached
-_SECRET_KEYS = _ss._SECRET_KEYS
-_MIN_LABELS_PER_CLASS = _ss._MIN_LABELS_PER_CLASS
+router = _ss.router  # type: ignore[has-type]
+logger = _ss.logger  # type: ignore[has-type]
+_bust_analytics_cache = _ss._bust_analytics_cache  # type: ignore[has-type]
+_cached = _ss._cached  # type: ignore[has-type]
+_load_matrix = _ss._load_matrix  # type: ignore[has-type]
+_fetch_session_events = _ss._fetch_session_events  # type: ignore[has-type]
+_reconstruct_labeled_sessions = _ss._reconstruct_labeled_sessions  # type: ignore[has-type]
+_resolve_token = _ss._resolve_token  # type: ignore[has-type]
+_query_logs = _ss._query_logs  # type: ignore[has-type]
+_finalize_cached = _ss._finalize_cached  # type: ignore[has-type]
+_SECRET_KEYS = _ss._SECRET_KEYS  # type: ignore[has-type]
+_MIN_LABELS_PER_CLASS = _ss._MIN_LABELS_PER_CLASS  # type: ignore[has-type]
 
 # Composite-endpoint dependencies — the /scoring/dashboard composite at the
 # bottom of this file calls back into the analytics endpoints that live in
 # the main module. Pull them by name so the composite can dispatch without
 # re-routing through HTTP.
-scoring_evaluation = _ss.scoring_evaluation
-scoring_health = _ss.scoring_health
-scoring_top_flagged = _ss.scoring_top_flagged
-scoring_score_distribution = _ss.scoring_score_distribution
-scoring_compliance_breakdown = _ss.scoring_compliance_breakdown
-scoring_curves = _ss.scoring_curves
-scoring_threshold_preview = _ss.scoring_threshold_preview
-scoring_status = _ss.scoring_status
+scoring_evaluation = _ss.scoring_evaluation  # type: ignore[has-type]
+scoring_health = _ss.scoring_health  # type: ignore[has-type]
+scoring_top_flagged = _ss.scoring_top_flagged  # type: ignore[has-type]
+scoring_score_distribution = _ss.scoring_score_distribution  # type: ignore[has-type]
+scoring_compliance_breakdown = _ss.scoring_compliance_breakdown  # type: ignore[has-type]
+scoring_curves = _ss.scoring_curves  # type: ignore[has-type]
+scoring_threshold_preview = _ss.scoring_threshold_preview  # type: ignore[has-type]
+scoring_status = _ss.scoring_status  # type: ignore[has-type]
 
 # ── module-private constants ──────────────────────────────────────────────────
 

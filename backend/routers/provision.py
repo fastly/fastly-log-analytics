@@ -8,6 +8,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -477,7 +478,7 @@ def provision_execute(req: ProvisionExecuteRequest):
 
         service_name = svcconfig.fetch_service_name(service_id, token) or service_id
 
-    cfg = {
+    cfg: dict[str, Any] = {
         "admin_token": token,
         "logging_service_id": service_id,
         "name": service_name,
@@ -674,7 +675,10 @@ def provision_ingest(body: dict):
             fos_key_id = existing["access_key"]
         else:
             try:
-                new_key = ensure_fos_access_key(desc, body, token, buckets=[body.get("fos_bucket_name")])
+                bucket_name = body.get("fos_bucket_name")
+                if not bucket_name:
+                    raise HTTPException(status_code=400, detail={"error": "fos_bucket_name required"})
+                new_key = ensure_fos_access_key(desc, body, token, buckets=[bucket_name])
                 fos_access_key = new_key["access_key"]
                 fos_secret_key = new_key["secret_key"]
                 fos_key_id = new_key["id"]
@@ -711,13 +715,10 @@ def provision_ingest(body: dict):
         "provisioning": {"fos_key_id": fos_key_id},
     }
 
-    if body.get("log_fields"):
+    log_fields_raw = body.get("log_fields")
+    if log_fields_raw:
         try:
-            state["log_fields"] = (
-                json.loads(body.get("log_fields"))
-                if isinstance(body.get("log_fields"), str)
-                else body.get("log_fields")
-            )
+            state["log_fields"] = json.loads(log_fields_raw) if isinstance(log_fields_raw, str) else log_fields_raw
         except Exception:
             pass
 

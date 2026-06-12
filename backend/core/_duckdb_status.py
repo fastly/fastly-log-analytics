@@ -644,7 +644,7 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
                 _db_main._top_values_cache[service_id] = post_fp
 
 
-def get_ingested_files(con: duckdb.DuckDBPyConnection, source: dict | None = None) -> list[dict]:
+def get_ingested_files(con: duckdb.DuckDBPyConnection | None, source: dict | None = None) -> list[dict]:
     """Return list of ingested files for a source.
 
     The ``con`` argument is kept for signature compatibility but unused — the

@@ -16,6 +16,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from typing import Any
 
 import aiohttp
 import yarl
@@ -365,7 +366,7 @@ async def handle_healthz(request: web.Request) -> web.Response:
     return web.Response(text="OK")
 
 
-async def handle_request(request: web.Request) -> web.Response:
+async def handle_request(request: web.Request) -> web.StreamResponse:
     global _IN_FLIGHT_REQUESTS
     with _IN_FLIGHT_LOCK:
         _IN_FLIGHT_REQUESTS += 1
@@ -376,7 +377,7 @@ async def handle_request(request: web.Request) -> web.Response:
             _IN_FLIGHT_REQUESTS -= 1
 
 
-async def _handle_request_inner(request: web.Request) -> web.Response:
+async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
     target_host = request.headers.get("X-Fos-Target")
     if not target_host:
         return web.Response(status=400, text="Missing X-Fos-Target header")
@@ -409,6 +410,11 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
     # buffering is bounded. If a future flow routes bulk payloads through
     # here, switch to STREAMING-AWS4-HMAC-SHA256-PAYLOAD chunked signing
     # before increasing the request-body size limit.
+    # ``data`` is either a fully-buffered ``bytes`` (signed paths) or a
+    # streaming ``aiohttp.StreamReader`` (unsigned fallback) — aiohttp's
+    # client accepts both, so ``Any`` keeps the union narrow at the
+    # callsite without forcing a buffer-up that would defeat streaming.
+    data: Any
     if service_id and request.can_read_body:
         body = await request.read()
         data = body
@@ -460,6 +466,7 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
                 # diverged from what R2 verifies — producing
                 # HTTP 403 'The calculated signature does not match'.
                 wire_url = yarl.URL(upstream_url, encoded=True)
+                assert _SESSION is not None, "telemetry-proxy session not initialised"
                 async with _SESSION.request(
                     method=request.method,
                     url=wire_url,
@@ -656,8 +663,13 @@ def _run_server() -> None:
     site = web.TCPSite(_RUNNER, "127.0.0.1", 0)
     _LOOP.run_until_complete(site.start())
 
-    # OS-assigned port becomes available only after .start()
-    _PORT = site._server.sockets[0].getsockname()[1]
+    # OS-assigned port becomes available only after .start().
+    # asyncio's AbstractServer base class doesn't declare ``sockets`` but
+    # every concrete implementation (Server/UnixServer) provides it; the
+    # site is started so `_server` is the concrete subclass at runtime.
+    _server = site._server
+    assert _server is not None
+    _PORT = _server.sockets[0].getsockname()[1]  # type: ignore[attr-defined]
     _READY.set()
 
     _LOOP.run_forever()

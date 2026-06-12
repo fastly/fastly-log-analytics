@@ -2,6 +2,7 @@ import datetime
 import re
 import shutil
 import urllib.parse
+from typing import Any
 
 from backend.core import field_registry as lf
 from backend.core.fastly.client import fastly
@@ -1005,20 +1006,16 @@ def update_logging_endpoint(cfg: dict, token: str):
     path_changed = path is not None and current_ep.get("path") != path
 
     current_cond_name = current_ep.get("response_condition")
-    current_stmt = ""
+    current_stmt: str = ""
     if current_cond_name:
         cond = find_condition(current_cond_name, service_id, active_ver, token)
-        current_stmt = cond.get("statement") if cond else ""
+        current_stmt = (cond.get("statement") if cond else "") or ""
 
-    target_sample_rate = (
-        int(sample_rate)
-        if sample_rate is not None
-        else (
-            int(re.search(r"randombool\((\d+),", current_stmt).group(1))
-            if re.search(r"randombool\((\d+),", current_stmt)
-            else 100
-        )
-    )
+    def _rate_from_stmt(stmt: str) -> int:
+        m = re.search(r"randombool\((\d+),", stmt)
+        return int(m.group(1)) if m else 100
+
+    target_sample_rate = int(sample_rate) if sample_rate is not None else _rate_from_stmt(current_stmt)
     target_edge_only = bool(edge_only) if edge_only is not None else ("req.restarts == 0" in current_stmt)
     target_custom_condition = cfg.get("custom_condition", "").strip()
 
@@ -1092,8 +1089,8 @@ def update_logging_endpoint(cfg: dict, token: str):
     yield {"type": "progress", "current": 2, "total": total_steps}
 
     try:
-        update_payload = {}
-        if period_changed:
+        update_payload: dict[str, Any] = {}
+        if period_changed and period is not None:
             update_payload["period"] = int(period)
         if path_changed:
             update_payload["path"] = path

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import queue
 import zipfile
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -68,7 +69,7 @@ class _AbortableQueue(queue.Queue):
         super().put(item, block, timeout)
 
 
-def _stream_from_worker(worker):
+def _stream_from_worker(worker: Any) -> Any:
     """Run *worker(q)* in a daemon thread and yield the bytes it puts into the queue."""
     import contextvars
     import threading
@@ -322,7 +323,10 @@ def download_folder(
         _sct()
         with _pcs(f"api:GET /admin/download-zip:{root}"):
             try:
-                with zipfile.ZipFile(_QueueFile(q), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                # _QueueFile is a stream-shaped duck type the zipfile stubs
+                # don't recognise; cast keeps the call site type-safe at the
+                # boundary without touching the runtime behaviour.
+                with zipfile.ZipFile(cast(Any, _QueueFile(q)), "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     cdn = source.get("cdn_url", "").rstrip("/")
                     fos_client = _db._get_fos_client(source)
                     paginator = fos_client.get_paginator("list_objects_v2", caller_hint="download_zip")
@@ -572,7 +576,7 @@ def download_all_files(
         _sct()
         with _pcs(f"api:GET /download-all:{include}"):
             try:
-                with zipfile.ZipFile(_QueueFile(q), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                with zipfile.ZipFile(cast(Any, _QueueFile(q)), "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     if include == "local":
                         db_path = src.get("duckdb_path")
                         if not db_path:
@@ -736,7 +740,7 @@ def sync_status(
     src: dict | None = None
     if service_id:
         src = _db.get_source_for_service(service_id)
-    if not src:
+    if not src or not service_id:
         return SyncStatusResponse.with_telemetry(configured=False)
 
     try:
@@ -1066,7 +1070,7 @@ def metadata_cleanup_now(source: dict = Depends(get_source)):
 
 
 @router.get("/admin/health-snapshot")
-def health_snapshot():
+def health_snapshot() -> dict[str, Any]:
     """One-shot health snapshot for the admin page system health card.
 
     Returns CPU load averages, memory, disk usage of the data mount,
@@ -1376,8 +1380,12 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     completed = [b for b in buckets if b.ts != in_flight_ts]
     sustained: SustainedLossAlert | None = None
     run_start = None
-    for i, b in enumerate(completed + [None]):
-        is_loss = b is not None and b.gap_pct >= LOG_ACCOUNTING_LOSS_THRESHOLD
+    # Rename loop var to dodge the str-binding from the earlier
+    # ``for b in time_buckets`` chunk in this same function — mypy
+    # carries the first binding's type into the second loop.
+    buckets_with_sentinel: list[LogAccountingBucket | None] = list(completed) + [None]
+    for i, bucket in enumerate(buckets_with_sentinel):
+        is_loss = bucket is not None and bucket.gap_pct >= LOG_ACCOUNTING_LOSS_THRESHOLD
         if is_loss and run_start is None:
             run_start = i
         elif not is_loss and run_start is not None:

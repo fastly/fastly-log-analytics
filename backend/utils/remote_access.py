@@ -455,7 +455,9 @@ async def _strip_analyst_envelope(response: Response) -> Response:
     if "application/json" not in ct:
         return response
     body = b""
-    async for chunk in response.body_iterator:
+    # `body_iterator` only exists on StreamingResponse; the caller wraps a
+    # plain Response in a StreamingResponse before calling this helper.
+    async for chunk in response.body_iterator:  # type: ignore[attr-defined]
         body += chunk
     try:
         data = json.loads(body)
@@ -890,9 +892,11 @@ class TimeBounds:
             eff_start = now - timedelta(hours=1)
             eff_end = now
         elif eff_start is None:
+            assert eff_end is not None  # narrowed by `not (start is None and end is None)` above
             eff_start = eff_end - timedelta(hours=1)
         elif eff_end is None:
             eff_end = datetime.now(UTC)
+        assert eff_start is not None and eff_end is not None  # narrowed by the branches above
         if eff_start >= eff_end:
             raise ValueError("clamped time range is empty")
         return eff_start, eff_end

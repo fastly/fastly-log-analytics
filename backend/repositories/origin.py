@@ -8,6 +8,7 @@ import math
 import threading
 import time
 from collections import OrderedDict
+from typing import Any
 
 import duckdb
 
@@ -135,7 +136,9 @@ def _enrich_with_distance(row: dict) -> dict:
             efficiency_ratio=efficiency,
             # High ratio alone isn't meaningful for short hops where TCP overhead dominates;
             # require ≥20ms absolute overhead above the theoretical floor before flagging.
-            anomaly_static=efficiency is not None and efficiency > 3.0 and p50 - light_rtt_ms >= 20.0,
+            anomaly_static=(
+                efficiency is not None and efficiency > 3.0 and p50 is not None and p50 - light_rtt_ms >= 20.0
+            ),
             edge_lat=e_coords[0],
             edge_lon=e_coords[1],
             shield_lat=s_coords[0],
@@ -256,7 +259,7 @@ def get_summary(
     has_data = rollup_row is not None and rollup_row[5] is not None
 
     if not has_data:
-        payload = {
+        payload: dict[str, Any] = {
             "has_data": False,
             "total_misses": None,
             "total_passes": None,
@@ -279,6 +282,7 @@ def get_summary(
     # 1=is_total, 2=requests, 3=total_misses, 4=total_passes, 5-8=ottfb
     # p50/p75/p95/p99, 9=ottlb_p50, 10=ottlb_p95, 11=cdn_overhead_p50,
     # 12=origin_error_rate, 13=obytes_p50.
+    assert rollup_row is not None  # has_data check above narrowed this
     row = (
         rollup_row[3],  # total_misses
         rollup_row[4],  # total_passes
