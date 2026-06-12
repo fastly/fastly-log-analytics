@@ -133,6 +133,8 @@ function kindBadgeVariant(kind: AttributionKind): 'default' | 'secondary' | 'des
 
 // ── The page ────────────────────────────────────────────────────────────────
 
+type ViewMode = 'all' | 'live' | 'past'
+
 export default function QueryMonitorPage() {
   const queryClient = useQueryClient()
   const visible = useDocumentVisible()
@@ -141,6 +143,7 @@ export default function QueryMonitorPage() {
   const [kindFilter, setKindFilter] = React.useState<AttributionKind | 'all'>('all')
   const [confirmKill, setConfirmKill] = React.useState<ActiveRow | null>(null)
   const [actionError, setActionError] = React.useState<string>('')
+  const [viewMode, setViewMode] = React.useState<ViewMode>('all')
 
   // Feature-flag check; if disabled, render a clear empty state.
   const { data: cfg } = useQuery<MonitorConfig>({
@@ -301,6 +304,15 @@ export default function QueryMonitorPage() {
             </Alert>
           )}
 
+          <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as ViewMode)}>
+            <TabsList>
+              <TabsTrigger value="all">All</TabsTrigger>
+              <TabsTrigger value="live">Live only</TabsTrigger>
+              <TabsTrigger value="past">Past only</TabsTrigger>
+            </TabsList>
+          </Tabs>
+
+          {viewMode !== 'past' && (
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
               <CardTitle className="text-base flex items-center gap-2">
@@ -338,7 +350,9 @@ export default function QueryMonitorPage() {
               />
             </CardContent>
           </Card>
+          )}
 
+          {viewMode !== 'live' && (
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
               <CardTitle className="text-base flex items-center gap-2">
@@ -366,7 +380,9 @@ export default function QueryMonitorPage() {
               <CompletedTable rows={slowQueries} preserveOrder emptyMessage={`No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`} />
             </CardContent>
           </Card>
+          )}
 
+          {viewMode !== 'live' && (
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
@@ -378,6 +394,7 @@ export default function QueryMonitorPage() {
               <CompletedTable rows={completed} />
             </CardContent>
           </Card>
+          )}
         </>
       )}
 

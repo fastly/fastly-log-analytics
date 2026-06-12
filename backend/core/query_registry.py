@@ -43,6 +43,7 @@ from __future__ import annotations
 import collections
 import itertools
 import logging
+import os
 import threading
 import time
 import weakref
@@ -62,6 +63,24 @@ _SQL_TRUNCATE = 4096
 _ERR_TRUNCATE = 512
 _HISTORY_CAP = 200
 _seq = itertools.count(1)
+
+# Hot-path kill switch. Read once at module load — flipping requires a
+# restart, but it's the kind of thing you'd flip during an incident
+# anyway. When True, register() / deregister() return immediately so the
+# SQL hot path takes ZERO instrumentation cost. Default off (registry on);
+# flip to "1" to surgically disable if you suspect the live monitor is
+# contributing to slowness.
+_REGISTRY_DISABLED = os.environ.get("QUERY_REGISTRY_DISABLED", "").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+if _REGISTRY_DISABLED:
+    logger.warning(
+        "query_registry hot-path DISABLED via QUERY_REGISTRY_DISABLED env. "
+        "Live Query Monitor will show no queries until you unset it and restart."
+    )
 
 # Identity → query_id map. Validates that interrupt() targets the right
 # query. id(con) is stable for the connection's lifetime and we clear the
@@ -182,6 +201,8 @@ class QueryRegistry:
         Returns ``-1`` on internal failure (so callers can blindly pass it
         to :meth:`deregister` without branching). Instrumentation never
         raises into the SQL hot path."""
+        if _REGISTRY_DISABLED:
+            return -1
         try:
             qid = next(_seq)
             qualname, file_line = _capture_caller()
