@@ -1909,6 +1909,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/slow-queries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Persisted Slow Queries
+         * @description Persistent slow-SQL history from the per-service ``slow_queries``
+         *     SQLite table — the durable backing store for the Notable Slow
+         *     Queries panel beyond the in-memory ring buffer's ~10-30 min /
+         *     restart-bounded window.
+         *
+         *     Server-side filters keep the response payload small:
+         *     ``threshold_ms`` is applied at the SQL level (indexed scan),
+         *     ``kind`` / ``db_type`` are equality filters on low-cardinality
+         *     columns. ``limit`` clamped at 2000 so a runaway client query can't
+         *     page the whole 7-day window in one shot.
+         *
+         *     Sort: ``recent`` (started_at_utc DESC, the panel default) or
+         *     ``duration`` (duration_ms DESC, the "what was slowest" variant).
+         */
+        get: operations["list_persisted_slow_queries_api_admin_slow_queries_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/queries/{qid}": {
         parameters: {
             query?: never;
@@ -10881,6 +10913,49 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SummaryResponse"];
+                };
+            };
+        };
+    };
+    list_persisted_slow_queries_api_admin_slow_queries_get: {
+        parameters: {
+            query?: {
+                since_hours?: number;
+                threshold_ms?: number;
+                kind?: string | null;
+                db_type?: string | null;
+                sort?: string;
+                limit?: number;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

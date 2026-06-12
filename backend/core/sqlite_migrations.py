@@ -177,6 +177,70 @@ def _migration_004_committed_buffers(con: sqlite3.Connection) -> None:
     )
 
 
+def _migration_005_slow_queries(con: sqlite3.Connection) -> None:
+    """Create ``slow_queries`` — durable per-service history of SQL queries
+    whose ``duration_ms`` exceeded the persistence threshold.
+
+    Why: the live ``query_registry`` only holds the most recent 2000
+    completed queries (in-memory ring buffer). That's ~10-30 minutes of
+    history on a busy service and zero history across restarts. The
+    Notable Slow Queries panel becomes empty every restart and can't
+    answer "what was slow yesterday?". This table is the persistent
+    backing store; the registry continues to serve live + most-recent
+    reads (cheap memory deque), while this SQLite table answers any
+    query past that window.
+
+    Writer: ``query_registry.deregister`` calls ``insert_slow_query``
+    inline ONLY when ``duration_ms >= _SLOW_QUERY_PERSIST_THRESHOLD_MS``
+    (default 100 ms). Filtering at the hot path means most queries (the
+    sub-100ms majority) pay zero SQLite cost; the ones we DO persist
+    are already slow enough that a 1-2 ms WAL append is invisible.
+
+    Reader: ``GET /api/admin/slow-queries?since_hours=...&threshold_ms=...``.
+
+    Retention: 7 days by default, governed by ``metadata_cleanup``.
+    """
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS slow_queries (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            query_id             INTEGER NOT NULL,
+            db_type              TEXT    NOT NULL,
+            service_id           TEXT,
+            started_at_utc       REAL    NOT NULL,
+            ended_at_utc         REAL    NOT NULL,
+            duration_ms          REAL    NOT NULL,
+            outcome              TEXT    NOT NULL,
+            sql_preview          TEXT    NOT NULL,
+            sql_full             TEXT,
+            sql_len              INTEGER NOT NULL DEFAULT 0,
+
+            attr_kind            TEXT    NOT NULL,
+            attr_label           TEXT    NOT NULL,
+            attr_principal_id    TEXT,
+            attr_caller_qualname TEXT    NOT NULL,
+            attr_caller_file     TEXT    NOT NULL,
+            attr_request_path    TEXT,
+            attr_request_id      TEXT,
+            attr_cron_job        TEXT,
+            attr_cron_run_id     TEXT,
+            attr_pool_slot       TEXT,
+
+            error_type           TEXT,
+            error_message        TEXT,
+            peak_memory_mb       REAL
+        )
+        """
+    )
+    # Time-descending lookups dominate the read pattern. A descending
+    # index on ``started_at_utc`` backs the WHERE range filter without
+    # a sort step.
+    con.execute("CREATE INDEX IF NOT EXISTS idx_slow_queries_started_at ON slow_queries(started_at_utc DESC)")
+    # Secondary index for the "slowest of the last 7d" query — the panel
+    # also offers a duration-DESC sort variant.
+    con.execute("CREATE INDEX IF NOT EXISTS idx_slow_queries_duration ON slow_queries(duration_ms DESC)")
+
+
 # Insertion order = application order. Use integer keys; gaps are not
 # allowed (`apply_pending` iterates sorted keys and stops on failure).
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -184,6 +248,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migration_002_add_ingested_files_file_date,
     3: _migration_003_rebuild_usage_log_hourly_summary,
     4: _migration_004_committed_buffers,
+    5: _migration_005_slow_queries,
 }
 
 LATEST_VERSION = max(MIGRATIONS) if MIGRATIONS else 0

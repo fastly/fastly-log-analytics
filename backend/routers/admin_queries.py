@@ -22,11 +22,13 @@ import time
 from collections import deque
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from backend.core import metadata as _meta_mod
 from backend.core.query_registry import query_registry
 from backend.core.settings import Settings
+from backend.deps import get_service_id
 
 router = APIRouter(prefix="/api/admin", tags=["admin", "query-monitor"])
 
@@ -117,6 +119,81 @@ def list_queries(
 def queries_summary() -> SummaryResponse:
     _ensure_enabled()
     return SummaryResponse(**query_registry.summary())
+
+
+@router.get("/slow-queries")
+def list_persisted_slow_queries(
+    service_id: str = Depends(get_service_id),
+    since_hours: int = Query(24, ge=1, le=24 * 30),
+    threshold_ms: float = Query(100.0, ge=0.0),
+    kind: str | None = Query(None, pattern="^(analyst|admin|cron|system)$"),
+    db_type: str | None = Query(None, pattern="^(DuckDB|SQLite)$"),
+    sort: str = Query("recent", pattern="^(recent|duration)$"),
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict[str, Any]:
+    """Persistent slow-SQL history from the per-service ``slow_queries``
+    SQLite table — the durable backing store for the Notable Slow
+    Queries panel beyond the in-memory ring buffer's ~10-30 min /
+    restart-bounded window.
+
+    Server-side filters keep the response payload small:
+    ``threshold_ms`` is applied at the SQL level (indexed scan),
+    ``kind`` / ``db_type`` are equality filters on low-cardinality
+    columns. ``limit`` clamped at 2000 so a runaway client query can't
+    page the whole 7-day window in one shot.
+
+    Sort: ``recent`` (started_at_utc DESC, the panel default) or
+    ``duration`` (duration_ms DESC, the "what was slowest" variant).
+    """
+    _ensure_enabled()
+    if not service_id:
+        raise HTTPException(status_code=400, detail="service_id required")
+    since_utc = time.time() - since_hours * 3600
+    rows = _meta_mod.list_slow_queries(
+        service_id,
+        since_utc=since_utc,
+        threshold_ms=threshold_ms,
+        kind=kind,
+        db_type=db_type,
+        sort_by_duration=(sort == "duration"),
+        limit=limit,
+    )
+    # Re-shape into the same dict layout the in-memory ``completed`` array
+    # uses so the frontend can render them through the existing
+    # ``CompletedRow`` type without a separate path. ``attribution`` is
+    # nested to match ``_attribution_payload``'s shape.
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "query_id": r["query_id"],
+                "db_type": r["db_type"],
+                "service_id": r["service_id"],
+                "sql_preview": r["sql_preview"],
+                "sql": r["sql_full"],
+                "sql_len": r["sql_len"],
+                "started_at_utc": r["started_at_utc"],
+                "ended_at_utc": r["ended_at_utc"],
+                "duration_ms": r["duration_ms"],
+                "outcome": r["outcome"],
+                "error_type": r["error_type"],
+                "error_message": r["error_message"],
+                "peak_memory_mb": r["peak_memory_mb"],
+                "attribution": {
+                    "kind": r["attr_kind"],
+                    "label": r["attr_label"],
+                    "principal_id": r["attr_principal_id"],
+                    "caller_qualname": r["attr_caller_qualname"],
+                    "caller_file": r["attr_caller_file"],
+                    "request_path": r["attr_request_path"],
+                    "request_id": r["attr_request_id"],
+                    "cron_job": r["attr_cron_job"],
+                    "cron_run_id": r["attr_cron_run_id"],
+                    "pool_slot": r["attr_pool_slot"],
+                },
+            }
+        )
+    return {"rows": out, "since_hours": since_hours, "threshold_ms": threshold_ms}
 
 
 @router.get("/queries/{qid}")

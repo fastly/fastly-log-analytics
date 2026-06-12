@@ -679,4 +679,10 @@ DEFAULT_METADATA_RETENTION = {
     "ingested_files_days": 1,
     "cron_runs_days": 7,
     "rollups_days": 90,
+    # Persistent slow-query history. 7 days matches cron_runs — both
+    # exist for incident-debug "what happened last week?" use cases.
+    # Set to 0 to disable persistence at the cleanup layer (the
+    # query_registry persistence threshold is the other knob, via
+    # QUERY_REGISTRY_PERSIST_THRESHOLD_MS).
+    "slow_queries_days": 7,
 }

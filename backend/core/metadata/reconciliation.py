@@ -31,14 +31,25 @@ _STATS_TABLES = (
     "audit_log",
     "in_flight_buffers",
     "locally_compacted_files",
+    "committed_buffers",
+    "slow_queries",
 )
 
 # (table, retention_key, timestamp_column) for each trimmable table.
+# ``slow_queries.started_at_utc`` is a unix-epoch REAL, not an
+# ISO/datetime string, so the standard ``datetime('now', '-Nd')``
+# comparison the loop uses below would silently skip every row. The
+# loop special-cases this table — see ``_SLOW_QUERIES_TABLE``.
 _CLEANUP_TABLES = (
     ("usage_log", "usage_log_days", "timestamp"),
     ("ingested_files", "ingested_files_days", "ingested_at"),
     ("cron_runs", "cron_runs_days", "started_at"),
+    ("slow_queries", "slow_queries_days", "started_at_utc"),
 )
+# Table whose timestamp column is unix-epoch seconds, not an ISO string.
+# Handled with an epoch-cutoff DELETE instead of the standard
+# ``datetime('now', '-Nd')`` comparison the other tables use.
+_SLOW_QUERIES_TABLE = "slow_queries"
 
 
 def get_metadata_storage_stats(service_id: str) -> dict:
@@ -199,10 +210,21 @@ def cleanup_metadata(
             continue
         _emit({"type": "status", "message": f"Trimming {table} (older than {days_int}d)…"})
         try:
-            cur = con.execute(
-                f"DELETE FROM {table} WHERE {ts_col} < datetime('now', ?)",
-                (f"-{days_int} days",),
-            )
+            if table == _SLOW_QUERIES_TABLE:
+                # Unix-epoch REAL cutoff for slow_queries — see
+                # ``_SLOW_QUERIES_TABLE`` comment above. Uses the same
+                # window length as the others; the only difference is
+                # the column type / comparison.
+                cutoff_epoch = _t.time() - days_int * 86400
+                cur = con.execute(
+                    f"DELETE FROM {table} WHERE {ts_col} < ?",
+                    (cutoff_epoch,),
+                )
+            else:
+                cur = con.execute(
+                    f"DELETE FROM {table} WHERE {ts_col} < datetime('now', ?)",
+                    (f"-{days_int} days",),
+                )
             deleted[table] = int(cur.rowcount or 0)
             con.commit()
             _emit(
