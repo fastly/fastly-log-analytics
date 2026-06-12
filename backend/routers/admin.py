@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import queue
 import zipfile
+from datetime import datetime
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -1255,6 +1256,47 @@ LOG_ACCOUNTING_LOSS_THRESHOLD = 0.05
 LOG_ACCOUNTING_MIN_RUN = 2
 
 
+def _duckdb_row_counts_per_bucket(source: dict, start: datetime, end: datetime, by: str) -> dict[str, int]:
+    """Per-bucket ``COUNT(*)`` from the live DuckDB view — the post-dedup
+    truth that should drive the log-accounting comparison.
+
+    Returns ``{bucket_string: count}`` where bucket_string matches the
+    SQLite metadata path's format (``YYYY-MM-DD-HH`` for hourly,
+    ``YYYY-MM-DD`` for daily) so the loop above can union the keys.
+
+    Opens its own short-lived read-only connection. Cheap on this query
+    (single aggregate, no joins) — ~50-150 ms on a 24h window on prod.
+    Errors collapse to an empty dict so the route still degrades to the
+    metadata-only path rather than 500ing.
+    """
+    from backend.core import duckdb as _ddb
+    from backend.deps import _ConnectionHolder
+
+    table_name = _ddb._safe_table_name(source["name"])
+    fmt = "%Y-%m-%d-%H" if by == "hour" else "%Y-%m-%d"
+    start_iso = start.strftime("%Y-%m-%d %H:%M:%S")
+    end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        # read_only=True so this uses the pool (cheap, doesn't contend with
+        # the cron writer).
+        with _ConnectionHolder(source, read_only=True) as con:
+            rows = con.execute(
+                f"SELECT strftime(timestamp, '{fmt}') AS bucket, COUNT(*) AS n "
+                f"FROM {table_name} "
+                f"WHERE timestamp >= TIMESTAMP '{start_iso}' "
+                f"  AND timestamp <  TIMESTAMP '{end_iso}' "
+                f"GROUP BY 1"
+            ).fetchall()
+        return {b: int(n) for b, n in rows}
+    except Exception as e:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "[log-accounting] DuckDB counts unavailable, falling back to metadata: %s", e
+        )
+        return {}
+
+
 def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> dict:
     """Pure compute path for log-line accounting.
 
@@ -1325,7 +1367,17 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
         service_id, sql_start_iso, sql_end_iso, width, start_bucket, end_bucket
     )
 
-    all_buckets = sorted(set(fastly_counts.keys()) | set(local_counts.keys()))
+    # ``our_rows`` comes from the live DuckDB view rather than
+    # ``ingested_files.row_count``. Reason: the metadata column reflects
+    # rows WRITTEN at ingest time. After ``local_compaction`` deduped by
+    # ``rid`` to clean up the buffer-commit-replay dup pattern (fixed
+    # 2026-06-12 in PR #21), the metadata column over-counts by the dup
+    # factor. Reading from DuckDB matches what the dashboard charts
+    # actually show. ``file_count`` stays from the metadata table — it's
+    # the count of source .log.gz files ingested, unrelated to dedup.
+    duckdb_counts: dict[str, int] = _duckdb_row_counts_per_bucket(source, start, end_clamp, by)
+
+    all_buckets = sorted(set(fastly_counts.keys()) | set(local_counts.keys()) | set(duckdb_counts.keys()))
     buckets: list[LogAccountingBucket] = []
     total_fastly = 0
     total_ours = 0
@@ -1333,7 +1385,11 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     worst_gap_pct: float | None = None
     for b in all_buckets:
         fastly = int(fastly_counts.get(b, 0))
-        ours, fcount = local_counts.get(b, (0, 0))
+        _meta_rows, fcount = local_counts.get(b, (0, 0))
+        # Prefer DuckDB's authoritative live count; fall back to metadata
+        # only when DuckDB has no entry (very old buckets that aged out of
+        # the local cache but still have an ingested_files row).
+        ours = int(duckdb_counts.get(b, _meta_rows))
         gap = fastly - ours
         denom = fastly if fastly > 0 else ours
         gap_pct = (gap / denom) if denom > 0 else 0.0
