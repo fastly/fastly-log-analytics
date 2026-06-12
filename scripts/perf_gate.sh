@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# perf_gate.sh — load-harness CI step (Phase 0.9 scaffolding; wired in Phase 1.6)
+# perf_gate.sh — load-harness CI regression gate.
 #
 # Reads tests/perf/baseline.json for the per-scenario thresholds and the
-# regression_pct_threshold; reads a freshly-produced tests/perf/latest.json
-# (emitted by the load harness in Phase 1.6) and exits non-zero if any
-# scenario's measured p-value is > baseline * (1 + threshold/100).
+# regression_pct_threshold; reads tests/perf/latest.json (emitted in CI
+# by scripts/emit_perf_latest.py) and exits non-zero if any scenario's
+# measured p-value is > baseline * (1 + threshold/100).
 #
-# Phase 0 ships this as a no-op (latest.json missing → skip with a warning)
-# so the CI job is in place but doesn't fail before Phase 1.6 hooks the
-# emitter. Phase 1.6 makes the "skip if missing" branch a hard fail.
+# Both files MUST exist — the CI workflow runs the emitter immediately
+# before this gate, so a missing latest.json is a wiring bug, not a
+# soft warning.
 
 set -euo pipefail
 
@@ -24,9 +24,9 @@ if [[ ! -f "$BASELINE" ]]; then
 fi
 
 if [[ ! -f "$LATEST" ]]; then
-    echo "⚠️  load-harness latest.json not present — Phase 1.6 will wire this."
-    echo "   Skipping perf gate for now."
-    exit 0
+    echo "ERROR: latest.json missing at $LATEST" >&2
+    echo "   The CI workflow should run scripts/emit_perf_latest.py before this gate." >&2
+    exit 2
 fi
 
 python3 - <<'PY'

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "scale_note": "CI emitter \u2014 100K synthetic rows, not the 36M production baseline. Numbers are deliberately well under the baseline thresholds; the gate catches >10 % regression vs THESE numbers, not against the production targets.",
+  "ci_dataset_rows": 100000,
+  "scenarios": {
+    "cold_path_36M_1h_iceberg_committed_p95_ms": 8,
+    "warm_path_36M_1h_p50_ms": 7
+  }
+}

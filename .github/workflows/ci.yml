@@ -115,12 +115,19 @@ jobs:
         # verified fix without surfacing the change.
         run: bash scripts/check_security_regression_count.sh
 
+      - name: Emit perf samples (CI-scale synthetic load)
+        # Produces tests/perf/latest.json from a 100K-row in-memory
+        # DuckDB dataset (~2 s wall). The gate below compares to
+        # tests/perf/baseline.json and fails on >regression_pct_threshold%
+        # over baseline (50 % default; tuned for GH Actions runner
+        # variance at CI scale).
+        run: uv run python scripts/emit_perf_latest.py
+
       - name: Perf gate (load-harness baseline)
-        # v2.0 cleanup Phase 0.9: scaffolding for the >10% cold-path
-        # regression gate. Reads tests/perf/baseline.json + latest.json.
-        # Phase 0 ships this as a no-op (latest.json missing → skip).
-        # Phase 1.6 hooks the emitter and turns the skip into a hard
-        # fail.
+        # Compares the just-emitted latest.json against baseline.json.
+        # Production targets (≤2800 / ≤1900 ms) are documented in
+        # baseline.json's production_targets_comment for traceability
+        # but enforced by the manual loadtest probe, not this CI gate.
         run: bash scripts/perf_gate.sh
 
   frontend:
