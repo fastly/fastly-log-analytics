@@ -40,7 +40,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 import duckdb
 
@@ -409,7 +409,7 @@ def _reject(
     message: str,
     session_id: str | None,
     service_id: str | None,
-) -> None:
+) -> NoReturn:
     """Emit a structured audit log line and raise SQLValidationError.
 
     Never returns — always raises. The log line is JSON-shaped so it can

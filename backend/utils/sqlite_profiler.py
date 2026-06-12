@@ -143,7 +143,7 @@ class InstrumentedCursor(sqlite3.Cursor):
     which we accept rather than triggering an implicit fetchall().
     """
 
-    def execute(self, sql, parameters=(), /):  # type: ignore[override]
+    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:  # type: ignore[override]
         t0 = time.perf_counter()
         qid = _live_register("SQLite", sql, self.connection)
         err: BaseException | None = None
@@ -156,7 +156,7 @@ class InstrumentedCursor(sqlite3.Cursor):
             _live_deregister(qid, err)
             _record(sql, parameters, (time.perf_counter() - t0) * 1000.0, self.rowcount, "execute")
 
-    def executemany(self, sql, seq_of_parameters, /):  # type: ignore[override]
+    def executemany(self, sql: str, seq_of_parameters: Any, /) -> sqlite3.Cursor:  # type: ignore[override]
         t0 = time.perf_counter()
         qid = _live_register("SQLite", sql, self.connection)
         err: BaseException | None = None
@@ -175,7 +175,7 @@ class InstrumentedCursor(sqlite3.Cursor):
                 "executemany",
             )
 
-    def executescript(self, sql_script, /):  # type: ignore[override]
+    def executescript(self, sql_script: str, /) -> sqlite3.Cursor:  # type: ignore[override]
         t0 = time.perf_counter()
         qid = _live_register("SQLite", sql_script, self.connection)
         err: BaseException | None = None

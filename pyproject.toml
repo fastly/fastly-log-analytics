@@ -184,7 +184,6 @@ module = [
     "backend.config",
     "backend.core.duckdb",
     "backend.core.ingest",
-    "backend.core.log_fields",
     "backend.deps",
     # Per-file list inside previously-wildcarded packages. Anything not
     # listed here is now type-checked — adding a new module to one of
@@ -213,13 +212,10 @@ module = [
     "backend.utils.bot_sources",
     "backend.utils.rdns_cache",
     "backend.utils.remote_access",
-    "backend.utils.sql_validator",
-    "backend.utils.sqlite_profiler",
     "backend.utils.telemetry",
     "backend.utils.telemetry_proxy",
     "backend.utils.terraform_gen",
     "backend.utils.tunnel.manager",
-    "backend.utils.vcl_validator",
 ]
 ignore_errors = true
 

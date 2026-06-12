@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -276,7 +277,7 @@ def lint_vcl(
 def validate_recv_exclusion_regex_with_lint(
     user_regex: str,
     *,
-    build_full_snippet: callable,
+    build_full_snippet: Callable[[str], str],
     require_falco: bool = True,
 ) -> tuple[str, LintResult]:
     """One-call validation: input policy → assemble snippet → falco lint.
