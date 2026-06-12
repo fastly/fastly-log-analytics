@@ -3662,6 +3662,8 @@ export interface components {
              * @enum {string}
              */
             chart_metric: "requests" | "5xx" | "4xx" | "hit_rate" | "p50_latency" | "p95_latency" | "p99_latency" | "throughput" | "req_size" | "ttfb";
+            /** Fields */
+            fields?: string[] | null;
         };
         /** AggregatesResponse */
         AggregatesResponse: {
