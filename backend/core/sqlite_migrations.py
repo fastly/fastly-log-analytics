@@ -144,12 +144,46 @@ def _migration_003_rebuild_usage_log_hourly_summary(con: sqlite3.Connection) -> 
     )
 
 
+def _migration_004_committed_buffers(con: sqlite3.Connection) -> None:
+    """Create ``committed_buffers`` — durable checkpoint that a buffer
+    parquet was successfully appended to Iceberg.
+
+    Closes the dup-creating race in ``backend.core.iceberg.buffer
+    .commit_buffer`` between ``table.append(combined)`` (writes Iceberg
+    snapshot) and ``tombstone_buffer_files(...)`` (marks the buffer file
+    as consumed). A crash between those two steps used to leave the
+    buffer file active, causing the next commit tick to re-append the
+    same rows — observable as ~2× row duplication for the affected
+    hour. With this checkpoint, the next tick sees the
+    ``committed_buffers`` row, skips the re-append, and tombstones the
+    buffer to close the loop.
+
+    Why SQLite, not a sidecar marker file on disk: a single fsync on a
+    SQLite WAL commit beats N marker files written/synced individually,
+    and bulk lookups (`WHERE buffer_filename IN (...)`) at the start of
+    every commit tick are cheap. Per-service DB (same place as
+    ``ingested_files``), so the bucket-scoped lifecycle matches.
+
+    ``filename`` is the BASENAME only (e.g. ``batch_abc123def456.parquet``)
+    — the parent directory is implicit per the per-service buffer dir.
+    """
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS committed_buffers (
+            buffer_filename TEXT PRIMARY KEY,
+            committed_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+
+
 # Insertion order = application order. Use integer keys; gaps are not
 # allowed (`apply_pending` iterates sorted keys and stops on failure).
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_001_add_ingested_files_error_count,
     2: _migration_002_add_ingested_files_file_date,
     3: _migration_003_rebuild_usage_log_hourly_summary,
+    4: _migration_004_committed_buffers,
 }
 
 LATEST_VERSION = max(MIGRATIONS) if MIGRATIONS else 0

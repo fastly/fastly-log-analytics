@@ -88,6 +88,7 @@ from backend.core.metadata.cron_log import (
 from backend.core.metadata.ingest_log import (
     _bootstrap_ingested_files_summary,
     clear_in_flight,
+    filter_uncommitted_buffers,
     get_ingested_filenames,
     get_ingested_files_status_summary,
     get_latest_ingest_ts,
@@ -98,10 +99,13 @@ from backend.core.metadata.ingest_log import (
     get_node_count_avg,
     get_storage_stats_window,
     insert_ingested_files,
+    list_committed_basenames,
     list_in_flight,
     list_ingested_files,
     list_ingested_files_for_status,
     list_unbackfilled_fastly_edge_files,
+    mark_buffers_committed,
+    purge_committed_buffer_rows,
     record_in_flight,
     register_locally_compacted,
 )
@@ -198,6 +202,10 @@ __all__ = [
     "record_in_flight",
     "clear_in_flight",
     "list_in_flight",
+    "filter_uncommitted_buffers",
+    "list_committed_basenames",
+    "mark_buffers_committed",
+    "purge_committed_buffer_rows",
     "get_log_activity",
     "get_node_count_avg",
     # Cron runs
