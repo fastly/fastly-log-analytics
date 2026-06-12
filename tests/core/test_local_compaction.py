@@ -23,15 +23,18 @@ import pytest
 from backend.core import local_compaction as lc
 
 
-def _write_parquet(path: str, rows: int, ts_start: int = 0) -> None:
-    """Write a tiny parquet file with `rows` records."""
-    table = pa.table(
-        {
-            "timestamp": pa.array(range(ts_start, ts_start + rows), type=pa.int64()),
-            "ip": pa.array([f"10.0.0.{i % 255}" for i in range(rows)]),
-            "status": pa.array([200 + (i % 5) for i in range(rows)], type=pa.int32()),
-        }
-    )
+def _write_parquet(path: str, rows: int, ts_start: int = 0, rid_start: int | None = None) -> None:
+    """Write a tiny parquet file with `rows` records. When ``rid_start``
+    is provided, every row gets a unique ``rid`` (used to exercise the
+    dedup-by-rid pass)."""
+    cols = {
+        "timestamp": pa.array(range(ts_start, ts_start + rows), type=pa.int64()),
+        "ip": pa.array([f"10.0.0.{i % 255}" for i in range(rows)]),
+        "status": pa.array([200 + (i % 5) for i in range(rows)], type=pa.int32()),
+    }
+    if rid_start is not None:
+        cols["rid"] = pa.array([f"r{rid_start + i}" for i in range(rows)])
+    table = pa.table(cols)
     pq.write_table(table, path, compression="zstd")
 
 
@@ -68,21 +71,53 @@ def patched_cache_dir(tmp_path, monkeypatch):
 
 
 def test_skips_partitions_below_threshold(patched_cache_dir):
-    """A partition with <= min_files_per_partition files is left alone."""
+    """A single-file partition is left alone — no compaction to do."""
     src = patched_cache_dir
     cache_root = src["_test_cache_root"]
     part = os.path.join(cache_root, "data", "timestamp_hour=2026-05-30-00")
     os.makedirs(part)
-    # Only 3 files; default min_files_per_partition=3 means we need >3.
-    for i in range(3):
-        _write_parquet(os.path.join(part, f"f{i}.parquet"), rows=10, ts_start=i * 10)
+    # Only 1 file; default min_files_per_partition=1 means we need >1.
+    _write_parquet(os.path.join(part, "f0.parquet"), rows=10, ts_start=0)
 
     result = lc.compact_local_partitions(src)
 
     assert result["partitions_scanned"] == 0
     assert result["partitions_compacted"] == 0
-    # All three original files still on disk.
-    assert len([f for f in os.listdir(part) if f.endswith(".parquet")]) == 3
+    assert len([f for f in os.listdir(part) if f.endswith(".parquet")]) == 1
+
+
+def test_dedup_removes_cross_file_duplicate_rids(patched_cache_dir):
+    """Two parquet files in the same partition containing OVERLAPPING rids
+    (the orphan-pattern produced by the buffer-commit ↔ tombstone race)
+    must merge into ONE file with each rid appearing exactly once. Without
+    this guarantee the dashboard double-counts every request for hours
+    affected by the race (the 2026-06-12 audit found ~12 days affected)."""
+    src = patched_cache_dir
+    cache_root = src["_test_cache_root"]
+    part = os.path.join(cache_root, "data", "timestamp_hour=2026-05-30-02")
+    os.makedirs(part)
+    # File A: rids 1..10. File B: rids 6..15 (5 overlap with A). Merged
+    # file should contain rids 1..15 (15 unique), not 20 rows.
+    _write_parquet(os.path.join(part, "a.parquet"), rows=10, ts_start=0, rid_start=1)
+    _write_parquet(os.path.join(part, "b.parquet"), rows=10, ts_start=10, rid_start=6)
+
+    result = lc.compact_local_partitions(src)
+    assert result["partitions_compacted"] == 1
+
+    remaining = [f for f in os.listdir(part) if f.endswith(".parquet")]
+    assert len(remaining) == 1
+    merged_path = os.path.join(part, remaining[0])
+    import duckdb as _ddb
+
+    con = _ddb.connect(":memory:")
+    try:
+        n_rows, n_uniq = con.execute(
+            f"SELECT COUNT(*), COUNT(DISTINCT rid) FROM read_parquet('{merged_path}')"
+        ).fetchone()
+    finally:
+        con.close()
+    assert n_rows == 15, f"merged file must dedupe by rid, got {n_rows} rows"
+    assert n_uniq == 15
 
 
 def test_merges_partitions_above_threshold(patched_cache_dir):
