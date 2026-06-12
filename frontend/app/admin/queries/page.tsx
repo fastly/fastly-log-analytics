@@ -20,7 +20,7 @@
 
 import * as React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ArrowLeft, Group, Keyboard, Search } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Group, Keyboard, Pause, Play, Search } from 'lucide-react'
 import Link from 'next/link'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -76,6 +76,10 @@ export default function QueryMonitorPage() {
   // can spawn dozens of identical queries that otherwise drown out the
   // user's own activity.
   const [groupCrons, setGroupCrons] = React.useState(true)
+  // Manual pause stops the 300ms snapshot poll so an admin can read a row
+  // mid-incident without it shifting under them. Distinct from the
+  // tab-visibility auto-pause; this one survives focus changes.
+  const [paused, setPaused] = React.useState(false)
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
   const [detailRow, setDetailRow] = React.useState<DetailRow | null>(null)
   const searchInputRef = React.useRef<HTMLInputElement>(null)
@@ -110,7 +114,7 @@ export default function QueryMonitorPage() {
       if (!r.ok) throw new Error(`status ${r.status}`)
       return r.json()
     },
-    enabled: visible && enabled,
+    enabled: visible && enabled && !paused,
     refetchInterval: 300,
     refetchIntervalInBackground: false,
   })
@@ -175,6 +179,14 @@ export default function QueryMonitorPage() {
         handler: (e) => {
           e.preventDefault()
           setShortcutsOpen(true)
+        },
+      },
+      {
+        key: '.',
+        description: 'Pause / resume the snapshot poll',
+        handler: (e) => {
+          e.preventDefault()
+          setPaused((p) => !p)
         },
       },
       {
@@ -276,9 +288,38 @@ export default function QueryMonitorPage() {
                     visible={visible}
                     isFetching={snapshotQuery.isFetching}
                     isError={snapshotQuery.isError}
+                    paused={paused}
                   />
                 </CardTitle>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant={paused ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => {
+                      if (paused) {
+                        // Resume → immediately fetch so the user gets fresh
+                        // data on the click rather than waiting up to 300ms.
+                        setPaused(false)
+                        queryClient.invalidateQueries({
+                          queryKey: ['admin', 'query-monitor', 'snapshot'],
+                        })
+                      } else {
+                        setPaused(true)
+                      }
+                    }}
+                    title={paused ? 'Resume polling (.)' : 'Pause polling (.)'}
+                  >
+                    {paused ? (
+                      <>
+                        <Play className="h-3 w-3 mr-1" /> Resume
+                      </>
+                    ) : (
+                      <>
+                        <Pause className="h-3 w-3 mr-1" /> Pause
+                      </>
+                    )}
+                  </Button>
                   <DbFilterChips value={dbFilter} onChange={setDbFilter} />
                   <FilterChips value={kindFilter} onChange={setKindFilter} />
                   <Button
