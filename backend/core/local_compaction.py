@@ -78,6 +78,45 @@ _HOUR_PART_RE = re.compile(r"^timestamp_hour=(\d{4}-\d{2}-\d{2})-(\d{2})$")
 _DAILY_FILE_RE = re.compile(r"^daily_(\d{4}-\d{2}-\d{2})_[0-9a-f]+\.parquet$")
 
 
+def _build_merge_select_sql(paths_sql: str, cols_to_strip: list[str], has_rid: bool) -> str:
+    """SELECT clause for the COPY that produces a merged parquet.
+
+    When the schema has a ``rid`` column, dedupe by ``rid`` keeping the
+    earliest-timestamp occurrence. Without this, the buffer-commit ↔
+    tombstone window (``buffer.py:463-477`` — table.append succeeded but
+    tombstone_buffer_files crashed before running) causes the same buffer
+    file's rows to be committed twice on the retry tick → every row in
+    that batch counted twice in every dashboard query. The 2026-06-12
+    audit found ~12 days of ~2× duplication from exactly this race.
+
+    ``rid`` is Fastly's per-request id and is unique per logical request,
+    so it's the right key. NULL-rid rows pass through unchanged — the row
+    is preserved without a uniqueness guarantee. In practice prod data
+    has zero NULL rids (verified 2026-06-12), so this branch is defensive.
+
+    When the schema has no ``rid`` column (older sources, test fixtures),
+    fall through to a plain SELECT — no dedup, original behaviour.
+    """
+    exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
+    if not has_rid:
+        return f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
+    # Add _dup_rn to the EXCLUDE list so the helper column doesn't bleed
+    # into the output parquet schema.
+    inner_exclude_clause = f" EXCLUDE ({', '.join([*cols_to_strip, '_dup_rn'])})"
+    return (
+        # Non-NULL rid: dedupe, keep earliest occurrence.
+        f"SELECT *{inner_exclude_clause} FROM ("
+        f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY rid ORDER BY timestamp) AS _dup_rn"
+        f"  FROM read_parquet([{paths_sql}], union_by_name=true)"
+        f"  WHERE rid IS NOT NULL"
+        f") WHERE _dup_rn = 1"
+        f" UNION ALL BY NAME "
+        # NULL rid: pass through.
+        f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
+        f" WHERE rid IS NULL"
+    )
+
+
 def _bin_pack_files(file_paths: list[str], max_bin_size_bytes: int) -> list[list[str]]:
     """Group file_paths into bins such that the sum of file sizes in each bin
     does not exceed max_bin_size_bytes. Preserves the original file order.
@@ -114,7 +153,7 @@ def _bin_pack_files(file_paths: list[str], max_bin_size_bytes: int) -> list[list
     return bins
 
 
-def compact_local_partitions(source: dict, min_files_per_partition: int = 3, dry_run: bool = False) -> dict[str, Any]:
+def compact_local_partitions(source: dict, min_files_per_partition: int = 1, dry_run: bool = False) -> dict[str, Any]:
     """Merge small parquet files within each hour-partition directory into
     a single larger file. Additionally rolls partitions older than
     ``_DAILY_TIER_AGE_DAYS`` into per-day merged files.
@@ -122,8 +161,14 @@ def compact_local_partitions(source: dict, min_files_per_partition: int = 3, dry
     Args:
         source: service source dict (used to resolve cache path)
         min_files_per_partition: only partitions with strictly more than
-            this many files are touched. Default 3 = aggressive: any hour
-            with 4+ files gets merged.
+            this many files are touched. Default 1 — every multi-file
+            partition is eligible. This is required for the dedup-on-merge
+            pass (see ``_build_merge_select_sql``) to clean up the
+            orphan-file dup pattern: a partition with exactly 3 files (one
+            ``compacted_*`` + a 2-split ``00000-N-*`` orphan pair from a
+            buffer-commit replay) needs ``> 1`` to be considered, not the
+            previous ``> 3``. Without this, the historic 12 days of ~2×
+            duplication would never self-heal.
         dry_run: if True, report what would be done without writing.
 
     Returns:
@@ -411,11 +456,11 @@ def _compact_daily_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]:
                             ).description
                             or []
                         )
-                        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if any(d[0] == c for d in probe))
-                        exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
+                        col_names = {d[0] for d in probe}
+                        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in col_names)
+                        select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, "rid" in col_names)
                         con.execute(
-                            f"COPY (SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
-                            f" ORDER BY timestamp, ip) "
+                            f"COPY ({select_sql} ORDER BY timestamp, ip) "
                             f"TO '{_sql_escape(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
                         )
                     finally:
@@ -559,11 +604,11 @@ def _compact_weekly_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]
                             ).description
                             or []
                         )
-                        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if any(d[0] == c for d in probe))
-                        exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
+                        col_names = {d[0] for d in probe}
+                        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in col_names)
+                        select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, "rid" in col_names)
                         con.execute(
-                            f"COPY (SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
-                            f" ORDER BY timestamp, ip) "
+                            f"COPY ({select_sql} ORDER BY timestamp, ip) "
                             f"TO '{_sql_escape(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
                         )
                     finally:
@@ -634,13 +679,13 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
         # with a duplicate-column UNION ALL BY NAME on a merged file
         # that already contained them.
         probe = con.execute(f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0").description or []
-        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if any(d[0] == c for d in probe))
-        exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
+        col_names = {d[0] for d in probe}
+        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in col_names)
+        select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, "rid" in col_names)
         # zstd compression matches Fastly's parquet output and the
         # buffer-commit writer; keeps decompression cost stable.
         con.execute(
-            f"COPY (SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
-            f" ORDER BY timestamp, ip) "
+            f"COPY ({select_sql} ORDER BY timestamp, ip) "
             f"TO '{_sql_escape(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
         )
     finally:
