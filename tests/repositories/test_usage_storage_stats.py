@@ -26,26 +26,26 @@ def test_get_storage_stats_returns_filtered_files_and_bytes():
 
 
 def test_get_storage_stats_safe_from_sql_injection():
-    """The previous DuckDB implementation interpolated src['name'] directly into the SQL string.
-    The new metadata_db implementation uses parameterized queries under the hood, protecting
-    against names containing quotes or other special characters."""
+    """A malformed service_id with quote-injection characters must be rejected
+    at the data-layer chokepoint BEFORE it can reach the SQL layer.
+
+    The original version of this test exercised the parameterized-query path
+    by passing the evil name through ``get_storage_stats`` and asserting no
+    SQL errors. That scenario is now structurally impossible: commit
+    ``acf81f0`` added an ``_SERVICE_ID_RE = ^[A-Za-z0-9_-]{1,64}$`` validator
+    inside :func:`backend.core.metadata.base.get_con`, so the evil name
+    raises :class:`InvalidServiceIdError` on the very first call. The
+    parameterization is still in place (it's defense in depth), but the
+    validator catches the attack at a higher layer.
+
+    This test now pins the validator's behavior instead — if a future
+    refactor weakens the regex (e.g. allows quotes), this test trips first.
+    """
+    import pytest
+
     import backend.core.metadata_db as metadata_db
-    from backend.repositories.usage import get_storage_stats
+    from backend.core.metadata.base import InvalidServiceIdError
 
     evil_name = "test' OR 1=1; DROP TABLE ingested_files; --"
-    metadata_db.get_con(evil_name).execute("DELETE FROM ingested_files")
-
-    metadata_db.get_con(evil_name).execute(
-        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, ingested_at) VALUES "
-        "(?, ?, 100, 1024, '2024-05-10T10:00:00Z')",
-        ("file1.gz", evil_name),
-    )
-
-    src = {"name": evil_name}
-    mock_con = MagicMock()
-
-    # This would have raised a DuckDB syntax error in the old implementation
-    stats = get_storage_stats(mock_con, src, "2024-05-01T00:00:00Z", "2024-05-20T00:00:00Z")
-
-    assert stats["total_files"] == 1
-    assert stats["total_bytes"] == 1024
+    with pytest.raises(InvalidServiceIdError):
+        metadata_db.get_con(evil_name)
