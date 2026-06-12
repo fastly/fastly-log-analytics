@@ -175,32 +175,36 @@ def _build_rollup_filter_sql(rollup_filters: FiltersDict | None) -> str:
     if not rollup_filters:
         return ""
     parts: list[str] = []
-    for col, spec in rollup_filters.items():
+    for col, spec_raw in rollup_filters.items():
         if col not in ("country", "asn"):
             # Caller's eligibility gate is supposed to enforce this;
             # the check here is defense-in-depth.
             return ""
+        # ``spec`` is either a FilterSpec pydantic model OR a plain dict —
+        # the function accepts both shapes historically. Cast away here so
+        # the hasattr-or-dict-get pattern doesn't trip the type checker.
+        spec: Any = spec_raw
         values = spec.values if hasattr(spec, "values") else spec.get("values", [])
         mode = spec.mode if hasattr(spec, "mode") else spec.get("mode", "include")
         if not values:
             continue
         if col == "asn":
             # asn is INTEGER in the rollup; cast user-supplied values.
-            literals = []
+            int_literals: list[str] = []
             for v in values:
                 try:
-                    literals.append(str(int(v)))
+                    int_literals.append(str(int(v)))
                 except (TypeError, ValueError):
                     continue
-            if not literals:
+            if not int_literals:
                 continue
-            in_list = ", ".join(literals)
+            in_list = ", ".join(int_literals)
             op = "NOT IN" if mode == "exclude" else "IN"
             parts.append(f'"asn" {op} ({in_list})')
         else:  # country: VARCHAR
-            literals = ", ".join("'" + str(v).replace("'", "''") + "'" for v in values)
+            country_literals = ", ".join("'" + str(v).replace("'", "''") + "'" for v in values)
             op = "NOT IN" if mode == "exclude" else "IN"
-            parts.append(f'"country" {op} ({literals})')
+            parts.append(f'"country" {op} ({country_literals})')
     if not parts:
         return ""
     return " AND " + " AND ".join(parts)

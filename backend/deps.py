@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
+from typing import Any
 
 # Ensure the root project directory (parent of backend/) is on sys.path so
 # that the backend package is importable.
@@ -88,8 +90,11 @@ class _ConnectionHolder:
         self.con: duckdb.DuckDBPyConnection | None = None
         # Set when we exit cleanly so __exit__ knows to return-vs-discard.
         self._errored = False
-        # Used only on the pooled path so __exit__ can release.
-        self._pool_cm = None
+        # Used only on the pooled path so __exit__ can release. Typed
+        # ``Any | None`` because ``duckdb_pool.checkout_connection`` is a
+        # contextmanager-decorated generator and mypy struggles to thread
+        # its return type through.
+        self._pool_cm: Any | None = None
 
     def __enter__(self) -> duckdb.DuckDBPyConnection:
         # Write mode + skip_view_update fall back to the fresh-connection
@@ -153,7 +158,7 @@ class _ConnectionHolder:
         return False
 
 
-def get_con(source: dict = Depends(get_source)) -> duckdb.DuckDBPyConnection:
+def get_con(source: dict = Depends(get_source)) -> Iterator[duckdb.DuckDBPyConnection]:
     """Dependency that yields a DuckDB connection and closes it after the request.
 
     Always opens in read-only mode for HTTP request handlers — write-mode

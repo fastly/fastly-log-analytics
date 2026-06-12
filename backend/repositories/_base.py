@@ -540,7 +540,7 @@ class QueryRunner:
     def create_filtered_temp_table(
         self,
         cols: list[str],
-        actual_cols: list[str],
+        actual_cols: list[str] | set[str],
         source_table: str,
         where_clause: str,
         params: list | None = None,
@@ -1064,7 +1064,7 @@ class QueryRunner:
 
         # We also need to get the live active hour stats from the base table
         _t_live = time.perf_counter()
-        live_res = []
+        live_res: list[tuple] = []
         # Defined here so the partial-day block below can reuse them
         # without re-fetching if the active-hour block populated them.
         actual_cols: list[str] = []
@@ -1157,9 +1157,10 @@ class QueryRunner:
         top_results = []
         _pfl = per_field_limits or {}
         for field in fields:
-            bucket = by_field.get(field)
-            if not bucket:
+            bucket_opt: dict[Any, int] | None = by_field.get(field)
+            if not bucket_opt:
                 continue
+            bucket = bucket_opt
             _field_limit = _pfl.get(field, limit)
             # Use heapq.nlargest when truncating to a small slice of a
             # large bucket — avoids the full O(N log N) sort for the

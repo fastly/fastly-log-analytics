@@ -34,6 +34,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 _ROOT_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -315,8 +316,11 @@ def fetch_service_name(service_id: str, api_key: str) -> str | None:
     """Fetch the human-readable service name from the Fastly API.
     Returns None on failure (caller should use cached name).
     """
+    tracked_call: Any | None
     try:
-        from backend.utils.telemetry import tracked_call
+        from backend.utils.telemetry import tracked_call as _tc
+
+        tracked_call = _tc
     except ImportError:
         tracked_call = None
 
@@ -334,7 +338,7 @@ def fetch_service_name(service_id: str, api_key: str) -> str | None:
         except Exception:
             return None
 
-    if tracked_call:
+    if tracked_call is not None:
         with tracked_call("GET", f"/service/{service_id}", service="Fastly API"):
             return _do_fetch()
     return _do_fetch()

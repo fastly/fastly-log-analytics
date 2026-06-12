@@ -122,7 +122,7 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         httponly=True,
         secure=True,
         samesite="strict",
-        max_age=share_db.iso_z_now() and 24 * 60 * 60,
+        max_age=24 * 60 * 60,
         path="/",
     )
     response.delete_cookie(PENDING_COOKIE_NAME, path="/")
@@ -200,7 +200,7 @@ def share_acknowledge_tos(payload: TosAckPayload, request: Request, response: Re
         httponly=True,
         secure=True,
         samesite="strict",
-        max_age=share_db.iso_z_now() and 24 * 60 * 60,
+        max_age=24 * 60 * 60,
         path="/",
     )
     response.delete_cookie(PENDING_COOKIE_NAME, path="/")
@@ -258,5 +258,5 @@ def share_claim(token: str, request: Request):
         name=invite.get("name") if invite else None,
         email=invite.get("email") if invite else None,
         expires_at=invite.get("expires_at") if invite else None,
-        service_ids=invite.get("service_ids") if invite else [],
+        service_ids=(invite.get("service_ids") if invite else []) or [],
     )
