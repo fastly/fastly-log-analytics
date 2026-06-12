@@ -132,6 +132,23 @@ def _initialize_service(cfg: dict):
                     compute_sync_status_cached(sid)
                 except Exception as e:
                     logging.warning("[fastapi] Service %s: sync-status pre-warm failed: %s", sid, e)
+
+                # Force-open the per-service usage_log.db so the one-shot
+                # migration from the legacy metadata.db's usage_log table
+                # (carved out 2026-06-12) runs HERE in a background init
+                # thread instead of inside the first user request. On a
+                # service with ~800k usage_log rows the copy takes ~10 s
+                # of holding the per-service _init_lock — any concurrent
+                # get_con() call during that window times out (the
+                # lock's timeout=10 is much shorter than the migration).
+                # Running here means user requests after startup find
+                # the file already populated and the lock held for ~0 s.
+                try:
+                    from backend.core.metadata import usage_log_db as _usage_log_db
+
+                    _usage_log_db.get_con(sid)
+                except Exception as e:
+                    logging.warning("[fastapi] Service %s: usage_log_db pre-warm failed: %s", sid, e)
                 # Data migrations: queues any pending one-time setup work
                 # (e.g. the initial rollups backfill) onto a daemon thread
                 # per service. Returns immediately so startup isn't gated
