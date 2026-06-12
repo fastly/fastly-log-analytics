@@ -2,7 +2,7 @@
 
 import { Badge } from '@/components/ui/badge'
 
-import { durationColor, formatDuration, kindBadgeVariant } from '../_helpers'
+import { durationColor, formatDuration, formatMemoryMb, kindBadgeVariant } from '../_helpers'
 import type { CompletedRow } from '../_types'
 
 /** Shared table for completed-query rows. Used by:
@@ -12,7 +12,12 @@ import type { CompletedRow } from '../_types'
  *
  *  Capped at 50 rows on render — completed history server-side is bounded
  *  to 200 (deque maxlen); 50 fills several screens without slowing the
- *  300ms refresh cycle's diff. */
+ *  300ms refresh cycle's diff.
+ *
+ *  The Memory column only renders when at least one visible row has a
+ *  `peak_memory_mb` value. SQLite rows and DuckDB rows where the probe
+ *  failed are always null, so an all-null view collapses the column out
+ *  entirely. */
 export function CompletedTable({
   rows,
   emptyMessage = 'No completed queries yet.',
@@ -28,6 +33,7 @@ export function CompletedTable({
   const sorted = preserveOrder
     ? rows.slice(0, 50)
     : [...rows].sort((a, b) => b.query_id - a.query_id).slice(0, 50)
+  const showMemory = sorted.some((r) => r.peak_memory_mb !== null && r.peak_memory_mb !== undefined)
 
   return (
     <div className="overflow-x-auto">
@@ -39,6 +45,7 @@ export function CompletedTable({
             <th className="px-3 py-2">Caller</th>
             <th className="px-3 py-2">DB</th>
             <th className="px-3 py-2 text-right">Duration</th>
+            {showMemory && <th className="px-3 py-2 text-right">Memory</th>}
             <th className="px-3 py-2">SQL</th>
           </tr>
         </thead>
@@ -80,6 +87,11 @@ export function CompletedTable({
               <td className={`px-3 py-2 text-right font-mono ${durationColor(row.duration_ms)}`}>
                 {formatDuration(row.duration_ms)}
               </td>
+              {showMemory && (
+                <td className="px-3 py-2 text-right font-mono text-xs text-muted-foreground tabular-nums">
+                  {formatMemoryMb(row.peak_memory_mb) || '—'}
+                </td>
+              )}
               <td
                 className="px-3 py-2 font-mono text-xs text-muted-foreground truncate max-w-md"
                 title={row.sql_preview}

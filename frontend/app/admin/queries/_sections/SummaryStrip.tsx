@@ -1,5 +1,6 @@
 'use client'
 
+import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 import { Badge } from '@/components/ui/badge'
@@ -10,7 +11,11 @@ import type { SummaryResponse } from '../_types'
 /** Top-of-page strip with live counts + longest in-flight duration.
  *  Polls the cheap `/api/admin/queries/summary` endpoint independently
  *  from the main snapshot so the badge stays fresh even when the table
- *  hides the row that's driving the "longest" value. */
+ *  hides the row that's driving the "longest" value.
+ *
+ *  Includes a screen-reader live region (`role="status"`, `aria-live=polite`)
+ *  that announces the count only when it actually changes — without the
+ *  memoisation the announcement would re-fire every 300ms poll. */
 export function SummaryStrip() {
   const visible = useDocumentVisible()
   const { data } = useQuery<SummaryResponse>({
@@ -26,6 +31,13 @@ export function SummaryStrip() {
     refetchInterval: 300,
     refetchIntervalInBackground: false,
   })
+  // Stable string for the live region. Only re-renders when the count
+  // changes, so screen readers don't fire on every poll. Pluralise so
+  // it reads as English, not "1 active queries".
+  const liveLabel = React.useMemo(() => {
+    if (!data) return ''
+    return `${data.active_total} active ${data.active_total === 1 ? 'query' : 'queries'}`
+  }, [data?.active_total])
   if (!data) return null
   return (
     <div className="flex items-center gap-3 text-sm">
@@ -42,6 +54,9 @@ export function SummaryStrip() {
           longest: {formatDuration(data.longest_ms)}
         </span>
       )}
+      <div role="status" aria-live="polite" className="sr-only">
+        {liveLabel}
+      </div>
     </div>
   )
 }

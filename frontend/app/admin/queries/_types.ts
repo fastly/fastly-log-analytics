@@ -42,6 +42,11 @@ export interface CompletedRow extends Omit<ActiveRow, 'cancellable' | 'cancelled
   outcome: 'ok' | 'error' | 'cancelled'
   error_type: string | null
   error_message: string | null
+  /** Memory still held by the DuckDB connection at deregister time, in MB.
+   *  `null` for SQLite rows and for any DuckDB row where the probe failed
+   *  (closed connection, version mismatch). Frontend skips the column when
+   *  every visible row is `null`. */
+  peak_memory_mb: number | null
 }
 
 export interface SnapshotResponse {

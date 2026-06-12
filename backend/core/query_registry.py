@@ -122,6 +122,11 @@ class CompletedQuery:
     outcome: str  # "ok" | "error" | "cancelled"
     error_type: str | None = None
     error_message: str | None = None
+    # Peak resident memory the engine reported at deregister time. Only
+    # populated for DuckDB rows when the connection is still alive and the
+    # ``memory_used`` setting returns a parseable value (see
+    # :func:`backend.core.query_instrumentation._probe_duckdb_memory`).
+    peak_memory_mb: float | None = None
 
 
 def _truncate(text: str, cap: int) -> str:
@@ -230,7 +235,13 @@ class QueryRegistry:
             logger.debug("query_registry.register failed", exc_info=True)
             return -1
 
-    def deregister(self, qid: int, *, error: BaseException | None = None) -> None:
+    def deregister(
+        self,
+        qid: int,
+        *,
+        error: BaseException | None = None,
+        peak_memory_mb: float | None = None,
+    ) -> None:
         if qid < 0:
             return
         try:
@@ -268,6 +279,7 @@ class QueryRegistry:
                     outcome=outcome,
                     error_type=err_type,
                     error_message=err_msg,
+                    peak_memory_mb=peak_memory_mb,
                 )
             )
 
@@ -465,6 +477,7 @@ def _row_for_completed(c: CompletedQuery, full_sql: bool) -> dict[str, Any]:
         "outcome": c.outcome,
         "error_type": c.error_type,
         "error_message": c.error_message,
+        "peak_memory_mb": c.peak_memory_mb,
     }
 
 

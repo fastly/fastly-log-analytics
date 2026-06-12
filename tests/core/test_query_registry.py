@@ -18,7 +18,12 @@ from backend.core.query_attribution import (
     current_attribution,
     derive_from_process_context,
 )
-from backend.core.query_instrumentation import InstrumentedDuckDBConnection
+from backend.core.query_instrumentation import (
+    InstrumentedDuckDBConnection,
+    _InstrumentedRecordReader,
+    _parse_memory_mb,
+    _probe_duckdb_memory,
+)
 from backend.core.query_registry import QueryRegistry, query_registry
 from backend.utils.sqlite_profiler import InstrumentedConnection
 
@@ -301,6 +306,145 @@ class TestDuckDBResultWrapper:
         assert matches
         assert matches[-1]["outcome"] == "error"
         assert "nonexistent" in (matches[-1]["error_message"] or "").lower() or matches[-1]["error_type"]
+
+
+# ── Peak memory probe ─────────────────────────────────────────────────────────
+
+
+class TestPeakMemory:
+    def test_parse_memory_mb_int(self):
+        assert _parse_memory_mb(1_048_576) == 1.0  # 1 MiB exactly
+        assert _parse_memory_mb(0) == 0.0
+        assert _parse_memory_mb(None) is None
+
+    def test_parse_memory_mb_strings(self):
+        assert _parse_memory_mb("1024") == round(1024 / (1024 * 1024), 2)
+        assert _parse_memory_mb("1 MiB") == 1.0
+        assert _parse_memory_mb("1 GiB") == 1024.0
+        assert _parse_memory_mb("1.5 GiB") == 1536.0
+        assert _parse_memory_mb("512 MB") == round(512_000_000 / (1024 * 1024), 2)
+        assert _parse_memory_mb("0 bytes") == 0.0
+
+    def test_parse_memory_mb_garbage(self):
+        assert _parse_memory_mb("") is None
+        assert _parse_memory_mb("not a number") is None
+        assert _parse_memory_mb("3 yibibytes") is None  # unknown unit
+        assert _parse_memory_mb(object()) is None
+
+    def test_probe_returns_some_value_on_live_connection(self):
+        raw = duckdb.connect(":memory:")
+        raw.execute("CREATE TABLE t AS SELECT i FROM range(500_000) tbl(i)")
+        mb = _probe_duckdb_memory(raw)
+        # Materialised table should hold non-trivial memory; if DuckDB
+        # reports zero on this machine the probe still must not crash.
+        assert mb is None or mb >= 0.0
+
+    def test_probe_swallows_errors(self):
+        # A non-duckdb object (no .cursor()) must not crash the probe.
+        assert _probe_duckdb_memory(object()) is None
+
+    def test_completed_row_has_peak_memory_field(self):
+        """The CompletedQuery JSON shape carries peak_memory_mb on every
+        row (None for SQLite / probe-failure paths). The frontend uses
+        the field's presence to decide whether to render the column."""
+        from backend.core.query_registry import query_registry as singleton
+
+        raw = duckdb.connect(":memory:")
+        con = InstrumentedDuckDBConnection(raw, service_id="mem_test_svc")
+        con.execute("CREATE TABLE t AS SELECT i FROM range(100_000) tbl(i)").fetchall()
+        hist = singleton.snapshot(include_completed=True)["completed"]
+        matches = [c for c in hist if c["service_id"] == "mem_test_svc"]
+        assert matches, "expected CREATE TABLE to land in completed history"
+        assert "peak_memory_mb" in matches[-1]
+
+    def test_sqlite_completed_row_has_null_peak_memory(self):
+        """SQLite never has a meaningful memory value; the field exists but
+        stays None so the frontend renders consistently."""
+        from backend.core.query_registry import query_registry as singleton
+
+        con = sqlite3.connect(":memory:", factory=InstrumentedConnection)
+        con.execute("CREATE TABLE x (i INT)").fetchall()
+        hist = singleton.snapshot(include_completed=True)["completed"]
+        sqlite_rows = [c for c in hist if c["db_type"] == "SQLite"]
+        assert sqlite_rows
+        assert sqlite_rows[-1]["peak_memory_mb"] is None
+
+
+# ── Streaming RecordBatchReader wrapper (.arrow() / fetch_record_batch) ──────
+
+
+class TestRecordBatchReader:
+    def test_arrow_iteration_holds_registration_until_consumed(self):
+        """``.arrow()`` returns a streaming reader; deregistration must
+        wait for iteration to complete. Without :class:`_InstrumentedRecordReader`,
+        a long downstream consumer would see ~0ms duration on the row."""
+        from backend.core.query_registry import query_registry as singleton
+
+        raw = duckdb.connect(":memory:")
+        con = InstrumentedDuckDBConnection(raw, service_id="arrow_svc")
+        con.execute("CREATE TABLE big AS SELECT i FROM range(500_000) tbl(i)").fetchall()
+        reader = con.execute("SELECT * FROM big").arrow()
+        # The reader was just returned — query should still be active.
+        active = singleton.snapshot()["active"]
+        active_for_reader = [r for r in active if r["service_id"] == "arrow_svc"]
+        assert active_for_reader, "row deregistered before reader iteration — _InstrumentedRecordReader missing?"
+
+        # Drain the reader; query should deregister.
+        total_rows = 0
+        for batch in reader:
+            total_rows += batch.num_rows
+            # Simulate slow consumer.
+            time.sleep(0.005)
+        assert total_rows == 500_000
+
+        # Now the query has moved to completed history.
+        hist = singleton.snapshot(include_completed=True)["completed"]
+        matches = [c for c in hist if c["service_id"] == "arrow_svc" and "SELECT * FROM big" in c["sql_preview"]]
+        assert matches, "expected SELECT to deregister after reader iteration"
+
+    def test_to_arrow_table_materialises_immediately(self):
+        """Sanity check that ``to_arrow_table()`` (the materialising call
+        used by [iceberg/buffer.py:666](backend/core/iceberg/buffer.py#L666))
+        still deregisters at the method-call boundary, not after iteration.
+        It's listed in ``_TERMINAL_METHODS``, not ``_READER_METHODS``."""
+        from backend.core.query_registry import query_registry as singleton
+
+        raw = duckdb.connect(":memory:")
+        con = InstrumentedDuckDBConnection(raw, service_id="materialised_svc")
+        con.execute("CREATE TABLE x AS SELECT i FROM range(10_000) tbl(i)").fetchall()
+        table = con.execute("SELECT * FROM x").to_arrow_table()
+        assert table.num_rows == 10_000
+        # Already deregistered before we even checked.
+        active = singleton.snapshot()["active"]
+        assert not [r for r in active if r["service_id"] == "materialised_svc"]
+
+    def test_reader_close_completes_registration(self):
+        """If the consumer never iterates but calls close(), the wrapper
+        still drives deregistration so the registry doesn't leak."""
+        from backend.core.query_registry import query_registry as singleton
+
+        raw = duckdb.connect(":memory:")
+        con = InstrumentedDuckDBConnection(raw, service_id="close_svc")
+        con.execute("CREATE TABLE y AS SELECT i FROM range(100) tbl(i)").fetchall()
+        reader = con.execute("SELECT * FROM y").arrow()
+        reader.close()
+        active = singleton.snapshot()["active"]
+        assert not [r for r in active if r["service_id"] == "close_svc"]
+
+    def test_reader_wrapper_passes_through_schema(self):
+        """The wrapper must delegate non-completion attribute access (like
+        the ``schema`` attribute) so callers that introspect the reader
+        keep working."""
+        raw = duckdb.connect(":memory:")
+        con = InstrumentedDuckDBConnection(raw, service_id="schema_svc")
+        con.execute("CREATE TABLE z AS SELECT 1 as a, 'x' as b").fetchall()
+        reader = con.execute("SELECT * FROM z").arrow()
+        assert isinstance(reader, _InstrumentedRecordReader)
+        # schema attribute is delegated to the raw reader
+        assert hasattr(reader, "schema")
+        names = [f.name for f in reader.schema]
+        assert names == ["a", "b"]
+        reader.close()
 
 
 # ── SQLite InstrumentedCursor integration ──────────────────────────────────

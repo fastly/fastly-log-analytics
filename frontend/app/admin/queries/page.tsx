@@ -14,7 +14,7 @@
 
 import * as React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ArrowLeft } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Keyboard, Layers, Search, Volume2, VolumeX } from 'lucide-react'
 import Link from 'next/link'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -25,14 +25,15 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page-header'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Search } from 'lucide-react'
 import { extractApiError } from '@/lib/api'
 
 import { useDocumentVisible } from './_helpers'
+import { useKeyboardShortcuts, type ShortcutBinding } from './_hooks/useKeyboardShortcuts'
 import { ActiveTable } from './_sections/ActiveTable'
 import { CompletedTable } from './_sections/CompletedTable'
 import { FilterChips } from './_sections/FilterChips'
 import { PollingIndicator } from './_sections/PollingIndicator'
+import { ShortcutsHelp } from './_sections/ShortcutsHelp'
 import { SummaryStrip } from './_sections/SummaryStrip'
 import type {
   ActiveOrPromotedRow,
@@ -45,6 +46,9 @@ import type {
   ViewMode,
 } from './_types'
 
+const SOUND_STORAGE_KEY = 'qm:sound-enabled'
+const DEFAULT_SLOW_THRESHOLD_MS = 500
+
 export default function QueryMonitorPage() {
   const queryClient = useQueryClient()
   const visible = useDocumentVisible()
@@ -54,7 +58,78 @@ export default function QueryMonitorPage() {
   const [confirmKill, setConfirmKill] = React.useState<ActiveRow | null>(null)
   const [actionError, setActionError] = React.useState<string>('')
   const [viewMode, setViewMode] = React.useState<ViewMode>('all')
-  const [slowThresholdMs, setSlowThresholdMs] = React.useState(500)
+  const [slowThresholdMs, setSlowThresholdMs] = React.useState(DEFAULT_SLOW_THRESHOLD_MS)
+  const [groupByRun, setGroupByRun] = React.useState(false)
+  const [focusedQid, setFocusedQid] = React.useState<number | null>(null)
+  const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
+  const [soundEnabled, setSoundEnabled] = React.useState(false)
+  const searchInputRef = React.useRef<HTMLInputElement>(null)
+
+  // Hydrate filter state from URL on mount. Single-shot; subsequent
+  // changes flow URL ← state via the write effect below. Pattern mirrors
+  // `useFilterUrlSync` — replaceState (not router.replace) so Next doesn't
+  // refresh the page on every filter tweak.
+  const hydratedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (hydratedRef.current) return
+    if (typeof window === 'undefined') return
+    const p = new URLSearchParams(window.location.search)
+    const q = p.get('q')
+    const kind = p.get('kind')
+    const view = p.get('view')
+    const slow = p.get('slow')
+    const group = p.get('group')
+    if (q !== null) setSearch(q)
+    if (kind === 'analyst' || kind === 'admin' || kind === 'cron' || kind === 'system') {
+      setKindFilter(kind)
+    }
+    if (view === 'live' || view === 'past' || view === 'all') setViewMode(view as ViewMode)
+    if (slow !== null) {
+      const n = parseInt(slow, 10)
+      if (Number.isFinite(n) && n > 0) setSlowThresholdMs(n)
+    }
+    if (group === 'run') setGroupByRun(true)
+    // Restore the sound preference (localStorage so it persists across
+    // sessions for this browser without leaking into the URL).
+    try {
+      const stored = window.localStorage.getItem(SOUND_STORAGE_KEY)
+      if (stored === '1') setSoundEnabled(true)
+    } catch {
+      // localStorage blocked (Safari private mode etc) — silently ignore.
+    }
+    hydratedRef.current = true
+  }, [])
+
+  // Write filter/view state to URL on change. Stripped to only the
+  // non-default values so the URL stays clean for default views.
+  React.useEffect(() => {
+    if (!hydratedRef.current) return
+    if (typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    if (search) url.searchParams.set('q', search)
+    else url.searchParams.delete('q')
+    if (kindFilter !== 'all') url.searchParams.set('kind', kindFilter)
+    else url.searchParams.delete('kind')
+    if (viewMode !== 'all') url.searchParams.set('view', viewMode)
+    else url.searchParams.delete('view')
+    if (slowThresholdMs !== DEFAULT_SLOW_THRESHOLD_MS) url.searchParams.set('slow', String(slowThresholdMs))
+    else url.searchParams.delete('slow')
+    if (groupByRun) url.searchParams.set('group', 'run')
+    else url.searchParams.delete('group')
+    window.history.replaceState({}, '', url.toString())
+  }, [search, kindFilter, viewMode, slowThresholdMs, groupByRun])
+
+  // Persist the sound toggle separately — localStorage, not URL, since
+  // it's a user preference rather than a shareable view.
+  React.useEffect(() => {
+    if (!hydratedRef.current) return
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(SOUND_STORAGE_KEY, soundEnabled ? '1' : '0')
+    } catch {
+      // ignore
+    }
+  }, [soundEnabled])
 
   // Feature-flag check; if disabled, render a clear empty state.
   const { data: cfg } = useQuery<MonitorConfig>({
@@ -173,14 +248,154 @@ export default function QueryMonitorPage() {
 
   const completed = snapshotQuery.data?.completed ?? []
 
-  const requestKill = (row: ActiveRow) => {
-    setActionError('')
-    if (row.attribution.kind === 'cron' || row.attribution.kind === 'system') {
-      setConfirmKill(row)
-    } else {
-      cancelMutation.mutate(row.query_id)
+  // Keep focusedQid valid: drop it if the focused row is no longer in
+  // the visible list. The keyboard nav clamps to first/last via
+  // `navigateFocus`, but a row that disappeared between renders needs
+  // to be cleared so `x` doesn't try to cancel a stale id.
+  React.useEffect(() => {
+    if (focusedQid === null) return
+    if (!filteredActive.some((r) => r.query_id === focusedQid)) {
+      setFocusedQid(null)
     }
-  }
+  }, [filteredActive, focusedQid])
+
+  // Sound notification on NEW errors. Tracks which error query_ids we've
+  // already announced so a row sticking around in the completed window
+  // doesn't beep on every poll. Reset when the user disables sound.
+  const announcedErrorIdsRef = React.useRef<Set<number>>(new Set())
+  React.useEffect(() => {
+    if (!soundEnabled) {
+      announcedErrorIdsRef.current.clear()
+      return
+    }
+    const errorRows = (snapshotQuery.data?.completed ?? []).filter((c) => c.outcome === 'error')
+    const newOnes = errorRows.filter((c) => !announcedErrorIdsRef.current.has(c.query_id))
+    if (newOnes.length === 0) return
+    for (const c of newOnes) announcedErrorIdsRef.current.add(c.query_id)
+    // First poll while sound is on: don't beep retroactively for errors
+    // that completed before the user enabled sound. Only beep when we
+    // already had a baseline.
+    if (announcedErrorIdsRef.current.size === newOnes.length) return
+    playErrorTone()
+  }, [snapshotQuery.data, soundEnabled])
+
+  const requestKill = React.useCallback(
+    (row: ActiveRow) => {
+      setActionError('')
+      if (row.attribution.kind === 'cron' || row.attribution.kind === 'system') {
+        setConfirmKill(row)
+      } else {
+        cancelMutation.mutate(row.query_id)
+      }
+    },
+    [cancelMutation],
+  )
+
+  const navigateFocus = React.useCallback(
+    (delta: number) => {
+      if (filteredActive.length === 0) return
+      const ids = filteredActive.map((r) => r.query_id)
+      if (focusedQid === null) {
+        setFocusedQid(delta > 0 ? ids[0] : ids[ids.length - 1])
+        return
+      }
+      const i = ids.indexOf(focusedQid)
+      if (i === -1) {
+        setFocusedQid(ids[0])
+        return
+      }
+      const next = Math.max(0, Math.min(ids.length - 1, i + delta))
+      setFocusedQid(ids[next])
+    },
+    [filteredActive, focusedQid],
+  )
+
+  const shortcuts = React.useMemo<ShortcutBinding[]>(
+    () => [
+      {
+        key: '/',
+        description: 'Focus the search field',
+        handler: (e) => {
+          e.preventDefault()
+          searchInputRef.current?.focus()
+          searchInputRef.current?.select()
+        },
+      },
+      {
+        key: 'j',
+        description: 'Focus next row',
+        handler: (e) => {
+          e.preventDefault()
+          navigateFocus(1)
+        },
+      },
+      {
+        key: 'k',
+        description: 'Focus previous row',
+        handler: (e) => {
+          e.preventDefault()
+          navigateFocus(-1)
+        },
+      },
+      {
+        key: 'Enter',
+        description: 'Toggle expand on focused row',
+        handler: (e) => {
+          if (focusedQid === null) return
+          e.preventDefault()
+          setExpandedQid((prev) => (prev === focusedQid ? null : focusedQid))
+        },
+      },
+      {
+        key: 'x',
+        description: 'Cancel focused query',
+        handler: (e) => {
+          if (focusedQid === null) return
+          const row = filteredActive.find((r) => r.query_id === focusedQid && !r._completed) as
+            | ActiveRow
+            | undefined
+          if (!row || !row.cancellable || row.cancelled_at !== null) return
+          e.preventDefault()
+          requestKill(row)
+        },
+      },
+      {
+        key: '?',
+        description: 'Show keyboard shortcuts',
+        handler: (e) => {
+          e.preventDefault()
+          setShortcutsOpen(true)
+        },
+      },
+      {
+        key: 'Escape',
+        description: 'Close drawer / dialog / overlay',
+        allowInForms: true,
+        handler: () => {
+          if (shortcutsOpen) {
+            setShortcutsOpen(false)
+            return
+          }
+          if (confirmKill) {
+            setConfirmKill(null)
+            return
+          }
+          if (expandedQid !== null) {
+            setExpandedQid(null)
+            return
+          }
+          // Last resort: blur the search input so the user can immediately
+          // start using row-level shortcuts.
+          if (document.activeElement === searchInputRef.current) {
+            searchInputRef.current?.blur()
+          }
+        },
+      },
+    ],
+    [navigateFocus, focusedQid, filteredActive, requestKill, shortcutsOpen, confirmKill, expandedQid],
+  )
+
+  useKeyboardShortcuts(shortcuts, enabled)
 
   return (
     <div className="space-y-6">
@@ -205,7 +420,38 @@ export default function QueryMonitorPage() {
 
       {enabled && (
         <>
-          <SummaryStrip />
+          <div className="flex items-center justify-between gap-3">
+            <SummaryStrip />
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2"
+                onClick={() => setSoundEnabled((v) => !v)}
+                title={soundEnabled ? 'Disable sound on errors' : 'Enable sound on errors'}
+                aria-pressed={soundEnabled}
+              >
+                {soundEnabled ? (
+                  <Volume2 className="h-4 w-4 text-primary" />
+                ) : (
+                  <VolumeX className="h-4 w-4 text-muted-foreground" />
+                )}
+                <span className="sr-only">
+                  {soundEnabled ? 'Disable sound notifications' : 'Enable sound notifications'}
+                </span>
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2"
+                onClick={() => setShortcutsOpen(true)}
+                title="Keyboard shortcuts (?)"
+              >
+                <Keyboard className="h-4 w-4 text-muted-foreground" />
+                <span className="sr-only">Show keyboard shortcuts</span>
+              </Button>
+            </div>
+          </div>
 
           {actionError && (
             <Alert variant="destructive">
@@ -238,10 +484,21 @@ export default function QueryMonitorPage() {
                   />
                 </CardTitle>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant={groupByRun ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-8 px-2 text-xs gap-1.5"
+                    onClick={() => setGroupByRun((v) => !v)}
+                    title="Group cron rows by run id"
+                    aria-pressed={groupByRun}
+                  >
+                    <Layers className="h-3.5 w-3.5" /> Group runs
+                  </Button>
                   <FilterChips value={kindFilter} onChange={setKindFilter} />
                   <div className="relative">
                     <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                     <Input
+                      ref={searchInputRef}
                       placeholder="Filter by SQL or caller…"
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
@@ -257,6 +514,8 @@ export default function QueryMonitorPage() {
                   onToggleRow={(qid) => setExpandedQid(expandedQid === qid ? null : qid)}
                   onKill={requestKill}
                   cancellingQid={cancelMutation.variables ?? null}
+                  focusedQid={focusedQid}
+                  groupByRun={groupByRun}
                 />
               </CardContent>
             </Card>
@@ -331,6 +590,45 @@ export default function QueryMonitorPage() {
           }}
         />
       )}
+
+      <ShortcutsHelp open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
     </div>
   )
+}
+
+/** Short, attention-getting blip via Web Audio. ~200ms total. No asset
+ *  to ship and no permission prompt — just two oscillator pings. Wrapped
+ *  in try/catch because AudioContext can throw if the user hasn't yet
+ *  interacted with the page (browsers gate autoplay-style audio). The
+ *  toggle is opt-in and the user clicks it, which counts as interaction
+ *  for the AudioContext gesture requirement. */
+function playErrorTone() {
+  try {
+    const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+    if (!AC) return
+    const ctx = new AC()
+    const now = ctx.currentTime
+    for (const [freq, delay] of [
+      [880, 0],
+      [660, 0.12],
+    ] as const) {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'sine'
+      osc.frequency.value = freq
+      // Quick attack + decay so it sounds like a UI ping, not a bell.
+      gain.gain.setValueAtTime(0.0001, now + delay)
+      gain.gain.exponentialRampToValueAtTime(0.12, now + delay + 0.01)
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + delay + 0.10)
+      osc.connect(gain).connect(ctx.destination)
+      osc.start(now + delay)
+      osc.stop(now + delay + 0.12)
+    }
+    // Close the context after the tones finish so we don't leak audio
+    // graph state in the page.
+    setTimeout(() => ctx.close().catch(() => {}), 400)
+  } catch {
+    // Autoplay blocked, no Web Audio, etc. The toggle being on is best
+    // effort — silent failure beats a crash on a notification.
+  }
 }

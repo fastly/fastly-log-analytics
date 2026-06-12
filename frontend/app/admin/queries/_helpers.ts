@@ -58,3 +58,13 @@ export function kindBadgeVariant(
       return 'outline'
   }
 }
+
+/** Format a memory value (in MB) for display. Returns an empty string for
+ *  null/undefined so table cells can render placeholder dashes consistently
+ *  without ternaries at every call site. */
+export function formatMemoryMb(mb: number | null | undefined): string {
+  if (mb === null || mb === undefined) return ''
+  if (mb < 1) return `${Math.round(mb * 1024)} KB`
+  if (mb < 1024) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`
+  return `${(mb / 1024).toFixed(2)} GB`
+}
