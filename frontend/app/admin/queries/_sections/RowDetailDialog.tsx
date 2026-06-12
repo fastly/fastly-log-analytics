@@ -14,8 +14,9 @@
  * keeps ticking while the operator reads the SQL.
  */
 
+import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { X } from 'lucide-react'
+import { Check, Copy, X } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -159,9 +160,12 @@ export function RowDetailDialog({
           )}
         </div>
 
-        <pre className="bg-muted/50 border rounded p-3 text-xs overflow-auto whitespace-pre-wrap font-mono max-h-96">
-          {sql}
-        </pre>
+        <div className="relative">
+          <CopySqlButton sql={sql} />
+          <pre className="bg-muted/50 border rounded p-3 pr-12 text-xs overflow-auto whitespace-pre-wrap font-mono max-h-96">
+            {sql}
+          </pre>
+        </div>
         {row.sql_len > 200 && !fullRow && isLive && (
           <div className="text-xs text-muted-foreground">Loading full SQL ({row.sql_len} chars)…</div>
         )}
@@ -183,5 +187,47 @@ export function RowDetailDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/** Tiny floating Copy button anchored to the top-right of the SQL <pre>.
+ *  Flashes a checkmark on success and reverts after 1.5 s — enough to
+ *  confirm the click without lingering UI noise. Falls back silently if
+ *  the Clipboard API is unavailable (e.g. insecure context); copying SQL
+ *  is convenience, not safety-critical. */
+function CopySqlButton({ sql }: { sql: string }) {
+  const [copied, setCopied] = React.useState(false)
+  React.useEffect(() => {
+    if (!copied) return
+    const t = setTimeout(() => setCopied(false), 1500)
+    return () => clearTimeout(t)
+  }, [copied])
+  const onClick = async () => {
+    if (typeof navigator === 'undefined' || !navigator.clipboard) return
+    try {
+      await navigator.clipboard.writeText(sql)
+      setCopied(true)
+    } catch {
+      // ignore — common in non-secure contexts and on permission denial
+    }
+  }
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      className="absolute top-1.5 right-1.5 h-7 px-2 text-xs"
+      onClick={onClick}
+      title="Copy SQL to clipboard"
+    >
+      {copied ? (
+        <>
+          <Check className="h-3 w-3 mr-1" /> Copied
+        </>
+      ) : (
+        <>
+          <Copy className="h-3 w-3 mr-1" /> Copy
+        </>
+      )}
+    </Button>
   )
 }
