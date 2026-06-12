@@ -41,6 +41,8 @@ import pyarrow.parquet as pq
 from pyiceberg.exceptions import CommitFailedException
 from pyiceberg.table.name_mapping import create_mapping_from_schema
 
+from backend.core import metadata as _meta_mod
+
 # Late-bind helpers from the main _core module (it's mid-load when this
 # file imports). __getattr__ catches any bare-name resolution that
 # falls through manifest.py's pattern.
@@ -185,6 +187,7 @@ def sweep_tombstoned_buffer_files(
     if not os.path.isdir(buf):
         return 0
     swept = 0
+    purged_basenames: list[str] = []
     for marker in _glob.glob(os.path.join(buf, "**", "*" + _TOMBSTONE_SUFFIX + "*"), recursive=True):
         base = os.path.basename(marker)
         if not _is_tombstone_marker(base):
@@ -209,7 +212,22 @@ def sweep_tombstoned_buffer_files(
             os.remove(marker)
         except Exception as e:
             logger.warning("%s Sweep failed to unlink tombstone %s: %s", _core_mod._ICE, marker, e)
+        purged_basenames.append(os.path.basename(parquet_path))
         swept += 1
+    # Drop the matching committed_buffers checkpoint rows once the
+    # parquet they referenced is gone from disk — keeps that table
+    # bounded over time. Done in one batched DELETE per sweep to avoid
+    # 1k tiny commits on a busy service.
+    if purged_basenames:
+        try:
+            service_id = source.get("service_id") or source.get("name", "")
+            _meta_mod.purge_committed_buffer_rows(service_id, purged_basenames)
+        except Exception as e:
+            logger.warning(
+                "%s Sweep failed to purge committed_buffers rows (will retry next tick): %s",
+                _core_mod._ICE,
+                e,
+            )
     return swept
 
 
@@ -400,6 +418,44 @@ def commit_buffer(source: dict, progress_callback=None) -> dict:
     if not files:
         return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
 
+    # Crash-recovery: tombstone any buffer file whose previous commit
+    # tick succeeded at ``table.append`` but died before
+    # ``tombstone_buffer_files`` ran. Without this skip, we'd re-append
+    # the same rows to Iceberg → duplicate rows in the data lake. With
+    # the ``committed_buffers`` checkpoint written between the append
+    # and the tombstone (see ``mark_buffers_committed`` below), the
+    # crash window is just the SQLite write itself (milliseconds);
+    # anything caught here is residue from that small window.
+    service_id = source.get("service_id") or source.get("name", "")
+    try:
+        all_basenames = [os.path.basename(p) for p in files]
+        already_committed = _meta_mod.list_committed_basenames(service_id, all_basenames)
+    except Exception as recovery_err:
+        # Recovery failure must NEVER block a commit — fall through and
+        # accept the dup risk for this tick (compaction-dedup cleans up).
+        logger.warning("%s commit-recovery lookup raised (continuing): %s", _core_mod._ICE, recovery_err)
+        already_committed = set()
+    if already_committed:
+        recovered_paths = [p for p in files if os.path.basename(p) in already_committed]
+        logger.warning(
+            "%s commit-recovery: %d buffer file(s) had committed_buffers rows but no tombstone — "
+            "tombstoning now and skipping re-append",
+            _core_mod._ICE,
+            len(recovered_paths),
+        )
+        try:
+            tombstone_buffer_files(source, recovered_paths)
+        except Exception as ts_err:
+            logger.warning("%s commit-recovery tombstone failed (continuing): %s", _core_mod._ICE, ts_err)
+        files = [p for p in files if os.path.basename(p) not in already_committed]
+        if not files:
+            return {
+                "files_committed": 0,
+                "rows_committed": 0,
+                "snapshot_id": None,
+                "quarantined_files": 0,
+            }
+
     if progress_callback:
         progress_callback("status", f"Found {len(files)} buffer file(s) to commit")
 
@@ -466,6 +522,28 @@ def commit_buffer(source: dict, progress_callback=None) -> dict:
         del tables, combined
         snapshot_id = table.current_snapshot().snapshot_id if table.current_snapshot() else snapshot_id
         total_rows += chunk_rows
+        # Durable checkpoint: record that THIS buffer batch has been
+        # appended BEFORE tombstoning. If we crash between this line and
+        # the tombstone below, the next commit tick's recovery sweep
+        # (above) sees the committed_buffers row, tombstones the buffer,
+        # and skips the re-append — no duplicate rows. The previous
+        # design (no checkpoint) relied on the tombstone alone, so a
+        # crash in this window let the next tick re-read the buffer and
+        # re-append it. That race produced the ~12-day, ~2× row
+        # duplication audited 2026-06-12 (PR #21 added compaction-dedup
+        # as a safety net; this is the source-side fix that prevents
+        # the dups from being created in the first place).
+        try:
+            _meta_mod.mark_buffers_committed(service_id, [os.path.basename(p) for p in chunk_successful])
+        except Exception as ckpt_err:
+            # If the checkpoint write fails we've lost our crash-recovery
+            # signal for this batch — log and continue. Worst case: a
+            # crash before tombstone → dup → compaction-dedup heals.
+            logger.warning(
+                "%s mark_buffers_committed failed (continuing, dup risk on crash): %s",
+                _core_mod._ICE,
+                ckpt_err,
+            )
         # Per-chunk tombstone: if we crash on a later chunk, the next
         # commit cron only re-processes the un-committed remainder
         # (tombstoned files are excluded from buffer_files()). The
