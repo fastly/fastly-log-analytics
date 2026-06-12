@@ -97,11 +97,19 @@ def _live_register(db_type: str, sql: Any, con: Any) -> int:
     """Register the executing statement with the Live Query Monitor's
     registry and bind ``query_id`` into the structlog context. Mirrors the
     profiler's contract: any failure here is swallowed at DEBUG and the SQL
-    path continues unaffected."""
+    path continues unaffected.
+
+    Reads ``con._service_id`` (stashed by
+    :func:`backend.core.metadata.base.get_con`) so the live monitor can
+    tag SQLite rows with the service whose metadata.db they're hitting.
+    Connections opened by code that bypasses ``get_con`` (test fixtures,
+    introspection scripts) have no such attribute and surface as
+    ``service: null`` rather than crashing."""
     try:
         from backend.core.query_registry import query_registry
 
-        qid = query_registry.register(db_type, str(sql), con=con)
+        service_id = getattr(con, "_service_id", None)
+        qid = query_registry.register(db_type, str(sql), service_id=service_id, con=con)
         if qid >= 0:
             structlog.contextvars.bind_contextvars(query_id=qid)
         return qid

@@ -268,9 +268,10 @@ function ActiveTableRow({
         </td>
         <td
           className="px-3 py-2 font-mono text-xs text-muted-foreground truncate max-w-xs"
-          title={row.attribution.caller_file}
+          title={`${row.attribution.caller_qualname}\n${row.attribution.caller_file}`}
         >
-          {row.attribution.caller_file}
+          <div className="truncate">{row.attribution.caller_qualname}</div>
+          <div className="truncate text-[10px] opacity-60">{row.attribution.caller_file}</div>
         </td>
         <td className="px-3 py-2">{row.db_type}</td>
         <td className="px-3 py-2 text-xs">{row.service_id ?? '—'}</td>
