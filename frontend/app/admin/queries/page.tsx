@@ -6,14 +6,21 @@
  * kill button. Admin-only (the route lives under /api/admin/* so
  * RemoteAccessMiddleware structurally blocks analyst sessions).
  *
- * This file is the orchestrator: state machinery + data wiring + layout.
- * Derived state lives in `_hooks/`; layout details in `_sections/`; shared
- * types/helpers in `_types.ts` / `_helpers.ts`.
+ * This file is the orchestrator: data wiring + layout. Derived state
+ * (filtered/promoted/slow row sets) lives in `_hooks/useFilteredActive`;
+ * URL sync in `_hooks/useQueryMonitorUrlSync`; layout details in
+ * `_sections/`; shared types/helpers in `_types.ts` / `_helpers.ts`.
+ *
+ * Tables render through the project-standard `<DataTable>` (column
+ * reorder, hide/show, resize, sort). Row click opens `RowDetailDialog`
+ * for the full SQL + attribution. The prior custom HTML tables and
+ * inline expand drawer were retired in favour of consistency with every
+ * other admin table on the dashboard.
  */
 
 import * as React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ArrowLeft, Keyboard, Layers, Search } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Keyboard, Search } from 'lucide-react'
 import Link from 'next/link'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -28,19 +35,22 @@ import { extractApiError } from '@/lib/api'
 
 import { useDocumentVisible } from './_helpers'
 import { useFilteredActive } from './_hooks/useFilteredActive'
-import { useQueryMonitorShortcuts } from './_hooks/useQueryMonitorShortcuts'
+import { useKeyboardShortcuts, type ShortcutBinding } from './_hooks/useKeyboardShortcuts'
 import { useQueryMonitorUrlSync } from './_hooks/useQueryMonitorUrlSync'
 import { ActiveTable } from './_sections/ActiveTable'
 import { CompletedTable } from './_sections/CompletedTable'
 import { DbFilterChips } from './_sections/DbFilterChips'
 import { FilterChips } from './_sections/FilterChips'
 import { PollingIndicator } from './_sections/PollingIndicator'
+import { RowDetailDialog } from './_sections/RowDetailDialog'
 import { ShortcutsHelp } from './_sections/ShortcutsHelp'
 import { SummaryStrip } from './_sections/SummaryStrip'
 import type {
+  ActiveOrPromotedRow,
   ActiveRow,
   AttributionKind,
   CancelResponse,
+  CompletedRow,
   DbFilter,
   MonitorConfig,
   SnapshotResponse,
@@ -49,10 +59,11 @@ import type {
 
 const DEFAULT_SLOW_THRESHOLD_MS = 500
 
+type DetailRow = ActiveOrPromotedRow | CompletedRow
+
 export default function QueryMonitorPage() {
   const queryClient = useQueryClient()
   const visible = useDocumentVisible()
-  const [expandedQid, setExpandedQid] = React.useState<number | null>(null)
   const [search, setSearch] = React.useState('')
   const [kindFilter, setKindFilter] = React.useState<AttributionKind | 'all'>('all')
   const [dbFilter, setDbFilter] = React.useState<DbFilter>('all')
@@ -60,18 +71,16 @@ export default function QueryMonitorPage() {
   const [actionError, setActionError] = React.useState<string>('')
   const [viewMode, setViewMode] = React.useState<ViewMode>('all')
   const [slowThresholdMs, setSlowThresholdMs] = React.useState(DEFAULT_SLOW_THRESHOLD_MS)
-  const [groupByRun, setGroupByRun] = React.useState(false)
-  const [focusedQid, setFocusedQid] = React.useState<number | null>(null)
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
+  const [detailRow, setDetailRow] = React.useState<DetailRow | null>(null)
   const searchInputRef = React.useRef<HTMLInputElement>(null)
 
   useQueryMonitorUrlSync(
-    { search, kindFilter, dbFilter, viewMode, slowThresholdMs, groupByRun },
-    { setSearch, setKindFilter, setDbFilter, setViewMode, setSlowThresholdMs, setGroupByRun },
+    { search, kindFilter, dbFilter, viewMode, slowThresholdMs },
+    { setSearch, setKindFilter, setDbFilter, setViewMode, setSlowThresholdMs },
     DEFAULT_SLOW_THRESHOLD_MS,
   )
 
-  // Feature-flag check; if disabled, render a clear empty state.
   const { data: cfg } = useQuery<MonitorConfig>({
     queryKey: ['admin', 'query-monitor', 'config'],
     queryFn: async ({ signal }) => {
@@ -112,8 +121,6 @@ export default function QueryMonitorPage() {
     },
     onSuccess: (res) => {
       setActionError('')
-      // Force an immediate refetch so the cancellation appears in the UI
-      // without waiting for the next polling tick.
       queryClient.invalidateQueries({ queryKey: ['admin', 'query-monitor', 'snapshot'] })
       if (res.state !== 'cancelled' && res.state !== 'already_finished') {
         setActionError(`Cancel returned: ${res.state}`)
@@ -142,28 +149,61 @@ export default function QueryMonitorPage() {
     [cancelMutation],
   )
 
-  const closeConfirmKill = React.useCallback(() => setConfirmKill(null), [])
+  // Row-level shortcuts (j/k/Enter/x) lived with the prior custom table
+  // and didn't survive the move to <DataTable>. The remaining shortcuts
+  // are page-level (search focus, dialog open/close, help).
+  const shortcuts = React.useMemo<ShortcutBinding[]>(
+    () => [
+      {
+        key: '/',
+        description: 'Focus the search field',
+        handler: (e) => {
+          e.preventDefault()
+          searchInputRef.current?.focus()
+          searchInputRef.current?.select()
+        },
+      },
+      {
+        key: '?',
+        description: 'Show keyboard shortcuts',
+        handler: (e) => {
+          e.preventDefault()
+          setShortcutsOpen(true)
+        },
+      },
+      {
+        key: 'Escape',
+        description: 'Close dialog / overlay',
+        allowInForms: true,
+        handler: () => {
+          if (shortcutsOpen) {
+            setShortcutsOpen(false)
+            return
+          }
+          if (detailRow) {
+            setDetailRow(null)
+            return
+          }
+          if (confirmKill) {
+            setConfirmKill(null)
+            return
+          }
+          if (document.activeElement === searchInputRef.current) {
+            searchInputRef.current?.blur()
+          }
+        },
+      },
+    ],
+    [shortcutsOpen, confirmKill, detailRow],
+  )
 
-  useQueryMonitorShortcuts({
-    enabled,
-    filteredActive,
-    focusedQid,
-    expandedQid,
-    shortcutsOpen,
-    confirmKillOpen: !!confirmKill,
-    searchInputRef,
-    setFocusedQid,
-    setExpandedQid,
-    setShortcutsOpen,
-    closeConfirmKill,
-    requestKill,
-  })
+  useKeyboardShortcuts(shortcuts, enabled)
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Live Query Monitor"
-        description="Real-time view of every executing DuckDB and SQLite query. Click a row to expand."
+        description="Real-time view of every executing DuckDB and SQLite query. Click a row to see the full SQL."
       >
         <Link href="/admin" className={buttonVariants({ variant: 'secondary', size: 'sm' })}>
           <ArrowLeft className="h-4 w-4 mr-1" /> Back to Admin
@@ -227,16 +267,6 @@ export default function QueryMonitorPage() {
                   />
                 </CardTitle>
                 <div className="flex items-center gap-2">
-                  <Button
-                    variant={groupByRun ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-8 px-2 text-xs gap-1.5"
-                    onClick={() => setGroupByRun((v) => !v)}
-                    title="Group cron rows by run id"
-                    aria-pressed={groupByRun}
-                  >
-                    <Layers className="h-3.5 w-3.5" /> Group runs
-                  </Button>
                   <DbFilterChips value={dbFilter} onChange={setDbFilter} />
                   <FilterChips value={kindFilter} onChange={setKindFilter} />
                   <div className="relative">
@@ -254,12 +284,9 @@ export default function QueryMonitorPage() {
               <CardContent className="p-0">
                 <ActiveTable
                   rows={filteredActive}
-                  expandedQid={expandedQid}
-                  onToggleRow={(qid) => setExpandedQid(expandedQid === qid ? null : qid)}
+                  onRowClick={(row) => setDetailRow(row)}
                   onKill={requestKill}
                   cancellingQid={cancelMutation.variables ?? null}
-                  focusedQid={focusedQid}
-                  groupByRun={groupByRun}
                 />
               </CardContent>
             </Card>
@@ -293,8 +320,9 @@ export default function QueryMonitorPage() {
               <CardContent className="p-0">
                 <CompletedTable
                   rows={slowQueries}
-                  preserveOrder
+                  onRowClick={(row) => setDetailRow(row)}
                   emptyMessage={`No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`}
+                  initialSorting={[{ id: 'duration_ms', desc: true }]}
                 />
               </CardContent>
             </Card>
@@ -309,12 +337,25 @@ export default function QueryMonitorPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="p-0">
-                <CompletedTable rows={completed} />
+                <CompletedTable
+                  rows={completed}
+                  onRowClick={(row) => setDetailRow(row)}
+                />
               </CardContent>
             </Card>
           )}
         </>
       )}
+
+      <RowDetailDialog
+        row={detailRow}
+        onClose={() => setDetailRow(null)}
+        onKill={(row) => {
+          setDetailRow(null)
+          requestKill(row)
+        }}
+        cancellingQid={cancelMutation.variables ?? null}
+      />
 
       {confirmKill && (
         <ConfirmDialog
