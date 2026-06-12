@@ -177,3 +177,24 @@ def test_normalize_double_slash_path_is_not_authority():
     assert normalize("//admin/secret").category == "admin"
     # Triple+ slashes get flattened too.
     assert normalize("///admin/secret").path.startswith("/admin")
+
+
+def test_normalize_finding_013_encoded_query_strings():
+    """Verify that encoded query strings (%3F) are stripped before normalization
+    to prevent high-cardinality routing DoS (Finding 013)."""
+    assert normalize("/search%3fq=red+shoes&page=2").path == "/search"
+    assert normalize("/search%3Fq=red+shoes&page=2").category == "browse"
+
+
+def test_normalize_finding_014_encoded_slash_traversal_bypass():
+    """Verify that encoded slashes (%2F) do not act as structural separators,
+    and thus do not allow path-traversal bypasses (Finding 014)."""
+    r = normalize("/auth/login%2F..%2F..%2Fproduct")
+    assert r.path == "/auth/login/../../product"
+    assert r.category == "auth"
+
+
+def test_normalize_urlsplit_value_error_handling():
+    """Verify that malformed URLs causing ValueError in urlsplit are gracefully
+    handled and fallback to '/' (Finding 008-val)."""
+    assert normalize("http://[example.com").path == "/"

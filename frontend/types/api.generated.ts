@@ -3256,6 +3256,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        get?: never;
+        put?: never;
         /**
          * Share Claim
          * @description One-time-view reveal of an invite's plaintext credentials.
@@ -3266,9 +3268,7 @@ export interface paths {
          *     URL exists to confirm scope and identity to the analyst without
          *     putting credentials in a chat tool that retains history.
          */
-        get: operations["share_claim_api_share_claim__token__get"];
-        put?: never;
-        post?: never;
+        post: operations["share_claim_api_share_claim__token__post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -12064,10 +12064,10 @@ export interface operations {
     };
     scoring_enforce_threshold_get_api_services__service_id__scoring_enforce_threshold_get: {
         parameters: {
-            query?: {
+            query?: never;
+            header?: {
                 token?: string;
             };
-            header?: never;
             path: {
                 service_id: string;
             };
@@ -12100,11 +12100,12 @@ export interface operations {
     scoring_enforce_threshold_put_api_services__service_id__scoring_enforce_threshold_put: {
         parameters: {
             query?: {
-                token?: string;
                 /** @description Set true to actually apply the enforcement change */
                 confirm?: boolean;
             };
-            header?: never;
+            header?: {
+                token?: string;
+            };
             path: {
                 service_id: string;
             };
@@ -12176,11 +12177,12 @@ export interface operations {
     scoring_exclude_regex_put_api_services__service_id__scoring_exclude_regex_put: {
         parameters: {
             query?: {
-                token?: string;
                 /** @description Set true to actually apply the change */
                 confirm?: boolean;
             };
-            header?: never;
+            header?: {
+                token?: string;
+            };
             path: {
                 service_id: string;
             };
@@ -12291,11 +12293,12 @@ export interface operations {
     scoring_enforce_status_code_put_api_services__service_id__scoring_enforce_status_code_put: {
         parameters: {
             query?: {
-                token?: string;
                 /** @description Set true to actually apply the change */
                 confirm?: boolean;
             };
-            header?: never;
+            header?: {
+                token?: string;
+            };
             path: {
                 service_id: string;
             };
@@ -12404,10 +12407,10 @@ export interface operations {
     };
     scoring_rotate_key_api_services__service_id__scoring_rotate_key_post: {
         parameters: {
-            query?: {
+            query?: never;
+            header?: {
                 token?: string;
             };
-            header?: never;
             path: {
                 service_id: string;
             };
@@ -12814,7 +12817,7 @@ export interface operations {
             };
         };
     };
-    share_claim_api_share_claim__token__get: {
+    share_claim_api_share_claim__token__post: {
         parameters: {
             query?: never;
             header?: never;

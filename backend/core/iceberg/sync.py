@@ -220,6 +220,28 @@ def sync_data(source: dict, progress_callback=None, start_time: str | None = Non
     s3 = _get_fos_client(source)
     bucket = source["bucket"]
     cdn_url = (source.get("cdn_url") or "").rstrip("/")
+    if cdn_url:
+        import ipaddress
+        import socket
+        import urllib.parse
+
+        parsed = urllib.parse.urlparse(cdn_url)
+        if parsed.scheme != "https":
+            return {"error": "cdn_url scheme must be https", "files_downloaded": 0}
+
+        hostname = parsed.hostname
+        if not hostname:
+            return {"error": "cdn_url must include a hostname", "files_downloaded": 0}
+
+        try:
+            addr_info = socket.getaddrinfo(hostname, None)
+            for info in addr_info:
+                ip = info[4][0]
+                if not ipaddress.ip_address(ip).is_global:
+                    return {"error": "cdn_url cannot resolve to an internal IP", "files_downloaded": 0}
+        except Exception:
+            return {"error": "cdn_url hostname resolution failed", "files_downloaded": 0}
+
     cdn_secret = source.get("cdn_secret") or ""
 
     import concurrent.futures

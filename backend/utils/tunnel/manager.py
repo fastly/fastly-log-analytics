@@ -254,9 +254,9 @@ class TunnelManager:
             # Re-sync mutable permission fields from the current invite (see
             # docstring): without this, tightening an analyst's permissions
             # mid-session would not take effect until natural timeout.
-            session.pii_policy = (
-                invite.get("pii_policy") if invite.get("pii_policy") is not None else session.pii_policy
-            )
+            new_pii_policy = invite.get("pii_policy")
+            if new_pii_policy is not None:
+                session.pii_policy = new_pii_policy
             session.query_window_hours = invite.get("query_window_hours")
             session.query_start_time = invite.get("query_start_time")
             session.query_end_time = invite.get("query_end_time")

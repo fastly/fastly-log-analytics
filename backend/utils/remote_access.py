@@ -361,7 +361,7 @@ def _is_blocked_path(path: str) -> bool:
     # the root "/" path itself intact (it doesn't appear in any blocklist
     # and an analyst can always reach the SPA shell).
     normalized = path.rstrip("/") or "/"
-    if any(normalized.startswith(p) for p in _ANALYST_BLOCKED_PREFIXES):
+    if any(normalized == p.rstrip("/") or normalized.startswith(p) for p in _ANALYST_BLOCKED_PREFIXES):
         return True
     for sp in _ANALYST_BLOCKED_SUBPATHS:
         if normalized == sp or normalized.startswith(sp + "/") or normalized.startswith(sp + "?"):
@@ -623,10 +623,11 @@ class _StaticAssetLimiter:
             if len(self._reqs) > self.MAX_TRACKED_IPS:
                 self._evict_locked(cutoff)
             rs = [t for t in self._reqs.get(ip, []) if t >= cutoff]
+            if len(rs) >= self.REQ_LIMIT:
+                self._reqs[ip] = rs
+                return False
             rs.append(now)
             self._reqs[ip] = rs
-            if len(rs) > self.REQ_LIMIT:
-                return False
             bs = [(t, n) for (t, n) in self._bytes.get(ip, []) if t >= cutoff]
             bs.append((now, max(0, int(content_length))))
             self._bytes[ip] = bs

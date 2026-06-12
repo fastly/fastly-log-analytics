@@ -1099,3 +1099,4 @@ from backend.core._duckdb_status import (  # noqa: E402, F401
     update_cron_duration,
     update_top_values,
 )
+from backend.utils.date_utils import safe_iso as _safe_iso  # noqa: E402, F401

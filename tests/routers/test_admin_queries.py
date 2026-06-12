@@ -226,15 +226,6 @@ class TestCancelEndpoint:
 
 
 class TestAdminIdHelper:
-    def test_admin_id_prefers_x_forwarded_for(self):
-        from backend.routers.admin_queries import _admin_id_from_request
-
-        class FakeReq:
-            headers = {"x-forwarded-for": "10.1.2.3, 192.168.0.1"}
-            client = None
-
-        assert _admin_id_from_request(FakeReq()) == "10.1.2.3"
-
     def test_admin_id_falls_back_to_client_host(self):
         from backend.routers.admin_queries import _admin_id_from_request
 

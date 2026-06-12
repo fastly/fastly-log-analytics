@@ -246,7 +246,7 @@ for c in $ACTIVE_CATEGORIES; do
     LSIZE="$(du -sh "$c" 2>/dev/null | awk '{print $1}')"
   fi
   RBYTES="$(echo "$REMOTE_BYTES_RAW" | awk -v p="$c" '$2==p {print $1; exit}')"
-  if [ -n "$RBYTES" ]; then
+  if [[ "$RBYTES" =~ ^[0-9]+$ ]]; then
     REMOTE_BYTES_TOTAL=$((REMOTE_BYTES_TOTAL + RBYTES))
     RHUMAN="$(fmt_bytes "$RBYTES")"
   else

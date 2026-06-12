@@ -1050,7 +1050,12 @@ class QueryRunner:
                     f"SELECT field, value, CAST(count AS BIGINT) AS count "
                     f"FROM read_parquet([{paths_sql}], hive_partitioning=0)"
                 )
-            q = "SELECT field, value, SUM(count) AS c FROM (" + " UNION ALL ".join(branches) + ") GROUP BY field, value"
+            _max_limit = max([limit] + list((per_field_limits or {}).values()))
+            q = (
+                "SELECT field, value, SUM(count) AS c FROM ("
+                + " UNION ALL ".join(branches)
+                + f") GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= {_max_limit}"
+            )
             try:
                 rolled_res = self.execute(q).fetchall()
             except Exception:

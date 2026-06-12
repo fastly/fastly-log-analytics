@@ -226,7 +226,7 @@ def share_heartbeat(request: Request):
     )
 
 
-@router.get("/claim/{token}", response_model=ShareClaimResponse)
+@router.post("/claim/{token}", response_model=ShareClaimResponse)
 def share_claim(token: str, request: Request):
     """One-time-view reveal of an invite's plaintext credentials.
 

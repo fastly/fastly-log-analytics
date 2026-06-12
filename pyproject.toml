@@ -190,22 +190,16 @@ module = [
     "backend.provision.fastly_api",
     "backend.provision.orchestrator",
     "backend.repositories._base",
-    "backend.repositories.dashboard",
     "backend.repositories.insights.registry",
-    "backend.repositories.network",
     "backend.repositories.origin",
-    "backend.repositories.session_scoring",
     "backend.repositories.sessions",
     "backend.routers.admin",
-    "backend.routers.admin_usage",
     "backend.routers.provision",
     "backend.routers.services.core",
     "backend.routers.session_scoring_admin",
     "backend.routers.share_auth",
-    "backend.utils.rdns_cache",
     "backend.utils.remote_access",
     "backend.utils.telemetry_proxy",
-    "backend.utils.tunnel.manager",
 ]
 ignore_errors = true
 

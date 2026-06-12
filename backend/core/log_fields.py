@@ -299,7 +299,7 @@ def generate_log_format(log_fields_config: dict) -> str:
                 # so non-digit values fall through to ``"null"``.
                 vcl_macro = (
                     f"if(fastly.ff.visits_this_service == 0 && "
-                    f'{raw_expr} ~ "^-?[0-9]+(\\.[0-9]+)?$", substr({raw_expr}, 0, {cf_limit}), "null")'
+                    f'substr({raw_expr}, 0, {cf_limit}) ~ "^-?[0-9]+(\\.[0-9]+)?$", substr({raw_expr}, 0, {cf_limit}), "null")'
                 )
                 entry = f'"{name}":%{{{vcl_macro}}}V'
             else:
@@ -329,7 +329,9 @@ def generate_log_format(log_fields_config: dict) -> str:
             # 014: see deliver-stage comment above — strict numeric
             # regex instead of ``!= ""`` so a custom-field header value
             # like ``"]"`` cannot break out of the JSON log line.
-            vcl_macro = f'if({expr} ~ "^-?[0-9]+(\\.[0-9]+)?$", substr({expr}, 0, {cf_limit}), "null")'
+            vcl_macro = (
+                f'if(substr({expr}, 0, {cf_limit}) ~ "^-?[0-9]+(\\.[0-9]+)?$", substr({expr}, 0, {cf_limit}), "null")'
+            )
             entry = f'"{name}":%{{{vcl_macro}}}V'
         else:
             # 016: substr-clamp the value before json.escape so an

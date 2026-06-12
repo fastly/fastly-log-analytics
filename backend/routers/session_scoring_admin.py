@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import os
 
-from fastapi import HTTPException, Path, Query
+from fastapi import Header, HTTPException, Path, Query
 
 # Pull the shared router + helpers from the main session_scoring module.
 # Importing the module (not the names) avoids a circular-import trap:
@@ -257,7 +257,7 @@ def scoring_session_events(
 @router.get("/{service_id}/scoring/enforce-threshold")
 def scoring_enforce_threshold_get(
     service_id: str = Path(...),
-    token: str = Query(default=""),
+    token: str = Header(default=""),
 ) -> dict:
     """Read the live enforce_threshold value from the scoring_config
     Compute ConfigStore. None = no enforcement.
@@ -317,7 +317,7 @@ def scoring_enforce_threshold_get(
 def scoring_enforce_threshold_put(
     body: dict,
     service_id: str = Path(...),
-    token: str = Query(default=""),
+    token: str = Header(default=""),
     confirm: bool = Query(default=False, description="Set true to actually apply the enforcement change"),
 ) -> dict:
     """Write the live enforce_threshold to the scoring_config ConfigStore.
@@ -455,7 +455,7 @@ def scoring_exclude_regex_get(service_id: str = Path(...)) -> dict:
 def scoring_exclude_regex_put(
     body: dict,
     service_id: str = Path(...),
-    token: str = Query(default=""),
+    token: str = Header(default=""),
     confirm: bool = Query(default=False, description="Set true to actually apply the change"),
 ) -> dict:
     """Update the URL-exclusion regex for the scoring recv snippet.
@@ -681,7 +681,7 @@ def scoring_enforce_status_code_get(service_id: str = Path(...)) -> dict:
 def scoring_enforce_status_code_put(
     body: dict,
     service_id: str = Path(...),
-    token: str = Query(default=""),
+    token: str = Header(default=""),
     confirm: bool = Query(default=False, description="Set true to actually apply the change"),
 ) -> dict:
     """Update the HTTP status code returned by the enforce snippet.
@@ -877,7 +877,7 @@ def scoring_matrix_versions_restore(
 @router.post("/{service_id}/scoring/rotate-key")
 def scoring_rotate_key(
     service_id: str = Path(...),
-    token: str = Query(default=""),
+    token: str = Header(default=""),
 ) -> dict:
     """Rotate the AES-GCM cookie-state encryption key.
 

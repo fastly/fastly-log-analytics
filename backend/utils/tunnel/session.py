@@ -57,7 +57,8 @@ class AnalystSession:
             login_time=row["login_time"],
             last_active_time=row["last_active_time"],
             last_activity=row.get("last_activity"),
-            service_ids=[],
+            tos_pending=row.get("tos_pending", False),
+            service_ids=row.get("service_ids", []),
         )
 
 

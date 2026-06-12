@@ -72,11 +72,7 @@ def _check_cancel_rate(admin_id: str) -> bool:
 def _admin_id_from_request(request: Request) -> str:
     """Same logic as :func:`backend.core.request_context._build_attribution_from_request`
     — keep them in sync if the admin-id derivation ever moves."""
-    return (
-        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or (request.client.host if request.client else "unknown")
-        or "admin"
-    )
+    return (request.client.host if request.client else "unknown") or "admin"
 
 
 # ── Response models ─────────────────────────────────────────────────────────

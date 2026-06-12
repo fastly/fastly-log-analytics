@@ -102,12 +102,7 @@ def is_stale_view_error(exc: BaseException) -> bool:
     :mod:`backend.core.iceberg`.
     """
     msg = str(exc)
-    return (
-        "No files found" in msg
-        or "Catalog Error: Table with name" in msg
-        or "does not exist" in msg
-        or "No such file or directory" in msg
-    )
+    return "No files found" in msg or "Catalog Error: Table with name" in msg or "No such file or directory" in msg
 
 
 def execute_with_stale_view_retry(con, source: dict, fn, *args, **kwargs):
@@ -162,8 +157,6 @@ def clear_source_caches(source_key: str, *, keep_snapshot_cache: bool = False) -
     _view_cache.pop(source_key, None)
     if not keep_snapshot_cache:
         _snapshot_files_cache.pop(source_key, None)
-    with _service_locks_lock:
-        _service_locks.pop(source_key, None)
 
 
 def _get_cache_file(source: dict, name: str) -> str:
@@ -950,7 +943,12 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
     # Use iceberg_scan when:
     # (a) plan_files() returned S3 URIs and no local files are cached yet, OR
     # (b) plan_files() failed silently but iceberg_loc is known (avoids WHERE false view)
-    if iceberg_loc and not local_paths and (s3_paths or not local_iceberg_files):
+    if (
+        iceberg_loc
+        and not local_paths
+        and (s3_paths or not local_iceberg_files)
+        and source.get("access_level") != "read_only"
+    ):
         parts.append(_strip_computed(f"iceberg_scan('{escape_sql_literal(iceberg_loc)}', allow_moved_paths=true)"))
         logger.info(
             "%s Falling back to iceberg_scan for %s (s3_paths=%d, local_iceberg_files=%d).",

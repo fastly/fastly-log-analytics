@@ -637,51 +637,51 @@ def optimize_table(source: dict, target_file_size_mb: int = 128, min_files_per_p
             start_ts = datetime.fromtimestamp(hour_val * 3600, tz=UTC)
             end_ts = datetime.fromtimestamp((hour_val + 1) * 3600, tz=UTC)
 
-            # Use DuckDB to read only these files (most efficient)
-            paths = [f.file_path for f in files]
-            paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
-
             try:
-                # Read into PyArrow. Must materialise to a Table — pyiceberg's
-                # overwrite() rejects RecordBatchReader with
-                # "Expected PyArrow table". DuckDB 1.5.x's .arrow() now returns
-                # a streaming reader, so use to_arrow_table() (or the older
-                # fetch_arrow_table() alias) to force materialisation. Skipping
-                # this turned every nightly optimize run into a silent no-op
-                # — the ValueError got logged as a warning to stderr and the
-                # cron recorded success with 0 files rewritten.
-                # ``union_by_name=True``: when a partition contains files
-                # written before AND after a schema bump (e.g. ``edge_sid``
-                # / ``edge_cookie_compliance`` / ``edge_score*`` added
-                # mid-day on 2026-06-01), the default positional union
-                # raises ``Schema mismatch ... try setting
-                # union_by_name=True`` and the partition lands in
-                # ``partition_errors``. With union-by-name DuckDB merges
-                # the column sets and fills missing columns with NULL,
-                # matching how Iceberg already presents the merged schema
-                # to readers. Verified prod incident 2026-06-06: two
-                # partitions (494541, 494542) had been stuck at ~14 files
-                # each since the schema bump because every nightly
-                # optimize attempt raised here. (#optimize-cron-warning)
-                arrow_table = con.execute(
-                    f"SELECT * FROM read_parquet([{paths_sql}], hive_partitioning=false, union_by_name=true)"
-                ).to_arrow_table()
-
-                # Perform an atomic overwrite of the specific time range.
-                # In Iceberg, this will delete the old files and add the
-                # new one. Wrapped in a small retry that reloads the
-                # table on the sequence-number CAS conflict that fires
-                # when an ingest commit lands between our plan_files
-                # read and this overwrite — pyiceberg refuses with
-                # ``ValueError: Cannot add snapshot with sequence
-                # number N older than last sequence number N``. The
-                # retry just refetches the table head and tries once
-                # more; ingest's 5-min cadence makes the contention
-                # window small enough that a single retry almost always
-                # wins.
                 overwrite_filter = f"timestamp >= '{start_ts.isoformat()}' AND timestamp < '{end_ts.isoformat()}'"
                 _CAS_RETRIES = 3
                 for _retry in range(_CAS_RETRIES):
+                    # Use DuckDB to read only these files (most efficient)
+                    paths = [f.file_path for f in files]
+                    paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
+
+                    # Read into PyArrow. Must materialise to a Table — pyiceberg's
+                    # overwrite() rejects RecordBatchReader with
+                    # "Expected PyArrow table". DuckDB 1.5.x's .arrow() now returns
+                    # a streaming reader, so use to_arrow_table() (or the older
+                    # fetch_arrow_table() alias) to force materialisation. Skipping
+                    # this turned every nightly optimize run into a silent no-op
+                    # — the ValueError got logged as a warning to stderr and the
+                    # cron recorded success with 0 files rewritten.
+                    # ``union_by_name=True``: when a partition contains files
+                    # written before AND after a schema bump (e.g. ``edge_sid``
+                    # / ``edge_cookie_compliance`` / ``edge_score*`` added
+                    # mid-day on 2026-06-01), the default positional union
+                    # raises ``Schema mismatch ... try setting
+                    # union_by_name=True`` and the partition lands in
+                    # ``partition_errors``. With union-by-name DuckDB merges
+                    # the column sets and fills missing columns with NULL,
+                    # matching how Iceberg already presents the merged schema
+                    # to readers. Verified prod incident 2026-06-06: two
+                    # partitions (494541, 494542) had been stuck at ~14 files
+                    # each since the schema bump because every nightly
+                    # optimize attempt raised here. (#optimize-cron-warning)
+                    arrow_table = con.execute(
+                        f"SELECT * FROM read_parquet([{paths_sql}], hive_partitioning=false, union_by_name=true)"
+                    ).to_arrow_table()
+
+                    # Perform an atomic overwrite of the specific time range.
+                    # In Iceberg, this will delete the old files and add the
+                    # new one. Wrapped in a small retry that reloads the
+                    # table on the sequence-number CAS conflict that fires
+                    # when an ingest commit lands between our plan_files
+                    # read and this overwrite — pyiceberg refuses with
+                    # ``ValueError: Cannot add snapshot with sequence
+                    # number N older than last sequence number N``. The
+                    # retry just refetches the table head and tries once
+                    # more; ingest's 5-min cadence makes the contention
+                    # window small enough that a single retry almost always
+                    # wins.
                     try:
                         table.overwrite(df=arrow_table, overwrite_filter=overwrite_filter)
                         break
@@ -706,6 +706,9 @@ def optimize_table(source: dict, target_file_size_mb: int = 128, min_files_per_p
                         try:
                             table = catalog.load_table(_core_mod._table_identifier(source))
                             _core_mod._set_cached_table(source, _core_mod._table_identifier(source), table)
+                            files = [f.file for f in table.scan().plan_files() if tuple(f.file.partition) == p_val]
+                            if not files:
+                                raise cas_err
                         except Exception as reload_err:
                             logger.warning(
                                 "[optimize] %s: table reload failed after CAS conflict, giving up on this partition: %s",

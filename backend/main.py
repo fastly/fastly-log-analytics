@@ -610,9 +610,7 @@ async def telemetry_middleware(request: Request, call_next):
             request_id=request_id,
         )
     else:
-        client_host = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
-            request.client.host if request.client else "unknown"
-        )
+        client_host = request.client.host if request.client else "unknown"
         attr = _Attribution.admin(
             admin_id=client_host or "admin",
             request_path=request_path,

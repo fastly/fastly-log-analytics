@@ -2410,6 +2410,7 @@ def test_optimize_table_retries_on_sequence_number_cas_conflict(monkeypatch):
     mock_file.file.partition = (12345,)
     mock_file.file.file_path = "s3://bucket/data.parquet"
     initial_table.scan().plan_files.return_value = [mock_file, mock_file]
+    reloaded_table.scan().plan_files.return_value = [mock_file, mock_file]
 
     fake_con = MagicMock()
     fake_arrow = MagicMock()

@@ -117,9 +117,15 @@ def fetch_session_events(
         if len(bucket) >= limit_per_sid:
             continue
         ts = r.get("ts")
+        if ts is None:
+            ts_str: str | None = None
+        elif hasattr(ts, "isoformat"):
+            ts_str = ts.isoformat()
+        else:
+            ts_str = str(ts)
         bucket.append(
             {
-                "ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts) if ts is not None else None,
+                "ts": ts_str,
                 "url": r.get("url") or "/",
                 "status": r.get("status"),
                 "ip": r.get("ip"),
@@ -158,7 +164,14 @@ def reconstruct_labeled_sessions(service_id: str, labels: list[dict]) -> list[tu
         # single transition, not its average. None-valued rows are
         # excluded so a sid with only un-scored events doesn't collapse
         # to max_edge_score=0.
-        scored_values = [e.get("edge_score") for e in events if e.get("edge_score") is not None]
+        # Filter+cast in one pass: ``e.get("edge_score")`` narrows to non-None
+        # after the comprehension's `is not None` guard, but mypy doesn't
+        # carry that through, so we re-bind via a typed walrus.
+        scored_values: list[float] = []
+        for e in events:
+            v = e.get("edge_score")
+            if v is not None:
+                scored_values.append(v)
         max_score = max(scored_values) if scored_values else None
         out.append(
             (

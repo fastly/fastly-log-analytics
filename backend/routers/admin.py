@@ -141,6 +141,8 @@ def _fetch_file_to_zip(
                 caller=caller,
             )
             return True
+        except ClientDisconnected:
+            raise
         except Exception as cdn_err:
             print(f"CDN fetch failed for {key}, falling back to FOS: {cdn_err}")
 
@@ -157,6 +159,8 @@ def _fetch_file_to_zip(
                     break
                 dest.write(chunk)
         return True
+    except ClientDisconnected:
+        raise
     except Exception as fos_err:
         print(f"Error fetching {key} from FOS: {fos_err}")
         return False

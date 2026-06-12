@@ -22,27 +22,24 @@ from __future__ import annotations
 
 import csv
 import io
-import logging
-import os
-import time
-from datetime import UTC, datetime, timedelta
-from typing import Any
 
-from fastapi import Depends, HTTPException, Path, Query, Request, Response
-from fastapi.responses import StreamingResponse
+# Pull the shared router + helpers from the main admin module. Until
+# ``backend.routers.admin`` is off the mypy override, its symbols come
+# through as untyped — explicit annotation lets the @router decorators
+# in this file resolve.
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from backend.deps import get_service_id, get_source
+from backend.deps import get_source
 from backend.models.admin import (
     SystemJobsResponse,
     UsageLogAggregate,
     UsageLogEntry,
     UsageLogResponse,
 )
-
-# Pull the shared router + helpers from the main admin module.
 from backend.routers import admin as _adm
 
-router = _adm.router
+router: APIRouter = _adm.router  # type: ignore
+
 
 @router.get("/admin/usage-logging")
 def get_usage_logging_settings():
@@ -168,7 +165,7 @@ def usage_log_endpoint(
 
         entries.append(
             UsageLogEntry(
-                id=r.get("id"),
+                id=int(r.get("id") or 0),
                 timestamp=str(r["timestamp"]),
                 service_id=r["service_id"],
                 operation_class=r["operation_class"],
@@ -211,8 +208,6 @@ def usage_log_export(
     operation_type: str = Query(default=""),
 ):
     """Export _usage_log as CSV from metadata_db (SQLite)."""
-    import csv
-    import io
 
     from fastapi.responses import StreamingResponse as _StreamingResponse
 

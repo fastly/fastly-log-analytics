@@ -7,6 +7,7 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Collection
 from typing import Any
 
 import duckdb
@@ -72,7 +73,7 @@ _VIRTUAL_FIELDS = ("waf_sig_ind", "edge_score_reason_ind")
 FIELDS = [f.code for f in _FIELD_REGISTRY if f.code != "_source_file"] + list(_VIRTUAL_FIELDS)
 
 
-def _add_bot_columns(actual_cols: set[str], columns: list[str], select_cols: list[str]) -> tuple[bool, bool]:
+def _add_bot_columns(actual_cols: Collection[str], columns: list[str], select_cols: list[str]) -> tuple[bool, bool]:
     """Ensure UA + IP (Arcjet) or waf_req_id (NGWAF) columns are in select_cols
     when the caller requested the virtual `_bot_name` / `_ngwaf_bot_name` fields.
 

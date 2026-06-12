@@ -234,9 +234,9 @@ def test_destructive_teardown_service_in_bound_list_proceeds(isolated_configs_di
     assert r.status_code == 200
 
 
-def test_cache_only_teardown_bypasses_auth_gate(isolated_configs_dir):
+def test_cache_only_teardown_requires_auth_gate(isolated_configs_dir):
     """remove_logging=false + remove_cdn=false + remove_bucket=false = cache-only
-    cleanup. Never touches Fastly, so no token needed.
+    cleanup. Still requires a token to prevent unauthenticated destruction of local state.
     """
     sid = "svc-auth-7"
     _seed_cfg(sid)
@@ -254,8 +254,9 @@ def test_cache_only_teardown_bypasses_auth_gate(isolated_configs_dir):
             },
         )
 
-    # No token, no /tokens/self call expected — endpoint should proceed.
-    assert r.status_code == 200, f"cache-only teardown should bypass auth, got {r.status_code}: {r.text[:300]}"
+    # Cache-only teardown should trigger token_required 401 gate
+    assert r.status_code == 401
+    assert "token_required" in r.json()["detail"]["error"]
 
 
 def test_destructive_teardown_fastly_unreachable_rejects(isolated_configs_dir):

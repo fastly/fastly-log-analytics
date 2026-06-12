@@ -36,6 +36,7 @@ import socket
 import sqlite3
 import sys
 import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -282,7 +283,7 @@ async def _do_lookup_async(
         for record_type in ("A", "AAAA"):
             try:
                 ans = await resolver.query_dns(hostname, record_type)
-                forward_ips.update(r.host for r in ans)
+                forward_ips.update(r.host for r in ans)  # type: ignore[attr-defined]
             except Exception:
                 continue
 
@@ -363,10 +364,7 @@ def _run_async_resolve(ips: list[str]) -> dict[str, int]:
 
     mod = sys.modules[__name__]
     do_lookup = mod._do_lookup
-    is_patched = (
-        getattr(do_lookup, "_mock_name", None) is not None
-        or "Mock" in type(do_lookup).__name__
-    )
+    is_patched = getattr(do_lookup, "_mock_name", None) is not None or "Mock" in type(do_lookup).__name__
 
     if is_patched:
         results = {ip: do_lookup(ip) for ip in ips}
@@ -383,10 +381,7 @@ def _run_async_resolve(ips: list[str]) -> dict[str, int]:
             results = {ip: _do_lookup(ip) for ip in ips}
 
     now = _now()
-    records = [
-        (hostname, status, int(fcrdns), now, ip)
-        for ip, (hostname, status, fcrdns) in results.items()
-    ]
+    records = [(hostname, status, int(fcrdns), now, ip) for ip, (hostname, status, fcrdns) in results.items()]
 
     if records:
         with _write_lock:
@@ -532,7 +527,7 @@ def get_stats() -> dict:
     }
 
 
-def backfill_from_sources_gen(max_ips: int = 50_000) -> int:
+def backfill_from_sources_gen(max_ips: int = 50_000) -> Iterator[dict]:
     """One-time seed: scan all DuckDB sources for IPs from the last 30 days.
     Yields progress events.
     """

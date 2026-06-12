@@ -11172,7 +11172,7 @@
           },
           {
             "name": "token",
-            "in": "query",
+            "in": "header",
             "required": false,
             "schema": {
               "type": "string",
@@ -11224,16 +11224,6 @@
             }
           },
           {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
-            }
-          },
-          {
             "name": "confirm",
             "in": "query",
             "required": false,
@@ -11244,6 +11234,16 @@
               "title": "Confirm"
             },
             "description": "Set true to actually apply the enforcement change"
+          },
+          {
+            "name": "token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
           }
         ],
         "requestBody": {
@@ -11346,16 +11346,6 @@
             }
           },
           {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
-            }
-          },
-          {
             "name": "confirm",
             "in": "query",
             "required": false,
@@ -11366,6 +11356,16 @@
               "title": "Confirm"
             },
             "description": "Set true to actually apply the change"
+          },
+          {
+            "name": "token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
           }
         ],
         "requestBody": {
@@ -11525,16 +11525,6 @@
             }
           },
           {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
-            }
-          },
-          {
             "name": "confirm",
             "in": "query",
             "required": false,
@@ -11545,6 +11535,16 @@
               "title": "Confirm"
             },
             "description": "Set true to actually apply the change"
+          },
+          {
+            "name": "token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
           }
         ],
         "requestBody": {
@@ -11720,7 +11720,7 @@
           },
           {
             "name": "token",
-            "in": "query",
+            "in": "header",
             "required": false,
             "schema": {
               "type": "string",
@@ -12293,13 +12293,13 @@
       }
     },
     "/api/share/claim/{token}": {
-      "get": {
+      "post": {
         "tags": [
           "share-auth"
         ],
         "summary": "Share Claim",
         "description": "One-time-view reveal of an invite's plaintext credentials.\n\nThe plaintext passcode itself isn't stored \u2014 the hash is one-way \u2014 so\nthis endpoint reveals everything *except* the passcode. The original\nplaintext is communicated by the admin via the share card; the claim\nURL exists to confirm scope and identity to the analyst without\nputting credentials in a chat tool that retains history.",
-        "operationId": "share_claim_api_share_claim__token__get",
+        "operationId": "share_claim_api_share_claim__token__post",
         "parameters": [
           {
             "name": "token",

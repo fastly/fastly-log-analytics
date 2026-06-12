@@ -106,8 +106,15 @@ def _strip_query(url: str) -> str:
     (``/foo/bar?x=1``) and absolute (``https://h/foo/bar?x=1``) inputs."""
     while url.startswith("//"):
         url = url[1:]
-    parts = urlsplit(url)
-    return parts.path or "/"
+    # Replace encoded query delimiter (%3F / %3f) and fragment delimiter (%23)
+    # with literal equivalents before splitting so that urlsplit can strip them.
+    # This prevents cardinality explosion when queries are encoded (Finding 013).
+    url = url.replace("%3f", "?").replace("%3F", "?").replace("%23", "#")
+    try:
+        parts = urlsplit(url)
+        return parts.path or "/"
+    except ValueError:
+        return "/"
 
 
 def _looks_like_id(segment: str) -> bool:
@@ -123,6 +130,23 @@ def _category_for(first_segment: str) -> str:
     return _CATEGORY_MAP.get(first_segment.lower(), "other")
 
 
+def unquote_except_slash(s: str) -> str:
+    """Decode all percent-encoded sequences in the string EXCEPT for encoded slashes
+    (%2f / %2F). This ensures that encoded directory traversals (like %2e%2e)
+    can be resolved by normpath, while encoded slashes are preserved as data."""
+    # Split by %2f and %2F case-insensitively
+    parts = re.split(r"(%2f|%2F)", s)
+    # parts will be like [chunk, "%2f", chunk, "%2F", ...]
+    # We only unquote chunks, leaving the delimiters intact
+    decoded_parts = []
+    for i, p in enumerate(parts):
+        if i % 2 == 0:
+            decoded_parts.append(unquote(p))
+        else:
+            decoded_parts.append(p)
+    return "".join(decoded_parts)
+
+
 def normalize(url: str) -> Route:
     """Convert a raw URL into a canonical (route, category) pair.
 
@@ -133,7 +157,10 @@ def normalize(url: str) -> Route:
         /api/v2/orders/00000abc-...        → Route('/api/v2/orders/*',  'api')
         /search?q=red+shoes&page=2         → Route('/search',           'browse')
     """
-    path = posixpath.normpath(unquote(_strip_query(url)))
+    # 013/014: Unquote everything EXCEPT encoded slashes before normalization
+    # so that encoded traversals are resolved, but encoded slashes cannot act
+    # as structural path separators.
+    path = posixpath.normpath(unquote_except_slash(_strip_query(url)))
     # Treat the root specially — there's no segment to inspect, and the
     # category is unambiguously 'home'.
     if path in ("", "/"):
@@ -142,7 +169,10 @@ def normalize(url: str) -> Route:
     # Split, normalize each segment, rejoin. Empty strings between
     # consecutive '/' or at the leading position drop out cleanly via the
     # filter; we re-prepend the leading '/' below.
-    raw_segments = [s for s in path.split("/") if s != ""]
+    # 014: unquote individual segments after splitting by '/' to prevent
+    # encoded slashes (%2F) from being treated as directory separators during
+    # posixpath.normpath.
+    raw_segments = [unquote(s) for s in path.split("/") if s != ""]
     if not raw_segments:
         return Route(path="/", category="home")
 

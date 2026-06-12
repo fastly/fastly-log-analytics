@@ -256,15 +256,9 @@ def provision_teardown(req: Request, body: dict | None = None):
     if not state:
         raise HTTPException(status_code=404, detail={"error": "No service config found."})
 
-    # Security: destructive teardown (logging / CDN / bucket) requires a
-    # caller-supplied Fastly token with the ``global`` scope and access to
-    # this service. Cache-only teardown (all three destructive flags false)
-    # is a local-cleanup operation and does not touch Fastly, so it does not
-    # require token validation. The /api/provision/ middleware gate ensures
-    # only local admin requests reach this endpoint regardless.
-    has_destructive = bool(remove_logging or remove_cdn or remove_bucket)
-    if has_destructive:
-        validate_destructive_token(token, service_id=service_id or "")
+    # Security: teardown requires a caller-supplied Fastly token with the
+    # ``global`` scope and access to this service.
+    validate_destructive_token(token, service_id=service_id or "")
 
     opts = {
         "remove_logging": remove_logging,

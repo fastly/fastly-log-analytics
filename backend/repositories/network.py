@@ -257,7 +257,7 @@ def get_health(
                 if total > 0:
                     asn_speed_mix[asn_v] = {cs: round(cnt / total, 3) for cs, cnt in rows}
 
-        asn_names_map = _db.get_asn_names(con, top_asns)
+        asn_names_map = _db.get_asn_names(src["name"], top_asns)
 
         # ── Build heatmap entries ──────────────────────────────────────────
         asn_bucket_data: dict[int, dict[str, dict]] = {}

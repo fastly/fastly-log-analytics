@@ -23,7 +23,6 @@ class TestIsStaleViewError:
         [
             'IO Error: No files found that match the pattern "cache/foo/batch_abc.parquet"',
             "Catalog Error: Table with name logs_xyz does not exist",
-            "does not exist",
             "No such file or directory: /tmp/buf.parquet",
         ],
     )
