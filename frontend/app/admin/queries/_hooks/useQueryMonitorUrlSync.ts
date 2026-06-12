@@ -24,7 +24,6 @@ export type QueryMonitorUrlState = {
   dbFilter: DbFilter
   viewMode: ViewMode
   slowThresholdMs: number
-  groupByRun: boolean
 }
 
 export type QueryMonitorUrlSetters = {
@@ -33,7 +32,6 @@ export type QueryMonitorUrlSetters = {
   setDbFilter: (v: DbFilter) => void
   setViewMode: (v: ViewMode) => void
   setSlowThresholdMs: (n: number) => void
-  setGroupByRun: (v: boolean) => void
 }
 
 export function useQueryMonitorUrlSync(
@@ -54,7 +52,6 @@ export function useQueryMonitorUrlSync(
     const kind = p.get('kind')
     const view = p.get('view')
     const slow = p.get('slow')
-    const group = p.get('group')
     const db = p.get('db')
     if (q !== null) setters.setSearch(q)
     if (kind === 'analyst' || kind === 'admin' || kind === 'cron' || kind === 'system') {
@@ -65,7 +62,6 @@ export function useQueryMonitorUrlSync(
       const n = parseInt(slow, 10)
       if (Number.isFinite(n) && n > 0) setters.setSlowThresholdMs(n)
     }
-    if (group === 'run') setters.setGroupByRun(true)
     if (db === 'DuckDB' || db === 'SQLite') setters.setDbFilter(db)
     hydratedRef.current = true
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -86,7 +82,6 @@ export function useQueryMonitorUrlSync(
     set('kind', state.kindFilter !== 'all' ? state.kindFilter : null)
     set('view', state.viewMode !== 'all' ? state.viewMode : null)
     set('slow', state.slowThresholdMs !== defaultSlowMs ? String(state.slowThresholdMs) : null)
-    set('group', state.groupByRun ? 'run' : null)
     set('db', state.dbFilter !== 'all' ? state.dbFilter : null)
     window.history.replaceState({}, '', url.toString())
   }, [
@@ -94,7 +89,6 @@ export function useQueryMonitorUrlSync(
     state.kindFilter,
     state.viewMode,
     state.slowThresholdMs,
-    state.groupByRun,
     state.dbFilter,
     defaultSlowMs,
   ])

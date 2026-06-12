@@ -107,6 +107,13 @@ def get_con(service_id: str) -> sqlite3.Connection:
         from backend.utils.sqlite_profiler import InstrumentedConnection
 
         con = sqlite3.connect(path, timeout=30.0, factory=InstrumentedConnection)
+        # Stash service_id on the connection so the Live Query Monitor's
+        # sqlite_profiler can surface it in the `service` column for the
+        # dedicated per-service usage_log.db connections (same mechanism
+        # as ``metadata.base.get_con`` — see that comment for context).
+        # Without this, usage_log writes show up as `service: null` on
+        # /admin/queries even though they target a specific service's db.
+        con._service_id = service_id  # type: ignore[attr-defined]
         with _all_connections_lock:
             _all_connections.append(con)
         try:
