@@ -10,11 +10,7 @@ from backend.repositories._sql import sessions as SQL
 
 
 def _placeholders(template: str) -> list[str]:
-    return sorted(
-        p.split("}")[0]
-        for p in template.split("{")[1:]
-        if "}" in p
-    )
+    return sorted(p.split("}")[0] for p in template.split("{")[1:] if "}" in p)
 
 
 # ── SESSIONS_CTE_PIPELINE ─────────────────────────────────────────────────────
@@ -153,15 +149,17 @@ def test_sessions_page_select_handles_empty_flagged_filter():
 
 
 def test_sessions_page_select_pins_all_expected_placeholders():
-    assert _placeholders(SQL.SESSIONS_PAGE_SELECT) == sorted([
-        "cte_prefix",
-        "flag_expr",
-        "flagged_filter",
-        "sort_by",
-        "sort_dir",
-        "limit",
-        "offset",
-    ])
+    assert _placeholders(SQL.SESSIONS_PAGE_SELECT) == sorted(
+        [
+            "cte_prefix",
+            "flag_expr",
+            "flagged_filter",
+            "sort_by",
+            "sort_dir",
+            "limit",
+            "offset",
+        ]
+    )
 
 
 # ── SESSIONS_COUNT_WRAPPER ───────────────────────────────────────────────────
@@ -181,8 +179,10 @@ def test_sessions_count_wrapper_renders_with_all_inputs():
 
 
 def test_sessions_count_wrapper_pins_all_expected_placeholders():
-    assert _placeholders(SQL.SESSIONS_COUNT_WRAPPER) == sorted([
-        "cte_prefix",
-        "flag_expr",
-        "flagged_filter",
-    ])
+    assert _placeholders(SQL.SESSIONS_COUNT_WRAPPER) == sorted(
+        [
+            "cte_prefix",
+            "flag_expr",
+            "flagged_filter",
+        ]
+    )

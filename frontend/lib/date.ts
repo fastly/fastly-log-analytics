@@ -4,7 +4,7 @@ import { formatInTimeZone, toDate } from 'date-fns-tz'
 export function toUTCDate(date: string | Date): Date {
   if (date instanceof Date) return date
   if (!date) return new Date(NaN)
-  
+
   // If it's already a valid ISO string with timezone, parse it
   if (date.includes('T') && (date.includes('Z') || /[+-]\d{2}:?\d{2}$/.test(date))) {
     return parseISO(date)
@@ -14,7 +14,7 @@ export function toUTCDate(date: string | Date): Date {
   const utcStr = date.includes('Z') || /[+-]\d{2}:?\d{2}$/.test(date)
     ? date.replace(' ', 'T')
     : date.replace(' ', 'T') + 'Z'
-  
+
   return parseISO(utcStr)
 }
 
@@ -62,7 +62,7 @@ export function formatRelative(date: string | Date) {
 function getTimeDiff(date: string | Date) {
   const d = toUTCDate(date)
   if (isNaN(d.getTime())) return null
-  
+
   const now = new Date()
   const diffSec = Math.floor((now.getTime() - d.getTime()) / 1000)
   return { diffSec, absSec: Math.abs(diffSec) }

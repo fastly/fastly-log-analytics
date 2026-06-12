@@ -165,9 +165,7 @@ def test_get_sessions_has_edge_sid_false_when_column_absent(in_memory_duckdb, te
     )
     assert result["has_edge_sid"] is False
     for session in result["sessions"]:
-        assert "edge_sid" not in session, (
-            f"edge_sid should not appear in session dict when column is absent: {session}"
-        )
+        assert "edge_sid" not in session, f"edge_sid should not appear in session dict when column is absent: {session}"
 
 
 def test_get_sessions_has_edge_sid_true_and_per_session_value_when_column_present(
@@ -193,7 +191,9 @@ def test_get_sessions_has_edge_sid_true_and_per_session_value_when_column_presen
     # deterministic. Production sessions usually carry a single cookie
     # value end-to-end; intra-session rotation would still resolve to
     # one MAX value.
-    in_memory_duckdb.execute(f'UPDATE {table_name} SET "edge_sid" = ? WHERE "ip" = ?', ["sid_abc123def456", "10.0.0.50"])
+    in_memory_duckdb.execute(
+        f'UPDATE {table_name} SET "edge_sid" = ? WHERE "ip" = ?', ["sid_abc123def456", "10.0.0.50"]
+    )
 
     # Bust the schema cache so get_schema_cols picks up the new column.
     _clear_schema_cache()

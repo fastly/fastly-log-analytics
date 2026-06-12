@@ -61,10 +61,9 @@ def test_caddyfile_rewrites_xff_only_when_peer_is_fastly():
     {http.request.header.Fastly-Client-IP}`` line is the trust-handoff
     moment — must stay scoped to the matcher."""
     caddyfile = _read("Caddyfile")
-    assert (
-        "request_header @from_fastly_v4 X-Forwarded-For "
-        "{http.request.header.Fastly-Client-IP}" in caddyfile
-    ), "XFF rewrite missing or unscoped from @from_fastly_v4"
+    assert "request_header @from_fastly_v4 X-Forwarded-For {http.request.header.Fastly-Client-IP}" in caddyfile, (
+        "XFF rewrite missing or unscoped from @from_fastly_v4"
+    )
 
 
 def test_caddyfile_share_login_rate_limit_present():

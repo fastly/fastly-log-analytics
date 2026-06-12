@@ -294,9 +294,7 @@ def get_cron_run_result(service_id: str, run_id: int) -> dict | None:
     needs the log_output to replay the run's terminal lines."""
     try:
         con = get_con(service_id)
-        row = con.execute(
-            "SELECT status, log_output FROM cron_runs WHERE id = ?", (run_id,)
-        ).fetchone()
+        row = con.execute("SELECT status, log_output FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
         if row is None:
             return None
         return {"status": row["status"], "log_output": row["log_output"]}

@@ -26,7 +26,7 @@ def test_virtual_field_exploded_top_n_renders_with_all_inputs():
         where_clause="1=1",
         requests_metric="COUNT(*)",
     )
-    assert 'unnest(string_split("waf_sig", \',\'))' in rendered
+    assert "unnest(string_split(\"waf_sig\", ','))" in rendered
     assert 'FROM "logs_xyz"' in rendered
     assert "WITH split_data AS" in rendered
     assert "CROSS JOIN total_count" in rendered
@@ -34,12 +34,14 @@ def test_virtual_field_exploded_top_n_renders_with_all_inputs():
 
 
 def test_virtual_field_exploded_top_n_placeholders_pinned():
-    assert _placeholders(SQL.VIRTUAL_FIELD_EXPLODED_TOP_N) == sorted([
-        "backing_col",
-        "table_name",
-        "where_clause",
-        "requests_metric",
-    ])
+    assert _placeholders(SQL.VIRTUAL_FIELD_EXPLODED_TOP_N) == sorted(
+        [
+            "backing_col",
+            "table_name",
+            "where_clause",
+            "requests_metric",
+        ]
+    )
 
 
 # ── CONN_REQUESTS_BUCKET ──────────────────────────────────────────────────────
@@ -55,16 +57,18 @@ def test_conn_requests_bucket_renders_with_all_inputs():
     assert "'2–5'" in rendered
     assert "'6–20'" in rendered
     assert "'21+'" in rendered
-    assert "ORDER BY MIN(\"conn_requests\")" in rendered
+    assert 'ORDER BY MIN("conn_requests")' in rendered
     assert 'FROM "logs_xyz"' in rendered
 
 
 def test_conn_requests_bucket_placeholders_pinned():
-    assert _placeholders(SQL.CONN_REQUESTS_BUCKET) == sorted([
-        "requests_metric",
-        "table_name",
-        "where_clause",
-    ])
+    assert _placeholders(SQL.CONN_REQUESTS_BUCKET) == sorted(
+        [
+            "requests_metric",
+            "table_name",
+            "where_clause",
+        ]
+    )
 
 
 # ── TIME_SERIES ───────────────────────────────────────────────────────────────
@@ -98,13 +102,15 @@ def test_time_series_renders_with_extra_where_for_latency():
 
 
 def test_time_series_placeholders_pinned():
-    assert _placeholders(SQL.TIME_SERIES) == sorted([
-        "time_bucket_select",
-        "value_expr",
-        "table_name",
-        "extra_where",
-        "where_clause",
-    ])
+    assert _placeholders(SQL.TIME_SERIES) == sorted(
+        [
+            "time_bucket_select",
+            "value_expr",
+            "table_name",
+            "extra_where",
+            "where_clause",
+        ]
+    )
 
 
 # ── MAP_DATA_BY_COUNTRY ───────────────────────────────────────────────────────
@@ -123,11 +129,13 @@ def test_map_data_by_country_renders():
 
 
 def test_map_data_by_country_placeholders_pinned():
-    assert _placeholders(SQL.MAP_DATA_BY_COUNTRY) == sorted([
-        "requests_metric",
-        "table_name",
-        "where_clause",
-    ])
+    assert _placeholders(SQL.MAP_DATA_BY_COUNTRY) == sorted(
+        [
+            "requests_metric",
+            "table_name",
+            "where_clause",
+        ]
+    )
 
 
 # ── FIELD_VALUES_BOT_UA ───────────────────────────────────────────────────────
@@ -158,12 +166,14 @@ def test_field_values_bot_ua_renders_without_filter():
 
 
 def test_field_values_bot_ua_placeholders_pinned():
-    assert _placeholders(SQL.FIELD_VALUES_BOT_UA) == sorted([
-        "requests_metric",
-        "table_name",
-        "where_clause",
-        "ua_filter",
-    ])
+    assert _placeholders(SQL.FIELD_VALUES_BOT_UA) == sorted(
+        [
+            "requests_metric",
+            "table_name",
+            "where_clause",
+            "ua_filter",
+        ]
+    )
 
 
 # ── FIELD_VALUES_VIRTUAL_SIGNALS ──────────────────────────────────────────────
@@ -178,7 +188,7 @@ def test_field_values_virtual_signals_renders_with_search():
         search_cond="AND trim(signal) ILIKE ?",
         limit=20,
     )
-    assert 'unnest(string_split("waf_sig", \',\'))' in rendered
+    assert "unnest(string_split(\"waf_sig\", ','))" in rendered
     assert 'FROM "logs_xyz"' in rendered
     assert "WHERE trim(signal) != '' AND trim(signal) ILIKE ?" in rendered
     assert "LIMIT 20" in rendered
@@ -193,20 +203,22 @@ def test_field_values_virtual_signals_renders_without_search():
         search_cond="",
         limit=10,
     )
-    assert 'unnest(string_split("edge_score_reason", \',\'))' in rendered
+    assert "unnest(string_split(\"edge_score_reason\", ','))" in rendered
     assert "WHERE trim(signal) != '' " in rendered
     assert "LIMIT 10" in rendered
 
 
 def test_field_values_virtual_signals_placeholders_pinned():
-    assert _placeholders(SQL.FIELD_VALUES_VIRTUAL_SIGNALS) == sorted([
-        "requests_metric",
-        "backing_col",
-        "table_name",
-        "where_clause",
-        "search_cond",
-        "limit",
-    ])
+    assert _placeholders(SQL.FIELD_VALUES_VIRTUAL_SIGNALS) == sorted(
+        [
+            "requests_metric",
+            "backing_col",
+            "table_name",
+            "where_clause",
+            "search_cond",
+            "limit",
+        ]
+    )
 
 
 # ── FIELD_VALUES_NATIVE_COLUMN ────────────────────────────────────────────────
@@ -242,14 +254,16 @@ def test_field_values_native_column_renders_without_search():
 
 
 def test_field_values_native_column_placeholders_pinned():
-    assert _placeholders(SQL.FIELD_VALUES_NATIVE_COLUMN) == sorted([
-        "clean_field",
-        "requests_metric",
-        "table_name",
-        "where_clause",
-        "search_cond",
-        "limit",
-    ])
+    assert _placeholders(SQL.FIELD_VALUES_NATIVE_COLUMN) == sorted(
+        [
+            "clean_field",
+            "requests_metric",
+            "table_name",
+            "where_clause",
+            "search_cond",
+            "limit",
+        ]
+    )
 
 
 # ── Module-level invariants ───────────────────────────────────────────────────

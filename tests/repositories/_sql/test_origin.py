@@ -12,11 +12,7 @@ from backend.repositories._sql import origin as SQL
 
 def _placeholders(template: str) -> list[str]:
     """Extract format-style ``{name}`` placeholders from a SQL template."""
-    return sorted({
-        p.split("}")[0]
-        for p in template.split("{")[1:]
-        if "}" in p
-    })
+    return sorted({p.split("}")[0] for p in template.split("{")[1:] if "}" in p})
 
 
 # ── Live-table templates ──────────────────────────────────────────────────────
@@ -38,25 +34,27 @@ def test_summary_grouping_sets_renders():
     )
     assert 'FROM "logs_xyz"' in rendered
     assert 'GROUPING("edge")' in rendered
-    assert "MEDIAN(COALESCE(\"ottfb\", \"ttfb\" * 1000000.0)) / 1000.0" in rendered
+    assert 'MEDIAN(COALESCE("ottfb", "ttfb" * 1000000.0)) / 1000.0' in rendered
     assert "GROUP BY GROUPING SETS" in rendered
     assert "AS ottfb_p99_ms" in rendered
 
 
 def test_summary_grouping_sets_placeholders_pinned():
-    assert _placeholders(SQL.SUMMARY_GROUPING_SETS) == sorted([
-        "edge_select",
-        "grouping_expr",
-        "lat_val",
-        "ottlb_p50",
-        "ottlb_p95",
-        "cdn_ovh",
-        "ost_5xx",
-        "obytes_p50",
-        "table",
-        "where",
-        "grouping_clause",
-    ])
+    assert _placeholders(SQL.SUMMARY_GROUPING_SETS) == sorted(
+        [
+            "edge_select",
+            "grouping_expr",
+            "lat_val",
+            "ottlb_p50",
+            "ottlb_p95",
+            "cdn_ovh",
+            "ost_5xx",
+            "obytes_p50",
+            "table",
+            "where",
+            "grouping_clause",
+        ]
+    )
 
 
 def test_timeseries_bucketed_renders():
@@ -78,16 +76,18 @@ def test_timeseries_bucketed_renders():
 
 
 def test_timeseries_bucketed_placeholders_pinned():
-    assert _placeholders(SQL.TIMESERIES_BUCKETED) == sorted([
-        "interval",
-        "agg_expr",
-        "unit_conv",
-        "edge_col",
-        "table",
-        "where",
-        "lat_expr",
-        "edge_group",
-    ])
+    assert _placeholders(SQL.TIMESERIES_BUCKETED) == sorted(
+        [
+            "interval",
+            "agg_expr",
+            "unit_conv",
+            "edge_col",
+            "table",
+            "where",
+            "lat_expr",
+            "edge_group",
+        ]
+    )
 
 
 def test_slow_urls_renders():
@@ -177,7 +177,7 @@ def test_shielding_analysis_renders():
     )
     assert "WITH edge_logs AS" in rendered
     assert "shield_logs AS" in rendered
-    assert 'INNER JOIN shield_logs s ON s.prid = e.rid' in rendered
+    assert "INNER JOIN shield_logs s ON s.prid = e.rid" in rendered
     assert "PERCENTILE_CONT(0.50)" in rendered
     assert rendered.rstrip().endswith("LIMIT ?")
 
@@ -204,13 +204,15 @@ def test_aggregates_create_temp_renders():
 
 
 def test_aggregates_create_temp_placeholders_pinned():
-    assert _placeholders(SQL.AGGREGATES_CREATE_TEMP) == sorted([
-        "temp_table",
-        "select_cols",
-        "lat_us_expr",
-        "table",
-        "where_clause",
-    ])
+    assert _placeholders(SQL.AGGREGATES_CREATE_TEMP) == sorted(
+        [
+            "temp_table",
+            "select_cols",
+            "lat_us_expr",
+            "table",
+            "where_clause",
+        ]
+    )
 
 
 def test_temp_summary_rollup_renders():
@@ -230,15 +232,17 @@ def test_temp_summary_rollup_renders():
 
 
 def test_temp_summary_rollup_placeholders_pinned():
-    assert _placeholders(SQL.TEMP_SUMMARY_ROLLUP) == sorted([
-        "lat_val",
-        "ottlb_p50",
-        "ottlb_p95",
-        "cdn_ovh",
-        "ost_5xx",
-        "obytes_p50",
-        "temp_table",
-    ])
+    assert _placeholders(SQL.TEMP_SUMMARY_ROLLUP) == sorted(
+        [
+            "lat_val",
+            "ottlb_p50",
+            "ottlb_p95",
+            "cdn_ovh",
+            "ost_5xx",
+            "obytes_p50",
+            "temp_table",
+        ]
+    )
 
 
 def test_temp_summary_by_edge_renders():
@@ -272,15 +276,17 @@ def test_temp_timeseries_renders():
 
 
 def test_temp_timeseries_placeholders_pinned():
-    assert _placeholders(SQL.TEMP_TIMESERIES) == sorted([
-        "interval",
-        "agg_expr",
-        "unit_conv",
-        "edge_col",
-        "temp_table",
-        "lat_expr",
-        "edge_group",
-    ])
+    assert _placeholders(SQL.TEMP_TIMESERIES) == sorted(
+        [
+            "interval",
+            "agg_expr",
+            "unit_conv",
+            "edge_col",
+            "temp_table",
+            "lat_expr",
+            "edge_group",
+        ]
+    )
 
 
 def test_temp_slow_urls_renders():

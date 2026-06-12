@@ -18,6 +18,7 @@ def _placeholders(template: str) -> list[str]:
 
 # ── TOP_UAS_BY_COUNT ──────────────────────────────────────────────────────────
 
+
 def test_top_uas_by_count_renders_with_temp_table():
     rendered = SQL.TOP_UAS_BY_COUNT.format(temp_table="t_filtered_xyz")
     assert "SELECT ua, count(*) AS cnt" in rendered
@@ -34,6 +35,7 @@ def test_top_uas_by_count_pins_placeholders():
 
 # ── NGWAF_TOP_BOTS_JOIN ───────────────────────────────────────────────────────
 
+
 def test_ngwaf_top_bots_join_renders_with_temp_table_and_n():
     rendered = SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table="t_filtered_xyz", n=15)
     assert "SELECT nb.bot_name, nb.category, count(*) AS cnt" in rendered
@@ -48,6 +50,7 @@ def test_ngwaf_top_bots_join_pins_placeholders():
 
 
 # ── VERIFIED_BOTS_TS ──────────────────────────────────────────────────────────
+
 
 def test_verified_bots_ts_renders_with_bucket_and_temp_table():
     rendered = SQL.VERIFIED_BOTS_TS.format(bucket_seconds=300, temp_table="t_filtered_xyz")
@@ -64,6 +67,7 @@ def test_verified_bots_ts_pins_placeholders():
 
 
 # ── NGWAF_VERIFIED_BOTS ───────────────────────────────────────────────────────
+
 
 def test_ngwaf_verified_bots_renders_with_temp_table():
     rendered = SQL.NGWAF_VERIFIED_BOTS.format(temp_table="t_filtered_xyz")
@@ -83,6 +87,7 @@ def test_ngwaf_verified_bots_pins_placeholders():
 
 # ── NGWAF_VERIFIED_BOTS_TS ────────────────────────────────────────────────────
 
+
 def test_ngwaf_verified_bots_ts_renders_with_bucket_and_temp_table():
     rendered = SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=60, temp_table="t_filtered_xyz")
     assert "time_bucket(INTERVAL '60 seconds', t.timestamp)" in rendered
@@ -97,6 +102,7 @@ def test_ngwaf_verified_bots_ts_pins_placeholders():
 
 
 # ── TLS_FINGERPRINTS ──────────────────────────────────────────────────────────
+
 
 def test_tls_fingerprints_renders_with_temp_table():
     rendered = SQL.TLS_FINGERPRINTS.format(temp_table="t_filtered_xyz")
@@ -113,6 +119,7 @@ def test_tls_fingerprints_pins_placeholders():
 
 
 # ── REQ_HEADER_SIZE_DIST ──────────────────────────────────────────────────────
+
 
 def test_req_header_size_dist_renders_with_temp_table():
     rendered = SQL.REQ_HEADER_SIZE_DIST.format(temp_table="t_filtered_xyz")
@@ -131,6 +138,7 @@ def test_req_header_size_dist_pins_placeholders():
 
 # ── TOP_IPS_BY_MAX_HEADER ─────────────────────────────────────────────────────
 
+
 def test_top_ips_by_max_header_renders_with_temp_table():
     rendered = SQL.TOP_IPS_BY_MAX_HEADER.format(temp_table="t_filtered_xyz")
     assert "SELECT ip, MAX(req_header_bytes) as max_header" in rendered
@@ -144,6 +152,7 @@ def test_top_ips_by_max_header_pins_placeholders():
 
 
 # ── IPV6_ADOPTION_TS ──────────────────────────────────────────────────────────
+
 
 def test_ipv6_adoption_ts_renders_with_time_bucket_and_temp_table():
     rendered = SQL.IPV6_ADOPTION_TS.format(
@@ -162,6 +171,7 @@ def test_ipv6_adoption_ts_pins_placeholders():
 
 # ── PROXY_TYPE_DIST ───────────────────────────────────────────────────────────
 
+
 def test_proxy_type_dist_renders_with_temp_table():
     rendered = SQL.PROXY_TYPE_DIST.format(temp_table="t_filtered_xyz")
     assert "SELECT p_type, count(*) as count" in rendered
@@ -175,6 +185,7 @@ def test_proxy_type_dist_pins_placeholders():
 
 
 # ── CONN_REUSE_DIST ───────────────────────────────────────────────────────────
+
 
 def test_conn_reuse_dist_renders_with_temp_table():
     rendered = SQL.CONN_REUSE_DIST.format(temp_table="t_filtered_xyz")
@@ -194,6 +205,7 @@ def test_conn_reuse_dist_pins_placeholders():
 
 # ── WELLKNOWN_BOTS_UA_IP ──────────────────────────────────────────────────────
 
+
 def test_wellknown_bots_ua_ip_renders_with_minimal_prefilter():
     rendered = SQL.WELLKNOWN_BOTS_UA_IP.format(
         temp_table="t_filtered_xyz",
@@ -208,10 +220,7 @@ def test_wellknown_bots_ua_ip_renders_with_minimal_prefilter():
 
 
 def test_wellknown_bots_ua_ip_renders_with_regex_prefilter():
-    prefilter = (
-        "WHERE ua IS NOT NULL AND ip IS NOT NULL "
-        "AND regexp_matches(ua, '(googlebot|bingbot)')"
-    )
+    prefilter = "WHERE ua IS NOT NULL AND ip IS NOT NULL AND regexp_matches(ua, '(googlebot|bingbot)')"
     rendered = SQL.WELLKNOWN_BOTS_UA_IP.format(
         temp_table="t_filtered_xyz",
         prefilter=prefilter,

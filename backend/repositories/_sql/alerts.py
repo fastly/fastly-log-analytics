@@ -38,8 +38,7 @@ Output (one row):
 
 
 COUNT_REQUESTS_IN_WINDOW = (
-    "SELECT count(*) FROM {table} "
-    "WHERE timestamp >= {window_start_expr} AND timestamp <= {window_end_expr}"
+    "SELECT count(*) FROM {table} WHERE timestamp >= {window_start_expr} AND timestamp <= {window_end_expr}"
 )
 """Total request count inside the alert's evaluation window.
 
@@ -74,9 +73,7 @@ expression suitable for arithmetic with ``INTERVAL`` literals.
 """
 
 
-WINDOW_OFFSET_EXPR = (
-    "(SELECT max(timestamp) FROM {table}) - INTERVAL '{minutes_ago} minutes'"
-)
+WINDOW_OFFSET_EXPR = "(SELECT max(timestamp) FROM {table}) - INTERVAL '{minutes_ago} minutes'"
 """Window-bound expression: ``max_ts - INTERVAL 'N minutes'``.
 
 Used four times by ``evaluate_alert``:

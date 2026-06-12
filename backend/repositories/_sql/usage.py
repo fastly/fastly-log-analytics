@@ -13,9 +13,7 @@ from __future__ import annotations
 
 # ── Edge ratio ────────────────────────────────────────────────────────────────
 
-EDGE_RATIO_PCT = (
-    "SELECT count(*) FILTER (WHERE edge = true) * 100.0 / count(*) FROM {table}"
-)
+EDGE_RATIO_PCT = "SELECT count(*) FILTER (WHERE edge = true) * 100.0 / count(*) FROM {table}"
 """Percentage of rows where ``edge = true``.
 
 Inputs:

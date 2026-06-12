@@ -51,14 +51,14 @@ function greatCirclePoints(
   const toDeg = (r: number) => (r * 180) / Math.PI
   const φ1 = toRad(lat1), λ1 = toRad(lon1)
   const φ2 = toRad(lat2), λ2 = toRad(lon2)
-  
+
   // Clamp dot product to [-1, 1] to prevent Math.acos from returning NaN due to floating point inaccuracy
   const dotProduct = Math.sin(φ1) * Math.sin(φ2) + Math.cos(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1)
   const clampedDot = Math.max(-1, Math.min(1, dotProduct))
   const d = Math.acos(clampedDot)
-  
+
   if (isNaN(d) || d < 0.001) return [[lon1, lat1], [lon2, lat2]]
-  
+
   const pts: [number, number][] = []
   let prevLon = lon1
 
@@ -69,7 +69,7 @@ function greatCirclePoints(
     const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2)
     const y = A * Math.cos(φ1) * Math.sin(λ1) + B * Math.cos(φ2) * Math.sin(λ2)
     const z = A * Math.sin(φ1) + B * Math.sin(φ2)
-    
+
     const lat = toDeg(Math.atan2(z, Math.sqrt(x * x + y * y)))
     let lon = toDeg(Math.atan2(y, x))
 
@@ -78,7 +78,7 @@ function greatCirclePoints(
       if (prevLon < 0) lon -= 360
       else lon += 360
     }
-    
+
     pts.push([lon, lat])
     prevLon = lon
   }
@@ -172,7 +172,7 @@ function buildArcFeatures(rows: any[]): GeoJSON.FeatureCollection {
       row.edge_lat == null || row.edge_lon == null ||
       row.shield_lat == null || row.shield_lon == null
     ) continue
-    
+
     // Skip 0-length arcs (same POP or coordinates) to prevent MapLibre WebGL triangulation crashes
     if (Math.abs(row.edge_lat - row.shield_lat) < 0.001 && Math.abs(row.edge_lon - row.shield_lon) < 0.001) {
       continue
@@ -391,7 +391,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
   // Update sources when rows change or map becomes ready
   useEffect(() => {
     if (!map.current || !mapReady) return
-    
+
     const updateData = () => {
       if (!map.current) return
       const arcSrc = map.current.getSource('arcs') as maplibregl.GeoJSONSource | undefined

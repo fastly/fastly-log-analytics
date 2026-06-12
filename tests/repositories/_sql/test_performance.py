@@ -20,15 +20,13 @@ def test_origin_timeseries_renders_with_all_inputs():
 
 
 def test_origin_timeseries_template_pins_all_expected_placeholders():
-    placeholders = sorted(
-        p.split("}")[0]
-        for p in SQL.ORIGIN_TIMESERIES.split("{")[1:]
-        if "}" in p
+    placeholders = sorted(p.split("}")[0] for p in SQL.ORIGIN_TIMESERIES.split("{")[1:] if "}" in p)
+    assert placeholders == sorted(
+        [
+            "time_bucket_select",
+            "value_expr",
+            "table",
+            "where_clause",
+            "metric_col",
+        ]
     )
-    assert placeholders == sorted([
-        "time_bucket_select",
-        "value_expr",
-        "table",
-        "where_clause",
-        "metric_col",
-    ])

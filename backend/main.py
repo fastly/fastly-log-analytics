@@ -773,9 +773,12 @@ def health_check(
             # A brand-new service legitimately has no ingest yet; don't flag
             # it as degraded. Only flag services that have ingested at least
             # once AND fell behind the cutoff.
-            if last_ingest and last_ingest < cutoff and svc_state["status"] == "ok":
-                svc_state["status"] = "degraded"
-                svc_state["reason"] = f"no ingest since {last_ingest} (cutoff {cutoff})"
+            if last_ingest and svc_state["status"] == "ok":
+                norm_last = str(last_ingest).replace(" ", "T").rstrip("Z")
+                norm_cutoff = str(cutoff).replace(" ", "T").rstrip("Z")
+                if norm_last < norm_cutoff:
+                    svc_state["status"] = "degraded"
+                    svc_state["reason"] = f"no ingest since {last_ingest} (cutoff {cutoff})"
         except Exception as e:
             svc_state["status"] = "degraded"
             svc_state["reason"] = f"metadata_db query failed: {e}"

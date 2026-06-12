@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from backend.deps import get_service_id
 from backend.core.request_context import RequestContext, build_request_context
+from backend.deps import get_service_id
 from backend.models.dashboard import QueryRequest
 from backend.repositories import query as repo
 

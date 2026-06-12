@@ -11,11 +11,7 @@ from backend.repositories._sql import query as SQL
 
 
 def _placeholders(template: str) -> list[str]:
-    return sorted(
-        p.split("}")[0]
-        for p in template.split("{")[1:]
-        if "}" in p
-    )
+    return sorted(p.split("}")[0] for p in template.split("{")[1:] if "}" in p)
 
 
 # ── EXPLAIN_WRAPPER ───────────────────────────────────────────────────────────

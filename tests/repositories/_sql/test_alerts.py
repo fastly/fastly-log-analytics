@@ -16,11 +16,7 @@ def test_max_timestamp_renders_with_table_name():
 
 
 def test_max_timestamp_template_pins_only_table_placeholder():
-    placeholders = sorted(
-        p.split("}")[0]
-        for p in SQL.MAX_TIMESTAMP.split("{")[1:]
-        if "}" in p
-    )
+    placeholders = sorted(p.split("}")[0] for p in SQL.MAX_TIMESTAMP.split("{")[1:] if "}" in p)
     assert placeholders == ["table"]
 
 
@@ -33,18 +29,14 @@ def test_count_requests_in_window_renders_with_all_inputs():
         window_start_expr="(SELECT max(timestamp) FROM \"logs_xyz\") - INTERVAL '5 minutes'",
         window_end_expr='(SELECT max(timestamp) FROM "logs_xyz")',
     )
-    assert "SELECT count(*) FROM \"logs_xyz\"" in rendered
+    assert 'SELECT count(*) FROM "logs_xyz"' in rendered
     assert "WHERE timestamp >=" in rendered
     assert "AND timestamp <=" in rendered
     assert "INTERVAL '5 minutes'" in rendered
 
 
 def test_count_requests_in_window_template_pins_all_expected_placeholders():
-    placeholders = sorted(
-        p.split("}")[0]
-        for p in SQL.COUNT_REQUESTS_IN_WINDOW.split("{")[1:]
-        if "}" in p
-    )
+    placeholders = sorted(p.split("}")[0] for p in SQL.COUNT_REQUESTS_IN_WINDOW.split("{")[1:] if "}" in p)
     assert placeholders == sorted(["table", "window_start_expr", "window_end_expr"])
 
 
@@ -59,11 +51,7 @@ def test_max_timestamp_subquery_expr_renders_as_parenthesised_subquery():
 
 
 def test_max_timestamp_subquery_expr_template_pins_only_table_placeholder():
-    placeholders = sorted(
-        p.split("}")[0]
-        for p in SQL.MAX_TIMESTAMP_SUBQUERY_EXPR.split("{")[1:]
-        if "}" in p
-    )
+    placeholders = sorted(p.split("}")[0] for p in SQL.MAX_TIMESTAMP_SUBQUERY_EXPR.split("{")[1:] if "}" in p)
     assert placeholders == ["table"]
 
 
@@ -72,10 +60,7 @@ def test_max_timestamp_subquery_expr_template_pins_only_table_placeholder():
 
 def test_window_offset_expr_renders_with_table_and_minutes():
     rendered = SQL.WINDOW_OFFSET_EXPR.format(table='"logs_xyz"', minutes_ago=15)
-    assert (
-        rendered
-        == "(SELECT max(timestamp) FROM \"logs_xyz\") - INTERVAL '15 minutes'"
-    )
+    assert rendered == "(SELECT max(timestamp) FROM \"logs_xyz\") - INTERVAL '15 minutes'"
 
 
 def test_window_offset_expr_accepts_summed_minutes_for_historic_window():
@@ -86,9 +71,5 @@ def test_window_offset_expr_accepts_summed_minutes_for_historic_window():
 
 
 def test_window_offset_expr_template_pins_all_expected_placeholders():
-    placeholders = sorted(
-        p.split("}")[0]
-        for p in SQL.WINDOW_OFFSET_EXPR.split("{")[1:]
-        if "}" in p
-    )
+    placeholders = sorted(p.split("}")[0] for p in SQL.WINDOW_OFFSET_EXPR.split("{")[1:] if "}" in p)
     assert placeholders == sorted(["table", "minutes_ago"])

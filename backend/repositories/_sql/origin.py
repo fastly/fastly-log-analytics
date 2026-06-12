@@ -264,9 +264,7 @@ Output columns per row:
 # ── Composite endpoint: get_aggregates → CREATE TEMP TABLE + 8 reads ──────────
 
 AGGREGATES_CREATE_TEMP = (
-    "CREATE TEMP TABLE {temp_table} AS "
-    "SELECT {select_cols}, {lat_us_expr} AS lat_us "
-    "FROM {table} WHERE {where_clause}"
+    "CREATE TEMP TABLE {temp_table} AS SELECT {select_cols}, {lat_us_expr} AS lat_us FROM {table} WHERE {where_clause}"
 )
 """Materialise a per-request TEMP TABLE for the composite origin endpoint.
 

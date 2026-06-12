@@ -551,11 +551,7 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
             # already in the Class A list, HEAD/DELETE/GET-of-object are
             # correctly Class B).
             billing_method = request.method
-            if (
-                service == "FOS"
-                and request.method == "GET"
-                and "list-type=" in request.query_string
-            ):
+            if service == "FOS" and request.method == "GET" and "list-type=" in request.query_string:
                 billing_method = "LIST_OBJECTS_V2"
             row = {
                 "method": billing_method,

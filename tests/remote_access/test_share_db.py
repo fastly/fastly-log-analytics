@@ -192,8 +192,8 @@ def test_login_rehashes_legacy_scrypt_in_place():
     con = share_db.get_global_share_con()
     con.execute("UPDATE remote_invites SET passcode=? WHERE id=?", (legacy, inv["id"]))
     con.commit()
-    assert con.execute("SELECT passcode FROM remote_invites WHERE id=?", (inv["id"],)).fetchone()[0].startswith(
-        "scrypt$"
+    assert (
+        con.execute("SELECT passcode FROM remote_invites WHERE id=?", (inv["id"],)).fetchone()[0].startswith("scrypt$")
     )
 
     # Login succeeds AND the row is rehashed to argon2id in place.

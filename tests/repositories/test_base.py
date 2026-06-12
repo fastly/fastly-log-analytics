@@ -754,7 +754,9 @@ class TestExecuteTopNBatchIntegerAggregation:
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         st = (datetime.combine(day_d, datetime.min.time(), tzinfo=UTC) + timedelta(hours=17, minutes=36)).isoformat()
-        et = (datetime.combine(day_d_plus_1, datetime.min.time(), tzinfo=UTC) + timedelta(hours=17, minutes=36)).isoformat()
+        et = (
+            datetime.combine(day_d_plus_1, datetime.min.time(), tzinfo=UTC) + timedelta(hours=17, minutes=36)
+        ).isoformat()
         rows, _ = runner.execute_top_n_rollups(["edge_score"], st, et, limit=10)
 
         values = {value: count for (field, value, count) in rows if field == "edge_score"}

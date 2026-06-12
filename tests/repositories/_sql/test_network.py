@@ -12,11 +12,7 @@ from backend.repositories._sql import network as SQL
 
 def _placeholders(template: str) -> list[str]:
     """Return the sorted list of ``{name}`` format placeholders in ``template``."""
-    return sorted(
-        p.split("}")[0]
-        for p in template.split("{")[1:]
-        if "}" in p
-    )
+    return sorted(p.split("}")[0] for p in template.split("{")[1:] if "}" in p)
 
 
 # ── HEATMAP_BY_ASN_BUCKET ────────────────────────────────────────────────────
@@ -63,17 +59,19 @@ def test_heatmap_by_asn_bucket_renders_with_null_column_exprs():
 
 
 def test_heatmap_by_asn_bucket_placeholders_pinned():
-    assert _placeholders(SQL.HEATMAP_BY_ASN_BUCKET) == sorted([
-        "bucket_ms",
-        "bucket_ms",
-        "rtt_min_expr",
-        "congestion_expr",
-        "ploss_expr",
-        "rtt_var_expr",
-        "table",
-        "where",
-        "row_limit",
-    ])
+    assert _placeholders(SQL.HEATMAP_BY_ASN_BUCKET) == sorted(
+        [
+            "bucket_ms",
+            "bucket_ms",
+            "rtt_min_expr",
+            "congestion_expr",
+            "ploss_expr",
+            "rtt_var_expr",
+            "table",
+            "where",
+            "row_limit",
+        ]
+    )
 
 
 # ── MAP_BY_COUNTRY_BUCKET ────────────────────────────────────────────────────
@@ -117,17 +115,19 @@ def test_map_by_country_bucket_renders_with_extended_where_for_map_asn():
 
 
 def test_map_by_country_bucket_placeholders_pinned():
-    assert _placeholders(SQL.MAP_BY_COUNTRY_BUCKET) == sorted([
-        "city_col",
-        "lat_col",
-        "lon_col",
-        "metro_col",
-        "bucket_ms",
-        "bucket_ms",
-        "ploss_expr",
-        "table",
-        "where",
-    ])
+    assert _placeholders(SQL.MAP_BY_COUNTRY_BUCKET) == sorted(
+        [
+            "city_col",
+            "lat_col",
+            "lon_col",
+            "metro_col",
+            "bucket_ms",
+            "bucket_ms",
+            "ploss_expr",
+            "table",
+            "where",
+        ]
+    )
 
 
 # ── METRO_LEADERBOARD ────────────────────────────────────────────────────────
@@ -150,14 +150,16 @@ def test_metro_leaderboard_renders_with_all_inputs():
 
 
 def test_metro_leaderboard_placeholders_pinned():
-    assert _placeholders(SQL.METRO_LEADERBOARD) == sorted([
-        "city_col",
-        "region_col",
-        "metro_col",
-        "ploss_expr",
-        "table",
-        "where",
-    ])
+    assert _placeholders(SQL.METRO_LEADERBOARD) == sorted(
+        [
+            "city_col",
+            "region_col",
+            "metro_col",
+            "ploss_expr",
+            "table",
+            "where",
+        ]
+    )
 
 
 # ── SPEED_DISTRIBUTION_BY_ASN ────────────────────────────────────────────────
@@ -176,11 +178,13 @@ def test_speed_distribution_by_asn_renders_with_placeholders():
 
 
 def test_speed_distribution_by_asn_placeholders_pinned():
-    assert _placeholders(SQL.SPEED_DISTRIBUTION_BY_ASN) == sorted([
-        "table",
-        "where",
-        "placeholders",
-    ])
+    assert _placeholders(SQL.SPEED_DISTRIBUTION_BY_ASN) == sorted(
+        [
+            "table",
+            "where",
+            "placeholders",
+        ]
+    )
 
 
 # ── RTT_PERCENTILES_BY_ASN ───────────────────────────────────────────────────
@@ -199,11 +203,13 @@ def test_rtt_percentiles_by_asn_renders_with_placeholders():
 
 
 def test_rtt_percentiles_by_asn_placeholders_pinned():
-    assert _placeholders(SQL.RTT_PERCENTILES_BY_ASN) == sorted([
-        "table",
-        "where",
-        "placeholders",
-    ])
+    assert _placeholders(SQL.RTT_PERCENTILES_BY_ASN) == sorted(
+        [
+            "table",
+            "where",
+            "placeholders",
+        ]
+    )
 
 
 # ── QUALITY_BAR_BY_GROUP ─────────────────────────────────────────────────────
@@ -231,20 +237,22 @@ def test_quality_bar_by_group_renders_with_extra_where():
         rtt_filter="tcp_rtt IS NOT NULL AND tcp_rtt > 0",
         extra_where=" AND country = ?",
     )
-    assert 'WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0 AND country = ?' in rendered
+    assert "WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0 AND country = ?" in rendered
     assert '"region" AS label' in rendered
 
 
 def test_quality_bar_by_group_placeholders_pinned():
-    assert _placeholders(SQL.QUALITY_BAR_BY_GROUP) == sorted([
-        "group_col",
-        "group_col",
-        "group_col",
-        "group_col",
-        "table",
-        "rtt_filter",
-        "extra_where",
-    ])
+    assert _placeholders(SQL.QUALITY_BAR_BY_GROUP) == sorted(
+        [
+            "group_col",
+            "group_col",
+            "group_col",
+            "group_col",
+            "table",
+            "rtt_filter",
+            "extra_where",
+        ]
+    )
 
 
 # ── QUALITY_COUNTRIES_DISTINCT ───────────────────────────────────────────────
@@ -262,10 +270,12 @@ def test_quality_countries_distinct_renders_with_all_inputs():
 
 
 def test_quality_countries_distinct_placeholders_pinned():
-    assert _placeholders(SQL.QUALITY_COUNTRIES_DISTINCT) == sorted([
-        "table",
-        "where_clause",
-    ])
+    assert _placeholders(SQL.QUALITY_COUNTRIES_DISTINCT) == sorted(
+        [
+            "table",
+            "where_clause",
+        ]
+    )
 
 
 # ── QUALITY_SCATTER ──────────────────────────────────────────────────────────
@@ -285,7 +295,9 @@ def test_quality_scatter_renders_with_all_inputs():
 
 
 def test_quality_scatter_placeholders_pinned():
-    assert _placeholders(SQL.QUALITY_SCATTER) == sorted([
-        "table",
-        "rtt_filter",
-    ])
+    assert _placeholders(SQL.QUALITY_SCATTER) == sorted(
+        [
+            "table",
+            "rtt_filter",
+        ]
+    )

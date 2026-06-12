@@ -40,6 +40,7 @@ repos:
         # strips it. Excluding the generated artifact breaks the cycle.
         exclude: '^frontend/openapi\.json$'
       - id: check-yaml
+        args: [--unsafe]
       - id: check-json
       - id: check-merge-conflict
       - id: debug-statements

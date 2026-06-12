@@ -59,9 +59,7 @@ def app_with_blocklist():
         sid = request.headers.get("x-test-session-services")
         if sid is not None:
             services = [s for s in sid.split(",") if s]
-            request.state.analyst_session = SimpleNamespace(
-                session_id="test", service_ids=services, email="t@t"
-            )
+            request.state.analyst_session = SimpleNamespace(session_id="test", service_ids=services, email="t@t")
             # Engage the actual blocklist function — this is the
             # function the H-1..H-4 fixes modified.
             if _is_blocked_path(request.url.path):
@@ -216,9 +214,7 @@ def test_cron_schedule_blocked_for_analyst(app_with_blocklist):
         "/enforce-status-code",
     ],
 )
-def test_scoring_admin_get_endpoints_blocked_for_analyst(
-    app_with_blocklist, suffix
-):
+def test_scoring_admin_get_endpoints_blocked_for_analyst(app_with_blocklist, suffix):
     """H-4: scoring config / status / audit / threshold / exclude-regex /
     enforce-status-code GETs are admin-only. Authorizing the analyst
     for the service must NOT bypass the suffix gate."""

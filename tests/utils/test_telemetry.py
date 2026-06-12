@@ -13,10 +13,10 @@ import threading
 
 from backend.utils.telemetry import (
     _LATEST_PROCESS_CONTEXT_LOCK,
+    _set_process_context_for_tests,
     get_process_context,
     get_process_context_with_fallback,
     process_context_scope,
-    _set_process_context_for_tests,
 )
 
 

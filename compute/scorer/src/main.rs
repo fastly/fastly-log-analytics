@@ -270,7 +270,7 @@ fn score_request(req: &Request) -> Response {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let elapsed_us = (t1.saturating_sub(t0)) / 1_000;
-        
+
         let current_dt_secs = state.as_ref()
             .map(|s| now_secs.saturating_sub(s.last_ts).min(3600))
             .unwrap_or(0);

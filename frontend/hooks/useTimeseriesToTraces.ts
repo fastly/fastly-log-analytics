@@ -17,10 +17,10 @@ export interface TraceConfig {
 
 /**
  * Transforms flat backend timeseries data into Plotly trace arrays.
- * 
+ *
  * Given an array of objects like:
  * [{ time: '2023-01-01', http2: 100, http3: 50 }, ...]
- * 
+ *
  * Returns Plotly traces based on the provided configuration.
  */
 export function useTimeseriesToTraces(

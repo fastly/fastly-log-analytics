@@ -118,7 +118,7 @@ export function DebugPanel() {
           }
         }
       }
-      
+
       setTimeout(() => {
         setQueries(extractedQueries)
         setCalls(extractedCalls)
@@ -156,9 +156,9 @@ export function DebugPanel() {
                 <Database className="h-4 w-4 text-primary" />
               </div>
               <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">DuckDB Queries</h3>
-              <Button 
-                variant="ghost" 
-                size="sm" 
+              <Button
+                variant="ghost"
+                size="sm"
                 className="h-6 text-[10px] px-2"
                 onClick={() => setIsQueryOpen(!isQueryOpen)}
               >
@@ -173,7 +173,7 @@ export function DebugPanel() {
               </div>
             </div>
           </div>
-          
+
           {isQueryOpen && (
             <div className="grid gap-4 max-h-[500px] overflow-auto pr-2 custom-scrollbar">
               {queries.map((q, i) => (
@@ -296,9 +296,9 @@ export function DebugPanel() {
                 <Network className="h-4 w-4 text-orange-500" />
               </div>
               <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">Fastly API & FOS Calls</h3>
-              <Button 
-                variant="ghost" 
-                size="sm" 
+              <Button
+                variant="ghost"
+                size="sm"
                 className="h-6 text-[10px] px-2"
                 onClick={() => setIsCallsOpen(!isCallsOpen)}
               >
@@ -312,7 +312,7 @@ export function DebugPanel() {
               </div>
             </div>
           </div>
-          
+
           {isCallsOpen && (
             <div className="grid gap-3 max-h-[500px] overflow-auto pr-2 custom-scrollbar">
               {calls.length === 0 ? (

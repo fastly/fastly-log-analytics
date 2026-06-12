@@ -3,18 +3,18 @@ import { useSSE } from '@/hooks/useSSE'
 import { Loader2 } from 'lucide-react'
 import { useDateFormat } from '@/hooks/useDateFormat'
 
-export function CronLiveLog({ 
-  runId, 
-  singleLine = false, 
+export function CronLiveLog({
+  runId,
+  singleLine = false,
   terminalMode = !singleLine,
   startedAt,
-  onDone 
-}: { 
-  runId: number | string | undefined, 
-  singleLine?: boolean, 
+  onDone
+}: {
+  runId: number | string | undefined,
+  singleLine?: boolean,
   terminalMode?: boolean,
   startedAt?: string,
-  onDone?: () => void 
+  onDone?: () => void
 }) {
   const { lines, status, start, stop } = useSSE()
   const started = useRef(false)
@@ -41,12 +41,12 @@ export function CronLiveLog({
     }
   }, [status, onDone])
 
-  // Under singleLine, only show the last line. 
+  // Under singleLine, only show the last line.
   // Otherwise under terminalMode show all lines. Fallback to last 2 lines.
-  const recentLines = singleLine 
-    ? lines.slice(-1) 
-    : terminalMode 
-      ? lines 
+  const recentLines = singleLine
+    ? lines.slice(-1)
+    : terminalMode
+      ? lines
       : lines.slice(-2)
 
   if (recentLines.length === 0) {
@@ -90,7 +90,7 @@ export function CronLiveLog({
         {recentLines.map((line, i) => {
           let text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : JSON.stringify(line))
           if (text.length > 80) text = text.substring(0, 80) + '...'
-          
+
           return (
             <div key={i} className="truncate w-full" title={typeof line.message === 'string' ? line.message : text}>
               {line.type === 'error' ? (
@@ -123,12 +123,12 @@ export function CronLiveLog({
       )}
       {recentLines.map((line, i) => {
         const text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : JSON.stringify(line))
-        
+
         return (
-          <div 
-            key={i} 
-            className={terminalMode 
-              ? "whitespace-pre-wrap break-all w-full text-zinc-300" 
+          <div
+            key={i}
+            className={terminalMode
+              ? "whitespace-pre-wrap break-all w-full text-zinc-300"
               : "truncate w-full"
             }
             title={typeof line.message === 'string' ? line.message : text}
@@ -150,4 +150,3 @@ export function CronLiveLog({
     </div>
   )
 }
-

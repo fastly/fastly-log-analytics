@@ -18,11 +18,7 @@ from backend.repositories._sql import base as SQL
 
 
 def _placeholders(template: str) -> list[str]:
-    return sorted(
-        p.split("}")[0]
-        for p in template.split("{")[1:]
-        if "}" in p
-    )
+    return sorted(p.split("}")[0] for p in template.split("{")[1:] if "}" in p)
 
 
 # ── CANONICAL_METRICS dict ───────────────────────────────────────────────────
@@ -83,12 +79,16 @@ def test_ts_rollup_and_live_metric_keys_match():
     """The rollup-served metric set must match the raw-row counterpart
     set exactly — otherwise an active-hour split where one side has the
     metric and the other doesn't would silently drop a chart band."""
-    assert set(SQL.TS_ROLLUP_METRIC_SQL) == set(SQL.LIVE_METRIC_SQL_FROM_RAW) == {
-        "requests",
-        "5xx",
-        "4xx",
-        "hit_rate",
-    }
+    assert (
+        set(SQL.TS_ROLLUP_METRIC_SQL)
+        == set(SQL.LIVE_METRIC_SQL_FROM_RAW)
+        == {
+            "requests",
+            "5xx",
+            "4xx",
+            "hit_rate",
+        }
+    )
 
 
 def test_ts_rollup_metric_sql_uses_rollup_columns():
@@ -157,14 +157,16 @@ def test_ts_live_clause_renders_with_all_inputs():
 
 
 def test_ts_live_clause_pins_placeholders():
-    assert _placeholders(SQL.TS_LIVE_CLAUSE) == sorted([
-        "interval",
-        "metric_sql",
-        "table_name",
-        "where_clause",
-        "live_st_iso",
-        "live_et_iso",
-    ])
+    assert _placeholders(SQL.TS_LIVE_CLAUSE) == sorted(
+        [
+            "interval",
+            "metric_sql",
+            "table_name",
+            "where_clause",
+            "live_st_iso",
+            "live_et_iso",
+        ]
+    )
 
 
 # ── TS_OUTER_WRAPPER ─────────────────────────────────────────────────────────
@@ -213,22 +215,24 @@ def test_top_n_batch_per_field_int_aggregate_select_val():
     floating-point jitter at ingest into integer-rounded buckets."""
     rendered = SQL.TOP_N_BATCH_PER_FIELD.format(
         field="ttl",
-        select_val="CAST(CAST(ROUND(\"ttl\") AS INTEGER) AS VARCHAR)",
+        select_val='CAST(CAST(ROUND("ttl") AS INTEGER) AS VARCHAR)',
         table_name='"logs_xyz"',
         where_filter='"ttl" IS NOT NULL',
         limit=10,
     )
-    assert "CAST(CAST(ROUND(\"ttl\") AS INTEGER) AS VARCHAR) as value" in rendered
+    assert 'CAST(CAST(ROUND("ttl") AS INTEGER) AS VARCHAR) as value' in rendered
 
 
 def test_top_n_batch_per_field_pins_placeholders():
-    assert _placeholders(SQL.TOP_N_BATCH_PER_FIELD) == sorted([
-        "field",
-        "select_val",
-        "table_name",
-        "where_filter",
-        "limit",
-    ])
+    assert _placeholders(SQL.TOP_N_BATCH_PER_FIELD) == sorted(
+        [
+            "field",
+            "select_val",
+            "table_name",
+            "where_filter",
+            "limit",
+        ]
+    )
 
 
 # ── Module-level placeholder pin ─────────────────────────────────────────────

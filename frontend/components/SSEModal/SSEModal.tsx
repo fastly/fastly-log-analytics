@@ -68,8 +68,8 @@ export function SSEModal({ trigger, title, description, endpoint, body, renderLi
           <DialogHeader className={panelDialogHeaderSolid}>
             <DialogTitle>{title}</DialogTitle>
           </DialogHeader>
-          
-          <SSEProgressView 
+
+          <SSEProgressView
             lines={lines}
             status={status}
             error={error}

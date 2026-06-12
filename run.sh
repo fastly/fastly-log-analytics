@@ -83,25 +83,25 @@ cleanup_existing() {
 # Function to clean up the spawned background processes when the user presses Ctrl+C
 cleanup() {
     echo -e "\nStopping all services..."
-    
+
     # 1. Ask nicely (SIGTERM to the process groups)
     if [ -n "$BACKEND_PGID" ]; then kill -TERM -$BACKEND_PGID 2>/dev/null; fi
     if [ -n "$FRONTEND_PGID" ]; then kill -TERM -$FRONTEND_PGID 2>/dev/null; fi
     kill -TERM $BACKEND_PID $FRONTEND_PID 2>/dev/null
-    
+
     # 2. Give them a second to clean up
     sleep 1
-    
+
     # 3. Force kill (SIGKILL) if they are stubborn
     if [ -n "$BACKEND_PGID" ]; then kill -9 -$BACKEND_PGID 2>/dev/null; fi
     if [ -n "$FRONTEND_PGID" ]; then kill -9 -$FRONTEND_PGID 2>/dev/null; fi
     kill -9 $BACKEND_PID $FRONTEND_PID 2>/dev/null
-    
+
     # 4. Nuclear option: Mop up any stray processes spawned in this directory
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     pkill -9 -f "$SCRIPT_DIR.*uvicorn" 2>/dev/null || true
     pkill -9 -f "$SCRIPT_DIR.*node.*next" 2>/dev/null || true
-    
+
     exit 0
 }
 

@@ -18,6 +18,7 @@ from backend.core import metadata_db
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cleanup")
 
+
 def cleanup_orphans(service_id: str):
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -42,6 +43,7 @@ def cleanup_orphans(service_id: str):
 
     # 2. Initialize S3 client via backend's proxy-enabled helper
     from backend.core.duckdb import _get_fos_client
+
     s3_client = _get_fos_client(src)
 
     logger.info(f"Listing raw files in bucket '{bucket}' with prefix '{prefix}'...")
@@ -84,16 +86,14 @@ def cleanup_orphans(service_id: str):
     for i in range(0, len(orphan_keys), batch_size):
         batch = orphan_keys[i : i + batch_size]
         try:
-            response = s3_client.delete_objects(
-                Bucket=bucket,
-                Delete={"Objects": batch, "Quiet": True}
-            )
+            response = s3_client.delete_objects(Bucket=bucket, Delete={"Objects": batch, "Quiet": True})
             deleted_count += len(batch)
             logger.info(f"Deleted batch {i // batch_size + 1}: {len(batch)} files (Total deleted: {deleted_count})")
         except Exception as e:
             logger.error(f"Failed to delete batch starting at index {i}: {e}")
 
     logger.info(f"Successfully pruned {deleted_count} orphaned raw files from FOS.")
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

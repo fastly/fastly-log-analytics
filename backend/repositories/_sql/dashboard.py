@@ -64,9 +64,9 @@ CONN_REQUESTS_BUCKET = (
     "                    END AS bucket,\n"
     "                    {requests_metric} AS c\n"
     "                FROM {table_name}\n"
-    "                WHERE \"conn_requests\" IS NOT NULL AND \"conn_requests\" > 0 AND {where_clause}\n"
+    '                WHERE "conn_requests" IS NOT NULL AND "conn_requests" > 0 AND {where_clause}\n'
     "                GROUP BY 1\n"
-    "                ORDER BY MIN(\"conn_requests\")\n"
+    '                ORDER BY MIN("conn_requests")\n'
     "            "
 )
 """Bucketed histogram of ``conn_requests`` (connection-reuse counter).

@@ -89,15 +89,11 @@ def test_error_spikes_renders_and_pins_placeholders():
 
 
 def test_botnet_grouping_renders_and_pins_placeholders():
-    rendered = SQL.BOTNET_GROUPING.format(
-        table_name="t_logs", fp_col="ja4", baseline_hours=24, window_hours=1
-    )
+    rendered = SQL.BOTNET_GROUPING.format(table_name="t_logs", fp_col="ja4", baseline_hours=24, window_hours=1)
     assert 'FROM t_logs WHERE "ja4" IS NOT NULL' in rendered
     assert "GREATEST(24, 1.0) * 1" in rendered
     assert rendered.count("?") == 2
-    assert _placeholders(SQL.BOTNET_GROUPING) == sorted(
-        ["table_name", "fp_col", "baseline_hours", "window_hours"]
-    )
+    assert _placeholders(SQL.BOTNET_GROUPING) == sorted(["table_name", "fp_col", "baseline_hours", "window_hours"])
 
 
 def test_new_country_traffic_renders_and_pins_placeholders():
@@ -203,15 +199,11 @@ def test_new_probe_urls_bakes_regex_and_pins_placeholders():
 
 
 def test_waf_signal_spikes_renders_and_pins_placeholders():
-    rendered = SQL.WAF_SIGNAL_SPIKES.format(
-        table_name="t_logs", baseline_hours=24, window_hours=1
-    )
+    rendered = SQL.WAF_SIGNAL_SPIKES.format(table_name="t_logs", baseline_hours=24, window_hours=1)
     assert "WITH all_signals AS" in rendered
     assert "BOT-ANALYSIS" in rendered
     assert rendered.count("?") == 2
-    assert _placeholders(SQL.WAF_SIGNAL_SPIKES) == sorted(
-        ["table_name", "baseline_hours", "window_hours"]
-    )
+    assert _placeholders(SQL.WAF_SIGNAL_SPIKES) == sorted(["table_name", "baseline_hours", "window_hours"])
 
 
 def test_proxy_surge_renders_and_pins_placeholders():
@@ -232,7 +224,7 @@ def test_asn_concentration_renders_and_pins_placeholders():
 
 def test_asn_metro_performance_renders_and_pins_placeholders():
     rendered = SQL.ASN_METRO_PERFORMANCE.format(table_name="t_logs")
-    assert '"country" = \'US\'' in rendered
+    assert "\"country\" = 'US'" in rendered
     assert "w_med >= b_med * 1.5" in rendered
     assert rendered.count("?") == 2
     assert _placeholders(SQL.ASN_METRO_PERFORMANCE) == ["table_name"]
@@ -265,9 +257,7 @@ def test_impossible_distance_renders_and_pins_placeholders():
     assert "RADIANS" in rendered
     assert 'AND t."edge" = true' in rendered
     assert rendered.count("?") == 1
-    assert _placeholders(SQL.IMPOSSIBLE_DISTANCE) == sorted(
-        ["table_name", "fp_col", "pop_values", "edge_filter"]
-    )
+    assert _placeholders(SQL.IMPOSSIBLE_DISTANCE) == sorted(["table_name", "fp_col", "pop_values", "edge_filter"])
 
 
 def test_tail_latency_renders_and_pins_placeholders():
@@ -280,15 +270,11 @@ def test_tail_latency_renders_and_pins_placeholders():
 
 
 def test_cipher_spread_renders_and_pins_placeholders():
-    rendered = SQL.CIPHER_SPREAD.format(
-        table_name="t_logs", baseline_hours=24, window_hours=1
-    )
+    rendered = SQL.CIPHER_SPREAD.format(table_name="t_logs", baseline_hours=24, window_hours=1)
     assert '"tls_ciphers_sha" IS NOT NULL' in rendered
-    assert "COUNT(DISTINCT \"ip\")" in rendered
+    assert 'COUNT(DISTINCT "ip")' in rendered
     assert rendered.count("?") == 2
-    assert _placeholders(SQL.CIPHER_SPREAD) == sorted(
-        ["table_name", "baseline_hours", "window_hours"]
-    )
+    assert _placeholders(SQL.CIPHER_SPREAD) == sorted(["table_name", "baseline_hours", "window_hours"])
 
 
 def test_request_size_anomaly_renders_and_pins_placeholders():
@@ -324,16 +310,12 @@ def test_cache_ttl_mismatch_renders_and_pins_placeholders():
 
 
 def test_image_optimization_opportunities_renders_and_pins_placeholders():
-    rendered = SQL.IMAGE_OPTIMIZATION_OPPORTUNITIES.format(
-        table_name="t_logs", ua_mobile_sel="0"
-    )
+    rendered = SQL.IMAGE_OPTIMIZATION_OPPORTUNITIES.format(table_name="t_logs", ua_mobile_sel="0")
     assert 'WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND "status" = 200' in rendered
     assert "(0) AS mobile_ratio" in rendered
     assert "%.jpg%" in rendered
     assert rendered.count("?") == 1
-    assert _placeholders(SQL.IMAGE_OPTIMIZATION_OPPORTUNITIES) == sorted(
-        ["table_name", "ua_mobile_sel"]
-    )
+    assert _placeholders(SQL.IMAGE_OPTIMIZATION_OPPORTUNITIES) == sorted(["table_name", "ua_mobile_sel"])
 
 
 def test_origin_latency_spike_renders_and_pins_placeholders():
@@ -401,7 +383,7 @@ def test_coalesced_city_aggregates_renders_and_pins_placeholders():
 
 def test_coalesced_url_aggregates_renders_and_pins_placeholders():
     rendered = SQL.COALESCED_URL_AGGREGATES.format(table_name="t_logs")
-    assert 'FROM t_logs' in rendered
+    assert "FROM t_logs" in rendered
     assert 'WHERE "url" IS NOT NULL' in rendered
     assert "w_5xx" in rendered
     assert "w_hits" in rendered

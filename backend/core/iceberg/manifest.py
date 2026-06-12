@@ -28,10 +28,8 @@ import logging
 import os
 import threading
 import time
-from datetime import UTC, datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 
-import duckdb
 import pyarrow as pa
 
 logger = logging.getLogger("backend.core.iceberg._core")
@@ -70,8 +68,6 @@ def _load_manifest_metadata_cache(source: dict) -> None:
             return
         _manifest_metadata_loaded.add(source_key)
 
-    import json
-
     cache_file = _core_mod._get_cache_file(source, "manifest_metadata_cache.json")
     if not os.path.exists(cache_file):
         return
@@ -104,7 +100,6 @@ def _save_manifest_metadata_cache(source: dict, live_manifest_paths: list[str]) 
     Filtering to `live_manifest_paths` prunes manifests dropped by snapshot
     expiry so the file stays bounded by the current snapshot's manifest count.
     """
-    import json
 
     cache_file = _core_mod._get_cache_file(source, "manifest_metadata_cache.json")
     payload: dict[str, dict] = {}

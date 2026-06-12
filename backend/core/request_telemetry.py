@@ -112,6 +112,7 @@ def _setup_sdk() -> None:
             )
         else:
             import logging as _logging
+
             _logging.getLogger(__name__).warning(
                 "OTEL_EXPORTER=%r is not a recognised value; install providers without exporters",
                 exporter,

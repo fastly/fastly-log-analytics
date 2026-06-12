@@ -14,7 +14,7 @@ ORIGIN_TIMESERIES = (
     "SELECT {time_bucket_select},\n"
     "       {value_expr} AS value\n"
     "FROM {table}\n"
-    "WHERE {where_clause} AND \"{metric_col}\" IS NOT NULL\n"
+    'WHERE {where_clause} AND "{metric_col}" IS NOT NULL\n'
     "GROUP BY 1 ORDER BY 1"
 )
 """Per-bucket origin latency time series at a percentile of choice.

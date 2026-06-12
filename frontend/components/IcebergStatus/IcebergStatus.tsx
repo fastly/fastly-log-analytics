@@ -4,19 +4,19 @@ import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
-import { 
-  Card, 
-  CardContent, 
-  CardHeader, 
+import {
+  Card,
+  CardContent,
+  CardHeader,
   CardTitle
 } from "@/components/ui/card"
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
-import { 
-  Database, 
-  Layers, 
-  FileCode, 
-  Clock, 
+import {
+  Database,
+  Layers,
+  FileCode,
+  Clock,
   Info,
   Archive
 } from 'lucide-react'

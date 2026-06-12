@@ -195,7 +195,9 @@ def origin_ip_health(req: OriginIpHealthRequest, ctx: RequestContext = Depends(b
 
 @router.post("/shielding-analysis", response_model=OriginShieldingAnalysisResponse)
 @query_errors()
-def origin_shielding_analysis(req: OriginShieldingAnalysisRequest, ctx: RequestContext = Depends(build_request_context)):
+def origin_shielding_analysis(
+    req: OriginShieldingAnalysisRequest, ctx: RequestContext = Depends(build_request_context)
+):
     res = repo.get_shielding_analysis(
         con=ctx.con,
         src=ctx.source,

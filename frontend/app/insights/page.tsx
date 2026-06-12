@@ -7,12 +7,12 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { InsightCard } from '@/components/Insights/InsightCard'
 import { InsightCardSkeleton } from '@/components/Insights/InsightCardSkeleton'
 import { InsightCardData } from '@/types/api'
-import { 
-  Select, 
-  SelectContent, 
-  SelectItem, 
-  SelectTrigger, 
-  SelectValue 
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
 } from "@/components/ui/select"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Info, AlertCircle, CheckCircle, Lightbulb, Filter, Loader2 } from 'lucide-react'

@@ -342,9 +342,7 @@ def test_insight_required_fields_exist_in_registry() -> None:
 
     for insight in INSIGHT_DEFINITIONS:
         for code in insight["required_fields"]:
-            assert fr.try_get(code) is not None, (
-                f"insight {insight['id']!r} requires unknown field {code!r}"
-            )
+            assert fr.try_get(code) is not None, f"insight {insight['id']!r} requires unknown field {code!r}"
 
 
 # ---------------------------------------------------------------------------

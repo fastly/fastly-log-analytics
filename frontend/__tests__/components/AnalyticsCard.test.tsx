@@ -9,7 +9,7 @@ test('renders AnalyticsCard with children', () => {
       <div data-testid="test-child">Child Content</div>
     </AnalyticsCard>
   )
-  
+
   // debug() // Use this if still failing
   expect(screen.getByText('Test Title')).toBeInTheDocument()
   expect(screen.getByTestId('test-child')).toBeInTheDocument()

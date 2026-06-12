@@ -15,14 +15,14 @@ export function formatBytes(bytes: number): string {
  */
 export function formatValue(field: string | undefined, value: string | number | null | undefined): string {
   if (value === null || value === undefined) return 'null'
-  
+
   if (typeof value === 'number') {
     if (field?.includes('bytes')) return formatBytes(value)
     return value.toLocaleString()
   }
-  
+
   const str = String(value)
-  
+
   // Country Code resolution
   if (field === 'country' && str.length === 2 && typeof Intl !== 'undefined') {
     try {

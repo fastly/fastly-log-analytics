@@ -16,10 +16,10 @@ export function useSSE() {
   const [lines, setLines] = useState<SSELine[]>([])
   const [status, setStatus] = useState<SSEStatus>('idle')
   const [error, setError] = useState<string | null>(null)
-  
+
   // Track the active stream reader
   const readerRef = useRef<ReadableStreamDefaultReader | null>(null)
-  
+
   // Track the current request ID to avoid race conditions from StrictMode
   const requestIdRef = useRef<number>(0)
   // Track if component is mounted
@@ -35,7 +35,7 @@ export function useSSE() {
     }
     // 2. Invalidate any pending fetch by incrementing the request ID
     requestIdRef.current++;
-    
+
     if (mountedRef.current) {
       setStatus('idle');
     }
@@ -94,14 +94,14 @@ export function useSSE() {
       if (!reader) {
         throw new Error('Response body is null')
       }
-      
+
       readerRef.current = reader
       const decoder = new TextDecoder()
       let buffer = ''
 
       while (true) {
         const { done, value } = await reader.read()
-        
+
         // Always check if we're still the active request AND still mounted
         if (currentReqId !== requestIdRef.current || !mountedRef.current) {
           if (reader) try { reader.cancel().catch(() => {}); } catch(e) {}

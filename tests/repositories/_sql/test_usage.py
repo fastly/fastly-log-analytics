@@ -17,9 +17,6 @@ def test_edge_ratio_pct_renders_with_table_name():
 def test_edge_ratio_pct_template_has_no_raw_user_input_placeholders():
     """The only format placeholder is ``{table}`` (trusted identifier).
     A SQL parameter binding would use ``?``, not a format placeholder."""
-    placeholders = [
-        p for p in SQL.EDGE_RATIO_PCT.split("{")[1:]
-        if "}" in p
-    ]
+    placeholders = [p for p in SQL.EDGE_RATIO_PCT.split("{")[1:] if "}" in p]
     names = [p.split("}")[0] for p in placeholders]
     assert names == ["table"]

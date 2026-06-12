@@ -240,7 +240,5 @@ def _reconstruct(original: Response, body: bytes) -> Response:
                     pass
                 break
     new = Response(content=body, status_code=original.status_code, media_type=media_type)
-    new.raw_headers.extend(
-        (k, v) for k, v in original.raw_headers if k.lower() not in drop
-    )
+    new.raw_headers.extend((k, v) for k, v in original.raw_headers if k.lower() not in drop)
     return new

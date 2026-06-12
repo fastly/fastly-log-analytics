@@ -11,12 +11,12 @@ interface PageHeaderProps {
   children?: React.ReactNode
 }
 
-export function PageHeader({ 
-  title, 
-  description, 
-  icon: Icon, 
-  className, 
-  children 
+export function PageHeader({
+  title,
+  description,
+  icon: Icon,
+  className,
+  children
 }: PageHeaderProps) {
   return (
     <div className={cn("flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6", className)}>

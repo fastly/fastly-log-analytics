@@ -30,12 +30,12 @@ export function FilterPopover({
 
   if (!isOpen) {
     return (
-      <span 
-        className={triggerClassName} 
-        onClick={(e) => { 
+      <span
+        className={triggerClassName}
+        onClick={(e) => {
           e.stopPropagation()
           e.preventDefault()
-          setIsOpen(true) 
+          setIsOpen(true)
         }}
       >
         {triggerLabel}

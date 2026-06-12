@@ -112,7 +112,7 @@ export default function UsagePage() {
         const { data: storage, isLoading: loadingStorage, isFetching: fetchingStorage } = useQuery({
     queryKey: ['usage', 'storage', activeServiceId, startTime, endTime],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/current-storage", { signal, 
+      const { data } = await client.GET("/api/usage/current-storage", { signal,
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined } }
       })
       return data
@@ -124,7 +124,7 @@ export default function UsagePage() {
   const { data: ops, isLoading: loadingOps, isFetching: fetchingOps } = useQuery({
     queryKey: ['usage', 'operations', activeServiceId, startTime, endTime, activityBy],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/operations", { signal, 
+      const { data } = await client.GET("/api/usage/operations", { signal,
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
       })
       return data
@@ -136,7 +136,7 @@ export default function UsagePage() {
   const { data: bw, isLoading: loadingBw, isFetching: fetchingBw } = useQuery({
     queryKey: ['usage', 'bandwidth', activeServiceId, startTime, endTime, activityBy],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/bandwidth", { signal, 
+      const { data } = await client.GET("/api/usage/bandwidth", { signal,
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
       })
       return data
@@ -148,7 +148,7 @@ export default function UsagePage() {
   const { data: logActivity, isLoading: loadingActivity, isFetching: fetchingActivity } = useQuery({
     queryKey: ['usage', 'log-activity', activeServiceId, startTime, endTime, activityBy],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/log-activity", { signal, 
+      const { data } = await client.GET("/api/usage/log-activity", { signal,
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
       })
       return data
@@ -192,7 +192,7 @@ export default function UsagePage() {
   const bwTimes = bw?.data.map((p: any) => p.time) ?? []
   const bwBytes = bw?.data.map((p: any) => p.bandwidth_bytes ?? 0) ?? []
   const maxBw = bwBytes.length > 0 ? Math.max(...bwBytes) : 0
-  
+
   let bwDiv = 1
   let bwUnit = 'B'
   if (maxBw >= 1e9) { bwDiv = 1e9; bwUnit = 'GB' }

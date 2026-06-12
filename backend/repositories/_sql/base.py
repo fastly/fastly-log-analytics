@@ -101,11 +101,7 @@ aggregation shape runs on the raw rows.
 
 # ── Top-N rollup outer aggregate wrapper ──────────────────────────────────────
 
-TOP_N_ROLLUP_AGGREGATE = (
-    "SELECT field, value, SUM(count) AS c "
-    "FROM ({branches_union_all}) "
-    "GROUP BY field, value"
-)
+TOP_N_ROLLUP_AGGREGATE = "SELECT field, value, SUM(count) AS c FROM ({branches_union_all}) GROUP BY field, value"
 """Outer aggregator that sums per-field counts across rollup branches.
 
 Inputs (trusted-identifier substitution; user input bound elsewhere):
@@ -163,10 +159,7 @@ Output (per row): ``(bucket: TIMESTAMP, value: float | None)``.
 
 # ── Time-series rollup outer wrapper ──────────────────────────────────────────
 
-TS_OUTER_WRAPPER = (
-    "SELECT out_bucket, value FROM ({unioned_clauses}) "
-    "WHERE out_bucket IS NOT NULL ORDER BY 1"
-)
+TS_OUTER_WRAPPER = "SELECT out_bucket, value FROM ({unioned_clauses}) WHERE out_bucket IS NOT NULL ORDER BY 1"
 """Outer wrapper around the UNION ALL of rollup + live clauses.
 
 Inputs:

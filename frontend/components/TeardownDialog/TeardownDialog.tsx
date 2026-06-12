@@ -127,8 +127,8 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
                   <h3 className="text-lg font-semibold tracking-tight">Executing Teardown Actions</h3>
                   <p className="text-sm text-muted-foreground">Please do not close this window until the process is complete.</p>
                </div>
-               
-               <SSEProgressView 
+
+               <SSEProgressView
                  lines={lines}
                  status={status}
                  error={sseError}

@@ -810,9 +810,7 @@ def _origin_summary_from_temp(runner: QueryRunner, temp_table: str, actual_cols:
 
     edge_rows = []
     if "edge" in actual_cols_set:
-        edge_rows = runner.execute(
-            SQL.TEMP_SUMMARY_BY_EDGE.format(lat_val=lat_val, temp_table=temp_table)
-        ).fetchall()
+        edge_rows = runner.execute(SQL.TEMP_SUMMARY_BY_EDGE.format(lat_val=lat_val, temp_table=temp_table)).fetchall()
 
     return {
         "has_data": True,
@@ -917,9 +915,7 @@ def _origin_slow_urls_from_temp(
 def _origin_status_codes_from_temp(runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str]) -> dict:
     if "ost" not in set(actual_cols):
         return {"has_data": False, "rows": []}
-    rows = runner.execute(
-        SQL.TEMP_STATUS_CODES.format(temp_table=temp_table)
-    ).fetchall()
+    rows = runner.execute(SQL.TEMP_STATUS_CODES.format(temp_table=temp_table)).fetchall()
     if not rows:
         return {"has_data": False, "rows": []}
     return {
@@ -932,9 +928,7 @@ def _origin_path_breakdown_from_temp(runner: QueryRunner, temp_table: str, actua
     actual_cols_set = set(actual_cols)
     if "edge" not in actual_cols_set:
         return {"has_data": False, "shielding_detected": False, "rows": []}
-    rows = runner.execute(
-        SQL.TEMP_PATH_BREAKDOWN.format(temp_table=temp_table)
-    ).fetchall()
+    rows = runner.execute(SQL.TEMP_PATH_BREAKDOWN.format(temp_table=temp_table)).fetchall()
     if not rows:
         return {"has_data": False, "shielding_detected": False, "rows": []}
     shielding_detected = any(r[0] is False for r in rows)

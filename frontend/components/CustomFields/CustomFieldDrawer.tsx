@@ -176,8 +176,8 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
             </div>
             <div className="space-y-2">
                 <Label>Description</Label>
-                <Textarea 
-                    placeholder="Describe what this field captures..." 
+                <Textarea
+                    placeholder="Describe what this field captures..."
                     value={formData.description || ''}
                     onChange={e => handleChange('description', e.target.value)}
                     className="h-20 text-sm"
@@ -190,11 +190,11 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
             <div className="flex justify-between items-center border-b pb-2">
                 <h3 className="text-sm font-semibold">VCL Log Expression <span className="text-destructive">*</span></h3>
             </div>
-            
+
             <div className="space-y-3 p-4 bg-muted/30 border rounded-md">
               <Label className="text-xs">Collection Stage</Label>
               <div className="grid grid-cols-2 gap-3">
-                <div 
+                <div
                   className={`flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors ${formData.collection_stage === 'edge' ? 'border-blue-500 bg-blue-500/5' : 'hover:bg-muted/50'}`}
                   onClick={() => handleChange('collection_stage', 'edge')}
                 >
@@ -204,7 +204,7 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
                   </span>
                   <span className="text-[10px] text-muted-foreground mt-1">Captured before shielding or backend fetches. Best for client data.</span>
                 </div>
-                <div 
+                <div
                   className={`flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors ${formData.collection_stage === 'origin' ? 'border-purple-500 bg-purple-500/5' : 'hover:bg-muted/50'}`}
                   onClick={() => handleChange('collection_stage', 'origin')}
                 >
@@ -221,14 +221,14 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
               <div className="space-y-3 p-4 bg-muted/30 border rounded-md mt-3">
                 <Label className="text-xs">Origin Log Frequency</Label>
                 <div className="grid grid-cols-2 gap-3">
-                  <div 
+                  <div
                     className={`flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors ${formData.origin_log_frequency === 'all' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50'}`}
                     onClick={() => handleChange('origin_log_frequency', 'all')}
                   >
                     <span className="font-medium text-sm">All requests</span>
                     <span className="text-[10px] text-muted-foreground mt-1">Log the origin value even on cache hits.</span>
                   </div>
-                  <div 
+                  <div
                     className={`flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors ${formData.origin_log_frequency === 'miss_pass' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50'}`}
                     onClick={() => handleChange('origin_log_frequency', 'miss_pass')}
                   >
@@ -328,13 +328,13 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
                  </div>
                  <div className="space-y-2">
                      <LabelWithInfo labelClassName="text-xs" info="An estimate of the size of this field per log line, used for calculating total storage costs and requirements." label="Bytes Estimate (per log)" />
-                     <Input 
-                        type="number" 
-                        min="1" 
-                        max="1024" 
+                     <Input
+                        type="number"
+                        min="1"
+                        max="1024"
                         className="h-8 text-xs"
-                        value={formData.bytes_estimate} 
-                        onChange={e => handleChange('bytes_estimate', parseInt(e.target.value) || 20)} 
+                        value={formData.bytes_estimate}
+                        onChange={e => handleChange('bytes_estimate', parseInt(e.target.value) || 20)}
                      />
                  </div>
              </div>

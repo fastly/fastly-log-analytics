@@ -35,9 +35,9 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
   const config = useMemo((): ReportConfiguration => {
     const spanSecs = (!startTime || !endTime) ? 0 : (new Date(endTime).getTime() - new Date(startTime).getTime()) / 1000
     const spanHours = spanSecs / 3600
-    
+
     const intervals = new Set(INTERVALS.map(i => i.value))
-    
+
     // Performance limits: prevent massive bucket counts
     if (spanHours > 6) intervals.delete('1 second')
     if (spanHours > 168) intervals.delete('1 minute')
@@ -70,11 +70,11 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
       if (secs > curInt) trends.add(t)
     }
 
-    return { 
-      spanHours: spanHours, 
-      validIntervals: intervals, 
-      validTrends: trends, 
-      effectiveInterval: effectiveInt 
+    return {
+      spanHours: spanHours,
+      validIntervals: intervals,
+      validTrends: trends,
+      effectiveInterval: effectiveInt
     }
   }, [startTime, endTime, chartInterval, manualInterval])
 
