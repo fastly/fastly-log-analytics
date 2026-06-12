@@ -304,6 +304,37 @@ def _run_service_cron(
                                     _re,
                                 )
 
+                            # Wellknown-bots rollup: pre-materialises the
+                            # 500-pattern UA-regex pre-filter that the
+                            # /api/security/aggregates wellknown_bots block
+                            # would otherwise re-run on the full window on
+                            # every request. Best-effort — the security
+                            # reader has a live-SQL fallback for any hour
+                            # that lacks a rollup, so a failure here only
+                            # forgoes the optimisation, not correctness.
+                            _t_bot = time.time()
+                            try:
+                                from backend.core.rollups import recompute_wellknown_bots_rollup
+
+                                _bn = recompute_wellknown_bots_rollup(service_id, src, set(touched_hours))
+                                if _bn:
+                                    _log_and_add_progress(
+                                        run_id,
+                                        service_id,
+                                        job_name="sync",
+                                        event={
+                                            "type": "status",
+                                            "message": f"{elapsed()} Bot rollups: {_bn} hours in "
+                                            f"{int((time.time() - _t_bot) * 1000)}ms",
+                                        },
+                                    )
+                            except Exception as _be:
+                                logger.warning(
+                                    "[scheduler] %s: post-sync bot rollup failed: %s",
+                                    service_id,
+                                    _be,
+                                )
+
         except Exception as e:
             log_text = _extract_log_text(run_id)
             summary = "Ingestion crashed"

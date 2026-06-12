@@ -52,6 +52,28 @@ def _cache_mtime() -> float:
     return ts
 
 
+def get_pattern_set_version() -> str:
+    """Return a stable version string for the currently-loaded bot pattern
+    set. Bumps whenever any source JSON file is refreshed via
+    :func:`fetch_and_cache_source`.
+
+    Used by the wellknown_bots rollup (backend/core/rollups.py) to stamp
+    each materialised row so the reader can detect a pattern-set update
+    and fall back to the live regex scan for hours that were rolled up
+    under the previous set.
+
+    Empty string means no source files exist yet — the rollup writer
+    should skip in that case.
+    """
+    ts = _cache_mtime()
+    if ts == 0.0:
+        return ""
+    # Truncate to whole seconds — the float precision is more than
+    # enough granularity to detect a refresh and avoids spurious version
+    # mismatches from filesystem mtime jitter at sub-second resolution.
+    return f"v{int(ts)}"
+
+
 # ── Source I/O ────────────────────────────────────────────────────────────────
 
 

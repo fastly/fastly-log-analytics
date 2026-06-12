@@ -254,7 +254,17 @@ def get_security_aggregates(
         return {"section_timings": section_timings, **runner.telemetry()}
 
     try:
-        return _build_security_response(runner, src, con, actual_cols, temp_table, bucket_seconds, section_timings)
+        return _build_security_response(
+            runner,
+            src,
+            con,
+            actual_cols,
+            temp_table,
+            bucket_seconds,
+            section_timings,
+            start_time=start_time,
+            end_time=end_time,
+        )
     finally:
         try:
             runner.execute(f"DROP TABLE IF EXISTS {temp_table}")
@@ -270,6 +280,9 @@ def _build_security_response(
     temp_table: str,
     bucket_seconds: int,
     section_timings: list[dict] | None = None,
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
 ) -> dict:
     import time as _time
 
@@ -472,22 +485,37 @@ def _build_security_response(
     # 7. Well-Known Bots (UA matching + FCrDNS verification)
     if "ua" in actual_cols and "ip" in actual_cols:
         try:
+            from backend.core.rollups import read_wellknown_bots_rollup
             from backend.utils.bot_sources import build_matcher, get_bot_regex_pattern
             from backend.utils.rdns_cache import classify, enqueue, get_hostnames
 
-            # Build a dynamic regex pre-filter from actual bot pattern literals.
-            # regexp_matches is O(N) via RE2, vs O(N*M) for long ILIKE OR chains.
-            pattern = get_bot_regex_pattern(500)
-            if pattern:
-                pattern_sql = pattern.replace("'", "''")
-                prefilter = f"WHERE ua IS NOT NULL AND ip IS NOT NULL AND regexp_matches(ua, '{pattern_sql}')"
-            else:
-                prefilter = "WHERE ua IS NOT NULL AND ip IS NOT NULL"
-
-            q = SQL.WELLKNOWN_BOTS_UA_IP.format(temp_table=temp_table, prefilter=prefilter)
+            # Fast path: try to pull (ua, ip, count) tuples from the
+            # pre-materialised wellknown_bots rollup. Returns None when
+            # any hour in the window lacks a fresh partition (active
+            # hour, missing file, or stale pattern_set_version after a
+            # bot-source refresh) — the live SQL path below handles
+            # those cases correctly. The rollup tuples are the SAME
+            # shape the SQL prefilter would have produced, so the
+            # Python loop downstream is unchanged.
             _t = _time.perf_counter()
-            ua_ip_rows = runner.execute(q).fetchall()
-            _phase("wellknown_bots_query", _t)
+            ua_ip_rows = read_wellknown_bots_rollup(src, start_time, end_time) if (start_time and end_time) else None
+            if ua_ip_rows is not None:
+                _phase("wellknown_bots_rollup_read", _t)
+            else:
+                # Slow path: regex prefilter against the request-scoped
+                # temp_table. Identical to the pre-rollup behaviour;
+                # kept as a correctness fallback for hour-mix windows
+                # and pattern-set transitions.
+                pattern = get_bot_regex_pattern(500)
+                if pattern:
+                    pattern_sql = pattern.replace("'", "''")
+                    prefilter = f"WHERE ua IS NOT NULL AND ip IS NOT NULL AND regexp_matches(ua, '{pattern_sql}')"
+                else:
+                    prefilter = "WHERE ua IS NOT NULL AND ip IS NOT NULL"
+
+                q = SQL.WELLKNOWN_BOTS_UA_IP.format(temp_table=temp_table, prefilter=prefilter)
+                ua_ip_rows = runner.execute(q).fetchall()
+                _phase("wellknown_bots_query", _t)
 
             match_ua = build_matcher()
             bot_agg: dict[str, dict] = {}
