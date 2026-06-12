@@ -9360,6 +9360,187 @@
         }
       }
     },
+    "/api/admin/slow-queries": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "List Persisted Slow Queries",
+        "description": "Persistent slow-SQL history from the per-service ``slow_queries``\nSQLite table \u2014 the durable backing store for the Notable Slow\nQueries panel beyond the in-memory ring buffer's ~10-30 min /\nrestart-bounded window.\n\nServer-side filters keep the response payload small:\n``threshold_ms`` is applied at the SQL level (indexed scan),\n``kind`` / ``db_type`` are equality filters on low-cardinality\ncolumns. ``limit`` clamped at 2000 so a runaway client query can't\npage the whole 7-day window in one shot.\n\nSort: ``recent`` (started_at_utc DESC, the panel default) or\n``duration`` (duration_ms DESC, the \"what was slowest\" variant).",
+        "operationId": "list_persisted_slow_queries_api_admin_slow_queries_get",
+        "parameters": [
+          {
+            "name": "since_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 720,
+              "minimum": 1,
+              "default": 24,
+              "title": "Since Hours"
+            }
+          },
+          {
+            "name": "threshold_ms",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "minimum": 0.0,
+              "default": 100.0,
+              "title": "Threshold Ms"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(analyst|admin|cron|system)$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "db_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(DuckDB|SQLite)$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Db Type"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(recent|duration)$",
+              "default": "recent",
+              "title": "Sort"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 2000,
+              "minimum": 1,
+              "default": 200,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response List Persisted Slow Queries Api Admin Slow Queries Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/queries/{qid}": {
       "get": {
         "tags": [

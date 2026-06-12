@@ -71,6 +71,14 @@ export default function QueryMonitorPage() {
   const [actionError, setActionError] = React.useState<string>('')
   const [viewMode, setViewMode] = React.useState<ViewMode>('all')
   const [slowThresholdMs, setSlowThresholdMs] = React.useState(DEFAULT_SLOW_THRESHOLD_MS)
+  // 'recent' = the in-memory ring buffer (~2000 entries, ~10-30 min on a
+  // busy service, cleared on restart). 'past_24h' / 'past_7d' = the
+  // persistent slow_queries SQLite table. Default to 'recent' because
+  // it's the fastest path and what the operator usually wants ("what
+  // just happened"); historical view is a deeper-dive toggle.
+  const [slowHistoryMode, setSlowHistoryMode] = React.useState<'recent' | 'past_24h' | 'past_7d'>(
+    'recent',
+  )
   // Cron-grouping collapses rows from the same cron run into a single
   // representative row with a ×N badge — default on because a single tick
   // can spawn dozens of identical queries that otherwise drown out the
@@ -151,6 +159,25 @@ export default function QueryMonitorPage() {
       }
     },
     onError: (err: Error) => setActionError(extractApiError(err) || err.message),
+  })
+
+  // Historical slow queries — only fetches when toggled away from
+  // 'recent'. Background polling stays off (this isn't a live view);
+  // staleTime is 30s so toggling between 24h / 7d back-to-back doesn't
+  // re-hit SQLite if the data was just fetched.
+  const historicalQuery = useQuery<{ rows: CompletedRow[] }>({
+    queryKey: ['admin', 'query-monitor', 'slow-history', slowHistoryMode, slowThresholdMs],
+    queryFn: async ({ signal }) => {
+      const sinceHours = slowHistoryMode === 'past_7d' ? 168 : 24
+      const r = await fetch(
+        `/api/admin/slow-queries?since_hours=${sinceHours}&threshold_ms=${slowThresholdMs}&sort=duration&limit=200`,
+        { signal },
+      )
+      if (!r.ok) throw new Error(`status ${r.status}`)
+      return r.json()
+    },
+    enabled: slowHistoryMode !== 'recent' && enabled,
+    staleTime: 30_000,
   })
 
   const { justFinished, filteredActive, completed, slowQueries } = useFilteredActive({
@@ -381,13 +408,44 @@ export default function QueryMonitorPage() {
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
                 <CardTitle className="text-base flex items-center gap-2">
                   Notable Slow Queries
-                  <Badge variant="outline">{slowQueries.length}</Badge>
+                  <Badge variant="outline">
+                    {slowHistoryMode === 'recent'
+                      ? slowQueries.length
+                      : (historicalQuery.data?.rows ?? []).length}
+                  </Badge>
                   <span className="text-xs text-muted-foreground font-normal">
                     ≥ {slowThresholdMs < 1000 ? `${slowThresholdMs} ms` : `${slowThresholdMs / 1000}s`},
                     sorted slowest first
                   </span>
+                  {slowHistoryMode !== 'recent' && historicalQuery.isFetching && (
+                    <span className="text-xs text-muted-foreground italic">loading…</span>
+                  )}
                 </CardTitle>
                 <div className="flex items-center gap-1">
+                  {/* History-window toggle. 'recent' is the in-memory
+                      ring buffer (no fetch — what the page already had);
+                      the other two query the persistent slow_queries
+                      SQLite table via /api/admin/slow-queries. */}
+                  <div className="flex items-center gap-1 mr-2">
+                    {(['recent', 'past_24h', 'past_7d'] as const).map((m) => (
+                      <Button
+                        key={m}
+                        variant={slowHistoryMode === m ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => setSlowHistoryMode(m)}
+                        title={
+                          m === 'recent'
+                            ? 'Live in-memory ring (~10–30 min window, clears on restart)'
+                            : m === 'past_24h'
+                              ? 'Persistent history — last 24 h'
+                              : 'Persistent history — last 7 d'
+                        }
+                      >
+                        {m === 'recent' ? 'Recent' : m === 'past_24h' ? '24 h' : '7 d'}
+                      </Button>
+                    ))}
+                  </div>
                   {[100, 500, 1000, 2000, 5000].map((ms) => (
                     <Button
                       key={ms}
@@ -403,9 +461,19 @@ export default function QueryMonitorPage() {
               </CardHeader>
               <CardContent className="p-0">
                 <CompletedTable
-                  rows={slowQueries}
+                  rows={
+                    slowHistoryMode === 'recent'
+                      ? slowQueries
+                      : (historicalQuery.data?.rows ?? [])
+                  }
                   onRowClick={(row) => setDetailRow(row)}
-                  emptyMessage={`No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`}
+                  emptyMessage={
+                    slowHistoryMode === 'recent'
+                      ? `No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`
+                      : historicalQuery.isFetching
+                        ? 'Loading…'
+                        : `No persisted queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in the last ${slowHistoryMode === 'past_7d' ? '7 days' : '24 hours'}.`
+                  }
                   initialSorting={[{ id: 'duration_ms', desc: true }]}
                   onToggleGroup={toggleGroup}
                 />

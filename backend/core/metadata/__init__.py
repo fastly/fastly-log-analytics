@@ -119,6 +119,17 @@ from backend.core.metadata.reconciliation import (
     is_ingested_files_dedup_active,
 )
 
+# Persistent slow-SQL history (extends the in-memory query_registry ring
+# buffer with durable per-service storage so the Notable Slow Queries
+# panel can show history beyond the 2000-entry / restart window).
+from backend.core.metadata.slow_queries import (
+    count_slow_queries,
+    insert_slow_query,
+    list_slow_queries,
+    purge_old_slow_queries,
+    slow_queries_storage_stats,
+)
+
 # Audit log + applied data migration tracking.
 from backend.core.metadata.state import (
     export_audit,
@@ -208,6 +219,12 @@ __all__ = [
     "purge_committed_buffer_rows",
     "get_log_activity",
     "get_node_count_avg",
+    # Persistent slow-SQL history
+    "insert_slow_query",
+    "list_slow_queries",
+    "count_slow_queries",
+    "purge_old_slow_queries",
+    "slow_queries_storage_stats",
     # Cron runs
     "start_cron_run",
     "log_cron_run",

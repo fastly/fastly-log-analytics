@@ -71,6 +71,23 @@ _ERR_TRUNCATE = 512
 # so 2000 entries ≈ 1 MB resident. Cheap; the alternative (per-db_type
 # ring buffers) was rejected as more complex without a measured win.
 _HISTORY_CAP = 2000
+
+# Persist completed queries above this threshold to the per-service
+# ``slow_queries`` SQLite table — see ``_migration_005_slow_queries``.
+# 100 ms catches anything noticeably slow without flooding the writer
+# with the typical sub-ms majority. The Notable Slow Queries panel UI
+# filters further (100/500/1000/2000/5000 ms thresholds), so erring on
+# the permissive side lets dynamic threshold changes work without
+# round-tripping a re-ingest.
+_SLOW_QUERY_PERSIST_THRESHOLD_MS = float(os.environ.get("QUERY_REGISTRY_PERSIST_THRESHOLD_MS", "100"))
+# Master kill switch for persistence — registry stays on but we skip the
+# SQLite write. Use if the metadata DB is under pressure.
+_SLOW_QUERY_PERSIST_DISABLED = os.environ.get("QUERY_REGISTRY_PERSIST_DISABLED", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 _seq = itertools.count(1)
 
 # Hot-path kill switch. Read once at module load — flipping requires a
@@ -292,6 +309,24 @@ class QueryRegistry:
                 )
             )
 
+            # Persistent slow-query history. Cheap when ``duration_ms``
+            # is under the threshold (no SQLite write). When over, the
+            # write is ~1 ms WAL-append cost added to a query that's
+            # already taking ≥ 100 ms — invisible to the caller. Skips
+            # queries without a service_id (rare system-level queries
+            # have nowhere to land in the per-service metadata DB).
+            # Exceptions MUST NOT propagate — this is best-effort
+            # observability, not a correctness path.
+            if (
+                not _SLOW_QUERY_PERSIST_DISABLED
+                and duration_ms >= _SLOW_QUERY_PERSIST_THRESHOLD_MS
+                and active.service_id
+            ):
+                try:
+                    _persist_slow_query(active, ended, duration_ms, outcome, err_type, err_msg, peak_memory_mb)
+                except Exception:
+                    logger.debug("query_registry slow-query persist failed", exc_info=True)
+
             _metric_safe(lambda: _metric_active_count.add(-1, {"db": active.db_type, "kind": active.attribution.kind}))
             _metric_safe(
                 lambda: _metric_duration_ms.record(
@@ -438,6 +473,57 @@ def _safe_weakref(obj: Any) -> Callable[[], Any] | None:
             return _strong_ref
         except Exception:
             return None
+
+
+def _persist_slow_query(
+    active: ActiveQuery,
+    ended: float,
+    duration_ms: float,
+    outcome: str,
+    err_type: str | None,
+    err_msg: str | None,
+    peak_memory_mb: float | None,
+) -> None:
+    """Insert a finished ActiveQuery into the per-service ``slow_queries``
+    SQLite table. Caller pre-filters by threshold + service_id presence,
+    so this just flattens the ActiveQuery shape into the table columns
+    and dispatches the insert.
+
+    The SQL is truncated to 4096 chars at register time (``_SQL_TRUNCATE``);
+    ``sql_preview`` is the first 200 chars, ``sql_full`` is the full
+    truncated body. The dashboard shows the preview by default and lets
+    the user expand for the full text via the row-detail dialog."""
+    from backend.core import metadata as _meta_mod
+
+    attr = active.attribution
+    _meta_mod.insert_slow_query(
+        active.service_id or "",
+        {
+            "query_id": active.query_id,
+            "db_type": active.db_type,
+            "service_id": active.service_id,
+            "started_at_utc": active.started_at_utc,
+            "ended_at_utc": ended,
+            "duration_ms": duration_ms,
+            "outcome": outcome,
+            "sql_preview": active.sql[:200],
+            "sql_full": active.sql,
+            "sql_len": len(active.sql),
+            "attr_kind": attr.kind,
+            "attr_label": attr.display_label(),
+            "attr_principal_id": attr.principal_id(),
+            "attr_caller_qualname": attr.caller_qualname,
+            "attr_caller_file": attr.caller_file,
+            "attr_request_path": attr.request_path,
+            "attr_request_id": attr.request_id,
+            "attr_cron_job": attr.cron_job,
+            "attr_cron_run_id": attr.cron_run_id,
+            "attr_pool_slot": attr.pool_slot,
+            "error_type": err_type,
+            "error_message": err_msg,
+            "peak_memory_mb": peak_memory_mb,
+        },
+    )
 
 
 def _attribution_payload(attr: Attribution) -> dict[str, Any]:
