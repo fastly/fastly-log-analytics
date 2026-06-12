@@ -75,7 +75,13 @@ export function useLogsPageState() {
     },
     enabled: !!activeServiceId && activeTab === 'cron',
     refetchInterval: 5000,
-    staleTime: 0
+    // Match staleTime to refetchInterval so an in-page tab toggle
+    // (cron → audit → cron) within a poll window reuses the cached
+    // 500-row / ~181 KB payload instead of paying a fresh /api/cron-runs
+    // round-trip on each remount. QueryProvider already disables
+    // refetchOnWindowFocus globally, so browser-level focus changes
+    // aren't a concern.
+    staleTime: 5_000,
   })
 
   // Separate query specifically for checking recent crons (including running) without reloading the entire 500-row table.
@@ -287,7 +293,9 @@ export function useLogsPageState() {
     },
     enabled: !!activeServiceId && activeTab === 'cron',
     refetchInterval: 10000,
-    staleTime: 0
+    // Schedule metadata changes only on admin config edits — caching for
+    // a single poll window is safe and skips refetch on cron-tab remount.
+    staleTime: 10_000,
   })
 
   const orderedSchedules = React.useMemo(() => {

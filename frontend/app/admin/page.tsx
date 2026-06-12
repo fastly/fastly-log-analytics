@@ -36,7 +36,14 @@ export default function AdminPage() {
             only revealed itself on hover, making the slot look empty. */}
         <Link
           href="/admin/share"
-          prefetch={true}
+          // Drop the mount-time RSC prefetch — paired with the two
+          // sibling nav Links it fires 3 unsolicited `?_rsc=` round-trips
+          // every time /admin renders. Next still prefetches the route
+          // automatically on hover (the user's mouse is over the Link by
+          // then anyway), and the onMouseEnter hook below already warms
+          // the destination's data query in parallel — so click-latency
+          // is unchanged in practice.
+          prefetch={false}
           onMouseEnter={() => {
             // Warm the share-status query so by the time the click
             // resolves, /admin/share's useQuery hits a fresh cache
@@ -60,7 +67,7 @@ export default function AdminPage() {
         </Link>
         <Link
           href="/admin/session-scoring"
-          prefetch={true}
+          prefetch={false}
           onMouseEnter={() => {
             if (!activeServiceId) return
             // Warm the two composite queries the destination page fires
@@ -109,7 +116,7 @@ export default function AdminPage() {
         </Link>
         <Link
           href="/admin/queries"
-          prefetch={true}
+          prefetch={false}
           className={buttonVariants({ variant: 'secondary', size: 'sm' })}
         >
           <Activity className="h-4 w-4 mr-1" /> Live Queries

@@ -28,7 +28,6 @@ or skip that import and the admin routes vanish — pin via the
 
 from __future__ import annotations
 
-import logging
 import os
 
 from fastapi import HTTPException, Path, Query
@@ -68,6 +67,17 @@ scoring_status = _ss.scoring_status
 # ── module-private constants ──────────────────────────────────────────────────
 
 _ENFORCE_THRESHOLD_KEY = "enforce_threshold"
+
+# Process-local TTL cache for the scoring-config ConfigStore reads. The
+# ``/scoring/enforce-threshold`` GET fires on every /admin/session-scoring
+# mount and costs ~200-460 ms per call (Fastly ConfigStore round-trip) per
+# the perf audit. 30 s TTL keeps repeated panel-refreshes / tab-toggles
+# cheap without making the operator wait long after their own PUT — and
+# the PUT counterpart busts the cache anyway so write-then-read is instant.
+from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
+
+_ENFORCE_THRESHOLD_CACHE_TTL = 30.0
+_enforce_threshold_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=512, ttl_seconds=_ENFORCE_THRESHOLD_CACHE_TTL)
 
 
 @router.post("/{service_id}/scoring/retrain")
@@ -244,10 +254,6 @@ def scoring_session_events(
     }
 
 
-
-
-
-
 @router.get("/{service_id}/scoring/enforce-threshold")
 def scoring_enforce_threshold_get(
     service_id: str = Path(...),
@@ -268,6 +274,11 @@ def scoring_enforce_threshold_get(
     config_store_id = scoring.get("scoring_config_store_id")
     if not config_store_id:
         raise HTTPException(status_code=400, detail={"error": "Scoring not enabled or config store missing"})
+
+    cache_key = (service_id, config_store_id)
+    cached = _enforce_threshold_cache.get(cache_key)
+    if cached is not None:
+        return {**cached, "_is_cached": True}
 
     resolved_token = _resolve_token(service_id, token)
     if not resolved_token:
@@ -293,11 +304,13 @@ def scoring_enforce_threshold_get(
                 detail={"error": f"failed to read enforce threshold: {exc}"},
             )
 
-    return {
+    result = {
         "threshold": threshold,
         "enforced": threshold is not None,
         "key": _ENFORCE_THRESHOLD_KEY,
     }
+    _enforce_threshold_cache[cache_key] = result
+    return result
 
 
 @router.put("/{service_id}/scoring/enforce-threshold")
@@ -369,6 +382,10 @@ def scoring_enforce_threshold_put(
     except Exception as e:
         logger.exception("scoring_enforce_threshold_put failed for %s", service_id)
         raise HTTPException(status_code=500, detail={"error": str(e)})
+
+    # Drop the cached GET response so the operator's read-after-write is
+    # accurate instead of returning the up-to-30s-old snapshot.
+    _enforce_threshold_cache.pop((service_id, config_store_id), None)
 
     metadata_db.record_scoring_audit(
         service_id,

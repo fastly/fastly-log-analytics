@@ -19,6 +19,21 @@ const ASN_COLUMN_IDS = ['label', 'requests', 'avg', 'p50', 'p95', 'p99']
 const urlColumns = makeLatencyColumns('url', 'URL', 'url')
 const asnColumns = makeLatencyColumns('label', 'ASN', 'asn')
 
+// Module-level so identity is stable across renders — PlotlyChart's React.memo
+// shallow-compares layout, and a fresh object literal each render forces a
+// full re-plot.
+const WATERFALL_LAYOUT = {
+  xaxis: { title: 'Latency (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
+  yaxis: { autorange: 'reversed' },
+  margin: { l: 140, r: 20, t: 20, b: 40 },
+  showlegend: false,
+}
+const TTL_DIST_LAYOUT = { yaxis: { title: 'Count' } }
+const SCATTER_LAYOUT = {
+  xaxis: { title: 'Origin TTFB (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
+  yaxis: { title: 'Edge Processing (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
+}
+
 export default function PerformancePage() {
   const getFieldLabel = useFieldLabel()
 
@@ -127,12 +142,7 @@ export default function PerformancePage() {
         >
           <PlotlyChart
             data={waterfallData}
-            layout={{
-              xaxis: { title: 'Latency (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
-              yaxis: { autorange: 'reversed' },
-              margin: { l: 140, r: 20, t: 20, b: 40 },
-              showlegend: false
-            }}
+            layout={WATERFALL_LAYOUT}
             height="100%"
           />
         </AnalyticsCard>
@@ -202,9 +212,7 @@ export default function PerformancePage() {
         >
           <PlotlyChart
             data={ttlDistData}
-            layout={{
-              yaxis: { title: 'Count' }
-            }}
+            layout={TTL_DIST_LAYOUT}
             height="100%"
           />        </AnalyticsCard>
 
@@ -219,10 +227,7 @@ export default function PerformancePage() {
         >
           <PlotlyChart
             data={scatterData}
-            layout={{
-              xaxis: { title: 'Origin TTFB (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
-              yaxis: { title: 'Edge Processing (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' }
-            }}
+            layout={SCATTER_LAYOUT}
             height="100%"
           />        </AnalyticsCard>
       </div>

@@ -441,6 +441,24 @@ def api_service_rename(service_id: str, body: dict):
 
 
 from backend.models.services import LoggingSettingsResponse
+from backend.utils.bounded_cache import BoundedTTLCache
+
+# Process-local response cache for /api/services/{service_id}/logging-settings.
+# The endpoint chains 2-3 Fastly API calls (get_active_version → GET endpoint
+# → find_condition) costing ~700ms cold. Per the perf audit it fires on
+# every /alerts page nav and every tab refocus inside the alerts UI, so the
+# same Fastly payload is fetched repeatedly within a single user session.
+#
+# Cached value shape: the full pre-pydantic dict that LoggingSettingsResponse
+# wraps. We stamp ``"_is_cached": True`` on hits so the Debug Panel can
+# distinguish cache vs cold and ``section_timings`` stays meaningful.
+#
+# Invalidation: ``api_service_update_logging_settings`` calls
+# ``_logging_settings_cache.pop(service_id, None)`` after a successful
+# Fastly mutation so the next read returns the user's own write, not the
+# stale snapshot.
+_LOGGING_SETTINGS_CACHE_TTL = 300.0  # 5 minutes
+_logging_settings_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_LOGGING_SETTINGS_CACHE_TTL)
 
 
 @router.get("/services/{service_id}/logging-settings", response_model=LoggingSettingsResponse)
@@ -460,6 +478,15 @@ def api_service_logging_settings(service_id: str):
 
     def _phase(name: str, t0: float) -> None:
         section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
+
+    cached_fields = _logging_settings_cache.get(service_id)
+    if cached_fields is not None:
+        return LoggingSettingsResponse.with_telemetry(
+            ok=True,
+            section_timings=[],
+            is_cached=True,
+            **cached_fields,
+        )
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -515,18 +542,26 @@ def api_service_logging_settings(service_id: str):
                 format_match = False
         except Exception:
             pass
-        from backend.models.services import LoggingSettingsResponse
+
+        # Cache only the business fields — telemetry (debug_queries,
+        # debug_calls, section_timings, is_cached) is regenerated per
+        # request so the Debug Panel keeps showing per-request data even
+        # on cache hits.
+        cacheable = {
+            "prefix": prefix,
+            "period": ep.get("period", 60),
+            "sample_rate": sample_rate,
+            "edge_only": edge_only,
+            "custom_condition": custom_condition,
+            "format_match": format_match,
+            "version": active_ver,
+        }
+        _logging_settings_cache[service_id] = cacheable
 
         return LoggingSettingsResponse.with_telemetry(
             ok=True,
-            prefix=prefix,
-            period=ep.get("period", 60),
-            sample_rate=sample_rate,
-            edge_only=edge_only,
-            custom_condition=custom_condition,
-            format_match=format_match,
-            version=active_ver,
             section_timings=section_timings,
+            **cacheable,
         )
     except HTTPException:
         raise
@@ -728,6 +763,11 @@ def api_service_update_logging_settings(
             }
             for event in update_logging_endpoint(update_cfg, token):
                 if event.get("type") == "done":
+                    # The Fastly mutation succeeded — drop the cached GET
+                    # response so the next /logging-settings read reflects
+                    # the user's own write instead of the up-to-5-min-old
+                    # snapshot. Safe to call even if the key isn't present.
+                    _logging_settings_cache.pop(service_id, None)
                     fresh_cfg = svcconfig.load_config(service_id) or cfg
                     fresh_prov = fresh_cfg.setdefault("provisioning", {})
                     fresh_prov["sample_rate"] = sample_rate

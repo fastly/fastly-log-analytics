@@ -130,6 +130,23 @@ def _reset_module_caches():
     _ic._sql_load_table_real_calls["n"] = 0
     _ic._FOS_CATALOG_CLASS = None
     _dash._dashboard_cache.clear()
+    # Process-local TTL caches added for the perf-report follow-through —
+    # same cross-test leak pattern as _dashboard_cache above. Both caches
+    # short-circuit on (service_id) / (service_id, config_store_id) keys
+    # and would otherwise carry a stale Fastly response into the next
+    # test using the same service_id.
+    try:
+        from backend.routers.services import core as _services_core
+
+        _services_core._logging_settings_cache.clear()
+    except (ImportError, AttributeError):
+        pass
+    try:
+        from backend.routers import session_scoring_admin as _ssa
+
+        _ssa._enforce_threshold_cache.clear()
+    except (ImportError, AttributeError):
+        pass
     yield
 
 
@@ -151,7 +168,7 @@ def client(in_memory_duckdb, test_service_source):
 
     from backend.core.request_context import RequestContext, build_request_context
     from backend.core.request_telemetry import RequestTelemetry
-    from backend.deps import get_con, get_service_id, get_source
+    from backend.deps import get_service_id, get_source
     from backend.main import app
 
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
