@@ -257,8 +257,14 @@ export default function QueryMonitorPage() {
                 <CardTitle className="text-base flex items-center gap-2">
                   Active &amp; Just-Finished
                   <Badge variant="secondary">
-                    {snapshotQuery.data?.active?.length ?? 0} active
-                    {justFinished.length > 0 && ` + ${justFinished.length} just-finished`}
+                    {/* Count the rows the user can actually see (post-filter),
+                       not the unfiltered totals. The prior version showed
+                       totals and produced a confusing "44 just-finished but
+                       empty table" mismatch when a filter (db / kind) was
+                       hiding everything. */}
+                    {filteredActive.filter((r) => !r._completed).length} active
+                    {filteredActive.some((r) => r._completed) &&
+                      ` + ${filteredActive.filter((r) => r._completed).length} just-finished`}
                   </Badge>
                   <PollingIndicator
                     visible={visible}
