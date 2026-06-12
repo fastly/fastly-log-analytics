@@ -153,18 +153,26 @@ function IngestHealthCard() {
 // ── Card 3: slow queries teaser ──────────────────────────────────────────
 
 function SlowQueriesTeaser() {
-  const { data } = useQuery<{ completed: { duration_ms: number }[] }>({
-    queryKey: ['admin', 'overview', 'slow-queries'],
+  // Use the persistent ``slow_queries`` SQLite via the dedicated count
+  // endpoint instead of filtering the in-memory snapshot client-side.
+  // Three wins: (1) the count is time-bounded ("in last 24 h") instead
+  // of size-bounded ("in last 2000-query window"), which is what an
+  // operator actually wants; (2) survives restarts; (3) single indexed
+  // COUNT(*) instead of shipping a 2000-row JSON payload.
+  const { data } = useQuery<{ count: number }>({
+    queryKey: ['admin', 'overview', 'slow-queries-count'],
     queryFn: async ({ signal }) => {
-      const r = await fetch('/api/admin/queries?include_completed=true', { signal })
+      const r = await fetch(
+        '/api/admin/slow-queries/count?since_hours=24&threshold_ms=1000',
+        { signal },
+      )
       if (!r.ok) throw new Error(`status ${r.status}`)
       return r.json()
     },
     refetchInterval: POLL_MS,
     refetchIntervalInBackground: false,
   })
-  const SLOW_MS = 1_000
-  const slowCount = (data?.completed ?? []).filter((c) => c.duration_ms >= SLOW_MS).length
+  const slowCount = data?.count ?? 0
   return (
     <OverviewCard
       href="/admin/queries?view=past&slow=1000"
@@ -172,11 +180,7 @@ function SlowQueriesTeaser() {
       title="Notable Slow Queries"
       primary={String(slowCount)}
       primaryTone={slowCount > 0 ? 'attention' : 'muted'}
-      secondary={
-        slowCount === 0
-          ? 'none above 1s in recent window'
-          : `≥ 1s in the last ${Math.min((data?.completed ?? []).length, 2000)}-query window`
-      }
+      secondary={slowCount === 0 ? 'none ≥ 1s in last 24h' : '≥ 1s in last 24h'}
     />
   )
 }

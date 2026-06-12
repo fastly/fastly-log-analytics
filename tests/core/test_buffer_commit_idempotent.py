@@ -100,3 +100,99 @@ def test_empty_inputs_skip_sql_round_trip(svc_id):
     assert _meta.purge_committed_buffer_rows(svc_id, []) == 0
     # And mark_buffers_committed on [] is a no-op.
     _meta.mark_buffers_committed(svc_id, [])
+
+
+# ── Iceberg-snapshot marker (second durable channel) ─────────────────────
+
+
+def test_buffer_marker_is_deterministic():
+    """``_buffer_basename_marker`` must produce the same value for the
+    same input across processes. The recovery sweep relies on this:
+    the marker stored in the Iceberg snapshot at write time must match
+    the marker computed at read time on a different process / restart.
+    """
+    from backend.core.iceberg.buffer import _buffer_basename_marker
+
+    m1 = _buffer_basename_marker("batch_abc123def456.parquet")
+    m2 = _buffer_basename_marker("batch_abc123def456.parquet")
+    assert m1 == m2
+    assert len(m1) == 12
+    # Different basenames must NOT collide (within reasonable bounds —
+    # 48-bit hash is overwhelmingly safe per commit chunk).
+    assert _buffer_basename_marker("batch_aaa.parquet") != _buffer_basename_marker("batch_bbb.parquet")
+
+
+def test_recent_snapshot_markers_returns_recent_only():
+    """``_recent_snapshot_markers`` must honour the time cutoff — the
+    point of the cutoff is to bound work on long-lived tables with
+    thousands of snapshots."""
+    from backend.core.iceberg.buffer import _COMMIT_MARKER_PREFIX, _recent_snapshot_markers
+
+    class _Summary:
+        def __init__(self, props):
+            self.additional_properties = props
+
+    class _Snap:
+        def __init__(self, ts_ms, props):
+            self.timestamp_ms = ts_ms
+            self.summary = _Summary(props)
+
+    class _Table:
+        def __init__(self, snaps):
+            self._snaps = snaps
+
+        def snapshots(self):
+            return self._snaps
+
+    now_ms = 1_700_000_000_000
+    table = _Table(
+        [
+            _Snap(now_ms - 60_000, {f"{_COMMIT_MARKER_PREFIX}aaaaa": "1"}),
+            _Snap(now_ms - 7_200_000, {f"{_COMMIT_MARKER_PREFIX}bbbbb": "1"}),
+        ]
+    )
+    markers = _recent_snapshot_markers(table, since_ms=now_ms - 3_600_000)
+    assert markers == {"aaaaa"}
+
+
+def test_recent_snapshot_markers_swallows_iceberg_errors():
+    """A flaky catalog read MUST NOT propagate — the recovery sweep
+    falls back to SQLite-only in that case (compaction-dedup is the
+    safety net below that)."""
+    from backend.core.iceberg.buffer import _recent_snapshot_markers
+
+    class _BrokenTable:
+        def snapshots(self):
+            raise RuntimeError("simulated catalog outage")
+
+    assert _recent_snapshot_markers(_BrokenTable(), since_ms=0) == set()
+
+
+def test_recent_snapshot_markers_ignores_non_marker_props():
+    """Snapshots carry many Iceberg-internal summary properties (added-
+    files-size, total-records, etc.). The scan must only return keys
+    under our namespace — picking up Iceberg's keys would create
+    nonsensical 'committed' basenames."""
+    from backend.core.iceberg.buffer import _COMMIT_MARKER_PREFIX, _recent_snapshot_markers
+
+    class _Summary:
+        def __init__(self, props):
+            self.additional_properties = props
+
+    class _Snap:
+        def __init__(self):
+            self.timestamp_ms = 1_700_000_000_000
+            self.summary = _Summary(
+                {
+                    "added-records": "1000",
+                    "added-files-size": "12345",
+                    f"{_COMMIT_MARKER_PREFIX}ourmarker": "1",
+                }
+            )
+
+    class _Table:
+        def snapshots(self):
+            return [_Snap()]
+
+    markers = _recent_snapshot_markers(_Table(), since_ms=0)
+    assert markers == {"ourmarker"}

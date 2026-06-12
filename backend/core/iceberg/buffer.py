@@ -23,6 +23,7 @@ flow through.
 from __future__ import annotations
 
 import glob as _glob
+import hashlib
 import logging
 import os
 import time
@@ -61,6 +62,67 @@ def __getattr__(name: str):
 
 _TOMBSTONE_SUFFIX = ".consumed-"  # Followed by an integer Unix-epoch seconds value.
 _TOMBSTONE_GRACE_SECONDS = 300  # See tombstone_buffer_files docstring for the rationale.
+
+# Snapshot-summary property namespace for the buffer-commit marker. Each
+# successful ``table.append`` tags its snapshot with one of these per
+# buffer file in the chunk. On retry, the commit-recovery sweep scans
+# recent snapshots for these markers and treats any matching buffer as
+# already-committed — durable proof of append that survives even the
+# SQLite committed_buffers checkpoint being lost (disk full, DB locked
+# at the wrong moment, etc). Without this, the only durable record of
+# "I appended this batch" is the SQLite write, which has a millisecond
+# gap after table.append where a crash produces duplicate rows.
+#
+# Window: scan only snapshots from the last ``_COMMIT_MARKER_LOOKBACK_S``
+# seconds so this stays cheap on long-lived tables with thousands of
+# snapshots.
+_COMMIT_MARKER_PREFIX = "app.buffer_commit_marker."
+_COMMIT_MARKER_LOOKBACK_S = 3600  # 1 hour — far exceeds any plausible retry window
+
+
+def _buffer_basename_marker(basename: str) -> str:
+    """Deterministic short marker for a buffer file basename.
+
+    Iceberg snapshot summary keys land in metadata.json so we want them
+    short (12 hex chars = 48 bits, collision-free per chunk size).
+    """
+    return hashlib.sha256(basename.encode("utf-8")).hexdigest()[:12]
+
+
+def _recent_snapshot_markers(table: Any, since_ms: int) -> set[str]:
+    """Return the set of buffer-commit markers attached to snapshots
+    since ``since_ms`` (unix epoch ms). The complementary half of
+    ``_buffer_basename_marker``: post-restart, if a basename's marker
+    appears here, ``table.append`` succeeded for that buffer regardless
+    of whether the SQLite checkpoint landed.
+
+    Defensive — any exception (transient catalog read failure, metadata
+    incompatibility on an older table) returns an empty set so the
+    caller falls back to the SQLite-only recovery path.
+    """
+    out: set[str] = set()
+    try:
+        for snap in table.snapshots():
+            ts = getattr(snap, "timestamp_ms", 0) or 0
+            if ts < since_ms:
+                continue
+            summary = getattr(snap, "summary", None)
+            if summary is None:
+                continue
+            # snap.summary may expose either ``additional_properties``
+            # (dict) or behave dict-like — handle both.
+            props = getattr(summary, "additional_properties", None) or {}
+            if not props and hasattr(summary, "__iter__"):
+                try:
+                    props = dict(summary)
+                except Exception:
+                    props = {}
+            for k in props.keys():
+                if isinstance(k, str) and k.startswith(_COMMIT_MARKER_PREFIX):
+                    out.add(k[len(_COMMIT_MARKER_PREFIX) :])
+    except Exception as e:
+        logger.warning("%s _recent_snapshot_markers raised (continuing): %s", _core_mod._ICE, e)
+    return out
 
 
 def _tombstone_marker_path(parquet_path: str, ts: int) -> str:
@@ -419,22 +481,53 @@ def commit_buffer(source: dict, progress_callback=None) -> dict:
         return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
 
     # Crash-recovery: tombstone any buffer file whose previous commit
-    # tick succeeded at ``table.append`` but died before
-    # ``tombstone_buffer_files`` ran. Without this skip, we'd re-append
-    # the same rows to Iceberg → duplicate rows in the data lake. With
-    # the ``committed_buffers`` checkpoint written between the append
-    # and the tombstone (see ``mark_buffers_committed`` below), the
-    # crash window is just the SQLite write itself (milliseconds);
-    # anything caught here is residue from that small window.
+    # tick succeeded at ``table.append`` but died before the SQLite
+    # checkpoint + tombstone landed. Two independent sources of truth:
+    #
+    # 1. SQLite ``committed_buffers`` (fast path, sub-ms). Written by
+    #    ``mark_buffers_committed`` AFTER ``table.append`` succeeds and
+    #    BEFORE ``tombstone_buffer_files``. Closes the original race.
+    #
+    # 2. Iceberg snapshot-summary markers (durable proof, ~50 ms read).
+    #    Each ``table.append`` carries ``snapshot_properties`` with one
+    #    marker per buffer file. If a snapshot in the last hour has a
+    #    marker for this buffer, the append landed — regardless of
+    #    whether SQLite step (1) made it. Closes the residual race
+    #    where the SQLite write itself fails between append and tombstone.
+    #
+    # Either signal is sufficient to tombstone+skip the buffer. Both
+    # being unavailable falls back to re-appending (compaction-dedup
+    # will clean up any resulting dups).
     service_id = source.get("service_id") or source.get("name", "")
+    all_basenames = [os.path.basename(p) for p in files]
     try:
-        all_basenames = [os.path.basename(p) for p in files]
         already_committed = _meta_mod.list_committed_basenames(service_id, all_basenames)
     except Exception as recovery_err:
-        # Recovery failure must NEVER block a commit — fall through and
-        # accept the dup risk for this tick (compaction-dedup cleans up).
-        logger.warning("%s commit-recovery lookup raised (continuing): %s", _core_mod._ICE, recovery_err)
+        logger.warning("%s commit-recovery (SQLite) raised: %s", _core_mod._ICE, recovery_err)
         already_committed = set()
+    # Iceberg-snapshot marker scan: cheap on tables with few snapshots,
+    # bounded to the last hour on tables with many. Any basename whose
+    # marker is in a recent snapshot is added to ``already_committed``
+    # even if SQLite missed it.
+    try:
+        _table_for_scan = _core_mod._init_iceberg_table_locked(source, create=False)
+        if _table_for_scan is not None:
+            since_ms = int((time.time() - _COMMIT_MARKER_LOOKBACK_S) * 1000)
+            recent_markers = _recent_snapshot_markers(_table_for_scan, since_ms)
+            if recent_markers:
+                marker_to_basename = {_buffer_basename_marker(bn): bn for bn in all_basenames}
+                iceberg_recovered = {bn for marker, bn in marker_to_basename.items() if marker in recent_markers}
+                new_via_iceberg = iceberg_recovered - already_committed
+                if new_via_iceberg:
+                    logger.warning(
+                        "%s commit-recovery (Iceberg-marker) rescued %d buffer file(s) "
+                        "not in SQLite checkpoint — closes the post-append crash window",
+                        _core_mod._ICE,
+                        len(new_via_iceberg),
+                    )
+                already_committed.update(iceberg_recovered)
+    except Exception as recovery_err:
+        logger.warning("%s commit-recovery (Iceberg) raised: %s", _core_mod._ICE, recovery_err)
     if already_committed:
         recovered_paths = [p for p in files if os.path.basename(p) in already_committed]
         logger.warning(
@@ -516,7 +609,16 @@ def commit_buffer(source: dict, progress_callback=None) -> dict:
                 "status",
                 f"Appending chunk {chunk_idx + 1}/{total_chunks} ({chunk_rows:,} rows) to Iceberg table in FOS...",
             )
-        table.append(combined)
+        # Tag the snapshot with one marker per buffer file in this chunk.
+        # The recovery sweep at the top of the next commit tick scans
+        # recent snapshots for these markers, giving at-most-once
+        # semantics even if every other durability channel (SQLite
+        # checkpoint, tombstone) fails. ~24 bytes per marker in
+        # metadata.json — negligible vs the row payload.
+        chunk_snapshot_props = {
+            f"{_COMMIT_MARKER_PREFIX}{_buffer_basename_marker(os.path.basename(p))}": "1" for p in chunk_successful
+        }
+        table.append(combined, snapshot_properties=chunk_snapshot_props)
         # Free the chunk's in-memory tables before the next iteration so
         # peak RSS doesn't accumulate across chunks.
         del tables, combined

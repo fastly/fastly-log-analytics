@@ -9360,6 +9360,130 @@
         }
       }
     },
+    "/api/admin/slow-queries/count": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "Count Persisted Slow Queries",
+        "description": "Cheap row-count for the operations-overview card. Pulls only the\naggregate (single indexed scan) so the card stays sub-50 ms even on\nservices with thousands of persisted rows.",
+        "operationId": "count_persisted_slow_queries_api_admin_slow_queries_count_get",
+        "parameters": [
+          {
+            "name": "since_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 720,
+              "minimum": 1,
+              "default": 24,
+              "title": "Since Hours"
+            }
+          },
+          {
+            "name": "threshold_ms",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "minimum": 0.0,
+              "default": 1000.0,
+              "title": "Threshold Ms"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Count Persisted Slow Queries Api Admin Slow Queries Count Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/slow-queries": {
       "get": {
         "tags": [

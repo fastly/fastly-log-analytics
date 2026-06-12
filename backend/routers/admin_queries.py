@@ -121,6 +121,26 @@ def queries_summary() -> SummaryResponse:
     return SummaryResponse(**query_registry.summary())
 
 
+@router.get("/slow-queries/count")
+def count_persisted_slow_queries(
+    service_id: str = Depends(get_service_id),
+    since_hours: int = Query(24, ge=1, le=24 * 30),
+    threshold_ms: float = Query(1000.0, ge=0.0),
+) -> dict[str, Any]:
+    """Cheap row-count for the operations-overview card. Pulls only the
+    aggregate (single indexed scan) so the card stays sub-50 ms even on
+    services with thousands of persisted rows."""
+    _ensure_enabled()
+    if not service_id:
+        raise HTTPException(status_code=400, detail="service_id required")
+    since_utc = time.time() - since_hours * 3600
+    return {
+        "count": _meta_mod.count_slow_queries(service_id, since_utc=since_utc, threshold_ms=threshold_ms),
+        "since_hours": since_hours,
+        "threshold_ms": threshold_ms,
+    }
+
+
 @router.get("/slow-queries")
 def list_persisted_slow_queries(
     service_id: str = Depends(get_service_id),

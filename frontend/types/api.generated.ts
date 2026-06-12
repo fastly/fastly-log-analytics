@@ -1909,6 +1909,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/slow-queries/count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Count Persisted Slow Queries
+         * @description Cheap row-count for the operations-overview card. Pulls only the
+         *     aggregate (single indexed scan) so the card stays sub-50 ms even on
+         *     services with thousands of persisted rows.
+         */
+        get: operations["count_persisted_slow_queries_api_admin_slow_queries_count_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/slow-queries": {
         parameters: {
             query?: never;
@@ -10913,6 +10935,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SummaryResponse"];
+                };
+            };
+        };
+    };
+    count_persisted_slow_queries_api_admin_slow_queries_count_get: {
+        parameters: {
+            query?: {
+                since_hours?: number;
+                threshold_ms?: number;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
