@@ -813,20 +813,45 @@ The registry dies with the process — a long DuckDB query running during a depl
 
 ---
 
-## 14. Best-Practice Checklist
+## 14. Best-Practice Checklist — v1 SHIPPED 2026-06-11
 
-Pulled together from the review above; these are non-negotiable for v1:
+All items below shipped in commits `a0419db` (backend), `42262ea` (frontend),
+`bd4e290` (pydantic-settings dep), `a834d99` (300ms polling + just-finished
+promotion), `919fea9` (active row visuals + slow-queries panel), `80c78a0`
+(view-mode tabs + registry kill switch).
 
-- [ ] Result-wrapper covers `fetchall/fetchone/fetchmany/fetchdf/fetch_df/df/arrow/fetch_arrow_table/pl/fetch_record_batch/close` AND `__iter__` AND `__del__`.
-- [ ] `_conn_to_query` stamp validated under lock before every `interrupt()`.
-- [ ] Pool sees raw connections only — proxy unwrap happens inside `checkout_connection`.
-- [ ] Instrumentation exceptions never propagate into the SQL path (mirrors [sqlite_profiler.py:50-51](backend/utils/sqlite_profiler.py#L50-L51)).
-- [ ] SQL truncated to 4KB at register time; full text fetched lazily.
-- [ ] Both DuckDB AND SQLite reported as `cancellable: true`.
-- [ ] Cancel returns structured state, never throws.
-- [ ] Admin endpoints behind `RemoteAccessMiddleware`, not source `access_level`.
-- [ ] Errored queries captured in the completed-history deque with exception type.
-- [ ] Audit log line on every successful cancel.
-- [ ] OTel counters/histograms emitted (matches existing telemetry surface).
-- [ ] Pool-reuse race test in §13.10 lands green.
-- [ ] No new third-party dependency — stdlib `contextvars` / `weakref` / `itertools` only.
+- [x] Result-wrapper covers `fetchall/fetchone/fetchmany/fetchdf/fetch_df/df/arrow/fetch_arrow_table/pl/fetch_record_batch/close` AND `__iter__` AND `__del__`. (`backend/core/query_instrumentation.py`)
+- [x] `_conn_to_query` stamp validated under lock before every `interrupt()`. (`backend/core/query_registry.py` — pool-reuse race test in `tests/core/test_query_registry.py::TestCancel::test_pool_reuse_race_does_not_kill_wrong_query`)
+- [x] Pool sees raw connections only — proxy unwrap happens inside `checkout_connection`. (`backend/core/duckdb_pool.py:557`)
+- [x] Instrumentation exceptions never propagate into the SQL path.
+- [x] SQL truncated to 4KB at register time; full text fetched lazily via `GET /api/admin/queries/{qid}`.
+- [x] Both DuckDB AND SQLite reported as `cancellable: true` (sqlite3.Connection.interrupt() does exist).
+- [x] Cancel returns structured state, never throws.
+- [x] Admin endpoints behind `RemoteAccessMiddleware` on the `/api/admin/*` prefix.
+- [x] Errored queries captured in the completed-history deque with `error_type` + truncated `error_message`.
+- [x] Audit log line on every successful cancel (`audit_log` in `backend/utils/structlog_config.py`).
+- [x] OTel counters/histograms emitted: `app.active_queries.count`, `app.query_duration_ms`, `app.queries_cancelled_total`.
+- [x] Pool-reuse race test landed green.
+- [x] No new third-party dependency surfaced to the runtime — `pydantic-settings` was already transitive; we promoted it to a direct dep when the live-monitor router made the import load-bearing (commit `bd4e290`).
+
+---
+
+## 15. What ALSO shipped beyond the original v1 spec
+
+Polishing the page in front of a real operator surfaced things the spec
+didn't anticipate. All of these landed today:
+
+- **View-mode tabs** (commit `80c78a0`). Top-level `All / Live only / Past only` toggle. "Live only" hides the past sections for a focused real-time view; "Past only" hides the active section for post-mortem work.
+- **Notable Slow Queries panel** (commit `919fea9`). Filters the completed-history ring buffer by a chosen threshold (100ms / 500ms / 1s / 2s / 5s), sorted slowest first. Answers "what was running when the dashboard got slow a minute ago" without scrolling the full completed list.
+- **Active rows visually distinct** (commit `919fea9`). Tinted background + left accent border + pulsing dot next to duration. Faded just-finished rows for clear contrast.
+- **Adaptive polling at 300 ms** (commit `a834d99`). The original 1-2s polling was useless for typical traffic — empirical measurement on prod showed p50 query duration is 0.2ms, max 29ms across 200 samples. Dropped to 300ms so real activity appears.
+- **"Just-finished" promotion into Active** (commit `a834d99`, window bumped to 10s in `919fea9`). Anything that completed in the last 10s appears in the Active section as a faded row with its outcome badge. Without this the Active list reads empty on typical traffic regardless of polling rate.
+- **Registry kill switch** (commit `80c78a0`). `QUERY_REGISTRY_DISABLED=1` env makes `register()` return immediately for zero hot-path overhead. Defensive lever for future incidents (measured overhead is ~21µs/query, but the switch costs nothing to ship).
+
+What's STILL deferred (genuine v2 work, see §13):
+- Auto-kill / runaway protection per attribution kind
+- DuckDB per-row progress + memory via `duckdb_memory()` and `pragma progress_bar_time`
+- Persistence across restart for the completed-history deque
+- Verify `.arrow()` lazy-reader semantics against `iceberg/buffer.py:647` (works in tests but the call-site comment hinted at quirks)
+- Explicit `cron_run_id` grouping in the UI (today we expose the field and the filter chips work, but there's no collapsible group-by render)
+- Keyboard shortcuts, ARIA live regions, sound notifications, URL-persisted filters — UX polish from the original §7 list that wasn't material for the operator workflow today
