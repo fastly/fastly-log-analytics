@@ -855,3 +855,101 @@ What's STILL deferred (genuine v2 work, see §13):
 - Verify `.arrow()` lazy-reader semantics against `iceberg/buffer.py:647` (works in tests but the call-site comment hinted at quirks)
 - Explicit `cron_run_id` grouping in the UI (today we expose the field and the filter chips work, but there's no collapsible group-by render)
 - Keyboard shortcuts, ARIA live regions, sound notifications, URL-persisted filters — UX polish from the original §7 list that wasn't material for the operator workflow today
+
+---
+
+## 16. v2 SHIPPED 2026-06-12 — closing the deferred-list
+
+Everything from the §15 "STILL deferred" list except the three items below is
+now shipped in a single commit (`613605c` —
+`feat(live-monitor): peak memory column, keyboard shortcuts, URL-persisted filters`).
+
+### Backend
+
+- **Peak memory at completion** ([backend/core/query_instrumentation.py](backend/core/query_instrumentation.py),
+  [backend/core/query_registry.py](backend/core/query_registry.py)).
+  At deregister time, `_probe_duckdb_memory()` opens a fresh cursor on the
+  now-idle connection and runs
+  `SELECT sum(memory_usage_bytes) + sum(temporary_storage_bytes) FROM duckdb_memory()`.
+  Result lands as `CompletedQuery.peak_memory_mb` and surfaces in the
+  snapshot endpoint and the Completed table. SQLite rows stay `None`.
+  Wired in the `_InstrumentedResult._finish` path AND the
+  `InstrumentedDuckDBConnection.execute` error path.
+- **`.arrow()` / `fetch_record_batch` lazy-reader wrapper**
+  ([backend/core/query_instrumentation.py](backend/core/query_instrumentation.py)).
+  New `_InstrumentedRecordReader` proxies `pyarrow.RecordBatchReader` so
+  deregistration waits for iteration to complete instead of firing at the
+  call site. Closes §13.11 — verified by a new regression test that drives
+  `.arrow()` through a 500k-row stream with sleeps between batches and
+  asserts the row stays active throughout. The §15 "verify `.arrow()`"
+  follow-up is therefore both verified AND defensively wrapped.
+- **Tests added** ([tests/core/test_query_registry.py](tests/core/test_query_registry.py)):
+  `_parse_memory_mb` parser (ints, binary + decimal suffixes, garbage),
+  peak-memory probe success + error swallowing, completed row carries
+  `peak_memory_mb`, SQLite stays null, reader-iteration holds registration,
+  `to_arrow_table` materialises immediately, `reader.close()` completes,
+  reader schema pass-through. 11 new tests, 37 total green.
+
+### Frontend (all in [frontend/app/admin/queries/](frontend/app/admin/queries/))
+
+- **`cron_run_id` collapsible grouping** ([_sections/ActiveTable.tsx](frontend/app/admin/queries/_sections/ActiveTable.tsx)).
+  New "Group runs" toggle next to the kind chips. When on, cron rows
+  bucket by `cron_run_id` (null → "Ungrouped cron"); each bucket is a
+  collapsible block headed by `Cron: {job} (run {short_id}) — N queries,
+  oldest {duration}`. Non-cron rows stay inline.
+- **Keyboard shortcuts** ([_hooks/useKeyboardShortcuts.ts](frontend/app/admin/queries/_hooks/useKeyboardShortcuts.ts),
+  [_sections/ShortcutsHelp.tsx](frontend/app/admin/queries/_sections/ShortcutsHelp.tsx)).
+  `/` focus search, `j`/`k` row nav, `Enter` expand, `x` cancel focused,
+  `Esc` close (drawer → confirm dialog → help → blur), `?` help overlay.
+  Focused row gets a visible ring. Help dialog accessible via the
+  keyboard icon in the page header for discoverability.
+- **ARIA live region** ([_sections/SummaryStrip.tsx](frontend/app/admin/queries/_sections/SummaryStrip.tsx)).
+  `<div role="status" aria-live="polite" class="sr-only">` announces
+  the active count to screen readers. Memoised on the count itself so
+  the 300ms poll doesn't chatter announcements every tick.
+- **Opt-in sound notification** ([page.tsx](frontend/app/admin/queries/page.tsx)).
+  Visible speaker toggle in the page header; `localStorage` persists the
+  preference. Fires on the first poll where a new `outcome === 'error'`
+  appears in completed, via Web Audio (~200ms two-tone ping). No audio
+  asset shipped. Doesn't beep retroactively for errors that existed
+  before the user enabled sound.
+- **Memory column** ([_sections/CompletedTable.tsx](frontend/app/admin/queries/_sections/CompletedTable.tsx)).
+  Renders only when at least one visible row has `peak_memory_mb !== null`,
+  so an all-SQLite view collapses the column out entirely.
+- **URL-persisted filter state** ([page.tsx](frontend/app/admin/queries/page.tsx)).
+  `search → ?q`, `kindFilter → ?kind`, `viewMode → ?view`,
+  `slowThresholdMs → ?slow`, `groupByRun → ?group=run`. Hydrate-once
+  pattern with a `hydratedRef` guard; writes via `window.history.replaceState`
+  to avoid Next's router refresh (mirrors [useFilterUrlSync.ts](frontend/hooks/useFilterUrlSync.ts)).
+  Default values omitted from the URL so clean views stay clean.
+
+### Surprise during verification
+
+- **`?` shortcut layout-quirk.** During the browser smoke-test the `?`
+  shortcut didn't fire. Cause: Playwright (and some non-US keyboard
+  layouts on older Chromium) report Shift+/ as `event.key === '/'` with
+  `shiftKey === true`, NOT as `event.key === '?'`. Real macOS Chrome on
+  US QWERTY reports `'?'` directly, which is why the bug didn't surface
+  in earlier manual testing. Fix: `logicalKey()` normalizer in
+  [useKeyboardShortcuts.ts](frontend/app/admin/queries/_hooks/useKeyboardShortcuts.ts)
+  promotes Shift + `/` (or `event.code === 'Slash'`) to `'?'` before
+  binding lookup. Regression-tested via a vitest case that fires
+  `KeyboardEvent({ key: '/', shiftKey: true, code: 'Slash' })` and
+  asserts the `?` handler runs.
+
+### What stays deferred (still v2.5 / v3 work)
+
+These three items are explicitly out of scope per user decision (see
+plan `/Users/drew.michael/.claude/plans/goofy-questing-ember.md` — context
+section):
+
+- **Auto-kill / runaway protection.** Admins manually cancel; no
+  automated killing.
+- **Disk persistence of completed-history.** The live query page must
+  not require a database; the in-memory ring buffer is the contract.
+- **In-flight DuckDB progress probing.** Too much concurrency risk for
+  the marginal UX win when the deregister-time probe gives a usable
+  number on most queries.
+
+These are documented here so a future reader sees they were considered
+and consciously left out, not forgotten.
