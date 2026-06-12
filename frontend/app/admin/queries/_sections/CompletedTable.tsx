@@ -4,15 +4,16 @@
  * Recently Completed + Notable Slow Queries panels — thin wrapper around
  * the project's standard ``<DataTable>``.
  *
- * Caller picks the row set; this component just renders. The Memory
- * column hides when every visible row has ``peak_memory_mb === null``
- * (SQLite rows always do; DuckDB rows can if the probe failed). Row
- * clicks open the shared ``RowDetailDialog`` for the full SQL +
- * attribution view.
+ * Service + Memory columns auto-hide when every visible row has the value
+ * empty. SQLite rows always have no Memory (probe is DuckDB-only); rows
+ * from connections that bypass ``get_con`` (rare, but possible) have no
+ * Service. Hiding empty columns keeps the table compact.
  *
- * Replaces the prior custom HTML table with all the same data, plus
- * column reorder / hide-show / resize / sort from the shared DataTable.
+ * Row clicks open the shared ``RowDetailDialog`` for the full SQL +
+ * attribution view.
  */
+
+import * as React from 'react'
 
 import { DataTable } from '@/components/DataTable'
 
@@ -28,14 +29,14 @@ export function CompletedTable({
   rows: CompletedRow[]
   onRowClick: (row: CompletedRow) => void
   emptyMessage?: string
-  /** Default for Slow Queries panel: duration desc. Recently-Completed
-   *  passes ``[{id: 'duration_ms', desc: true}]`` or omits to use the
-   *  default; either way DataTable's sort state is internal so the
-   *  operator can re-sort from the headers. */
   initialSorting?: { id: string; desc: boolean }[]
 }) {
   const showMemory = rows.some((r) => r.peak_memory_mb !== null && r.peak_memory_mb !== undefined)
-  const columns = buildCompletedColumns({ showMemory })
+  const showService = rows.some((r) => r.service_id !== null && r.service_id !== undefined)
+  const columns = React.useMemo(
+    () => buildCompletedColumns({ showMemory, showService }),
+    [showMemory, showService],
+  )
   return (
     <DataTable<CompletedRow, unknown>
       columns={columns}

@@ -151,8 +151,10 @@ function buildActionsCell(
 export function buildActiveColumns(deps: {
   onKill: (row: ActiveRow) => void
   cancellingQid: number | null
+  showService: boolean
+  showPool: boolean
 }): ColumnDef<ActiveOrPromotedRow>[] {
-  return [
+  const cols: ColumnDef<ActiveOrPromotedRow>[] = [
     {
       id: 'source',
       accessorFn: (r) => r.attribution.label,
@@ -174,7 +176,9 @@ export function buildActiveColumns(deps: {
       size: 80,
       cell: ({ row }) => <span className="text-xs">{row.original.db_type}</span>,
     },
-    {
+  ]
+  if (deps.showService) {
+    cols.push({
       id: 'service_id',
       accessorFn: (r) => r.service_id ?? '',
       header: SortHeader({ label: 'Service' }),
@@ -184,8 +188,10 @@ export function buildActiveColumns(deps: {
           {row.original.service_id ?? '—'}
         </span>
       ),
-    },
-    {
+    })
+  }
+  if (deps.showPool) {
+    cols.push({
       id: 'pool_slot',
       accessorFn: (r) => r.attribution.pool_slot ?? '',
       header: SortHeader({ label: 'Pool' }),
@@ -193,7 +199,9 @@ export function buildActiveColumns(deps: {
       cell: ({ row }) => (
         <span className="text-xs font-mono">{row.original.attribution.pool_slot ?? '—'}</span>
       ),
-    },
+    })
+  }
+  cols.push(
     {
       id: 'duration_ms',
       accessorKey: 'duration_ms',
@@ -208,11 +216,13 @@ export function buildActiveColumns(deps: {
       size: 110,
       cell: buildActionsCell(deps.onKill, deps.cancellingQid),
     },
-  ]
+  )
+  return cols
 }
 
 export function buildCompletedColumns(opts: {
   showMemory: boolean
+  showService: boolean
 }): ColumnDef<CompletedRow>[] {
   const cols: ColumnDef<CompletedRow>[] = [
     {
@@ -267,17 +277,6 @@ export function buildCompletedColumns(opts: {
       cell: ({ row }) => <span className="text-xs">{row.original.db_type}</span>,
     },
     {
-      id: 'service_id',
-      accessorFn: (r) => r.service_id ?? '',
-      header: SortHeader({ label: 'Service' }),
-      size: 200,
-      cell: ({ row }) => (
-        <span className="text-xs font-mono truncate" title={row.original.service_id ?? ''}>
-          {row.original.service_id ?? '—'}
-        </span>
-      ),
-    },
-    {
       id: 'duration_ms',
       accessorKey: 'duration_ms',
       header: SortHeader({ label: 'Duration' }),
@@ -289,6 +288,21 @@ export function buildCompletedColumns(opts: {
       ),
     },
   ]
+  if (opts.showService) {
+    // Insert just before the Duration column — same position as the
+    // Active table for visual consistency.
+    cols.splice(cols.length - 1, 0, {
+      id: 'service_id',
+      accessorFn: (r) => r.service_id ?? '',
+      header: SortHeader({ label: 'Service' }),
+      size: 200,
+      cell: ({ row }) => (
+        <span className="text-xs font-mono truncate" title={row.original.service_id ?? ''}>
+          {row.original.service_id ?? '—'}
+        </span>
+      ),
+    })
+  }
   if (opts.showMemory) {
     cols.push({
       id: 'peak_memory_mb',
