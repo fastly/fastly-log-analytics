@@ -99,13 +99,16 @@ jobs:
         #   confidence-batch (insights+admin+services+dashboard+origin+
         #   hypothesis+regression+E2E smoke): 78% (current 83% — 5pp buffer)
         #   post live-query-monitor (2026-06-11): 80% (current 82%)
+        #   post backend coverage waves (reconciliation/compaction/session_scoring
+        #   /data_migrations/tunnel-state/dashboard-router/views/sqlite_profiler):
+        #     82% (current 83% — 1pp buffer; tight while v2.0 target 85% lands).
         #
         # `-n auto` parallelizes via pytest-xdist (TESTING_PLAN_3 item 21).
         # Verified safe: per-service SQLite (`{id}.metadata.db`) + per-test
         # tmp_path give file isolation; autouse `_reset_module_caches` resets
         # the 8 module-level caches between tests; moto fixtures are per-test.
         # Local run: 2268 passed in 58s under `-n auto` vs ~3min serial.
-        run: uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=80
+        run: uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=82
 
       - name: Security-regression count gate
         # v2.0 cleanup Phase 0.8: asserts the
