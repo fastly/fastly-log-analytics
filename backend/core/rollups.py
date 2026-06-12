@@ -926,12 +926,26 @@ def bundle_hours(service_id: str, source: dict, hours: list[str]) -> int:
             if not per_field_paths:
                 continue
 
-            # Skip if bundle is already up-to-date.
+            # Skip if bundle is already up-to-date — but still run the
+            # per-field cleanup against this hour, because:
+            #   (a) backlog from before the cleanup pass shipped means
+            #       many already-bundled hours still carry stale per-
+            #       field copies on disk; this branch is how they get
+            #       reaped without forcing an explicit one-shot job;
+            #   (b) the cleanup is a no-op if there's nothing to delete
+            #       (no per-field dirs for the hour), so the cost is
+            #       one os.listdir.
             bundle_dir = os.path.join(bundled_root, f"hour={hour}")
             bundle_path = os.path.join(bundle_dir, "all_fields.parquet")
             if os.path.exists(bundle_path):
                 try:
                     if os.path.getmtime(bundle_path) >= max_src_mtime:
+                        _cleanup_per_field_after_bundle(
+                            hour_per_field_root,
+                            hour,
+                            bundle_path,
+                            service_id,
+                        )
                         continue
                 except OSError:
                     pass
@@ -960,11 +974,128 @@ def bundle_hours(service_id: str, source: dict, hours: list[str]) -> int:
             with _get_service_lock(lock_key):
                 # Atomic publish — os.replace is atomic on POSIX.
                 os.replace(tmp_path, bundle_path)
+                # Now that the bundle for this hour is on disk and at least
+                # as new as every per-field source we just read, the per-
+                # field per-hour files are redundant — the reader prefers
+                # the bundled path. Sweep them so the active-day query
+                # window stops opening N×72 small parquets when N hours
+                # have already been bundled. The active hour is skipped
+                # above (line 893), so we only ever clean closed hours.
+                # Guarded by ROLLUP_CLEANUP_DRY_RUN=1 for the first-deploy
+                # log-only audit before the actual unlinks ship.
+                _cleanup_per_field_after_bundle(
+                    hour_per_field_root,
+                    hour,
+                    bundle_path,
+                    service_id,
+                )
             rebuilt += 1
     finally:
         con.close()
 
     return rebuilt
+
+
+def _cleanup_per_field_after_bundle(
+    hour_per_field_root: str,
+    hour: str,
+    bundle_path: str,
+    service_id: str,
+) -> None:
+    """Sweep the per-field per-hour parquet directories for ``hour`` after
+    a fresh hour bundle has been published.
+
+    Safety checks (any failure → log and bail, do NOT unlink):
+    - ``hour_bundled/.../all_fields.parquet`` exists on disk.
+    - Bundle mtime ≥ max per-field mtime under hour=HOUR (i.e. the bundle
+      includes everything that's currently in the per-field tree).
+
+    Reader fallback at backend/repositories/_base.py:937-1003 prefers the
+    bundled file, so dropping per-field for a bundled hour is safe; if a
+    bundle ever gets deleted, ``backfill_rollups`` or the next sync tick
+    rebuilds per-field from the base data. Loss of dual-storage redundancy
+    is the trade for the file-count win.
+
+    Gated on ROLLUP_CLEANUP_DRY_RUN=1: when set, log "would delete N
+    files" instead of unlinking. First prod tick should run with this to
+    confirm the math, then unset.
+    """
+    if not os.path.exists(bundle_path):
+        return
+    try:
+        bundle_mtime = os.path.getmtime(bundle_path)
+    except OSError:
+        return
+
+    dry_run = os.environ.get("ROLLUP_CLEANUP_DRY_RUN") == "1"
+    candidate_dirs: list[str] = []
+    file_count = 0
+    try:
+        for field_entry in os.listdir(hour_per_field_root):
+            if not field_entry.startswith("field="):
+                continue
+            hour_dir = os.path.join(hour_per_field_root, field_entry, f"hour={hour}")
+            if not os.path.isdir(hour_dir):
+                continue
+            # Bundle must be at least as new as every per-field file in
+            # the dir, otherwise we'd lose data published since the
+            # bundle ran. (Belt-and-suspenders — bundle_hours already
+            # verifies max_src_mtime ≤ bundle mtime before reusing an
+            # existing bundle, but a concurrent recompute could have
+            # rewritten a per-field file between the bundle COPY and
+            # this sweep.)
+            ok = True
+            count_here = 0
+            try:
+                for fname in os.listdir(hour_dir):
+                    if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
+                        continue
+                    p = os.path.join(hour_dir, fname)
+                    try:
+                        if os.path.getmtime(p) > bundle_mtime:
+                            ok = False
+                            break
+                        count_here += 1
+                    except OSError:
+                        ok = False
+                        break
+            except OSError:
+                ok = False
+            if ok and count_here > 0:
+                candidate_dirs.append(hour_dir)
+                file_count += count_here
+    except OSError:
+        return
+
+    if not candidate_dirs:
+        return
+
+    if dry_run:
+        logger.info(
+            "[rollups] %s: ROLLUP_CLEANUP_DRY_RUN — would delete %d per-field parquets across %d field dirs for hour=%s",
+            service_id,
+            file_count,
+            len(candidate_dirs),
+            hour,
+        )
+        return
+
+    deleted_files = 0
+    deleted_dirs = 0
+    for hour_dir in candidate_dirs:
+        try:
+            shutil.rmtree(hour_dir)
+            deleted_dirs += 1
+            deleted_files += 1  # underestimate; we don't recount post-delete
+        except OSError as e:
+            logger.warning("[rollups] %s: cleanup failed for %s: %s", service_id, hour_dir, e)
+    logger.debug(
+        "[rollups] %s: cleaned %d per-field dirs (~%d parquets) for bundled hour=%s",
+        service_id,
+        deleted_dirs,
+        file_count,
+        hour,
+    )
 
 
 def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
