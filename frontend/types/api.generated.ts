@@ -10135,7 +10135,7 @@ export interface operations {
     local_compact_now_api_admin_local_compact_now_post: {
         parameters: {
             query?: {
-                /** @description Compact partitions with strictly more files than this. */
+                /** @description Compact partitions with strictly more files than this. Default 3 = normal cron behaviour. Pass 1 to dedupe the 2-3-file orphan pattern. Pass 0 to force-rewrite every partition through the dedup pipeline (one-shot historical cleanup of intra-file dups in single-parquet partitions). */
                 min_files?: number;
                 /** @description Report what would happen without writing. */
                 dry_run?: boolean;

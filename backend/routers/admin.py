@@ -853,7 +853,17 @@ def optimize_now(
 @router.post("/admin/local-compact-now")
 def local_compact_now(
     source: dict = Depends(get_source),
-    min_files: int = Query(default=3, ge=1, description="Compact partitions with strictly more files than this."),
+    min_files: int = Query(
+        default=3,
+        ge=0,
+        description=(
+            "Compact partitions with strictly more files than this. "
+            "Default 3 = normal cron behaviour. Pass 1 to dedupe the "
+            "2-3-file orphan pattern. Pass 0 to force-rewrite every "
+            "partition through the dedup pipeline (one-shot historical "
+            "cleanup of intra-file dups in single-parquet partitions)."
+        ),
+    ),
     dry_run: bool = Query(default=False, description="Report what would happen without writing."),
 ):
     """Trigger an immediate local-only parquet compaction pass.

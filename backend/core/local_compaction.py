@@ -247,7 +247,15 @@ def compact_local_partitions(source: dict, min_files_per_partition: int = 1, dry
         full_paths = [os.path.join(part_dir, f) for f in parquets_sorted]
         bins = _bin_pack_files(full_paths, _MAX_PARTITION_BYTES)
 
-        eligible_bins = [b for b in bins if len(b) > 1]
+        # In normal compaction (``min_files_per_partition >= 1``) a single-
+        # file bin is a no-op — there's nothing to merge. In force-rewrite
+        # mode (``== 0``, one-shot dedup pass) we DO want to rewrite even
+        # singletons so intra-file dups in long-stable partitions get the
+        # dedup-by-rid pass.
+        if min_files_per_partition == 0:
+            eligible_bins = bins
+        else:
+            eligible_bins = [b for b in bins if len(b) > 1]
         if not eligible_bins:
             continue
 
