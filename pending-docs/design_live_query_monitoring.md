@@ -913,6 +913,12 @@ now shipped in a single commit (`613605c` —
   appears in completed, via Web Audio (~200ms two-tone ping). No audio
   asset shipped. Doesn't beep retroactively for errors that existed
   before the user enabled sound.
+  **Removed 2026-06-12** (same day) at user request — a visible speaker
+  icon on an admin observability page reads as out-of-place, and the
+  ARIA live region already covers the screen-reader path. Auditory
+  monitoring during incidents remains possible via OS-level notifications
+  on the OTel `app.query_duration_ms` / `app.active_queries.count`
+  metrics; we don't need a page-level audio channel.
 - **Memory column** ([_sections/CompletedTable.tsx](frontend/app/admin/queries/_sections/CompletedTable.tsx)).
   Renders only when at least one visible row has `peak_memory_mb !== null`,
   so an all-SQLite view collapses the column out entirely.

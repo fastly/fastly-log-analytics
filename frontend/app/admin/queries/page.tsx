@@ -14,7 +14,7 @@
 
 import * as React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ArrowLeft, Keyboard, Layers, Search, Volume2, VolumeX } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Keyboard, Layers, Search } from 'lucide-react'
 import Link from 'next/link'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -48,7 +48,6 @@ import type {
   ViewMode,
 } from './_types'
 
-const SOUND_STORAGE_KEY = 'qm:sound-enabled'
 const DEFAULT_SLOW_THRESHOLD_MS = 500
 
 export default function QueryMonitorPage() {
@@ -65,7 +64,6 @@ export default function QueryMonitorPage() {
   const [groupByRun, setGroupByRun] = React.useState(false)
   const [focusedQid, setFocusedQid] = React.useState<number | null>(null)
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
-  const [soundEnabled, setSoundEnabled] = React.useState(false)
   const searchInputRef = React.useRef<HTMLInputElement>(null)
 
   // Hydrate filter state from URL on mount. Single-shot; subsequent
@@ -94,14 +92,6 @@ export default function QueryMonitorPage() {
     }
     if (group === 'run') setGroupByRun(true)
     if (db === 'DuckDB' || db === 'SQLite') setDbFilter(db)
-    // Restore the sound preference (localStorage so it persists across
-    // sessions for this browser without leaking into the URL).
-    try {
-      const stored = window.localStorage.getItem(SOUND_STORAGE_KEY)
-      if (stored === '1') setSoundEnabled(true)
-    } catch {
-      // localStorage blocked (Safari private mode etc) — silently ignore.
-    }
     hydratedRef.current = true
   }, [])
 
@@ -125,18 +115,6 @@ export default function QueryMonitorPage() {
     else url.searchParams.delete('db')
     window.history.replaceState({}, '', url.toString())
   }, [search, kindFilter, viewMode, slowThresholdMs, groupByRun, dbFilter])
-
-  // Persist the sound toggle separately — localStorage, not URL, since
-  // it's a user preference rather than a shareable view.
-  React.useEffect(() => {
-    if (!hydratedRef.current) return
-    if (typeof window === 'undefined') return
-    try {
-      window.localStorage.setItem(SOUND_STORAGE_KEY, soundEnabled ? '1' : '0')
-    } catch {
-      // ignore
-    }
-  }, [soundEnabled])
 
   // Feature-flag check; if disabled, render a clear empty state.
   const { data: cfg } = useQuery<MonitorConfig>({
@@ -270,26 +248,6 @@ export default function QueryMonitorPage() {
       setFocusedQid(null)
     }
   }, [filteredActive, focusedQid])
-
-  // Sound notification on NEW errors. Tracks which error query_ids we've
-  // already announced so a row sticking around in the completed window
-  // doesn't beep on every poll. Reset when the user disables sound.
-  const announcedErrorIdsRef = React.useRef<Set<number>>(new Set())
-  React.useEffect(() => {
-    if (!soundEnabled) {
-      announcedErrorIdsRef.current.clear()
-      return
-    }
-    const errorRows = (snapshotQuery.data?.completed ?? []).filter((c) => c.outcome === 'error')
-    const newOnes = errorRows.filter((c) => !announcedErrorIdsRef.current.has(c.query_id))
-    if (newOnes.length === 0) return
-    for (const c of newOnes) announcedErrorIdsRef.current.add(c.query_id)
-    // First poll while sound is on: don't beep retroactively for errors
-    // that completed before the user enabled sound. Only beep when we
-    // already had a baseline.
-    if (announcedErrorIdsRef.current.size === newOnes.length) return
-    playErrorTone()
-  }, [snapshotQuery.data, soundEnabled])
 
   const requestKill = React.useCallback(
     (row: ActiveRow) => {
@@ -434,35 +392,16 @@ export default function QueryMonitorPage() {
         <>
           <div className="flex items-center justify-between gap-3">
             <SummaryStrip />
-            <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-8 px-2"
-                onClick={() => setSoundEnabled((v) => !v)}
-                title={soundEnabled ? 'Disable sound on errors' : 'Enable sound on errors'}
-                aria-pressed={soundEnabled}
-              >
-                {soundEnabled ? (
-                  <Volume2 className="h-4 w-4 text-primary" />
-                ) : (
-                  <VolumeX className="h-4 w-4 text-muted-foreground" />
-                )}
-                <span className="sr-only">
-                  {soundEnabled ? 'Disable sound notifications' : 'Enable sound notifications'}
-                </span>
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-8 px-2"
-                onClick={() => setShortcutsOpen(true)}
-                title="Keyboard shortcuts (?)"
-              >
-                <Keyboard className="h-4 w-4 text-muted-foreground" />
-                <span className="sr-only">Show keyboard shortcuts</span>
-              </Button>
-            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2"
+              onClick={() => setShortcutsOpen(true)}
+              title="Keyboard shortcuts (?)"
+            >
+              <Keyboard className="h-4 w-4 text-muted-foreground" />
+              <span className="sr-only">Show keyboard shortcuts</span>
+            </Button>
           </div>
 
           {actionError && (
@@ -607,41 +546,4 @@ export default function QueryMonitorPage() {
       <ShortcutsHelp open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
     </div>
   )
-}
-
-/** Short, attention-getting blip via Web Audio. ~200ms total. No asset
- *  to ship and no permission prompt — just two oscillator pings. Wrapped
- *  in try/catch because AudioContext can throw if the user hasn't yet
- *  interacted with the page (browsers gate autoplay-style audio). The
- *  toggle is opt-in and the user clicks it, which counts as interaction
- *  for the AudioContext gesture requirement. */
-function playErrorTone() {
-  try {
-    const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-    if (!AC) return
-    const ctx = new AC()
-    const now = ctx.currentTime
-    for (const [freq, delay] of [
-      [880, 0],
-      [660, 0.12],
-    ] as const) {
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.type = 'sine'
-      osc.frequency.value = freq
-      // Quick attack + decay so it sounds like a UI ping, not a bell.
-      gain.gain.setValueAtTime(0.0001, now + delay)
-      gain.gain.exponentialRampToValueAtTime(0.12, now + delay + 0.01)
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + delay + 0.10)
-      osc.connect(gain).connect(ctx.destination)
-      osc.start(now + delay)
-      osc.stop(now + delay + 0.12)
-    }
-    // Close the context after the tones finish so we don't leak audio
-    // graph state in the page.
-    setTimeout(() => ctx.close().catch(() => {}), 400)
-  } catch {
-    // Autoplay blocked, no Web Audio, etc. The toggle being on is best
-    // effort — silent failure beats a crash on a notification.
-  }
 }
