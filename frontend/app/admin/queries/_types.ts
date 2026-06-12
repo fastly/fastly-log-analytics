@@ -80,14 +80,24 @@ export type DbFilter = 'all' | 'DuckDB' | 'SQLite'
  *  the just-finished window. The table component renders these as faded
  *  rows with an outcome badge instead of a Kill button.
  *
- *  ``_groupedCount`` is set when cron-grouping is on and this row stands in
- *  for N siblings sharing the same ``cron_run_id``. The Source cell shows
- *  a ``×N`` badge so the user knows extras are hidden; toggling off groups
- *  shows the full set. */
+ *  Cron-grouping markers:
+ *  - ``_groupedCount`` — set on the representative row of a collapsed group
+ *    OR on the head of an expanded one. Drives the ``×N`` badge.
+ *  - ``_isGroupHead`` — true on the leading row of an expanded group; tells
+ *    the badge to render in "expanded" state (chevron flipped).
+ *  - ``_expandedChild`` — true on sibling rows revealed by expanding a
+ *    group. Renders with a left indent + muted background so the visual
+ *    grouping is obvious. */
 export type ActiveOrPromotedRow = ActiveRow & {
   _completed?: CompletedRow
   _groupedCount?: number
+  _isGroupHead?: boolean
+  _expandedChild?: boolean
 }
 
-/** CompletedRow extended with the same cron-grouping marker. */
-export type GroupedCompletedRow = CompletedRow & { _groupedCount?: number }
+/** CompletedRow extended with the same cron-grouping markers. */
+export type GroupedCompletedRow = CompletedRow & {
+  _groupedCount?: number
+  _isGroupHead?: boolean
+  _expandedChild?: boolean
+}

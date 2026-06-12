@@ -18,7 +18,7 @@
 
 import * as React from 'react'
 import { ColumnDef } from '@tanstack/react-table'
-import { ArrowUpDown, X } from 'lucide-react'
+import { ArrowUpDown, ChevronDown, ChevronRight, X } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -48,32 +48,51 @@ function SortHeader({ label }: { label: string }) {
 
 // ── Shared cell renderers ─────────────────────────────────────────────────
 
-/** Source cell: kind badge + attribution label, truncated. When the row
- *  stands in for a cron-group of N siblings, append a ``×N`` badge so the
- *  user knows extras are folded under this row (toggle off groups to see
- *  them). */
-function sourceCell({ row }: { row: any }) {
-  const attr = row.original.attribution
-  const groupCount: number | undefined = row.original._groupedCount
-  return (
-    <div className="flex items-center gap-2 min-w-0">
-      <Badge variant={kindBadgeVariant(attr.kind)} className="capitalize shrink-0">
-        {attr.kind}
-      </Badge>
-      <span className="truncate text-xs" title={attr.label}>
-        {attr.label}
-      </span>
-      {groupCount && groupCount > 1 ? (
-        <Badge
-          variant="secondary"
-          className="shrink-0 font-mono text-[10px] px-1.5"
-          title={`${groupCount} queries in this cron run — toggle "Group crons" off to expand`}
-        >
-          ×{groupCount}
+/** Build the Source cell renderer with cron-group toggle support. The cell
+ *  shows: kind badge + label + (when a cron group) a chevron-prefixed
+ *  ``×N`` badge that toggles per-run expansion via ``onToggleGroup``.
+ *  Expanded sibling rows render with an inset chevron in place of the
+ *  badge so the visual grouping is clear. */
+function buildSourceCell(onToggleGroup: (runId: string) => void) {
+  return function SourceCell({ row }: { row: any }) {
+    const attr = row.original.attribution
+    const groupCount: number | undefined = row.original._groupedCount
+    const isGroupHead: boolean = !!row.original._isGroupHead
+    const isExpandedChild: boolean = !!row.original._expandedChild
+    return (
+      <div className={`flex items-center gap-2 min-w-0 ${isExpandedChild ? 'pl-5' : ''}`}>
+        <Badge variant={kindBadgeVariant(attr.kind)} className="capitalize shrink-0">
+          {attr.kind}
         </Badge>
-      ) : null}
-    </div>
-  )
+        <span className="truncate text-xs" title={attr.label}>
+          {attr.label}
+        </span>
+        {groupCount && groupCount > 1 ? (
+          <button
+            type="button"
+            className="shrink-0 inline-flex items-center gap-0.5 rounded-md border border-input bg-secondary px-1.5 py-0.5 font-mono text-[10px] hover:bg-secondary/80"
+            title={
+              isGroupHead
+                ? `Collapse this cron run (${groupCount} queries)`
+                : `Expand this cron run (${groupCount} queries)`
+            }
+            onClick={(e) => {
+              e.stopPropagation()
+              const runId: string | null = row.original.attribution.cron_run_id
+              if (runId) onToggleGroup(runId)
+            }}
+          >
+            {isGroupHead ? (
+              <ChevronDown className="h-2.5 w-2.5" />
+            ) : (
+              <ChevronRight className="h-2.5 w-2.5" />
+            )}
+            ×{groupCount}
+          </button>
+        ) : null}
+      </div>
+    )
+  }
 }
 
 /** Caller cell: qualname primary, file:line secondary at 60% opacity. */
@@ -171,7 +190,9 @@ export function buildActiveColumns(deps: {
   cancellingQid: number | null
   showService: boolean
   showPool: boolean
+  onToggleGroup: (runId: string) => void
 }): ColumnDef<ActiveOrPromotedRow>[] {
+  const sourceCell = buildSourceCell(deps.onToggleGroup)
   const cols: ColumnDef<ActiveOrPromotedRow>[] = [
     {
       id: 'source',
@@ -241,7 +262,9 @@ export function buildActiveColumns(deps: {
 export function buildCompletedColumns(opts: {
   showMemory: boolean
   showService: boolean
+  onToggleGroup: (runId: string) => void
 }): ColumnDef<GroupedCompletedRow>[] {
+  const sourceCell = buildSourceCell(opts.onToggleGroup)
   const cols: ColumnDef<GroupedCompletedRow>[] = [
     {
       id: 'outcome',

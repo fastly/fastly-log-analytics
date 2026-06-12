@@ -42,7 +42,10 @@ const SLOW_QUERIES_MAX = 30
  * ``attribution.cron_run_id`` collapse to a single representative row —
  * the longest-running one — with ``_groupedCount`` set to the original
  * group size. Cuts table noise during a heavy cron tick without losing
- * information (toggle off to see them all).
+ * information (toggle off to see them all). Per-group expansion: any
+ * ``cron_run_id`` present in ``expandedRunIds`` is shown in full, with
+ * the head row keeping the ``×N`` badge and the sibling rows tagged with
+ * ``_expandedChild`` for visual indent.
  */
 export function useFilteredActive({
   snapshot,
@@ -51,6 +54,7 @@ export function useFilteredActive({
   dbFilter,
   slowThresholdMs,
   groupCrons,
+  expandedRunIds,
 }: {
   snapshot: SnapshotResponse | undefined
   search: string
@@ -58,6 +62,7 @@ export function useFilteredActive({
   dbFilter: DbFilter
   slowThresholdMs: number
   groupCrons: boolean
+  expandedRunIds: ReadonlySet<string>
 }): {
   justFinished: CompletedRow[]
   filteredActive: ActiveOrPromotedRow[]
@@ -75,9 +80,9 @@ export function useFilteredActive({
     const filtered = all
       .filter((c) => c.duration_ms >= slowThresholdMs)
       .filter((c) => dbFilter === 'all' || c.db_type === dbFilter)
-    const grouped = groupCrons ? collapseCronRunsCompleted(filtered) : filtered
+    const grouped = groupCrons ? collapseCronRunsCompleted(filtered, expandedRunIds) : filtered
     return [...grouped].sort((a, b) => b.duration_ms - a.duration_ms).slice(0, SLOW_QUERIES_MAX)
-  }, [snapshot, slowThresholdMs, dbFilter, groupCrons])
+  }, [snapshot, slowThresholdMs, dbFilter, groupCrons, expandedRunIds])
 
   const filteredActive = React.useMemo(() => {
     const active: ActiveOrPromotedRow[] = (snapshot?.active ?? []).map((r) => ({ ...r }))
@@ -116,14 +121,14 @@ export function useFilteredActive({
         r.attribution.label.toLowerCase().includes(q)
       )
     })
-    return groupCrons ? collapseCronRunsActive(filtered) : filtered
-  }, [snapshot, justFinished, search, kindFilter, dbFilter, groupCrons])
+    return groupCrons ? collapseCronRunsActive(filtered, expandedRunIds) : filtered
+  }, [snapshot, justFinished, search, kindFilter, dbFilter, groupCrons, expandedRunIds])
 
   const completed = React.useMemo<GroupedCompletedRow[]>(() => {
     const raw = snapshot?.completed ?? []
     const filtered = dbFilter === 'all' ? raw : raw.filter((c) => c.db_type === dbFilter)
-    return groupCrons ? collapseCronRunsCompleted(filtered) : filtered
-  }, [snapshot, dbFilter, groupCrons])
+    return groupCrons ? collapseCronRunsCompleted(filtered, expandedRunIds) : filtered
+  }, [snapshot, dbFilter, groupCrons, expandedRunIds])
 
   return { justFinished, filteredActive, completed, slowQueries }
 }
@@ -131,8 +136,15 @@ export function useFilteredActive({
 /** Collapse Active rows by ``cron_run_id``: keep the longest-running row in
  *  each run, tag it with the original group size. Non-cron rows and rows
  *  without a ``cron_run_id`` pass through untouched. Stable ordering — the
- *  representative row keeps the position of the longest-running sibling. */
-function collapseCronRunsActive(rows: ActiveOrPromotedRow[]): ActiveOrPromotedRow[] {
+ *  representative row keeps the position of the longest-running sibling.
+ *
+ *  When a run_id is in ``expandedRunIds``, ALL siblings render: the head
+ *  keeps the badge so the user can still toggle it back to collapsed, and
+ *  the rest get ``_expandedChild`` for visual indent. */
+function collapseCronRunsActive(
+  rows: ActiveOrPromotedRow[],
+  expandedRunIds: ReadonlySet<string>,
+): ActiveOrPromotedRow[] {
   const groups = new Map<string, ActiveOrPromotedRow[]>()
   const out: ActiveOrPromotedRow[] = []
   const groupIndex = new Map<string, number>() // first-seen position
@@ -149,19 +161,28 @@ function collapseCronRunsActive(rows: ActiveOrPromotedRow[]): ActiveOrPromotedRo
     }
     groups.get(runId)!.push(r)
   }
-  for (const [runId, members] of groups) {
+  // Walk groups in reverse insertion order so splice-insertion of expanded
+  // children doesn't shift indices of yet-to-process groups.
+  const reversed = [...groups.entries()].reverse()
+  for (const [runId, members] of reversed) {
     if (members.length === 1) {
       out[groupIndex.get(runId)!] = members[0]
       continue
     }
-    // Pick the longest-running. Live (`!_completed`) rows beat promoted
-    // ones — a still-running query is the most actionable representative.
     const sorted = [...members].sort((a, b) => {
       const liveDelta = (a._completed ? 1 : 0) - (b._completed ? 1 : 0)
       if (liveDelta !== 0) return liveDelta
       return b.duration_ms - a.duration_ms
     })
-    out[groupIndex.get(runId)!] = { ...sorted[0], _groupedCount: members.length }
+    const head = sorted[0]
+    const rest = sorted.slice(1)
+    if (expandedRunIds.has(runId)) {
+      out[groupIndex.get(runId)!] = { ...head, _groupedCount: members.length, _isGroupHead: true }
+      const children = rest.map((r) => ({ ...r, _expandedChild: true as const }))
+      out.splice(groupIndex.get(runId)! + 1, 0, ...children)
+    } else {
+      out[groupIndex.get(runId)!] = { ...head, _groupedCount: members.length }
+    }
   }
   return out
 }
@@ -170,7 +191,10 @@ function collapseCronRunsActive(rows: ActiveOrPromotedRow[]): ActiveOrPromotedRo
  *  longest, tag with original group size. Used by ``completed`` and
  *  ``slowQueries`` views so a single noisy cron tick doesn't flood either
  *  list. */
-function collapseCronRunsCompleted(rows: CompletedRow[]): GroupedCompletedRow[] {
+function collapseCronRunsCompleted(
+  rows: CompletedRow[],
+  expandedRunIds: ReadonlySet<string>,
+): GroupedCompletedRow[] {
   const groups = new Map<string, CompletedRow[]>()
   const out: GroupedCompletedRow[] = []
   const groupIndex = new Map<string, number>()
@@ -187,13 +211,22 @@ function collapseCronRunsCompleted(rows: CompletedRow[]): GroupedCompletedRow[] 
     }
     groups.get(runId)!.push(r)
   }
-  for (const [runId, members] of groups) {
+  const reversed = [...groups.entries()].reverse()
+  for (const [runId, members] of reversed) {
     if (members.length === 1) {
       out[groupIndex.get(runId)!] = members[0]
       continue
     }
     const sorted = [...members].sort((a, b) => b.duration_ms - a.duration_ms)
-    out[groupIndex.get(runId)!] = { ...sorted[0], _groupedCount: members.length }
+    const head = sorted[0]
+    const rest = sorted.slice(1)
+    if (expandedRunIds.has(runId)) {
+      out[groupIndex.get(runId)!] = { ...head, _groupedCount: members.length, _isGroupHead: true }
+      const children = rest.map((r) => ({ ...r, _expandedChild: true as const }))
+      out.splice(groupIndex.get(runId)! + 1, 0, ...children)
+    } else {
+      out[groupIndex.get(runId)!] = { ...head, _groupedCount: members.length }
+    }
   }
   return out
 }

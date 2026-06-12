@@ -16,8 +16,8 @@
  * (which has no pool concept).
  *
  * Inline expand drawer → ``RowDetailDialog`` opened on row click.
- * Cron-grouping by run_id is dropped — re-add as a separate feature if
- * needed.
+ * Cron-groups: ×N badge in the Source cell toggles per-run expansion;
+ * sibling rows render with a muted-bg + left indent.
  */
 
 import * as React from 'react'
@@ -32,19 +32,21 @@ export function ActiveTable({
   onRowClick,
   onKill,
   cancellingQid,
+  onToggleGroup,
 }: {
   rows: ActiveOrPromotedRow[]
   onRowClick: (row: ActiveOrPromotedRow) => void
   onKill: (row: ActiveRow) => void
   cancellingQid: number | null
+  onToggleGroup: (runId: string) => void
 }) {
   const showService = rows.some((r) => r.service_id !== null && r.service_id !== undefined)
   const showPool = rows.some((r) => r.attribution.pool_slot !== null && r.attribution.pool_slot !== undefined)
   // Memoise so DataTable's React.memo doesn't see a new columns array on
   // every snapshot poll — would defeat the row-level virtualisation memo.
   const columns = React.useMemo(
-    () => buildActiveColumns({ onKill, cancellingQid, showService, showPool }),
-    [onKill, cancellingQid, showService, showPool],
+    () => buildActiveColumns({ onKill, cancellingQid, showService, showPool, onToggleGroup }),
+    [onKill, cancellingQid, showService, showPool, onToggleGroup],
   )
   return (
     <DataTable<ActiveOrPromotedRow, unknown>
@@ -62,9 +64,11 @@ export function ActiveTable({
 }
 
 function rowClassName(row: ActiveOrPromotedRow): string {
+  // Expanded cron sibling rows are inset and muted — order matters: this
+  // takes precedence over the live-tint so a group's children read as a
+  // visual subtree, not as N separate live rows.
+  if (row._expandedChild) return 'bg-muted/30 border-l-2 border-l-muted-foreground/30'
   if (row._completed) return 'opacity-60'
   if (row.cancelled_at !== null) return 'opacity-50'
-  // Live (in-flight) — subtle tint + left accent. Tailwind classes that
-  // resolve at runtime; matches the prior custom-table treatment.
   return 'bg-primary/5 border-l-2 border-l-primary/60'
 }

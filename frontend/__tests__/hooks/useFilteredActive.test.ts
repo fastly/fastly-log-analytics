@@ -74,6 +74,8 @@ const snapshot = (over: Partial<SnapshotResponse> = {}): SnapshotResponse => ({
   ...over,
 })
 
+const EMPTY_EXPANDED: ReadonlySet<string> = new Set()
+
 describe('useFilteredActive cron-grouping', () => {
   it('returns rows unchanged when groupCrons=false', () => {
     const rows = [
@@ -88,6 +90,7 @@ describe('useFilteredActive cron-grouping', () => {
         kindFilter: 'all',
         dbFilter: 'all',
         slowThresholdMs: 500,
+        expandedRunIds: EMPTY_EXPANDED,
         groupCrons: false,
       }),
     )
@@ -108,6 +111,7 @@ describe('useFilteredActive cron-grouping', () => {
         kindFilter: 'all',
         dbFilter: 'all',
         slowThresholdMs: 500,
+        expandedRunIds: EMPTY_EXPANDED,
         groupCrons: true,
       }),
     )
@@ -128,6 +132,7 @@ describe('useFilteredActive cron-grouping', () => {
         kindFilter: 'all',
         dbFilter: 'all',
         slowThresholdMs: 500,
+        expandedRunIds: EMPTY_EXPANDED,
         groupCrons: true,
       }),
     )
@@ -147,6 +152,7 @@ describe('useFilteredActive cron-grouping', () => {
         kindFilter: 'all',
         dbFilter: 'all',
         slowThresholdMs: 500,
+        expandedRunIds: EMPTY_EXPANDED,
         groupCrons: true,
       }),
     )
@@ -166,6 +172,7 @@ describe('useFilteredActive cron-grouping', () => {
         kindFilter: 'all',
         dbFilter: 'all',
         slowThresholdMs: 500,
+        expandedRunIds: EMPTY_EXPANDED,
         groupCrons: true,
       }),
     )
@@ -186,6 +193,7 @@ describe('useFilteredActive cron-grouping', () => {
         kindFilter: 'all',
         dbFilter: 'all',
         slowThresholdMs: 500,
+        expandedRunIds: EMPTY_EXPANDED,
         groupCrons: true,
       }),
     )
@@ -211,7 +219,8 @@ describe('useFilteredActive cron-grouping', () => {
         search: '',
         kindFilter: 'all',
         dbFilter: 'all',
-        slowThresholdMs: 9999, // exclude both from slow
+        slowThresholdMs: 9999,
+        expandedRunIds: EMPTY_EXPANDED, // exclude both from slow
         groupCrons: true,
       }),
     )
@@ -219,5 +228,68 @@ describe('useFilteredActive cron-grouping', () => {
     // Live row wins the tie-breaker even though the promoted row is slower.
     expect(result.current.filteredActive[0].query_id).toBe(1)
     expect(result.current.filteredActive[0]._groupedCount).toBe(2)
+  })
+})
+
+describe('useFilteredActive cron-group expansion', () => {
+  it('expands a single run when its id is in expandedRunIds: head + children visible', () => {
+    const rows = [
+      active(1, 50, { attribution: attr({ cron_run_id: 'run-A' }) }),
+      active(2, 250, { attribution: attr({ cron_run_id: 'run-A' }) }), // head (longest)
+      active(3, 100, { attribution: attr({ cron_run_id: 'run-A' }) }),
+    ]
+    const { result } = renderHook(() =>
+      useFilteredActive({
+        snapshot: snapshot({ active: rows }),
+        search: '',
+        kindFilter: 'all',
+        dbFilter: 'all',
+        slowThresholdMs: 500,
+        expandedRunIds: new Set(['run-A']),
+        groupCrons: true,
+      }),
+    )
+    expect(result.current.filteredActive).toHaveLength(3)
+    const head = result.current.filteredActive[0]
+    expect(head.query_id).toBe(2)
+    expect(head._groupedCount).toBe(3)
+    expect(head._isGroupHead).toBe(true)
+    expect(head._expandedChild).toBeUndefined()
+    const children = result.current.filteredActive.slice(1)
+    expect(children.every((r) => r._expandedChild === true)).toBe(true)
+    expect(children.every((r) => r._groupedCount === undefined)).toBe(true)
+  })
+
+  it('only the expanded run expands; other groups stay collapsed', () => {
+    const rows = [
+      active(1, 100, { attribution: attr({ cron_run_id: 'run-A' }) }),
+      active(2, 200, { attribution: attr({ cron_run_id: 'run-A' }) }), // longest A
+      active(3, 50, { attribution: attr({ cron_run_id: 'run-B' }) }),
+      active(4, 150, { attribution: attr({ cron_run_id: 'run-B' }) }), // longest B
+    ]
+    const { result } = renderHook(() =>
+      useFilteredActive({
+        snapshot: snapshot({ active: rows }),
+        search: '',
+        kindFilter: 'all',
+        dbFilter: 'all',
+        slowThresholdMs: 500,
+        expandedRunIds: new Set(['run-A']),
+        groupCrons: true,
+      }),
+    )
+    // A expanded (2 rows: head + 1 child), B collapsed (1 row)
+    expect(result.current.filteredActive).toHaveLength(3)
+    const heads = result.current.filteredActive.filter((r) => r._isGroupHead)
+    expect(heads).toHaveLength(1)
+    expect(heads[0].query_id).toBe(2)
+    const children = result.current.filteredActive.filter((r) => r._expandedChild)
+    expect(children).toHaveLength(1)
+    expect(children[0].query_id).toBe(1)
+    const collapsedReps = result.current.filteredActive.filter(
+      (r) => r._groupedCount && !r._isGroupHead,
+    )
+    expect(collapsedReps).toHaveLength(1)
+    expect(collapsedReps[0].query_id).toBe(4)
   })
 })
