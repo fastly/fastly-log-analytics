@@ -168,4 +168,7 @@ jobs:
         #   end Milestone A: 40% (baseline 42.7%, -2pp buffer)
         #   end Milestone E: 44% (current 46.55%)
         #   post live-query-monitor (2026-06-11): 53% (current 55.19%)
-        run: npx vitest run --coverage --coverage.thresholds.lines=53
+        #   post lib/toast + lib/api/custom-fields + lib/workers/parseJson tests
+        #     (2026-06-12): 55% (current 57.12%). Still short of the 58% v2.0
+        #     target — see v2_tag_readiness.md §10.14.
+        run: npx vitest run --coverage --coverage.thresholds.lines=55
