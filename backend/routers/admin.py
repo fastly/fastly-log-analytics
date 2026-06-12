@@ -1273,7 +1273,12 @@ def _duckdb_row_counts_per_bucket(source: dict, start: datetime, end: datetime, 
     from backend.deps import _ConnectionHolder
 
     table_name = _ddb._safe_table_name(source["name"])
-    fmt = "%Y-%m-%d-%H" if by == "hour" else "%Y-%m-%d"
+    # Bucket key MUST match metadata_db.get_log_accounting_counts: hourly
+    # uses ``YYYY-MM-DDTHH`` (T separator, from the .log.gz basename's
+    # ISO prefix); daily uses ``YYYY-MM-DD``. Mismatch here makes the
+    # union-by-key loop in compute_log_accounting produce ghost buckets
+    # with our_rows but zero fastly_logs.
+    fmt = "%Y-%m-%dT%H" if by == "hour" else "%Y-%m-%d"
     start_iso = start.strftime("%Y-%m-%d %H:%M:%S")
     end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
     try:
