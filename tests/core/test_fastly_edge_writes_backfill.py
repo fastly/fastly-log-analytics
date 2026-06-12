@@ -62,7 +62,6 @@ def test_backfill_calls_metadata_db(_log_synth, _enabled, seeded_metadata_db):
 def test_backfill_is_idempotent_end_to_end(_enabled, seeded_metadata_db):
     """Running backfill multiple times should not insert duplicate rows."""
     from backend.core import duckdb as _db
-    from backend.core import metadata_db
 
     first = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
     second = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
@@ -72,7 +71,10 @@ def test_backfill_is_idempotent_end_to_end(_enabled, seeded_metadata_db):
     assert second == 0
     assert third == 0
 
-    con = metadata_db.get_con(seeded_metadata_db)
+    # usage_log lives in its own SQLite file post-2026-06-12.
+    from backend.core.metadata import usage_log_db
+
+    con = usage_log_db.get_con(seeded_metadata_db)
     total = con.execute("SELECT count(*) FROM usage_log WHERE function_name = 'fastly.edge'").fetchone()[0]
     assert total == 3
 

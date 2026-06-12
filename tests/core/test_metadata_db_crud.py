@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from backend.core import metadata_db
+from backend.core.metadata import usage_log_db
 
 
 @pytest.fixture
@@ -590,7 +591,7 @@ def test_get_usage_logs_aggregates_and_breaks_down_in_one_pass(sid):
     two-query form is what the cost panel + Usage Log page contract was built
     against, and any drift in the totals or breakdown shape would silently
     break both."""
-    con = metadata_db.get_con(sid)
+    con = usage_log_db.get_con(sid)
     rows = [
         ("2026-05-25T10:00:00Z", sid, "A", "PUT_OBJECT", "u1", "OK", 1.0, "fn1", None, 100, 2),
         ("2026-05-25T10:00:01Z", sid, "A", "PUT_OBJECT", "u2", "OK", 1.0, "fn1", None, 200, 3),
@@ -732,7 +733,10 @@ def test_log_usage_calls_classifies_fos_class_a_correctly(sid):
         ],
     )
 
-    con = metadata_db.get_con(sid)
+    # usage_log lives in its own SQLite file post-2026-06-12 — see
+    # backend/core/metadata/usage_log_db.py for rationale. Read against
+    # that db, not metadata.db.
+    con = usage_log_db.get_con(sid)
     classes = [
         r["operation_class"] for r in con.execute("SELECT operation_class FROM usage_log ORDER BY id").fetchall()
     ]
@@ -741,14 +745,14 @@ def test_log_usage_calls_classifies_fos_class_a_correctly(sid):
 
 def test_log_usage_calls_classifies_cdn_separately(sid):
     metadata_db.log_usage_calls(sid, [{"method": "GET", "service": "CDN"}])
-    con = metadata_db.get_con(sid)
+    con = usage_log_db.get_con(sid)
     row = con.execute("SELECT operation_class FROM usage_log").fetchone()
     assert row["operation_class"] == "CDN"
 
 
 def test_log_usage_calls_noops_on_empty_list(sid):
     metadata_db.log_usage_calls(sid, [])  # must not raise
-    con = metadata_db.get_con(sid)
+    con = usage_log_db.get_con(sid)
     assert con.execute("SELECT count(*) FROM usage_log").fetchone()[0] == 0
 
 
@@ -764,7 +768,10 @@ def _seed_usage_log_row(
     bytes_count: int = 1024,
 ):
     """Insert a usage_log row directly via SQL for testing query helpers."""
-    con = metadata_db.get_con(sid)
+    # usage_log now lives in its own per-service SQLite file (separated
+    # from metadata.db on 2026-06-12) — insert against that db so the
+    # public-API readers (metadata_db.get_usage_logs etc.) find the rows.
+    con = usage_log_db.get_con(sid)
     con.execute(
         """INSERT INTO usage_log
             (service_id, timestamp, operation_class, operation_type, url, bytes,

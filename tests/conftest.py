@@ -64,6 +64,18 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
     metadata_db._clear_ingested_filenames_cache()
 
+    # Per-service usage_log lives in its own SQLite file post-2026-06-12;
+    # it shares ``_DATA_DIR`` with metadata.db but uses its own thread-
+    # local pool + initialised-paths set, so isolate those too. Without
+    # this a test would either (a) collide on a real-disk file because
+    # _DATA_DIR was already cached, or (b) leak thread-local connections
+    # across test runs and emit ResourceWarning on shutdown.
+    from backend.core.metadata import usage_log_db as _usage_log_db
+
+    monkeypatch.setattr(_usage_log_db, "_DATA_DIR", str(sandbox_services))
+    monkeypatch.setattr(_usage_log_db, "_initialized", set())
+    monkeypatch.setattr(_usage_log_db, "_local", __import__("threading").local())
+
     monkeypatch.setattr(svcconfig, "DATA_DIR", sandbox_data)
     monkeypatch.setattr(svcconfig, "SERVICES_DATA_DIR", sandbox_services)
     monkeypatch.setattr(svcconfig, "CONFIGS_DIR", sandbox_configs)

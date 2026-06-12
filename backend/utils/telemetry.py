@@ -261,7 +261,7 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
 
         from datetime import UTC, datetime
 
-        from backend.core import metadata_db
+        from backend.core.metadata import usage_log_db as _usage_log_db
 
         start_iso = datetime.fromtimestamp(start_ts, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         # Raw string compare on timestamp (no datetime() wrapping) so the
@@ -272,15 +272,31 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
         # seconds ago, so they're correctly excluded by string comparison.
         # LIMIT 25 caps the response body so an admin nav during a cron
         # tick doesn't drag in 500 rows of iothread spam (~120KB / 5s).
-        con = metadata_db.get_con(sid)
-        cur = con.execute(
-            "SELECT operation_type, url, status, duration_ms, function_name, bytes, operation_class "
-            "FROM usage_log "
-            "WHERE process_context = ? AND timestamp >= ? "
-            "ORDER BY timestamp ASC LIMIT 25",
-            (ctx, start_iso),
-        )
-        rows = cur.fetchall()
+        #
+        # Open the usage_log.db in URI mode=ro so this read path cannot
+        # acquire the writer lock under any circumstances — a slow scan
+        # here is guaranteed not to block the cron writer. The
+        # connection is short-lived (closed in the finally below) so
+        # we don't pool it.
+        try:
+            con = _usage_log_db.open_readonly(sid)
+        except Exception:
+            # File doesn't exist yet (writer hasn't run) — nothing to surface.
+            return []
+        try:
+            cur = con.execute(
+                "SELECT operation_type, url, status, duration_ms, function_name, bytes, operation_class "
+                "FROM usage_log "
+                "WHERE process_context = ? AND timestamp >= ? "
+                "ORDER BY timestamp ASC LIMIT 25",
+                (ctx, start_iso),
+            )
+            rows = cur.fetchall()
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
         return [
             {
                 "service": "CDN" if r[6] == "CDN" else "FOS",

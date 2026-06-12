@@ -318,12 +318,18 @@ def list_unbackfilled_fastly_edge_files(
     backfilled files on every cron tick.
 
     ``since`` (ISO timestamp string) bounds the outer scan via
-    ``ingested_at >= since`` so the cron hot path doesn't pay the N×NOT EXISTS
-    cost on million-row services where every file is already backfilled
-    (steady-state: returns 0 rows but the scan itself was ~7 s). The bounded
-    query uses ``idx_ingested_files_source_ingested_at`` for an indexed range
-    scan and the inner ``NOT EXISTS`` continues to use ``idx_usage_dedup``.
-    Pass ``None`` for an unbounded scan (rare — admin sweep, repair tools).
+    ``ingested_at >= since`` so the cron hot path doesn't pay the N-row
+    semi-join cost on million-row services where every file is already
+    backfilled. Pass ``None`` for an unbounded scan (rare — admin sweep,
+    repair tools).
+
+    Cross-database semi-join: ``ingested_files`` lives in metadata.db,
+    ``usage_log`` lives in its own ``usage_log.db`` (carved out
+    2026-06-12 so cron-writer locks don't block admin readers). SQLite
+    can't NOT-EXISTS across separate files, so this implements the
+    same predicate as two queries Python-joined into a set difference.
+    idx_ingested_files_source_ingested_at + idx_usage_dedup still serve
+    both sides individually.
     """
     con = get_con(service_id)
     if since is None:
@@ -333,12 +339,6 @@ def list_unbackfilled_fastly_edge_files(
             FROM ingested_files
             WHERE source_name = ?
               AND file_name != '__seeding_attempted__'
-              AND NOT EXISTS (
-                SELECT 1 FROM usage_log
-                WHERE service_id = ingested_files.source_name
-                  AND function_name = 'fastly.edge'
-                  AND url = ingested_files.file_name
-              )
             """,
             (service_id,),
         ).fetchall()
@@ -350,16 +350,44 @@ def list_unbackfilled_fastly_edge_files(
             WHERE source_name = ?
               AND ingested_at >= ?
               AND file_name != '__seeding_attempted__'
-              AND NOT EXISTS (
-                SELECT 1 FROM usage_log
-                WHERE service_id = ingested_files.source_name
-                  AND function_name = 'fastly.edge'
-                  AND url = ingested_files.file_name
-              )
             """,
             (service_id, since),
         ).fetchall()
-    return [(r["file_name"], r["ingested_at"], r["row_count"], r["file_size_bytes"]) for r in rows]
+
+    # Pull the already-backfilled file names from usage_log.db once and
+    # do the anti-join in Python. The set membership check is O(1) per
+    # row; the SELECT on usage_log uses idx_usage_dedup keyed on
+    # (service_id, function_name, url).
+    from backend.core.metadata import usage_log_db as _usage_log_db
+
+    backfilled: set[str] = set()
+    try:
+        ul_con = _usage_log_db.open_readonly(service_id)
+    except Exception:
+        # usage_log.db doesn't exist yet → no rows are backfilled → all
+        # ingested_files qualify. Matches the SQL semantics (NOT EXISTS
+        # against an empty table returns every outer row).
+        ul_con = None
+    if ul_con is not None:
+        try:
+            backfilled.update(
+                r[0]
+                for r in ul_con.execute(
+                    "SELECT url FROM usage_log WHERE service_id = ? AND function_name = 'fastly.edge'",
+                    (service_id,),
+                ).fetchall()
+            )
+        finally:
+            try:
+                ul_con.close()
+            except Exception:
+                pass
+
+    return [
+        (r["file_name"], r["ingested_at"], r["row_count"], r["file_size_bytes"])
+        for r in rows
+        if r["file_name"] not in backfilled
+    ]
 
 
 def get_latest_ingest_ts(service_id: str) -> str | None:

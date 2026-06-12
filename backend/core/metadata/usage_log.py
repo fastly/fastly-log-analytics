@@ -14,10 +14,27 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 
+from backend.core.metadata import usage_log_db as _usage_log_db
 from backend.core.metadata.base import get_con
 from backend.utils.date_utils import iso_z, iso_z_now
 
 logger = logging.getLogger(__name__)
+
+
+def _ul(service_id: str) -> sqlite3.Connection:
+    """Thread-local RW connection to the per-service usage_log.db.
+
+    Carved out of metadata.db on 2026-06-12 per the perf audit — keeps
+    the cron writer's WAL lock isolated from the admin endpoints that
+    read audit_logs / views / scoring_labels off metadata.db. See
+    :mod:`backend.core.metadata.usage_log_db` for the rationale.
+
+    Code that reads/writes the ``sources`` table (only consumers
+    register_source / get_source_by_name below) continues to use
+    :func:`backend.core.metadata.base.get_con` — sources lives in
+    metadata.db, not usage_log.db.
+    """
+    return _usage_log_db.get_con(service_id)
 
 
 # ── sources ───────────────────────────────────────────────────────────────────
@@ -50,7 +67,7 @@ def get_source_by_name(service_id: str, name: str) -> dict | None:
 def log_usage_calls(service_id: str, calls: list[dict], process_context: str | None = None) -> None:
     if not calls:
         return
-    con = get_con(service_id)
+    con = _ul(service_id)
     now = iso_z_now()
     rows = []
     for c in calls:
@@ -130,7 +147,7 @@ def log_synthetic_usage(service_id: str, calls: list[dict]) -> int:
     """
     if not calls:
         return 0
-    con = get_con(service_id)
+    con = _ul(service_id)
 
     urls = [c.get("path") for c in calls if c.get("path")]
     if not urls:
@@ -213,7 +230,7 @@ def reconcile_fastly_stats(
     """
     if not hourly_records:
         return 0
-    con = get_con(service_id)
+    con = _ul(service_id)
 
     # Normalise the incoming records into {hour_start_iso: {"A": int, "B": int}}.
     by_hour: dict[str, dict[str, int]] = {}
@@ -316,14 +333,14 @@ def reconcile_fastly_stats(
 def purge_usage_log(service_id: str, retention_days: int) -> None:
     if retention_days <= 0:
         return
-    con = get_con(service_id)
+    con = _ul(service_id)
     cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
     con.execute("DELETE FROM usage_log WHERE timestamp < ?", (cutoff,))
     con.commit()
 
 
 def clear_usage_log(service_id: str) -> None:
-    con = get_con(service_id)
+    con = _ul(service_id)
     con.execute("DELETE FROM usage_log WHERE service_id = ?", (service_id,))
     con.commit()
 
@@ -345,6 +362,15 @@ def _ensure_usage_log_hourly_backfilled(con: sqlite3.Connection, service_id: str
     trigger handles all NEW inserts; this backfill catches the rows that
     existed before the trigger was added. Synchronous so /admin/usage-log
     returns correct data on first access (typically <1 s for ~1 M rows).
+
+    Post-2026-06-12 carve-out: usage_log now lives in its own SQLite file
+    (``data/services/<sid>.usage_log.db``); the ``applied_data_migrations``
+    table that tracked the legacy migration stamp lives in the OTHER db
+    (``<sid>.metadata.db``). When the marker table isn't present in the
+    connection we were handed, the backfill is no-op-safe to skip —
+    :func:`backend.core.metadata.usage_log_db.migrate_from_metadata_db`
+    already replays the authoritative summary during the one-time copy,
+    and the AFTER INSERT trigger keeps it consistent thereafter.
     """
     if service_id in _usage_log_backfilled:
         return
@@ -352,6 +378,15 @@ def _ensure_usage_log_hourly_backfilled(con: sqlite3.Connection, service_id: str
         if service_id in _usage_log_backfilled:
             return
         try:
+            has_marker_table = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='applied_data_migrations'"
+            ).fetchone()
+            if has_marker_table is None:
+                # usage_log.db — no marker table here; the migration
+                # path already populated the summary correctly. Mark in-
+                # process so the lookup doesn't repeat for this service.
+                _usage_log_backfilled.add(service_id)
+                return
             applied = con.execute(
                 "SELECT 1 FROM applied_data_migrations WHERE name = ?",
                 (USAGE_LOG_HOURLY_BACKFILL_NAME,),
@@ -522,7 +557,7 @@ def get_usage_logs(
     page_size: int = 100,
 ) -> tuple[list[dict], int, dict]:
     """Paginated usage log query with aggregates. Used by the Usage Log page."""
-    con = get_con(service_id)
+    con = _ul(service_id)
     conditions = ["service_id = ?", "timestamp >= ?", "timestamp <= ?"]
     params: list = [service_id, start, end]
 
