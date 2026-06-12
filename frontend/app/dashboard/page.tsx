@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useCardVisibility } from '@/hooks/useCardVisibility'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
@@ -123,6 +123,22 @@ function DashboardBody({
   // request instead of THREE (it was 3 — aggregates + compare-mode
   // aggregates + top-bots; compare-mode is still independent
   // because it only fires when the user enables it).
+  const searchParams = useSearchParams()
+  const isLazy = searchParams?.get('lazy') === 'true'
+
+  const LAZY_INITIAL_FIELDS = React.useMemo(() => [
+    'ip', 'asn', 'host', 'url', 'method', 'status', 'cache', 'proto', 'ua', 'referer', 'country'
+  ], [])
+
+  const activeFields = isLazy ? LAZY_INITIAL_FIELDS : undefined
+
+  // Perf audit Phase D-4: composite endpoint fetches aggregates +
+  // security/top-bots in one round-trip and seeds the existing cache
+  // keys. The two dedicated useQuery calls below gate on this
+  // being pending so the dashboard's cold load fires ONE backend
+  // request instead of THREE (it was 3 — aggregates + compare-mode
+  // aggregates + top-bots; compare-mode is still independent
+  // because it only fires when the user enables it).
   const bundleQuery = useDashboardBundle({
     startTime,
     endTime,
@@ -130,12 +146,13 @@ function DashboardBody({
     metric,
     interval: config.effectiveInterval,
     enabled: isReady,
+    fields: activeFields,
   })
   const bundlePending =
     bundleQuery.fetchStatus === 'fetching' && bundleQuery.data === undefined
 
-  const { data: aggregates, isLoading: isLoadingAggs, isFetching: isFetchingAggs } = useServiceQuery(
-    ['dashboard', 'aggregates', activeServiceId, startTime, endTime, filterPayload, metric, config.effectiveInterval],
+  const { data: initialAggregates, isLoading: isLoadingInitialAggs, isFetching: isFetchingInitialAggs } = useServiceQuery(
+    ['dashboard', 'aggregates', activeServiceId, startTime, endTime, filterPayload, metric, config.effectiveInterval, activeFields],
     async ({ signal }) => {
       const { data } = await client.POST("/api/dashboard/aggregates", { signal,
         body: {
@@ -143,13 +160,50 @@ function DashboardBody({
           end_time: endTime!,
           filters: filterPayload,
           chart_metric: metric as any,
-          chart_interval: config.effectiveInterval
+          chart_interval: config.effectiveInterval,
+          fields: activeFields,
         }
       })
       return throwIfStaleAggregates(data)
     },
     { ...STALE_VIEW_RETRY_OPTIONS, enabled: !bundlePending },
   )
+
+  const fullAggregatesQuery = useQuery({
+    queryKey: ['dashboard', 'aggregates', 'full', activeServiceId, startTime, endTime, filterPayload, metric, config.effectiveInterval],
+    queryFn: async ({ signal }) => {
+      const { data } = await client.POST("/api/dashboard/aggregates", { signal,
+        body: {
+          start_time: startTime!,
+          end_time: endTime!,
+          filters: filterPayload,
+          chart_metric: metric as any,
+          chart_interval: config.effectiveInterval,
+        }
+      })
+      return throwIfStaleAggregates(data)
+    },
+    enabled: isReady && isLazy && !bundlePending && !!bundleQuery.data,
+    ...STALE_VIEW_RETRY_OPTIONS,
+  })
+
+  const aggregates = isLazy ? (fullAggregatesQuery.data || initialAggregates) : initialAggregates
+  const isLoadingAggs = isLazy ? bundleQuery.isLoading : isLoadingInitialAggs
+  const isFetchingAggs = isLazy ? bundleQuery.isFetching : isFetchingInitialAggs
+
+  const loadingCards = React.useMemo(() => {
+    if (!isLazy) return undefined
+    if (fullAggregatesQuery.data) return undefined
+    // All cards except LAZY_INITIAL_FIELDS are currently loading
+    const allCardIds = allCards.map((c: any) => c.id)
+    const loadingSet = new Set<string>()
+    for (const id of allCardIds) {
+      if (!LAZY_INITIAL_FIELDS.includes(id)) {
+        loadingSet.add(id)
+      }
+    }
+    return loadingSet
+  }, [isLazy, fullAggregatesQuery.data, allCards, LAZY_INITIAL_FIELDS])
 
   const { data: compareAggregates } = useQuery({
     queryKey: ['dashboard', 'aggregates', 'compare', activeServiceId, compareStartTime, compareEndTime, filterPayload, metric, config.effectiveInterval],
@@ -348,6 +402,7 @@ function DashboardBody({
         collapsedSections={collapsedSections}
         toggleSectionCollapsed={toggleSectionCollapsed}
         onRowClick={handleRowClick}
+        loadingCards={loadingCards}
       />
 
       {/* ── Raw logs CTA ── */}

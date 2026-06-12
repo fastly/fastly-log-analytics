@@ -34,6 +34,7 @@ def dashboard_aggregates(req: AggregatesRequest, ctx: RequestContext = Depends(b
         filters=req.filters,
         chart_interval=req.chart_interval,
         chart_metric=req.chart_metric,
+        fields_filter=req.fields,
     )
 
 
@@ -73,16 +74,20 @@ def dashboard_bundle(req: AggregatesRequest, ctx: RequestContext = Depends(build
         filters=req.filters,
         chart_interval=req.chart_interval,
         chart_metric=req.chart_metric,
+        fields_filter=req.fields,
     )
     section_timings.append({"section": "bundle:aggregates", "time_ms": round((time.perf_counter() - t0) * 1000, 2)})
     t1 = time.perf_counter()
-    top_bots = security_repo.get_top_bots(
-        con=ctx.con,
-        src=ctx.source,
-        start_time=req.start_time,
-        end_time=req.end_time,
-        filters=req.filters,
-    )
+    if req.fields is not None and not any(f in req.fields for f in ("_bot_name", "_ngwaf_bot_name")):
+        top_bots = {"bots": [], "ngwaf_bots": []}
+    else:
+        top_bots = security_repo.get_top_bots(
+            con=ctx.con,
+            src=ctx.source,
+            start_time=req.start_time,
+            end_time=req.end_time,
+            filters=req.filters,
+        )
     section_timings.append({"section": "bundle:top_bots", "time_ms": round((time.perf_counter() - t1) * 1000, 2)})
     # Rename nested `section_timings` → `_section_timings` so the bundle
     # response mirrors what the dedicated /aggregates and /top-bots

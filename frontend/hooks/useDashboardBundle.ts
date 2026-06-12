@@ -34,6 +34,7 @@ export interface DashboardBundleArgs {
   metric: string
   interval: string
   enabled: boolean
+  fields?: string[]
 }
 
 export function useDashboardBundle({
@@ -43,13 +44,14 @@ export function useDashboardBundle({
   metric,
   interval,
   enabled,
+  fields,
 }: DashboardBundleArgs) {
   const { activeServiceId } = useServiceStore()
   const queryClient = useQueryClient()
 
-  const aggregatesKey = ['dashboard', 'aggregates', activeServiceId, startTime, endTime, filterPayload, metric, interval]
+  const aggregatesKey = ['dashboard', 'aggregates', activeServiceId, startTime, endTime, filterPayload, metric, interval, fields]
   const topBotsKey = ['dashboard', 'top-bots', activeServiceId, startTime, endTime, filterPayload]
-  const bundleKey = ['dashboard', 'bundle', activeServiceId, startTime, endTime, filterPayload, metric, interval]
+  const bundleKey = ['dashboard', 'bundle', activeServiceId, startTime, endTime, filterPayload, metric, interval, fields]
 
   return useQuery({
     queryKey: bundleKey,
@@ -62,6 +64,7 @@ export function useDashboardBundle({
           filters: filterPayload,
           chart_metric: metric as any,
           chart_interval: interval,
+          fields: fields,
         },
       })
       const body = data as { aggregates?: any; top_bots?: any } | undefined

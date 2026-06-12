@@ -27,6 +27,7 @@ ChartMetric = Literal[
 class AggregatesRequest(FilteredRequest):
     chart_interval: str = "1 minute"
     chart_metric: ChartMetric = "requests"
+    fields: list[str] | None = None
 
 
 class FieldTopEntry(BaseModel):

@@ -98,6 +98,7 @@ def get_aggregates(
     filters: FiltersDict,
     chart_interval: str,
     chart_metric: str,
+    fields_filter: list[str] | None = None,
 ) -> dict:
     source_name = src["name"]
     table_name = _safe_table(source_name)
@@ -108,7 +109,11 @@ def get_aggregates(
         for cf in lf_config.get("custom_fields", [])
         if cf.get("enabled", True) and cf.get("show_in_dashboard", True)
     ]
-    fields = FIELDS + _custom_field_names
+    all_fields = FIELDS + _custom_field_names
+    if fields_filter is not None:
+        fields = [f for f in fields_filter if f in all_fields]
+    else:
+        fields = all_fields
 
     _key_payload = json.dumps(
         {
@@ -117,6 +122,7 @@ def get_aggregates(
             "f": {k: (v.mode, sorted(str(x) for x in v.values)) for k, v in sorted(filters.items())},
             "ci": chart_interval,
             "cm": chart_metric,
+            "fields": sorted(fields_filter) if fields_filter is not None else None,
         },
         separators=(",", ":"),
     )

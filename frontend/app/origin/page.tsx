@@ -31,86 +31,60 @@ function OriginReportContent({
   const [popVisibility, setPopVisibility, onPopVisChange] = useColumnVisibility()
   const [ipVisibility, setIpVisibility, onIpVisChange] = useColumnVisibility()
 
-  const summary = useServiceQuery(
-    ['origin', 'summary', activeServiceId, startTime, endTime, filterPayload],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/origin/summary", { signal,
-        body: { start_time: startTime, end_time: endTime, filters: filterPayload }
-      })
-      return data as any
-    }
-  )
+  // Composite endpoint: one parquet scan → one shared TEMP TABLE → six
+  // sub-aggregations. Backend at /api/origin/aggregates. The granular
+  // /api/origin/{summary,timeseries,slow-urls,status-codes,pop-latency,
+  // ip-health} endpoints still exist on the server for rollback safety
+  // but should no longer fire from this page. Per-card pseudo-query
+  // objects below preserve the {data, isLoading, isFetching} shape the
+  // existing section components consume so the migration is invisible
+  // to <Aggregates>/<Timeseries>/<LatencyHeatmap>.
+  const intervalMap: Record<string, number> = {
+    "1 second": 1 / 60,
+    "1 minute": 1,
+    "5 minutes": 5,
+    "15 minutes": 15,
+    "30 minutes": 30,
+    "1 hour": 60,
+    "6 hours": 360,
+    "12 hours": 720,
+    "1 day": 1440,
+  }
+  const bucketMinutes = intervalMap[config.effectiveInterval] || 5
 
-  const originTs = useServiceQuery(
-    ['origin', 'timeseries', activeServiceId, startTime, endTime, filterPayload, config.effectiveInterval, originMetric, originPercentile],
+  const bundle = useServiceQuery(
+    ['origin', 'aggregates', activeServiceId, startTime, endTime, filterPayload, bucketMinutes, originMetric, originPercentile],
     async ({ signal }) => {
-      const intervalMap = {
-        "1 second": 1 / 60,
-        "1 minute": 1,
-        "5 minutes": 5,
-        "15 minutes": 15,
-        "30 minutes": 30,
-        "1 hour": 60,
-        "6 hours": 360,
-        "12 hours": 720,
-        "1 day": 1440,
-      }
-      const bucketMinutes = (intervalMap as Record<string, number>)[config.effectiveInterval] || 5
-
-      const { data } = await client.POST('/api/origin/timeseries', { signal,
+      const { data } = await client.POST('/api/origin/aggregates', { signal,
         body: {
           start_time: startTime,
           end_time: endTime,
           filters: filterPayload,
           bucket_minutes: bucketMinutes,
           split_by_leg: false,
-          metric: originMetric,
-          percentile: originPercentile,
+          timeseries_metric: originMetric,
+          timeseries_percentile: originPercentile,
+          slow_urls_limit: 20,
+          slow_urls_min_requests: 10,
+          pop_latency_limit: 30,
+          ip_health_limit: 30,
         },
       })
       return data as any
     },
   )
 
-  const slowUrls = useServiceQuery(
-    ['origin', 'slow-urls', activeServiceId, startTime, endTime, filterPayload],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/origin/slow-urls", { signal,
-        body: { start_time: startTime, end_time: endTime, filters: filterPayload, limit: 20, min_requests: 10 }
-      })
-      return data as any
-    }
-  )
-
-  const statusCodes = useServiceQuery(
-    ['origin', 'status-codes', activeServiceId, startTime, endTime, filterPayload],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/origin/status-codes", { signal,
-        body: { start_time: startTime, end_time: endTime, filters: filterPayload }
-      })
-      return data as any
-    }
-  )
-
-  const popLatency = useServiceQuery(
-    ['origin', 'pop-latency', activeServiceId, startTime, endTime, filterPayload],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/origin/pop-latency", { signal,
-        body: { start_time: startTime, end_time: endTime, filters: filterPayload, limit: 30 }
-      })
-      return data as any
-    }
-  )
-
-  const ipHealth = useServiceQuery(
-    ['origin', 'ip-health', activeServiceId, startTime, endTime, filterPayload],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/origin/ip-health", { signal,
-        body: { start_time: startTime, end_time: endTime, filters: filterPayload, limit: 30 }
-      })
-      return data as any
-    }
-  )
+  // useMemo so identity stays stable across re-renders for the same bundle
+  // tick; the section components are dumb consumers and re-renders fan out
+  // through the existing isLoading/isFetching propagation.
+  const isLoading = bundle.isLoading
+  const isFetching = bundle.isFetching
+  const summary = React.useMemo(() => ({ data: bundle.data?.summary, isLoading, isFetching }), [bundle.data?.summary, isLoading, isFetching])
+  const originTs = React.useMemo(() => ({ data: bundle.data?.timeseries, isLoading, isFetching }), [bundle.data?.timeseries, isLoading, isFetching])
+  const slowUrls = React.useMemo(() => ({ data: bundle.data?.slow_urls, isLoading, isFetching }), [bundle.data?.slow_urls, isLoading, isFetching])
+  const statusCodes = React.useMemo(() => ({ data: bundle.data?.status_codes, isLoading, isFetching }), [bundle.data?.status_codes, isLoading, isFetching])
+  const popLatency = React.useMemo(() => ({ data: bundle.data?.pop_latency, isLoading, isFetching }), [bundle.data?.pop_latency, isLoading, isFetching])
+  const ipHealth = React.useMemo(() => ({ data: bundle.data?.ip_health, isLoading, isFetching }), [bundle.data?.ip_health, isLoading, isFetching])
 
   const baseOriginTraces = useTimeseriesToTraces(originTs.data?.series, React.useMemo(() => [
     { key: 'value', name: originMetric === 'ttfb' ? 'Origin TTFB' : 'Origin TTLB', color: '#ef4444', fill: 'tozeroy' }
