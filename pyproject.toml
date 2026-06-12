@@ -187,6 +187,30 @@ exclude = ["frontend/", "docs/", "scripts/"]
 module = []
 ignore_errors = true
 
+# Per-module mypy-strict ratchet (cleanup_plan §10.14). Modules listed
+# below are checked with `disallow_untyped_defs` + friends — every
+# function declares its parameter and return types, no `Any` return
+# leakage from declared concrete types, no unused `# type: ignore` slips.
+# Add a module here once it's clean under default checks AND has the
+# annotations to support the stricter set; new files in these packages
+# inherit the stricter checks automatically.
+[[tool.mypy.overrides]]
+module = [
+    "backend.core.query_registry",
+    "backend.core.query_instrumentation",
+    "backend.core.query_attribution",
+    "backend.core.metadata.reconciliation",
+    "backend.cron.jobs.compaction",
+    "backend.repositories.session_scoring",
+    "backend.routers.admin_queries",
+    "backend.utils.tunnel.state",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = true
+
 [tool.ruff]
 line-length = 120
 target-version = "py313"

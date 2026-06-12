@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time as _t
+from collections.abc import Callable
 
 from backend.core.metadata.base import db_path, get_con
 from backend.core.metadata.usage_log import DEFAULT_METADATA_RETENTION
@@ -101,7 +102,7 @@ def is_ingested_files_dedup_active(service_id: str) -> bool:
 def cleanup_metadata(
     service_id: str,
     retention: dict | None = None,
-    on_event=None,
+    on_event: Callable[[dict], None] | None = None,
 ) -> dict:
     """Delete rows older than the per-table retention window. VACUUM if any were deleted.
 

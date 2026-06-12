@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -119,7 +120,7 @@ def queries_summary() -> SummaryResponse:
 
 
 @router.get("/queries/{qid}")
-def get_query(qid: int) -> dict:
+def get_query(qid: int) -> dict[str, Any]:
     """Fetch the full SQL + attribution for a single in-flight query.
 
     Looks up the active row only — completed queries are returned via the
@@ -129,7 +130,7 @@ def get_query(qid: int) -> dict:
     if active is None:
         raise HTTPException(status_code=404, detail="query_not_found")
     snap = query_registry.snapshot(since_seq=qid - 1, full_sql=True)
-    row = next((r for r in snap["active"] if r["query_id"] == qid), None)
+    row: dict[str, Any] | None = next((r for r in snap["active"] if r["query_id"] == qid), None)
     if row is None:
         raise HTTPException(status_code=404, detail="query_not_found")
     return row

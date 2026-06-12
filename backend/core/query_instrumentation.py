@@ -87,16 +87,16 @@ class InstrumentedDuckDBConnection:
 
     # ── instrumented exec entry-points ──────────────────────────────────────
 
-    def execute(self, query, *args, **kwargs):
+    def execute(self, query: Any, *args: Any, **kwargs: Any) -> Any:
         return self._invoke("execute", query, args, kwargs)
 
-    def executemany(self, query, *args, **kwargs):
+    def executemany(self, query: Any, *args: Any, **kwargs: Any) -> Any:
         return self._invoke("executemany", query, args, kwargs)
 
-    def sql(self, query, *args, **kwargs):
+    def sql(self, query: Any, *args: Any, **kwargs: Any) -> Any:
         return self._invoke("sql", query, args, kwargs)
 
-    def query(self, query, *args, **kwargs):
+    def query(self, query: Any, *args: Any, **kwargs: Any) -> Any:
         return self._invoke("query", query, args, kwargs)
 
     # ── delegation for everything else ──────────────────────────────────────
@@ -107,12 +107,12 @@ class InstrumentedDuckDBConnection:
         # connection.
         return getattr(self._con, name)
 
-    def __enter__(self):
+    def __enter__(self) -> InstrumentedDuckDBConnection:
         # DuckDB connections support context-manager use; preserve it.
         self._con.__enter__()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
         return self._con.__exit__(exc_type, exc_val, exc_tb)
 
     # Cursor-style attribute access — DuckDB doesn't have a cursor() method
@@ -251,7 +251,7 @@ class _InstrumentedResult:
             if not self._done:
                 self._finish(err)
 
-    def __del__(self):
+    def __del__(self) -> None:
         # Safety net for callers that never reach a terminal method. Under
         # CPython refcount this fires deterministically when the wrapper
         # goes out of scope. Skip the memory probe — running SQL during
@@ -334,7 +334,7 @@ class _InstrumentedRecordReader:
         # are the deterministic completion points.
         return getattr(self._raw, name)
 
-    def __del__(self):
+    def __del__(self) -> None:
         try:
             self._complete(None, probe_memory=False)
         except Exception:
