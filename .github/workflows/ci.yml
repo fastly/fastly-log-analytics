@@ -92,19 +92,20 @@ jobs:
         env:
           FALCO_REQUIRED: "1"
           TERRAFORM_VALIDATE: "1"
-        # Gate ratcheted as milestones land:
+        # Gate ratcheted as milestones land (convention: current actual − 2pp):
         #   end Milestone A: 44% (baseline 46%, -2pp buffer)
         #   end Milestone E: 47% (current 49% — keeps the 2pp buffer)
         #   post-Milestone E coverage backfill: 55% (current 59% — 4pp buffer)
         #   confidence-batch (insights+admin+services+dashboard+origin+
         #   hypothesis+regression+E2E smoke): 78% (current 83% — 5pp buffer)
+        #   post live-query-monitor (2026-06-11): 80% (current 82%)
         #
         # `-n auto` parallelizes via pytest-xdist (TESTING_PLAN_3 item 21).
         # Verified safe: per-service SQLite (`{id}.metadata.db`) + per-test
         # tmp_path give file isolation; autouse `_reset_module_caches` resets
         # the 8 module-level caches between tests; moto fixtures are per-test.
         # Local run: 2268 passed in 58s under `-n auto` vs ~3min serial.
-        run: uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=78
+        run: uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=80
 
       - name: Security-regression count gate
         # v2.0 cleanup Phase 0.8: asserts the
