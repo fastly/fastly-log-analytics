@@ -589,12 +589,15 @@ class Scheduler:
             # ── Gap-heal evaluator (auto full_sweep on sustained loss) ────────
             # Polls compute_log_accounting every 30 min; when sustained loss
             # is detected (≥2 consecutive completed buckets with ≥5% gap), it
-            # invokes _run_full_sweep — throttled to one heal per
-            # GAP_HEAL_THROTTLE_HOURS to prevent thrashing on unrecoverable
-            # Fastly→FOS transport loss. Requires a logging_service_id since
-            # gap math depends on Fastly's /stats/service API.
+            # invokes _run_full_sweep — throttled adaptively (see
+            # ``_gap_heal_throttle_hours``). Requires a logging_service_id
+            # since gap math depends on Fastly's /stats/service API. Match
+            # the admin endpoint's resolution: fall back to ``service_id``
+            # when ``logging_service_id`` isn't set as a distinct field —
+            # otherwise the cron silently never registers and a 200k-line
+            # burst goes unhealed.
             heal_cfg = prov.get("cron_gap_heal", {})
-            has_logging_svc = bool(cfg.get("logging_service_id"))
+            has_logging_svc = bool(cfg.get("logging_service_id") or cfg.get("service_id"))
             if heal_cfg.get("enabled", True) and has_logging_svc:
                 heal_job_id = f"gap_heal_{service_id}"
                 seen_ids.add(heal_job_id)

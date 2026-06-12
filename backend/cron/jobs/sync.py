@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 
 from backend.cron.decorators import cron_task
 from backend.cron.scheduler import (
@@ -540,8 +541,21 @@ def _run_service_cron(
 # ── _run_full_sweep (daily catch-net) ────────────────────────────────────────
 
 
+# Default budget for a full sweep — bounded enough that one run can't pin a
+# pod for >15 min and can't burn through too many S3 GETs at once. Heal-
+# triggered invocations override these via ``_run_full_sweep(...,
+# max_files=N, max_seconds=N)`` when sustained loss is severe (see
+# ``_run_gap_heal``); the daily catch-net keeps the conservative defaults.
+_FULL_SWEEP_DEFAULT_MAX_FILES = 20_000
+_FULL_SWEEP_DEFAULT_MAX_SECONDS = 900
+
+
 @cron_task("full_sync")
-def _run_full_sweep(service_id: str) -> None:
+def _run_full_sweep(
+    service_id: str,
+    max_files: int = _FULL_SWEEP_DEFAULT_MAX_FILES,
+    max_seconds: int = _FULL_SWEEP_DEFAULT_MAX_SECONDS,
+) -> None:
     """Daily catch-net: full LIST over raw/ to pick up late-arriving files.
 
     The minute-cadence sync uses a 4h ``StartAfter`` lookback to bound LIST
@@ -550,6 +564,11 @@ def _run_full_sweep(service_id: str) -> None:
     This sweep lists the entire raw/ prefix once a day and ingests anything
     not already in ``ingested_files``. Logged as task=``full_sync`` so users
     can distinguish catch-net runs from regular sync in the cron history.
+
+    ``max_files`` / ``max_seconds`` are exposed so ``_run_gap_heal`` can
+    push a bigger budget through during severe sustained-loss recovery —
+    healing 200k missing files at the default 20k/run would take >40 hours
+    of throttled cycles.
     """
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
@@ -576,7 +595,12 @@ def _run_full_sweep(service_id: str) -> None:
     start_progress(run_id, service_id=service_id, task="full_sync")
     _svc_name = _display_name(src, service_id)
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
-    logger.info("▶️  \x1b[95m[full_sync]\x1b[0m %s: Daily full-LIST sweep started.", _display)
+    logger.info(
+        "▶️  \x1b[95m[full_sync]\x1b[0m %s: Full-LIST sweep started (max_files=%d, max_seconds=%d).",
+        _display,
+        max_files,
+        max_seconds,
+    )
 
     start_time_exec = time.time()
     processed_files = 0
@@ -588,8 +612,8 @@ def _run_full_sweep(service_id: str) -> None:
         for event in ingest(
             source=src,
             delete_after=delete_after,
-            max_files=20000,
-            max_seconds=900,
+            max_files=max_files,
+            max_seconds=max_seconds,
             incremental_only=False,
         ):
             _log_and_add_progress(run_id, service_id, job_name="full_sync", event=event)
@@ -660,10 +684,81 @@ def _run_full_sweep(service_id: str) -> None:
 # ── _run_gap_heal (periodic detector → triggers full_sweep) ──────────────────
 
 
-# Throttle window between gap-heal-triggered full_sweep invocations. The
-# detection cron itself runs more often (every 30 min) so we react fast to
-# new sustained loss, but the actual heal is bounded to prevent thrashing.
+# Default throttle between gap-heal-triggered full_sweep invocations — used
+# for mild loss only. ``_gap_heal_severity`` shortens it (and bumps the
+# sweep budget) as the loss gets worse so a 200k-line burst doesn't take
+# 40+ hours to drain at 20k files/run.
 GAP_HEAL_THROTTLE_HOURS = 4
+
+
+# Severity bands. Lower bound is "any loss the detector flagged" (≥5% gap
+# over ≥2 buckets — already filtered by ``compute_log_accounting``); each
+# band tightens the throttle and widens the sweep budget so heal can keep
+# pace with the burst.
+@dataclass(frozen=True)
+class _GapHealSeverityBand:
+    name: str
+    # Sustained-loss thresholds — entering this band requires EITHER the
+    # gap_pct or the total_lost_lines floor to be hit.
+    min_gap_pct: float
+    min_lost_lines: int
+    # How long to throttle between heal-triggered sweeps. The detector
+    # itself still runs every 30 min; this just bounds how often it
+    # actually invokes a sweep.
+    throttle_hours: float
+    # Sweep budget overrides — passed to ``_run_full_sweep``. Larger sweeps
+    # cost more S3 calls per run but drain backlog faster.
+    sweep_max_files: int
+    sweep_max_seconds: int
+
+
+_GAP_HEAL_SEVERITY_BANDS: tuple[_GapHealSeverityBand, ...] = (
+    # Severest first — first match wins.
+    _GapHealSeverityBand(
+        name="critical",
+        min_gap_pct=0.80,
+        min_lost_lines=500_000,
+        throttle_hours=0.0,  # every detector tick is allowed to trigger
+        sweep_max_files=100_000,
+        sweep_max_seconds=1800,
+    ),
+    _GapHealSeverityBand(
+        name="severe",
+        min_gap_pct=0.50,
+        min_lost_lines=100_000,
+        throttle_hours=0.25,  # 15 min
+        sweep_max_files=50_000,
+        sweep_max_seconds=1500,
+    ),
+    _GapHealSeverityBand(
+        name="elevated",
+        min_gap_pct=0.10,
+        min_lost_lines=10_000,
+        throttle_hours=1.0,
+        sweep_max_files=_FULL_SWEEP_DEFAULT_MAX_FILES,
+        sweep_max_seconds=_FULL_SWEEP_DEFAULT_MAX_SECONDS,
+    ),
+    _GapHealSeverityBand(
+        name="mild",
+        min_gap_pct=0.0,
+        min_lost_lines=0,
+        throttle_hours=GAP_HEAL_THROTTLE_HOURS,
+        sweep_max_files=_FULL_SWEEP_DEFAULT_MAX_FILES,
+        sweep_max_seconds=_FULL_SWEEP_DEFAULT_MAX_SECONDS,
+    ),
+)
+
+
+def _gap_heal_severity(max_gap_pct: float, total_lost_lines: int) -> _GapHealSeverityBand:
+    """Return the first severity band whose floor either field clears.
+
+    Tested via threshold matrix in ``test_gap_heal_severity.py`` — keep the
+    band tuple sorted severest-first so the bisection here works.
+    """
+    for band in _GAP_HEAL_SEVERITY_BANDS:
+        if max_gap_pct >= band.min_gap_pct or total_lost_lines >= band.min_lost_lines:
+            return band
+    return _GAP_HEAL_SEVERITY_BANDS[-1]  # defensive — last band is the catch-all
 
 
 # Tracks the wall-clock time of the most recent gap_heal that actually
@@ -738,20 +833,25 @@ def _run_gap_heal(service_id: str) -> None:
             )
             return
 
-        # Sustained loss observed — apply throttle to actual heal trigger.
+        # Sustained loss observed — apply severity-scaled throttle to the
+        # actual heal trigger. Worse loss = shorter throttle + bigger sweep
+        # budget. See ``_gap_heal_severity`` for the bands.
+        band = _gap_heal_severity(sustained.max_gap_pct, sustained.total_lost_lines)
         # Look up the throttle state through the shim so legacy patches on
         # ``backend.scheduler._last_successful_gap_heal_trigger`` continue to
         # intercept the call.
         import backend.scheduler as _shim
 
         last_heal = _shim._last_successful_gap_heal_trigger(service_id)
-        if last_heal is not None:
+        if band.throttle_hours > 0 and last_heal is not None:
             elapsed_hours = (time.time() - last_heal) / 3600.0
-            if elapsed_hours < GAP_HEAL_THROTTLE_HOURS:
+            if elapsed_hours < band.throttle_hours:
                 msg = (
                     f"Sustained loss detected ({sustained.n_buckets} bucket(s), "
-                    f"max gap {sustained.max_gap_pct:.1%}) — throttled, last heal "
-                    f"{elapsed_hours:.1f}h ago (< {GAP_HEAL_THROTTLE_HOURS}h)"
+                    f"max gap {sustained.max_gap_pct:.1%}, "
+                    f"{sustained.total_lost_lines} lost line(s), severity={band.name}) "
+                    f"— throttled, last heal {elapsed_hours:.1f}h ago "
+                    f"(< {band.throttle_hours:g}h)"
                 )
                 log_cron_run(
                     src,
@@ -768,7 +868,9 @@ def _run_gap_heal(service_id: str) -> None:
         msg = (
             f"Sustained loss detected ({sustained.n_buckets} bucket(s) "
             f"from {sustained.started_at}, max gap {sustained.max_gap_pct:.1%}, "
-            f"{sustained.total_lost_lines} lost line(s)) — triggering full_sweep"
+            f"{sustained.total_lost_lines} lost line(s), severity={band.name}) — "
+            f"triggering full_sweep (max_files={band.sweep_max_files}, "
+            f"max_seconds={band.sweep_max_seconds})"
         )
         logger.warning("🩹 \x1b[33m[gap_heal]\x1b[0m %s: %s", _display, msg)
         _log_and_add_progress(run_id, service_id, job_name="gap_heal", event={"type": "status", "message": msg})
@@ -787,7 +889,11 @@ def _run_gap_heal(service_id: str) -> None:
         # ``backend.scheduler._mark_gap_heal_triggered`` /
         # ``backend.scheduler._run_full_sweep`` keep intercepting.
         _shim._mark_gap_heal_triggered(service_id)
-        _shim._run_full_sweep(service_id)
+        _shim._run_full_sweep(
+            service_id,
+            max_files=band.sweep_max_files,
+            max_seconds=band.sweep_max_seconds,
+        )
     except Exception as e:
         log_cron_run(
             src,
