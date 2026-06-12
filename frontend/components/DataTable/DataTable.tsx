@@ -74,6 +74,11 @@ interface DataTableProps<TData, TValue> {
   onColumnVisibilityChange?: (visibility: VisibilityState) => void
   emptyMessage?: string
   onRowClick?: (row: TData) => void
+  /** Optional per-row class hook. Receives the row's ``original`` data and
+   *  returns a Tailwind class string (or empty). Lets callers tint live vs
+   *  faded rows without forking the table component. Opt-in; tables that
+   *  don't pass this prop render unchanged. */
+  getRowClassName?: (row: TData) => string
   tableCaption?: string
 }
 
@@ -97,6 +102,7 @@ function DataTableImpl<TData, TValue>({
   onColumnVisibilityChange,
   emptyMessage = "No results.",
   onRowClick,
+  getRowClassName,
   tableCaption
 }: DataTableProps<TData, TValue>) {
   const isControlled = controlledVisibility !== undefined
@@ -224,7 +230,7 @@ function DataTableImpl<TData, TValue>({
   const tableContainerRef = React.useRef<HTMLDivElement>(null)
 
   const { rows } = table.getRowModel()
-  
+
   const rowVirtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => tableContainerRef.current,
@@ -323,6 +329,7 @@ function DataTableImpl<TData, TValue>({
                         key={row.id}
                         row={row}
                         onRowClick={onRowClick}
+                        rowClassName={getRowClassName ? getRowClassName(row.original) : undefined}
                         columnVisibility={columnVisibility}
                         columns={columns}
                       />

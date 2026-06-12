@@ -4,24 +4,23 @@
  * Active & Just-Finished panel — thin wrapper around the project's
  * standard ``<DataTable>``.
  *
- * Loses (vs the prior custom-HTML-table implementation):
- *   - Per-row tinted background for live rows / faded background for
- *     promoted rows (DataTable's MemoizedTableRow doesn't expose a
- *     ``getRowProps`` hook — cell-level styling only; the duration cell
- *     still shows the pulsing dot on live rows and fades on promoted).
- *   - Inline expand drawer (replaced by ``RowDetailDialog`` opened on
- *     row click).
- *   - Cron-grouping by run_id (TanStack's getGroupedRowModel has
- *     different semantics from the prior custom collapsible blocks;
- *     dropped for now — re-add as a separate feature if needed).
- *   - Focused row + arrow-key navigation (sort + search + filter chips
- *     cover the common "find the right row" cases).
+ * Visual hierarchy via DataTable's opt-in ``getRowClassName`` hook (added
+ * 2026-06-12): live rows get a subtle tinted bg + left accent border,
+ * promoted (just-finished) rows fade to 60% opacity, cancelled rows dim.
+ * The pulsing dot in the Duration cell + Kill button vs outcome badge in
+ * the Actions cell are the other live-vs-promoted signals.
  *
- * Gains:
- *   - Column reorder via drag-and-drop, hide/show via column-visibility
- *     menu, resize, virtualization, pagination — all from the shared
- *     DataTable. Consistent with every other table on the dashboard.
+ * Service + Pool columns auto-hide when every visible row has the value
+ * empty — same pattern as the Memory column in CompletedTable. Keeps the
+ * table compact when the filter narrows to a single service or to SQLite
+ * (which has no pool concept).
+ *
+ * Inline expand drawer → ``RowDetailDialog`` opened on row click.
+ * Cron-grouping by run_id is dropped — re-add as a separate feature if
+ * needed.
  */
+
+import * as React from 'react'
 
 import { DataTable } from '@/components/DataTable'
 
@@ -39,12 +38,20 @@ export function ActiveTable({
   onKill: (row: ActiveRow) => void
   cancellingQid: number | null
 }) {
-  const columns = buildActiveColumns({ onKill, cancellingQid })
+  const showService = rows.some((r) => r.service_id !== null && r.service_id !== undefined)
+  const showPool = rows.some((r) => r.attribution.pool_slot !== null && r.attribution.pool_slot !== undefined)
+  // Memoise so DataTable's React.memo doesn't see a new columns array on
+  // every snapshot poll — would defeat the row-level virtualisation memo.
+  const columns = React.useMemo(
+    () => buildActiveColumns({ onKill, cancellingQid, showService, showPool }),
+    [onKill, cancellingQid, showService, showPool],
+  )
   return (
     <DataTable<ActiveOrPromotedRow, unknown>
       columns={columns}
       data={rows}
       onRowClick={onRowClick}
+      getRowClassName={rowClassName}
       hideToolbar
       showPagination={false}
       emptyMessage="No active queries. Long-running queries will appear here in real time."
@@ -52,4 +59,12 @@ export function ActiveTable({
       tableCaption="Active and just-finished queries"
     />
   )
+}
+
+function rowClassName(row: ActiveOrPromotedRow): string {
+  if (row._completed) return 'opacity-60'
+  if (row.cancelled_at !== null) return 'opacity-50'
+  // Live (in-flight) — subtle tint + left accent. Tailwind classes that
+  // resolve at runtime; matches the prior custom-table treatment.
+  return 'bg-primary/5 border-l-2 border-l-primary/60'
 }
