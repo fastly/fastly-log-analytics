@@ -31,6 +31,7 @@ import { useDocumentVisible } from './_helpers'
 import { useKeyboardShortcuts, type ShortcutBinding } from './_hooks/useKeyboardShortcuts'
 import { ActiveTable } from './_sections/ActiveTable'
 import { CompletedTable } from './_sections/CompletedTable'
+import { DbFilterChips } from './_sections/DbFilterChips'
 import { FilterChips } from './_sections/FilterChips'
 import { PollingIndicator } from './_sections/PollingIndicator'
 import { ShortcutsHelp } from './_sections/ShortcutsHelp'
@@ -41,6 +42,7 @@ import type {
   AttributionKind,
   CancelResponse,
   CompletedRow,
+  DbFilter,
   MonitorConfig,
   SnapshotResponse,
   ViewMode,
@@ -55,6 +57,7 @@ export default function QueryMonitorPage() {
   const [expandedQid, setExpandedQid] = React.useState<number | null>(null)
   const [search, setSearch] = React.useState('')
   const [kindFilter, setKindFilter] = React.useState<AttributionKind | 'all'>('all')
+  const [dbFilter, setDbFilter] = React.useState<DbFilter>('all')
   const [confirmKill, setConfirmKill] = React.useState<ActiveRow | null>(null)
   const [actionError, setActionError] = React.useState<string>('')
   const [viewMode, setViewMode] = React.useState<ViewMode>('all')
@@ -79,6 +82,7 @@ export default function QueryMonitorPage() {
     const view = p.get('view')
     const slow = p.get('slow')
     const group = p.get('group')
+    const db = p.get('db')
     if (q !== null) setSearch(q)
     if (kind === 'analyst' || kind === 'admin' || kind === 'cron' || kind === 'system') {
       setKindFilter(kind)
@@ -89,6 +93,7 @@ export default function QueryMonitorPage() {
       if (Number.isFinite(n) && n > 0) setSlowThresholdMs(n)
     }
     if (group === 'run') setGroupByRun(true)
+    if (db === 'DuckDB' || db === 'SQLite') setDbFilter(db)
     // Restore the sound preference (localStorage so it persists across
     // sessions for this browser without leaking into the URL).
     try {
@@ -116,8 +121,10 @@ export default function QueryMonitorPage() {
     else url.searchParams.delete('slow')
     if (groupByRun) url.searchParams.set('group', 'run')
     else url.searchParams.delete('group')
+    if (dbFilter !== 'all') url.searchParams.set('db', dbFilter)
+    else url.searchParams.delete('db')
     window.history.replaceState({}, '', url.toString())
-  }, [search, kindFilter, viewMode, slowThresholdMs, groupByRun])
+  }, [search, kindFilter, viewMode, slowThresholdMs, groupByRun, dbFilter])
 
   // Persist the sound toggle separately — localStorage, not URL, since
   // it's a user preference rather than a shareable view.
@@ -204,9 +211,10 @@ export default function QueryMonitorPage() {
     const completed = snapshotQuery.data?.completed ?? []
     return [...completed]
       .filter((c) => c.duration_ms >= slowThresholdMs)
+      .filter((c) => dbFilter === 'all' || c.db_type === dbFilter)
       .sort((a, b) => b.duration_ms - a.duration_ms)
       .slice(0, 30)
-  }, [snapshotQuery.data, slowThresholdMs])
+  }, [snapshotQuery.data, slowThresholdMs, dbFilter])
 
   // Filter / search the active list (active rows + just-finished promotions).
   const filteredActive = React.useMemo(() => {
@@ -236,6 +244,7 @@ export default function QueryMonitorPage() {
     const q = search.trim().toLowerCase()
     return combined.filter((r) => {
       if (kindFilter !== 'all' && r.attribution.kind !== kindFilter) return false
+      if (dbFilter !== 'all' && r.db_type !== dbFilter) return false
       if (!q) return true
       return (
         r.sql_preview.toLowerCase().includes(q) ||
@@ -244,9 +253,12 @@ export default function QueryMonitorPage() {
         r.attribution.label.toLowerCase().includes(q)
       )
     })
-  }, [snapshotQuery.data, justFinished, search, kindFilter])
+  }, [snapshotQuery.data, justFinished, search, kindFilter, dbFilter])
 
-  const completed = snapshotQuery.data?.completed ?? []
+  const completed = React.useMemo(() => {
+    const raw = snapshotQuery.data?.completed ?? []
+    return dbFilter === 'all' ? raw : raw.filter((c) => c.db_type === dbFilter)
+  }, [snapshotQuery.data, dbFilter])
 
   // Keep focusedQid valid: drop it if the focused row is no longer in
   // the visible list. The keyboard nav clamps to first/last via
@@ -494,6 +506,7 @@ export default function QueryMonitorPage() {
                   >
                     <Layers className="h-3.5 w-3.5" /> Group runs
                   </Button>
+                  <DbFilterChips value={dbFilter} onChange={setDbFilter} />
                   <FilterChips value={kindFilter} onChange={setKindFilter} />
                   <div className="relative">
                     <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
