@@ -119,6 +119,19 @@ def _initialize_service(cfg: dict):
             if src:
                 _db.refresh_config_status(sid)
                 _ensure_persistent_view(sid, src)
+                # Pre-warm compute_sync_status_cached so the very first
+                # /api/sync-status?skip_fos=true after restart doesn't pay
+                # the ~700ms _get_dir_size walk (19k files on a populated
+                # rollups cache). The FilterBar, header badge, and every
+                # CSR page fires this endpoint within the first second of
+                # nav — landing here cold added 1.7s to /dashboard cold
+                # load in the 2026-06-11 audit.
+                try:
+                    from backend.routers.admin import compute_sync_status_cached
+
+                    compute_sync_status_cached(sid)
+                except Exception as e:
+                    logging.warning("[fastapi] Service %s: sync-status pre-warm failed: %s", sid, e)
                 # Data migrations: queues any pending one-time setup work
                 # (e.g. the initial rollups backfill) onto a daemon thread
                 # per service. Returns immediately so startup isn't gated
@@ -546,9 +559,17 @@ async def telemetry_middleware(request: Request, call_next):
     from backend.core.query_attribution import (
         current_attribution as _current_attribution,
     )
+    from backend.scoring import labels as _scoring_labels
     from backend.utils.telemetry import process_context_scope, start_call_tracking
 
     start_call_tracking()
+    # Open a per-request memoization scope for scoring_labels. The
+    # /admin/session-scoring composite fires list_labels / counts_by_label
+    # against the same service_id from 10+ sub-handlers; without this each
+    # one independently opens the per-service SQLite handle and runs the
+    # same SELECT. Cleared in the finally below so cron / test paths fall
+    # through to the live DB read.
+    _scoring_labels.init_request_cache()
     ctx_name = f"api:{request.method} {request.url.path}"
 
     # Best-effort attribution: analyst_session is only on request.state
@@ -610,6 +631,14 @@ async def telemetry_middleware(request: Request, call_next):
     # _LATEST_PROCESS_CONTEXT.
     try:
         _current_attribution.set(_prev_attr)
+    except Exception:
+        pass
+    # Close the scoring_labels per-request cache. Setting to None means
+    # any post-response background work (or a subsequent request reusing
+    # the same thread) sees a clean state and falls through to live reads
+    # instead of stale cached rows.
+    try:
+        _scoring_labels.clear_request_cache()
     except Exception:
         pass
     return response
