@@ -11,6 +11,7 @@ import { UserPlus, ShieldCheck, Activity } from 'lucide-react'
 
 import { ServicesTable } from './_sections/ServicesTable'
 import { GlobalSettings, PricingSettings } from './_sections/GlobalSettings'
+import { OperationsOverview } from './_sections/OperationsOverview'
 
 export default function AdminPage() {
   const queryClient = useQueryClient()
@@ -122,6 +123,8 @@ export default function AdminPage() {
           <Activity className="h-4 w-4 mr-1" /> Live Queries
         </Link>
       </PageHeader>
+
+      <OperationsOverview />
 
       <ServicesTable />
 
