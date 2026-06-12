@@ -72,6 +72,10 @@ export interface MonitorConfig {
 
 export type ViewMode = 'all' | 'live' | 'past'
 
+/** DB-engine filter. ``'all'`` shows both; the other two narrow to a single
+ *  engine and apply page-wide (Active + Slow + Recently Completed). */
+export type DbFilter = 'all' | 'DuckDB' | 'SQLite'
+
 /** Active row plus an optional `_completed` field for rows promoted from
  *  the just-finished window. The table component renders these as faded
  *  rows with an outcome badge instead of a Kill button. */
