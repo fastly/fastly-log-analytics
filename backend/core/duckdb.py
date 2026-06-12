@@ -12,7 +12,7 @@ import re
 import threading
 import time
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import boto3
@@ -37,8 +37,6 @@ ACCESS_LEVEL = "read_write"  # per-service from config
 
 _ORPHAN_THRESHOLD_MINS = 5
 
-
-from backend.utils.date_utils import safe_iso as _safe_iso  # noqa: E402
 
 # Cached per-process constants — computed once, reused on every connection open.
 _cached_n_threads: int | None = None
@@ -1004,7 +1002,13 @@ def log_cron_run(
 
 
 # Cache for FOS file listings to avoid redundant glob() calls during polling
-_fos_cache = {"gz_last_check": 0, "parquet_count": 0, "manifest_last_mod": None, "gz_files": [], "source_name": None}
+_fos_cache: dict[str, Any] = {
+    "gz_last_check": 0,
+    "parquet_count": 0,
+    "manifest_last_mod": None,
+    "gz_files": [],
+    "source_name": None,
+}
 
 # Cache for the data-side half of the get_sync_status COUNT/MIN/MAX query —
 # the second-largest cost in the sync cron path (~240 ms warm with ~1.7 k
@@ -1069,8 +1073,6 @@ def _data_stats_fingerprint(source: dict) -> tuple | None:
     return (data_sum, data_count)
 
 
-
-
 # ── Sync-status / schema / ASN / usage-log helpers ────────────────────────
 #
 # Carved out to backend/core/_duckdb_status.py for the v2.0 file-size
@@ -1078,22 +1080,22 @@ def _data_stats_fingerprint(source: dict) -> tuple | None:
 # name back into this module preserves the historical flat-import
 # surface: ``from backend.core.duckdb import get_sync_status`` etc.
 from backend.core._duckdb_status import (  # noqa: E402, F401
-    get_sync_status,
-    refresh_config_status,
-    update_top_values,
-    get_ingested_files,
-    delete_ingested_files,
-    _clear_schema_cache,
-    get_schema,
-    get_asn_names,
-    format_asn_label,
-    enrich_asn_labels,
-    update_cron_duration,
-    log_usage_calls,
-    backfill_fastly_edge_writes,
-    reconcile_fastly_stats,
-    purge_usage_log,
-    ASN_CACHE_TTL_DAYS,
     _SCHEMA_CACHE_TTL,
+    ASN_CACHE_TTL_DAYS,
+    _clear_schema_cache,
     _schema_cache,
+    backfill_fastly_edge_writes,
+    delete_ingested_files,
+    enrich_asn_labels,
+    format_asn_label,
+    get_asn_names,
+    get_ingested_files,
+    get_schema,
+    get_sync_status,
+    log_usage_calls,
+    purge_usage_log,
+    reconcile_fastly_stats,
+    refresh_config_status,
+    update_cron_duration,
+    update_top_values,
 )

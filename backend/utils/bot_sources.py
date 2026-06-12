@@ -319,11 +319,13 @@ def extract_literal_substring(pattern: str) -> str | None:
 # ── Matcher ───────────────────────────────────────────────────────────────────
 
 
-def build_matcher() -> Callable[[str], list[dict]]:
+def build_matcher() -> Callable[[str], tuple[dict, ...]]:
     """Return a cached UA matcher. Rebuilds when source cache files change.
 
     The returned function is internally lru_cached — UA strings in log data
     follow a heavy power-law distribution so repeated lookups are near-free.
+    The matcher returns a tuple (immutable + hashable, plays nicely with
+    ``functools.lru_cache``); callers iterate it.
     """
     current_mtime = _cache_mtime()
 
@@ -420,7 +422,7 @@ def enrich_bot_metadata(df: Any) -> None:
         # Match UAs first so we know exactly which IPs need hostname resolution
         # — then batch-resolve them in one SQLite read instead of opening a
         # fresh connection per row.
-        row_matches: list[tuple[str, list[dict]]] = []
+        row_matches: list[tuple[str, tuple[dict, ...]]] = []
         candidate_ips: list[str] = []
         for ua_val, ip_val in zip(df["ua"], df["ip"]):
             matches = match_ua(str(ua_val) if ua_val else "")

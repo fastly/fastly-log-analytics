@@ -346,7 +346,11 @@ def record_call(
             # Walk up past telemetry.py, the TrackedClient/Paginator wrappers in
             # duckdb.py, and contextlib so we surface the real application caller.
             # Using sys._getframe() is significantly faster than inspect.stack().
-            frame = sys._getframe(1)
+            # Declared as Optional because `frame.f_back` narrows to None at
+            # the top of the stack and we reassign it back into the same name.
+            from types import FrameType
+
+            frame: FrameType | None = sys._getframe(1)
             while frame:
                 code = getattr(frame, "f_code", None)
                 if not code:

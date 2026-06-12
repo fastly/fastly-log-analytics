@@ -67,15 +67,20 @@ EDGE_DATA_MAPPING = {
 }
 
 
-def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
+def generate_capture_vcl(log_fields_config: dict | None) -> dict[str, str]:
     """Return dict of VCL snippets keyed by subroutine name.
 
     Always returns "recv", "miss", and "pass". When group L (Origin Metrics)
     is enabled, also returns "fetch", "error", and "deliver".
+
+    ``log_fields_config`` accepts ``None`` because most callers pass the
+    raw ``cfg.get("log_fields")`` value; coerced to ``{}`` at the top so
+    downstream calls don't have to repeat the None-check.
     """
+    log_fields_config = log_fields_config or {}
     required = lf.get_required_edge_headers(log_fields_config)
-    group_l = "L" in ((log_fields_config or {}).get("groups") or [])
-    limits = (log_fields_config or {}).get("field_limits") or {}
+    group_l = "L" in (log_fields_config.get("groups") or [])
+    limits = log_fields_config.get("field_limits") or {}
 
     enabled_custom = sorted(
         [cf for cf in (log_fields_config or {}).get("custom_fields", []) if cf.get("enabled", True)],

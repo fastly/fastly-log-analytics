@@ -830,7 +830,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "group": "L",
         "label": "Parent Request ID",
         "description": "Edge POP's rid forwarded to the shield. Non-null only on shield log lines (edge=0, cache=MISS).",
-        "vcl": '"prid":"%{req.http.x-edge-req-id}V"',
+        "vcl": '"prid":"%{json.escape(req.http.x-edge-req-id)}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 16,
         "required_by": [],
@@ -1123,7 +1123,7 @@ GROUP_DEPENDENCIES = {g: info["requires"] for g, info in GROUP_INFO.items() if i
 # Preset bundles
 # ---------------------------------------------------------------------------
 
-PRESETS = {
+PRESETS: dict[str, dict[str, Any]] = {
     "minimal": {
         "label": "Minimal",
         "description": "Always-on fields only. Error rates, latency, hit rates, throughput.",
