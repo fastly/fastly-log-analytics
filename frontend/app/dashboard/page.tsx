@@ -124,7 +124,7 @@ function DashboardBody({
   // aggregates + top-bots; compare-mode is still independent
   // because it only fires when the user enables it).
   const searchParams = useSearchParams()
-  const isLazy = searchParams?.get('lazy') === 'true'
+  const isLazy = searchParams?.get('lazy') !== 'false'
 
   const LAZY_INITIAL_FIELDS = React.useMemo(() => [
     'ip', 'asn', 'host', 'url', 'method', 'status', 'cache', 'proto', 'ua', 'referer', 'country'
