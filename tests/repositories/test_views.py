@@ -87,3 +87,59 @@ def test_delete_view_falls_back_to_cross_service_scan():
         res = delete_view(view["id"])
 
     assert res["service_id"] == sid
+
+
+def test_get_view_by_id_returns_view_with_service_id_stamped():
+    """``get_view_by_id`` is the security mirror of ``alerts.get_alert_by_id``.
+    The router-level cross-tenant gate calls it before delete_view to verify
+    the requesting analyst owns the targeted view. The returned row MUST
+    have ``service_id`` stamped so the caller can compare without re-scanning."""
+    from backend.repositories.views import get_view_by_id
+
+    sid = "svc-views-get-by-id"
+    view = save_view(_make_view(sid, "by-id"))
+
+    with patch(
+        "backend.repositories.views.svcconfig.list_configs",
+        return_value=[{"service_id": sid}],
+    ):
+        row = get_view_by_id(view["id"])
+
+    assert row is not None
+    assert row["id"] == view["id"]
+    # Critical: service_id is stamped onto the row so the cross-tenant
+    # check downstream doesn't have to re-scan.
+    assert row["service_id"] == sid
+
+
+def test_get_view_by_id_returns_none_when_view_does_not_exist():
+    from backend.repositories.views import get_view_by_id
+
+    with patch(
+        "backend.repositories.views.svcconfig.list_configs",
+        return_value=[{"service_id": "svc-no-views"}],
+    ):
+        assert get_view_by_id("nonexistent-id") is None
+
+
+def test_get_view_by_id_skips_configs_with_no_service_id():
+    """Defensive: a config whose ``service_id`` key is missing/None must
+    not crash the lookup. The function skips and moves on."""
+    from backend.repositories.views import get_view_by_id
+
+    with patch(
+        "backend.repositories.views.svcconfig.list_configs",
+        return_value=[{"service_id": None}, {}, {"service_id": "svc-empty-x"}],
+    ):
+        # No matching service_id → None, no exception.
+        assert get_view_by_id("any-id") is None
+
+
+def test_find_view_service_skips_configs_with_no_service_id():
+    """Same defensive coverage on the find helper: configs with missing
+    service_id are skipped silently."""
+    with patch(
+        "backend.repositories.views.svcconfig.list_configs",
+        return_value=[{}, {"service_id": None}, {"service_id": "svc-skip-empty"}],
+    ):
+        assert _find_view_service("any-id") is None
