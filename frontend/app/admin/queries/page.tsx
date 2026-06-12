@@ -6,10 +6,9 @@
  * kill button. Admin-only (the route lives under /api/admin/* so
  * RemoteAccessMiddleware structurally blocks analyst sessions).
  *
- * This file is the orchestrator: state machinery + data wiring. Layout
- * details live in `_sections/` and shared types/helpers in `_types.ts` /
- * `_helpers.ts`. Phase 9b split kept this file under 500 lines per
- * cleanup_plan §9b.
+ * This file is the orchestrator: state machinery + data wiring + layout.
+ * Derived state lives in `_hooks/`; layout details in `_sections/`; shared
+ * types/helpers in `_types.ts` / `_helpers.ts`.
  */
 
 import * as React from 'react'
@@ -28,7 +27,9 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { extractApiError } from '@/lib/api'
 
 import { useDocumentVisible } from './_helpers'
-import { useKeyboardShortcuts, type ShortcutBinding } from './_hooks/useKeyboardShortcuts'
+import { useFilteredActive } from './_hooks/useFilteredActive'
+import { useQueryMonitorShortcuts } from './_hooks/useQueryMonitorShortcuts'
+import { useQueryMonitorUrlSync } from './_hooks/useQueryMonitorUrlSync'
 import { ActiveTable } from './_sections/ActiveTable'
 import { CompletedTable } from './_sections/CompletedTable'
 import { DbFilterChips } from './_sections/DbFilterChips'
@@ -37,11 +38,9 @@ import { PollingIndicator } from './_sections/PollingIndicator'
 import { ShortcutsHelp } from './_sections/ShortcutsHelp'
 import { SummaryStrip } from './_sections/SummaryStrip'
 import type {
-  ActiveOrPromotedRow,
   ActiveRow,
   AttributionKind,
   CancelResponse,
-  CompletedRow,
   DbFilter,
   MonitorConfig,
   SnapshotResponse,
@@ -66,55 +65,11 @@ export default function QueryMonitorPage() {
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
   const searchInputRef = React.useRef<HTMLInputElement>(null)
 
-  // Hydrate filter state from URL on mount. Single-shot; subsequent
-  // changes flow URL ← state via the write effect below. Pattern mirrors
-  // `useFilterUrlSync` — replaceState (not router.replace) so Next doesn't
-  // refresh the page on every filter tweak.
-  const hydratedRef = React.useRef(false)
-  React.useEffect(() => {
-    if (hydratedRef.current) return
-    if (typeof window === 'undefined') return
-    const p = new URLSearchParams(window.location.search)
-    const q = p.get('q')
-    const kind = p.get('kind')
-    const view = p.get('view')
-    const slow = p.get('slow')
-    const group = p.get('group')
-    const db = p.get('db')
-    if (q !== null) setSearch(q)
-    if (kind === 'analyst' || kind === 'admin' || kind === 'cron' || kind === 'system') {
-      setKindFilter(kind)
-    }
-    if (view === 'live' || view === 'past' || view === 'all') setViewMode(view as ViewMode)
-    if (slow !== null) {
-      const n = parseInt(slow, 10)
-      if (Number.isFinite(n) && n > 0) setSlowThresholdMs(n)
-    }
-    if (group === 'run') setGroupByRun(true)
-    if (db === 'DuckDB' || db === 'SQLite') setDbFilter(db)
-    hydratedRef.current = true
-  }, [])
-
-  // Write filter/view state to URL on change. Stripped to only the
-  // non-default values so the URL stays clean for default views.
-  React.useEffect(() => {
-    if (!hydratedRef.current) return
-    if (typeof window === 'undefined') return
-    const url = new URL(window.location.href)
-    if (search) url.searchParams.set('q', search)
-    else url.searchParams.delete('q')
-    if (kindFilter !== 'all') url.searchParams.set('kind', kindFilter)
-    else url.searchParams.delete('kind')
-    if (viewMode !== 'all') url.searchParams.set('view', viewMode)
-    else url.searchParams.delete('view')
-    if (slowThresholdMs !== DEFAULT_SLOW_THRESHOLD_MS) url.searchParams.set('slow', String(slowThresholdMs))
-    else url.searchParams.delete('slow')
-    if (groupByRun) url.searchParams.set('group', 'run')
-    else url.searchParams.delete('group')
-    if (dbFilter !== 'all') url.searchParams.set('db', dbFilter)
-    else url.searchParams.delete('db')
-    window.history.replaceState({}, '', url.toString())
-  }, [search, kindFilter, viewMode, slowThresholdMs, groupByRun, dbFilter])
+  useQueryMonitorUrlSync(
+    { search, kindFilter, dbFilter, viewMode, slowThresholdMs, groupByRun },
+    { setSearch, setKindFilter, setDbFilter, setViewMode, setSlowThresholdMs, setGroupByRun },
+    DEFAULT_SLOW_THRESHOLD_MS,
+  )
 
   // Feature-flag check; if disabled, render a clear empty state.
   const { data: cfg } = useQuery<MonitorConfig>({
@@ -167,87 +122,13 @@ export default function QueryMonitorPage() {
     onError: (err: Error) => setActionError(extractApiError(err) || err.message),
   })
 
-  // "Just finished" — anything that completed in the last 10 seconds.
-  // Promoted into the Active section as a faded row with the outcome pill
-  // so the user gets visual feedback even when real queries are sub-300ms.
-  // Without this the Active list reads empty on typical traffic (verified
-  // on prod 2026-06-11: p50 query duration 0.2ms, max 29ms — far below
-  // any poll cadence).
-  const JUST_FINISHED_WINDOW_S = 10
-  const justFinished = React.useMemo(() => {
-    const completed = snapshotQuery.data?.completed ?? []
-    const cutoff = Date.now() / 1000 - JUST_FINISHED_WINDOW_S
-    return completed.filter((c) => c.ended_at_utc >= cutoff)
-  }, [snapshotQuery.data])
-
-  // Notable slow queries — anything that took longer than the threshold,
-  // regardless of how long ago it finished. The most-investigated case in
-  // ops: "I saw the dashboard get slow a minute ago, what was running?".
-  // The history ring buffer caps at 200 rows (server-side), so the lookback
-  // window in practice is "as far back as the buffer goes".
-  const slowQueries = React.useMemo(() => {
-    const completed = snapshotQuery.data?.completed ?? []
-    return [...completed]
-      .filter((c) => c.duration_ms >= slowThresholdMs)
-      .filter((c) => dbFilter === 'all' || c.db_type === dbFilter)
-      .sort((a, b) => b.duration_ms - a.duration_ms)
-      .slice(0, 30)
-  }, [snapshotQuery.data, slowThresholdMs, dbFilter])
-
-  // Filter / search the active list (active rows + just-finished promotions).
-  const filteredActive = React.useMemo(() => {
-    const active: ActiveOrPromotedRow[] = (snapshotQuery.data?.active ?? []).map((r) => ({ ...r }))
-    const justRows: ActiveOrPromotedRow[] = justFinished.map((c: CompletedRow) => ({
-      query_id: c.query_id,
-      db_type: c.db_type,
-      sql_preview: c.sql_preview,
-      sql: c.sql,
-      sql_len: c.sql_len,
-      attribution: c.attribution,
-      service_id: c.service_id,
-      started_at_utc: c.started_at_utc,
-      duration_ms: c.duration_ms,
-      cancellable: false,
-      cancelled_at: null,
-      _completed: c,
-    }))
-    // Newest first, no dupes (a row could theoretically appear in both).
-    const seen = new Set<number>()
-    const combined: ActiveOrPromotedRow[] = []
-    for (const r of [...active, ...justRows]) {
-      if (seen.has(r.query_id)) continue
-      seen.add(r.query_id)
-      combined.push(r)
-    }
-    const q = search.trim().toLowerCase()
-    return combined.filter((r) => {
-      if (kindFilter !== 'all' && r.attribution.kind !== kindFilter) return false
-      if (dbFilter !== 'all' && r.db_type !== dbFilter) return false
-      if (!q) return true
-      return (
-        r.sql_preview.toLowerCase().includes(q) ||
-        r.attribution.caller_qualname.toLowerCase().includes(q) ||
-        r.attribution.caller_file.toLowerCase().includes(q) ||
-        r.attribution.label.toLowerCase().includes(q)
-      )
-    })
-  }, [snapshotQuery.data, justFinished, search, kindFilter, dbFilter])
-
-  const completed = React.useMemo(() => {
-    const raw = snapshotQuery.data?.completed ?? []
-    return dbFilter === 'all' ? raw : raw.filter((c) => c.db_type === dbFilter)
-  }, [snapshotQuery.data, dbFilter])
-
-  // Keep focusedQid valid: drop it if the focused row is no longer in
-  // the visible list. The keyboard nav clamps to first/last via
-  // `navigateFocus`, but a row that disappeared between renders needs
-  // to be cleared so `x` doesn't try to cancel a stale id.
-  React.useEffect(() => {
-    if (focusedQid === null) return
-    if (!filteredActive.some((r) => r.query_id === focusedQid)) {
-      setFocusedQid(null)
-    }
-  }, [filteredActive, focusedQid])
+  const { justFinished, filteredActive, completed, slowQueries } = useFilteredActive({
+    snapshot: snapshotQuery.data,
+    search,
+    kindFilter,
+    dbFilter,
+    slowThresholdMs,
+  })
 
   const requestKill = React.useCallback(
     (row: ActiveRow) => {
@@ -261,111 +142,22 @@ export default function QueryMonitorPage() {
     [cancelMutation],
   )
 
-  const navigateFocus = React.useCallback(
-    (delta: number) => {
-      if (filteredActive.length === 0) return
-      const ids = filteredActive.map((r) => r.query_id)
-      if (focusedQid === null) {
-        setFocusedQid(delta > 0 ? ids[0] : ids[ids.length - 1])
-        return
-      }
-      const i = ids.indexOf(focusedQid)
-      if (i === -1) {
-        setFocusedQid(ids[0])
-        return
-      }
-      const next = Math.max(0, Math.min(ids.length - 1, i + delta))
-      setFocusedQid(ids[next])
-    },
-    [filteredActive, focusedQid],
-  )
+  const closeConfirmKill = React.useCallback(() => setConfirmKill(null), [])
 
-  const shortcuts = React.useMemo<ShortcutBinding[]>(
-    () => [
-      {
-        key: '/',
-        description: 'Focus the search field',
-        handler: (e) => {
-          e.preventDefault()
-          searchInputRef.current?.focus()
-          searchInputRef.current?.select()
-        },
-      },
-      {
-        key: 'j',
-        description: 'Focus next row',
-        handler: (e) => {
-          e.preventDefault()
-          navigateFocus(1)
-        },
-      },
-      {
-        key: 'k',
-        description: 'Focus previous row',
-        handler: (e) => {
-          e.preventDefault()
-          navigateFocus(-1)
-        },
-      },
-      {
-        key: 'Enter',
-        description: 'Toggle expand on focused row',
-        handler: (e) => {
-          if (focusedQid === null) return
-          e.preventDefault()
-          setExpandedQid((prev) => (prev === focusedQid ? null : focusedQid))
-        },
-      },
-      {
-        key: 'x',
-        description: 'Cancel focused query',
-        handler: (e) => {
-          if (focusedQid === null) return
-          const row = filteredActive.find((r) => r.query_id === focusedQid && !r._completed) as
-            | ActiveRow
-            | undefined
-          if (!row || !row.cancellable || row.cancelled_at !== null) return
-          e.preventDefault()
-          requestKill(row)
-        },
-      },
-      {
-        key: '?',
-        description: 'Show keyboard shortcuts',
-        handler: (e) => {
-          e.preventDefault()
-          setShortcutsOpen(true)
-        },
-      },
-      {
-        key: 'Escape',
-        description: 'Close drawer / dialog / overlay',
-        allowInForms: true,
-        handler: () => {
-          if (shortcutsOpen) {
-            setShortcutsOpen(false)
-            return
-          }
-          if (confirmKill) {
-            setConfirmKill(null)
-            return
-          }
-          if (expandedQid !== null) {
-            setExpandedQid(null)
-            return
-          }
-          // Last resort: blur the search input so the user can immediately
-          // start using row-level shortcuts.
-          if (document.activeElement === searchInputRef.current) {
-            searchInputRef.current?.blur()
-          }
-        },
-      },
-    ],
-    [navigateFocus, focusedQid, filteredActive, requestKill, shortcutsOpen, confirmKill, expandedQid],
-  )
-
-  useKeyboardShortcuts(shortcuts, enabled)
+  useQueryMonitorShortcuts({
+    enabled,
+    filteredActive,
+    focusedQid,
+    expandedQid,
+    shortcutsOpen,
+    confirmKillOpen: !!confirmKill,
+    searchInputRef,
+    setFocusedQid,
+    setExpandedQid,
+    setShortcutsOpen,
+    closeConfirmKill,
+    requestKill,
+  })
 
   return (
     <div className="space-y-6">
