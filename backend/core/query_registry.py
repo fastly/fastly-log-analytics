@@ -61,7 +61,16 @@ logger = logging.getLogger(__name__)
 
 _SQL_TRUNCATE = 4096
 _ERR_TRUNCATE = 512
-_HISTORY_CAP = 200
+# Bumped from 200 → 2000 (2026-06-12) because SQLite cron noise was
+# saturating the buffer and evicting any DuckDB row within seconds — on a
+# busy service the usage_log + ingest_log cron passes fire dozens of
+# SQLite statements per tick (every few hundred ms), so the prior 200-cap
+# meant the Live Monitor's filtered DuckDB / Notable-Slow-Queries view
+# was effectively empty even when DuckDB queries had just run. Per-entry
+# cost is ~500B (truncated SQL + attribution + a handful of timestamps),
+# so 2000 entries ≈ 1 MB resident. Cheap; the alternative (per-db_type
+# ring buffers) was rejected as more complex without a measured win.
+_HISTORY_CAP = 2000
 _seq = itertools.count(1)
 
 # Hot-path kill switch. Read once at module load — flipping requires a
