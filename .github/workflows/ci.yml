@@ -169,6 +169,12 @@ jobs:
         #   end Milestone E: 44% (current 46.55%)
         #   post live-query-monitor (2026-06-11): 53% (current 55.19%)
         #   post lib/toast + lib/api/custom-fields + lib/workers/parseJson tests
-        #     (2026-06-12): 55% (current 57.12%). Still short of the 58% v2.0
-        #     target — see v2_tag_readiness.md §10.14.
-        run: npx vitest run --coverage --coverage.thresholds.lines=55
+        #     (2026-06-12): 55% (current 57.12%)
+        #   post ProvisionWizard/wizard-config-helpers tests
+        #     (2026-06-12): 56% (current 58.42%)
+        #   post ProvisionWizard/wizard-api tests
+        #     (2026-06-12): 57% (current 59.8%)
+        #   post ProvisionWizard/wizard-deploy tests
+        #     (2026-06-12): 58% (current 61.66%) — final v2.0 target hit
+        #     per cleanup_plan §10.14.
+        run: npx vitest run --coverage --coverage.thresholds.lines=58

@@ -11,7 +11,7 @@ This doc is the **single source of truth** for "is v2 ready?" — every PR that 
 | 10.12 — every backend module touched by phases 1–10 at ≥ 80% coverage | per-module ≥ 80% | total 82%, per-module not yet audited | ⚠️ partial | Per-module audit not yet run. Some modules (rollups.py at 34%, repositories/session_scoring.py at 34%, cron/jobs/compaction.py at 42%, etc.) are well below 80%. |
 | 10.13 — `tool.mypy.overrides` ignore_errors list ≤ 3 modules | ≤ 3 | 36 explicit per-file entries | ⚠️ partial (PR #9) | Reduced from 5 wildcards covering ~120 files to 36 explicit per-file entries. Each remaining entry needs a fix-or-annotate session. |
 | 10.14 — backend `--cov-fail-under=85` | 85 | gate 80, actual 82 | ❌ pending | Bumping the gate alone breaks CI; need ~770 more covered lines first (back-of-envelope: 3pp on 25,611 statements). |
-| 10.14 — frontend `coverage.thresholds.lines=58` | 58 | gate 55, actual 57.12 | ⚠️ partial (2026-06-12) | Tests added for `lib/toast.ts` (8 → 95.5%), `lib/api/custom-fields.ts` (13 → 100%), and `lib/workers/parseJson.ts` (0 → 37.5%; max in jsdom — the Worker path is unreachable in test env). Gate ratcheted 53 → 55 per the −2pp convention. Still ~36 covered lines short of the 58% v2.0 target. Next candidates: `components/ProvisionWizard/wizard-config-helpers.ts` (1.8%, 56 lines), `wizard-api.ts` (6.5%, 61 lines) — both pure helpers / API wrappers, easy to MSW. |
+| 10.14 — frontend `coverage.thresholds.lines=58` | 58 | gate 58, actual 61.66 | ✅ green (2026-06-12) | Tests added for `lib/toast.ts` (8 → 95.5%), `lib/api/custom-fields.ts` (13 → 100%), `lib/workers/parseJson.ts` (0 → 37.5%; max in jsdom — Worker path unreachable in test env), `components/ProvisionWizard/wizard-config-helpers.ts` (1.8 → 96.4%), `components/ProvisionWizard/wizard-api.ts` (6.5 → 98.4%), and `components/ProvisionWizard/wizard-deploy.ts` (2.3 → 89.7%; runExportTerraform skipped — needs jsdom-unsupported URL.createObjectURL). Overall: 55.19 → 61.66%; gate 53 → 58. **v2.0 target hit.** |
 | 10.14 — load-harness CI step green | green | scaffolded, not yet emitting samples | ⚠️ scaffold-only | `scripts/perf_gate.sh` ships as no-op until Phase 1.6 hooks the emitter. |
 | 10.14 — security-regression count ≥ Phase 0 baseline (24) | ≥ 24 | enforced by `scripts/check_security_regression_count.sh` | ✅ green | Pre-commit + CI both run this. |
 | 10.14 — mypy strict on touched-module list | strict on touched | non-strict project-wide; per-module strict deferred | ❌ pending | The project's `tool.mypy` block has `strict = false`. Per-phase ratchet not yet started. |
@@ -35,7 +35,7 @@ In order — each bullet unblocks the next:
 
 1. **10.13 burndown** — fix-or-annotate the 36 modules in the `tool.mypy.overrides` list (PR #9 made this trackable; the actual fixes are per-module work). Target: list ≤ 3 entries.
 2. **10.14 backend coverage push** — write tests for the modules below 80% per `10.12` audit (the per-module ≥ 80% goal). Once total clears 85% with the 2pp convention buffer, ratchet `--cov-fail-under=85`.
-3. **10.14 frontend coverage push** — first wave (2026-06-12) shipped: `parseJson.ts` 0→37.5%, `custom-fields.ts` 13→100%, `toast.ts` 8→95.5%; overall 55.19→57.12%; gate 53→55. Need another ~36 lines for the 58% target. Next: cover one or two of the `ProvisionWizard/wizard-*.ts` helpers (sub-10% today, ~50–60 lines each).
+3. ~~**10.14 frontend coverage push**~~ — ✅ DONE 2026-06-12. Final state: actual 61.66%, gate 58 (the v2.0 target). Tests added across `lib/toast.ts`, `lib/api/custom-fields.ts`, `lib/workers/parseJson.ts`, `components/ProvisionWizard/{wizard-config-helpers,wizard-api,wizard-deploy}.ts`.
 4. **10.14 mypy strict on touched modules** — for each module not in `ignore_errors`, add per-module `strict = true` override. Project-wide `strict` flag stays false (intentional — opt-in module by module per cleanup_plan §"Cross-cutting workstream — mypy ratchet").
 5. **10.15 final verify** — full `make ci` green; deploy to prod; smoke-test; verify dashboards clean for 15 min (cleanup_plan §"Verification").
 6. **10.16** — bump `pyproject.toml` and `frontend/package.json` versions to `2.0.0`, `git tag v2.0.0`, push tag.
@@ -44,7 +44,7 @@ In order — each bullet unblocks the next:
 
 - **10.13 burndown (36 modules):** Each module is 1-20 errors. Some are trivial (`var-annotated` one-liners), others (`repositories/origin.py` with 13 `Any | None` indexing errors) need deeper attention. Estimate: **3-6 hours** to clear or annotate-with-pragma all 36 down to ≤ 3.
 - **10.14 backend coverage push:** ~770 covered lines needed. The lowest-coverage modules (`rollups.py` at 34%, `repositories/session_scoring.py` at 34%) are the highest-leverage. Estimate: **4-8 hours** focused.
-- **10.14 frontend coverage push:** First wave done (2026-06-12) — needs ~36 more lines to clear 58%. Estimate: **30 min** for the next ProvisionWizard helper test file.
+- ~~**10.14 frontend coverage push:**~~ ✅ DONE 2026-06-12.
 - **10.14 mypy strict on touched modules:** Per-phase opt-in; each module is a small ratchet. Estimate: **2-4 hours** across the modules that ARE clean today.
 - **10.15 + 10.16:** Mechanical once the above land. **30 min - 1 hour**.
 
