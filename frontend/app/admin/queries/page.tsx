@@ -80,6 +80,21 @@ export default function QueryMonitorPage() {
   // mid-incident without it shifting under them. Distinct from the
   // tab-visibility auto-pause; this one survives focus changes.
   const [paused, setPaused] = React.useState(false)
+  // Per-run expansion state for cron-grouping. Transient (no URL persist) —
+  // the expanded set should reset on hard navigation since the rows it
+  // points at won't exist anyway. Stable identity via useCallback so the
+  // column builder's useMemo doesn't churn each render.
+  const [expandedRunIds, setExpandedRunIds] = React.useState<ReadonlySet<string>>(
+    () => new Set(),
+  )
+  const toggleGroup = React.useCallback((runId: string) => {
+    setExpandedRunIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(runId)) next.delete(runId)
+      else next.add(runId)
+      return next
+    })
+  }, [])
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
   const [detailRow, setDetailRow] = React.useState<DetailRow | null>(null)
   const searchInputRef = React.useRef<HTMLInputElement>(null)
@@ -145,6 +160,7 @@ export default function QueryMonitorPage() {
     dbFilter,
     slowThresholdMs,
     groupCrons,
+    expandedRunIds,
   })
 
   const requestKill = React.useCallback(
@@ -354,6 +370,7 @@ export default function QueryMonitorPage() {
                   onRowClick={(row) => setDetailRow(row)}
                   onKill={requestKill}
                   cancellingQid={cancelMutation.variables ?? null}
+                  onToggleGroup={toggleGroup}
                 />
               </CardContent>
             </Card>
@@ -390,6 +407,7 @@ export default function QueryMonitorPage() {
                   onRowClick={(row) => setDetailRow(row)}
                   emptyMessage={`No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`}
                   initialSorting={[{ id: 'duration_ms', desc: true }]}
+                  onToggleGroup={toggleGroup}
                 />
               </CardContent>
             </Card>
@@ -407,6 +425,7 @@ export default function QueryMonitorPage() {
                 <CompletedTable
                   rows={completed}
                   onRowClick={(row) => setDetailRow(row)}
+                  onToggleGroup={toggleGroup}
                 />
               </CardContent>
             </Card>
