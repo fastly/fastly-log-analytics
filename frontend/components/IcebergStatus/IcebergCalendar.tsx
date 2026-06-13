@@ -4,10 +4,10 @@ import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
-import { 
-  Card, 
-  CardContent, 
-  CardHeader, 
+import {
+  Card,
+  CardContent,
+  CardHeader,
   CardTitle,
   CardDescription
 } from "@/components/ui/card"
@@ -67,7 +67,7 @@ export function IcebergCalendar() {
               {days.map((date) => {
                 const dayData = (calendar as any)?.[date]
                 const hasData = !!dayData
-                
+
                 return (
                   <TooltipProvider key={date}>
                     <Tooltip>
@@ -105,7 +105,7 @@ export function IcebergCalendar() {
             </div>
           </>
         )}
-        
+
         <div className="mt-4 flex items-center gap-4 text-[10px] text-muted-foreground uppercase font-bold tracking-wider">
             <div className="flex items-center gap-1.5">
                 <div className="h-2 w-2 rounded-[1px] bg-blue-500" />

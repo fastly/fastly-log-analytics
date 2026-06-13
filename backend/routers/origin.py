@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends
 
-from backend.deps import AnalyticsDeps
+from backend.core.request_context import RequestContext, build_request_context
 from backend.models.common import FilteredRequest, Limit100, Limit200, Limit1440
 from backend.models.origin import (
     OriginAggregatesResponse,
@@ -66,7 +66,7 @@ class OriginAggregatesRequest(FilteredRequest):
 
 @router.post("/aggregates", response_model=OriginAggregatesResponse)
 @query_errors()
-def origin_aggregates(req: OriginAggregatesRequest, deps: AnalyticsDeps = Depends()):
+def origin_aggregates(req: OriginAggregatesRequest, ctx: RequestContext = Depends(build_request_context)):
     """Composite of the six origin cards (summary, timeseries, slow-urls,
     status-codes, path-breakdown, pop-latency, ip-health) backed by ONE
     parquet scan. Shielding-analysis stays at /api/origin/shielding-analysis
@@ -77,8 +77,8 @@ def origin_aggregates(req: OriginAggregatesRequest, deps: AnalyticsDeps = Depend
     redeploy.
     """
     res = repo.get_aggregates(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -96,10 +96,10 @@ def origin_aggregates(req: OriginAggregatesRequest, deps: AnalyticsDeps = Depend
 
 @router.post("/summary", response_model=OriginSummaryResponse)
 @query_errors()
-def origin_summary(req: OriginRequest, deps: AnalyticsDeps = Depends()):
+def origin_summary(req: OriginRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_summary(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -109,10 +109,10 @@ def origin_summary(req: OriginRequest, deps: AnalyticsDeps = Depends()):
 
 @router.post("/timeseries", response_model=OriginTimeseriesResponse)
 @query_errors()
-def origin_timeseries(req: OriginTimeseriesRequest, deps: AnalyticsDeps = Depends()):
+def origin_timeseries(req: OriginTimeseriesRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_timeseries(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -126,10 +126,10 @@ def origin_timeseries(req: OriginTimeseriesRequest, deps: AnalyticsDeps = Depend
 
 @router.post("/slow-urls", response_model=OriginSlowUrlsResponse)
 @query_errors()
-def origin_slow_urls(req: OriginSlowUrlsRequest, deps: AnalyticsDeps = Depends()):
+def origin_slow_urls(req: OriginSlowUrlsRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_slow_urls(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -141,10 +141,10 @@ def origin_slow_urls(req: OriginSlowUrlsRequest, deps: AnalyticsDeps = Depends()
 
 @router.post("/status-codes", response_model=OriginStatusCodesResponse)
 @query_errors()
-def origin_status_codes(req: OriginRequest, deps: AnalyticsDeps = Depends()):
+def origin_status_codes(req: OriginRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_status_codes(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -154,10 +154,10 @@ def origin_status_codes(req: OriginRequest, deps: AnalyticsDeps = Depends()):
 
 @router.post("/path-breakdown", response_model=OriginPathBreakdownResponse)
 @query_errors()
-def origin_path_breakdown(req: OriginRequest, deps: AnalyticsDeps = Depends()):
+def origin_path_breakdown(req: OriginRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_path_breakdown(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -167,10 +167,10 @@ def origin_path_breakdown(req: OriginRequest, deps: AnalyticsDeps = Depends()):
 
 @router.post("/pop-latency", response_model=OriginPopLatencyResponse)
 @query_errors()
-def origin_pop_latency(req: OriginPopLatencyRequest, deps: AnalyticsDeps = Depends()):
+def origin_pop_latency(req: OriginPopLatencyRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_pop_latency(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -181,10 +181,10 @@ def origin_pop_latency(req: OriginPopLatencyRequest, deps: AnalyticsDeps = Depen
 
 @router.post("/ip-health", response_model=OriginIpHealthResponse)
 @query_errors()
-def origin_ip_health(req: OriginIpHealthRequest, deps: AnalyticsDeps = Depends()):
+def origin_ip_health(req: OriginIpHealthRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_ip_health(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -195,10 +195,12 @@ def origin_ip_health(req: OriginIpHealthRequest, deps: AnalyticsDeps = Depends()
 
 @router.post("/shielding-analysis", response_model=OriginShieldingAnalysisResponse)
 @query_errors()
-def origin_shielding_analysis(req: OriginShieldingAnalysisRequest, deps: AnalyticsDeps = Depends()):
+def origin_shielding_analysis(
+    req: OriginShieldingAnalysisRequest, ctx: RequestContext = Depends(build_request_context)
+):
     res = repo.get_shielding_analysis(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,

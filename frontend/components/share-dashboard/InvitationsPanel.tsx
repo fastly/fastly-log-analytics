@@ -183,7 +183,9 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                 <div>{invite.name}</div>
                 {onViewAuditLogs && (
                   <button
+                    type="button"
                     onClick={() => onViewAuditLogs(invite.email)}
+                    aria-label={`View audit logs for ${invite.email}`}
                     className="text-[10px] text-primary hover:underline block mt-0.5 text-left font-normal"
                   >
                     view audit logs

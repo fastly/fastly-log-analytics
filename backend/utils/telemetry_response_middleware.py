@@ -118,6 +118,17 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             # the request.
             return response
 
+        # 2026-06-10 audit (N-1): never attach telemetry to analyst
+        # responses, regardless of DEBUG_RESPONSES. The envelope leaks the
+        # Fastly KV store ID via _debug_calls and raw SQL via
+        # _debug_queries. Stripping in RemoteAccessMiddleware isn't enough
+        # because this middleware sits OUTSIDE it in the dispatch order
+        # and would re-inject. Honor the same is_remote flag the strip
+        # uses so admin (loopback) keeps the debug panel and analyst gets
+        # clean payloads.
+        if getattr(request.state, "is_remote", False):
+            return response
+
         if not _debug_responses_enabled():
             return response
         if _is_streaming_content_type(response):
@@ -229,7 +240,5 @@ def _reconstruct(original: Response, body: bytes) -> Response:
                     pass
                 break
     new = Response(content=body, status_code=original.status_code, media_type=media_type)
-    new.raw_headers.extend(
-        (k, v) for k, v in original.raw_headers if k.lower() not in drop
-    )
+    new.raw_headers.extend((k, v) for k, v in original.raw_headers if k.lower() not in drop)
     return new

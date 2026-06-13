@@ -1,5 +1,6 @@
 import threading
 import time
+from typing import Any
 
 import boto3
 from botocore.config import Config
@@ -64,7 +65,7 @@ class _ProvisioningTracker:
 
         op = name.upper()
 
-        def tracked(*args, **kwargs):
+        def tracked(*args: Any, **kwargs: Any) -> Any:
             t0 = time.time()
             status: str | int = "OK"
             exc_raised = None
@@ -360,7 +361,7 @@ def ensure_fos_access_key(
     info(f"Creating FOS access key ({permission})…")
     if status_cb:
         status_cb(f"⏳ Creating {permission} access key...")
-    payload = {"permission": permission, "description": description}
+    payload: dict[str, Any] = {"permission": permission, "description": description}
     if buckets:
         payload["buckets"] = buckets
 

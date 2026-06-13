@@ -438,8 +438,7 @@ async def test_proxy_translates_fos_list_get_to_list_objects_v2(proxy_server):
         with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
             async with aiohttp.ClientSession() as s:
                 url = (
-                    f"{proxy_server.proxy_endpoint()}/bucket"
-                    "?list-type=2&prefix=raw%2F&start-after=raw%2F2026-06-08%2F"
+                    f"{proxy_server.proxy_endpoint()}/bucket?list-type=2&prefix=raw%2F&start-after=raw%2F2026-06-08%2F"
                 )
                 async with s.get(
                     url,
@@ -760,9 +759,10 @@ async def test_proxy_writes_actually_persist_to_metadata_db(proxy_server, tmp_pa
 
     # A MISS, MISS chain produces TWO rows (CDN + synth FOS GET_OBJECT
     # from Task 7). We assert on the CDN row specifically.
-    from backend.core import metadata_db
+    # usage_log lives in its own SQLite file post-2026-06-12.
+    from backend.core.metadata import usage_log_db
 
-    con = metadata_db.get_con("real-svc-task6")
+    con = usage_log_db.get_con("real-svc-task6")
     rows = con.execute(
         "SELECT operation_class, operation_type, url, bytes "
         "FROM usage_log WHERE operation_class = 'CDN' "

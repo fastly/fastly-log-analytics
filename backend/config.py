@@ -34,6 +34,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 _ROOT_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -120,7 +121,7 @@ def duckdb_path(service_id: str) -> str:
     return str(SERVICES_DATA_DIR / f"{service_id}.duckdb")
 
 
-def load_config(service_id: str) -> dict | None:
+def load_config(service_id: str | None) -> dict | None:
     """Load a single service config by ID. Returns None if not found.
 
     Returns a freshly-parsed dict on every call — callers that mutate the
@@ -128,13 +129,15 @@ def load_config(service_id: str) -> dict | None:
     revalidated via st_mtime_ns, so external edits and save_config writes
     are picked up on the next call without explicit invalidation.
 
-    Returns ``None`` (not a raised exception) for invalid service IDs —
-    several call sites pass unsanitized input (e.g., a stale URL param,
-    an iteration over a stale config list) and rely on the None response
-    to mean "no config". Security's validation in ``config_path`` is
-    still what blocks the actual path-traversal attack; this just makes
-    the helper friendlier at call sites that don't pre-validate.
+    Returns ``None`` (not a raised exception) for invalid service IDs,
+    including ``None`` itself — several call sites in the iceberg/
+    submodules pass ``src.get("name")`` (typed as ``Any | None``) and
+    rely on the None response to mean "no config". Security's validation
+    in ``config_path`` is still what blocks path-traversal; this just
+    makes the helper friendlier at call sites that don't pre-validate.
     """
+    if service_id is None:
+        return None
     try:
         path = config_path(service_id)
     except ValueError:
@@ -313,8 +316,11 @@ def fetch_service_name(service_id: str, api_key: str) -> str | None:
     """Fetch the human-readable service name from the Fastly API.
     Returns None on failure (caller should use cached name).
     """
+    tracked_call: Any | None
     try:
-        from backend.utils.telemetry import tracked_call
+        from backend.utils.telemetry import tracked_call as _tc
+
+        tracked_call = _tc
     except ImportError:
         tracked_call = None
 
@@ -332,7 +338,7 @@ def fetch_service_name(service_id: str, api_key: str) -> str | None:
         except Exception:
             return None
 
-    if tracked_call:
+    if tracked_call is not None:
         with tracked_call("GET", f"/service/{service_id}", service="Fastly API"):
             return _do_fetch()
     return _do_fetch()

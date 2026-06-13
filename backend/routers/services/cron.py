@@ -1,7 +1,11 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.deps import get_source
 from backend.repositories.cron import delete_cron_log, get_cron_logs, purge_cron_logs
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/cron-runs", tags=["cron-runs"])
 
@@ -26,7 +30,9 @@ def api_cron_logs(
             "entries": entries,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": str(e)})
+        from backend.utils.router_utils import raise_internal
+
+        raise_internal(logger, e, code="cron_logs_read_failed")
 
 
 @router.delete("/{log_id}")
@@ -35,7 +41,9 @@ def api_cron_log_delete(log_id: int, source: dict = Depends(get_source)):
         delete_cron_log(source["name"], log_id)
         return {"ok": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": str(e)})
+        from backend.utils.router_utils import raise_internal
+
+        raise_internal(logger, e, code="cron_log_delete_failed")
 
 
 @router.delete("")

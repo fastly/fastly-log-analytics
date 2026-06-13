@@ -18,13 +18,13 @@ interface SSEProgressViewProps {
   doneMessage?: string
 }
 
-export function SSEProgressView({ 
-  lines, 
-  status, 
-  error, 
-  description, 
-  onStart, 
-  renderLine, 
+export function SSEProgressView({
+  lines,
+  status,
+  error,
+  description,
+  onStart,
+  renderLine,
   className,
   progressLabel = "Progress",
   doneMessage = "Process completed successfully."
@@ -40,11 +40,11 @@ export function SSEProgressView({
     l.type === 'status' && typeof l.message === 'string' && l.message.trim() !== ''
   )
   const currentStepMessage = lastStepStatusLine?.message || ""
-  
+
   let progressCurrent = 0
   let progressTotal = 1
   let progressPercent = 0
-  
+
   if (lastProgressLine) {
     progressCurrent = typeof lastProgressLine.current === 'number' ? lastProgressLine.current : 0
     progressTotal = typeof lastProgressLine.total === 'number' ? lastProgressLine.total : 1
@@ -58,8 +58,8 @@ export function SSEProgressView({
           <div className="max-w-md space-y-6">
             <div className="text-muted-foreground leading-relaxed font-sans text-sm">{description}</div>
             {onStart && (
-              <button 
-                onClick={onStart} 
+              <button
+                onClick={onStart}
                 className="w-full font-sans font-semibold bg-primary text-primary-foreground h-11 px-8 rounded-md transition-colors hover:bg-primary/90"
               >
                 Start Process
@@ -68,7 +68,7 @@ export function SSEProgressView({
           </div>
         </div>
       )}
-      
+
       <ScrollArea className="flex-1 p-4 h-full">
         <div className="space-y-1.5 pb-4">
           {lines
@@ -78,7 +78,7 @@ export function SSEProgressView({
             if (line.type === 'file_done' || (line.message && line.message.includes('[') && line.message.includes('] Read'))) {
               isDoneFile = true;
             }
-            
+
             return (
               <div key={i} className={cn("transition-colors leading-relaxed", isDoneFile ? "text-muted-foreground" : "text-foreground")}>
                 {((renderLine ? renderLine(line, i) : null) || (
@@ -104,7 +104,7 @@ export function SSEProgressView({
           <div ref={bottomRef} />
         </div>
       </ScrollArea>
-      
+
       {lastProgressLine && (
         <div className="p-4 bg-muted/50 border-t shrink-0">
           <div className="flex justify-between items-end text-xs text-muted-foreground mb-2 font-sans font-medium">

@@ -316,18 +316,18 @@ def test_claim_token_one_shot_reveal(client):
     invite = _seed_invite()
     token = share_db.create_claim_token(invite["id"], ttl_hours=1)
     # No share required — claim happens before login.
-    r = client.get(f"/api/share/claim/{token}")
+    r = client.post(f"/api/share/claim/{token}")
     assert r.status_code == 200
     body = r.json()
     assert body["email"] == invite["email"]
     # second view: token is consumed
-    r2 = client.get(f"/api/share/claim/{token}")
+    r2 = client.post(f"/api/share/claim/{token}")
     assert r2.status_code == 404
     assert r2.json()["detail"]["error"] == "invalid_or_used"
 
 
 def test_claim_invalid_token_returns_404(client):
-    r = client.get("/api/share/claim/not-a-real-token")
+    r = client.post("/api/share/claim/not-a-real-token")
     assert r.status_code == 404
 
 
@@ -449,4 +449,3 @@ def test_on_demand_session_rehydration(client):
     # Confirm it was restored to memory
     with mgr._lock:
         assert sid in mgr._sessions
-

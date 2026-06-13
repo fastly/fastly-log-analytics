@@ -26,6 +26,7 @@ export function StatCard({ title, value, sub, icon: Icon, iconClassName, loading
     <Button
       variant="ghost"
       size="icon"
+      aria-label="About this metric"
       className="h-6 w-6 text-muted-foreground hover:text-foreground"
       onClick={() => setIsHelpOpen(true)}
       title="About this metric"

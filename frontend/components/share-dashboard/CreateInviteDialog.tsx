@@ -162,6 +162,7 @@ function CreateInviteDialogInner({
                   type="button"
                   variant="ghost"
                   size="icon"
+                  aria-label={revealPasscode ? 'Hide passcode' : 'Reveal passcode'}
                   onClick={() => setRevealPasscode((r) => !r)}
                   title={revealPasscode ? 'Hide passcode' : 'Reveal passcode'}
                 >

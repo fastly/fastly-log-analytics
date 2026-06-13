@@ -11,6 +11,7 @@ class PerformanceAggregatesResponse(BaseResponse):
     top_asns: list[dict[str, Any]] = []
     ttl_dist: list[dict[str, Any]] = []
     scatter: list[dict[str, Any]] = []
+    waterfall: dict[str, dict[str, float]] = {}
 
 
 class PerformanceOriginTsResponse(BaseResponse):

@@ -35,7 +35,7 @@ const VISIBILITY_KEY = 'fastly_charts_card_visibility'
 export default function ChartsPage() {
   const allCards = useDashboardCards()
   const { data: catalog } = useLogFieldsCatalog()
-  
+
   const chartCards = React.useMemo(() => {
     return allCards.filter((c: any) => CHART_CARD_IDS.has(c.id))
   }, [allCards])
@@ -72,11 +72,14 @@ export default function ChartsPage() {
     STALE_VIEW_RETRY_OPTIONS,
   )
 
-  const chartLayout = {
+  // Stable reference so PlotlyChart's React.memo doesn't re-render every
+  // card on every parent re-render (the previous inline object was a new
+  // identity each render).
+  const chartLayout = React.useMemo(() => ({
     showlegend: true,
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
-  }
+  }), [])
 
   const isLoadingInitial = isLoading || (isFetching && !aggregates)
 
@@ -180,7 +183,7 @@ export default function ChartsPage() {
                     const fieldId = card.id
                     const fieldMeta = catalog?.fields?.find(f => f.id === fieldId)
                     const groupId = fieldMeta?.group
-                    
+
                     if (groupId) {
                       const groupMeta = catalog?.groups?.find(g => g.id === groupId)
                       if (groupMeta) {

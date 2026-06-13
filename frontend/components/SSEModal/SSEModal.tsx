@@ -7,6 +7,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogFooter,
+  DialogTrigger,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { useSSE, SSELine } from '@/hooks/useSSE'
@@ -61,39 +62,42 @@ export function SSEModal({ trigger, title, description, endpoint, body, renderLi
   }
 
   return (
-    <>
-      <div onClick={() => handleOpenChange(true)}>{trigger}</div>
-      <Dialog open={open} onOpenChange={handleOpenChange}>
-        <DialogContent className="sm:max-w-4xl max-h-[85vh] min-h-[50vh] flex flex-col p-0 overflow-hidden" showCloseButton={status !== 'streaming'}>
-          <DialogHeader className={panelDialogHeaderSolid}>
-            <DialogTitle>{title}</DialogTitle>
-          </DialogHeader>
-          
-          <SSEProgressView 
-            lines={lines}
-            status={status}
-            error={error}
-            description={description}
-            onStart={handleStart}
-            renderLine={renderLine}
-            className="flex-1 mx-6 my-4"
-          />
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      {/* base-ui uses `render` (not Radix's `asChild`) to wrap a custom
+          element with the DialogTrigger's open-toggling behaviour.
+          The trigger is typically a <Button>, so this avoids the
+          nested-interactive-element a11y violation the old div onClick
+          wrapper had. */}
+      <DialogTrigger render={trigger as React.ReactElement} />
+      <DialogContent className="sm:max-w-4xl max-h-[85vh] min-h-[50vh] flex flex-col p-0 overflow-hidden" showCloseButton={status !== 'streaming'}>
+        <DialogHeader className={panelDialogHeaderSolid}>
+          <DialogTitle>{title}</DialogTitle>
+        </DialogHeader>
 
-          <DialogFooter className="px-6 py-4 bg-muted/10 border-t shrink-0">
-            {status === 'idle' && !description && (
-              <Button onClick={handleStart}>Start</Button>
-            )}
-            {status !== 'streaming' && (
-               <Button variant="outline" onClick={() => handleOpenChange(false)}>
-                 {status === 'done' ? 'Close' : 'Cancel'}
-               </Button>
-            )}
-            {status === 'streaming' && (
-              <Button variant="outline" onClick={stop}>Stop</Button>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+        <SSEProgressView
+          lines={lines}
+          status={status}
+          error={error}
+          description={description}
+          onStart={handleStart}
+          renderLine={renderLine}
+          className="flex-1 mx-6 my-4"
+        />
+
+        <DialogFooter className="px-6 py-4 bg-muted/10 border-t shrink-0">
+          {status === 'idle' && !description && (
+            <Button onClick={handleStart}>Start</Button>
+          )}
+          {status !== 'streaming' && (
+            <Button variant="outline" onClick={() => handleOpenChange(false)}>
+              {status === 'done' ? 'Close' : 'Cancel'}
+            </Button>
+          )}
+          {status === 'streaming' && (
+            <Button variant="outline" onClick={stop}>Stop</Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }

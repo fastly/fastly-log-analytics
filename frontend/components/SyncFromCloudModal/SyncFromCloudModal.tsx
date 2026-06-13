@@ -33,7 +33,7 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
   const [lakeInfo, setLakeInfo] = useState<any>(null)
   const [lakeError, setLakeError] = useState<string | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
-  
+
   const [importMode, setImportMode] = useState<"all" | "range">("all")
   const [importRange, setImportRange] = useState({ start: "", end: "" })
 
@@ -55,12 +55,12 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
 
     for (const [dateStr, stats] of Object.entries(lakeInfo.calendar)) {
       if (dateStr === "unknown") continue;
-      
+
       if (importMode === "range") {
         if (start && dateStr < start.split('T')[0]) continue;
         if (end && dateStr > end.split('T')[0]) continue;
       }
-      
+
       total += (stats as any).size_bytes || 0;
     }
     return total;
@@ -215,7 +215,7 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
                   </div>
                 </div>
               )}
-              
+
               <Button onClick={handleStartSync} className="w-full h-8 text-xs mt-2" variant="default">
                 Start Sync
               </Button>

@@ -21,9 +21,10 @@ export interface ReportConfiguration {
 }
 
 export function useReportConfig(options: ReportConfigOptions = {}) {
-  const { startTime, endTime } = useFilterStore(useShallow(state => ({
+  const { startTime, endTime, hasSyncedExtents } = useFilterStore(useShallow(state => ({
     startTime: state.startTime,
-    endTime: state.endTime
+    endTime: state.endTime,
+    hasSyncedExtents: state.hasSyncedExtents
   })))
 
   const [metric, setMetric] = useState(options.defaultMetric || 'requests')
@@ -34,9 +35,9 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
   const config = useMemo((): ReportConfiguration => {
     const spanSecs = (!startTime || !endTime) ? 0 : (new Date(endTime).getTime() - new Date(startTime).getTime()) / 1000
     const spanHours = spanSecs / 3600
-    
+
     const intervals = new Set(INTERVALS.map(i => i.value))
-    
+
     // Performance limits: prevent massive bucket counts
     if (spanHours > 6) intervals.delete('1 second')
     if (spanHours > 168) intervals.delete('1 minute')
@@ -69,11 +70,11 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
       if (secs > curInt) trends.add(t)
     }
 
-    return { 
-      spanHours: spanHours, 
-      validIntervals: intervals, 
-      validTrends: trends, 
-      effectiveInterval: effectiveInt 
+    return {
+      spanHours: spanHours,
+      validIntervals: intervals,
+      validTrends: trends,
+      effectiveInterval: effectiveInt
     }
   }, [startTime, endTime, chartInterval, manualInterval])
 
@@ -87,6 +88,16 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
       setTrend('off')
     }
   }, [config, chartInterval, trend])
+
+  // When the user clicks Reset, filterStore.clearFilters() flips
+  // hasSyncedExtents back to false. Clear the manualInterval lock so
+  // auto-detection resumes from the freshly-reset time range. During
+  // normal use (manual interval pick) the lock stays in place.
+  useEffect(() => {
+    if (!hasSyncedExtents && manualInterval !== null) {
+      setManualInterval(null)
+    }
+  }, [hasSyncedExtents, manualInterval])
 
   return {
     metric,

@@ -47,6 +47,7 @@ Failure handling:
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import queue
@@ -148,12 +149,15 @@ def _safe_buffer_mtime(src: dict | None) -> float | None:
     if src is None:
         return None
     try:
-        from backend.core.iceberg import _buffer_dir
+        from backend.core.iceberg._core import _buffer_dir
 
         path = _buffer_dir(src)
         return os.path.getmtime(path)
     except Exception:
         return None
+
+
+_WAIT_SAMPLES_MAX = 1024  # ~last 17 minutes at 1 req/s; ~3.5 minutes at 5 req/s
 
 
 class _Pool:
@@ -174,10 +178,25 @@ class _Pool:
         self._created_total = 0
         self._reused_total = 0
         self._discarded_total = 0
+        # Phase 6 in-process sampler — last ``_WAIT_SAMPLES_MAX`` checkout
+        # wait times in milliseconds. Companion to the OTel histogram
+        # (``app.thread_wait_ms``) so the admin UI can render p50/p95/p99
+        # without parsing docker logs. Bounded deque so memory stays flat
+        # regardless of throughput.
+        self._wait_samples: collections.deque[float] = collections.deque(maxlen=_WAIT_SAMPLES_MAX)
+        self._wait_samples_lock = threading.Lock()
 
     def acquire(self, src: dict, max_wait: float) -> duckdb.DuckDBPyConnection:
-        deadline = time.monotonic() + max_wait
+        # Phase 6 telemetry: time how long this checkout spends WAITING for
+        # an idle connection (the saturated path). Both fast-path (idle
+        # ready) and fresh-build paths record ~0 ms here; only contention
+        # with cron / another request shows up as non-zero. ADR-03 reads
+        # the p95 of ``app.thread_wait_ms`` to decide cron isolation
+        # strategy (separate pool vs separate process).
+        t_acquire_start = time.monotonic()
+        deadline = t_acquire_start + max_wait
         reused_con: duckdb.DuckDBPyConnection | None = None
+        waited = False
         with self._cond:
             while True:
                 # Fast path: idle connection available
@@ -197,8 +216,41 @@ class _Pool:
                 # Saturated: wait for a return
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    wait_ms = (time.monotonic() - t_acquire_start) * 1000.0
+                    try:
+                        from backend.core.request_telemetry import thread_wait_histogram
+
+                        thread_wait_histogram().record(
+                            wait_ms,
+                            {"service": self.service_key, "outcome": "timeout"},
+                        )
+                    except Exception:
+                        pass
+                    self._record_wait_sample(wait_ms)
                     raise _PoolBusy(f"pool for {self.service_key} saturated at {self.max_size}")
+                waited = True
                 self._cond.wait(timeout=remaining)
+
+        # Record the (possibly zero) wait time so Phase 6 has a population
+        # of samples — even fast-path checkouts contribute, so the median
+        # tracks total request-path cost rather than just contention.
+        wait_ms = (time.monotonic() - t_acquire_start) * 1000.0
+        try:
+            from backend.core.request_telemetry import thread_wait_histogram
+
+            thread_wait_histogram().record(
+                wait_ms,
+                {
+                    "service": self.service_key,
+                    "outcome": "reused" if reused_con is not None else "created",
+                    "waited": str(waited).lower(),
+                },
+            )
+        except Exception:
+            # OTel SDK not initialised (tests) or histogram creation failed —
+            # never let telemetry instrumentation break a checkout.
+            pass
+        self._record_wait_sample(wait_ms)
 
         # Outside lock. Both branches can call ``update_iceberg_view`` which
         # may take seconds when an Iceberg snapshot reload or S3 manifest read
@@ -314,9 +366,9 @@ class _Pool:
         fails, discard the connection and let the caller retry.
         """
         try:
-            from backend.core import iceberg
+            from backend.core.iceberg import view as iceberg_view
 
-            current = iceberg._view_cache.get(self.service_key)
+            current = iceberg_view._view_cache.get(self.service_key)
             stamped_view = _get_conn_state(con, "view_fingerprint")
             stamped_buf = _get_conn_state(con, "buffer_mtime")
             current_buf = _safe_buffer_mtime(src)
@@ -324,7 +376,7 @@ class _Pool:
                 # View AND underlying buffer set match what we bound last
                 # time — nothing to do.
                 return con
-            iceberg.update_iceberg_view(con, src)
+            iceberg_view.update_iceberg_view(con, src)
             self._stamp_fingerprint(con, src)
             return con
         except Exception as e:
@@ -332,11 +384,72 @@ class _Pool:
             self._discard(con)
             raise
 
+    def warm_idle(self, src: dict) -> None:
+        """Rebind every idle connection to the latest cached view.
+
+        Called by writer-side cron jobs (sync, commit) after they mutate
+        state that invalidates the per-service _view_cache fingerprint.
+        Drains the idle queue under the lock, binds the cached view DDL
+        on each conn via _try_fast_path_view (which handles the CREATE OR
+        REPLACE VIEW → TEMP VIEW translation), re-stamps the fingerprint,
+        then returns every conn to the queue. Sequential because TEMP
+        VIEWs are per-connection in DuckDB and a single connection handle
+        is not safe to call from multiple threads.
+
+        Drain-then-return rather than pop-bind-put-per-conn because _idle
+        is a LIFO queue: pop-then-put returns the same conn on the next
+        pop, so we'd just keep warming one slot.
+
+        Bookkeeping: _in_use is unchanged across drain + return because
+        drained conns are conceptually "held by warm_idle" — same slot
+        in the invariant `_in_use == checked_out + idle_count`. A
+        concurrent acquirer that arrives mid-warm either builds a new
+        conn (if _in_use < max_size) or waits on _cond, identical to
+        today's behavior.
+        """
+        from backend.core.iceberg import view as iceberg_view
+
+        drained: list[duckdb.DuckDBPyConnection] = []
+        with self._cond:
+            while True:
+                try:
+                    drained.append(self._idle.get_nowait())
+                except queue.Empty:
+                    break
+        if not drained:
+            return
+
+        for con in drained:
+            try:
+                iceberg_view._try_fast_path_view(con, src)
+                self._stamp_fingerprint(con, src)
+            except Exception as e:
+                logger.warning(
+                    "[pool] %s: warm_idle bind failed (will rebind on next checkout): %s",
+                    self.service_key,
+                    e,
+                )
+
+        with self._cond:
+            for con in drained:
+                try:
+                    self._idle.put_nowait(con)
+                    self._cond.notify()
+                except queue.Full:
+                    # Should not happen — we drained this same queue under the
+                    # same lock with no intervening puts. Defensive close.
+                    try:
+                        con.close()
+                    except Exception:
+                        pass
+                    self._in_use -= 1
+                    self._cond.notify()
+
     def _stamp_fingerprint(self, con: duckdb.DuckDBPyConnection, src: dict | None = None) -> None:
         try:
-            from backend.core import iceberg
+            from backend.core.iceberg import view as iceberg_view
 
-            current = iceberg._view_cache.get(self.service_key)
+            current = iceberg_view._view_cache.get(self.service_key)
             buf_mtime = _safe_buffer_mtime(src) if src is not None else None
             _set_conn_state(
                 con,
@@ -358,14 +471,55 @@ class _Pool:
             return
         for (name,) in rows:
             try:
-                con.execute(f"DROP TABLE IF EXISTS {name}")
+                con.execute(f'DROP TABLE IF EXISTS "{name}"')
             except Exception:
                 # Best-effort — if a single table fails to drop, keep going.
                 pass
 
+    def _record_wait_sample(self, wait_ms: float) -> None:
+        """Append a checkout wait-time sample to the bounded ring buffer.
+
+        Lock-protected so concurrent acquirers don't trample the deque's
+        internal state (CPython's deque IS thread-safe for single ops, but
+        we also read+sort it from ``_wait_stats`` which would race).
+        """
+        with self._wait_samples_lock:
+            self._wait_samples.append(wait_ms)
+
+    def _wait_stats(self) -> dict:
+        """Return percentile summary over the recent-samples ring buffer.
+
+        Computed on-read (sort a snapshot, no continuous histogram) — at
+        ~1024 samples this is well under 1 ms. Returns zeros when the
+        buffer is empty so the admin UI can render a stable shape from
+        boot (no conditional rendering churn). Counts are emitted so the
+        operator can tell whether a green p95 reflects "no contention"
+        or "no samples yet".
+        """
+        with self._wait_samples_lock:
+            snap = list(self._wait_samples)
+        n = len(snap)
+        if n == 0:
+            return {"count": 0, "p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "max_ms": 0.0, "mean_ms": 0.0}
+        snap.sort()
+
+        # Nearest-rank percentile — fine at this sample count.
+        def _pct(p: float) -> float:
+            idx = min(n - 1, max(0, int(round(p * (n - 1)))))
+            return round(snap[idx], 2)
+
+        return {
+            "count": n,
+            "p50_ms": _pct(0.50),
+            "p95_ms": _pct(0.95),
+            "p99_ms": _pct(0.99),
+            "max_ms": round(snap[-1], 2),
+            "mean_ms": round(sum(snap) / n, 2),
+        }
+
     def stats(self) -> dict:
         with self._cond:
-            return {
+            base = {
                 "service": self.service_key,
                 "max_size": self.max_size,
                 "in_use": self._in_use,
@@ -374,6 +528,11 @@ class _Pool:
                 "reused_total": self._reused_total,
                 "discarded_total": self._discarded_total,
             }
+        # Wait-stats snapshot OUTSIDE the pool lock — its own lock guards
+        # the sample deque, and the call would otherwise tie checkout
+        # waiters up behind a sort.
+        base["wait"] = self._wait_stats()
+        return base
 
 
 class _PoolBusy(Exception):
@@ -402,31 +561,72 @@ def checkout_connection(src: dict, max_wait: float = 10.0):
     Falls back to the legacy always-fresh path when ``DUCKDB_CONNECTION_POOL``
     is disabled. Returns the connection to the pool on clean exit; discards
     it on any exception so a poisoned connection doesn't get reused.
+
+    The yielded value is an :class:`InstrumentedDuckDBConnection` proxy that
+    records every ``execute()``/``sql()``/``query()`` in the Live Query
+    Monitor registry. The proxy is local to this contextmanager — the raw
+    connection is what flows into/out of the pool — so the pool's
+    ``id(con)``-keyed state ([_conn_state]) and ``pool.release(raw_con, ...)``
+    bookkeeping are untouched.
     """
     if not _pool_enabled():
         from backend.core.duckdb import get_connection
 
-        con = get_connection(source=src, read_only=True, max_wait=max_wait)
+        raw_con = get_connection(source=src, read_only=True, max_wait=max_wait)
+        wrapped = _instrument(raw_con, service_key=src.get("name") or src.get("service_id"))
         try:
-            yield con
+            yield wrapped
         finally:
             try:
-                con.close()
+                raw_con.close()
             except Exception:
                 pass
         return
 
     service_key = src.get("name") or src.get("service_id") or "default"
     pool = _get_pool(service_key)
-    con = pool.acquire(src, max_wait=max_wait)
+    raw_con = pool.acquire(src, max_wait=max_wait)
+    wrapped = _instrument(raw_con, service_key=service_key)
     errored = False
     try:
-        yield con
+        yield wrapped
     except Exception:
         errored = True
         raise
     finally:
-        pool.release(con, errored=errored)
+        # Always release the RAW connection — pool internals key on id(raw)
+        # and _conn_state lookups would miss if we passed the proxy in.
+        pool.release(raw_con, errored=errored)
+
+
+def _instrument(raw_con, *, service_key: str | None):
+    """Wrap a raw DuckDB connection in the live-query monitor proxy.
+
+    Lazy import so the duckdb_pool module stays importable in tests that
+    don't pull in the registry. Returns the raw connection unchanged if
+    instrumentation construction fails — instrumentation must never block
+    a checkout."""
+    try:
+        from backend.core.query_instrumentation import InstrumentedDuckDBConnection
+
+        return InstrumentedDuckDBConnection(raw_con, service_id=service_key)
+    except Exception:
+        logger.debug("DuckDB live-instrumentation skipped", exc_info=True)
+        return raw_con
+
+
+def warm_pool_for_service(service_key: str, src: dict) -> None:
+    """Warm the per-service pool's idle connections to the latest view.
+
+    Called by writer-side cron jobs (sync, commit) after they mutate state
+    that invalidates _view_cache. No-op if no pool exists yet (no readers
+    have queried this service).
+    """
+    with _pools_lock:
+        pool = _pools.get(service_key)
+    if pool is None:
+        return
+    pool.warm_idle(src)
 
 
 def get_all_stats() -> list[dict]:

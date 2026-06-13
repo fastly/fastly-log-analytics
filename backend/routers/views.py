@@ -54,15 +54,21 @@ def create_view(view: SavedView, request: Request):
 
 @router.delete("/{view_id}")
 def delete_view(view_id: str, request: Request, service_id: str | None = Depends(get_service_id)):
+    # Security: service_id is required (audit finding 018). The pre-fix
+    # variant fell through to an O(N) scan across every tenant DB when
+    # service_id was absent, which an authenticated user could trivially
+    # exploit for resource exhaustion. Reject early with a 400.
+    if not service_id:
+        raise HTTPException(status_code=400, detail={"error": "service_id_required"})
     # Security: pre-flight scope check, mirrors alerts.delete_alert.
     allowed = _analyst_allowed_services(request)
     if allowed is not None:
-        existing = repo.get_view_by_id(view_id)
+        existing = repo.get_view_by_id(view_id, service_id)
         if existing and existing.get("service_id") not in allowed:
             raise HTTPException(
                 status_code=403,
                 detail={"error": "service_not_authorized", "service": existing.get("service_id")},
             )
-    res = repo.delete_view(view_id, service_id_hint=service_id)
+    res = repo.delete_view(view_id, service_id)
     sync_admin_state(res.get("service_id"))
     return res

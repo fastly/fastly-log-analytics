@@ -195,6 +195,11 @@ def toggle_alert_enabled(
     request: Request,
     service_id: str | None = Depends(get_service_id),
 ):
+    # Security: service_id is required (audit finding 018). The pre-fix
+    # variant fell through to an O(N) cross-tenant scan when service_id
+    # was absent.
+    if not service_id:
+        raise HTTPException(status_code=400, detail={"error": "service_id_required"})
     # Security: pre-flight scope check BEFORE the mutation. Earlier
     # implementation toggled first and then 403'd on the result, so a
     # cross-tenant write would still land and the analyst would just see
@@ -202,13 +207,14 @@ def toggle_alert_enabled(
     # unauthorized session.
     allowed = _analyst_allowed_services(request)
     if allowed is not None:
-        existing = repo.get_alert_by_id(alert_id)
+        existing = repo.get_alert_by_id(alert_id, service_id)
         if existing and existing.get("service_id") not in allowed:
             raise HTTPException(
                 status_code=403,
                 detail={"error": "service_not_authorized", "service": existing.get("service_id")},
             )
-    res = repo.toggle_alert(alert_id, body.enabled, service_id_hint=service_id)
+    res = repo.toggle_alert(alert_id, body.enabled, service_id)
+    res.setdefault("service_id", service_id)
     sync_admin_state(res.get("service_id"))
     return AlertPreviewResponse.with_telemetry(data=res)
 
@@ -219,17 +225,21 @@ def delete_alert(
     request: Request,
     service_id: str | None = Depends(get_service_id),
 ):
+    # Security: service_id is required (audit finding 018).
+    if not service_id:
+        raise HTTPException(status_code=400, detail={"error": "service_id_required"})
     # Pre-flight scope check: look up the alert's service_id before
     # deleting so we don't leak the existence of cross-tenant alerts
     # via a delete-then-403 pattern.
     allowed = _analyst_allowed_services(request)
     if allowed is not None:
-        existing = repo.get_alert_by_id(alert_id)
+        existing = repo.get_alert_by_id(alert_id, service_id)
         if existing and existing.get("service_id") not in allowed:
             raise HTTPException(
                 status_code=403,
                 detail={"error": "service_not_authorized", "service": existing.get("service_id")},
             )
-    res = repo.delete_alert(alert_id, service_id_hint=service_id)
+    res = repo.delete_alert(alert_id, service_id)
+    res.setdefault("service_id", service_id)
     sync_admin_state(res.get("service_id"))
     return AlertPreviewResponse.with_telemetry(data=res)

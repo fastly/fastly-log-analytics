@@ -93,8 +93,13 @@ def build_where_clause(
                 conditions.append(f"timestamp_hour <= {_add_param(end_hour)}")
 
     for filter_key, spec in filters.items():
-        # Strip filter_ / xfilter_ prefixes and numeric suffixes that the
-        # frontend appends to guarantee unique dict keys.
+        # Strip filter_ / xfilter_ prefixes and the `_<n>` dedup suffix that
+        # frontend buildFiltersPayload appends when the same column needs
+        # both include + exclude buckets. The frontend filterStore.addFilter
+        # guard rejects column names matching /_\d+$/ at entry, so a real
+        # field whose name ends in `_<digit>` cannot reach this strip and
+        # be corrupted — any future field naming convention must preserve
+        # that constraint or this regex needs to change.
         col = filter_key
         for prefix in ("xfilter_", "filter_"):
             if col.startswith(prefix):

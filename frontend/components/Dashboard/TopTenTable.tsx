@@ -69,7 +69,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
     }
 
     return (
-      <div className="flex flex-col border rounded-lg p-4 h-full bg-card">
+      <div className="flex flex-col border rounded-lg p-4 h-full bg-card [content-visibility:auto] [contain-intrinsic-size:300px]">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-medium tracking-tight flex items-center gap-1.5">
             {icon} {title}
@@ -102,7 +102,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
   }
 
   return (
-    <div className="flex flex-col border rounded-lg p-4 h-full bg-card">
+    <div className="flex flex-col border rounded-lg p-4 h-full bg-card [content-visibility:auto] [contain-intrinsic-size:300px]">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium tracking-tight flex items-center gap-1.5">
           {icon} {title} <span className="text-muted-foreground font-normal text-xs ml-1">(Top 10)</span>
@@ -114,6 +114,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
               <Button
                 variant="ghost"
                 size="icon"
+                aria-label={copied ? 'Copied!' : 'Copy table as CSV'}
                 className="h-7 w-7 text-muted-foreground hover:text-primary"
                 onClick={handleCopyCSV}
               >
@@ -133,14 +134,14 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
           const delta = calculateDelta(item.count, compCount)
 
           return (
-            <div 
-              key={i} 
+            <div
+              key={i}
               className="group flex items-center justify-between py-1.5 px-2 -mx-2 rounded-sm cursor-pointer hover:bg-muted/50 text-sm relative overflow-hidden"
               onClick={() => onRowClick?.(field ?? '', item.value as string | number)}
               title={String(displayVal)}
             >
-              <div 
-                className="absolute inset-y-0 left-0 bg-primary/10 transition-all duration-300" 
+              <div
+                className="absolute inset-y-0 left-0 bg-primary/10 transition-all duration-300"
                 style={{ width: `${(item.count / maxCount) * 100}%` }}
               />
               <span className="relative z-10 truncate pr-4 max-w-[65%]">

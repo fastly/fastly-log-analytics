@@ -343,12 +343,10 @@ def test_multiple_set_cookie_headers_survive_reconstruction():
     cookies = r.headers.get_list("set-cookie")
     joined = " | ".join(cookies)
     assert any("alpha=A" in c for c in cookies), (
-        f"the Set-Cookie that sets `alpha` was dropped during reconstruction. "
-        f"saw: {joined!r}"
+        f"the Set-Cookie that sets `alpha` was dropped during reconstruction. saw: {joined!r}"
     )
     assert any("beta=" in c and ("Max-Age=0" in c or "expires=" in c.lower()) for c in cookies), (
-        f"the Set-Cookie that deletes `beta` was dropped during reconstruction. "
-        f"saw: {joined!r}"
+        f"the Set-Cookie that deletes `beta` was dropped during reconstruction. saw: {joined!r}"
     )
 
 

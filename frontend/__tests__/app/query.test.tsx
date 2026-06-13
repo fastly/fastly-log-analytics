@@ -7,11 +7,36 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { client } from '@/lib/api'
 import React from 'react'
 
+// Mock next/navigation
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+  useSearchParams: () => new URLSearchParams(),
+  usePathname: () => '/query',
+}))
+
 // Mock complicated components
 vi.mock('@/components/CodeEditor', () => ({
   CodeEditor: ({ value, onChange }: any) => (
     <textarea data-testid="mock-editor" value={value} onChange={(e) => onChange(e.target.value)} />
   )
+}))
+
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: (options: any) => ({
+    getVirtualItems: () => {
+      const count = options.count || 0
+      return Array.from({ length: count }).map((_, i) => ({
+        index: i,
+        start: i * 40,
+        size: 40,
+      }))
+    },
+    getTotalSize: () => (options.count || 0) * 40,
+  }),
 }))
 
 // Mock the API client
@@ -68,6 +93,9 @@ test('renders query page and executes a query', async () => {
 
   // Verify header
   expect(screen.getByText('Query Explorer')).toBeInTheDocument()
+
+  // Click the Raw SQL tab to switch modes before interacting with the editor
+  await user.click(screen.getByRole('tab', { name: /edit raw sql/i }))
 
   // Type a query. The mocked CodeEditor is a controlled <textarea>; user.clear()
   // + user.type() exercises the focus + per-character input chain. SQL string

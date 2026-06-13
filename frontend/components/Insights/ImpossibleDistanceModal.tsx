@@ -138,7 +138,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
     } else {
       if (map.current.isStyleLoaded()) {
         map.current.setPaintProperty('background', 'background-color', isDark ? '#18181b' : '#f4f4f5')
-        
+
         if (map.current.getLayer('countries')) {
           map.current.setPaintProperty('countries', 'fill-color', isDark ? '#27272a' : '#e4e4e7')
           map.current.setPaintProperty('countries', 'fill-outline-color', isDark ? '#3f3f46' : '#d4d4d8')
@@ -172,7 +172,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
               }
             ]
           })
-          
+
           const bounds = new maplibregl.LngLatBounds()
           bounds.extend([data.client_lon, data.client_lat])
           bounds.extend([data.pop_lon, data.pop_lat])
@@ -249,7 +249,7 @@ export function ImpossibleDistanceModal({ isOpen, onOpenChange, data }: Impossib
   const c_fibre = 200000
   const one_way_ms = data.tcp_rtt / 2 / 1000
   const required_speed = data.distance_km / (one_way_ms / 1000)
-  
+
   const violation_ratio = required_speed / c_fibre
   const exceeds_vacuum = required_speed > c
 
@@ -309,7 +309,7 @@ export function ImpossibleDistanceModal({ isOpen, onOpenChange, data }: Impossib
               </h4>
               <div className="space-y-1">
                 <p className="text-xs leading-relaxed">
-                  To cover {data.distance_km.toLocaleString()} km in {one_way_ms.toFixed(2)} ms (one-way), 
+                  To cover {data.distance_km.toLocaleString()} km in {one_way_ms.toFixed(2)} ms (one-way),
                   the signal would need to travel at:
                 </p>
                 <p className="font-mono text-lg font-bold text-center py-1">

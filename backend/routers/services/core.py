@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from backend.deps import get_service_id, get_source
@@ -16,12 +18,47 @@ from backend.utils.router_utils import sse_flush_preamble as _sse_flush
 router = APIRouter(prefix="/api", tags=["services"])
 
 
+# N-2: fields safe to surface to a remote analyst on ``GET /api/services``.
+# The full enriched dict contains operator infra strings (cdn_url,
+# cdn_service_id, fos_bucket, fos_region, ngwaf_workspace_id) plus DuckDB
+# internals (duckdb_size_bytes, cache_file_count, log_row_count) and per-
+# service cron schedules — none of which the analyst frontend renders.
+# Anything not in this set is stripped before the response leaves the
+# router for analyst sessions.
+_ANALYST_SAFE_SERVICE_FIELDS = frozenset(
+    {
+        "service_id",
+        "name",
+        "access_level",
+        "is_active",
+    }
+)
+
+
+def _trim_for_analyst(services: list[dict], allowed_ids: set[str]) -> list[dict]:
+    out: list[dict] = []
+    for svc in services:
+        sid = svc.get("service_id", "")
+        if sid not in allowed_ids:
+            continue
+        out.append({k: v for k, v in svc.items() if k in _ANALYST_SAFE_SERVICE_FIELDS})
+    return out
+
+
 @router.get("/services", response_model=ServicesListResponse)
-def api_services_list(service_id: str | None = Depends(get_service_id)):
+def api_services_list(request: Request, service_id: str | None = Depends(get_service_id)):
     from backend.services.service_manager import get_enriched_services
 
     _debug_queries: list[dict] = []
     result = get_enriched_services(service_id)
+
+    # N-2: analysts get a slim, whitelisted view scoped to their invite's
+    # service_ids. Admins (analyst_session is None) see the full enriched
+    # list, unchanged.
+    analyst_session = getattr(request.state, "analyst_session", None)
+    if analyst_session is not None:
+        allowed = set(analyst_session.service_ids or [])
+        result = _trim_for_analyst(result, allowed)
 
     return ServicesListResponse.with_telemetry(services=result, debug_queries=_debug_queries)
 
@@ -149,10 +186,7 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                         from backend.core import metadata_db
 
                         if service_id:
-                            con = metadata_db.get_con(service_id)
-                            row = con.execute(
-                                "SELECT status, log_output FROM cron_runs WHERE id = ?", (run_id,)
-                            ).fetchone()
+                            row = metadata_db.get_cron_run_result(service_id, run_id)
                             if row:
                                 status = row["status"]
                                 log_output = row["log_output"]
@@ -305,7 +339,7 @@ def api_cron_schedule(source: dict = Depends(get_source)):
 
 
 @router.patch("/services/{service_id}/credentials")
-def api_service_update_credentials(service_id: str, body: dict):
+def api_service_update_credentials(request: Request, service_id: str, body: dict):
     """Rotate FOS credentials for a service.
 
     Two modes:
@@ -320,6 +354,11 @@ def api_service_update_credentials(service_id: str, body: dict):
 
     from backend import config as svcconfig
     from backend.core.duckdb import _get_fos_client
+
+    analyst_session = getattr(request.state, "analyst_session", None)
+    if analyst_session is not None:
+        if service_id not in set(analyst_session.service_ids or []):
+            raise HTTPException(status_code=403, detail={"error": "Access denied"})
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -409,14 +448,52 @@ def api_service_rename(service_id: str, body: dict):
 
 
 from backend.models.services import LoggingSettingsResponse
+from backend.utils.bounded_cache import BoundedTTLCache
+
+# Process-local response cache for /api/services/{service_id}/logging-settings.
+# The endpoint chains 2-3 Fastly API calls (get_active_version → GET endpoint
+# → find_condition) costing ~700ms cold. Per the perf audit it fires on
+# every /alerts page nav and every tab refocus inside the alerts UI, so the
+# same Fastly payload is fetched repeatedly within a single user session.
+#
+# Cached value shape: the full pre-pydantic dict that LoggingSettingsResponse
+# wraps. We stamp ``"_is_cached": True`` on hits so the Debug Panel can
+# distinguish cache vs cold and ``section_timings`` stays meaningful.
+#
+# Invalidation: ``api_service_update_logging_settings`` calls
+# ``_logging_settings_cache.pop(service_id, None)`` after a successful
+# Fastly mutation so the next read returns the user's own write, not the
+# stale snapshot.
+_LOGGING_SETTINGS_CACHE_TTL = 300.0  # 5 minutes
+_logging_settings_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_LOGGING_SETTINGS_CACHE_TTL)
 
 
 @router.get("/services/{service_id}/logging-settings", response_model=LoggingSettingsResponse)
 def api_service_logging_settings(service_id: str):
     import re
+    import time as _time
     import urllib.parse
 
     from backend import config as svcconfig
+
+    # Per-phase wall-clock for the two-three Fastly API round-trips this
+    # endpoint makes. Per perf audit /api/services/{service_id}/logging-
+    # settings is ~742 ms on the alerts page; section_timings tells us
+    # how that splits between get_active_version / GET endpoint /
+    # find_condition so the caching work targets the right call.
+    section_timings: list[dict] = []
+
+    def _phase(name: str, t0: float) -> None:
+        section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
+
+    cached_fields = _logging_settings_cache.get(service_id)
+    if cached_fields is not None:
+        return LoggingSettingsResponse.with_telemetry(
+            ok=True,
+            section_timings=[],
+            is_cached=True,
+            **cached_fields,
+        )
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -427,17 +504,23 @@ def api_service_logging_settings(service_id: str):
         from backend.core.fastly.client import fastly
         from backend.core.fastly.service import find_condition, get_active_version
 
+        _t = _time.perf_counter()
         active_ver = get_active_version(service_id, token)
+        _phase("get_active_version", _t)
         if not active_ver:
             raise HTTPException(status_code=400, detail={"error": "No active version found"})
         encoded_name = urllib.parse.quote(endpoint_name, safe="")
+        _t = _time.perf_counter()
         ep = fastly("GET", f"/service/{service_id}/version/{active_ver}/logging/s3/{encoded_name}", token=token)
+        _phase("get_logging_endpoint", _t)
         sample_rate = 100
         edge_only = False
         custom_condition = ""
         cond_name = ep.get("response_condition")
         if cond_name:
+            _t = _time.perf_counter()
             cond = find_condition(cond_name, service_id, active_ver, token)
+            _phase("find_condition", _t)
             stmt = cond.get("statement", "") if cond else ""
             m = re.search("randombool\\((\\d+),", stmt)
             if m:
@@ -466,17 +549,26 @@ def api_service_logging_settings(service_id: str):
                 format_match = False
         except Exception:
             pass
-        from backend.models.services import LoggingSettingsResponse
+
+        # Cache only the business fields — telemetry (debug_queries,
+        # debug_calls, section_timings, is_cached) is regenerated per
+        # request so the Debug Panel keeps showing per-request data even
+        # on cache hits.
+        cacheable = {
+            "prefix": prefix,
+            "period": ep.get("period", 60),
+            "sample_rate": sample_rate,
+            "edge_only": edge_only,
+            "custom_condition": custom_condition,
+            "format_match": format_match,
+            "version": active_ver,
+        }
+        _logging_settings_cache[service_id] = cacheable
 
         return LoggingSettingsResponse.with_telemetry(
             ok=True,
-            prefix=prefix,
-            period=ep.get("period", 60),
-            sample_rate=sample_rate,
-            edge_only=edge_only,
-            custom_condition=custom_condition,
-            format_match=format_match,
-            version=active_ver,
+            section_timings=section_timings,
+            **cacheable,
         )
     except HTTPException:
         raise
@@ -492,7 +584,7 @@ def api_service_log_fields_get(service_id: str):
 
     from backend import config as svcconfig
     from backend.core import duckdb as _db
-    from backend.core import log_fields as lf
+    from backend.core import field_registry as lf
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -558,7 +650,7 @@ def api_service_log_fields_set(service_id: str, body: LogFieldsUpdateRequest):
     from datetime import datetime
 
     from backend import config as svcconfig
-    from backend.core import log_fields as lf
+    from backend.core import field_registry as lf
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -656,6 +748,11 @@ def api_service_update_logging_settings(
         raise HTTPException(status_code=400, detail={"error": "Rotation period must be between 1 and 86400 seconds"})
     if not 1 <= sample_rate <= 100:
         raise HTTPException(status_code=400, detail={"error": "Sample rate must be between 1 and 100"})
+    if prefix and not re.match(r"^[A-Za-z0-9/_-]*$", prefix):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Invalid prefix. Use alphanumerics, /, _, -."},
+        )
     token = cfg.get("fastly_api_key", "")
     endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
     prefix = prefix.strip("/")
@@ -678,6 +775,11 @@ def api_service_update_logging_settings(
             }
             for event in update_logging_endpoint(update_cfg, token):
                 if event.get("type") == "done":
+                    # The Fastly mutation succeeded — drop the cached GET
+                    # response so the next /logging-settings read reflects
+                    # the user's own write instead of the up-to-5-min-old
+                    # snapshot. Safe to call even if the key isn't present.
+                    _logging_settings_cache.pop(service_id, None)
                     fresh_cfg = svcconfig.load_config(service_id) or cfg
                     fresh_prov = fresh_cfg.setdefault("provisioning", {})
                     fresh_prov["sample_rate"] = sample_rate
@@ -765,7 +867,7 @@ def api_ngwaf_sync(service_id: str):
     from backend.utils.ngwaf import fetch_verified_bots_paged
     from backend.utils.ngwaf_bot_cache import cleanup_old_bots, upsert_bots
 
-    def stream():
+    def stream() -> Iterator[str]:
         yield from _sse_flush()
         cfg = svcconfig.load_config(service_id)
         if not cfg:
@@ -867,7 +969,7 @@ def api_list_custom_fields(service_id: str):
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         raise HTTPException(status_code=404, detail={"error": "Service not found"})
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     lf = lf_module.get_lf_config(cfg)
     return CustomFieldsListResponse(fields=lf.get("custom_fields", []))
@@ -885,7 +987,11 @@ def _check_iceberg_type_lock(
     if not src:
         return
     try:
-        from backend.core.iceberg import _DUCKDB_TO_ICEBERG, _get_catalog, _table_identifier
+        from backend.core.iceberg import (  # type: ignore[attr-defined]
+            _DUCKDB_TO_ICEBERG,
+            _get_catalog,
+            _table_identifier,
+        )
 
         catalog = _get_catalog(src)
         identifier = _table_identifier(src)
@@ -915,7 +1021,7 @@ def api_create_custom_field(service_id: str, body: CustomFieldCreate):
 
     from backend import config as svcconfig
     from backend import provision
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -963,7 +1069,7 @@ def api_update_custom_field(service_id: str, field_name: str, body: CustomFieldU
     from backend import config as svcconfig
     from backend import provision
     from backend.core import duckdb as _db
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -984,7 +1090,10 @@ def api_update_custom_field(service_id: str, field_name: str, body: CustomFieldU
         src = _db.get_source_for_service(service_id)
         if src:
             try:
-                from backend.core.iceberg import _get_catalog, _table_identifier
+                from backend.core.iceberg import (  # type: ignore[attr-defined]
+                    _get_catalog,
+                    _table_identifier,
+                )
 
                 catalog = _get_catalog(src)
                 identifier = _table_identifier(src)
@@ -1038,7 +1147,7 @@ def api_delete_custom_field(service_id: str, field_name: str):
     from datetime import UTC, datetime
 
     from backend import config as svcconfig
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -1070,7 +1179,7 @@ def api_delete_custom_field(service_id: str, field_name: str):
 def api_validate_custom_vcl(service_id: str, body: VclLintRequest):
     from backend import config as svcconfig
     from backend import provision
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -1109,7 +1218,7 @@ def api_export_custom_fields(service_id: str):
     import json
 
     from backend import config as svcconfig
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -1128,7 +1237,7 @@ def api_import_custom_fields(service_id: str, body: dict):
 
     from backend import config as svcconfig
     from backend import provision
-    from backend.core import log_fields as lf_module
+    from backend.core import field_registry as lf_module
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -1142,7 +1251,10 @@ def api_import_custom_fields(service_id: str, body: dict):
     locked_field_names: set[str] = set()
     try:
         from backend.core import duckdb as _db
-        from backend.core.iceberg import _get_catalog, _table_identifier
+        from backend.core.iceberg import (  # type: ignore[attr-defined]
+            _get_catalog,
+            _table_identifier,
+        )
 
         src = _db.get_source_for_service(service_id)
         if src:

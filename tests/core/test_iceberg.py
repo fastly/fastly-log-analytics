@@ -275,90 +275,80 @@ def test_get_iceberg_schema_field_ids_stable():
         assert dyn_field.field_id == base_field.field_id
 
 
-@patch("backend.core.duckdb._get_fos_client")
-def test_read_metadata_pointer_s3_fallback(mock_get_fos_client):
-    """Test that _read_metadata_pointer correctly falls back to listing S3 and picks the latest metadata JSON."""
-    # Ensure no stale entry from a prior test in the same process leaks in.
-    with iceberg._pointer_cache_lock:
-        iceberg._pointer_cache.clear()
-    source = {"name": "test-svc", "bucket": "mock-bucket", "prefix": "logs"}
-    identifier = ("default", "logs")
-
-    mock_s3 = MagicMock()
-    mock_get_fos_client.return_value = mock_s3
-
-    # Make getting the exact pointer file fail so it falls back to listing
-    mock_s3.get_object.side_effect = Exception("Not found")
-
-    # Simulate an S3 list_objects_v2 response that contains metadata files
-    mock_s3.list_objects_v2.return_value = {
-        "Contents": [
-            {"Key": "logs/iceberg/default/logs/metadata/00000-old.metadata.json"},
-            {"Key": "logs/iceberg/default/logs/metadata/00001-latest.metadata.json"},
-        ]
-    }
-
-    # The pointer should resolve to the alphabetically latest metadata.json
-    loc = iceberg._read_metadata_pointer(source, identifier)
-    assert loc == "s3://mock-bucket/logs/iceberg/default/logs/metadata/00001-latest.metadata.json"
-
-
 def _reset_pointer_cache():
     with iceberg._pointer_cache_lock:
         iceberg._pointer_cache.clear()
 
 
-@patch("backend.core.duckdb._get_fos_client")
-def test_read_metadata_pointer_caches_within_ttl(mock_get_fos_client):
+def test_read_metadata_pointer_s3_fallback(s3_mock, fos_source):
+    """When the pointer file is missing, fall back to listing the metadata
+    dir and pick the alphabetically latest .metadata.json.
+
+    Migrated from MagicMock(boto3) → real moto S3: NoSuchKey now flows
+    through the actual botocore exception path instead of a stubbed
+    ``Exception("Not found")``, so we exercise the real fallback trigger.
+    """
+    _reset_pointer_cache()
+    source = {**fos_source, "prefix": "logs"}
+    identifier = ("default", "logs")
+
+    # Seed two metadata files; deliberately do NOT seed the pointer file
+    # so the GetObject path raises NoSuchKey and the listing fallback runs.
+    for key in (
+        "logs/iceberg/default/logs/metadata/00000-old.metadata.json",
+        "logs/iceberg/default/logs/metadata/00001-latest.metadata.json",
+    ):
+        s3_mock.put_object(Bucket="test-bucket", Key=key, Body=b"{}")
+
+    loc = iceberg._read_metadata_pointer(source, identifier)
+    assert loc == "s3://test-bucket/logs/iceberg/default/logs/metadata/00001-latest.metadata.json"
+
+
+def test_read_metadata_pointer_caches_within_ttl(s3_mock, fos_source):
     """Pre-fix telemetry on 2026-05-20 showed cron_compact calling
     _read_metadata_pointer 4× within the same second (init_table, sync_data,
     get_table_info, get_snapshot_calendar), each costing ~200ms via the
     CDN. The in-process TTL cache must collapse those redundant calls to a
     single wire fetch — that's the entire point of the cache."""
     _reset_pointer_cache()
-    source = {"name": "test-svc", "bucket": "mock-bucket", "prefix": "logs"}
+    source = {**fos_source, "prefix": "logs"}
     identifier = ("default", "logs")
-
-    mock_s3 = MagicMock()
-    mock_get_fos_client.return_value = mock_s3
-    mock_s3.get_object.return_value = {
-        "Body": MagicMock(read=lambda: b"s3://mock-bucket/logs/iceberg/default/logs/metadata/v1.metadata.json")
-    }
-
-    for _ in range(4):
-        loc = iceberg._read_metadata_pointer(source, identifier)
-        assert loc == "s3://mock-bucket/logs/iceberg/default/logs/metadata/v1.metadata.json"
-
-    # Only the first call should have gone to FOS.
-    assert mock_s3.get_object.call_count == 1, (
-        f"Expected 1 FOS call (rest served from cache), got {mock_s3.get_object.call_count}"
+    pointer_value = b"s3://test-bucket/logs/iceberg/default/logs/metadata/v1.metadata.json"
+    s3_mock.put_object(
+        Bucket="test-bucket",
+        Key="logs/iceberg/default/logs/metadata_location.txt",
+        Body=pointer_value,
     )
 
+    with patch.object(s3_mock, "get_object", wraps=s3_mock.get_object) as spy:
+        for _ in range(4):
+            loc = iceberg._read_metadata_pointer(source, identifier)
+            assert loc == pointer_value.decode()
+        assert spy.call_count == 1, f"Expected 1 FOS call (rest served from cache), got {spy.call_count}"
 
-@patch("backend.core.duckdb._get_fos_client")
-def test_read_metadata_pointer_cache_expires_after_ttl(mock_get_fos_client, monkeypatch):
+
+def test_read_metadata_pointer_cache_expires_after_ttl(s3_mock, fos_source, monkeypatch):
     """Even without explicit invalidation, the cache must expire after
     _POINTER_CACHE_TTL_SEC so a long-running process eventually picks up
     pointer updates committed by other processes (Admin from a peer
     backend, manual ops via CDN purge). Tested with TTL=0 to avoid sleep."""
     _reset_pointer_cache()
     monkeypatch.setattr(iceberg, "_POINTER_CACHE_TTL_SEC", 0.0)
-    source = {"name": "test-svc", "bucket": "mock-bucket", "prefix": "logs"}
+    source = {**fos_source, "prefix": "logs"}
     identifier = ("default", "logs")
+    s3_mock.put_object(
+        Bucket="test-bucket",
+        Key="logs/iceberg/default/logs/metadata_location.txt",
+        Body=b"s3://test-bucket/logs/iceberg/default/logs/metadata/v1.metadata.json",
+    )
 
-    mock_s3 = MagicMock()
-    mock_get_fos_client.return_value = mock_s3
-    mock_s3.get_object.return_value = {
-        "Body": MagicMock(read=lambda: b"s3://mock-bucket/logs/iceberg/default/logs/metadata/v1.metadata.json")
-    }
-
-    iceberg._read_metadata_pointer(source, identifier)
-    iceberg._read_metadata_pointer(source, identifier)
-    assert mock_s3.get_object.call_count == 2, "TTL=0 must defeat the cache entirely"
+    with patch.object(s3_mock, "get_object", wraps=s3_mock.get_object) as spy:
+        iceberg._read_metadata_pointer(source, identifier)
+        iceberg._read_metadata_pointer(source, identifier)
+        assert spy.call_count == 2, "TTL=0 must defeat the cache entirely"
 
 
-@patch("backend.core.duckdb._get_fos_client")
-def test_write_metadata_pointer_invalidates_cache(mock_get_fos_client):
+def test_write_metadata_pointer_invalidates_cache(s3_mock, fos_source):
     """Same-process write must bust the cache so the next reader sees the
     fresh value instead of returning the stale pre-commit pointer. The
     cron_compact workflow reads the pointer before commit, writes the new
@@ -366,32 +356,28 @@ def test_write_metadata_pointer_invalidates_cache(mock_get_fos_client):
     refresh — without invalidation the post-commit read would return the
     stale pre-commit value for up to _POINTER_CACHE_TTL_SEC."""
     _reset_pointer_cache()
-    source = {"name": "test-svc", "bucket": "mock-bucket", "prefix": "logs"}
+    source = {**fos_source, "prefix": "logs"}
     identifier = ("default", "logs")
-
-    mock_s3 = MagicMock()
-    mock_get_fos_client.return_value = mock_s3
-
-    # First read: returns v1 and caches it.
-    mock_s3.get_object.return_value = {
-        "Body": MagicMock(read=lambda: b"s3://mock-bucket/logs/iceberg/default/logs/metadata/v1.metadata.json")
-    }
-    loc1 = iceberg._read_metadata_pointer(source, identifier)
-    assert loc1.endswith("v1.metadata.json")
-    assert mock_s3.get_object.call_count == 1
-
-    # Write a new pointer — invalidates cache.
-    iceberg._write_metadata_pointer(source, "s3://mock-bucket/logs/iceberg/default/logs/metadata/v2.metadata.json")
-
-    # Next read: should NOT hit the cache; FOS returns v2.
-    mock_s3.get_object.return_value = {
-        "Body": MagicMock(read=lambda: b"s3://mock-bucket/logs/iceberg/default/logs/metadata/v2.metadata.json")
-    }
-    loc2 = iceberg._read_metadata_pointer(source, identifier)
-    assert loc2.endswith("v2.metadata.json")
-    assert mock_s3.get_object.call_count == 2, (
-        "Write must invalidate; otherwise reader would return stale v1 until TTL elapses"
+    pointer_key = "logs/iceberg/default/logs/metadata_location.txt"
+    s3_mock.put_object(
+        Bucket="test-bucket",
+        Key=pointer_key,
+        Body=b"s3://test-bucket/logs/iceberg/default/logs/metadata/v1.metadata.json",
     )
+
+    with patch.object(s3_mock, "get_object", wraps=s3_mock.get_object) as spy:
+        loc1 = iceberg._read_metadata_pointer(source, identifier)
+        assert loc1.endswith("v1.metadata.json")
+        assert spy.call_count == 1
+
+        # Write a new pointer — invalidates cache. _write_metadata_pointer
+        # writes to S3 itself via the same moto client, so the next read
+        # naturally sees v2 from real storage.
+        iceberg._write_metadata_pointer(source, "s3://test-bucket/logs/iceberg/default/logs/metadata/v2.metadata.json")
+
+        loc2 = iceberg._read_metadata_pointer(source, identifier)
+        assert loc2.endswith("v2.metadata.json")
+        assert spy.call_count == 2, "Write must invalidate; otherwise reader would return stale v1 until TTL elapses"
 
 
 # ── post-sync cache update: rate-limit retry ────────────────────────────────
@@ -2424,6 +2410,7 @@ def test_optimize_table_retries_on_sequence_number_cas_conflict(monkeypatch):
     mock_file.file.partition = (12345,)
     mock_file.file.file_path = "s3://bucket/data.parquet"
     initial_table.scan().plan_files.return_value = [mock_file, mock_file]
+    reloaded_table.scan().plan_files.return_value = [mock_file, mock_file]
 
     fake_con = MagicMock()
     fake_arrow = MagicMock()

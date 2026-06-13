@@ -611,7 +611,7 @@ def enable_scoring(
         scoring_meta["logging_service_active_version"] = new_ver
 
         # Publish the new custom_fields list to FOS's admin_state.json so
-        # read_only analyst hosts (and the GCE prod backend) pick them up
+        # read_only analyst hosts (and the prod VM backend) pick them up
         # on their next import_admin_state tick. Without this, a stale
         # admin_state.json from before scoring was enabled would silently
         # strip our 6 custom_fields on every metadata_sync — exactly the

@@ -1269,6 +1269,12 @@ def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
             "backend.core.iceberg.commit_buffer",
             return_value={"files_committed": 3, "rows_committed": 1500, "snapshot_id": 42},
         ),
+        # Post-commit view-refresh + pool-warm path needs a stand-in DuckDB
+        # connection and a no-op update_iceberg_view. Real get_connection
+        # would block on DB lock retries (default max_wait=300s) inside the
+        # test sandbox.
+        patch("backend.core.iceberg.update_iceberg_view"),
+        patch("backend.core.duckdb.get_connection", return_value=MagicMock()),
         patch("backend.scheduler._run_metadata_sync") as mock_sync,
         patch("backend.cron_progress.cleanup_progress"),
         patch("backend.cron_progress.start_progress"),
@@ -2073,7 +2079,10 @@ def test_run_gap_heal_triggers_full_sweep_on_sustained_loss():
         patch("backend.core.duckdb.get_source_for_service", return_value=_gap_heal_src()),
         patch("backend.core.duckdb.start_cron_run", return_value=43),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **k: log_calls.append((a, k))),
-        patch("backend.scheduler._run_full_sweep", side_effect=lambda sid: full_sweep_calls.append(sid)),
+        patch(
+            "backend.scheduler._run_full_sweep",
+            side_effect=lambda sid, **kw: full_sweep_calls.append((sid, kw)),
+        ),
         patch(
             "backend.routers.admin.compute_log_accounting",
             return_value={"sustained_loss": sustained, "buckets": [], "totals": None},
@@ -2083,7 +2092,12 @@ def test_run_gap_heal_triggers_full_sweep_on_sustained_loss():
     ):
         _run_gap_heal("svc-gap")
 
-    assert full_sweep_calls == ["svc-gap"]
+    assert len(full_sweep_calls) == 1
+    sid, kw = full_sweep_calls[0]
+    assert sid == "svc-gap"
+    # 12% gap → "elevated" band → default sweep budget
+    assert kw["max_files"] == 20_000
+    assert kw["max_seconds"] == 900
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
     assert args[3] == "success"
@@ -2113,7 +2127,10 @@ def test_run_gap_heal_respects_throttle_window():
         patch("backend.core.duckdb.get_source_for_service", return_value=_gap_heal_src()),
         patch("backend.core.duckdb.start_cron_run", return_value=44),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **k: log_calls.append((a, k))),
-        patch("backend.scheduler._run_full_sweep", side_effect=lambda sid: full_sweep_calls.append(sid)),
+        patch(
+            "backend.scheduler._run_full_sweep",
+            side_effect=lambda sid, **kw: full_sweep_calls.append((sid, kw)),
+        ),
         patch(
             "backend.routers.admin.compute_log_accounting",
             return_value={"sustained_loss": sustained, "buckets": [], "totals": None},
@@ -2127,6 +2144,126 @@ def test_run_gap_heal_respects_throttle_window():
     args, kwargs = log_calls[0]
     assert args[3] == "success"
     assert "throttled" in kwargs["summary"]
+
+
+def test_gap_heal_severity_bands():
+    """Threshold matrix for the severity classifier — pins the band each
+    (gap_pct, lost_lines) pair lands in so a future tweak to the bands or
+    the OR/AND logic can't silently downgrade severe loss."""
+    from backend.cron.jobs.sync import _gap_heal_severity
+
+    # Mild: under all elevated floors
+    assert _gap_heal_severity(0.05, 1_000).name == "mild"
+    # Elevated: either gap_pct or lost_lines crosses the elevated floor
+    assert _gap_heal_severity(0.15, 0).name == "elevated"
+    assert _gap_heal_severity(0.0, 15_000).name == "elevated"
+    # Severe band
+    assert _gap_heal_severity(0.55, 0).name == "severe"
+    assert _gap_heal_severity(0.0, 150_000).name == "severe"
+    # Critical
+    assert _gap_heal_severity(0.85, 0).name == "critical"
+    assert _gap_heal_severity(0.0, 600_000).name == "critical"
+    # Exact-boundary lands in the same band (>= comparison)
+    assert _gap_heal_severity(0.80, 0).name == "critical"
+    assert _gap_heal_severity(0.50, 0).name == "severe"
+    assert _gap_heal_severity(0.10, 0).name == "elevated"
+
+
+def test_run_gap_heal_critical_bypasses_throttle_and_widens_sweep():
+    """Critical loss (≥80% gap or ≥500k lost lines) must fire on every
+    detector tick (no throttle) and pass a far larger sweep budget so the
+    backlog drains in hours not days. Without this a single 200k-line
+    burst would take ~40 hours at the default 20k files/run."""
+    from backend.routers.admin import SustainedLossAlert
+    from backend.scheduler import _run_gap_heal
+
+    log_calls = []
+    full_sweep_calls: list[tuple[str, dict]] = []
+    sustained = SustainedLossAlert(
+        started_at="2026-06-11T20:00:00Z",
+        n_buckets=4,
+        max_gap_pct=0.88,
+        total_lost_lines=203_000,
+    )
+    # Pretend a heal happened 1 min ago — would normally throttle.
+    one_min_ago = time.time() - 60
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=_gap_heal_src()),
+        patch("backend.core.duckdb.start_cron_run", return_value=45),
+        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **k: log_calls.append((a, k))),
+        patch(
+            "backend.scheduler._run_full_sweep",
+            side_effect=lambda sid, **kw: full_sweep_calls.append((sid, kw)),
+        ),
+        patch(
+            "backend.routers.admin.compute_log_accounting",
+            return_value={"sustained_loss": sustained, "buckets": [], "totals": None},
+        ),
+        patch("backend.scheduler._last_successful_gap_heal_trigger", return_value=one_min_ago),
+        patch("backend.scheduler._mark_gap_heal_triggered"),
+    ):
+        _run_gap_heal("svc-gap")
+
+    assert len(full_sweep_calls) == 1, "critical loss must bypass throttle"
+    sid, kw = full_sweep_calls[0]
+    assert sid == "svc-gap"
+    assert kw["max_files"] == 100_000, "critical band must widen sweep file budget"
+    assert kw["max_seconds"] == 1800, "critical band must widen sweep time budget"
+    summary = log_calls[0][1]["summary"]
+    assert "severity=critical" in summary
+    assert "max_files=100000" in summary
+
+
+def test_run_gap_heal_severe_uses_15min_throttle():
+    """Severe band (≥50% gap or ≥100k lost lines) cuts throttle to 15 min
+    so a 200k-line burst gets ~4 sweeps/hour instead of one every 4h."""
+    from backend.routers.admin import SustainedLossAlert
+    from backend.scheduler import _run_gap_heal
+
+    log_calls = []
+    full_sweep_calls: list[tuple[str, dict]] = []
+    sustained = SustainedLossAlert(
+        started_at="2026-06-11T20:00:00Z",
+        n_buckets=3,
+        max_gap_pct=0.60,
+        total_lost_lines=150_000,
+    )
+    # 30 min ago — past the 15 min throttle, should trigger.
+    thirty_min_ago = time.time() - 1800
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=_gap_heal_src()),
+        patch("backend.core.duckdb.start_cron_run", return_value=46),
+        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **k: log_calls.append((a, k))),
+        patch(
+            "backend.scheduler._run_full_sweep",
+            side_effect=lambda sid, **kw: full_sweep_calls.append((sid, kw)),
+        ),
+        patch(
+            "backend.routers.admin.compute_log_accounting",
+            return_value={"sustained_loss": sustained, "buckets": [], "totals": None},
+        ),
+        patch("backend.scheduler._last_successful_gap_heal_trigger", return_value=thirty_min_ago),
+        patch("backend.scheduler._mark_gap_heal_triggered"),
+    ):
+        _run_gap_heal("svc-gap")
+
+    assert len(full_sweep_calls) == 1
+    sid, kw = full_sweep_calls[0]
+    assert kw["max_files"] == 50_000, "severe band widens file budget"
+    assert kw["max_seconds"] == 1500
+
+
+def test_run_full_sweep_default_budget_unchanged_for_daily_scheduled_run():
+    """The daily catch-net cron calls ``_run_full_sweep(service_id)``
+    with no kwargs and must get the conservative 20k / 900s defaults —
+    only heal-triggered sweeps should get a bigger budget."""
+    import inspect
+
+    from backend.cron.jobs.sync import _FULL_SWEEP_DEFAULT_MAX_FILES, _FULL_SWEEP_DEFAULT_MAX_SECONDS, _run_full_sweep
+
+    sig = inspect.signature(_run_full_sweep)
+    assert sig.parameters["max_files"].default == _FULL_SWEEP_DEFAULT_MAX_FILES == 20_000
+    assert sig.parameters["max_seconds"].default == _FULL_SWEEP_DEFAULT_MAX_SECONDS == 900
 
 
 def test_sync_jobs_registers_gap_heal_when_logging_service_id_present():
@@ -2155,13 +2292,16 @@ def test_sync_jobs_registers_gap_heal_when_logging_service_id_present():
     assert "gap_heal_svc-heal" in s._job_ids
 
 
-def test_sync_jobs_skips_gap_heal_without_logging_service_id():
-    """No logging_service_id → no gap_heal cron (Fastly Stats call
-    would 400)."""
+def test_sync_jobs_registers_gap_heal_when_only_service_id_present():
+    """Even without an explicit ``logging_service_id`` field, the heal
+    cron must register — ``compute_log_accounting`` falls back to
+    ``service_id`` for the Fastly Stats call, and the scheduler check
+    must do the same. Regression: missing this fallback let a 200k-line
+    burst go unhealed (gap_heal cron was simply never scheduled)."""
     from backend.scheduler import Scheduler
 
     cfg = {
-        "service_id": "svc-nostat",
+        "service_id": "svc-fallback",
         "log_period": 60,
         "access_level": "read_write",
         "provisioning": {"cron_sync": {"enabled": True}},
@@ -2170,14 +2310,43 @@ def test_sync_jobs_skips_gap_heal_without_logging_service_id():
     s = Scheduler()
     with (
         patch("backend.config.list_configs", return_value=[cfg]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-nostat")),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-fallback")),
         patch("backend.core.duckdb.is_configured", return_value=True),
         patch("backend.config.get_ngwaf_workspace_id", return_value=None),
         patch("backend.core.metadata_db.count_alerts", return_value=1),
     ):
         s._sync_jobs()
 
-    assert "gap_heal_svc-nostat" not in s._job_ids
+    assert "gap_heal_svc-fallback" in s._job_ids
+
+
+def test_sync_jobs_skips_gap_heal_when_disabled():
+    """``cron_gap_heal.enabled: False`` must keep the heal cron out of
+    the schedule even if the service has a logging_service_id."""
+    from backend.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-disabled",
+        "log_period": 60,
+        "access_level": "read_write",
+        "logging_service_id": "log-svc-1",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_gap_heal": {"enabled": False},
+        },
+    }
+
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata_db.count_alerts", return_value=1),
+    ):
+        s._sync_jobs()
+
+    assert "gap_heal_svc-disabled" not in s._job_ids
 
 
 def test_check_disk_space_passes_when_plenty_free(tmp_path):

@@ -52,6 +52,28 @@ def _cache_mtime() -> float:
     return ts
 
 
+def get_pattern_set_version() -> str:
+    """Return a stable version string for the currently-loaded bot pattern
+    set. Bumps whenever any source JSON file is refreshed via
+    :func:`fetch_and_cache_source`.
+
+    Used by the wellknown_bots rollup (backend/core/rollups.py) to stamp
+    each materialised row so the reader can detect a pattern-set update
+    and fall back to the live regex scan for hours that were rolled up
+    under the previous set.
+
+    Empty string means no source files exist yet — the rollup writer
+    should skip in that case.
+    """
+    ts = _cache_mtime()
+    if ts == 0.0:
+        return ""
+    # Truncate to whole seconds — the float precision is more than
+    # enough granularity to detect a refresh and avoids spurious version
+    # mismatches from filesystem mtime jitter at sub-second resolution.
+    return f"v{int(ts)}"
+
+
 # ── Source I/O ────────────────────────────────────────────────────────────────
 
 
@@ -297,11 +319,13 @@ def extract_literal_substring(pattern: str) -> str | None:
 # ── Matcher ───────────────────────────────────────────────────────────────────
 
 
-def build_matcher() -> Callable[[str], list[dict]]:
+def build_matcher() -> Callable[[str], tuple[dict, ...]]:
     """Return a cached UA matcher. Rebuilds when source cache files change.
 
     The returned function is internally lru_cached — UA strings in log data
     follow a heavy power-law distribution so repeated lookups are near-free.
+    The matcher returns a tuple (immutable + hashable, plays nicely with
+    ``functools.lru_cache``); callers iterate it.
     """
     current_mtime = _cache_mtime()
 
@@ -398,7 +422,7 @@ def enrich_bot_metadata(df: Any) -> None:
         # Match UAs first so we know exactly which IPs need hostname resolution
         # — then batch-resolve them in one SQLite read instead of opening a
         # fresh connection per row.
-        row_matches: list[tuple[str, list[dict]]] = []
+        row_matches: list[tuple[str, tuple[dict, ...]]] = []
         candidate_ips: list[str] = []
         for ua_val, ip_val in zip(df["ua"], df["ip"]):
             matches = match_ua(str(ua_val) if ua_val else "")

@@ -17,11 +17,20 @@
  * invariants, column visibility, and the resize-race guard.
  */
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import { describe, it, expect, beforeAll, afterEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest'
 import { axe } from 'vitest-axe'
 import React from 'react'
 import { DataTable } from '@/components/DataTable/DataTable'
 import type { ColumnDef } from '@tanstack/react-table'
+
+vi.mock('@tanstack/react-virtual', () => {
+  return {
+    useVirtualizer: (options: any) => ({
+      getVirtualItems: () => Array.from({ length: options.count }).map((_, i) => ({ index: i, start: i * 40, end: (i + 1) * 40 })),
+      getTotalSize: () => options.count * 40,
+    })
+  }
+})
 
 beforeAll(() => {
   global.ResizeObserver = class {

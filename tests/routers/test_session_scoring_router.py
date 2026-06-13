@@ -107,6 +107,27 @@ def test_status_404_on_unknown_service(client, with_config):
     assert r.status_code == 404
 
 
+def test_scoring_admin_routes_reject_service_id_with_invalid_chars(client):
+    """Defense in depth: the ``ServiceId`` Annotated type on every
+    /scoring/* admin endpoint rejects path params containing characters
+    outside ``[A-Za-z0-9_-]`` at the FastAPI boundary (422), so malformed
+    ids never reach load_config / SQL / filesystem code paths. The
+    application layer also rejects unknown ids (via load_config →
+    404), but this catches anything stage-shaped like ``svc;DROP`` or
+    ``svc.dot`` before the request handler even runs.
+
+    Use endpoints that have the ServiceId type guard — /scoring/status
+    is on the main session_scoring router (no guard); the admin routes
+    in session_scoring_admin.py are what we're pinning.
+    """
+    # Semicolon and dot both fall outside [A-Za-z0-9_-] but pass through
+    # FastAPI's route-matching (they're URL-safe inside a single segment).
+    r = client.get("/api/services/svc;DROP/scoring/threshold")
+    assert r.status_code == 422
+    r = client.get("/api/services/svc.dot/scoring/threshold")
+    assert r.status_code == 422
+
+
 # ── /scoring/enable: token resolution ────────────────────────────────────────
 
 
@@ -150,7 +171,7 @@ def test_enable_query_token_overrides_config_token(client, with_config):
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable?token=FROM_QUERY")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "FROM_QUERY"})
     assert r.status_code == 200
     assert captured_token["t"] == "FROM_QUERY"
 
@@ -185,7 +206,7 @@ def test_enable_streams_status_events_then_done(client, with_config):
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable?token=TOKEN")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "TOKEN"})
 
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
@@ -214,7 +235,7 @@ def test_enable_streams_error_event_on_orchestrator_failure(client, with_config)
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable?token=TOKEN")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "TOKEN"})
 
     assert r.status_code == 200  # streaming endpoint always 200; error is in the body
     events = [json.loads(line[len("data: ") :]) for line in r.text.splitlines() if line.startswith("data: ")]
@@ -242,7 +263,7 @@ def test_disable_streams_status_events_then_done(client, with_config):
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/disable?token=TOKEN")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/disable", json={"token": "TOKEN"})
 
     assert r.status_code == 200
     events = [json.loads(line[len("data: ") :]) for line in r.text.splitlines() if line.startswith("data: ")]
@@ -361,7 +382,7 @@ def test_labels_delete_is_idempotent(client):
 def _patch_query_logs(rows: list[dict]):
     """Patch the router's _query_logs helper to return canned rows so we
     don't need a live DuckDB connection for these tests."""
-    return patch("backend.routers.session_scoring._query_logs", return_value=rows)
+    return patch("backend.repositories.session_scoring.query_logs", return_value=rows)
 
 
 def test_top_flagged_returns_query_rows(client):
@@ -503,7 +524,7 @@ def test_evaluation_returns_auc_when_min_samples_met(client, with_config):
         patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
         patch("backend.routers.session_scoring._load_matrix", return_value={"transitions": {}}),
         patch(
-            "backend.routers.session_scoring._reconstruct_labeled_sessions",
+            "backend.repositories.session_scoring.reconstruct_labeled_sessions",
             return_value=[
                 ({"session_id": lbl["sid"], "events": [], "max_edge_score": 0}, lbl["label"]) for lbl in fake_labels
             ],
@@ -564,7 +585,7 @@ def test_curves_computes_perfect_separation_correctly(client, with_config):
     with (
         patch("backend.scoring.labels.list_labels", return_value=fake_labels),
         patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
-        patch("backend.routers.session_scoring._reconstruct_labeled_sessions", return_value=reconstructed),
+        patch("backend.repositories.session_scoring.reconstruct_labeled_sessions", return_value=reconstructed),
     ):
         from backend.routers import session_scoring as _ss
 
@@ -622,7 +643,7 @@ def test_threshold_preview_buckets_sessions_correctly(client, with_config):
     fake_counts = {"good": 2, "bad": 3, "neutral": 0}
 
     with (
-        patch("backend.routers.session_scoring._query_logs", side_effect=_route_query),
+        patch("backend.repositories.session_scoring.query_logs", side_effect=_route_query),
         patch("backend.scoring.labels.list_labels", return_value=fake_labels),
         patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
         patch("backend.routers.session_scoring._bust_analytics_cache"),
@@ -668,7 +689,7 @@ def test_threshold_preview_extreme_thresholds(client, with_config):
         return agg_low if call_count["n"] == 1 else agg_high
 
     with (
-        patch("backend.routers.session_scoring._query_logs", side_effect=_route_query),
+        patch("backend.repositories.session_scoring.query_logs", side_effect=_route_query),
         patch("backend.scoring.labels.list_labels", return_value=[]),
         patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
     ):
@@ -767,7 +788,7 @@ def test_session_events_returns_event_timeline(client, with_config):
             "edge_score_reason": "",
         },
     ]
-    with patch("backend.routers.session_scoring._query_logs", return_value=canned):
+    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/sessions/abc123/events")
     assert r.status_code == 200
     body = r.json()
@@ -784,7 +805,7 @@ def test_session_events_empty_when_sid_not_in_duckdb(client, with_config):
     yet (or rotated away). Return event_count=0, NOT 404 — the UI
     surfaces a 'no events yet' message."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
-    with patch("backend.routers.session_scoring._query_logs", return_value=[]):
+    with patch("backend.repositories.session_scoring.query_logs", return_value=[]):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/sessions/nosuch/events")
     assert r.status_code == 200
     assert r.json()["event_count"] == 0
@@ -840,7 +861,7 @@ def test_scoring_health_returns_expected_shape(client, with_config):
             "l2_high_count": 5,
         }
     ]
-    with patch("backend.routers.session_scoring._query_logs", return_value=canned):
+    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
         from backend.routers import session_scoring as _ss
 
         _ss._analytics_cache.clear()
@@ -864,7 +885,7 @@ def test_scoring_dashboard_returns_all_subobjects(client, with_config):
     with (
         patch("backend.scoring.labels.list_labels", return_value=[]),
         patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
-        patch("backend.routers.session_scoring._query_logs", return_value=[]),
+        patch("backend.repositories.session_scoring.query_logs", return_value=[]),
     ):
         from backend.routers import session_scoring as _ss
 
@@ -1708,3 +1729,42 @@ def test_scoring_enforce_status_code_put_null_resets_to_default(client, with_con
     assert body["is_default"] is True
     assert body["effective_status_code"] == 429
     assert "Reset to default" in body["message"]
+
+
+def test_cached_drops_inflight_entry_on_cache_hit():
+    """Regression: _cached previously skipped the ``_inflight.pop(key)``
+    cleanup whenever the cache-hit branch early-returned, because the
+    cleanup lived in the producer-path try/finally. The result was at
+    most one stuck Lock object per distinct key — bounded by key
+    cardinality but slow growth across the TTL window — and a runtime
+    contract that didn't match the comment above the pop line. Pinned
+    so a regression that puts the try/finally back inside the producer
+    branch fails this test immediately.
+    """
+    from backend.routers import session_scoring as _ss
+
+    _ss._analytics_cache.clear()
+    _ss._inflight.clear()
+    key = ("test_endpoint", "svc-test", 24)
+
+    # Prime the cache via the first call (producer runs once).
+    _ss._cached(key, lambda: {"foo": 1})
+    # First call's finally already cleared _inflight.
+    assert key not in _ss._inflight
+
+    # Second call hits the cache. The fix's outer try/finally must also
+    # clear _inflight on this path, even though the producer never runs.
+    # If a regression collapses the try/finally back around just the
+    # producer, this would leak a Lock here.
+    produced = {"flag": False}
+
+    def producer():
+        produced["flag"] = True
+        return {"foo": 999}
+
+    _ss._cached(key, producer)
+    assert produced["flag"] is False, "cache hit must not invoke producer"
+    assert key not in _ss._inflight, (
+        "regression: _inflight retains a Lock after a cache hit. The fix's "
+        "outer try/finally was reverted into a producer-branch-only finally."
+    )

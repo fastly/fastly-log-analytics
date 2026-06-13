@@ -10,11 +10,40 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from functools import wraps
+from logging import Logger
+from typing import NoReturn
 
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
+
+
+def raise_internal(
+    log: Logger,
+    exc: BaseException,
+    *,
+    code: str = "request_failed",
+    status: int = 500,
+) -> NoReturn:
+    """Log the full exception server-side; raise a generic ``HTTPException``
+    that does NOT echo the original exception message to the client.
+
+    Use at except sites that previously did
+    ``raise HTTPException(status_code=500, detail={"error": str(e)})`` —
+    that pattern leaks upstream API response bodies (e.g. Fastly error
+    text interpolated by ``backend.core.fastly.client.fastly()``) to the
+    caller. ``error_id`` lets operators correlate a client report with
+    the matching server-log line.
+    """
+    error_id = uuid.uuid4().hex[:8]
+    log.exception("%s [error_id=%s]", code, error_id)
+    raise HTTPException(
+        status_code=status,
+        detail={"error": code, "error_id": error_id},
+    ) from exc
+
 
 # ── Debug request formatting ──────────────────────────────────────────────────
 

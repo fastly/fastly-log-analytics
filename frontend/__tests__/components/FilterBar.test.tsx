@@ -37,6 +37,12 @@ vi.mock('@tanstack/react-query', async () => {
   return {
     ...actual,
     useQuery: () => ({ data: undefined, isLoading: false, error: null }),
+    // FilterBar uses queryClient.getQueryState(['bootstrap']) to gate
+    // its log-extents query on bootstrap pending. The test doesn't
+    // mount a QueryClientProvider; return a stub whose getQueryState
+    // says "no bootstrap observed" so the FilterBar code path doesn't
+    // crash and falls through to its existing enabled gate.
+    useQueryClient: () => ({ getQueryState: () => undefined }),
   }
 })
 

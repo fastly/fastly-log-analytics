@@ -10,6 +10,35 @@ export function useBootstrap() {
     queryKey: ['bootstrap'],
     queryFn: async () => {
       const { data } = await client.GET("/api/bootstrap")
+      // Seed dependent caches INSIDE the queryFn so subscribers that
+      // gate on `bootstrap === 'pending' → fire own fetch` find data
+      // already in their target cache by the time React Query unblocks
+      // them. Doing this in a useEffect outside the queryFn races:
+      // bootstrap status transitions pending→success and the
+      // dependent hook re-renders BEFORE useEffect runs, so its
+      // `enabled` flips true and it queries an empty cache. Seeding
+      // here closes that race.
+      if (data?.active_service_id) {
+        const sid = data.active_service_id
+        const seededViews = (data as any).views
+        if (Array.isArray(seededViews)) {
+          queryClient.setQueryData(['views', sid], seededViews)
+        }
+        const seededCatalog = (data as any).log_fields_catalog
+        if (seededCatalog) {
+          queryClient.setQueryData(['log-fields-catalog', sid], seededCatalog)
+        }
+        // Admin-only; analyst sessions get null from the backend.
+        const seededSyncStatus = (data as any).sync_status
+        if (seededSyncStatus) {
+          queryClient.setQueryData(['sync-status', sid], seededSyncStatus)
+        }
+        // Available to both admin and analyst.
+        const seededLogExtents = (data as any).log_extents
+        if (seededLogExtents) {
+          queryClient.setQueryData(['log-extents', sid], seededLogExtents)
+        }
+      }
       return data
     },
     // Bootstrap returns the services list + role flags + analyst session
@@ -32,16 +61,11 @@ export function useBootstrap() {
     setServices((query.data.services ?? []).map(toService))
     setInitialized(true)
 
-    // Seed the views cache from the bootstrap response so ViewSelector
-    // and useUrlFilterSync skip their own /api/views/{id} round-trip on
-    // initial load. The existing ['views', activeServiceId] query keeps
-    // its semantics for service-switch — if the user switches to a
-    // service not in this seed, the granular query fires normally.
-    const seededActive = query.data.active_service_id
-    const seededViews = (query.data as any).views
-    if (seededActive && Array.isArray(seededViews)) {
-      queryClient.setQueryData(['views', seededActive], seededViews)
-    }
+    // Note: views + log-fields-catalog cache seeding now happens
+    // inside the queryFn (synchronously after the fetch resolves) so
+    // dependent hooks gated on bootstrap status find data already in
+    // their target cache. Moving it here would re-introduce the race
+    // where dependent hooks re-render before useEffect runs.
   }, [query.data, setServices, setInitialized, queryClient])
 
   useEffect(() => {
@@ -51,13 +75,13 @@ export function useBootstrap() {
 
     if (!activeServiceId && services.length > 0) {
       const defaultId = query.data.active_service_id && services.some(s => s.id === query.data!.active_service_id)
-        ? query.data.active_service_id 
+        ? query.data.active_service_id
         : services[0]?.id
       if (defaultId) setActiveServiceId(defaultId)
     } else if (activeServiceId && !currentServiceExists) {
       const defaultId = services.length > 0 ? (
         (query.data.active_service_id && services.some(s => s.id === query.data!.active_service_id))
-          ? query.data.active_service_id 
+          ? query.data.active_service_id
           : services[0]?.id
       ) : null
       if (activeServiceId !== defaultId) setActiveServiceId(defaultId)

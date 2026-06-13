@@ -20,7 +20,7 @@ function Tooltip({ ...props }: TooltipPrimitive.Root.Props) {
 }
 
 function TooltipTrigger({ asChild, ...props }: TooltipPrimitive.Trigger.Props & { asChild?: boolean }) {
-  // Note: Base UI uses `render` prop instead of `asChild`. 
+  // Note: Base UI uses `render` prop instead of `asChild`.
   // We spread the props since `render` handles custom tags in Base UI.
   return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />
 }

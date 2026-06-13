@@ -5,6 +5,250 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-06-12
+
+Architecture cleanup release. The post-`v1.2.0` perf branch closed the
+worst read-path latency by stacking remediation on top of an
+architecture that wasn't designed for the workload; this release pays
+that down. The largest backend files were carved into per-concern
+packages, telemetry moved to OpenTelemetry + structlog, tenancy got a
+typed `RequestContext` boundary, frontend hydration warm-up hacks were
+replaced with policy, and the test + type gates ratcheted to a level
+that catches regressions on the way in. Composite endpoints land as a
+hard cutover — frontend + backend ship together, granular endpoints
+deleted.
+
+### Architecture
+
+- **`backend/core/iceberg.py` (4,232 LOC)** → `iceberg/` package
+  (`view`, `catalog`, `warehouse`, `manifest`, `fs`, `_core`,
+  `buffer`, `ddl`, `snapshot_cache`, `dedup`, …). Custom
+  `FosFsspecFileIO(FsspecFileIO)` + `CachedFosS3FileSystem(S3FileSystem)`
+  subclasses replace 5 of the 6 historical `s3fs` monkeypatches;
+  only the `ThreadPoolExecutor.submit` ContextVar wrapper remains
+  (see [MONKEYPATCHES.md](MONKEYPATCHES.md)).
+- **`backend/scheduler.py` (2,843 LOC)** → `backend/cron/` package
+  with `scheduler`, `decorators`, and per-job modules under
+  `cron/jobs/` (`sync`, `commit`, `compaction`, `optimize`, `expire`,
+  `metadata`, `gap_heal`, `rollup_compact_daily`). The scheduler
+  picks the **separate-pool** isolation strategy based on Phase 1
+  thread-wait telemetry; the deferred-view-cache-invalidation hack
+  is gone.
+- **`backend/core/metadata_db.py` (3,168 LOC)** → `backend/core/metadata/`
+  package with concern-partitioned mixins (`base`, `alerts`, `views`,
+  `ingest_log`, `cron_log`, `asn_cache`, `usage_log`, `reconciliation`,
+  `state`). `metadata_db.py` becomes a thin backward-compatible shim.
+- **`backend/utils/tunnel.py` (1,022 LOC)** → `backend/utils/tunnel/`
+  package (`manager`, `session`, `rate_limiter`, `state`,
+  `fingerprint`). The SSH-to-localhost.run path is **deleted entirely**
+  (~400 lines): no more SSH subprocess + sleep-listener + reconnect
+  state machine. Direct-mode only; production has always used direct.
+- **`backend/core/share_db.py` (1,312 LOC)** → `backend/core/share_db/`
+  package (`connection`, `schema`, `invites`, `sessions`, `audit`,
+  `passcode`, `tos`, `settings`). `argon2-cffi` replaces `scrypt` for
+  passcode hashing.
+- **`backend/routers/admin.py` (1,650 LOC)** → `backend/routers/admin/`
+  package (14 sub-modules: `pop_locations`, `ingest`, `trees`,
+  `downloads`, `sync_status`, `compaction`, `health`,
+  `log_accounting`, `iceberg`, `bot_sources` + shared
+  `_helpers` / `_dir_size` / `_router`).
+- **`backend/core/rollups.py` (2,045 LOC)** → `backend/core/rollups/`
+  package (8 sub-modules: `_common`, `time_series`, `sessions`,
+  `hour_bundles`, `day_bundles`, `recompute`, `wellknown_bots`).
+- **`RequestContext` replaces `AnalyticsDeps`** ([`backend/core/request_context.py`](backend/core/request_context.py)).
+  Tenancy is enforced at context construction; routes never parse a
+  `service_id` from a path param. The security-load-bearing private
+  `read_only` attribute is now structurally unexposable as a query
+  param.
+- **Composite endpoints + hard cutover** — `dashboard/bundle`,
+  `security/bundle`, `network/bundle` ship together with the frontend
+  swap. Granular per-card endpoints deleted, `_meta_con` parallel path
+  dropped, `is_cached/_is_cached` alias collapsed,
+  `AnalyticsDeps = RequestContext` shim removed. Top-5 backend files
+  now ≤ 1,461 LOC; no backend file > 1,500.
+
+### Telemetry, observability
+
+- **OpenTelemetry** (`opentelemetry-api/sdk` +
+  `fastapi`/`botocore`/`aiohttp` instrumentors) replaces the four
+  fragmented custom telemetry surfaces. Console exporter ships by
+  default; backends (Jaeger / Tempo / Honeycomb / …) are a
+  deploy-config decision, not part of this release.
+- **`structlog`** wires `trace_id` + `span_id` into structured log
+  output via a custom processor.
+- **`process_context_scope` + `_ACTIVE_CONTEXTS` mirror kept** at
+  [`backend/utils/telemetry.py`](backend/utils/telemetry.py). OTel context
+  propagation uses Python ContextVars under the hood, which inherit
+  the cross-thread limitation (fsspec iothread, pyiceberg
+  ThreadPoolExecutor) the manual mirror was built to solve; removing
+  the mirror would re-introduce the ~80%-NULL telemetry bucket
+  observed on 2026-05-20. Docstring + plan entry document the
+  reasoning.
+- **`RequestTelemetry`** thin wrapper owns section spans, query
+  attribution, call log, and the custom `app.thread_wait_ms` metric
+  that fed the Phase 6 separate-pool decision.
+
+### Reliability, perf
+
+- **`aiodns` + `asyncio.gather` + bulk-transaction sqlite writes** in
+  [`backend/utils/rdns_cache.py`](backend/utils/rdns_cache.py) replace the
+  serial-blocking `socket.gethostbyaddr` loop that wedged the sync
+  worker for minutes on bulk lookups.
+- **`tenacity`** decorator-based retry replaces ad-hoc try/except loops
+  for Fastly API + NGWAF + SQLite WAL-busy paths; centralised policy
+  on `Settings`.
+- **`pydantic-settings`** centralises env-var reads + boot validation
+  (the "TRUSTED_PROXY_IPS required in prod" gate is now a pydantic
+  validator).
+- **`cachetools`** replaces `bounded_cache` / `rdns_cache` /
+  `ngwaf_bot_cache` in-process LRU/TTL implementations.
+- **Structured `.tf.json`** generation replaces f-string HCL +
+  `_hcl_escape` regex (`backend/utils/terraform_gen.py`), eliminating
+  the custom-HCL escaping injection vector.
+- **`orjson` via FastAPI `ORJSONResponse`** for ~5–10× faster JSON
+  serialisation on composite endpoint payloads.
+- **`rich` + `typer`** for the provision CLI; `httpx` everywhere
+  except `telemetry_proxy.py` (which stays on `aiohttp` for the proxy
+  server role).
+- **`nuqs`** as the URL state source on the frontend, replacing the
+  custom Zustand/Effect sync hooks that produced hydration desync on
+  refresh.
+- **`session_scoring._cached`** clears `_inflight` on the cache-hit
+  path too, not only on producer-path teardown — concurrent callers
+  on a hot cache key no longer leak the inflight registration when
+  the producer finishes before they wake up.
+- **`iceberg/buffer.tombstone_buffer_files`** logs + skips on
+  marker-write failure (the immediate-`os.remove` fallback re-opened
+  the in-flight-query race the tombstone grace window exists to
+  close). Pair regression test pins the contract.
+- **`DROP TABLE IF EXISTS` identifier quoting** at 11 temp-table
+  cleanup sites so the drop tolerates reserved keywords / hyphenated
+  service slugs that would otherwise raise.
+
+### Trust topology, middleware
+
+- **Middleware order asserted at boot AND in tests** — the
+  multi-paragraph prose comments in `main.py` were replaced with
+  one-line `# INVARIANT` markers + a boot-time crash if
+  `app.user_middleware` doesn't match the declared tuple. Snapshot
+  tests cover Caddy + docker-compose middleware order too.
+- **`@pytest.mark.security_regression` marker + monotonic-count CI
+  gate** (floor: 24, from `audit-findings/`). Every test covering a
+  verified security fix carries the mark; a refactor cannot silently
+  drop coverage of a known fix.
+- **Trust-topology snapshot tests** pin Caddy `@from_fastly` matcher,
+  XFF forwarding, `/share-login` rate-limit, and the backend
+  `--forwarded-allow-ips=127.0.0.1` flags.
+- **`raise_internal(logger, exc, code, status)`** replaces
+  `raise HTTPException(detail={"error": str(e)})` at every backend
+  except site that previously echoed the original exception message
+  to the client. Detail is now `{"error": <code>, "error_id": <8-hex>}`;
+  the full exception lands in the server log with the same
+  `error_id` so operators triage without the upstream body / token
+  fragments leaking on the wire.
+- **`escape_sql_literal`** applied at every `read_parquet()` /
+  `glob()` site that interpolates a computed path. Closes the
+  injection surface a partially-validated path could open through
+  DuckDB's `read_parquet()` glob expansion.
+- **Caddy container drops privileges** — `caddy/Dockerfile` adds
+  `USER caddy` (the base image ships the user). Caddy is the only
+  externally-facing socket and binds nothing below port 1024, so
+  there's no reason to keep `root` in the runtime.
+
+### Frontend
+
+- **RSC/CSR boundary** documented in `app/_routing.md`. The
+  hidden-Plotly + hidden-MapLibre + `setTimeout` warm-up hacks are
+  dropped; replaced with `modulepreload` + the styledata-event swap
+  pattern.
+- **16 frontend files > 500 LOC split.** `ProvisionWizard.tsx`
+  (3,582 LOC) → `wizard/steps/*` + `state.ts` + `api.ts`;
+  `app/logs/page.tsx` (2,136 LOC) → `_sections/*` + `_state.ts`.
+  `app/admin`, `app/dashboard`, `app/alerts`, `app/security`, etc.
+  all post-split < 500. **No frontend file > 499 LOC.**
+- **Live Query Monitor** — live-first sort, peak-memory column,
+  keyboard shortcuts, URL-persisted filters, per-run inline expand
+  for ×N cron-grouped rows, ≥ 30 s stuck-query pulse, copy-SQL,
+  sound notification removed.
+- **Operations Overview cards** on the admin landing page surface
+  ingest gap + live query activity + slow-query count so the things
+  operators actually care about don't live three clicks deep.
+  Tone-coded (default → attention → warning → critical) so a
+  sustained_loss event jumps out.
+- **Stable React keys on dynamic lists** — `DebugPanel`, `CronLiveLog`,
+  the network metro leaderboard, the query toolbar, and the
+  custom-field drawer now key off a stable identity instead of array
+  index. `useSSE` attaches a monotonic `_id` to each line so
+  append-only feeds (cron progress, query streams) keep stable keys
+  across re-renders.
+- **Accessibility pass** — `FieldGroups` and `FileBrowser` disclosure
+  widgets are real `<button>`s with `aria-expanded`; `SSEModal` uses
+  the base-ui `Dialog` render prop instead of a non-keyboard `<div>`
+  wrapper; per-row "view audit logs" buttons carry an `aria-label`
+  that includes the row's email so screen readers don't read 20
+  identical "View" buttons in a row.
+- **`fetchWithTimeout` helper** (30 s default; heartbeat tightens to
+  10 s) applied to `share-login`, `acknowledge`, and
+  `useAnalystHeartbeat` so a hung request surfaces as an error
+  instead of an infinite spinner.
+
+### Quality gates
+
+- **Backend coverage gate `--cov-fail-under` 78 → 85** (final actual
+  85.05 %). Per-module test waves cover every cleanup-touched module
+  + the post-split `rollups/` and `admin/` packages.
+- **Frontend coverage gate `coverage.thresholds.lines` 44 → 58**
+  (final actual 61.66 %).
+- **`tool.mypy.overrides` `ignore_errors` list: 36 modules → 0.**
+  Every backend module type-checks under default settings. Three real
+  bugs surfaced + fixed during the burndown
+  (`repositories/network.py:260` was passing the DuckDB connection
+  where `get_asn_names` expected `service_id`;
+  `routers/share_auth.py:125,203` had an `iso_z_now() and 24*60*60`
+  cookie `max_age` expression where the `and` was a no-op leftover;
+  `routers/admin.py` shadowed loop variable that defeated narrowing).
+- **mypy per-module strict block: 19 modules opted in**
+  (`disallow_untyped_defs` + `disallow_incomplete_defs` +
+  `check_untyped_defs` + `warn_return_any` + `warn_unused_ignores`).
+  Live-query-monitor surface + every module the v2.0 waves added
+  tests for. Full mypy: 221 source files clean.
+- **Load-harness CI step**: `scripts/emit_perf_latest.py` runs a
+  100K-row synthetic DuckDB workload (~2 s wall); `scripts/perf_gate.sh`
+  fails on > 50 % regression vs `tests/perf/baseline.json`. Production
+  targets (≤ 2,800 / ≤ 1,900 ms on 36 M rows) documented in
+  `baseline.json` `production_targets_comment` and validated by the
+  manual `scripts/dev/loadtest_probe.sh`, not the CI gate (GH Actions
+  runner variance is too high).
+
+### Operations, portability
+
+- **VM-agnostic deploy runbooks** at
+  [`docs/deploy/`](docs/deploy/): `aws_ec2.md`, `azure_vm.md`,
+  `gce.md`, `generic_linux.md`. Storage stays Fastly Object Storage
+  (S3-compatible API; boto3 keeps working). GCE-specific wording in
+  comments renamed to "cloud" / "VM" (the link-local
+  169.254.169.254 metadata IP is identical on AWS + GCE; the SSRF
+  gate works on both).
+- **`scripts/refresh_fastly_cidrs.py`** pulls
+  `api.fastly.com/public-ip-list` and rewrites the Caddy
+  `@from_fastly` block. Manual or cron-scheduled.
+
+### Breaking
+
+- **Composite-endpoint cutover.** The granular per-card endpoints
+  (`/api/dashboard/aggregates`, `/api/dashboard/raw`,
+  `/api/dashboard/top_n`, etc.) are **deleted**; callers must use the
+  composite (`/api/dashboard/bundle`). External integrators were
+  notified 24–48 h ahead.
+- **`AnalyticsDeps`** alias for `RequestContext` is removed.
+- **`is_cached` / `_is_cached`** alias on `BaseResponse` is removed
+  (`is_cached` is the canonical name).
+- **SSH-to-localhost.run analyst sharing** is removed. The laptop-
+  admin tunnel use case is no longer supported; production has always
+  been direct-mode against the Fastly+Caddy public URL.
+
+[2.0.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.0.0
+
 ## [1.2.0] - 2026-06-09
 
 Dashboard performance overhaul plus capability-focused security hardening. Cold and warm dashboard loads drop from seconds to sub-second on large services; sustained concurrent load no longer wedges the backend. Read-path I/O is structurally cut by a per-service DuckDB connection pool, a per-minute time-series rollup bundle, size-capped bin-packing local compaction, composite endpoints that collapse multi-card admin pages into one request, and a frontend pre-warm / hover-prefetch pattern that makes navigation feel instant. Security hardening tightens cross-tenant boundaries, closes a ContextVar propagation hole in the s3fs proxy hook, removes a secret-in-URL leak on downloads, and adds strict validation across the destructive-op surface.

@@ -1059,7 +1059,7 @@ def test_download_folder_returns_zip_with_attachment_disposition(client, test_se
 
     with (
         patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
-        patch("backend.routers.admin._fetch_file_to_zip"),  # never called for empty pages
+        patch("backend.routers.admin.downloads._fetch_file_to_zip"),  # never called for empty pages
     ):
         resp = client.get("/api/download-folder", params={"prefix": "subdir", "root": "raw"})
 
@@ -1078,7 +1078,7 @@ def test_download_folder_uses_root_as_filename_when_prefix_empty(client, test_se
 
     with (
         patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
-        patch("backend.routers.admin._fetch_file_to_zip"),
+        patch("backend.routers.admin.downloads._fetch_file_to_zip"),
     ):
         resp = client.get("/api/download-folder", params={"prefix": "", "root": "raw"})
 
@@ -1092,7 +1092,7 @@ def test_download_folder_invokes_fetch_for_each_listed_object(in_memory_duckdb):
     missing logs)."""
     from fastapi.testclient import TestClient
 
-    from backend.deps import get_con, get_meta_con, get_source
+    from backend.deps import get_con, get_source
     from backend.main import app
 
     src_with_bucket = {"name": "test_service", "service_id": "tsid", "bucket": "my-bucket"}
@@ -1105,13 +1105,13 @@ def test_download_folder_invokes_fetch_for_each_listed_object(in_memory_duckdb):
     fetch_calls = []
 
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
-    app.dependency_overrides[get_meta_con] = lambda: in_memory_duckdb
+    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: src_with_bucket
     try:
         with (
             patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
             patch(
-                "backend.routers.admin._fetch_file_to_zip",
+                "backend.routers.admin.downloads._fetch_file_to_zip",
                 side_effect=lambda *a, **k: fetch_calls.append(a[3]),  # 4th arg is the key
             ),
             TestClient(app) as c,
@@ -1168,7 +1168,7 @@ def test_download_all_returns_zip_with_service_named_filename(client, test_servi
             patch("backend.core.duckdb.get_source_for_service", return_value=src),
             patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc-123"}),
             patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
-            patch("backend.routers.admin._fetch_file_to_zip"),
+            patch("backend.routers.admin.downloads._fetch_file_to_zip"),
         ):
             resp = client.get("/api/download-all", params={"service_id": "svc-123"})
     finally:
@@ -1348,19 +1348,27 @@ def test_sync_status_503s_on_db_busy_error(client, test_service_source):
 
 
 def test_sync_status_500s_on_unexpected_exception(client, test_service_source):
-    """Any other exception → 500 with the message. Pinned because
-    losing this would surface a 200 with garbage data (the
-    `with_telemetry` wrapper wouldn't be reached)."""
+    """Any non-DBBusyError exception → 500 with the ``raise_internal``
+    shape (generic ``error`` code + ``error_id``, no leaked exception
+    string). Pinned because losing this would surface a 200 with
+    garbage data (the `with_telemetry` wrapper wouldn't be reached) —
+    and pinning the leak shape prevents a regression that puts the
+    raw exception back on the wire (e.g. a DuckDB stack frame
+    revealing filesystem paths)."""
     src = {"name": "test_service", "service_id": "test-service-id"}
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.duckdb.get_connection", side_effect=RuntimeError("disk full")),
+        patch("backend.core.duckdb.get_connection", side_effect=RuntimeError("disk full at /mnt/internal/path")),
     ):
         resp = client.get("/api/sync-status")
 
     assert resp.status_code == 500
-    assert "disk full" in resp.json()["detail"]["error"]
+    body = resp.json()["detail"]
+    assert body["error"] == "sync_status_failed"
+    assert "error_id" in body
+    assert "disk full" not in body["error"]
+    assert "/mnt/internal" not in str(body)
 
 
 def test_stream_from_worker_disconnect_closes_worker_thread():
@@ -1368,9 +1376,8 @@ def test_stream_from_worker_disconnect_closes_worker_thread():
     the background thread is notified via ClientDisconnected and exits cleanly
     instead of blocking indefinitely on a full queue.
     """
-    import time
-
     from backend.routers.admin import ClientDisconnected, _stream_from_worker
+    from tests.utils.polling import wait_until
 
     thread_failed = []
     thread_success = []
@@ -1392,8 +1399,7 @@ def test_stream_from_worker_disconnect_closes_worker_thread():
     # Simulate client disconnect by closing the generator
     gen.close()
 
-    # Give the thread a moment to execute its next put and catch ClientDisconnected
-    time.sleep(0.1)
+    wait_until(lambda: bool(thread_success or thread_failed), timeout=1.0)
 
     assert thread_success == [True]
     assert thread_failed == []

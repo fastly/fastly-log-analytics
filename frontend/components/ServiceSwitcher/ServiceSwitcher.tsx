@@ -42,6 +42,7 @@ export function ServiceSwitcher() {
       <PopoverTrigger
         role="combobox"
         aria-expanded={open}
+        aria-label="Active service"
         className={cn(buttonVariants({ variant: "outline" }), "w-[250px] justify-between")}
       >
         <span className="flex min-w-0 flex-1 items-center justify-between">

@@ -40,7 +40,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 import duckdb
 
@@ -197,6 +197,9 @@ def validate_user_sql(
     """
     if not isinstance(sql, str):
         _reject(sql, "input_type", "SQL must be a string", session_id, service_id)
+
+    if "\x00" in sql:
+        _reject(sql, "nul_byte_injection", "query contains a NUL byte", session_id, service_id)
 
     # Size pre-check (cheap; bounds parser cost).
     encoded = sql.encode("utf-8", errors="replace")
@@ -409,7 +412,7 @@ def _reject(
     message: str,
     session_id: str | None,
     service_id: str | None,
-) -> None:
+) -> NoReturn:
     """Emit a structured audit log line and raise SQLValidationError.
 
     Never returns — always raises. The log line is JSON-shaped so it can

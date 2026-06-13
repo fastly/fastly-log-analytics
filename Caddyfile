@@ -50,7 +50,13 @@
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
 		# Conservative CSP. Next.js needs inline styles for hydration; loosen if
 		# you see CSP violations in DevTools after deploy.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		#
+		# 'unsafe-eval' is intentionally absent — no app code uses eval(),
+		# new Function(), or string-form setTimeout/setInterval (grep-verified
+		# across frontend/{app,components,lib,hooks}). If a future dep pulls
+		# in a runtime template engine that breaks this, restore 'unsafe-eval'
+		# only on a confirmed console violation and note the cause here.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 	}
 }
 
@@ -109,9 +115,23 @@
 
 	# API → backend (preserve Host so backend's DNS-rebinding gate matches the
 	# registered public_endpoint).
+	#
+	# Bandaid for the dashboard-30d slow-query 502 (perf audit F0): the
+	# raw time_series scan can take 60-90 s on a 30d window when the
+	# rollup fast-path falls through (e.g. before the
+	# 2026-06-10_rollups_time_series_backfill migration completes on a
+	# given service). Caddy's default response_header_timeout is short
+	# enough that those requests come back to the client as 502 Bad
+	# Gateway. 120 s lets the slow path finish at the cost of one stuck
+	# worker per such request. Once the time_series rollup backfill is
+	# in place, queries return in <1 s and the timeout never matters.
 	@api path /api/*
 	reverse_proxy @api 127.0.0.1:8000 {
 		flush_interval -1
+		transport http {
+			response_header_timeout 120s
+			read_timeout 120s
+		}
 	}
 
 	# Everything else → Next.js frontend.

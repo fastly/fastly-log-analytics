@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
+from typing import Annotated, Any
 
 # Ensure the root project directory (parent of backend/) is on sys.path so
 # that the backend package is importable.
@@ -16,11 +18,19 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import duckdb
-from fastapi import Depends, Header, HTTPException, Query
+from fastapi import Depends, Header, HTTPException, Path, Query
 
 from backend import config as svcconfig
 from backend.core import duckdb as db
 from backend.core.duckdb import DBBusyError, get_connection
+
+# Path-param service_id with a defence-in-depth regex. The authoritative
+# validation lives at ``load_config(service_id)`` (which rejects any id
+# missing from CONFIGS_DIR), but tightening at the FastAPI boundary means
+# malformed ids never reach SQL / filesystem code paths in the first
+# place. Mirrors the alphabet S3 bucket names use (the same character set
+# Fastly assigns to its service ids).
+ServiceId = Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]+$")]
 
 # ── Service resolution ────────────────────────────────────────────────────────
 
@@ -88,8 +98,11 @@ class _ConnectionHolder:
         self.con: duckdb.DuckDBPyConnection | None = None
         # Set when we exit cleanly so __exit__ knows to return-vs-discard.
         self._errored = False
-        # Used only on the pooled path so __exit__ can release.
-        self._pool_cm = None
+        # Used only on the pooled path so __exit__ can release. Typed
+        # ``Any | None`` because ``duckdb_pool.checkout_connection`` is a
+        # contextmanager-decorated generator and mypy struggles to thread
+        # its return type through.
+        self._pool_cm: Any | None = None
 
     def __enter__(self) -> duckdb.DuckDBPyConnection:
         # Write mode + skip_view_update fall back to the fresh-connection
@@ -153,7 +166,7 @@ class _ConnectionHolder:
         return False
 
 
-def get_con(source: dict = Depends(get_source)) -> duckdb.DuckDBPyConnection:
+def get_con(source: dict = Depends(get_source)) -> Iterator[duckdb.DuckDBPyConnection]:
     """Dependency that yields a DuckDB connection and closes it after the request.
 
     Always opens in read-only mode for HTTP request handlers — write-mode
@@ -171,27 +184,12 @@ def get_con(source: dict = Depends(get_source)) -> duckdb.DuckDBPyConnection:
         yield con
 
 
-# ── Bundled analytics dependency ─────────────────────────────────────────────
-
-
-class AnalyticsDeps:
-    """Bundles the two common analytics dependencies into a single injectable.
-
-    Usage in a route::
-
-        @router.post("/api/my-endpoint")
-        @query_errors()
-        def my_endpoint(req: MyRequest, deps: AnalyticsDeps = Depends()):
-            return repo.do_stuff(con=deps.con, src=deps.source, ...)
-    """
-
-    def __init__(
-        self,
-        source: dict = Depends(get_source),
-        con: duckdb.DuckDBPyConnection = Depends(get_con),
-    ):
-        self.source = source
-        self.con = con
+# ``AnalyticsDeps`` (bundle of get_source + get_con) was removed at the
+# v2.0 cut. Routes now take :class:`backend.core.request_context.RequestContext`
+# directly via ``Depends(build_request_context)`` — same connection +
+# source surface, with structural tenancy enforcement on every route
+# (the old bundle skipped it because ``require_service_access`` was
+# never wired in as a sibling dep).
 
 
 # ── Tenant-scope enforcement (security) ─────────────
@@ -230,15 +228,9 @@ def require_service_access(
     return service_id
 
 
-def get_meta_con(source: dict = Depends(get_source)) -> duckdb.DuckDBPyConnection:
-    """Dependency that yields a DuckDB connection, skipping the Iceberg view update.
-
-    Use this for metadata routes (e.g. cron logs, admin settings) that don't
-    need to query the main logs table, to avoid blocking on S3 manifest reads.
-
-    Security: ``read_only`` is hardcoded True for the same reason as
-    ``get_con`` above.
-    """
-    holder = _ConnectionHolder(source, skip_view_update=True, read_only=True)
-    with holder as con:
-        yield con
+# ``get_meta_con`` (skip-view-update parallel path) removed at v2.0 cut.
+# After the Phase 4 iceberg carve + duckdb_pool fingerprint check
+# (backend/core/duckdb_pool.py:299), pool checkouts skip update_iceberg_view
+# when the (view_cache identity, buffer mtime) tuple is unchanged — making
+# the skip-on-purpose path of the old helper structurally unnecessary for
+# the metadata-shaped read paths that used it.

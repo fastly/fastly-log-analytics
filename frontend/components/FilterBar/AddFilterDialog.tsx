@@ -29,8 +29,8 @@ import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 
 const COMMON_FIELD_IDS = [
   'ip', 'url', 'host', 'method', 'status', 'ua', 'country', 'city',
-  'asn', 'ja4', 'ja3', 'cache', 'edge', 'pop', 'backend', 'proto',
-  'tls', 'referer', 'waf', 'waf_resp',
+  'asn', 'p_type', 'p_desc', 'ja4', 'ja3', 'cache', 'edge', 'pop',
+  'backend', 'proto', 'tls', 'referer', 'waf', 'waf_resp',
 ]
 
 export function AddFilterDialog() {

@@ -88,10 +88,10 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
             <div className="relative">
                 <Button variant="outline" size="sm" title="Import Custom Fields" className="cursor-pointer">
                    <Upload className="h-4 w-4" />
-                   <input 
-                       type="file" 
-                       accept=".json" 
-                       className="absolute inset-0 opacity-0 cursor-pointer" 
+                   <input
+                       type="file"
+                       accept=".json"
+                       className="absolute inset-0 opacity-0 cursor-pointer"
                        onChange={handleImport}
                    />
                 </Button>

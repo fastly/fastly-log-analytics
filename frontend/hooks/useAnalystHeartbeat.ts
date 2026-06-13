@@ -2,6 +2,7 @@
 
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
+import { fetchWithTimeout } from '@/lib/fetchWithTimeout'
 
 interface Options {
   enabled: boolean
@@ -45,10 +46,17 @@ export function useAnalystHeartbeat({
         // flows through the Next.js proxy that the tunnel exposes. The typed
         // client routes direct to 127.0.0.1:8000, which is unreachable from
         // the analyst's browser.
-        const res = await fetch('/api/share/heartbeat', {
-          credentials: 'include',
-          headers: { 'X-Remote-Analyst': '1' },
-        })
+        // 10s timeout — heartbeats are frequent and must not back up if
+        // the network is wedged. A stuck fetch would still leave the
+        // setInterval queueing more, so a tight bound is load-bearing.
+        const res = await fetchWithTimeout(
+          '/api/share/heartbeat',
+          {
+            credentials: 'include',
+            headers: { 'X-Remote-Analyst': '1' },
+          },
+          10_000,
+        )
         if (res.status === 401 || res.status === 403) {
           router.replace('/share-login')
           return

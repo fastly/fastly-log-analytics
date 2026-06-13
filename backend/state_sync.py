@@ -140,7 +140,7 @@ def restore_scoring_matrix_version(service_id: str, version: str) -> dict | None
 
 def publish_matrix_to_fos(service_id: str, matrix: dict) -> None:
     """Upload the trained scoring matrix JSON to FOS so analyst replicas
-    + GCE backend can fetch the same matrix the admin host has on disk.
+    + the prod VM backend can fetch the same matrix the admin host has on disk.
 
     Without this, every fresh container needs the matrix scp'd in
     manually (which is how the AUC field got bootstrapped the first
@@ -241,7 +241,7 @@ def export_admin_state(service_id: str):
         # Export custom_fields from the service config file
         cfg = svcconfig.load_config(service_id)
         if cfg:
-            from backend.core import log_fields as _lf
+            from backend.core import field_registry as _lf
 
             lf = _lf.get_lf_config(cfg)
             state["custom_fields"] = lf.get("custom_fields", [])
@@ -269,8 +269,9 @@ def _cdn_get(source: dict, key: str) -> bytes:
 
     # SSRF guard: ``cdn_url`` is user-supplied at provision time. Reject
     # anything that isn't an https Fastly hostname so the helper can't be
-    # turned into an outbound HTTP probe of internal services (GCE
-    # metadata, peer VMs, link-local addresses).
+    # turned into an outbound HTTP probe of internal services (cloud
+    # metadata at 169.254.169.254 on AWS/GCE/Azure, peer VMs, link-local
+    # addresses).
     cdn_url = _safe_cdn_url((source.get("cdn_url") or "").rstrip("/"))
     if not cdn_url:
         raise urllib.error.URLError("cdn_url missing or not on the Fastly allowlist")
@@ -365,7 +366,7 @@ def import_admin_state(service_id: str):
         if "custom_fields" in state:
             cfg = svcconfig.load_config(service_id)
             if cfg is not None:
-                from backend.core import log_fields as _lf
+                from backend.core import field_registry as _lf
 
                 lf = _lf.get_lf_config(cfg)
                 remote_fields = list(state["custom_fields"])

@@ -30,9 +30,9 @@ def test_lake_info_success():
         }
 
         client = TestClient(app)
-        response = client.get(
+        response = client.post(
             "/api/provision/lake-info",
-            params={
+            json={
                 "bucket": "test-bucket",
                 "region": "us-east-1",
                 "access_key": "ak",
@@ -59,9 +59,9 @@ def test_lake_info_not_found():
         mock_init.return_value = None
 
         client = TestClient(app)
-        response = client.get(
+        response = client.post(
             "/api/provision/lake-info",
-            params={"bucket": "test-bucket", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
+            json={"bucket": "test-bucket", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
         )
 
         assert response.status_code == 200
@@ -86,9 +86,9 @@ def test_lake_info_analyst_location():
 
         client = TestClient(app)
         loc = "s3://test-bucket/iceberg/metadata/v1.metadata.json"
-        client.get(
+        client.post(
             "/api/provision/lake-info",
-            params={
+            json={
                 "bucket": "test-bucket",
                 "region": "us-east-1",
                 "access_key": "ak",
@@ -537,9 +537,9 @@ def test_check_fos_returns_ok_when_list_succeeds():
         TestClient(app) as c,
         patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
     ):
-        resp = c.get(
+        resp = c.post(
             "/api/provision/check-fos",
-            params={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
+            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
         )
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
@@ -560,9 +560,9 @@ def test_check_fos_maps_access_denied_to_friendly_message():
         TestClient(app) as c,
         patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
     ):
-        resp = c.get(
+        resp = c.post(
             "/api/provision/check-fos",
-            params={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
+            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
         )
     assert resp.status_code == 200
     body = resp.json()
@@ -583,9 +583,9 @@ def test_check_fos_maps_no_such_bucket_to_friendly_message():
         TestClient(app) as c,
         patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
     ):
-        resp = c.get(
+        resp = c.post(
             "/api/provision/check-fos",
-            params={"bucket": "wrong-bucket", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
+            json={"bucket": "wrong-bucket", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
         )
     body = resp.json()
     assert body["ok"] is False
@@ -606,9 +606,9 @@ def test_check_fos_maps_region_mismatch_to_friendly_message():
         TestClient(app) as c,
         patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
     ):
-        resp = c.get(
+        resp = c.post(
             "/api/provision/check-fos",
-            params={"bucket": "b", "region": "us-west-2", "access_key": "ak", "secret_key": "sk"},
+            json={"bucket": "b", "region": "us-west-2", "access_key": "ak", "secret_key": "sk"},
         )
     body = resp.json()
     assert body["ok"] is False
@@ -627,9 +627,9 @@ def test_check_fos_maps_endpoint_connection_error_to_friendly_message():
             side_effect=RuntimeError("boto3 EndpointConnectionError on x.object.fastlystorage.app"),
         ),
     ):
-        resp = c.get(
+        resp = c.post(
             "/api/provision/check-fos",
-            params={"bucket": "b", "region": "not-a-region", "access_key": "ak", "secret_key": "sk"},
+            json={"bucket": "b", "region": "not-a-region", "access_key": "ak", "secret_key": "sk"},
         )
     body = resp.json()
     assert body["ok"] is False
@@ -1047,6 +1047,32 @@ def test_provision_execute_rejects_bucket_starting_with_hyphen():
             },
         )
     assert r.status_code == 400
+
+
+def test_provision_execute_rejects_fos_prefix_with_sql_metachars():
+    """fos_prefix must be alphanumerics + / _ - only. Without this
+    guard, a prefix containing `'`, `*`, `?`, or `[]` reaches DuckDB's
+    glob() via f-string interpolation and either breaks the SQL literal
+    or changes the glob scope. Pinned because losing this validation
+    re-opens a SQL-injection-style sink in
+    _duckdb_status._delete_ingested_files."""
+    with (
+        TestClient(app) as c,
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.config.fetch_service_name", return_value="x"),
+        patch("backend.provision.parse_period", return_value=60),
+    ):
+        r = c.post(
+            "/api/provision/execute",
+            json={
+                "token": "tok",
+                "service_id": "svc-1",
+                "fos_bucket_name": "valid-bucket",
+                "fos_prefix": "x'; DROP TABLE--",
+            },
+        )
+    assert r.status_code == 400
+    assert "prefix" in r.json()["detail"]["error"].lower()
 
 
 def test_provision_execute_400s_on_bad_log_period():

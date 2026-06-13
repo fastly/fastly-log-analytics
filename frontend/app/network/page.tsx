@@ -51,6 +51,11 @@ import { Network as NetworkIcon, AlertCircle, Globe, Zap, Activity, Shield, Exte
 import Link from 'next/link'
 import { ReportLayout } from '@/components/ReportLayout'
 
+// Static — module-level keeps the reference stable across renders without
+// adding a hook call (we can't safely add hooks after the render-prop's
+// early-return at `data.available === false`).
+const HEATMAP_LAYOUT = { xaxis: { tickangle: -45 } }
+
 // ── Help content ──────────────────────────────────────────────────────────────
 
 export default function NetworkPage() {
@@ -77,7 +82,7 @@ export default function NetworkPage() {
   const { data, isLoading, isFetching } = useServiceQuery(
     ['network', 'health', activeServiceId, startTime, endTime, filterPayload, animBucketSeconds, mapAsn],
     async ({ signal }) => {
-      const { data } = await client.POST("/api/network-health", { signal, 
+      const { data } = await client.POST("/api/network-health", { signal,
         body: {
           start_time: startTime!,
           end_time: endTime!,
@@ -114,6 +119,23 @@ export default function NetworkPage() {
     return { x: xBuckets, y: yLabels, z }
   }, [data?.heatmap, data?.buckets])
 
+  // Stable ref so PlotlyChart's React.memo treats unrelated parent re-renders
+  // as no-ops. Must live ABOVE the `data.available === false` early-return so
+  // the hook order is identical on every render.
+  const heatmapTrace = React.useMemo(() => (
+    heatmapData ? [{
+      type: 'heatmap',
+      x: heatmapData.x,
+      y: heatmapData.y,
+      z: heatmapData.z,
+      colorscale: 'RdYlGn',
+      zmin: 0,
+      zmax: 100,
+      colorbar: { title: 'Score', thickness: 12 },
+      hovertemplate: '<b>%{y}</b><br>%{x}<br>Score: %{z}<extra></extra>',
+    }] : []
+  ), [heatmapData])
+
         if (data?.available === false) {
           return (
             <div className="flex flex-col items-center justify-center h-[50vh] text-center max-w-md mx-auto">
@@ -126,19 +148,9 @@ export default function NetworkPage() {
 
         const summary = data?.summary || {}
 
-  const heatmapTrace = heatmapData ? [{
-    type: 'heatmap',
-    x: heatmapData.x,
-    y: heatmapData.y,
-    z: heatmapData.z,
-    colorscale: 'RdYlGn',
-    zmin: 0,
-    zmax: 100,
-    colorbar: { title: 'Score', thickness: 12 },
-    hovertemplate: '<b>%{y}</b><br>%{x}<br>Score: %{z}<extra></extra>',
-  }] : []
-
-  const heatmapLayout = { xaxis: { tickangle: -45 } }
+  // heatmapTrace + HEATMAP_LAYOUT defined above the early-return / at
+  // module scope — keeps hook order stable and gives PlotlyChart stable
+  // identity for its React.memo shallow-compare.
 
         return (
           <>
@@ -203,7 +215,7 @@ export default function NetworkPage() {
           helpTitle="ASN Health Score over Time"
           helpContent={<HeatmapHelp />}
         >
-          <PlotlyChart data={heatmapTrace as any[]} layout={heatmapLayout} height={Math.min(60 + heatmapData.y.length * 28, 600)} />
+          <PlotlyChart data={heatmapTrace as any[]} layout={HEATMAP_LAYOUT} height={Math.min(60 + heatmapData.y.length * 28, 600)} />
         </AnalyticsCard>
       )}
 
@@ -397,8 +409,8 @@ export default function NetworkPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {(data?.metro_leaderboard ?? []).map((m: any, i: number) => (
-                      <tr key={i} className="border-b last:border-0 hover:bg-muted/50 transition-colors">
+                    {(data?.metro_leaderboard ?? []).map((m: any) => (
+                      <tr key={`${m.city}-${m.region}-${m.country}`} className="border-b last:border-0 hover:bg-muted/50 transition-colors">
                         <td className="px-4 py-3 font-medium">
                           <div className="flex items-center gap-2 group">
                             <span>{m.city}</span>

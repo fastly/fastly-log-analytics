@@ -1,9 +1,8 @@
 'use client'
 
 import React from 'react'
-import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
-import { useIsDataReady } from '@/hooks/useIsDataReady'
+import { useEffectiveServiceId, useIsDataReady } from '@/hooks/useIsDataReady'
 import { useShallow } from 'zustand/react/shallow'
 import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { PageHeader } from '@/components/ui/page-header'
@@ -32,7 +31,11 @@ export function ReportShell({
   requireService = true,
   className
 }: ReportShellProps) {
-  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  // useEffectiveServiceId falls back to bootstrap.active_service_id
+  // from the SSR-hydrated cache so the page doesn't flash "No service
+  // selected" before useBootstrap's post-mount effect populates the
+  // persisted Zustand store.
+  const activeServiceId = useEffectiveServiceId()
   const { isAutoRange, hasSyncedExtents } = useFilterStore(
     useShallow(s => ({ isAutoRange: s.isAutoRange, hasSyncedExtents: s.hasSyncedExtents }))
   )
@@ -44,9 +47,9 @@ export function ReportShell({
   if (requireService && !activeServiceId) {
     const FallbackIcon = Icon || Loader2
     return (
-      <NoServiceSelected 
-        icon={FallbackIcon} 
-        message={`Please select a service from the header to view ${title.toLowerCase()}.`} 
+      <NoServiceSelected
+        icon={FallbackIcon}
+        message={`Please select a service from the header to view ${title.toLowerCase()}.`}
       />
     )
   }
@@ -71,4 +74,3 @@ export function ReportShell({
     </div>
   )
 }
-

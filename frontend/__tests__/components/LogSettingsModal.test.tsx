@@ -42,7 +42,7 @@ test('LogSettingsModal navigates through wizard steps', async () => {
   const user = userEvent.setup()
   const queryClient = new QueryClient()
   const onOpenChange = vi.fn()
-  
+
   // Mock API requests
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: any) => {
     if (url.includes('/api/log-fields/catalog')) {
@@ -70,7 +70,7 @@ test('LogSettingsModal navigates through wizard steps', async () => {
   // Step 1: Wait for it to load and render "General Settings"
   await waitFor(() => expect(screen.getByText('Log Period')).toBeDefined())
   expect(screen.getByText('1. Standard Fields')).toBeDefined()
-  
+
   // Verify custom condition is loaded
   const customConditionInput = screen.getByLabelText(/Optional Log Condition/i) as HTMLInputElement
   expect(customConditionInput.value).toBe('req.url ~ "test"')
@@ -104,7 +104,7 @@ test('LogSettingsModal navigates through wizard steps', async () => {
 
   // Click Back
   await user.click(screen.getByRole('button', { name: /^Back$/i }))
-  
+
   // Back to Step 2
   await waitFor(() => expect(screen.getByText('Define Custom Log Fields')).toBeDefined())
 })
@@ -113,19 +113,19 @@ test('LogSettingsModal shows custom fields in review step', async () => {
   const user = userEvent.setup()
   const queryClient = new QueryClient()
   const onOpenChange = vi.fn()
-  
+
   // Mock API requests with a custom field
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: any) => {
     if (url.includes('/api/log-fields/catalog')) {
-      return { 
-        data: { 
-          groups: [{ id: 'core', label: 'Core', fields: ['ip'] }], 
+      return {
+        data: {
+          groups: [{ id: 'core', label: 'Core', fields: ['ip'] }],
           fields: [
             { id: 'ip', label: 'IP Address', group: 'core', is_custom: false },
             { id: 'x_custom', label: 'My Custom Field', group: 'custom', is_custom: true }
-          ], 
-          presets: {} 
-        } 
+          ],
+          presets: {}
+        }
       } as any
     }
     return { data: { log_fields: { groups: ['core'] } } } as any
@@ -150,7 +150,7 @@ test('LogSettingsModal shows custom fields in review step', async () => {
 
   // Click Next Step to go to Step 3
   await user.click(screen.getAllByRole('button', { name: /Next Step/i })[0])
-  
+
   // Wait for Review Step header
   await waitFor(() => expect(screen.getByText('Review Log Configuration Changes')).toBeDefined())
 

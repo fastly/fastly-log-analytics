@@ -329,9 +329,7 @@ def test_migration_003_rebuilds_corrupted_rollup(tmp_path, monkeypatch):
         assert sqlite_migrations.get_current_version(con) == sqlite_migrations.LATEST_VERSION
 
         # Rollup must exactly mirror the raw SUM(count) per (hour, class, type).
-        raw_a = con.execute(
-            "SELECT COALESCE(SUM(count), 0) FROM usage_log WHERE operation_class='A'"
-        ).fetchone()[0]
+        raw_a = con.execute("SELECT COALESCE(SUM(count), 0) FROM usage_log WHERE operation_class='A'").fetchone()[0]
         roll_a = con.execute(
             "SELECT COALESCE(SUM(count), 0) FROM usage_log_hourly_summary WHERE operation_class='A'"
         ).fetchone()[0]

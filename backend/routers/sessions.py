@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from backend.deps import AnalyticsDeps
+from backend.core.request_context import RequestContext, build_request_context
 from backend.models.dashboard import (
     SessionDetailRequest,
     SessionDetailResponse,
@@ -19,10 +19,10 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 @router.post("", response_model=SessionsResponse)
 @query_errors()
-def sessions_endpoint(req: SessionsRequest, deps: AnalyticsDeps = Depends()):
+def sessions_endpoint(req: SessionsRequest, ctx: RequestContext = Depends(build_request_context)):
     return repo.get_sessions(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -38,12 +38,12 @@ def sessions_endpoint(req: SessionsRequest, deps: AnalyticsDeps = Depends()):
 
 @router.post("/detail", response_model=SessionDetailResponse)
 @query_errors()
-def sessions_detail(req: SessionDetailRequest, deps: AnalyticsDeps = Depends()):
+def sessions_detail(req: SessionDetailRequest, ctx: RequestContext = Depends(build_request_context)):
     if not req.ip or not req.start_time or not req.end_time:
         raise HTTPException(status_code=400, detail={"error": "ip, session_start, and session_end are required"})
     return repo.get_session_detail(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         ip=req.ip,
         ja4=req.ja4,
         session_start=req.start_time,

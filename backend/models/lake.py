@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import urllib.parse
+from typing import Any
 
 # Hostname suffixes allowed for ``cdn_url`` when the SSRF check below
 # decides whether to issue an outbound HTTP request. Any other hostname
@@ -11,7 +12,8 @@ import urllib.parse
 # attacker-supplied internal hostnames) is rejected — the field is
 # user-controlled at provision time and an attacker who can inject
 # ``http://169.254.169.254`` would otherwise turn fetch_lake_info into
-# an SSRF probe of the GCE metadata service.
+# an SSRF probe of the cloud metadata service (same link-local IP on
+# AWS, GCE, and Azure).
 _CDN_URL_ALLOWED_HOST_SUFFIXES = (
     ".fastly.net",
     ".fastlystorage.app",
@@ -61,7 +63,7 @@ def fetch_lake_info(source: dict, use_temp_cache: bool = False) -> dict:
     try:
         base_prefix = source.get("prefix", "").strip("/")
         iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-        namespace, table_name = db_iceberg._table_identifier(source)
+        namespace, table_name = db_iceberg._table_identifier(source)  # type: ignore[attr-defined]
         summary_key = f"{iceberg_root}/{namespace}/{table_name}/table_summary.json"
 
         cdn_url = _safe_cdn_url((source.get("cdn_url") or "").rstrip("/"))
@@ -84,7 +86,7 @@ def fetch_lake_info(source: dict, use_temp_cache: bool = False) -> dict:
             deadline = t0 + 10.0
             _MAX_RESP_BYTES = 10 * 1024 * 1024
 
-            def _read_with_deadline(resp):
+            def _read_with_deadline(resp: Any) -> bytes:
                 # Stream-read with both a wall-clock deadline (defeats slow-loris
                 # producers that trickle bytes inside the socket timeout) and a
                 # hard size cap (defeats unbounded responses that exhaust memory).

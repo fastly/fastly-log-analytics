@@ -109,7 +109,10 @@ def audit_logs(
 
 
 class ShareStartPayload(BaseModel):
-    use_tunnel: bool = True
+    # Direct-mode only since v2.0; the SSH-to-localhost.run path was
+    # removed. The field stays in the payload schema so old clients don't
+    # 422, but any truthy value will be rejected by the manager.
+    use_tunnel: bool = False
     public_endpoint: str | None = None
     forward_port: int = 3000
 
@@ -123,17 +126,8 @@ def share_start(payload: ShareStartPayload):
             public_endpoint=payload.public_endpoint,
             forward_port=payload.forward_port,
         )
-    except RuntimeError as exc:
-        msg = str(exc)
-        if "port" in msg.lower() and "not bound" in msg.lower():
-            raise HTTPException(
-                status_code=409,
-                detail={"error": "port_unavailable", "hint": msg},
-            ) from exc
-        raise HTTPException(status_code=500, detail={"error": "tunnel_start_failed", "message": msg}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": "invalid_request", "message": str(exc)}) from exc
-    mgr.start_sleep_listener()
     return result
 
 
@@ -375,7 +369,7 @@ def update_settings(payload: SettingsPayload):
     if payload.max_concurrent_analyst_sessions is not None:
         if payload.max_concurrent_analyst_sessions < 1:
             raise HTTPException(status_code=400, detail={"error": "invalid_value"})
-        share_db.set_setting("max_concurrent_analyst_sessions", str(payload.max_concurrent_analyst_sessions))
+        share_db.set_setting(share_db.MAX_CONCURRENT_ANALYST_SESSIONS_KEY, str(payload.max_concurrent_analyst_sessions))
     return {"max_concurrent_analyst_sessions": share_db.get_max_concurrent_sessions()}
 
 

@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { AlertTriangle, Check, Loader2 } from 'lucide-react'
+import { fetchWithTimeout } from '@/lib/fetchWithTimeout'
 
 type TosPayload = { version: string; text: string }
 
@@ -26,7 +27,7 @@ export default function AcknowledgePage() {
     // The backend enforces an exact version match (audit finding 021), so the
     // version we display has to be the one the backend currently considers
     // latest — fetching it here is the only way to stay in sync.
-    fetch('/api/share/tos', {
+    fetchWithTimeout('/api/share/tos', {
       credentials: 'include',
       headers: { 'X-Remote-Analyst': '1' },
     })
@@ -57,7 +58,7 @@ export default function AcknowledgePage() {
     setError(null)
     try {
       // Raw fetch: share-* routes — see comment above on heartbeat call.
-      const res = await fetch('/api/share/acknowledge', {
+      const res = await fetchWithTimeout('/api/share/acknowledge', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

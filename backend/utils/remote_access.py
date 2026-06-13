@@ -19,6 +19,7 @@ Per the plan:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -31,6 +32,21 @@ from backend.core import share_db
 from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
+
+# Response envelope fields that carry server-internal telemetry. Stripped
+# unconditionally from analyst-bound JSON bodies after call_next so that
+# routes which build responses as plain dicts (bypassing BaseResponse's
+# DEBUG_RESPONSES gate) cannot leak operator-side data — concrete examples
+# the QA pass surfaced: raw DuckDB SQL via _debug_queries, Fastly KV store
+# paths via _debug_calls, internal section names via _section_timings,
+# server cache state via _is_cached.
+_ANALYST_STRIPPED_ENVELOPE_KEYS = (
+    "_debug_queries",
+    "_debug_calls",
+    "_section_timings",
+    "_is_cached",
+)
+
 
 # Paths that an analyst can always reach without a session (login, the static
 # share-login bundle, heartbeat). The middleware short-circuits on these
@@ -53,11 +69,71 @@ _UNAUTH_ANALYST_PATHS = {
 }
 
 # Path prefixes that are EXPLICITLY blocked for analysts even with a valid
-# session. Admin surface, anything mutating provisioning, debug.
+# session. Admin surface, anything mutating provisioning, debug, and the
+# operator-only usage/cost surface (H-1).
 _ANALYST_BLOCKED_PREFIXES = (
     "/api/admin/",  # includes /api/admin/share/* — analyst can never reach admin tooling
     "/api/provision/",
     "/api/debug/",
+    "/api/usage/",  # H-1: cost/billing/usage data is operator-only
+    "/api/cron-runs",  # H-5: ingestion task history with absolute paths
+    "/api/audit-logs",  # H-5: admin audit trail
+    "/api/alerts",  # H-7: alerts surface is operator-only per directive
+)
+
+# Exact-path or path-with-query-string blocks for endpoints that live under an
+# otherwise-permitted router but expose admin-only surface area. Matched via
+# `path == p` OR `path.startswith(p + "?")` OR `path.startswith(p + "/")` so a
+# bare segment like "/api/download" won't accidentally swallow a sibling such
+# as "/api/download-foo". Each entry is the FULL path the route is mounted at.
+_ANALYST_BLOCKED_SUBPATHS = (
+    "/api/download",  # H-2: raw object download
+    "/api/download-all",  # H-2: bulk raw object download
+    "/api/download-folder",  # H-2: folder-level raw object download
+    "/api/cron-schedule",  # H-3: exposes per-service cron cadence config
+    "/api/sync-status",  # N-3: leaks ngwaf_workspace_id + active cron task state
+)
+
+# Path-parameter-bearing endpoints to block for analysts. Each entry is a
+# compiled regex matched with .fullmatch() against the URL path (no query
+# string). Keep these surgical — every regex here must NOT accidentally match
+# analyst-needed routes such as
+# /api/services/{id}/scoring/{config,status,labels,sessions/...} which are
+# handled by the scoring-suffix gate or are intentionally allowed.
+_ANALYST_BLOCKED_SUBPATH_REGEX: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^/api/services/[^/]+/lake-info$"),  # H-3: Iceberg/object-store layout
+    re.compile(r"^/api/services/[^/]+/logging-settings(/.*)?$"),  # H-3: per-service logging cfg
+    re.compile(
+        r"^/api/services/[^/]+/log-fields$"
+    ),  # H-3: per-service field map (catalog at /api/log-fields/catalog stays open)
+    re.compile(r"^/api/services/[^/]+/custom-fields(/.*)?$"),  # H-6 + N-7: VCL schema list + export
+)
+
+# Session-scoring sub-routes that are admin-only. The gate only fires for
+# paths that contain "/scoring/" AND end with one of these suffixes, so
+# analyst-needed reads like /scoring/labels, /scoring/sessions/<sid>/events,
+# /scoring/top-flagged, /scoring/score-distribution, /scoring/compliance-
+# breakdown, /scoring/health, /scoring/evaluation, /scoring/curves,
+# /scoring/matrix-versions, /scoring/threshold-preview, /scoring/analytics
+# stay reachable. (H-4)
+#
+# /threshold-preview is intentionally NOT gated: the operator's chosen
+# threshold value is supplied by the CALLER as a query param, not returned,
+# and the response payload (confusion-matrix counts at the given cutoff) is
+# equivalent in sensitivity to /score-distribution + /compliance-breakdown
+# which analysts already see. /threshold (without "-preview") IS gated
+# because it returns the operator's persisted committed value.
+_ANALYST_BLOCKED_SCORING_SUFFIXES: tuple[str, ...] = (
+    "/config",
+    "/status",
+    "/audit",
+    "/threshold",
+    "/exclude-regex",
+    "/enforce-status-code",
+    "/enforce-threshold",  # N-5: operator's enforce decision; also a KV-ID-leak vector via outbound calls
+    "/matrix-versions",  # N-5: ML retrain history
+    "/dashboard",  # N-5: admin scoring dashboard (handler returned 400 to analyst, but block before reaching it)
+    "/evaluation/per-reason",  # N-5: per-reason evaluation breakdown (same reasoning as /dashboard)
 )
 
 # POST/PUT/PATCH/DELETE paths that analysts CAN reach despite the read-only
@@ -125,7 +201,8 @@ def _is_private_or_loopback(ip_str: str) -> bool:
     analyst behind a VPN would be misclassified as an admin and bypass
     the analyst-blocked endpoint prefixes (``/api/provision/``,
     ``/api/admin/`` etc.) entirely. Even worse, an SSRF probe of
-    ``169.254.169.254`` (GCE metadata) would land as "local" too.
+    ``169.254.169.254`` (cloud metadata service — same IP on AWS, GCE,
+    Azure) would land as "local" too.
 
     Production topology: Caddy connects to uvicorn over loopback
     (127.0.0.1, host network mode + ``--forwarded-allow-ips=127.0.0.1``)
@@ -255,7 +332,45 @@ def _origin_allowed(origin: str) -> bool:
 
 
 def _is_blocked_path(path: str) -> bool:
-    return any(path.startswith(p) for p in _ANALYST_BLOCKED_PREFIXES)
+    """Return True if the analyst is forbidden from reaching this path.
+
+    Three layers, in order of cost:
+      1. Prefix match against ``_ANALYST_BLOCKED_PREFIXES`` (admin/provision/
+         debug/usage entire trees).
+      2. Exact / sub-path match against ``_ANALYST_BLOCKED_SUBPATHS`` —
+         endpoints that share a router with permitted paths and must be
+         identified individually. Uses ``path == p`` OR ``startswith(p + "/")``
+         OR ``startswith(p + "?")`` so a bare "/api/download" entry won't
+         shadow a sibling like "/api/download-foo".
+      3. Session-scoring suffix gate: any path that contains "/scoring/" AND
+         ends with one of ``_ANALYST_BLOCKED_SCORING_SUFFIXES`` is admin-only.
+         The "/scoring/" containment check keeps analyst-needed reads like
+         /scoring/labels and /scoring/sessions/<sid>/events accessible.
+      4. Regex match against ``_ANALYST_BLOCKED_SUBPATH_REGEX`` for routes
+         that embed a path parameter (e.g. /api/services/{id}/lake-info).
+
+    Trailing slashes are normalized before matching so an attacker cannot
+    bypass the gate by requesting ``/api/services/{id}/scoring/config/`` or
+    ``/api/services/{id}/lake-info/``. Starlette's ``redirect_slashes=True``
+    default would issue a 307 to the canonical form, but the middleware
+    runs BEFORE routing so the redirect can't help us — we have to strip
+    the slash ourselves. Multiple trailing slashes are collapsed (rare in
+    practice, but cheap to defend against).
+    """
+    # Normalize: strip one or more trailing slashes for matching, but keep
+    # the root "/" path itself intact (it doesn't appear in any blocklist
+    # and an analyst can always reach the SPA shell).
+    normalized = path.rstrip("/") or "/"
+    if any(normalized == p.rstrip("/") or normalized.startswith(p) for p in _ANALYST_BLOCKED_PREFIXES):
+        return True
+    for sp in _ANALYST_BLOCKED_SUBPATHS:
+        if normalized == sp or normalized.startswith(sp + "/") or normalized.startswith(sp + "?"):
+            return True
+    if "/scoring/" in normalized and normalized.endswith(_ANALYST_BLOCKED_SCORING_SUFFIXES):
+        return True
+    if any(pat.fullmatch(normalized) for pat in _ANALYST_BLOCKED_SUBPATH_REGEX):
+        return True
+    return False
 
 
 # Path-parameter patterns that carry a service ID. The middleware extracts the
@@ -322,6 +437,137 @@ def apply_response_hardening(response: Response) -> Response:
     return response
 
 
+async def _strip_analyst_envelope(response: Response) -> Response:
+    """Remove server-internal telemetry keys from analyst-bound JSON bodies.
+
+    Catches both ``BaseResponse``-built payloads and ad-hoc dict responses
+    (e.g. ``return {**result, "_debug_calls": get_tracked_calls()}`` in
+    admin routers) that escape ``DEBUG_RESPONSES`` gating in
+    ``backend/models/common.py``. The strip is keyed on the four envelope
+    fields listed in ``_ANALYST_STRIPPED_ENVELOPE_KEYS``; non-JSON
+    responses and bodies that fail to parse pass through unchanged.
+
+    Operators (loopback / TestClient) never reach this helper — the
+    middleware only invokes it on the ``is_remote`` branch — so the
+    debug panel on the admin UI keeps working.
+    """
+    ct = response.headers.get("content-type", "")
+    if "application/json" not in ct:
+        return response
+    body = b""
+    # `body_iterator` only exists on StreamingResponse; the caller wraps a
+    # plain Response in a StreamingResponse before calling this helper.
+    async for chunk in response.body_iterator:  # type: ignore[attr-defined]
+        body += chunk
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=ct,
+        )
+    changed = False
+    if isinstance(data, dict):
+        for k in _ANALYST_STRIPPED_ENVELOPE_KEYS:
+            if k in data:
+                data.pop(k)
+                changed = True
+    if not changed:
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=ct,
+        )
+    new_body = json.dumps(data, separators=(",", ":")).encode()
+    new_headers = dict(response.headers)
+    new_headers["content-length"] = str(len(new_body))
+    return Response(
+        content=new_body,
+        status_code=response.status_code,
+        headers=new_headers,
+        media_type=ct,
+    )
+
+
+async def _body_service_ids(request: Request) -> list[str]:
+    """Extract ``service_id``/``service`` from a JSON POST body, if any.
+
+    Used by the service-scope gate so a forged ``service_id`` field in the
+    request body is treated as a candidate and rejected when it doesn't
+    match the analyst's authorized services. Closes M-3 (silent fallback
+    on ``POST /api/dashboard/aggregates`` when the body service_id mismatches).
+
+    Buffers the body via the raw ASGI receive callable and re-installs a
+    replay version on ``request._receive`` so downstream handlers see the
+    same bytes. We can't use ``await request.body()`` here because
+    Starlette's ``BaseHTTPMiddleware`` constructs a fresh Request for the
+    inner app whose ``_body`` cache is independent — the downstream
+    handler would then see an empty body. The replay-receive pattern is
+    the documented workaround.
+    """
+    method = request.method.upper()
+    if method != "POST":
+        return []
+    ct = request.headers.get("content-type", "")
+    if "application/json" not in ct:
+        return []
+    # Drain the receive stream once, capture the body bytes.
+    receive = request._receive  # type: ignore[attr-defined]
+    chunks: list[bytes] = []
+    try:
+        more_body = True
+        while more_body:
+            msg = await receive()
+            if msg.get("type") != "http.request":
+                # Disconnect or something unexpected — bail without replay
+                # (downstream will see the same disconnect).
+                return []
+            chunks.append(msg.get("body", b""))
+            more_body = bool(msg.get("more_body", False))
+    except Exception:
+        return []
+    body_bytes = b"".join(chunks)
+
+    # Install a single-shot replay so the downstream handler can re-read
+    # the body. Subsequent calls return http.disconnect so a misbehaving
+    # client that tries to stream more bytes doesn't hang forever.
+    sent = False
+
+    async def _replay():
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+    request._receive = _replay  # type: ignore[attr-defined]
+    # Also clear any pre-cached body on the Request object so a downstream
+    # call to ``await request.body()`` reads from our replay.
+    if hasattr(request, "_body"):
+        try:
+            del request._body  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+
+    if not body_bytes:
+        return []
+    try:
+        body = json.loads(body_bytes)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(body, dict):
+        return []
+    out: list[str] = []
+    for k in ("service_id", "service"):
+        v = body.get(k)
+        if isinstance(v, str) and v:
+            out.append(v)
+    return out
+
+
 # ── Sliding-window static-asset rate limiter (per IP) ───────────────────────
 
 
@@ -379,10 +625,11 @@ class _StaticAssetLimiter:
             if len(self._reqs) > self.MAX_TRACKED_IPS:
                 self._evict_locked(cutoff)
             rs = [t for t in self._reqs.get(ip, []) if t >= cutoff]
+            if len(rs) >= self.REQ_LIMIT:
+                self._reqs[ip] = rs
+                return False
             rs.append(now)
             self._reqs[ip] = rs
-            if len(rs) > self.REQ_LIMIT:
-                return False
             bs = [(t, n) for (t, n) in self._bytes.get(ip, []) if t >= cutoff]
             bs.append((now, max(0, int(content_length))))
             self._bytes[ip] = bs
@@ -471,6 +718,8 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         session = mgr.validate_session(sid)
         if session is None:
             return JSONResponse(status_code=401, content={"error": "unauthenticated"})
+        if getattr(session, "tos_pending", False):
+            return JSONResponse(status_code=403, content={"error": "tos_pending"})
 
         # Fingerprint match.
         headers_lc = {k.lower(): v for k, v in request.headers.items()}
@@ -524,6 +773,12 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             ):
                 if src:
                     raw_candidates.append(src)
+            # M-3: a forged service_id in the JSON body was silently ignored
+            # before, with the handler falling back to the session-authorized
+            # service. Promote it to a candidate so the scope check below
+            # rejects mismatched bodies with the same 403 we'd return for
+            # query/path mismatches.
+            raw_candidates.extend(await _body_service_ids(request))
 
             cdn_map = svcconfig.get_cdn_service_id_map() if raw_candidates else {}
             resolved_candidates: list[str] = []
@@ -589,6 +844,15 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         except Exception:
             pass
 
+        # N-1 + N-10: strip server-internal telemetry envelope from analyst
+        # responses (success AND error bodies). The handler-side
+        # ``DEBUG_RESPONSES`` gate in BaseResponse covers the Pydantic path
+        # but misses ad-hoc dict responses in admin routers and the
+        # short-circuit JSONResponse error bodies, so we do a final pass
+        # here on the buffered body. SSE responses (text/event-stream) are
+        # passed through unchanged inside the helper.
+        response = await _strip_analyst_envelope(response)
+
         # SSE-safe: don't add hardening headers to SSE streams in a way that
         # interferes; the keep-alive headers go on the route itself.
         apply_response_hardening(response)
@@ -628,9 +892,11 @@ class TimeBounds:
             eff_start = now - timedelta(hours=1)
             eff_end = now
         elif eff_start is None:
+            assert eff_end is not None  # narrowed by `not (start is None and end is None)` above
             eff_start = eff_end - timedelta(hours=1)
         elif eff_end is None:
             eff_end = datetime.now(UTC)
+        assert eff_start is not None and eff_end is not None  # narrowed by the branches above
         if eff_start >= eff_end:
             raise ValueError("clamped time range is empty")
         return eff_start, eff_end

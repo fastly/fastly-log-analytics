@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+
+logger = logging.getLogger(__name__)
 
 from backend.core.fastly.utils import FASTLY_LOG_FIELDS
 from backend.deps import get_con, get_source
@@ -60,9 +63,18 @@ def _extract_fos_ops(record: dict) -> tuple[int, int]:
 @query_errors()
 async def prefill(source: dict = Depends(get_source)):
     import asyncio
+    import time as _time
 
     from backend import config as svcconfig
     from backend.config import get_fastly_api_key, get_fastly_logging_service_id
+
+    # Per-phase timings — /api/usage/prefill clocks ~1.4 s p50 per perf
+    # audit; section_timings shows whether the cost is in the Fastly
+    # endpoint chain, the /stats fetch, or the DuckDB edge-ratio hop.
+    section_timings: list[dict] = []
+
+    def _phase(name: str, t0: float) -> None:
+        section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
 
     global_rates = svcconfig.load_usage_logging_config()
 
@@ -101,12 +113,47 @@ async def prefill(source: dict = Depends(get_source)):
             result["commit_interval_mins"] = int(cron_sync.get("commit_interval_mins", 5))
             result["log_retention_days"] = int(cfg.get("log_retention_days", 90))
             try:
-                from backend.core import log_fields as lf
+                from backend.core.field_registry import BY_CODE, REGISTRY, Group
 
                 lf_cfg = cfg.get("log_fields") or prov.get("log_fields", {})
                 if not lf_cfg:
                     lf_cfg = {"groups": ["A", "B", "C", "D"], "field_overrides": {}}
-                result["estimated_bytes_per_line"] = lf.estimate_log_line_bytes(lf_cfg)
+
+                # Resolve enabled field codes from the registry. Mirrors
+                # log_fields.resolve_enabled_fields, but using registry primitives:
+                # always-on CORE + selected groups (with the E→D / G→F dependency
+                # closure) + per-field overrides. We re-encode the two dep rules
+                # here rather than importing the private _GROUP_REQS — they're
+                # stable and the alternative is importing across module
+                # boundaries for two key/value pairs.
+                enabled_groups: set[str] = set(lf_cfg.get("groups", []))
+                _GROUP_DEPS = {"E": "D", "G": "F"}
+                changed = True
+                while changed:
+                    changed = False
+                    for grp, required in _GROUP_DEPS.items():
+                        if grp in enabled_groups and required not in enabled_groups:
+                            enabled_groups.add(required)
+                            changed = True
+
+                enabled_codes: set[str] = {f.code for f in REGISTRY if f.group is Group.CORE}
+                for f in REGISTRY:
+                    if f.group is not Group.CORE and f.group.value in enabled_groups:
+                        enabled_codes.add(f.code)
+                for fid, on in lf_cfg.get("field_overrides", {}).items():
+                    if on:
+                        enabled_codes.add(fid)
+                    else:
+                        enabled_codes.discard(fid)
+
+                # Byte estimate = sum of typical_bytes for enabled fields + JSON
+                # structural overhead (braces + per-field key quotes/colon/comma).
+                # Custom fields are not part of the prefill payload, so they're
+                # not summed here (matches the prior call site shape — lf_cfg
+                # never carries custom_fields on this code path).
+                field_bytes = sum(BY_CODE[c].typical_bytes for c in enabled_codes if c in BY_CODE)
+                structural = 2 + len(enabled_codes) * 5
+                result["estimated_bytes_per_line"] = structural + field_bytes
             except Exception:
                 pass
             try:
@@ -215,7 +262,9 @@ async def prefill(source: dict = Depends(get_source)):
                 return None
 
         try:
+            _t = _time.perf_counter()
             chain_updates, payload = await asyncio.gather(_resolve_endpoint_chain(), _fetch_stats())
+            _phase("fastly_chain_and_stats", _t)
             # Chain updates feed into the response shape's existing keys
             # — overrides any defaults set above and any cron_sync values
             # set from the local config, matching the prior precedence
@@ -264,7 +313,9 @@ async def prefill(source: dict = Depends(get_source)):
                 finally:
                     con.close()
 
+            _t = _time.perf_counter()
             edge_ratio, debug_queries = await asyncio.to_thread(_edge_ratio_blocking)
+            _phase("edge_ratio_query", _t)
             if edge_ratio is not None:
                 result["edge_ratio"] = edge_ratio
         except Exception:
@@ -280,7 +331,7 @@ async def prefill(source: dict = Depends(get_source)):
     except Exception:
         pass
 
-    return PrefillResponse.with_telemetry(debug_queries=debug_queries, **result)
+    return PrefillResponse.with_telemetry(debug_queries=debug_queries, section_timings=section_timings, **result)
 
 
 @router.get("/current-storage", response_model=CurrentStorageResponse)
@@ -404,7 +455,9 @@ def usage_current_storage(
             end=end_str,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": str(e)})
+        from backend.utils.router_utils import raise_internal
+
+        raise_internal(logger, e, code="usage_storage_failed")
 
 
 @router.get("/operations", response_model=UsageOperationsResponse)
@@ -477,12 +530,14 @@ def usage_operations(
         # explicit tracked_call wrapper was duplicating the entry.
         payload = _fastly_api(f"/stats/aggregate?by={by}&from={from_ts}&to={to_ts}", api_key)
         _accumulate(payload.get("data", []))
-    except RuntimeError as e:
-        # fastly() raises RuntimeError("HTTP 502 GET /stats/aggregate ...")
-        # on non-2xx, with the upstream body included. Surface as 502.
-        raise HTTPException(status_code=502, detail={"error": f"Fastly Stats API: {e}"})
     except Exception as e:
-        raise HTTPException(status_code=502, detail={"error": str(e)})
+        # fastly() raises RuntimeError("HTTP 502 GET /stats/aggregate ...")
+        # on non-2xx, with the upstream body included. The body can contain
+        # internal hostnames or token fragments, so log server-side and
+        # return a generic code keyed by error_id for correlation.
+        from backend.utils.router_utils import raise_internal
+
+        raise_internal(logger, e, code="fastly_stats_aggregate_failed", status=502)
 
     points = [{"date": d, **v} for d, v in sorted(agg.items())]
     total_a = sum(d["class_a"] for d in points)
@@ -561,7 +616,9 @@ def usage_bandwidth(
             payload = _fastly_api(f"/stats/service/{cdn_svc}?by={by}&from={from_ts}&to={to_ts}", api_key)
             _merge(payload)
         except Exception as e:
-            raise HTTPException(status_code=502, detail={"error": str(e)})
+            from backend.utils.router_utils import raise_internal
+
+            raise_internal(logger, e, code="fastly_stats_service_failed", status=502)
 
     fmt = "%Y-%m-%dT%H:00" if by == "hour" else "%Y-%m-%dT%H:%M" if by == "minute" else "%Y-%m-%d"
     points = [{"time": datetime.fromtimestamp(ts, tz=UTC).strftime(fmt), **v} for ts, v in sorted(agg.items())]

@@ -103,7 +103,6 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         )
 
     # Success.
-    mgr.clear_login_failures(ip)
     session = mgr.create_session(invite=invite, ip_address=ip, user_agent=user_agent, headers=headers)
     share_db.log_share_audit_event(
         event_type="LOGIN_SUCCESS",
@@ -117,31 +116,16 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         tos and (invite.get("tos_accepted_at") is None or (invite.get("tos_version") or "") != tos["version"])
     )
 
-    # Cookie contract — see Section #4. secure=True is non-negotiable.
-    # In test mode (TestClient defaults to http://testserver), uvicorn won't
-    # send secure cookies; we tag it anyway because tests can read Set-Cookie.
-    if tos_pending:
-        response.set_cookie(
-            key=PENDING_COOKIE_NAME,
-            value=session.session_id,
-            httponly=True,
-            secure=True,
-            samesite="strict",
-            max_age=share_db.iso_z_now() and 24 * 60 * 60,
-            path="/",
-        )
-        response.delete_cookie(COOKIE_NAME, path="/")
-    else:
-        response.set_cookie(
-            key=COOKIE_NAME,
-            value=session.session_id,
-            httponly=True,
-            secure=True,
-            samesite="strict",
-            max_age=share_db.iso_z_now() and 24 * 60 * 60,
-            path="/",
-        )
-        response.delete_cookie(PENDING_COOKIE_NAME, path="/")
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=session.session_id,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=24 * 60 * 60,
+        path="/",
+    )
+    response.delete_cookie(PENDING_COOKIE_NAME, path="/")
 
     return ShareLoginResponse(
         ok=True,
@@ -216,7 +200,7 @@ def share_acknowledge_tos(payload: TosAckPayload, request: Request, response: Re
         httponly=True,
         secure=True,
         samesite="strict",
-        max_age=share_db.iso_z_now() and 24 * 60 * 60,
+        max_age=24 * 60 * 60,
         path="/",
     )
     response.delete_cookie(PENDING_COOKIE_NAME, path="/")
@@ -242,7 +226,7 @@ def share_heartbeat(request: Request):
     )
 
 
-@router.get("/claim/{token}", response_model=ShareClaimResponse)
+@router.post("/claim/{token}", response_model=ShareClaimResponse)
 def share_claim(token: str, request: Request):
     """One-time-view reveal of an invite's plaintext credentials.
 
@@ -274,5 +258,5 @@ def share_claim(token: str, request: Request):
         name=invite.get("name") if invite else None,
         email=invite.get("email") if invite else None,
         expires_at=invite.get("expires_at") if invite else None,
-        service_ids=invite.get("service_ids") if invite else [],
+        service_ids=(invite.get("service_ids") if invite else []) or [],
     )

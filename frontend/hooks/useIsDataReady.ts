@@ -1,5 +1,7 @@
 'use client'
 
+import { useQueryClient } from '@tanstack/react-query'
+
 import { useServiceStore } from '@/stores/serviceStore'
 
 /**
@@ -10,16 +12,30 @@ import { useServiceStore } from '@/stores/serviceStore'
  * automatically — so the "auto-snap to most-recent-24h" behavior still
  * works, the dashboard just doesn't *wait* for it before painting.
  *
+ * Bootstrap fallback (added 2026-06-11 alongside the SSR bootstrap
+ * change): with bootstrap pre-seeded in the React Query cache, the
+ * active service id is known on first paint. useBootstrap only writes
+ * it into the persisted Zustand store from a post-mount useEffect,
+ * which leaves a one-render window where "No service selected" flashes
+ * before the effect runs. Fall back to bootstrap.active_service_id
+ * whenever the store hasn't been populated yet so the gate flips true
+ * on first render.
+ *
  * Previously also required `hasSyncedExtents`. That flag is set in
  * FilterBar's effect after /api/sync-status returns (~1s wall-clock on a
  * cold load). Gating data fetches on it meant every first page load
- * burned ~1s before any of the real queries could even start. The
- * trade-off wasn't worth it: the only thing the wait bought was a
- * marginally better default range, and most users pick their own range
- * anyway. On the rare cases where the default window misses real data,
- * the refire still happens — just from the painted state instead of
- * from a spinner.
+ * burned ~1s before any of the real queries could even start.
  */
+export function useEffectiveServiceId(): string | null | undefined {
+  const stored = useServiceStore(s => s.activeServiceId)
+  const queryClient = useQueryClient()
+  if (stored) return stored
+  const bootstrap = queryClient.getQueryData(['bootstrap']) as
+    | { active_service_id?: string | null }
+    | undefined
+  return bootstrap?.active_service_id ?? stored
+}
+
 export function useIsDataReady(): boolean {
-  return !!useServiceStore(s => s.activeServiceId)
+  return !!useEffectiveServiceId()
 }

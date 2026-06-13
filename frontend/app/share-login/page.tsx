@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Eye, EyeOff, KeyRound, Loader2, AlertTriangle } from 'lucide-react'
 import type { components } from '@/types/api.generated'
+import { fetchWithTimeout } from '@/lib/fetchWithTimeout'
 
 type LoginResponse = components['schemas']['ShareLoginResponse']
 
@@ -39,7 +40,7 @@ export default function ShareLoginPage() {
       // 503 capacity) and a relative URL so the request flows through the
       // Next.js proxy in remote-analyst mode. The typed client's middleware
       // throws on any non-OK response, collapsing those distinctions.
-      const res = await fetch('/api/share/login', {
+      const res = await fetchWithTimeout('/api/share/login', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -2,13 +2,13 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
-import { 
-  LayoutDashboard, 
-  BarChart3, 
-  Network, 
-  Users, 
-  Settings, 
+import { usePathname, useSearchParams } from 'next/navigation'
+import {
+  LayoutDashboard,
+  BarChart3,
+  Network,
+  Users,
+  Settings,
   Database,
   Search,
   Activity,
@@ -23,6 +23,7 @@ import {
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
+import { useFilterUrlSync } from '@/hooks/useFilterUrlSync'
 import { TimezoneSwitcher } from '@/components/TimezoneSwitcher/TimezoneSwitcher'
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle'
 import { FilterBar } from '@/components/FilterBar/FilterBar'
@@ -59,7 +60,7 @@ const SERVICE_NAVIGATION = [
   { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
   { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
-  { name: 'Alerts', href: '/alerts', icon: Bell, analystVisible: true },
+  { name: 'Alerts', href: '/alerts', icon: Bell, analystVisible: false },
   { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: false },
 ]
 
@@ -69,6 +70,20 @@ const SYSTEM_NAVIGATION = [
 
 function UrlServiceSync() {
   useUrlServiceSync()
+  return null
+}
+
+// Lifts the `?mode=raw` search-param flag into a callback so the parent
+// AppLayout can react to it without calling `useSearchParams()` directly.
+// `useSearchParams()` requires a Suspense boundary above it for Next.js
+// static rendering; isolating it here lets us wrap just this slice in
+// <Suspense> rather than every consumer of the layout.
+function RawQueryModeProbe({ onChange }: { onChange: (isRaw: boolean) => void }) {
+  const searchParams = useSearchParams()
+  const isRaw = searchParams.get('mode') === 'raw'
+  React.useEffect(() => {
+    onChange(isRaw)
+  }, [isRaw, onChange])
   return null
 }
 
@@ -110,7 +125,7 @@ function NavLink({ href, icon: Icon, name, isActive, disabled, activeServiceId, 
         !disabled && isActive ? "bg-primary text-primary-foreground shadow-sm" : !disabled ? "text-muted-foreground" : ""
       )}
     >
-      <Icon className="h-4 w-4" />
+      <Icon className="h-4 w-4" aria-hidden="true" />
       {name}
     </Link>
   )
@@ -120,6 +135,14 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
   const { data: bootstrapData, isSuccess, isLoading } = useBootstrap()
+  // Tracks whether the current /query page is in raw-SQL mode (?mode=raw).
+  // Populated by <RawQueryModeProbe> inside the Suspense boundary below
+  // so we don't have to call useSearchParams() directly here.
+  const [isRawQueryMode, setIsRawQueryMode] = React.useState(false)
+
+  // Persist filter state to URL so back-nav, refresh, and shared links
+  // all round-trip the user's current dashboard view.
+  useFilterUrlSync()
 
   // (Removed) Navigation cancel pattern was here. The intent was to
   // abort the previous route's in-flight polls on route change, but
@@ -186,21 +209,34 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       React.startTransition(() => router.replace('/share-login'))
       return
     }
-    // Analysts can't access admin pages. The backend already returns 403
-    // on /api/admin/*, but the page shells are served by Next.js — bounce
-    // them away client-side so the URL isn't reachable.
-    if (isAnalyst && pathname.startsWith('/admin')) {
-      React.startTransition(() =>
-        router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'),
-      )
-      return
-    }
-    // Share-invited analysts also can't see ingestion ops (Data Management
-    // = /logs). FOS-sharing analysts who run their own copy still can.
-    if (isShareAnalyst && pathname.startsWith('/logs')) {
-      React.startTransition(() =>
-        router.replace(activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'),
-      )
+    // Analysts can't access admin pages, the Usage & Cost page, the Alerts
+    // surface, or the Data Management page. The backend returns 403 on
+    // /api/admin/*, /api/usage/*, /api/alerts/*, /api/cron-runs and friends,
+    // but the page shells are served by Next.js — bounce them away client-
+    // side so the URL isn't reachable (otherwise the page mounts and
+    // silently fails its data fetches).
+    //
+    // 2026-06-10 audit: ``router.replace`` inside ``startTransition`` was
+    // observed NOT firing on prod for /alerts and /logs even though the
+    // bundle clearly contained the redirect (verified via direct chunk
+    // fetch). The first redirect (/admin) DID work — likely because the
+    // page.tsx for /alerts and /logs themselves mount expensive client
+    // hooks (useQuery against now-403 endpoints) that race with the
+    // transition. Use ``window.location.replace`` for these blocking
+    // redirects: a full page navigation is cheap (the analyst never
+    // reaches the destination's data fetches anyway), it can't be raced
+    // by the destination route's own effects, and it preserves browser
+    // history correctly.
+    const analystBlocked =
+      isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts'))
+    const logsBlocked = (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs')
+    if (analystBlocked || logsBlocked) {
+      const target = activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'
+      if (typeof window !== 'undefined') {
+        window.location.replace(target)
+      } else {
+        React.startTransition(() => router.replace(target))
+      }
       return
     }
     // Admin-side wizard redirect — only for local admins.
@@ -209,11 +245,38 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     }
   }, [isLoading, hasServices, isAnalyst, isShareAnalyst, needsLogin, pathname, router, activeServiceId])
 
-  // Hide the global filter bar on pages where it does not apply
-  const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || pathname.startsWith('/query') || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || !hasServices
+  // Hint the browser to fetch world.geojson early on routes that actually
+  // mount a map (dashboard's "Requests by Country" choropleth, /network's
+  // choropleth). Previously this was a global <link rel="preload"> in
+  // app/layout.tsx, which fired on every page (including /share-login)
+  // and wasted ~251KB on routes that never paint a map. React 19 hoists
+  // <link> to <head> automatically when rendered from a client component.
+  //
+  // `rel="prefetch"` (not `preload`): the map is dynamic-imported, so
+  // MapLibre's actual fetch lands several seconds after page load — past
+  // Chrome's "preloaded but not used within a few seconds" timer. Prefetch
+  // is a low-priority hint without that heuristic; the bytes are still
+  // cached for MapLibre's later request, just not flagged as urgent.
+  const needsGeoPreload =
+    pathname.startsWith('/dashboard') || pathname.startsWith('/network')
+
+  // Hide the global filter bar on pages where it does not apply.
+  // /query is a special case: Structured Mode (default) syncs with the
+  // FilterBar, so we keep it visible; Raw SQL Mode (?mode=raw) owns its
+  // own editor + filters and the global bar would only confuse the
+  // SQL the user is hand-writing.
+  const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
+  const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || !hasServices
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-background">
+      {needsGeoPreload && (
+        <link
+          rel="prefetch"
+          href="/geo/world.geojson"
+          as="fetch"
+        />
+      )}
       {shareBanner.node}
       <div className="flex flex-1 overflow-hidden min-h-0">
       {isAnalyst && disconnected && (
@@ -232,22 +295,25 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       )}
       <React.Suspense fallback={null}>
         <UrlServiceSync />
+        <RawQueryModeProbe onChange={setIsRawQueryMode} />
       </React.Suspense>
-      {/* Force Plotly to parse + complete its first-plot draw during
-          app mount so the dashboard's real chart's data-arrival render
-          hits Plotly's fast react()-update path instead of the cold
-          init path. See PlotlyPrewarm.tsx for full rationale. */}
+      {/* Cold-init pre-warmers — intentional perf components, not hacks.
+          Plotly (~500-1500ms cold parse + first-plot init) and MapLibre
+          GL (~500-1200ms parse + WebGL context + first paint) both pay
+          their cold init the first time they render with non-empty data.
+          Running a 1-pixel invisible render during app mount moves that
+          cost onto the page-load wait the user is already absorbing, so
+          the dashboard's real chart/map render hits the fast
+          react()-update path. Both modules are used across most analytics
+          pages, so app-level rendering is intentional. Full per-component
+          rationale in PlotlyPrewarm.tsx + MapPrewarm.tsx. */}
       <PlotlyPrewarm />
-      {/* Same idea for MapLibre GL (used by the dashboard's
-          "Requests by Country" choropleth). ~1MB chunk + WebGL init
-          would otherwise run when the dashboard route mounts; the
-          prewarm gets it done during app mount instead. */}
       <MapPrewarm />
       {/* Desktop Sidebar */}
       <aside className="hidden md:flex w-64 flex-col border-r bg-muted/40">
         <div className="flex h-14 items-center justify-center border-b px-4 py-2 shrink-0">
-          <Link 
-            href={hasServices ? (activeServiceId ? `/dashboard?service=${activeServiceId}` : "/dashboard") : "/admin"} 
+          <Link
+            href={hasServices ? (activeServiceId ? `/dashboard?service=${activeServiceId}` : "/dashboard") : "/admin"}
             className="flex flex-col items-center justify-center hover:opacity-80 transition-opacity mt-1"
           >
              <img src="/fastly.svg" alt="Fastly" className="h-5 dark:invert" />
@@ -304,10 +370,10 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
             <TimezoneSwitcher />
             <ThemeToggle />
           </div>
-        </header>        
+        </header>
         {!hideFilterBar && <FilterBar />}
 
-        <main className="flex-1 overflow-auto p-6">
+        <main id="main" className="flex-1 overflow-auto p-6">
           {/* Render children IMMEDIATELY on navigation. The previous
               ``isLoading ? <Spinner /> : children`` gate held every
               route hostage to /api/bootstrap, which has no staleTime —

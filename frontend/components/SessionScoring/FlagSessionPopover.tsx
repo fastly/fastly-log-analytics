@@ -22,6 +22,10 @@ interface FlagSessionPopoverProps {
   // Currently-applied label (from the labels API). Undefined means we
   // don't know / haven't checked.
   currentLabel?: LabelValue | null
+  // Id of the currently-applied label row, required to issue the DELETE
+  // that un-flags the session. Optional — when absent the "Clear Label"
+  // affordance is hidden.
+  currentLabelId?: string | null
   trigger?: React.ReactNode
   onFlagged?: () => void
 }
@@ -50,12 +54,14 @@ export function FlagSessionPopover({
   sampleUa = '',
   sampleUrl = '',
   currentLabel,
+  currentLabelId,
   trigger,
   onFlagged,
 }: FlagSessionPopoverProps) {
   const [open, setOpen] = React.useState(false)
   const [notes, setNotes] = React.useState('')
   const [busy, setBusy] = React.useState<LabelValue | null>(null)
+  const [clearing, setClearing] = React.useState(false)
   const [error, setError] = React.useState('')
 
   const disabled = !sid
@@ -85,6 +91,23 @@ export function FlagSessionPopover({
     }
   }
 
+  const handleClearLabel = async () => {
+    if (!currentLabelId) return
+    setClearing(true)
+    setError('')
+    try {
+      await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}' as any, {
+        params: { path: { service_id: serviceId, label_id: currentLabelId } },
+      } as any)
+      setOpen(false)
+      onFlagged?.()
+    } catch (e: any) {
+      setError(extractApiError(e) || 'Failed to clear label')
+    } finally {
+      setClearing(false)
+    }
+  }
+
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
@@ -96,6 +119,7 @@ export function FlagSessionPopover({
               {...props}
               variant="ghost"
               size="icon"
+              aria-label={disabled ? 'No session id (cookieless request)' : 'Flag this session'}
               className="h-7 w-7"
               disabled={disabled}
               title={disabled ? 'No session id (cookieless request)' : 'Flag this session'}
@@ -141,13 +165,30 @@ export function FlagSessionPopover({
                 variant="outline"
                 size="sm"
                 className={`text-xs ${LABEL_STYLES[lbl]}`}
-                disabled={disabled || !!busy}
+                disabled={disabled || !!busy || clearing}
                 onClick={() => submit(lbl)}
               >
                 {busy === lbl ? <Loader2 className="h-3 w-3 animate-spin" /> : lbl}
               </Button>
             ))}
           </div>
+          {currentLabel && currentLabelId && (
+            <div className="pt-1 border-t">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+                disabled={!!busy || clearing}
+                onClick={handleClearLabel}
+              >
+                {clearing ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  'Clear Label (Un-flag)'
+                )}
+              </Button>
+            </div>
+          )}
         </div>
       </PopoverContent>
     </Popover>

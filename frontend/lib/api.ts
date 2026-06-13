@@ -1,6 +1,7 @@
 import createClient from "openapi-fetch";
 import type { paths } from "@/types/api.generated";
 import { useServiceStore } from "@/stores/serviceStore";
+import { showReadOnlyToast } from "@/lib/toast";
 
 export function extractApiError(error: unknown): string {
   if (!error) return 'Unknown error'
@@ -86,6 +87,14 @@ client.use({
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: "An unknown error occurred" }));
       const msg = extractApiError(error);
+      // N-6 / M-1: any analyst-blocked mutation (Save View, Alerts modal,
+      // etc.) used to fail silently — the modal would stay open with no
+      // toast, no banner. Surface a global toast for the specific
+      // ``403 read_only`` error so every analyst-visible write path gets
+      // useful feedback without per-modal plumbing.
+      if (response.status === 403 && msg === 'read_only') {
+        showReadOnlyToast();
+      }
       throw new Error(msg);
     }
     return response;

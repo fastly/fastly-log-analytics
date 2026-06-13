@@ -118,7 +118,7 @@ export function DebugPanel() {
           }
         }
       }
-      
+
       setTimeout(() => {
         setQueries(extractedQueries)
         setCalls(extractedCalls)
@@ -156,9 +156,9 @@ export function DebugPanel() {
                 <Database className="h-4 w-4 text-primary" />
               </div>
               <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">DuckDB Queries</h3>
-              <Button 
-                variant="ghost" 
-                size="sm" 
+              <Button
+                variant="ghost"
+                size="sm"
                 className="h-6 text-[10px] px-2"
                 onClick={() => setIsQueryOpen(!isQueryOpen)}
               >
@@ -173,11 +173,11 @@ export function DebugPanel() {
               </div>
             </div>
           </div>
-          
+
           {isQueryOpen && (
             <div className="grid gap-4 max-h-[500px] overflow-auto pr-2 custom-scrollbar">
               {queries.map((q, i) => (
-                <div key={i} className="bg-muted/30 p-4 rounded-md border font-mono text-[11px] relative group">
+                <div key={`query-${i}-${q.sql.length}-${q.time_ms}`} className="bg-muted/30 p-4 rounded-md border font-mono text-[11px] relative group">
                   <div className="flex justify-between items-center mb-2 pb-2 border-b border-muted">
                     <span className="text-muted-foreground font-semibold">
                       QUERY #{i + 1} {q.is_cached && <span className="text-blue-500 ml-2">(CACHED)</span>}
@@ -296,9 +296,9 @@ export function DebugPanel() {
                 <Network className="h-4 w-4 text-orange-500" />
               </div>
               <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">Fastly API & FOS Calls</h3>
-              <Button 
-                variant="ghost" 
-                size="sm" 
+              <Button
+                variant="ghost"
+                size="sm"
                 className="h-6 text-[10px] px-2"
                 onClick={() => setIsCallsOpen(!isCallsOpen)}
               >
@@ -312,7 +312,7 @@ export function DebugPanel() {
               </div>
             </div>
           </div>
-          
+
           {isCallsOpen && (
             <div className="grid gap-3 max-h-[500px] overflow-auto pr-2 custom-scrollbar">
               {calls.length === 0 ? (
@@ -321,7 +321,7 @@ export function DebugPanel() {
                 </div>
               ) : (
                 calls.map((c, i) => (
-                  <div key={i} className="bg-muted/30 p-3 rounded-md border font-mono text-[11px] flex flex-col gap-2">
+                  <div key={`${c.service}-${c.method}-${c.path}-${i}`} className="bg-muted/30 p-3 rounded-md border font-mono text-[11px] flex flex-col gap-2">
                     <div className="flex justify-between items-start">
                       <div className="flex items-center gap-2 flex-wrap">
                         <Badge variant="outline" className={`text-[10px] ${c.service === 'FOS' ? 'bg-blue-500/10 text-blue-500 border-blue-500/20' : 'bg-orange-500/10 text-orange-500 border-orange-500/20'}`}>

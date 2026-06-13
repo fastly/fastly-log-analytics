@@ -30,7 +30,14 @@ RUN npm ci
 
 COPY frontend/ .
 
-# Generate TypeScript types from the schema produced in the previous stage
+# Generate TypeScript types from the schema produced in the previous stage.
+# Security: openapi.json is copied into the final image layer and is
+# served by Next.js (used by client-side type generation + occasional
+# debug fetches). Keep it free of embedded credentials, example tokens,
+# or internal-only hostnames. The schema is built from FastAPI route
+# definitions only — no values flow in from running services — but if
+# you ever add an ``example=`` to a Pydantic model, double-check it
+# before merging.
 COPY --from=api-schema /app/openapi.json ./openapi.json
 RUN npx openapi-typescript openapi.json -o types/api.generated.ts
 

@@ -318,6 +318,63 @@ def test_query_errors_maps_unknown_exception_in_async_handler_to_configured_stat
     )
 
 
+# ── raise_internal: server-log the cause, generic detail on the wire ────────
+
+
+def test_raise_internal_does_not_leak_exception_string_to_client(caplog):
+    """Server-side log captures the traceback (operators can triage); the
+    HTTPException detail returned to the client carries ONLY a generic
+    ``code`` and an ``error_id`` for correlation. Pinned because the v2.0
+    audit found 8 routers that interpolated ``str(e)`` directly into
+    HTTPException.detail — when the exception originates in
+    ``backend.core.fastly.client.fastly()`` that ``str(e)`` includes
+    the upstream Fastly response body (potentially internal hostnames,
+    token fragments, etc.). Re-introducing that pattern would re-open
+    the leak.
+    """
+    import logging
+
+    log = logging.getLogger("test.raise_internal")
+
+    leaky = RuntimeError("HTTP 502 GET /tokens/self\n    internal.fastly.svc:5001 timed out")
+    with caplog.at_level(logging.ERROR, logger="test.raise_internal"):
+        with pytest.raises(HTTPException) as exc:
+            router_utils.raise_internal(log, leaky, code="my_endpoint_failed", status=500)
+
+    assert exc.value.status_code == 500
+    detail = exc.value.detail or {}
+    assert detail.get("error") == "my_endpoint_failed"
+    assert "error_id" in detail
+    assert len(detail["error_id"]) == 8  # 8-char hex prefix
+    # The leaky message MUST NOT be on the wire.
+    assert "internal.fastly.svc" not in str(detail)
+    assert "502" not in detail.get("error", "")
+    # But the operator log MUST have captured the full exception for triage.
+    log_text = "\n".join(r.getMessage() for r in caplog.records) + "\n".join(
+        str(r.exc_info) for r in caplog.records if r.exc_info
+    )
+    assert detail["error_id"] in log_text
+
+
+def test_raise_internal_chains_original_exception_for_traceback():
+    """``raise from`` semantics: the caused-by chain must point at the
+    original exception so server logs show the full root cause.
+    Without ``from exc`` the operator log would show only the generic
+    ``request_failed`` exception, hiding the actual upstream failure."""
+    import logging
+
+    log = logging.getLogger("test.raise_internal_chain")
+    orig = RuntimeError("root cause")
+    try:
+        try:
+            raise orig
+        except RuntimeError as e:
+            router_utils.raise_internal(log, e)
+    except HTTPException as wrapped:
+        # The wrapped exception's __cause__ is the original (via "raise ... from exc")
+        assert wrapped.__cause__ is orig
+
+
 def test_query_errors_async_branch_preserves_concurrency():
     """The whole point of converting to async: two awaitables started
     via asyncio.gather under @query_errors must run concurrently. If

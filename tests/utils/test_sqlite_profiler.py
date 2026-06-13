@@ -159,3 +159,99 @@ def test_metadata_db_traffic_appears_in_buffer():
     sqls = [q["sql"] for q in snap["queries"]]
     # PRAGMA journal_mode=WAL is the canonical first statement after connect.
     assert any("PRAGMA journal_mode" in s for s in sqls)
+
+
+# ── Helper-function direct tests (cover the small surface) ──────────────────
+
+
+def test_summarize_sql_truncates_long_strings():
+    long_sql = "SELECT " + ", ".join(f"col_{i}" for i in range(1000))
+    out = sqlite_profiler._summarize_sql(long_sql)
+    assert "chars]" in out
+    assert len(out) < len(long_sql)
+
+
+def test_summarize_sql_coerces_non_strings():
+    """Some callers pass bytes / int; the profiler must not raise."""
+    # bytes → str(bytes) gives "b'...'" which is acceptable; just verify
+    # no exception and the result is a string.
+    out = sqlite_profiler._summarize_sql(b"SELECT 1")
+    assert isinstance(out, str)
+    assert "SELECT 1" in out
+    assert sqlite_profiler._summarize_sql(42) == "42"
+
+
+def test_describe_params_covers_each_shape():
+    assert sqlite_profiler._describe_params(None) == "none"
+    assert sqlite_profiler._describe_params([1, 2, 3]) == "seq[3]"
+    assert sqlite_profiler._describe_params((1,)) == "seq[1]"
+    assert sqlite_profiler._describe_params({"a": 1, "b": 2}) == "map[2]"
+    # Other types fall through to the type-name branch.
+    assert sqlite_profiler._describe_params(42) == "int"
+
+
+def test_record_swallows_internal_exceptions(monkeypatch):
+    """The profiler's hard contract: any internal failure must never
+    reach the caller's SQL path."""
+    from unittest.mock import MagicMock
+
+    bad = MagicMock()
+    bad.append.side_effect = RuntimeError("buffer borked")
+    monkeypatch.setattr(sqlite_profiler, "_buffer", bad)
+    # Must not raise — exception is logged at DEBUG and swallowed.
+    sqlite_profiler._record("SELECT 1", None, 0.5, 1, "execute")
+
+
+def test_live_register_returns_sentinel_on_registry_failure(monkeypatch):
+    """When the registry import / call raises, _live_register returns -1
+    (a sentinel that _live_deregister treats as a no-op)."""
+    from backend.core import query_registry
+
+    monkeypatch.setattr(
+        query_registry.query_registry,
+        "register",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("registry down")),
+    )
+    qid = sqlite_profiler._live_register("SQLite", "SELECT 1", con=None)
+    assert qid == -1
+
+
+def test_live_deregister_is_noop_for_negative_qid():
+    # Must not raise even though we never registered.
+    sqlite_profiler._live_deregister(-1, error=None)
+
+
+def test_live_deregister_swallows_registry_errors(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from backend.core import query_registry
+
+    monkeypatch.setattr(
+        query_registry.query_registry,
+        "deregister",
+        MagicMock(side_effect=RuntimeError("dereg failed")),
+    )
+    # Must not raise even though deregister blew up.
+    sqlite_profiler._live_deregister(42, error=None)
+
+
+def test_connection_cursor_returns_instrumented_by_default():
+    con = sqlite3.connect(":memory:", factory=sqlite_profiler.InstrumentedConnection)
+    cur = con.cursor()
+    assert isinstance(cur, sqlite_profiler.InstrumentedCursor)
+
+
+def test_connection_cursor_respects_explicit_factory():
+    """Callers can opt out by passing factory=sqlite3.Cursor; the
+    instrumentation shouldn't force its subclass on them."""
+    con = sqlite3.connect(":memory:", factory=sqlite_profiler.InstrumentedConnection)
+    cur = con.cursor(factory=sqlite3.Cursor)
+    assert type(cur) is sqlite3.Cursor
+
+
+def test_executescript_failure_is_still_recorded(tmp_path):
+    con = _open_instrumented(str(tmp_path / "t.db"))
+    with pytest.raises(sqlite3.OperationalError):
+        con.executescript("CREATE TABLE BAD SQL BLAH;")
+    snap = sqlite_profiler.get_recent()
+    assert any("BAD SQL" in q["sql"] for q in snap["queries"])

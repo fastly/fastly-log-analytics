@@ -524,13 +524,13 @@ def test_operations_accumulates_class_a_and_class_b_per_day(client, tmp_path, mo
 
 
 def test_operations_maps_http_error_to_502(client, tmp_path, monkeypatch):
-    """Fastly Stats upstream failure → 502 with the upstream status +
-    body. Pinned because the FE distinguishes 502 (transient upstream)
-    from 4xx (config issue) when retrying.
-
-    `_fastly_api` now delegates to `backend.core.fastly.client.fastly`
-    which raises `RuntimeError("HTTP 503 GET /stats/aggregate ...\\n   body")`
-    on non-2xx. The router catches RuntimeError → 502."""
+    """Fastly Stats upstream failure → 502 with a generic error code +
+    correlation id. The upstream status and body are NOT echoed to the
+    client (they can contain internal hostnames / token fragments per
+    the v2.0 raise_internal sweep); operators triage via the server log
+    keyed on ``error_id``. Pinned because the FE distinguishes 502
+    (transient upstream) from 4xx (config issue) when retrying.
+    """
     from backend import config
     from backend.deps import get_source
     from backend.main import app
@@ -549,10 +549,12 @@ def test_operations_maps_http_error_to_502(client, tmp_path, monkeypatch):
         )
 
     assert resp.status_code == 502
-    detail = resp.json()["detail"]["error"]
-    # Both the upstream status and message body surface
-    assert "503" in detail
-    assert "service unavailable" in detail
+    body = resp.json()["detail"]
+    assert body["error"] == "fastly_stats_aggregate_failed"
+    assert "error_id" in body
+    # Critical: upstream status/body MUST NOT leak through the wire.
+    assert "503" not in body["error"]
+    assert "service unavailable" not in body["error"]
 
 
 def test_operations_maps_generic_exception_to_502(client, tmp_path, monkeypatch):

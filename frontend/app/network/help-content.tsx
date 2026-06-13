@@ -122,7 +122,7 @@ export const MetroLeaderboardHelp = () => (
 export const ShieldingHelp = () => (
   <div className="space-y-4 text-sm text-muted-foreground">
     <p>Edge-to-Shield round-trip latency, isolated by subtracting the Shield-to-Origin fetch time from the Edge&apos;s total upstream wait. Requests are correlated via the <code>rid</code>/<code>prid</code> fields.</p>
-    
+
     <div className="space-y-2 border-t pt-4">
       <h4 className="font-semibold text-foreground text-xs uppercase tracking-wider">Efficiency Legend</h4>
       <ul className="space-y-2 list-none pl-0">
@@ -221,4 +221,3 @@ export const SHIELDING_LABELS: Record<string, string> = {
 export const getShieldingLabels = (ids: string[]) => ids.map(id => ({ id, label: SHIELDING_LABELS[id] || id }))
 
 // ── Page ──────────────────────────────────────────────────────────────────────
-

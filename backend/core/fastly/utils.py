@@ -57,6 +57,14 @@ penaltybox auth_fail_pb {}
 #RATELIMIT_END
 
 sub miss_pass {
+    # Shield-auth marker: tell the shield POP's vcl_recv that this bereq
+    # already passed edge auth so it can skip its own auth gate. Stamped
+    # on every outgoing bereq from edge; the shield's vcl_recv matches
+    # this against the compiled-in random secret (unspoofable from
+    # outside — see audit finding 006). For services with shielding
+    # disabled the bereq goes direct to FOS, which ignores the header.
+    set bereq.http.X-Edge-CDN-Auth = "REPLACE_AT_LOAD_VCL_SHIELD_SECRET";
+
     # Fastly Object Storage signing https://www.fastly.com/documentation/guides/integrations/non-fastly-services/amazon-s3/
     if ((req.method == "GET" || req.method == "HEAD") && !req.backend.is_shield) {
         declare local var.fosAccessKey STRING;
@@ -145,7 +153,21 @@ sub miss_pass {
 }
 
 sub vcl_recv {
-  if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+  # Strip client-supplied X-Edge-CDN-Auth before any auth-related logic
+  # reads it. The shield-detection check below trusts an exact match
+  # against a compiled-in random secret; only the edge's own miss_pass
+  # sub (which has the secret baked into VCL) can set a matching value.
+  # Anything else came from a client and gets dropped here — that way
+  # edge-only gates (auth, Fastly-Client-IP set, etc.) still fire on
+  # the spoofer's request. See audit finding 006: prior code used
+  # `fastly.ff.visits_this_service == 0` for this gate, but `Fastly-FF`
+  # is derived from a client-controllable HTTP header and therefore
+  # spoofable.
+  if (req.restarts == 0 && req.http.X-Edge-CDN-Auth != "REPLACE_AT_LOAD_VCL_SHIELD_SECRET") {
+    unset req.http.X-Edge-CDN-Auth;
+  }
+
+  if (req.restarts == 0 && req.http.X-Edge-CDN-Auth != "REPLACE_AT_LOAD_VCL_SHIELD_SECRET") {
     set req.http.Fastly-Client-IP = client.ip;
   }
 
@@ -153,11 +175,11 @@ sub vcl_recv {
   # NOTE on the auth fallback: the third argument to ``table.lookup`` is
   # returned when ``cdn_auth.secret`` is absent from the edge dictionary.
   # Defaulting to ``""`` is fail-open — an attacker who sends an empty
-  # ``key`` query param trivially matches. ``__FALLBACK_SECRET__`` is
-  # substituted in load_vcl() with ``secrets.token_hex(32)``, which is
-  # never knowable to an attacker and therefore fails closed when the
-  # dictionary is unprovisioned.
-  if (req.restarts == 0 && fastly.ff.visits_this_service == 0 && subfield(req.url.qs, "key", "&") != table.lookup(cdn_auth, "secret", "__FALLBACK_SECRET__") && req.http.x-fastly-key != table.lookup(cdn_auth, "secret", "__FALLBACK_SECRET__")) {
+  # ``key`` query param trivially matches. The literal fallback string
+  # below is substituted in load_vcl() with ``secrets.token_hex(32)``,
+  # which is never knowable to an attacker and therefore fails closed
+  # when the dictionary is unprovisioned.
+  if (req.restarts == 0 && req.http.X-Edge-CDN-Auth != "REPLACE_AT_LOAD_VCL_SHIELD_SECRET" && subfield(req.url.qs, "key", "&") != table.lookup(cdn_auth, "secret", "REPLACE_AT_LOAD_VCL_FALLBACK_SECRET") && req.http.x-fastly-key != table.lookup(cdn_auth, "secret", "REPLACE_AT_LOAD_VCL_FALLBACK_SECRET")) {
 #RATELIMIT_BEGIN
     declare local var.last_minute INTEGER;
     set var.last_minute = ratelimit.ratecounter_increment(auth_fail_rc, req.http.Fastly-Client-IP, 1);
@@ -168,7 +190,7 @@ sub vcl_recv {
     error 401 "Unauthorized";
   }
 #RATELIMIT_BEGIN
-  if (req.method != "FASTLYPURGE" && req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+  if (req.method != "FASTLYPURGE" && req.restarts == 0 && req.http.X-Edge-CDN-Auth != "REPLACE_AT_LOAD_VCL_SHIELD_SECRET") {
     if (ratelimit.penaltybox_has(auth_fail_pb, req.http.Fastly-Client-IP)) {
       error 401 "Unauthorized";
     }
@@ -319,12 +341,20 @@ sub vcl_log {
 }"""
     if not rate_limiting:
         vcl = re.sub(r"\s*#RATELIMIT_BEGIN.*?#RATELIMIT_END", "", vcl, flags=re.DOTALL)
-    # Substitute the placeholder with a fresh random fallback secret so
-    # that when ``cdn_auth.secret`` is missing from the edge dictionary,
-    # the lookup returns an unguessable value and the auth check fails
-    # closed instead of allowing empty-key requests through. A new secret
-    # per load_vcl() call is fine: real auth uses the dictionary value
-    # (this fallback is never matched in steady state).
-    fallback_secret = secrets.token_hex(32)
-    vcl = vcl.replace("__FALLBACK_SECRET__", fallback_secret)
+    # Substitute the fallback-secret placeholder with a fresh random
+    # value so that when ``cdn_auth.secret`` is missing from the edge
+    # dictionary, the lookup returns an unguessable value and the auth
+    # check fails closed instead of allowing empty-key requests through.
+    # A new secret per load_vcl() call is fine: real auth uses the
+    # dictionary value (this fallback is never matched in steady state).
+    vcl = vcl.replace("REPLACE_AT_LOAD_VCL_FALLBACK_SECRET", secrets.token_hex(32))
+    # Shield-auth secret (audit finding 006): single random value baked
+    # into BOTH the edge-side and shield-side copies of the VCL (they're
+    # the same compiled VCL artifact, so the constant matches by
+    # construction). Edge stamps it on outgoing bereqs in miss_pass;
+    # shield's vcl_recv sees the match and skips its own auth gate.
+    # An attacker who tries to spoof ``Fastly-FF`` cannot satisfy the
+    # comparison because the secret is only known to the compiled VCL
+    # and never sent to clients.
+    vcl = vcl.replace("REPLACE_AT_LOAD_VCL_SHIELD_SECRET", secrets.token_hex(32))
     return vcl

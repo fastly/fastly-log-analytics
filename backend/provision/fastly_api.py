@@ -2,8 +2,9 @@ import datetime
 import re
 import shutil
 import urllib.parse
+from typing import Any
 
-from backend.core import log_fields as lf
+from backend.core import field_registry as lf
 from backend.core.fastly.client import fastly
 from backend.core.fastly.service import (
     ensure_condition,
@@ -62,18 +63,25 @@ EDGE_DATA_MAPPING = {
     "data_segs": 'if(client.socket.tcpi_data_segs_out > 0, "" + client.socket.tcpi_data_segs_out, "null")',
     # Group H — Security: TLS Fingerprinting (TLS state only valid at true edge PoP)
     "tls_csha": "tls.client.ciphers_list_sha",
+    "h2fp": "fastly_info.h2.fingerprint",
+    "ohfp": "fastly_info.oh_fingerprint",
 }
 
 
-def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
+def generate_capture_vcl(log_fields_config: dict | None) -> dict[str, str]:
     """Return dict of VCL snippets keyed by subroutine name.
 
     Always returns "recv", "miss", and "pass". When group L (Origin Metrics)
     is enabled, also returns "fetch", "error", and "deliver".
+
+    ``log_fields_config`` accepts ``None`` because most callers pass the
+    raw ``cfg.get("log_fields")`` value; coerced to ``{}`` at the top so
+    downstream calls don't have to repeat the None-check.
     """
+    log_fields_config = log_fields_config or {}
     required = lf.get_required_edge_headers(log_fields_config)
-    group_l = "L" in ((log_fields_config or {}).get("groups") or [])
-    limits = (log_fields_config or {}).get("field_limits") or {}
+    group_l = "L" in (log_fields_config.get("groups") or [])
+    limits = log_fields_config.get("field_limits") or {}
 
     enabled_custom = sorted(
         [cf for cf in (log_fields_config or {}).get("custom_fields", []) if cf.get("enabled", True)],
@@ -998,20 +1006,16 @@ def update_logging_endpoint(cfg: dict, token: str):
     path_changed = path is not None and current_ep.get("path") != path
 
     current_cond_name = current_ep.get("response_condition")
-    current_stmt = ""
+    current_stmt: str = ""
     if current_cond_name:
         cond = find_condition(current_cond_name, service_id, active_ver, token)
-        current_stmt = cond.get("statement") if cond else ""
+        current_stmt = (cond.get("statement") if cond else "") or ""
 
-    target_sample_rate = (
-        int(sample_rate)
-        if sample_rate is not None
-        else (
-            int(re.search(r"randombool\((\d+),", current_stmt).group(1))
-            if re.search(r"randombool\((\d+),", current_stmt)
-            else 100
-        )
-    )
+    def _rate_from_stmt(stmt: str) -> int:
+        m = re.search(r"randombool\((\d+),", stmt)
+        return int(m.group(1)) if m else 100
+
+    target_sample_rate = int(sample_rate) if sample_rate is not None else _rate_from_stmt(current_stmt)
     target_edge_only = bool(edge_only) if edge_only is not None else ("req.restarts == 0" in current_stmt)
     target_custom_condition = cfg.get("custom_condition", "").strip()
 
@@ -1085,8 +1089,8 @@ def update_logging_endpoint(cfg: dict, token: str):
     yield {"type": "progress", "current": 2, "total": total_steps}
 
     try:
-        update_payload = {}
-        if period_changed:
+        update_payload: dict[str, Any] = {}
+        if period_changed and period is not None:
             update_payload["period"] = int(period)
         if path_changed:
             update_payload["path"] = path

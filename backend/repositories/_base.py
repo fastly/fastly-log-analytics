@@ -19,6 +19,101 @@ import duckdb
 _PARQUET_LIST_RE = re.compile(r"read_parquet\(\[\s*('[^']+'\s*(?:,\s*'[^']+'\s*)*)\]")
 
 
+# Cache for ``QueryRunner.get_schema_cols``, keyed on
+# ``(service_id, log_format_hash)``. The schema only changes when an
+# admin edits the log format (which mints a new ``format_hash`` on the
+# saved config — see ``backend.routers.services.core``); a new
+# ``format_hash`` produces a cache miss naturally, so no explicit
+# invalidation hook is needed. Cap at 64 entries to bound memory in the
+# pathological case where format_hash churns (e.g., test fixtures).
+#
+# Why this exists: SUMMARIZE-over-the-Iceberg-view walks the manifest
+# list, which sits on FOS in production. The perf audit clocked
+# ``get_schema_cols`` at 2.8s p50 on a cold prod connection vs <1ms on
+# warm local — the same SUMMARIZE that takes <1ms once the manifests
+# are in-process burns seconds per request when it isn't cached.
+_schema_cols_cache: dict[tuple[str, str], list[str]] = {}
+_SCHEMA_COLS_CACHE_MAX_ENTRIES = 64
+
+
+def _schema_cols_cache_key(src: dict) -> tuple[str, str] | None:
+    """Return the cache key for ``src``, or ``None`` if we shouldn't cache.
+
+    We need BOTH a stable service id AND a format_hash. Missing either
+    means the source dict is malformed or pre-dates the format_hash
+    field — fall through to the uncached path rather than risk caching
+    under a key we can't invalidate.
+    """
+    sid = src.get("service_id") or src.get("name")
+    fmt = (src.get("log_fields") or {}).get("format_hash")
+    if not sid or not fmt:
+        return None
+    return (sid, fmt)
+
+
+def clear_schema_cols_cache(service_id: str | None = None) -> None:
+    """Drop cached schema columns.
+
+    With ``service_id=None``, clears everything. With a specific id,
+    drops entries for that service across all format_hashes (useful in
+    tests). Production code shouldn't need to call this — the
+    format_hash-keyed cache invalidates itself on log_format changes.
+    """
+    global _schema_cols_cache
+    if service_id is None:
+        _schema_cols_cache.clear()
+    else:
+        _schema_cols_cache = {k: v for k, v in _schema_cols_cache.items() if k[0] != service_id}
+
+
+# Cache for ``os.listdir`` on the rollup directory tree. The dir_enum
+# pass inside ``QueryRunner.execute_top_n_rollups`` calls listdir once
+# per (field) at the field-hour and field-day roots, plus once at the
+# bundled-hour root. On prod that's ~80 listdirs returning ~375 entries
+# each per request and lands at 1.3-3 s of pure stat work — sometimes
+# the bulk of the request — per the perf audit (F5).
+#
+# The cron sync rebuilds the rollup tree at most every minute, so a
+# 60 s TTL captures changes without ever serving rollup output that's
+# more than one tick stale. Bounded by entry count so unbounded service
+# / hour churn can't blow the cache.
+_listdir_cache: dict[str, tuple[float, list[str]]] = {}
+_LISTDIR_CACHE_TTL_S = 60.0
+_LISTDIR_CACHE_MAX_ENTRIES = 4096
+
+
+def _cached_listdir(path: str) -> list[str]:
+    """Return ``os.listdir(path)`` cached for ``_LISTDIR_CACHE_TTL_S``.
+
+    Returns ``[]`` on any OSError (matching the existing call-site
+    behaviour around the rollup tree — callers treat missing/empty
+    directories the same). The cache is intentionally simple: no
+    per-entry expiry sweep, just a flat-clear when full.
+    """
+    import time as _time
+
+    now = _time.monotonic()
+    cached = _listdir_cache.get(path)
+    if cached is not None and (now - cached[0]) < _LISTDIR_CACHE_TTL_S:
+        return cached[1]
+    try:
+        import os as _os
+
+        entries = _os.listdir(path)
+    except OSError:
+        entries = []
+    if len(_listdir_cache) >= _LISTDIR_CACHE_MAX_ENTRIES:
+        _listdir_cache.clear()
+    _listdir_cache[path] = (now, entries)
+    return entries
+
+
+def clear_listdir_cache() -> None:
+    """Drop the cached rollup listdir entries. Used by tests + the
+    sync writer's commit hook when fresh files have been written."""
+    _listdir_cache.clear()
+
+
 def _compact_sql_for_debug(sql: str) -> str:
     """Replace explicit ``read_parquet([...long file list...])`` literals
     with ``read_parquet([N files])`` for transport in the debug-panel
@@ -126,8 +221,14 @@ def _is_stale_view_error(e: Exception) -> bool:
 
 
 def optional_col(col: str, actual_cols, default: str = "NULL") -> str:
-    """Return a quoted column reference if the column exists, else a SQL default expression."""
-    return f'"{col}"' if col in actual_cols else default
+    """Return a quoted column reference if the column exists, else a SQL default expression.
+
+    Escapes internal double quotes (DuckDB identifier-quote escape: `"` → `""`)
+    so a hostile column name (admin-defined custom log fields can contain
+    arbitrary characters) cannot break out of the quoted identifier into raw
+    SQL. See audit finding 004.
+    """
+    return '"{}"'.format(col.replace('"', '""')) if col in actual_cols else default
 
 
 VALID_CHART_INTERVALS: frozenset[str] = frozenset({"1 second", "1 minute", "1 hour", "1 day"})
@@ -333,7 +434,19 @@ class QueryRunner:
         return res
 
     def get_schema_cols(self) -> list[str]:
-        """Get schema columns, retrying and refreshing the view if needed."""
+        """Get schema columns, retrying and refreshing the view if needed.
+
+        Result is cached per ``(service_id, log_format_hash)`` so the
+        SUMMARIZE-over-Iceberg-view cost is paid once per format
+        revision instead of per request. See ``_schema_cols_cache``
+        above for the rationale (2.8s p50 cold on prod).
+        """
+        cache_key = _schema_cols_cache_key(self.src)
+        if cache_key is not None and cache_key in _schema_cols_cache:
+            cached = _schema_cols_cache[cache_key]
+            self.actual_cols = set(cached)
+            return cached
+
         actual_cols = [col["name"] for col in _get_schema(self.con, self.src)]
         if not actual_cols:
             # The connection's bound view is stale — most likely the sync
@@ -370,6 +483,14 @@ class QueryRunner:
             except Exception:
                 pass
         self.actual_cols = set(actual_cols)
+        # Only cache non-empty results. An empty result here means the
+        # self-heal path also failed — caching empty would pin the
+        # "no schema" answer until the next format_hash change, which
+        # is exactly the prod incident the self-heal exists to prevent.
+        if actual_cols and cache_key is not None:
+            if len(_schema_cols_cache) >= _SCHEMA_COLS_CACHE_MAX_ENTRIES:
+                _schema_cols_cache.clear()
+            _schema_cols_cache[cache_key] = actual_cols
         return actual_cols
 
     def execute_with_retry(self, sql: str, params: list | None = None):
@@ -425,7 +546,7 @@ class QueryRunner:
     def create_filtered_temp_table(
         self,
         cols: list[str],
-        actual_cols: list[str],
+        actual_cols: list[str] | set[str],
         source_table: str,
         where_clause: str,
         params: list | None = None,
@@ -436,7 +557,9 @@ class QueryRunner:
         """
         import uuid as _uuid
 
-        select_cols = [f'"{c}"' for c in cols if c in actual_cols]
+        # Escape internal double quotes so a hostile column name cannot break
+        # out of the quoted identifier (audit finding 004).
+        select_cols = ['"{}"'.format(c.replace('"', '""')) for c in cols if c in actual_cols]
         if not select_cols:
             return None
         temp_name = f"t_{_uuid.uuid4().hex}"
@@ -508,7 +631,8 @@ class QueryRunner:
         seen: set[str] = {"timestamp"}
         for f in fields:
             if f in actual_cols and f not in seen:
-                select_parts.append(f'"{f}"')
+                # Escape internal double quotes (audit finding 004).
+                select_parts.append('"{}"'.format(f.replace('"', '""')))
                 seen.add(f)
         cols_sql = ", ".join(select_parts)
         where = (
@@ -530,7 +654,7 @@ class QueryRunner:
         except Exception:
             # Schema mismatch, missing column, etc. Caller falls back.
             try:
-                self.con.execute(f"DROP TABLE IF EXISTS {temp_name}")
+                self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
             except Exception:
                 pass
             return None
@@ -556,7 +680,7 @@ class QueryRunner:
         finally:
             if name is not None:
                 try:
-                    self.execute(f"DROP TABLE IF EXISTS {name}")
+                    self.execute(f'DROP TABLE IF EXISTS "{name}"')
                 except Exception:
                     pass
 
@@ -683,6 +807,7 @@ class QueryRunner:
         # the dashboard top-N tabs went blank.
         day_root = os.path.join(cache_dir, "rollups", "day")
         bundled_hour_root = os.path.join(cache_dir, "rollups", "hour_bundled")
+        bundled_day_root = os.path.join(cache_dir, "rollups", "day_bundled")
         active_day = active_str[:10]
         day_paths: list[str] = []
         hour_paths: list[str] = []
@@ -696,25 +821,126 @@ class QueryRunner:
         # errors when UNION ALL'd with the per-field branch.
         bundled_hour_paths: list[str] = []
         bundled_hours: set[str] = set()
-        if os.path.isdir(bundled_hour_root):
+        # Per-day bundled files: one parquet per closed day containing
+        # all fields' top-N. When present, replaces ~40 per-field-day
+        # files (or 24 per-field-hour files) for that day. Built by the
+        # daily rollup_compact_daily cron via backend.core.rollups.
+        # bundle_days(); reader prefers it over per-field-day files.
+        # Same schema as bundled_hour (field/value/count as columns,
+        # no hive partitioning on the projection).
+        bundled_day_paths: list[str] = []
+        bundled_days_set: set[str] = set()
+
+        # Per-day rollups cover [day 00:00 UTC, +24h). When the request
+        # window starts or ends mid-day, including the boundary day's
+        # per-day file would over-count rows outside the user's window
+        # (e.g. a request starting at 17:36 would pull in counts from
+        # 00:00-17:36 too). Only use a per-day file when its entire
+        # 24h is contained in the request window; boundary days fall
+        # back to per-hour rollups for their in-window hours.
+        def _day_fully_in_window(day_str: str) -> bool:
             try:
-                for hour_entry in os.listdir(bundled_hour_root):
-                    if not hour_entry.startswith("hour="):
-                        continue
-                    hour = hour_entry[len("hour=") :]
-                    if st_str_floor and hour < st_str_floor:
-                        continue
-                    if et_str_floor and hour > et_str_floor:
-                        continue
-                    if hour >= active_str:
-                        # Active hour served live, not from any bundle.
-                        continue
-                    bundle_path = os.path.join(bundled_hour_root, hour_entry, "all_fields.parquet")
-                    if os.path.isfile(bundle_path):
-                        bundled_hour_paths.append(bundle_path)
-                        bundled_hours.add(hour)
-            except OSError:
-                pass
+                day_start = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=UTC)
+            except ValueError:
+                return False
+            day_end = day_start + timedelta(days=1)
+            if st_dt and st_dt > day_start:
+                return False
+            if et_dt and et_dt < day_end:
+                return False
+            return True
+
+        # Pre-pass: collect days where AT LEAST ONE safe field has a
+        # usable per-day file (in-window, fully-contained, closed,
+        # parquet present). The bundled-hour walk below skips bundled
+        # files whose day is in this set, preventing the day-vs-bundled
+        # double count that fires on hour-aligned closed-day-only
+        # windows. Per-field per-hour fallback (for fields without a
+        # day file for that day) still works because the per-field walk
+        # uses its OWN per-field covered_days set, not this global one.
+        day_covered_by_any_field: set[str] = set()
+        for field in safe_fields:
+            field_day_dir = os.path.join(day_root, f"field={field}")
+            if not os.path.isdir(field_day_dir):
+                continue
+            day_entries = _cached_listdir(field_day_dir)
+            for day_entry in day_entries:
+                if not day_entry.startswith("day="):
+                    continue
+                day = day_entry[len("day=") :]
+                if len(day) != 10 or day in day_covered_by_any_field:
+                    continue
+                if day >= active_day:
+                    continue
+                if st_str_floor and day < st_str_floor[:10]:
+                    continue
+                if et_str_floor and day > et_str_floor[:10]:
+                    continue
+                if not _day_fully_in_window(day):
+                    continue
+                day_dir = os.path.join(field_day_dir, day_entry)
+                try:
+                    if any(f.endswith(".parquet") and not f.startswith(".tmp_") for f in os.listdir(day_dir)):
+                        day_covered_by_any_field.add(day)
+                except OSError:
+                    continue
+
+        # Bundled-day walk (preferred over per-field-day for windows
+        # where the whole day fits). When present, replaces ~40 per-
+        # field-day file opens with 1. Active day skipped — bundling
+        # only runs for closed days. Days NOT fully contained in the
+        # window fall through to per-field-hour for the in-window
+        # portion (same fall-through as per-field-day).
+        if os.path.isdir(bundled_day_root):
+            for day_entry in _cached_listdir(bundled_day_root):
+                if not day_entry.startswith("day="):
+                    continue
+                day = day_entry[len("day=") :]
+                if len(day) != 10:
+                    continue
+                if day >= active_day:
+                    continue
+                if st_str_floor and day < st_str_floor[:10]:
+                    continue
+                if et_str_floor and day > et_str_floor[:10]:
+                    continue
+                if not _day_fully_in_window(day):
+                    continue
+                bundle_path = os.path.join(bundled_day_root, day_entry, "all_fields.parquet")
+                if os.path.isfile(bundle_path):
+                    bundled_day_paths.append(bundle_path)
+                    bundled_days_set.add(day)
+
+        if os.path.isdir(bundled_hour_root):
+            for hour_entry in _cached_listdir(bundled_hour_root):
+                if not hour_entry.startswith("hour="):
+                    continue
+                hour = hour_entry[len("hour=") :]
+                if st_str_floor and hour < st_str_floor:
+                    continue
+                if et_str_floor and hour > et_str_floor:
+                    continue
+                if hour >= active_str:
+                    # Active hour served live, not from any bundle.
+                    continue
+                if hour[:10] in bundled_days_set:
+                    # Day bundle covers this hour (and every field for
+                    # this day). Including the hour bundle would
+                    # double-count via UNION ALL.
+                    continue
+                if hour[:10] in day_covered_by_any_field:
+                    # Day file covers this hour for at least one
+                    # field; including the bundled file would
+                    # double-count that field via the UNION ALL.
+                    # Fields without a day file for this day fall
+                    # through to per-field per-hour in the loop
+                    # below (their covered_days won't include this
+                    # day).
+                    continue
+                bundle_path = os.path.join(bundled_hour_root, hour_entry, "all_fields.parquet")
+                if os.path.isfile(bundle_path):
+                    bundled_hour_paths.append(bundle_path)
+                    bundled_hours.add(hour)
 
         _t_dir_enum = time.perf_counter()
         for field in safe_fields:
@@ -725,17 +951,22 @@ class QueryRunner:
             # Track which (field, day) tuples we satisfied from the
             # per-day compacted file; the per-hour walk below skips
             # those hours.
-            covered_days: set[str] = set()
+            # Track which days are covered for this field. Seeded by
+            # `bundled_days_set` so the per-day-bundle suppresses both
+            # the per-field-day file AND the per-field-hour fallback
+            # for that day (the bundle's one row per (field, value)
+            # already aggregates the field's whole day).
+            covered_days: set[str] = set(bundled_days_set)
             if os.path.isdir(field_day_dir):
-                try:
-                    day_entries = os.listdir(field_day_dir)
-                except OSError:
-                    day_entries = []
+                day_entries = _cached_listdir(field_day_dir)
                 for day_entry in day_entries:
                     if not day_entry.startswith("day="):
                         continue
                     day = day_entry[len("day=") :]
                     if len(day) != 10:
+                        continue
+                    if day in bundled_days_set:
+                        # Already served by the bundled-day file.
                         continue
                     if day >= active_day:
                         # Active day is still being written — read per-hour.
@@ -744,18 +975,18 @@ class QueryRunner:
                         continue
                     if et_str_floor and day > et_str_floor[:10]:
                         continue
-                    day_dir = os.path.join(field_day_dir, day_entry)
-                    try:
-                        for fname in os.listdir(day_dir):
-                            if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
-                                day_paths.append(os.path.join(day_dir, fname))
-                                covered_days.add(day)
-                    except OSError:
+                    if not _day_fully_in_window(day):
+                        # Boundary day — using the per-day file would over-
+                        # count rows outside the requested window. Fall
+                        # through to per-hour rollups for the in-window
+                        # hours of this day.
                         continue
-            try:
-                hour_entries = os.listdir(field_hour_dir)
-            except OSError:
-                continue
+                    day_dir = os.path.join(field_day_dir, day_entry)
+                    for fname in _cached_listdir(day_dir):
+                        if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
+                            day_paths.append(os.path.join(day_dir, fname))
+                            covered_days.add(day)
+            hour_entries = _cached_listdir(field_hour_dir)
             for hour_entry in hour_entries:
                 if not hour_entry.startswith("hour="):
                     continue
@@ -776,20 +1007,18 @@ class QueryRunner:
                     # Per-hour bundle already covers this (field, hour).
                     continue
                 hour_dir = os.path.join(field_hour_dir, hour_entry)
-                try:
-                    for fname in os.listdir(hour_dir):
-                        if fname.endswith(".parquet"):
-                            hour_paths.append(os.path.join(hour_dir, fname))
-                except OSError:
-                    continue
+                for fname in _cached_listdir(hour_dir):
+                    if fname.endswith(".parquet"):
+                        hour_paths.append(os.path.join(hour_dir, fname))
 
         _phase("dir_enum", (time.perf_counter() - _t_dir_enum) * 1000)
         _phase("dir_enum:n_day_files", float(len(day_paths)))
         _phase("dir_enum:n_hour_files", float(len(hour_paths)))
         _phase("dir_enum:n_bundled_hour_files", float(len(bundled_hour_paths)))
+        _phase("dir_enum:n_bundled_day_files", float(len(bundled_day_paths)))
 
         _t_rolled = time.perf_counter()
-        if not day_paths and not hour_paths and not bundled_hour_paths:
+        if not day_paths and not hour_paths and not bundled_hour_paths and not bundled_day_paths:
             rolled_res: list = []
         else:
             # Inline each path list as its OWN read_parquet call and
@@ -822,7 +1051,20 @@ class QueryRunner:
                     f"SELECT field, value, CAST(count AS BIGINT) AS count "
                     f"FROM read_parquet([{paths_sql}], hive_partitioning=0)"
                 )
-            q = "SELECT field, value, SUM(count) AS c FROM (" + " UNION ALL ".join(branches) + ") GROUP BY field, value"
+            if bundled_day_paths:
+                # Same shape as bundled_hour (field/value/count as
+                # columns, no hive partitioning on the projection).
+                paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in bundled_day_paths)
+                branches.append(
+                    f"SELECT field, value, CAST(count AS BIGINT) AS count "
+                    f"FROM read_parquet([{paths_sql}], hive_partitioning=0)"
+                )
+            _max_limit = max([limit] + list((per_field_limits or {}).values()))
+            q = (
+                "SELECT field, value, SUM(count) AS c FROM ("
+                + " UNION ALL ".join(branches)
+                + f") GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= {_max_limit}"
+            )
             try:
                 rolled_res = self.execute(q).fetchall()
             except Exception:
@@ -831,7 +1073,11 @@ class QueryRunner:
 
         # We also need to get the live active hour stats from the base table
         _t_live = time.perf_counter()
-        live_res = []
+        live_res: list[tuple] = []
+        # Defined here so the partial-day block below can reuse them
+        # without re-fetching if the active-hour block populated them.
+        actual_cols: list[str] = []
+        schema_types: dict[str, str] = {}
 
         # Clamp the live window to the intersection of (active hour) and
         # (requested window). Without this, a partial-hour request like
@@ -872,17 +1118,29 @@ class QueryRunner:
                 # skipping the iceberg view (~700ms saved per request on the
                 # 2026-06-08 baseline). Falls back to the view-based path if
                 # the direct read fails (schema mismatch, missing dirs, etc).
-                tmp_name = self._create_active_hour_temp_direct(fields, actual_cols, live_start, live_end)
+                # Use the safe_fields list (validated at line 741) for temp
+                # construction so a hostile field name can never reach the
+                # SQL builder via this fast path — audit finding 004.
+                tmp_name = self._create_active_hour_temp_direct(safe_fields, actual_cols, live_start, live_end)
                 if tmp_name is None:
-                    tmp_name = self.create_filtered_temp_table(fields, actual_cols, base_table, live_where)
+                    tmp_name = self.create_filtered_temp_table(safe_fields, actual_cols, base_table, live_where)
                 if tmp_name:
                     try:
-                        live_res, _ = self.execute_top_n_batch(
-                            fields, tmp_name, actual_cols, schema_types, limit=_live_limit
-                        )
+                        # Filter to columns present in the temp's projection.
+                        # Virtual fields (waf_sig_ind, edge_score_reason_ind)
+                        # have rollup parquets but no live column — including
+                        # them here would build SQL referencing a missing
+                        # column and BinderException out the entire UNION
+                        # ALL, silently dropping the live-hour merge for
+                        # the real fields too.
+                        live_fields = [f for f in safe_fields if f in actual_cols]
+                        if live_fields:
+                            live_res, _ = self.execute_top_n_batch(
+                                live_fields, tmp_name, actual_cols, schema_types, limit=_live_limit
+                            )
                     finally:
                         try:
-                            self.execute(f"DROP TABLE IF EXISTS {tmp_name}")
+                            self.execute(f'DROP TABLE IF EXISTS "{tmp_name}"')
                         except Exception:
                             pass
             except Exception:
@@ -911,9 +1169,10 @@ class QueryRunner:
         top_results = []
         _pfl = per_field_limits or {}
         for field in fields:
-            bucket = by_field.get(field)
-            if not bucket:
+            bucket_opt: dict[Any, int] | None = by_field.get(field)
+            if not bucket_opt:
                 continue
+            bucket = bucket_opt
             _field_limit = _pfl.get(field, limit)
             # Use heapq.nlargest when truncating to a small slice of a
             # large bucket — avoids the full O(N log N) sort for the
@@ -987,8 +1246,12 @@ class QueryRunner:
         import os
         from datetime import UTC, datetime, timedelta
 
-        from backend.core.duckdb import _cache_dir
-        from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME, _hour_bundled_root
+        from backend.core.rollups import (
+            TIME_SERIES_BUNDLE_FILENAME,
+            _hour_bundled_root,
+            _rollups_root,
+        )
+        from backend.utils.date_utils import parse_iso_utc
 
         if chart_metric not in self._TS_ROLLUP_METRIC_SQL:
             return None
@@ -996,26 +1259,53 @@ class QueryRunner:
             return None
         if not start_time or not end_time:
             return None
-        try:
-            st = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-            et = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
-        except ValueError:
+        # parse_iso_utc is the project-standard helper — it always returns
+        # tz-aware UTC, which is what the bundle directory names and the
+        # active_hour_str comparison below both assume. Using raw
+        # datetime.fromisoformat here is what caused the 2026-06-11 missing-
+        # tail bug: cursor kept the request's input tz (CDT for a FE in
+        # Central) and looked up bundles by CDT-named hours, missing the
+        # last 5 hours of a 24h window.
+        st = parse_iso_utc(start_time)
+        et = parse_iso_utc(end_time)
+        if st is None or et is None:
             return None
-        if st.tzinfo is None:
-            st = st.replace(tzinfo=UTC)
-        if et.tzinfo is None:
-            et = et.replace(tzinfo=UTC)
         if et <= st:
+            return None
+
+        if (et - st) > timedelta(days=366):
             return None
 
         bundled_root = _hour_bundled_root(self.src)
         if not os.path.isdir(bundled_root):
             return None
 
+        # Per-field rollup root, used to distinguish "hour had no data"
+        # (per-field tree is empty for that hour → safe to skip) from
+        # "rollup writer hasn't covered this hour yet" (per-field tree
+        # HAS data → can't skip without undercounting → fall back to raw).
+        # Listing fields once and caching cuts the per-missing-hour cost
+        # from N×listdir to N×isdir.
+        hour_per_field_root = _rollups_root(self.src)
+        try:
+            field_dirs = [f for f in os.listdir(hour_per_field_root) if f.startswith("field=")]
+        except OSError:
+            field_dirs = []
+
+        def _hour_had_any_data(h: str) -> bool:
+            for f in field_dirs:
+                if os.path.isdir(os.path.join(hour_per_field_root, f, f"hour={h}")):
+                    return True
+            return False
+
         active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
         active_hour_dt = datetime.strptime(active_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
 
         rollup_paths: list[str] = []
+        # st is UTC (parse_iso_utc guarantees it) so cursor's strftime
+        # produces UTC hour strings that match the on-disk bundle names
+        # and the UTC active_hour_str comparison above. See the comment
+        # at the parse site for the bug history.
         cursor = st.replace(minute=0, second=0, microsecond=0)
         crosses_active = False
         while cursor < et:
@@ -1028,9 +1318,20 @@ class QueryRunner:
                 break
             path = os.path.join(bundled_root, f"hour={hour_str}", TIME_SERIES_BUNDLE_FILENAME)
             if not os.path.isfile(path):
-                # Hole in the rollup coverage for a closed hour. Fall back
-                # to raw — partial-window rollup serving would undercount.
-                return None
+                # No bundle for this hour. Two cases:
+                #   (a) Hour genuinely had no logs — the per-field rollup
+                #       tree is also empty for that hour. Safe to skip;
+                #       contributes 0 to the chart for this bucket. This
+                #       is the common case for low-traffic services or
+                #       brief gaps between hours of activity.
+                #   (b) Hour had data but the time_series writer hasn't
+                #       covered it (the bundle is missing while per-field
+                #       rollups exist). Can't skip without undercounting
+                #       — fall back to raw.
+                if _hour_had_any_data(hour_str):
+                    return None
+                cursor += timedelta(hours=1)
+                continue
             rollup_paths.append(path)
             cursor += timedelta(hours=1)
 
@@ -1040,11 +1341,14 @@ class QueryRunner:
             return None
 
         metric_sql = self._TS_ROLLUP_METRIC_SQL[chart_metric]
-        # The rollup stores `bucket` as naive TIMESTAMP (UTC-implied) since
-        # time_bucket() returns the bucketing column's type. Compare without
-        # the tz suffix so DuckDB doesn't choke on TIMESTAMP vs TIMESTAMPTZ.
-        st_naive = st.astimezone(UTC).replace(tzinfo=None).isoformat()
-        et_naive = et.astimezone(UTC).replace(tzinfo=None).isoformat()
+        # Bucket is TIMESTAMPTZ in the bundle parquets (older notes about
+        # "naive TIMESTAMP" referred to a since-removed schema). Use
+        # TIMESTAMPTZ literals so the comparison is unambiguous regardless
+        # of DuckDB's session timezone — without the explicit offset, a
+        # session tz like CDT silently shifts the filter by 5 hours and
+        # drops bundles at the window's edges.
+        st_tz = st.astimezone(UTC).isoformat()
+        et_tz = et.astimezone(UTC).isoformat()
 
         select_clauses: list[str] = []
         if rollup_paths:
@@ -1053,8 +1357,8 @@ class QueryRunner:
                 f"SELECT time_bucket(INTERVAL '{interval}', bucket) AS out_bucket, "
                 f"       {metric_sql} AS value "
                 f"FROM read_parquet([{paths_sql}]) "
-                f"WHERE bucket >= TIMESTAMP '{st_naive}' "
-                f"  AND bucket < TIMESTAMP '{et_naive}' "
+                f"WHERE bucket >= TIMESTAMPTZ '{st_tz}' "
+                f"  AND bucket < TIMESTAMPTZ '{et_tz}' "
                 f"GROUP BY 1"
             )
 
@@ -1066,8 +1370,8 @@ class QueryRunner:
             # filter — we further constrain by the live-slice timestamps.
             live_start = max(st, active_hour_dt)
             live_end = et
-            live_st_naive = live_start.astimezone(UTC).replace(tzinfo=None).isoformat()
-            live_et_naive = live_end.astimezone(UTC).replace(tzinfo=None).isoformat()
+            live_st_tz = live_start.astimezone(UTC).isoformat()
+            live_et_tz = live_end.astimezone(UTC).isoformat()
 
             metric_for_live = _live_metric_sql_from_raw(chart_metric)
             if metric_for_live is None:
@@ -1080,8 +1384,8 @@ class QueryRunner:
                 f"       {metric_for_live} AS value "
                 f"FROM {table_name} "
                 f"WHERE {where_clause} "
-                f"  AND timestamp >= TIMESTAMPTZ '{live_st_naive}+00:00' "
-                f"  AND timestamp <  TIMESTAMPTZ '{live_et_naive}+00:00' "
+                f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
+                f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}' "
                 f"GROUP BY 1"
             )
             select_clauses.append(live_clause)
@@ -1103,9 +1407,7 @@ class QueryRunner:
             # debug — the caller will produce a working result anyway.
             import logging as _logging
 
-            _logging.getLogger(__name__).debug(
-                "[time_series_rollup] read failed, falling back to raw: %s", e
-            )
+            _logging.getLogger(__name__).debug("[time_series_rollup] read failed, falling back to raw: %s", e)
             return None
 
         out: list[dict] = []

@@ -8,9 +8,9 @@ import React from 'react'
 // Mock everything
 vi.mock('@/stores/serviceStore', () => ({
   useServiceStore: vi.fn((selector) => {
-    const state = { 
-      activeServiceId: 'test-svc', 
-      isInitialized: true, 
+    const state = {
+      activeServiceId: 'test-svc',
+      isInitialized: true,
       services: [{ id: 'test-svc', name: 'Test Service' }],
       setServices: vi.fn(),
       setInitialized: vi.fn(),
@@ -22,8 +22,8 @@ vi.mock('@/stores/serviceStore', () => ({
 
 vi.mock('@/stores/filterStore', () => ({
   useFilterStore: vi.fn((selector) => {
-    const state = { 
-      startTime: '2026-01-01T00:00:00Z', 
+    const state = {
+      startTime: '2026-01-01T00:00:00Z',
       endTime: '2026-01-01T01:00:00Z',
       filters: [],
       isAutoRange: false,
@@ -70,9 +70,9 @@ test('renders dashboard and fetches data', async () => {
   })
 
   vi.mocked(apiLib.client.POST).mockResolvedValue({
-    data: { 
+    data: {
       summary: { total: 1234 },
-      time_series: [] 
+      time_series: []
     }
   } as any)
 
@@ -84,7 +84,7 @@ test('renders dashboard and fetches data', async () => {
 
   // Header should be visible
   expect(screen.getByText('Dashboard')).toBeInTheDocument()
-  
+
   await waitFor(() => {
     expect(screen.getByText('HTTP Status')).toBeInTheDocument()
   })

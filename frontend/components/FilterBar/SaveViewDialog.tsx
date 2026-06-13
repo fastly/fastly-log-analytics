@@ -25,7 +25,7 @@ export function SaveViewDialog() {
   const [open, setOpen] = React.useState(false)
   const [name, setName] = React.useState('')
   const [isSaving, setIsSaving] = React.useState(false)
-  
+
   const { startTime, endTime, filters } = useFilterStore()
   const { activeServiceId } = useServiceStore()
   const pathname = usePathname()
@@ -60,7 +60,7 @@ export function SaveViewDialog() {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger 
+      <DialogTrigger
         render={
           <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
             <Bookmark className="h-3.5 w-3.5" />

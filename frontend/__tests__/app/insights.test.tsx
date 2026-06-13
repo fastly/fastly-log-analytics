@@ -25,11 +25,11 @@ vi.mock('@/lib/api', () => ({
 }))
 
 const queryClient = new QueryClient({
-  defaultOptions: { 
-    queries: { 
+  defaultOptions: {
+    queries: {
       retry: false,
       staleTime: 0
-    } 
+    }
   }
 })
 

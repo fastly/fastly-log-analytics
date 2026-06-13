@@ -3,7 +3,7 @@
   "info": {
     "title": "Fastly Log Analytics API",
     "description": "FastAPI backend for the Fastly Log Analytics tool. Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json.",
-    "version": "1.2.0"
+    "version": "2.0.0"
   },
   "paths": {
     "/api/dashboard/aggregates": {
@@ -97,6 +97,112 @@
                 "schema": {
                   "$ref": "#/components/schemas/AggregatesResponse"
                 }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dashboard/bundle": {
+      "post": {
+        "tags": [
+          "dashboard"
+        ],
+        "summary": "Dashboard Bundle",
+        "description": "Composite endpoint returning the two queries the dashboard page\nfires on every mount: /api/dashboard/aggregates + /api/security/top-bots.\n\nSaves one RTT per cold load \u2014 the frontend's useDashboardBundle\nhook fetches this once and seeds the existing\n``['dashboard', 'aggregates', ...]`` and ``['dashboard',\n'top-bots', ...]`` React Query caches so the dedicated hooks\nreturn cached data without firing their own POSTs.\n\nSequential execution (not parallel): the two queries share the\nsame DuckDB connection from RequestContext, and DuckDB\nconnections aren't thread-safe \u2014 running concurrently would\nrequire separate connections, which the connection-pool\naccounting on this endpoint isn't sized for. Sequential is\ncorrect + safe; the saving is the RTT, not backend wall-clock.\n\nResponse shape is intentionally untyped (no response_model) so\nthe existing dedicated endpoints stay the source of truth for\nAggregatesResponse / SecurityTopBotsResponse schemas \u2014 this\ncomposite passes through whatever those return.",
+        "operationId": "dashboard_bundle_api_dashboard_bundle_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AggregatesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           },
@@ -6234,21 +6340,21 @@
         }
       }
     },
-    "/api/admin/pop-locations": {
+    "/api/admin/bot-sources": {
       "get": {
         "tags": [
           "admin"
         ],
-        "summary": "Get Pop Locations",
-        "description": "Return the cached POP locations (code, name, coordinates).",
-        "operationId": "get_pop_locations_api_admin_pop_locations_get",
+        "summary": "Get Bot Sources Endpoint",
+        "description": "Return metadata for all bot sources plus rDNS cache stats.",
+        "operationId": "get_bot_sources_endpoint_api_admin_bot_sources_get",
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PopLocationsResponse"
+                  "$ref": "#/components/schemas/BotSourcesResponse"
                 }
               }
             }
@@ -6256,175 +6362,22 @@
         }
       }
     },
-    "/api/admin/pop-locations/refresh": {
+    "/api/admin/bot-sources/{source_id}/refresh": {
       "post": {
         "tags": [
           "admin"
         ],
-        "summary": "Refresh Pop Locations",
-        "description": "Refresh the POP locations cache from the Fastly API.",
-        "operationId": "refresh_pop_locations_api_admin_pop_locations_refresh_post",
+        "summary": "Refresh Bot Source Endpoint",
+        "description": "Fetch and re-cache a single bot source.",
+        "operationId": "refresh_bot_source_endpoint_api_admin_bot_sources__source_id__refresh_post",
         "parameters": [
           {
-            "name": "token",
-            "in": "query",
-            "required": false,
+            "name": "source_id",
+            "in": "path",
+            "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Token"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/RefreshPopLocationsRequest"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "title": "Req"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PopLocationsResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/admin/ingest-logs": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Ingest Endpoint",
-        "operationId": "ingest_endpoint_api_admin_ingest_logs_post",
-        "parameters": [
-          {
-            "name": "start_time",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Start Time"
-            }
-          },
-          {
-            "name": "end_time",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "End Time"
-            }
-          },
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
+              "type": "string",
+              "title": "Source Id"
             }
           }
         ],
@@ -6434,759 +6387,6 @@
             "content": {
               "application/json": {
                 "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/download-folder": {
-      "get": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Download Folder",
-        "operationId": "download_folder_api_download_folder_get",
-        "parameters": [
-          {
-            "name": "prefix",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Prefix"
-            }
-          },
-          {
-            "name": "root",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "raw",
-              "title": "Root"
-            }
-          },
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/admin/raw-tree": {
-      "get": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Raw Tree Endpoint",
-        "operationId": "raw_tree_endpoint_api_admin_raw_tree_get",
-        "parameters": [
-          {
-            "name": "prefix",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Prefix"
-            }
-          },
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TreeResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/admin/iceberg-tree": {
-      "get": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Iceberg Tree Endpoint",
-        "operationId": "iceberg_tree_endpoint_api_admin_iceberg_tree_get",
-        "parameters": [
-          {
-            "name": "prefix",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Prefix"
-            }
-          },
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TreeResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/download": {
-      "get": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Download File",
-        "operationId": "download_file_api_download_get",
-        "parameters": [
-          {
-            "name": "key",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Key"
-            }
-          },
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/download-all": {
-      "get": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Download All Files",
-        "operationId": "download_all_files_api_download_all_get",
-        "parameters": [
-          {
-            "name": "include",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "all",
-              "title": "Include"
-            }
-          },
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/sync-status": {
-      "get": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Sync Status",
-        "operationId": "sync_status_api_sync_status_get",
-        "parameters": [
-          {
-            "name": "skip_fos",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false,
-              "title": "Skip Fos"
-            }
-          },
-          {
-            "name": "force",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false,
-              "title": "Force"
-            }
-          },
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SyncStatusResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/admin/ingested-files": {
-      "get": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Ingested Files",
-        "operationId": "ingested_files_api_admin_ingested_files_get",
-        "parameters": [
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IngestedFilesResponse"
-                }
               }
             }
           },
@@ -7332,12 +6532,12 @@
             "required": false,
             "schema": {
               "type": "integer",
-              "minimum": 1,
-              "description": "Compact partitions with strictly more files than this.",
+              "minimum": 0,
+              "description": "Compact partitions with strictly more files than this. Default 3 = normal cron behaviour. Pass 1 to dedupe the 2-3-file orphan pattern. Pass 0 to force-rewrite every partition through the dedup pipeline (one-shot historical cleanup of intra-file dups in single-parquet partitions).",
               "default": 3,
               "title": "Min Files"
             },
-            "description": "Compact partitions with strictly more files than this."
+            "description": "Compact partitions with strictly more files than this. Default 3 = normal cron behaviour. Pass 1 to dedupe the 2-3-file orphan pattern. Pass 0 to force-rewrite every partition through the dedup pipeline (one-shot historical cleanup of intra-file dups in single-parquet partitions)."
           },
           {
             "name": "dry_run",
@@ -7834,6 +7034,331 @@
         }
       }
     },
+    "/api/download-folder": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Download Folder",
+        "operationId": "download_folder_api_download_folder_get",
+        "parameters": [
+          {
+            "name": "prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Prefix"
+            }
+          },
+          {
+            "name": "root",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "raw",
+              "title": "Root"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/download": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Download File",
+        "operationId": "download_file_api_download_get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Key"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/download-all": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Download All Files",
+        "operationId": "download_all_files_api_download_all_get",
+        "parameters": [
+          {
+            "name": "include",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "all",
+              "title": "Include"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/health-snapshot": {
       "get": {
         "tags": [
@@ -7847,245 +7372,10 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/admin/backfill-window": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Backfill Window",
-        "description": "Force-sync a specific time window from FOS into local cache.\n\nUse to fill gaps left by ingestion outages (the normal cron pulls\n'since last sync' and won't reach back past its pointer once recovered).\nIdempotent \u2014 files already present in the local cache are skipped.",
-        "operationId": "backfill_window_api_admin_backfill_window_post",
-        "parameters": [
-          {
-            "name": "start_time",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "description": "ISO 8601 UTC start, e.g. '2026-05-31T23:00:00Z'",
-              "title": "Start Time"
-            },
-            "description": "ISO 8601 UTC start, e.g. '2026-05-31T23:00:00Z'"
-          },
-          {
-            "name": "end_time",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "description": "ISO 8601 UTC end, e.g. '2026-06-01T01:00:00Z'",
-              "title": "End Time"
-            },
-            "description": "ISO 8601 UTC end, e.g. '2026-06-01T01:00:00Z'"
-          },
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/admin/log-accounting": {
-      "get": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Api Log Accounting",
-        "description": "Reconcile Fastly's authoritative log-line emission count against our\nlocally-ingested row counts to surface any gap between emission and ingest.\n\nPer-bucket gap is the actionable signal \u2014 totals smooth over burst losses.",
-        "operationId": "api_log_accounting_api_admin_log_accounting_get",
-        "parameters": [
-          {
-            "name": "hours",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 720,
-              "minimum": 1,
-              "default": 24,
-              "title": "Hours"
-            }
-          },
-          {
-            "name": "by",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "pattern": "^(hour|day)$",
-              "default": "hour",
-              "title": "By"
-            }
-          },
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LogAccountingResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Health Snapshot Api Admin Health Snapshot Get"
                 }
               }
             }
@@ -8479,21 +7769,130 @@
         }
       }
     },
-    "/api/admin/bot-sources": {
-      "get": {
+    "/api/admin/ingest-logs": {
+      "post": {
         "tags": [
           "admin"
         ],
-        "summary": "Get Bot Sources Endpoint",
-        "description": "Return metadata for all bot sources plus rDNS cache stats.",
-        "operationId": "get_bot_sources_endpoint_api_admin_bot_sources_get",
+        "summary": "Ingest Endpoint",
+        "operationId": "ingest_endpoint_api_admin_ingest_logs_post",
+        "parameters": [
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Time"
+            }
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Time"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BotSourcesResponse"
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Ingest Endpoint Api Admin Ingest Logs Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -8501,22 +7900,99 @@
         }
       }
     },
-    "/api/admin/bot-sources/{source_id}/refresh": {
+    "/api/admin/backfill-window": {
       "post": {
         "tags": [
           "admin"
         ],
-        "summary": "Refresh Bot Source Endpoint",
-        "description": "Fetch and re-cache a single bot source.",
-        "operationId": "refresh_bot_source_endpoint_api_admin_bot_sources__source_id__refresh_post",
+        "summary": "Backfill Window",
+        "description": "Force-sync a specific time window from FOS into local cache.\n\nUse to fill gaps left by ingestion outages (the normal cron pulls\n'since last sync' and won't reach back past its pointer once recovered).\nIdempotent \u2014 files already present in the local cache are skipped.",
+        "operationId": "backfill_window_api_admin_backfill_window_post",
         "parameters": [
           {
-            "name": "source_id",
-            "in": "path",
+            "name": "start_time",
+            "in": "query",
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Source Id"
+              "description": "ISO 8601 UTC start, e.g. '2026-05-31T23:00:00Z'",
+              "title": "Start Time"
+            },
+            "description": "ISO 8601 UTC start, e.g. '2026-05-31T23:00:00Z'"
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 UTC end, e.g. '2026-06-01T01:00:00Z'",
+              "title": "End Time"
+            },
+            "description": "ISO 8601 UTC end, e.g. '2026-06-01T01:00:00Z'"
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
             }
           }
         ],
@@ -8525,7 +8001,747 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Backfill Window Api Admin Backfill Window Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/log-accounting": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Api Log Accounting",
+        "description": "Reconcile Fastly's authoritative log-line emission count against our\nlocally-ingested row counts to surface any gap between emission and ingest.\n\nPer-bucket gap is the actionable signal \u2014 totals smooth over burst losses.",
+        "operationId": "api_log_accounting_api_admin_log_accounting_get",
+        "parameters": [
+          {
+            "name": "hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 720,
+              "minimum": 1,
+              "default": 24,
+              "title": "Hours"
+            }
+          },
+          {
+            "name": "by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(hour|day)$",
+              "default": "hour",
+              "title": "By"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogAccountingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/pop-locations": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get Pop Locations",
+        "description": "Return the cached POP locations (code, name, coordinates).",
+        "operationId": "get_pop_locations_api_admin_pop_locations_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PopLocationsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/pop-locations/refresh": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Refresh Pop Locations",
+        "description": "Refresh the POP locations cache from the Fastly API.",
+        "operationId": "refresh_pop_locations_api_admin_pop_locations_refresh_post",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RefreshPopLocationsRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PopLocationsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sync-status": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Sync Status",
+        "operationId": "sync_status_api_sync_status_get",
+        "parameters": [
+          {
+            "name": "skip_fos",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Skip Fos"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/log-extents": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Log Extents",
+        "description": "Return only the earliest/latest log timestamps for the FilterBar.\n\nAnalyst-safe sibling of ``/api/sync-status``: same cached-status fast\npath but projected down to the two fields the FilterBar actually\nreads. ``/api/sync-status`` is blocked for analysts because it leaks\n``ngwaf_workspace_id`` and active cron-task state; this endpoint\ndrops both, so the middleware lets it through and the FilterBar's\nsnap-to-extents UX works for analysts too.\n\nReads only the persisted status snapshot \u2014 no DuckDB connection\ngrabbed, no contention with cron, no 503 path. The snapshot is\nrefreshed by the sync cron every minute so a freshly started\nservice sees populated extents within ~60s.",
+        "operationId": "log_extents_api_log_extents_get",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogExtentsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/ingested-files": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Ingested Files",
+        "operationId": "ingested_files_api_admin_ingested_files_get",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestedFilesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/raw-tree": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Raw Tree Endpoint",
+        "operationId": "raw_tree_endpoint_api_admin_raw_tree_get",
+        "parameters": [
+          {
+            "name": "prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Prefix"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TreeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/iceberg-tree": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Iceberg Tree Endpoint",
+        "operationId": "iceberg_tree_endpoint_api_admin_iceberg_tree_get",
+        "parameters": [
+          {
+            "name": "prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Prefix"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TreeResponse"
+                }
               }
             }
           },
@@ -9075,6 +9291,502 @@
         }
       }
     },
+    "/api/admin/queries": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "List Queries",
+        "operationId": "list_queries_api_admin_queries_get",
+        "parameters": [
+          {
+            "name": "since_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Since Seq"
+            }
+          },
+          {
+            "name": "include_completed",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Completed"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/queries/summary": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "Queries Summary",
+        "operationId": "queries_summary_api_admin_queries_summary_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SummaryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/slow-queries/count": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "Count Persisted Slow Queries",
+        "description": "Cheap row-count for the operations-overview card. Pulls only the\naggregate (single indexed scan) so the card stays sub-50 ms even on\nservices with thousands of persisted rows.",
+        "operationId": "count_persisted_slow_queries_api_admin_slow_queries_count_get",
+        "parameters": [
+          {
+            "name": "since_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 720,
+              "minimum": 1,
+              "default": 24,
+              "title": "Since Hours"
+            }
+          },
+          {
+            "name": "threshold_ms",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "minimum": 0.0,
+              "default": 1000.0,
+              "title": "Threshold Ms"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Count Persisted Slow Queries Api Admin Slow Queries Count Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/slow-queries": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "List Persisted Slow Queries",
+        "description": "Persistent slow-SQL history from the per-service ``slow_queries``\nSQLite table \u2014 the durable backing store for the Notable Slow\nQueries panel beyond the in-memory ring buffer's ~10-30 min /\nrestart-bounded window.\n\nServer-side filters keep the response payload small:\n``threshold_ms`` is applied at the SQL level (indexed scan),\n``kind`` / ``db_type`` are equality filters on low-cardinality\ncolumns. ``limit`` clamped at 2000 so a runaway client query can't\npage the whole 7-day window in one shot.\n\nSort: ``recent`` (started_at_utc DESC, the panel default) or\n``duration`` (duration_ms DESC, the \"what was slowest\" variant).",
+        "operationId": "list_persisted_slow_queries_api_admin_slow_queries_get",
+        "parameters": [
+          {
+            "name": "since_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 720,
+              "minimum": 1,
+              "default": 24,
+              "title": "Since Hours"
+            }
+          },
+          {
+            "name": "threshold_ms",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "minimum": 0.0,
+              "default": 100.0,
+              "title": "Threshold Ms"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(analyst|admin|cron|system)$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "db_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(DuckDB|SQLite)$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Db Type"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(recent|duration)$",
+              "default": "recent",
+              "title": "Sort"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 2000,
+              "minimum": 1,
+              "default": 200,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response List Persisted Slow Queries Api Admin Slow Queries Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/queries/{qid}": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "Get Query",
+        "description": "Fetch the full SQL + attribution for a single in-flight query.\n\nLooks up the active row only \u2014 completed queries are returned via the\nsnapshot endpoint with ``include_completed=true``.",
+        "operationId": "get_query_api_admin_queries__qid__get",
+        "parameters": [
+          {
+            "name": "qid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Qid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Query Api Admin Queries  Qid  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/queries/{qid}/cancel": {
+      "post": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "Cancel Query",
+        "operationId": "cancel_query_api_admin_queries__qid__cancel_post",
+        "parameters": [
+          {
+            "name": "qid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Qid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/app-config/query-monitor": {
+      "get": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "Query Monitor Config",
+        "description": "Tiny config endpoint the frontend hits on mount to decide whether to\nrender the Live Query Monitor tab. Returns enabled=False (not 404) so\nthe nav can render a stable shape regardless of the flag state.",
+        "operationId": "query_monitor_config_api_admin_app_config_query_monitor_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Query Monitor Config Api Admin App Config Query Monitor Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/provision/services": {
       "get": {
         "tags": [
@@ -9203,51 +9915,23 @@
       }
     },
     "/api/provision/check-fos": {
-      "get": {
+      "post": {
         "tags": [
           "provision"
         ],
         "summary": "Provision Check Fos",
         "description": "Validate FOS credentials by attempting to list objects.",
-        "operationId": "provision_check_fos_api_provision_check_fos_get",
-        "parameters": [
-          {
-            "name": "bucket",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Bucket"
+        "operationId": "provision_check_fos_api_provision_check_fos_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckFosRequest"
+              }
             }
           },
-          {
-            "name": "region",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Region"
-            }
-          },
-          {
-            "name": "access_key",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Access Key"
-            }
-          },
-          {
-            "name": "secret_key",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Secret Key"
-            }
-          }
-        ],
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -9319,93 +10003,23 @@
       }
     },
     "/api/provision/lake-info": {
-      "get": {
+      "post": {
         "tags": [
           "provision"
         ],
         "summary": "Provision Lake Info",
         "description": "Return Iceberg table range and calendar for a given bucket/credentials without registering it.",
-        "operationId": "provision_lake_info_api_provision_lake_info_get",
-        "parameters": [
-          {
-            "name": "bucket",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Bucket"
+        "operationId": "provision_lake_info_api_provision_lake_info_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LakeInfoRequest"
+              }
             }
           },
-          {
-            "name": "region",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Region"
-            }
-          },
-          {
-            "name": "access_key",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Access Key"
-            }
-          },
-          {
-            "name": "secret_key",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Secret Key"
-            }
-          },
-          {
-            "name": "prefix",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Prefix"
-            }
-          },
-          {
-            "name": "endpoint",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Endpoint"
-            }
-          },
-          {
-            "name": "iceberg_metadata_location",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Iceberg Metadata Location"
-            }
-          }
-        ],
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -9823,18 +10437,26 @@
               "title": "Service Id"
             },
             "description": "Logging service ID to enable scoring on"
-          },
-          {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
-            }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -9876,18 +10498,26 @@
               "title": "Service Id"
             },
             "description": "Logging service ID to disable scoring on"
-          },
-          {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
-            }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -10709,6 +11339,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           },
@@ -10786,6 +11417,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           },
@@ -10854,12 +11486,13 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           },
           {
             "name": "token",
-            "in": "query",
+            "in": "header",
             "required": false,
             "schema": {
               "type": "string",
@@ -10907,17 +11540,8 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
             }
           },
           {
@@ -10931,6 +11555,16 @@
               "title": "Confirm"
             },
             "description": "Set true to actually apply the enforcement change"
+          },
+          {
+            "name": "token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
           }
         ],
         "requestBody": {
@@ -10986,6 +11620,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           }
@@ -11029,17 +11664,8 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
             }
           },
           {
@@ -11053,6 +11679,16 @@
               "title": "Confirm"
             },
             "description": "Set true to actually apply the change"
+          },
+          {
+            "name": "token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
           }
         ],
         "requestBody": {
@@ -11108,6 +11744,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           }
@@ -11165,6 +11802,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           }
@@ -11208,17 +11846,8 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
             }
           },
           {
@@ -11232,6 +11861,16 @@
               "title": "Confirm"
             },
             "description": "Set true to actually apply the change"
+          },
+          {
+            "name": "token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
           }
         ],
         "requestBody": {
@@ -11287,6 +11926,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           }
@@ -11332,6 +11972,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           },
@@ -11402,12 +12043,13 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           },
           {
             "name": "token",
-            "in": "query",
+            "in": "header",
             "required": false,
             "schema": {
               "type": "string",
@@ -11457,6 +12099,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           },
@@ -11532,6 +12175,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           }
@@ -11575,6 +12219,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           }
@@ -11632,6 +12277,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           }
@@ -11677,6 +12323,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
               "title": "Service Id"
             }
           },
@@ -11980,13 +12627,13 @@
       }
     },
     "/api/share/claim/{token}": {
-      "get": {
+      "post": {
         "tags": [
           "share-auth"
         ],
         "summary": "Share Claim",
         "description": "One-time-view reveal of an invite's plaintext credentials.\n\nThe plaintext passcode itself isn't stored \u2014 the hash is one-way \u2014 so\nthis endpoint reveals everything *except* the passcode. The original\nplaintext is communicated by the admin via the share card; the claim\nURL exists to confirm scope and identity to the analyst without\nputting credentials in a chat tool that retains history.",
-        "operationId": "share_claim_api_share_claim__token__get",
+        "operationId": "share_claim_api_share_claim__token__post",
         "parameters": [
           {
             "name": "token",
@@ -12827,6 +13474,20 @@
             ],
             "title": "Chart Metric",
             "default": "requests"
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fields"
           }
         },
         "type": "object",
@@ -13569,6 +14230,66 @@
             },
             "type": "array",
             "title": "Views"
+          },
+          "log_fields_catalog": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Fields Catalog"
+          },
+          "sync_status": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Status"
+          },
+          "share_banner": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Share Banner"
+          },
+          "header_badge": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Badge"
+          },
+          "log_extents": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Extents"
           }
         },
         "type": "object",
@@ -13710,6 +14431,52 @@
           "rdns"
         ],
         "title": "BotSourcesResponse"
+      },
+      "CancelResponse": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "query_id": {
+            "type": "integer",
+            "title": "Query Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state",
+          "query_id"
+        ],
+        "title": "CancelResponse"
+      },
+      "CheckFosRequest": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "region": {
+            "type": "string",
+            "title": "Region"
+          },
+          "access_key": {
+            "type": "string",
+            "title": "Access Key"
+          },
+          "secret_key": {
+            "type": "string",
+            "title": "Secret Key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bucket",
+          "region",
+          "access_key",
+          "secret_key"
+        ],
+        "title": "CheckFosRequest"
       },
       "ClearSqliteResponse": {
         "properties": {
@@ -15329,6 +16096,61 @@
         ],
         "title": "InvitePayload"
       },
+      "LakeInfoRequest": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "region": {
+            "type": "string",
+            "title": "Region"
+          },
+          "access_key": {
+            "type": "string",
+            "title": "Access Key"
+          },
+          "secret_key": {
+            "type": "string",
+            "title": "Secret Key"
+          },
+          "prefix": {
+            "type": "string",
+            "title": "Prefix",
+            "default": ""
+          },
+          "endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
+          },
+          "iceberg_metadata_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iceberg Metadata Location"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bucket",
+          "region",
+          "access_key",
+          "secret_key"
+        ],
+        "title": "LakeInfoRequest"
+      },
       "LogAccountingBucket": {
         "properties": {
           "ts": {
@@ -15513,6 +16335,67 @@
           "gap_pct"
         ],
         "title": "LogAccountingTotals"
+      },
+      "LogExtentsResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "configured": {
+            "type": "boolean",
+            "title": "Configured",
+            "default": true
+          },
+          "earliest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Log At"
+          },
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          }
+        },
+        "type": "object",
+        "title": "LogExtentsResponse",
+        "description": "Minimal extents projection for the FilterBar's time-range snap.\n\nSibling of ``SyncStatusResponse`` but strips every field that the\nmiddleware blocks ``/api/sync-status`` for an analyst over: no\n``ngwaf_workspace_id``, no ``active_run``, no cron task state, no\nDuckDB size, no storage mode. Just the two timestamps the\nFilterBar needs to snap its range, plus a ``configured`` flag so\nthe frontend can short-circuit when a service has no source."
       },
       "LogFieldsConfig": {
         "properties": {
@@ -17339,6 +18222,17 @@
             "type": "array",
             "title": "Scatter",
             "default": []
+          },
+          "waterfall": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": "object"
+            },
+            "type": "object",
+            "title": "Waterfall",
+            "default": {}
           }
         },
         "type": "object",
@@ -18335,6 +19229,32 @@
             "title": "Tls Fingerprints",
             "default": []
           },
+          "h2_fingerprints": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "H2 Fingerprints",
+            "default": []
+          },
+          "oh_fingerprints": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Oh Fingerprints",
+            "default": []
+          },
+          "fingerprint_coverage": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Fingerprint Coverage",
+            "default": {}
+          },
           "req_size_dist": {
             "items": {
               "additionalProperties": true,
@@ -18487,11 +19407,25 @@
             "title": "Name"
           },
           "fos_bucket": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Fos Bucket"
           },
           "fos_region": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Fos Region"
           },
           "log_period": {
@@ -18661,9 +19595,7 @@
         "type": "object",
         "required": [
           "service_id",
-          "name",
-          "fos_bucket",
-          "fos_region"
+          "name"
         ],
         "title": "ServiceConfig"
       },
@@ -19040,6 +19972,17 @@
             ],
             "title": "Median Rtt Ms"
           },
+          "edge_sid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge Sid"
+          },
           "flagged": {
             "type": "boolean",
             "title": "Flagged"
@@ -19284,6 +20227,11 @@
             "type": "boolean",
             "title": "Has Edge"
           },
+          "has_edge_sid": {
+            "type": "boolean",
+            "title": "Has Edge Sid",
+            "default": false
+          },
           "min_reqs_flag": {
             "type": "integer",
             "title": "Min Reqs Flag"
@@ -19507,7 +20455,7 @@
           "use_tunnel": {
             "type": "boolean",
             "title": "Use Tunnel",
-            "default": true
+            "default": false
           },
           "public_endpoint": {
             "anyOf": [
@@ -19528,6 +20476,37 @@
         },
         "type": "object",
         "title": "ShareStartPayload"
+      },
+      "SnapshotResponse": {
+        "properties": {
+          "last_seq": {
+            "type": "integer",
+            "title": "Last Seq"
+          },
+          "active": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Active"
+          },
+          "completed": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Completed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "last_seq",
+          "active",
+          "completed"
+        ],
+        "title": "SnapshotResponse"
       },
       "SqliteProfilerEntry": {
         "properties": {
@@ -19576,6 +20555,32 @@
           "op"
         ],
         "title": "SqliteProfilerEntry"
+      },
+      "SummaryResponse": {
+        "properties": {
+          "active_total": {
+            "type": "integer",
+            "title": "Active Total"
+          },
+          "by_db_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "By Db Type"
+          },
+          "longest_ms": {
+            "type": "number",
+            "title": "Longest Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "active_total",
+          "by_db_type",
+          "longest_ms"
+        ],
+        "title": "SummaryResponse"
       },
       "SustainedLossAlert": {
         "properties": {

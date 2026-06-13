@@ -435,7 +435,11 @@ def test_log_fields_catalog_handles_missing_config_gracefully(client):
 
 
 def test_log_fields_catalog_500s_on_exception(client):
-    with patch("backend.core.log_fields.get_catalog_for_api", side_effect=RuntimeError("oops")):
+    # bootstrap.py calls `fr.get_catalog_for_api`, which is a same-identity
+    # re-export of `log_fields.get_catalog_for_api`. Patching the original
+    # `log_fields` binding does NOT affect the registry's already-bound
+    # reference, so patch the registry's path directly.
+    with patch("backend.core.field_registry.get_catalog_for_api", side_effect=RuntimeError("oops")):
         response = client.get("/api/log-fields/catalog")
     assert response.status_code == 500
 

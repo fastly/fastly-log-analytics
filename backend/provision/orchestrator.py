@@ -8,7 +8,7 @@ import time
 
 logger = logging.getLogger(__name__)
 
-from backend.core import log_fields as lf
+from backend.core import field_registry as lf
 from backend.core.fastly.client import fastly
 from backend.core.fastly.utils import (
     region_endpoint,
@@ -55,6 +55,8 @@ def write_service_config(state: dict):
     from backend import config as svcconfig
 
     service_id = state.get("logging_service_id") or state.get("service_id")
+    if not service_id:
+        raise ValueError("ingest state missing logging_service_id / service_id")
     db_path = svcconfig.duckdb_path(service_id)
 
     # Snapshot the existing on-disk cfg so we can preserve code-managed
@@ -589,8 +591,8 @@ def generate_analyst_invite(service_id: str) -> dict:
         from backend.core import iceberg as db_iceberg
 
         src = svcconfig.config_to_source(cfg)
-        catalog = db_iceberg._get_catalog(src)
-        table = catalog.load_table(db_iceberg._table_identifier(src))
+        catalog = db_iceberg._get_catalog(src)  # type: ignore[attr-defined]
+        table = catalog.load_table(db_iceberg._table_identifier(src))  # type: ignore[attr-defined]
         iceberg_metadata_location = table.metadata_location
     except Exception:
         pass
@@ -614,6 +616,8 @@ def generate_analyst_invite(service_id: str) -> dict:
 def _build_log_fields_config(args) -> dict:
     preset_name = getattr(args, "preset", None) or "standard"
     preset = lf.PRESETS.get(preset_name)
+    if preset is None:
+        raise ValueError(f"Unknown log-fields preset: {preset_name!r}")
     groups = list(preset["groups"])
     for g in getattr(args, "enable_group", None) or []:
         if g not in groups:

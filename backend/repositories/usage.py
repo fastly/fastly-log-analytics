@@ -5,6 +5,7 @@ from __future__ import annotations
 import duckdb
 
 from backend.repositories._base import QueryRunner, _safe_table
+from backend.repositories._sql import usage as SQL
 
 
 def get_edge_ratio(con: duckdb.DuckDBPyConnection, src: dict) -> tuple[float | None, list]:
@@ -16,7 +17,7 @@ def get_edge_ratio(con: duckdb.DuckDBPyConnection, src: dict) -> tuple[float | N
     actual_cols = [col["name"] for col in get_schema(con, src)]
     if "edge" not in actual_cols:
         return None, runner.debug_queries
-    result = runner.execute_with_retry(f"SELECT count(*) FILTER (WHERE edge = true) * 100.0 / count(*) FROM {table}")
+    result = runner.execute_with_retry(SQL.EDGE_RATIO_PCT.format(table=table))
     if result is None:
         return None, runner.debug_queries
     row = result.fetchone()

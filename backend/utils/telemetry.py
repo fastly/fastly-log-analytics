@@ -41,7 +41,30 @@ _LATEST_PROCESS_CONTEXT: str | None = None
 _LATEST_PROCESS_CONTEXT_LOCK = threading.Lock()
 
 
-def set_process_context(ctx: str | None) -> None:
+def _set_process_context_for_tests(ctx: str | None) -> None:
+    """Set the process-context ContextVar AND the active-stack mirror in
+    one shot — WITHOUT the push/pop bookkeeping of ``process_context_scope``.
+
+    **Test-fixture / introspection helper ONLY. NEVER call from production
+    code.** The underscore prefix + name suffix are the contract: the
+    public API is ``process_context_scope`` and only that.
+
+    Why this exists at all: the test suite needs to assert what happens
+    when the ContextVar is set by a code path that doesn't use the
+    context manager (e.g. when validating the fallback's last-writer-wins
+    semantics, or simulating a thread that inherits a partial context).
+    Test code that emulates "a thread that set the context and exited"
+    without doing the work of pushing/popping the active-context stack
+    is exactly the failure mode we want to test, so this helper exists
+    to enable that test, not to be used in real code.
+
+    In production the plain setter loses the stack semantics that keep
+    concurrent cron / request scopes from clobbering each other's mirror
+    on exit: a setter call from one scope's body, followed by that
+    scope's exit, would null the mirror while a concurrent scope's
+    in-flight iothread I/O is still draining → ``untagged:fsspecIO``
+    rows in usage_log.
+    """
     global _LATEST_PROCESS_CONTEXT
     _PROCESS_CONTEXT.set(ctx)
     with _LATEST_PROCESS_CONTEXT_LOCK:
@@ -103,6 +126,27 @@ def process_context_scope(name: str):
     """
     global _LATEST_PROCESS_CONTEXT
     token = _PROCESS_CONTEXT.set(name)
+    # Mirror into the Live Query Monitor attribution ContextVar so cron
+    # queries get a kind="cron" row instead of "system". Use snapshot-and-
+    # restore rather than token-reset because the cron scope can be entered
+    # and exited across context boundaries (asyncio.to_thread, fsspec
+    # iothread) which would make ContextVar.reset() raise.
+    prev_attribution = None
+    attribution_set = False
+    try:
+        from backend.core.query_attribution import (
+            current_attribution,
+            derive_from_process_context,
+        )
+
+        attribution = derive_from_process_context(name)
+        if attribution is not None:
+            prev_attribution = current_attribution.get()
+            current_attribution.set(attribution)
+            attribution_set = True
+    except Exception:
+        # Attribution wiring is observability, not control flow.
+        attribution_set = False
     with _LATEST_PROCESS_CONTEXT_LOCK:
         _ACTIVE_CONTEXTS.append(name)
         _LATEST_PROCESS_CONTEXT = name
@@ -110,6 +154,13 @@ def process_context_scope(name: str):
         yield
     finally:
         _PROCESS_CONTEXT.reset(token)
+        if attribution_set:
+            try:
+                from backend.core.query_attribution import current_attribution
+
+                current_attribution.set(prev_attribution)
+            except Exception:
+                pass
         with _LATEST_PROCESS_CONTEXT_LOCK:
             try:
                 # Remove the *last* occurrence so nested scopes with the
@@ -210,7 +261,7 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
 
         from datetime import UTC, datetime
 
-        from backend.core import metadata_db
+        from backend.core.metadata import usage_log_db as _usage_log_db
 
         start_iso = datetime.fromtimestamp(start_ts, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         # Raw string compare on timestamp (no datetime() wrapping) so the
@@ -221,15 +272,31 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
         # seconds ago, so they're correctly excluded by string comparison.
         # LIMIT 25 caps the response body so an admin nav during a cron
         # tick doesn't drag in 500 rows of iothread spam (~120KB / 5s).
-        con = metadata_db.get_con(sid)
-        cur = con.execute(
-            "SELECT operation_type, url, status, duration_ms, function_name, bytes, operation_class "
-            "FROM usage_log "
-            "WHERE process_context = ? AND timestamp >= ? "
-            "ORDER BY timestamp ASC LIMIT 25",
-            (ctx, start_iso),
-        )
-        rows = cur.fetchall()
+        #
+        # Open the usage_log.db in URI mode=ro so this read path cannot
+        # acquire the writer lock under any circumstances — a slow scan
+        # here is guaranteed not to block the cron writer. The
+        # connection is short-lived (closed in the finally below) so
+        # we don't pool it.
+        try:
+            con = _usage_log_db.open_readonly(sid)
+        except Exception:
+            # File doesn't exist yet (writer hasn't run) — nothing to surface.
+            return []
+        try:
+            cur = con.execute(
+                "SELECT operation_type, url, status, duration_ms, function_name, bytes, operation_class "
+                "FROM usage_log "
+                "WHERE process_context = ? AND timestamp >= ? "
+                "ORDER BY timestamp ASC LIMIT 25",
+                (ctx, start_iso),
+            )
+            rows = cur.fetchall()
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
         return [
             {
                 "service": "CDN" if r[6] == "CDN" else "FOS",
@@ -279,7 +346,11 @@ def record_call(
             # Walk up past telemetry.py, the TrackedClient/Paginator wrappers in
             # duckdb.py, and contextlib so we surface the real application caller.
             # Using sys._getframe() is significantly faster than inspect.stack().
-            frame = sys._getframe(1)
+            # Declared as Optional because `frame.f_back` narrows to None at
+            # the top of the stack and we reassign it back into the same name.
+            from types import FrameType
+
+            frame: FrameType | None = sys._getframe(1)
             while frame:
                 code = getattr(frame, "f_code", None)
                 if not code:
@@ -313,6 +384,37 @@ def record_call(
     )
     _CALLS.set(calls)
 
+    # Phase 1 telemetry bridge — when we're inside a RequestTelemetry section
+    # span (or any other start_as_current_span block), surface this call as
+    # an OTel span event so the OTel pipeline sees the same external-call
+    # attribution the debug panel renders. No-op when no span is current
+    # (which is the common case for cron-driven boto3/fsspec hooks that run
+    # off the request thread).
+    try:
+        from opentelemetry import trace as _otel_trace
+
+        _span = _otel_trace.get_current_span()
+        if _span is not None and _span.is_recording():
+            attrs: dict = {
+                "app.call.method": method,
+                "app.call.path": path,
+                "app.call.time_ms": float(time_ms),
+                "app.call.service": service,
+            }
+            if status is not None:
+                attrs["app.call.status"] = str(status)
+            if details:
+                attrs["app.call.details"] = details
+            if caller:
+                attrs["app.call.caller"] = caller
+            if bytes_count is not None:
+                attrs["app.call.bytes"] = int(bytes_count)
+            _span.add_event(name="external_call", attributes=attrs)
+    except Exception:
+        # OTel SDK import or recording failure must never fail the caller —
+        # this is best-effort telemetry, not load-bearing.
+        pass
+
 
 class track_query:
     """Context manager to execute and time a DuckDB query, yielding the cursor."""
@@ -334,6 +436,24 @@ class track_query:
         queries = get_queries()
         queries.append({"sql": self.query.strip(), "time_ms": elapsed})
         _QUERIES.set(queries)
+
+        # Phase 1 telemetry bridge — surface as a span event when inside
+        # an active section span.
+        try:
+            from opentelemetry import trace as _otel_trace
+
+            _span = _otel_trace.get_current_span()
+            if _span is not None and _span.is_recording():
+                _span.add_event(
+                    name="db.query",
+                    attributes={
+                        "db.statement": self.query.strip()[:4000],
+                        "db.elapsed_ms": float(elapsed),
+                        "db.label": self.label,
+                    },
+                )
+        except Exception:
+            pass
 
 
 def _is_full_miss(x_cache: str | None) -> bool:

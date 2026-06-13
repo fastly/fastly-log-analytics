@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from backend.utils.geo import format_city_label
 
@@ -923,7 +924,7 @@ registry.register(
 
 def region_latency_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [server_region, w_p95, b_p95, w_total, b_total, ottfb_p95]
-    item = {
+    item: dict[str, Any] = {
         "label": row[0] or "(unknown)",
         "current_val": float(row[1] or 0),
         "baseline_val": float(row[2] or 0),

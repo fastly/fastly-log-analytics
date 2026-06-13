@@ -222,4 +222,32 @@ class BootstrapResponse(BaseResponse):
     # render ViewSelector and rehydrate from URL view params without a
     # second /api/views/{service_id} round-trip on every page nav.
     views: list[dict] = Field(default_factory=list)
+    # Full log-fields catalog (same payload as /api/log-fields/catalog)
+    # for the active service. Folded in so the frontend can seed its
+    # ['log-fields-catalog', service_id] React Query cache and skip the
+    # 35-KB round-trip on every cold page load (perf audit Phase D).
+    # None when no active service.
+    log_fields_catalog: dict | None = None
+    # Cached sync-status (same fast-path payload /api/sync-status?skip_fos=true
+    # returns). Folded in so SyncStatusBadge / logs page hit cache on
+    # first mount. ADMIN ONLY — None for analyst sessions (matches the
+    # dedicated endpoint's 403 for analysts).
+    sync_status: dict | None = None
+    # Lean share-status banner ({sharing_active, public_url}). Folded
+    # in so the global share banner has its initial state on first
+    # render and skips the first /api/admin/share/banner poll.
+    # ADMIN ONLY — analysts don't manage sharing.
+    share_banner: dict | None = None
+    # Analyst-safe sibling of sync_status, projected down to the two
+    # fields the global SyncStatusBadge renders (latest_log_at,
+    # local_rows). Available to BOTH admin AND analyst sessions so the
+    # badge shows on prod for analyst-shared instances too.
+    header_badge: dict | None = None
+    # Analyst-safe log extents (same shape as /api/log-extents): the
+    # earliest + latest log timestamps the FilterBar uses for its
+    # auto-range snap-to-extents. Folded in so the FilterBar's first
+    # render skips the dedicated round-trip; the existing 3-s
+    # not-yet-populated poll continues from useFilterBar for new
+    # services where extents land later.
+    log_extents: dict | None = None
     # section_timings is inherited from BaseResponse.

@@ -8,11 +8,13 @@ import math
 import threading
 import time
 from collections import OrderedDict
+from typing import Any
 
 import duckdb
 
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, _safe_table, safe_iso
+from backend.repositories._sql import origin as SQL
 from backend.repositories.utils.filters import build_where_clause
 
 # ── Response memo cache ───────────────────────────────────────────────────────
@@ -134,7 +136,9 @@ def _enrich_with_distance(row: dict) -> dict:
             efficiency_ratio=efficiency,
             # High ratio alone isn't meaningful for short hops where TCP overhead dominates;
             # require ≥20ms absolute overhead above the theoretical floor before flagging.
-            anomaly_static=efficiency is not None and efficiency > 3.0 and p50 - light_rtt_ms >= 20.0,
+            anomaly_static=(
+                efficiency is not None and efficiency > 3.0 and p50 is not None and p50 - light_rtt_ms >= 20.0
+            ),
             edge_lat=e_coords[0],
             edge_lon=e_coords[1],
             shield_lat=s_coords[0],
@@ -190,8 +194,15 @@ def get_summary(
 
     lat_val = origin_latency_us_expr(actual_cols)
 
+    # N-8: return a ratio (0.0–1.0), NOT a percentage. The frontend at
+    # ``frontend/app/origin/_sections/Aggregates.tsx`` already multiplies
+    # the value by 100 to render; the prior ``* 100.0`` here made the
+    # display show 2181.11% on a real 21.81% error rate. Also clamp the
+    # 5xx filter to (500-599) — counting any "ost >= 500" let buggy
+    # synthetic codes leak in (origin status 829 was observed in prod).
     ost_5xx = (
-        'COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0 / NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
+        'COUNT(*) FILTER (WHERE "ost" >= 500 AND "ost" < 600) * 1.0 / '
+        'NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
         if "ost" in actual_cols
         else "NULL"
     )
@@ -219,26 +230,19 @@ def get_summary(
         grouping_clause = ""  # single rollup row, no need for GROUPING SETS
         grouping_expr = "1"  # always-rollup
     rows = runner.execute(
-        f"""
-        SELECT
-          {edge_select}                                                                       AS edge_group,
-          {grouping_expr}                                                                     AS is_total,
-          COUNT(*)                                                                            AS requests,
-          COUNT(*) FILTER (WHERE "cache" ILIKE 'MISS%')                                       AS total_misses,
-          COUNT(*) FILTER (WHERE "cache" ILIKE 'PASS%')                                       AS total_passes,
-          MEDIAN({lat_val}) / 1000.0                                                          AS ottfb_p50_ms,
-          APPROX_QUANTILE({lat_val}, 0.75) / 1000.0                                           AS ottfb_p75_ms,
-          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                                           AS ottfb_p95_ms,
-          APPROX_QUANTILE({lat_val}, 0.99) / 1000.0                                           AS ottfb_p99_ms,
-          {ottlb_p50}                                                                          AS ottlb_p50_ms,
-          {ottlb_p95}                                                                          AS ottlb_p95_ms,
-          {cdn_ovh}                                                                            AS cdn_overhead_p50_ms,
-          {ost_5xx}                                                                            AS origin_error_rate,
-          {obytes_p50}                                                                         AS obytes_p50
-        FROM {table_name}
-        WHERE {where} AND ({lat_val} IS NOT NULL)
-        {grouping_clause}
-        """,
+        SQL.SUMMARY_GROUPING_SETS.format(
+            edge_select=edge_select,
+            grouping_expr=grouping_expr,
+            lat_val=lat_val,
+            ottlb_p50=ottlb_p50,
+            ottlb_p95=ottlb_p95,
+            cdn_ovh=cdn_ovh,
+            ost_5xx=ost_5xx,
+            obytes_p50=obytes_p50,
+            table=table_name,
+            where=where,
+            grouping_clause=grouping_clause,
+        ),
         params,
     ).fetchall()
 
@@ -255,7 +259,7 @@ def get_summary(
     has_data = rollup_row is not None and rollup_row[5] is not None
 
     if not has_data:
-        payload = {
+        payload: dict[str, Any] = {
             "has_data": False,
             "total_misses": None,
             "total_passes": None,
@@ -278,6 +282,7 @@ def get_summary(
     # 1=is_total, 2=requests, 3=total_misses, 4=total_passes, 5-8=ottfb
     # p50/p75/p95/p99, 9=ottlb_p50, 10=ottlb_p95, 11=cdn_overhead_p50,
     # 12=origin_error_rate, 13=obytes_p50.
+    assert rollup_row is not None  # has_data check above narrowed this
     row = (
         rollup_row[3],  # total_misses
         rollup_row[4],  # total_passes
@@ -387,17 +392,16 @@ def get_timeseries(
     edge_group = ', "edge"' if (split_by_leg and "edge" in actual_cols) else ""
 
     rows = runner.execute(
-        f"""
-        SELECT
-          time_bucket({interval}, "timestamp")                              AS ts,
-          COUNT(*)                                                          AS miss_count,
-          {agg_expr} {unit_conv}                                            AS value
-          {edge_col}
-        FROM {table_name}
-        WHERE {where} AND ({lat_expr} IS NOT NULL)
-        GROUP BY ts {edge_group}
-        ORDER BY ts
-        """,
+        SQL.TIMESERIES_BUCKETED.format(
+            interval=interval,
+            agg_expr=agg_expr,
+            unit_conv=unit_conv,
+            edge_col=edge_col,
+            table=table_name,
+            where=where,
+            lat_expr=lat_expr,
+            edge_group=edge_group,
+        ),
         params,
     ).fetchall()
 
@@ -447,20 +451,7 @@ def get_slow_urls(
     lat_val = origin_latency_us_expr(actual_cols)
 
     rows = runner.execute(
-        f"""
-        SELECT
-          "url",
-          COUNT(*)                                                         AS requests,
-          MEDIAN({lat_val}) / 1000.0                                       AS p50_ms,
-          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                        AS p95_ms,
-          APPROX_QUANTILE({lat_val}, 0.99) / 1000.0                        AS p99_ms
-        FROM {table_name}
-        WHERE {where} AND ({lat_val} IS NOT NULL) AND "url" IS NOT NULL
-        GROUP BY "url"
-        HAVING COUNT(*) >= ?
-        ORDER BY p95_ms DESC
-        LIMIT ?
-        """,
+        SQL.SLOW_URLS.format(lat_val=lat_val, table=table_name, where=where),
         params + [min_requests, limit],
     ).fetchall()
 
@@ -495,16 +486,7 @@ def get_status_codes(
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
 
     rows = runner.execute(
-        f"""
-        SELECT
-          "ost"                                             AS status,
-          COUNT(*)                                         AS count,
-          COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()        AS pct
-        FROM {table_name}
-        WHERE {where} AND "ost" IS NOT NULL
-        GROUP BY "ost"
-        ORDER BY count DESC
-        """,
+        SQL.STATUS_CODES.format(table=table_name, where=where),
         params,
     ).fetchall()
 
@@ -548,16 +530,7 @@ def get_path_breakdown(
     lat_val = origin_latency_us_expr(actual_cols)
 
     rows = runner.execute(
-        f"""
-        SELECT
-          "edge",
-          COUNT(*)                                                          AS requests,
-          MEDIAN({lat_val}) / 1000.0                                        AS p50_ms,
-          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                         AS p95_ms
-        FROM {table_name}
-        WHERE {where} AND ({lat_val} IS NOT NULL)
-        GROUP BY "edge"
-        """,
+        SQL.PATH_BREAKDOWN.format(lat_val=lat_val, table=table_name, where=where),
         params,
     ).fetchall()
 
@@ -607,18 +580,7 @@ def get_pop_latency(
     lat_val = origin_latency_us_expr(actual_cols)
 
     rows = runner.execute(
-        f"""
-        SELECT
-          "pop",
-          COUNT(*)                                                          AS requests,
-          MEDIAN({lat_val}) / 1000.0                                        AS p50_ms,
-          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                         AS p95_ms
-        FROM {table_name}
-        WHERE {where} AND ({lat_val} IS NOT NULL) AND "pop" IS NOT NULL AND "pop" != ''
-        GROUP BY "pop"
-        ORDER BY p95_ms DESC
-        LIMIT ?
-        """,
+        SQL.POP_LATENCY.format(lat_val=lat_val, table=table_name, where=where),
         params + [limit],
     ).fetchall()
 
@@ -676,21 +638,7 @@ def get_ip_health(
     lat_val = origin_latency_us_expr(actual_cols)
 
     rows = runner.execute(
-        f"""
-        SELECT
-          "oip",
-          COUNT(*)                                                            AS requests,
-          MEDIAN({lat_val}) / 1000.0                                          AS p50_ms,
-          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                           AS p95_ms,
-          ROUND(COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0
-            / NULLIF(COUNT(*), 0), 1)                                         AS error_pct
-        FROM {table_name}
-        WHERE {where} AND "oip" IS NOT NULL AND "oip" != '' AND "ost" IS NOT NULL
-        GROUP BY "oip"
-        HAVING COUNT(*) >= 10
-        ORDER BY error_pct DESC
-        LIMIT ?
-        """,
+        SQL.IP_HEALTH.format(lat_val=lat_val, table=table_name, where=where),
         params + [limit],
     ).fetchall()
 
@@ -743,30 +691,11 @@ def get_shielding_analysis(
     # We only apply time bounds to the shield CTE.
     time_params, time_where = build_where_clause(start_time, end_time, {}, actual_cols)
 
-    query = f"""
-        WITH edge_logs AS (
-            SELECT "rid", "pop", "ottfb"
-            FROM {table_name}
-            WHERE {where} AND "edge" = true AND "ottfb" IS NOT NULL
-        ),
-        shield_logs AS (
-            SELECT "prid", "pop", "ottfb", "ttfb"
-            FROM {table_name}
-            WHERE {time_where} AND "edge" = false AND "prid" IS NOT NULL AND "prid" != ''
-        )
-        SELECT
-          e.pop                                                                    AS edge_pop,
-          s.pop                                                                    AS shield_pop,
-          COUNT(*)                                                                 AS requests,
-          PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY (e.ottfb - COALESCE(s.ottfb, s.ttfb * 1000000))) / 1000.0 AS p50_ms,
-          PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY (e.ottfb - COALESCE(s.ottfb, s.ttfb * 1000000))) / 1000.0 AS p95_ms,
-          PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY (e.ottfb - COALESCE(s.ottfb, s.ttfb * 1000000))) / 1000.0 AS p99_ms
-        FROM edge_logs e
-        INNER JOIN shield_logs s ON s.prid = e.rid
-        GROUP BY 1, 2
-        ORDER BY requests DESC
-        LIMIT ?
-    """
+    query = SQL.SHIELDING_ANALYSIS.format(
+        table=table_name,
+        where=where,
+        time_where=time_where,
+    )
 
     rows = runner.execute(query, params + time_params + [limit]).fetchall()
 
@@ -835,8 +764,12 @@ def _origin_summary_from_temp(runner: QueryRunner, temp_table: str, actual_cols:
     actual_cols_set = set(actual_cols)
     lat_val = "lat_us"
 
+    # N-8: same fix as get_summary above — return ratio not percentage,
+    # clamp the 5xx filter to (500-599) so synthetic origin status codes
+    # like 829 don't inflate the count.
     ost_5xx = (
-        'COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0 / NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
+        'COUNT(*) FILTER (WHERE "ost" >= 500 AND "ost" < 600) * 1.0 / '
+        'NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
         if "ost" in actual_cols_set
         else "NULL"
     )
@@ -850,22 +783,15 @@ def _origin_summary_from_temp(runner: QueryRunner, temp_table: str, actual_cols:
     obytes_p50 = 'MEDIAN("obytes")' if "obytes" in actual_cols_set else "NULL"
 
     row = runner.execute(
-        f"""
-        SELECT
-          COUNT(*) FILTER (WHERE "cache" ILIKE 'MISS%')                                    AS total_misses,
-          COUNT(*) FILTER (WHERE "cache" ILIKE 'PASS%')                                    AS total_passes,
-          MEDIAN({lat_val}) / 1000.0                                                       AS ottfb_p50_ms,
-          APPROX_QUANTILE({lat_val}, 0.75) / 1000.0                                        AS ottfb_p75_ms,
-          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                                        AS ottfb_p95_ms,
-          APPROX_QUANTILE({lat_val}, 0.99) / 1000.0                                        AS ottfb_p99_ms,
-          {ottlb_p50}                                                                       AS ottlb_p50_ms,
-          {ottlb_p95}                                                                       AS ottlb_p95_ms,
-          {cdn_ovh}                                                                         AS cdn_overhead_p50_ms,
-          {ost_5xx}                                                                         AS origin_error_rate,
-          {obytes_p50}                                                                      AS obytes_p50
-        FROM {temp_table}
-        WHERE ({lat_val} IS NOT NULL)
-        """
+        SQL.TEMP_SUMMARY_ROLLUP.format(
+            lat_val=lat_val,
+            ottlb_p50=ottlb_p50,
+            ottlb_p95=ottlb_p95,
+            cdn_ovh=cdn_ovh,
+            ost_5xx=ost_5xx,
+            obytes_p50=obytes_p50,
+            temp_table=temp_table,
+        )
     ).fetchone()
 
     has_data = row is not None and row[2] is not None
@@ -888,17 +814,7 @@ def _origin_summary_from_temp(runner: QueryRunner, temp_table: str, actual_cols:
 
     edge_rows = []
     if "edge" in actual_cols_set:
-        edge_rows = runner.execute(
-            f"""
-            SELECT "edge",
-              COUNT(*)                                                     AS requests,
-              MEDIAN({lat_val}) / 1000.0                                   AS p50_ms,
-              APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                    AS p95_ms
-            FROM {temp_table}
-            WHERE ({lat_val} IS NOT NULL)
-            GROUP BY "edge"
-            """
-        ).fetchall()
+        edge_rows = runner.execute(SQL.TEMP_SUMMARY_BY_EDGE.format(lat_val=lat_val, temp_table=temp_table)).fetchall()
 
     return {
         "has_data": True,
@@ -954,17 +870,15 @@ def _origin_timeseries_from_temp(
     edge_group = ', "edge"' if (split_by_leg and "edge" in actual_cols_set) else ""
 
     rows = runner.execute(
-        f"""
-        SELECT
-          time_bucket({interval}, "timestamp")                              AS ts,
-          COUNT(*)                                                          AS miss_count,
-          {agg_expr} {unit_conv}                                            AS value
-          {edge_col}
-        FROM {temp_table}
-        WHERE ({lat_expr} IS NOT NULL)
-        GROUP BY ts {edge_group}
-        ORDER BY ts
-        """
+        SQL.TEMP_TIMESERIES.format(
+            interval=interval,
+            agg_expr=agg_expr,
+            unit_conv=unit_conv,
+            edge_col=edge_col,
+            temp_table=temp_table,
+            lat_expr=lat_expr,
+            edge_group=edge_group,
+        )
     ).fetchall()
 
     has_edge_col = split_by_leg and "edge" in actual_cols_set
@@ -993,20 +907,7 @@ def _origin_slow_urls_from_temp(
     # Use the pre-computed lat_us column so percentile sorts can leverage
     # column-store layout instead of paying COALESCE per row.
     rows = runner.execute(
-        f"""
-        SELECT
-          "url",
-          COUNT(*)                                                         AS requests,
-          MEDIAN(lat_us) / 1000.0                                          AS p50_ms,
-          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                           AS p95_ms,
-          APPROX_QUANTILE(lat_us, 0.99) / 1000.0                           AS p99_ms
-        FROM {temp_table}
-        WHERE lat_us IS NOT NULL AND "url" IS NOT NULL
-        GROUP BY "url"
-        HAVING COUNT(*) >= ?
-        ORDER BY p95_ms DESC
-        LIMIT ?
-        """,
+        SQL.TEMP_SLOW_URLS.format(temp_table=temp_table),
         [min_requests, limit],
     ).fetchall()
     return {
@@ -1018,18 +919,7 @@ def _origin_slow_urls_from_temp(
 def _origin_status_codes_from_temp(runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str]) -> dict:
     if "ost" not in set(actual_cols):
         return {"has_data": False, "rows": []}
-    rows = runner.execute(
-        f"""
-        SELECT
-          "ost"                                             AS status,
-          COUNT(*)                                          AS count,
-          COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()          AS pct
-        FROM {temp_table}
-        WHERE "ost" IS NOT NULL
-        GROUP BY "ost"
-        ORDER BY count DESC
-        """
-    ).fetchall()
+    rows = runner.execute(SQL.TEMP_STATUS_CODES.format(temp_table=temp_table)).fetchall()
     if not rows:
         return {"has_data": False, "rows": []}
     return {
@@ -1042,18 +932,7 @@ def _origin_path_breakdown_from_temp(runner: QueryRunner, temp_table: str, actua
     actual_cols_set = set(actual_cols)
     if "edge" not in actual_cols_set:
         return {"has_data": False, "shielding_detected": False, "rows": []}
-    rows = runner.execute(
-        f"""
-        SELECT
-          "edge",
-          COUNT(*)                                                          AS requests,
-          MEDIAN(lat_us) / 1000.0                                           AS p50_ms,
-          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                            AS p95_ms
-        FROM {temp_table}
-        WHERE lat_us IS NOT NULL
-        GROUP BY "edge"
-        """
-    ).fetchall()
+    rows = runner.execute(SQL.TEMP_PATH_BREAKDOWN.format(temp_table=temp_table)).fetchall()
     if not rows:
         return {"has_data": False, "shielding_detected": False, "rows": []}
     shielding_detected = any(r[0] is False for r in rows)
@@ -1071,18 +950,7 @@ def _origin_pop_latency_from_temp(
     if "pop" not in actual_cols_set:
         return {"has_data": False, "requires_group_c": True, "rows": []}
     rows = runner.execute(
-        f"""
-        SELECT
-          "pop",
-          COUNT(*)                                                          AS requests,
-          MEDIAN(lat_us) / 1000.0                                           AS p50_ms,
-          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                            AS p95_ms
-        FROM {temp_table}
-        WHERE lat_us IS NOT NULL AND "pop" IS NOT NULL AND "pop" != ''
-        GROUP BY "pop"
-        ORDER BY p95_ms DESC
-        LIMIT ?
-        """,
+        SQL.TEMP_POP_LATENCY.format(temp_table=temp_table),
         [limit],
     ).fetchall()
     if not rows:
@@ -1113,21 +981,7 @@ def _origin_ip_health_from_temp(
     if "oip" not in actual_cols_set or "ost" not in actual_cols_set:
         return {"has_data": False, "rows": []}
     rows = runner.execute(
-        f"""
-        SELECT
-          "oip",
-          COUNT(*)                                                            AS requests,
-          MEDIAN(lat_us) / 1000.0                                             AS p50_ms,
-          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                              AS p95_ms,
-          ROUND(COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0
-            / NULLIF(COUNT(*), 0), 1)                                         AS error_pct
-        FROM {temp_table}
-        WHERE "oip" IS NOT NULL AND "oip" != '' AND "ost" IS NOT NULL
-        GROUP BY "oip"
-        HAVING COUNT(*) >= 10
-        ORDER BY error_pct DESC
-        LIMIT ?
-        """,
+        SQL.TEMP_IP_HEALTH.format(temp_table=temp_table),
         [limit],
     ).fetchall()
     if not rows:
@@ -1215,10 +1069,12 @@ def get_aggregates(
         return {**empty_payload, **runner.telemetry()}
     lat_us_expr = origin_latency_us_expr(actual_set)
     temp_table = f"t_origin_{_uuid.uuid4().hex}"
-    create_sql = (
-        f"CREATE TEMP TABLE {temp_table} AS "
-        f"SELECT {', '.join(select_cols)}, {lat_us_expr} AS lat_us "
-        f"FROM {table_name} WHERE {where_clause}"
+    create_sql = SQL.AGGREGATES_CREATE_TEMP.format(
+        temp_table=temp_table,
+        select_cols=", ".join(select_cols),
+        lat_us_expr=lat_us_expr,
+        table=table_name,
+        where_clause=where_clause,
     )
     if not runner.create_temp_table(create_sql, params):
         return {**empty_payload, **runner.telemetry()}
@@ -1252,6 +1108,6 @@ def get_aggregates(
         }
     finally:
         try:
-            runner.execute(f"DROP TABLE IF EXISTS {temp_table}")
+            runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
         except Exception:
             pass

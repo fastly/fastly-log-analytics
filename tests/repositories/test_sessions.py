@@ -19,7 +19,7 @@ def clear_caches():
 
 
 def test_get_sessions_returns_expected_keys(in_memory_duckdb, test_service_source):
-    """Result always contains sessions/total/page/limit/has_rtt/has_ja4/has_edge."""
+    """Result always contains sessions/total/page/limit/has_rtt/has_ja4/has_edge/has_edge_sid."""
     logs = generate_mock_logs(test_service_source, num_logs=30, hours_ago=1)
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
 
@@ -37,7 +37,7 @@ def test_get_sessions_returns_expected_keys(in_memory_duckdb, test_service_sourc
         min_reqs_flag=None,
         min_4xx_pct_flag=None,
     )
-    for key in ("sessions", "total", "page", "limit", "has_rtt", "has_ja4", "has_edge"):
+    for key in ("sessions", "total", "page", "limit", "has_rtt", "has_ja4", "has_edge", "has_edge_sid"):
         assert key in result, f"Missing key: {key}"
     assert isinstance(result["sessions"], list)
     assert result["page"] == 1
@@ -133,6 +133,95 @@ def test_get_sessions_empty_table(in_memory_duckdb, test_service_source):
     )
     assert result["sessions"] == []
     assert result["total"] == 0
+
+
+# ── get_sessions: edge_sid aggregation ────────────────────────────────────────
+
+
+def test_get_sessions_has_edge_sid_false_when_column_absent(in_memory_duckdb, test_service_source):
+    """When the log table has no ``edge_sid`` column (the default
+    LOG_FIELD_CATALOG shape — edge_sid is only added when the
+    session_scoring orchestrator provisions it), the response reports
+    ``has_edge_sid: False`` and individual sessions do not carry an
+    ``edge_sid`` field. Pinned because the frontend gates the flag column
+    on this flag — without it, the column would render for every service
+    even when the data isn't there to power it."""
+    logs = generate_mock_logs(test_service_source, num_logs=10, hours_ago=1)
+    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
+
+    result = get_sessions(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        page=1,
+        limit=20,
+        sort_by="session_start",
+        sort_dir="desc",
+        flagged_only=False,
+        min_reqs_flag=None,
+        min_4xx_pct_flag=None,
+    )
+    assert result["has_edge_sid"] is False
+    for session in result["sessions"]:
+        assert "edge_sid" not in session, f"edge_sid should not appear in session dict when column is absent: {session}"
+
+
+def test_get_sessions_has_edge_sid_true_and_per_session_value_when_column_present(
+    in_memory_duckdb, test_service_source
+):
+    """When ``edge_sid`` is in the schema, the response reports
+    ``has_edge_sid: True`` and each session row carries an ``edge_sid``
+    aggregated via MAX() across the session's requests. Pinned because
+    the frontend's per-row Flag popover keys label lookups on this
+    string — a regression where MAX is dropped or aliased differently
+    would silently break flagging from the sessions table."""
+    # Add edge_sid to the mock-data schema. LOG_FIELD_CATALOG only
+    # contains edge_sid when session_scoring is provisioned, so this
+    # test injects the column directly into the in-memory table after
+    # insert_mock_logs creates it.
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=8, hours_ago=1)
+    for log in logs:
+        log["ip"] = "10.0.0.50"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+    in_memory_duckdb.execute(f'ALTER TABLE {table_name} ADD COLUMN "edge_sid" VARCHAR')
+    # Tag every row in this session with the same edge_sid so MAX is
+    # deterministic. Production sessions usually carry a single cookie
+    # value end-to-end; intra-session rotation would still resolve to
+    # one MAX value.
+    in_memory_duckdb.execute(
+        f'UPDATE {table_name} SET "edge_sid" = ? WHERE "ip" = ?', ["sid_abc123def456", "10.0.0.50"]
+    )
+
+    # Bust the schema cache so get_schema_cols picks up the new column.
+    _clear_schema_cache()
+
+    result = get_sessions(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        page=1,
+        limit=20,
+        sort_by="session_start",
+        sort_dir="desc",
+        flagged_only=False,
+        min_reqs_flag=None,
+        min_4xx_pct_flag=None,
+    )
+    assert result["has_edge_sid"] is True
+    assert len(result["sessions"]) >= 1
+    for session in result["sessions"]:
+        # Every session that has rows from the seeded IP should carry
+        # the aggregated cookie id. Sessions from other random IPs (if
+        # any leaked through) would also have the column key present
+        # (even if NULL) because the SELECT projects it unconditionally.
+        assert "edge_sid" in session
+        if session.get("ip") == "10.0.0.50":
+            assert session["edge_sid"] == "sid_abc123def456"
 
 
 # ── get_session_detail ────────────────────────────────────────────────────────

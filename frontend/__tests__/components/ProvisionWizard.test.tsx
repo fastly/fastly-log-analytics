@@ -29,7 +29,7 @@ vi.mock("@/hooks/useSSE", () => ({
   }),
 }));
 
-// Lucide icons often cause issues in Vitest if they use SVG primitives that 
+// Lucide icons often cause issues in Vitest if they use SVG primitives that
 // jsdom doesn't fully support or if they are imported as ES modules.
 vi.mock("lucide-react", async () => {
   const actual = await vi.importActual("lucide-react");
@@ -58,10 +58,10 @@ const wrapper = ({ children }: { children: React.ReactNode }) => (
 describe.skip("ProvisionWizard", () => {
   it("renders the mode selection step by default", () => {
     render(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { wrapper });
-    
+
     // Check for the main title
     expect(screen.getByText(/Setup/i)).toBeInTheDocument();
-    
+
     // Check for the three primary modes
     expect(screen.getByText(/Provision New/i)).toBeInTheDocument();
     expect(screen.getByText(/Import Existing/i)).toBeInTheDocument();
@@ -70,12 +70,12 @@ describe.skip("ProvisionWizard", () => {
 
   it("transitions to the token step when 'Provision New' is selected", () => {
     render(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { wrapper });
-    
+
     const provisionBtn = screen.getByText(/Provision New/i).closest("button");
     if (!provisionBtn) throw new Error("Could not find Provision New button");
-    
+
     fireEvent.click(provisionBtn);
-    
+
     // Header should change to indicate token requirement
     expect(screen.getByText(/Connect to Fastly/i)).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/fastly_v1_/i)).toBeInTheDocument();
@@ -83,16 +83,16 @@ describe.skip("ProvisionWizard", () => {
 
   it("shows an error when attempting to proceed with an empty token", () => {
     render(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { wrapper });
-    
+
     // Go to token step
     fireEvent.click(screen.getByText(/Provision New/i).closest("button")!);
-    
+
     // Click Next without entering token
     const nextBtn = screen.getByText(/Next/i).closest("button");
     if (!nextBtn) throw new Error("Could not find Next button");
-    
+
     fireEvent.click(nextBtn);
-    
+
     // Validation should prevent transition (or show error if implemented)
     // In this component, if token is empty, the button is often disabled or it stays on the step.
     expect(screen.getByText(/Connect to Fastly/i)).toBeInTheDocument();

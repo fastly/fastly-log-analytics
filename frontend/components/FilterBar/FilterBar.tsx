@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { X, Plus, Bot } from 'lucide-react'
-import { subHours, subDays } from 'date-fns'
+import { subDays } from 'date-fns'
 
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -11,7 +11,7 @@ import { useFilterStore } from '@/stores/filterStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { formatForInput, parseFromInput, toUTCDate } from '@/lib/date'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { usePathname } from 'next/navigation'
@@ -28,20 +28,23 @@ export const FilterBar = React.memo(function FilterBar() {
   const pathname = usePathname()
   const [mounted, setMounted] = React.useState(false)
   const { activeServiceId } = useServiceStore()
-  const { 
-    startTime, 
-    endTime, 
-    filters, 
-    edgeOnly, 
+  const {
+    startTime,
+    endTime,
+    filters,
+    edgeOnly,
     hasSyncedExtents,
     isAutoRange,
-    setRange, 
+    relativeRange,
+    setRange,
+    setRelativeRange,
     autoSetRange,
     setHasSyncedExtents,
     removeFilter,
     toggleFilterMode,
     toggleEdgeOnly,
     clearFilters,
+    resetAll,
     resetRange,
     compareMode,
     compareStartTime,
@@ -49,19 +52,22 @@ export const FilterBar = React.memo(function FilterBar() {
     toggleCompareMode,
     setCompareRange
   } = useFilterStore(useShallow(state => ({
-    startTime: state.startTime, 
-    endTime: state.endTime, 
-    filters: state.filters, 
-    edgeOnly: state.edgeOnly, 
+    startTime: state.startTime,
+    endTime: state.endTime,
+    filters: state.filters,
+    edgeOnly: state.edgeOnly,
     hasSyncedExtents: state.hasSyncedExtents,
     isAutoRange: state.isAutoRange,
-    setRange: state.setRange, 
+    relativeRange: state.relativeRange,
+    setRange: state.setRange,
+    setRelativeRange: state.setRelativeRange,
     autoSetRange: state.autoSetRange,
     setHasSyncedExtents: state.setHasSyncedExtents,
     removeFilter: state.removeFilter,
     toggleFilterMode: state.toggleFilterMode,
     toggleEdgeOnly: state.toggleEdgeOnly,
     clearFilters: state.clearFilters,
+    resetAll: state.resetAll,
     resetRange: state.resetRange,
     compareMode: state.compareMode,
     compareStartTime: state.compareStartTime,
@@ -112,16 +118,27 @@ export const FilterBar = React.memo(function FilterBar() {
     return id.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
   }
 
-  // Auto-sync bounds from API when changing service
+  // Auto-sync bounds from API when changing service.
+  // Uses /api/log-extents — an analyst-safe sibling of /api/sync-status that
+  // returns only {configured, earliest_log_at, latest_log_at} with none of
+  // the admin-only fields (ngwaf_workspace_id, active_run, cron task state)
+  // that get the admin endpoint 403'd for remote analysts. Swapping here
+  // closes the analyst-403-every-3s polling loop documented in
+  // pending-docs/session_2026-06-10_otel_dump_and_log_extents.md.
+  //
+  // Perf audit Phase D: useBootstrap seeds ['log-extents', sid] in its
+  // queryFn from bootstrap's log_extents field. Gate on bootstrap
+  // pending so this query hits the seeded cache on cold load.
+  const queryClient = useQueryClient()
+  const bootstrapState = queryClient.getQueryState(['bootstrap'])
+  const bootstrapPending = bootstrapState !== undefined && bootstrapState.status === 'pending'
   const { data: status } = useQuery({
-    queryKey: ['admin', 'status', activeServiceId],
+    queryKey: ['log-extents', activeServiceId],
     queryFn: async () => {
-      const { data } = await client.GET("/api/sync-status", {
-        params: { query: { skip_fos: true } },
-      })
+      const { data } = await client.GET("/api/log-extents")
       return data
     },
-    enabled: !!activeServiceId,
+    enabled: !!activeServiceId && !bootstrapPending,
     refetchInterval: (query) => {
       // Keep polling if we haven't seen valid log extents yet
       const data = query.state.data;
@@ -145,14 +162,14 @@ export const FilterBar = React.memo(function FilterBar() {
         const earliestLog = toUTCDate(status.earliest_log_at.length === 10 ? status.earliest_log_at + "T00:00:00.000Z" : status.earliest_log_at)
         const latestLog = toUTCDate(status.latest_log_at.length === 10 ? status.latest_log_at + "T23:59:59.999Z" : status.latest_log_at)
 
-        // Requirement: 
+        // Requirement:
         // 1. If we have 1 day of data or less, default to the full available range.
         // 2. If we have more than 1 day, default to the most recent 24 hours of data.
         // This ensures the dashboard is never empty on load if data exists, while prioritizing recent traffic.
         // To prevent double-fetching on every page load, only snap the range if
         // the available data is stale (>15 mins old). If data is actively flowing,
         // the default "last 24h from now" is correct and captures everything.
-        
+
         const spanDays = (latestLog.getTime() - earliestLog.getTime()) / (1000 * 3600 * 24)
         const ageMinutes = (new Date().getTime() - latestLog.getTime()) / (1000 * 60)
 
@@ -233,26 +250,25 @@ export const FilterBar = React.memo(function FilterBar() {
 
   const handleReset = React.useCallback(() => {
     React.startTransition(() => {
-      clearFilters()
+      resetAll()
     })
-  }, [clearFilters])
+  }, [resetAll])
 
   const spanHours = React.useMemo(() => {
     if (!startTime || !endTime) return null
     return (new Date(endTime).getTime() - new Date(startTime).getTime()) / (1000 * 3600)
   }, [startTime, endTime])
 
+  // Prefer the explicit `relativeRange` flag (set by pill click) over
+  // duration-derivation. Derivation is the fallback for legacy bookmarks
+  // and saved views whose absolute timestamps happen to match a pill.
   const activePreset = React.useMemo(() => {
+    if (relativeRange) return relativeRange
     if (!spanHours || !endTime) return null
-    // If end is not near "now", it's a custom range
     if (Math.abs(new Date(endTime).getTime() - new Date().getTime()) > 60000) {
       return null
     }
-
-    // Calculate rounded hours to account for millisecond differences between
-    // preset generation time and the current selected bounds
     const h = Math.round(spanHours * 10) / 10
-
     if (h === 1) return '1h'
     if (h === 3) return '3h'
     if (h === 6) return '6h'
@@ -262,18 +278,27 @@ export const FilterBar = React.memo(function FilterBar() {
     if (h === 168) return '7d'
     if (h === 720) return '30d'
     return null
-  }, [spanHours, endTime])
+  }, [relativeRange, spanHours, endTime])
+
+  // Pills call setRelativeRange so the URL persists as ?range=<label>
+  // instead of ?start_time=&end_time=. Reload re-derives [now-duration, now]
+  // from the label, so "last 24h" stays rolling.
+  const pickRelative = React.useCallback((label: string, hours: number) => {
+    const now = new Date()
+    const start = new Date(now.getTime() - hours * 3600 * 1000).toISOString()
+    React.startTransition(() => setRelativeRange(label, start, now.toISOString()))
+  }, [setRelativeRange])
 
   const quickPresets = React.useMemo(() => [
-    { label: '1h', value: () => React.startTransition(() => setRange(subHours(new Date(), 1).toISOString(), new Date().toISOString())) },
-    { label: '3h', value: () => React.startTransition(() => setRange(subHours(new Date(), 3).toISOString(), new Date().toISOString())) },
-    { label: '6h', value: () => React.startTransition(() => setRange(subHours(new Date(), 6).toISOString(), new Date().toISOString())) },
-    { label: '12h', value: () => React.startTransition(() => setRange(subHours(new Date(), 12).toISOString(), new Date().toISOString())) },
-    { label: '24h', value: () => React.startTransition(() => setRange(subHours(new Date(), 24).toISOString(), new Date().toISOString())) },
-    { label: '3d', value: () => React.startTransition(() => setRange(subDays(new Date(), 3).toISOString(), new Date().toISOString())) },
-    { label: '7d', value: () => React.startTransition(() => setRange(subDays(new Date(), 7).toISOString(), new Date().toISOString())) },
-    { label: '30d', value: () => React.startTransition(() => setRange(subDays(new Date(), 30).toISOString(), new Date().toISOString())) },
-  ], [setRange])
+    { label: '1h',  value: () => pickRelative('1h', 1) },
+    { label: '3h',  value: () => pickRelative('3h', 3) },
+    { label: '6h',  value: () => pickRelative('6h', 6) },
+    { label: '12h', value: () => pickRelative('12h', 12) },
+    { label: '24h', value: () => pickRelative('24h', 24) },
+    { label: '3d',  value: () => pickRelative('3d', 72) },
+    { label: '7d',  value: () => pickRelative('7d', 168) },
+    { label: '30d', value: () => pickRelative('30d', 720) },
+  ], [pickRelative])
 
   // Prevent hydration mismatch on date rendering
   if (!mounted) {
@@ -290,6 +315,7 @@ export const FilterBar = React.memo(function FilterBar() {
               variant={activePreset === preset.label ? 'secondary' : 'ghost'}
               size="sm"
               onClick={preset.value}
+              aria-pressed={activePreset === preset.label}
               className={cn("h-6.5 px-2 text-[11px]", activePreset === preset.label ? "bg-background shadow-sm text-foreground" : "")}
             >
               {preset.label}
@@ -415,7 +441,7 @@ export const FilterBar = React.memo(function FilterBar() {
               </Button>
             </Badge>
           ))}
-          
+
           <AddFilterDialog />
         </div>
       )}

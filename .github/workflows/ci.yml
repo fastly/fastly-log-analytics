@@ -32,8 +32,15 @@ jobs:
       - name: Format check (ruff)
         run: uv run ruff format --check .
 
-      - name: Type check (mypy)
-        run: uv run mypy backend/
+      - name: Type check (mypy, filtered through mypy-baseline)
+        # Pre-existing errors accepted via mypy-baseline.txt; the filter
+        # exits non-zero only on NET-NEW errors. Refresh the baseline after
+        # a burndown PR with
+        #   uv run mypy backend/ 2>&1 | uv run mypy-baseline sync
+        # and commit mypy-baseline.txt. Burndown plan +
+        # bucket scoping live in
+        # pending-docs/session_2026-06-10_otel_dump_and_log_extents.md.
+        run: uv run mypy backend/ 2>&1 | uv run mypy-baseline filter
 
       - name: Install falco
         run: |
@@ -85,19 +92,50 @@ jobs:
         env:
           FALCO_REQUIRED: "1"
           TERRAFORM_VALIDATE: "1"
-        # Gate ratcheted as milestones land:
+        # Gate ratcheted as milestones land (convention: current actual − 2pp):
         #   end Milestone A: 44% (baseline 46%, -2pp buffer)
         #   end Milestone E: 47% (current 49% — keeps the 2pp buffer)
         #   post-Milestone E coverage backfill: 55% (current 59% — 4pp buffer)
         #   confidence-batch (insights+admin+services+dashboard+origin+
         #   hypothesis+regression+E2E smoke): 78% (current 83% — 5pp buffer)
+        #   post live-query-monitor (2026-06-11): 80% (current 82%)
+        #   post backend coverage waves (reconciliation/compaction/session_scoring
+        #   /data_migrations/tunnel-state/dashboard-router/views/sqlite_profiler):
+        #     82% (current 83% — 1pp buffer; tight while v2.0 target 85% lands).
+        #   v2.0 final wave (2026-06-12): per-module tests for the post-split
+        #   rollups/ + admin/ packages (rollups/sessions 85, rollups/time_series
+        #   84, rollups/day_bundles 76, rollups/recompute 96, admin/compaction
+        #   100, admin/health 100): 85% (current 85% — the v2.0 target hit).
         #
         # `-n auto` parallelizes via pytest-xdist (TESTING_PLAN_3 item 21).
         # Verified safe: per-service SQLite (`{id}.metadata.db`) + per-test
         # tmp_path give file isolation; autouse `_reset_module_caches` resets
         # the 8 module-level caches between tests; moto fixtures are per-test.
         # Local run: 2268 passed in 58s under `-n auto` vs ~3min serial.
-        run: uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=78
+        run: uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=85
+
+      - name: Security-regression count gate
+        # v2.0 cleanup Phase 0.8: asserts the
+        # @pytest.mark.security_regression count never drops below the
+        # baseline floor (24 — derived from audit-findings/ verified
+        # fixes). A refactor cannot silently delete coverage of a
+        # verified fix without surfacing the change.
+        run: bash scripts/check_security_regression_count.sh
+
+      - name: Emit perf samples (CI-scale synthetic load)
+        # Produces tests/perf/latest.json from a 100K-row in-memory
+        # DuckDB dataset (~2 s wall). The gate below compares to
+        # tests/perf/baseline.json and fails on >regression_pct_threshold%
+        # over baseline (50 % default; tuned for GH Actions runner
+        # variance at CI scale).
+        run: uv run python scripts/emit_perf_latest.py
+
+      - name: Perf gate (load-harness baseline)
+        # Compares the just-emitted latest.json against baseline.json.
+        # Production targets (≤2800 / ≤1900 ms) are documented in
+        # baseline.json's production_targets_comment for traceability
+        # but enforced by the manual loadtest probe, not this CI gate.
+        run: bash scripts/perf_gate.sh
 
   frontend:
     name: Frontend (Node)
@@ -140,7 +178,17 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Tests (vitest with coverage)
-        # Gate ratcheted as milestones land:
+        # Gate ratcheted as milestones land (convention: current actual − 2pp):
         #   end Milestone A: 40% (baseline 42.7%, -2pp buffer)
-        #   end Milestone E: 44% (current 46.55% — keeps the 2pp buffer)
-        run: npx vitest run --coverage --coverage.thresholds.lines=44
+        #   end Milestone E: 44% (current 46.55%)
+        #   post live-query-monitor (2026-06-11): 53% (current 55.19%)
+        #   post lib/toast + lib/api/custom-fields + lib/workers/parseJson tests
+        #     (2026-06-12): 55% (current 57.12%)
+        #   post ProvisionWizard/wizard-config-helpers tests
+        #     (2026-06-12): 56% (current 58.42%)
+        #   post ProvisionWizard/wizard-api tests
+        #     (2026-06-12): 57% (current 59.8%)
+        #   post ProvisionWizard/wizard-deploy tests
+        #     (2026-06-12): 58% (current 61.66%) — final v2.0 target hit
+        #     per cleanup_plan §10.14.
+        run: npx vitest run --coverage --coverage.thresholds.lines=58

@@ -131,6 +131,17 @@ fn score_request(req: &Request) -> Response {
         .get_header_str("cookie")
         .and_then(|h| extract_cookie_value(h, COOKIE_NAME));
 
+    // Compute "now" UP FRONT so we can reject expired cookies BEFORE we hand
+    // their state into the scorer. Pre-fix (audit finding 009), expiration
+    // was only evaluated at the bottom of this function when minting the
+    // replacement cookie — meaning an attacker who replayed an expired
+    // low-score cookie got scored against the trusted historical state and
+    // bypassed enforcement thresholds.
+    let now_secs: u32 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+
     let (state, compliance) = match inbound_cookie {
         None => (None, "missing"),
         Some(value) => match cookie::decode(
@@ -140,7 +151,15 @@ fn score_request(req: &Request) -> Response {
             service_id,
             cookie::SCHEMA_VERSION,
         ) {
-            Ok(s) => (Some(s), "ok"),
+            Ok(s) => {
+                let idle = now_secs.saturating_sub(s.last_ts);
+                let age = now_secs.saturating_sub(s.issued_at);
+                if idle > SESSION_IDLE_EXPIRE_S || age > SESSION_HARD_CAP_S {
+                    (None, "expired")
+                } else {
+                    (Some(s), "ok")
+                }
+            }
             Err(_) => {
                 TAMPERED_COOKIE_COUNT.fetch_add(1, Ordering::Relaxed);
                 (None, "tampered")
@@ -211,11 +230,9 @@ fn score_request(req: &Request) -> Response {
     // ── Re-encode the updated cookie. ────────────────────────────────────────
     // We rotate the cookie on every request so the seq/sum_dt fields stay
     // fresh and the encryption nonce never repeats. The just-scored
-    // current_route becomes the next request's prev_route.
-    let now_secs: u32 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(0);
+    // current_route becomes the next request's prev_route. `now_secs` was
+    // computed near the top of the function so the expiration check could
+    // run before scoring (see audit finding 009).
     let updated = update_state(state.clone(), &result, &current_route.path, now_secs);
     let set_cookie = match cookie::encode(
         &updated,
@@ -270,7 +287,7 @@ fn score_request(req: &Request) -> Response {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let elapsed_us = (t1.saturating_sub(t0)) / 1_000;
-        
+
         let current_dt_secs = state.as_ref()
             .map(|s| now_secs.saturating_sub(s.last_ts).min(3600))
             .unwrap_or(0);

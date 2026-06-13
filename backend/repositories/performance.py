@@ -13,6 +13,7 @@ from backend.repositories._base import (
     safe_iso,
     time_bucket_select,
 )
+from backend.repositories._sql import performance as SQL
 from backend.repositories.utils.filters import build_where_clause
 
 
@@ -38,7 +39,7 @@ def get_performance_aggregates(
 
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
 
-    cols = ["timestamp", "url", "asn", "ttfb", "elapsed", "cache", "ttl"]
+    cols = ["timestamp", "url", "asn", "ttfb", "elapsed", "cache", "ttl", "ottfb", "ottlb"]
     with runner.temp_table(cols, actual_cols, table_name, where_clause, params) as temp_table:
         if temp_table is None:
             from backend.repositories._base import empty_schema_response
@@ -182,6 +183,76 @@ def get_performance_aggregates(
         else:
             results["scatter"] = []
 
+        # 7. Waterfall Components
+        if "ttfb" in actual_cols and "elapsed" in actual_cols:
+            ottfb_expr = "COALESCE(CAST(ottfb AS DOUBLE) / 1000.0, 0)" if "ottfb" in actual_cols else "0"
+            ottlb_expr = "COALESCE(CAST(ottlb AS DOUBLE) / 1000.0, 0)" if "ottlb" in actual_cols else "0"
+
+            waterfall_q = f"""
+                WITH components AS (
+                    SELECT
+                        {ottfb_expr} as origin_wait,
+                        GREATEST(0.0, {ottlb_expr} - {ottfb_expr}) as origin_download,
+                        GREATEST(0.0, (CAST(ttfb AS DOUBLE) * 1000.0) - {ottfb_expr}) as edge_processing,
+                        GREATEST(0.0, (CAST(elapsed AS DOUBLE) / 1000.0) - GREATEST({ottlb_expr}, CAST(ttfb AS DOUBLE) * 1000.0)) as client_download
+                    FROM {temp_table}
+                    WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL
+                )
+                SELECT
+                    AVG(edge_processing),
+                    {percentile_ms_expr("edge_processing", 0.5)},
+                    {percentile_ms_expr("edge_processing", 0.95)},
+                    {percentile_ms_expr("edge_processing", 0.99)},
+
+                    AVG(origin_wait),
+                    {percentile_ms_expr("origin_wait", 0.5)},
+                    {percentile_ms_expr("origin_wait", 0.95)},
+                    {percentile_ms_expr("origin_wait", 0.99)},
+
+                    AVG(origin_download),
+                    {percentile_ms_expr("origin_download", 0.5)},
+                    {percentile_ms_expr("origin_download", 0.95)},
+                    {percentile_ms_expr("origin_download", 0.99)},
+
+                    AVG(client_download),
+                    {percentile_ms_expr("client_download", 0.5)},
+                    {percentile_ms_expr("client_download", 0.95)},
+                    {percentile_ms_expr("client_download", 0.99)}
+                FROM components
+            """
+            waterfall_res = runner.execute(waterfall_q).fetchone()
+            if waterfall_res:
+                results["waterfall"] = {
+                    "avg": {
+                        "edge_processing": float(waterfall_res[0] or 0.0),
+                        "origin_wait": float(waterfall_res[4] or 0.0),
+                        "origin_download": float(waterfall_res[8] or 0.0),
+                        "client_download": float(waterfall_res[12] or 0.0),
+                    },
+                    "p50": {
+                        "edge_processing": float(waterfall_res[1] or 0.0),
+                        "origin_wait": float(waterfall_res[5] or 0.0),
+                        "origin_download": float(waterfall_res[9] or 0.0),
+                        "client_download": float(waterfall_res[13] or 0.0),
+                    },
+                    "p95": {
+                        "edge_processing": float(waterfall_res[2] or 0.0),
+                        "origin_wait": float(waterfall_res[6] or 0.0),
+                        "origin_download": float(waterfall_res[10] or 0.0),
+                        "client_download": float(waterfall_res[14] or 0.0),
+                    },
+                    "p99": {
+                        "edge_processing": float(waterfall_res[3] or 0.0),
+                        "origin_wait": float(waterfall_res[7] or 0.0),
+                        "origin_download": float(waterfall_res[11] or 0.0),
+                        "client_download": float(waterfall_res[15] or 0.0),
+                    },
+                }
+            else:
+                results["waterfall"] = {}
+        else:
+            results["waterfall"] = {}
+
         return results
 
 
@@ -227,13 +298,13 @@ def get_origin_ts(
         # Seconds to Milliseconds
         val_expr = f'ROUND(COALESCE(PERCENTILE_CONT({pct_val}) WITHIN GROUP (ORDER BY "{metric_col}") * 1000.0, 0), 2)'
 
-    q = f"""
-        SELECT {time_bucket_select(interval_str)},
-               {val_expr} AS value
-        FROM {table_name}
-        WHERE {where_clause} AND "{metric_col}" IS NOT NULL
-        GROUP BY 1 ORDER BY 1
-    """
+    q = SQL.ORIGIN_TIMESERIES.format(
+        time_bucket_select=time_bucket_select(interval_str),
+        value_expr=val_expr,
+        table=table_name,
+        where_clause=where_clause,
+        metric_col=metric_col,
+    )
     res_cursor = runner.execute_with_retry(q, params)
     if res_cursor is None:
         from backend.repositories._base import empty_schema_response

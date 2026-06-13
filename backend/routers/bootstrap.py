@@ -5,7 +5,7 @@ from __future__ import annotations
 import duckdb
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from backend.deps import get_meta_con, get_service_id, get_source
+from backend.deps import get_con, get_service_id, get_source
 from backend.models.common import BootstrapResponse
 from backend.utils.router_utils import query_errors
 
@@ -116,15 +116,18 @@ def bootstrap(
 
     pops = _timed("get_pop_lat_lon_map", get_pop_lat_lon_map)
 
-    # Include custom field info so the dashboard can render custom distribution cards
-    # without a separate fetch. We load the raw config here because the enriched
-    # services list above strips log_fields out.
+    # Per the perf audit (F6): bootstrap's custom_fields_catalog was a
+    # ~10-15 KB duplicate of what every chart page already fetches
+    # separately from /api/log-fields/catalog. No frontend code reads
+    # bootstrap.custom_fields_catalog (the dashboard card hook only
+    # uses custom_dashboard_cards and active_log_field_ids — both
+    # derived from the catalog and shipped here). Keep the field on the
+    # response model for API back-compat but emit it empty.
     custom_dashboard_cards: list[dict] = []
-    custom_fields_catalog: list[dict] = []
     active_log_field_ids: list[str] = []
 
     def _resolve_custom_fields():
-        nonlocal custom_dashboard_cards, custom_fields_catalog, active_log_field_ids
+        nonlocal custom_dashboard_cards, active_log_field_ids
         if not valid_active_id:
             return
         from backend import config as svcconfig
@@ -134,15 +137,133 @@ def bootstrap(
         if not active_cfg:
             return
         lf_config = _lf.get_lf_config(active_cfg)
-        custom_fields_catalog = _lf.get_custom_fields_catalog_entries(lf_config)
+        catalog_entries = _lf.get_custom_fields_catalog_entries(lf_config)
         custom_dashboard_cards = [
-            {"id": f["id"], "label": f["label"]} for f in custom_fields_catalog if f.get("show_in_dashboard")
+            {"id": f["id"], "label": f["label"]} for f in catalog_entries if f.get("show_in_dashboard")
         ]
         active_log_field_ids = sorted(_lf.resolve_enabled_fields(lf_config)) + [
             cf["name"] for cf in lf_config.get("custom_fields", []) if cf.get("enabled", True)
         ]
 
     _timed("custom_fields_catalog", _resolve_custom_fields)
+
+    # Perf audit Phase D: fold the log-fields catalog into the
+    # bootstrap response so the frontend can seed its
+    # ['log-fields-catalog', service_id] React Query cache from the
+    # same payload (mirrors how `views` is already seeded). Saves one
+    # HTTP round-trip + ~35 KB transfer on every cold page load
+    # without changing the dedicated /api/log-fields/catalog endpoint
+    # (other consumers / direct callers still work). Analyst-scope is
+    # already enforced for valid_active_id above.
+    log_fields_catalog_payload: dict | None = None
+
+    def _resolve_log_fields_catalog():
+        nonlocal log_fields_catalog_payload
+        if not valid_active_id:
+            return
+        log_fields_catalog_payload = _compute_log_fields_catalog(valid_active_id)
+
+    _timed("log_fields_catalog", _resolve_log_fields_catalog)
+
+    # Phase D-2: fold the cached sync-status into bootstrap for admin
+    # callers. The dedicated /api/sync-status endpoint is admin-only
+    # (RemoteAccessMiddleware blocks analysts) — same restriction
+    # applies here. Frontend seeds its ['sync-status', service_id]
+    # React Query cache so SyncStatusBadge / useLogsPageState hit
+    # cache on first call instead of paying a round-trip.
+    #
+    # Only emit when the analyst gate would let the dedicated endpoint
+    # return data: admin caller AND a valid_active_id with cached
+    # status persisted. Analyst sessions get None, matching their 403
+    # on the dedicated endpoint.
+    sync_status_payload: dict | None = None
+
+    def _resolve_sync_status():
+        nonlocal sync_status_payload
+        if analyst_session is not None:
+            return
+        if not valid_active_id:
+            return
+        from backend.routers.admin import compute_sync_status_cached
+
+        sync_status_payload = compute_sync_status_cached(valid_active_id)
+
+    _timed("sync_status", _resolve_sync_status)
+
+    # Phase D-3: fold the lean share-status banner into bootstrap so
+    # the header banner has its initial state on first render and
+    # skips the first ~80 B / 1-RTT poll. Polling continues on its
+    # 15-s cadence inside useShareStatusBanner for ongoing updates.
+    # Admin-only — analyst sessions don't manage sharing.
+    share_banner_payload: dict | None = None
+
+    def _resolve_share_banner():
+        nonlocal share_banner_payload
+        if analyst_session is not None:
+            return
+        try:
+            from backend.utils.tunnel import get_tunnel_manager
+
+            mgr = get_tunnel_manager()
+            share_banner_payload = {
+                "sharing_active": mgr.is_sharing_active(),
+                "public_url": mgr.public_url(),
+            }
+        except Exception:
+            # Banner is non-essential UX; never break /api/bootstrap
+            # if the tunnel manager is in a transient state.
+            pass
+
+    _timed("share_banner", _resolve_share_banner)
+
+    # Header badge + log extents: analyst-safe payloads projected
+    # from the cached sync-status snapshot. Both available to BOTH
+    # admin AND analyst.
+    #   - header_badge: {latest_log_at, local_rows} — what
+    #     SyncStatusBadge renders in the global header (closes the
+    #     missing-header-for-analyst gap).
+    #   - log_extents: {earliest_log_at, latest_log_at, configured} —
+    #     what the FilterBar's auto-range snap-to-extents UX needs.
+    #     Same shape /api/log-extents returns.
+    header_badge_payload: dict | None = None
+    log_extents_payload: dict | None = None
+
+    def _resolve_header_badge_and_extents():
+        nonlocal header_badge_payload, log_extents_payload
+        if not valid_active_id:
+            return
+        # svcconfig.get_status is keyed on the service NAME, not the
+        # service_id. They're often identical, but resolving via the
+        # source dict matches the dedicated /api/sync-status handler
+        # exactly so analyst/admin both look in the same place.
+        active_src = _db.get_source_for_service(valid_active_id)
+        if not active_src:
+            return
+        from backend import config as svcconfig
+
+        cached_status = svcconfig.get_status(active_src["name"]) or {}
+        latest = (
+            cached_status.get("latest_log_at")
+            or cached_status.get("latest_available_file_at")
+            or cached_status.get("latest_ingested_file_at")
+        )
+        earliest = cached_status.get("earliest_log_at")
+        local_rows = cached_status.get("local_rows")
+        if latest is not None or local_rows is not None:
+            header_badge_payload = {
+                "latest_log_at": latest,
+                "local_rows": local_rows,
+            }
+        # log_extents: emit even when both are None (with configured=True)
+        # so the frontend can distinguish "no extents yet, keep polling"
+        # from "service not configured" — matches the dedicated endpoint.
+        log_extents_payload = {
+            "configured": True,
+            "earliest_log_at": earliest,
+            "latest_log_at": cached_status.get("latest_log_at"),
+        }
+
+    _timed("header_badge_and_extents", _resolve_header_badge_and_extents)
 
     views: list[dict] = []
 
@@ -182,9 +303,13 @@ def bootstrap(
             "analyst_name": analyst_session.name if analyst_session else None,
         },
         custom_dashboard_cards=custom_dashboard_cards,
-        custom_fields_catalog=custom_fields_catalog,
         active_log_field_ids=active_log_field_ids,
         views=views,
+        log_fields_catalog=log_fields_catalog_payload,
+        sync_status=sync_status_payload,
+        share_banner=share_banner_payload,
+        header_badge=header_badge_payload,
+        log_extents=log_extents_payload,
         section_timings=section_timings,
     )
 
@@ -230,7 +355,7 @@ def sources_endpoint(request: Request):
 def schema_endpoint(
     request: Request,
     source: dict = Depends(get_source),
-    con: duckdb.DuckDBPyConnection = Depends(get_meta_con),
+    con: duckdb.DuckDBPyConnection = Depends(get_con),
 ):
     from backend import config as svcconfig
     from backend.core.duckdb import _safe_table_name, get_schema
@@ -255,6 +380,43 @@ def schema_endpoint(
     return {"schema": get_schema(con, source), "table_name": _safe_table_name(source["name"])}
 
 
+def _compute_log_fields_catalog(service_id: str | None) -> dict:
+    """Build the log-fields catalog payload for ``service_id``.
+
+    Extracted so /api/bootstrap can fold the catalog into its response
+    (page-shell composite, perf audit Phase D) without paying a second
+    HTTP round-trip on every cold page load.
+
+    Caller is responsible for analyst-scope enforcement on ``service_id``
+    before invoking — this helper trusts the caller.
+    """
+    from backend.core import field_registry as fr
+    from backend.core import log_fields as lf
+
+    field_limits: dict = {}
+    custom_entries: list = []
+    if service_id:
+        from backend import config as svcconfig
+
+        cfg = svcconfig.load_config(service_id)
+        if cfg:
+            lf_config = lf.get_lf_config(cfg)
+            field_limits = lf_config.get("field_limits", {})
+            custom_entries = lf.get_custom_fields_catalog_entries(lf_config)
+
+    fields = fr.get_catalog_for_api(field_limits) + custom_entries
+
+    return {
+        "groups": fr.get_groups_for_api(),
+        "fields": fields,
+        "insights": fr.INSIGHT_DEFINITIONS,
+        "presets": {
+            name: {"label": p["label"], "description": p["description"], "groups": p["groups"]}
+            for name, p in fr.PRESETS.items()
+        },
+    }
+
+
 @router.get("/log-fields/catalog")
 @query_errors(status_code=500)
 def log_fields_catalog(
@@ -268,9 +430,6 @@ def log_fields_catalog(
     ``?service_id=svc-B`` and read svc-B's custom field configuration
     (including PII-related field configs).
     """
-    from backend.core import log_fields as lf
-    from backend.core.log_fields import INSIGHT_DEFINITIONS
-
     analyst_session = getattr(request.state, "analyst_session", None)
     if analyst_session is not None and service_id is not None:
         allowed = set(analyst_session.service_ids or [])
@@ -280,32 +439,7 @@ def log_fields_catalog(
                 detail={"error": "service_not_authorized", "service": service_id},
             )
 
-    # Try to load existing limits
-    field_limits = {}
-    if service_id:
-        from backend import config as svcconfig
-
-        cfg = svcconfig.load_config(service_id)
-        if cfg:
-            lf_config = lf.get_lf_config(cfg)
-            field_limits = lf_config.get("field_limits", {})
-            custom_entries = lf.get_custom_fields_catalog_entries(lf_config)
-        else:
-            custom_entries = []
-    else:
-        custom_entries = []
-
-    fields = lf.get_catalog_for_api(field_limits) + custom_entries
-
-    return {
-        "groups": lf.get_groups_for_api(),
-        "fields": fields,
-        "insights": INSIGHT_DEFINITIONS,
-        "presets": {
-            name: {"label": p["label"], "description": p["description"], "groups": p["groups"]}
-            for name, p in lf.PRESETS.items()
-        },
-    }
+    return _compute_log_fields_catalog(service_id)
 
 
 from backend.models.dashboard import InsightsAvailabilityResponse
@@ -316,7 +450,7 @@ from backend.models.dashboard import InsightsAvailabilityResponse
 def insight_availability(
     request: Request,
     source: dict = Depends(get_source),
-    con: duckdb.DuckDBPyConnection = Depends(get_meta_con),
+    con: duckdb.DuckDBPyConnection = Depends(get_con),
 ):
     from backend.core.duckdb import get_schema
 
@@ -350,7 +484,7 @@ def insight_availability(
         # lookup so first-load isn't a 503 — subsequent calls hit
         # the cron-populated cache.
         actual_cols = {col["name"] for col in get_schema(con, source)}
-    from backend.core.log_fields import INSIGHT_DEFINITIONS
+    from backend.core.field_registry import INSIGHT_DEFINITIONS
 
     result = []
     for d in INSIGHT_DEFINITIONS:

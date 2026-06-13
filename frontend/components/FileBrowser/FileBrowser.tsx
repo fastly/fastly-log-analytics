@@ -41,19 +41,23 @@ function Node({ node, prefix, level, type, forceExpand }: { node: TreeNode, pref
   if (node.type === 'directory') {
     return (
       <div>
-        <div 
+        <div
           className={cn(
-            "flex items-center justify-between gap-2 py-1.5 hover:bg-muted/50 cursor-pointer rounded-md transition-colors group",
+            "flex items-center justify-between gap-2 py-1.5 hover:bg-muted/50 rounded-md transition-colors group",
             level === 0 ? "font-medium" : "text-sm text-muted-foreground"
           )}
           style={{ paddingLeft: `${level * 16 + 8}px`, paddingRight: '8px' }}
-          onClick={() => setIsOpen(!isOpen)}
         >
-          <div className="flex items-center gap-2 min-w-0 flex-1">
+          <button
+            type="button"
+            aria-expanded={isOpen}
+            onClick={() => setIsOpen(!isOpen)}
+            className="flex items-center gap-2 min-w-0 flex-1 bg-transparent border-0 p-0 text-left cursor-pointer"
+          >
             {isOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />}
             <Folder className="h-4 w-4 shrink-0 text-blue-500/70 dark:text-blue-400/70" />
             <span className="truncate group-hover:text-foreground transition-colors">{node.name}</span>
-          </div>
+          </button>
           <div className="flex items-center gap-4 shrink-0">
             {node.size != null && node.size > 0 && (
               <span className="text-xs font-mono text-muted-foreground tabular-nums w-20 text-right">
@@ -61,10 +65,11 @@ function Node({ node, prefix, level, type, forceExpand }: { node: TreeNode, pref
               </span>
             )}
             <div className="w-20 flex items-center justify-end gap-2">
-              <Button 
-                variant="ghost" 
-                size="icon" 
-                className="h-6 w-6 text-muted-foreground transition-opacity" 
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Download folder as ZIP"
+                className="h-6 w-6 text-muted-foreground transition-opacity"
                 onClick={(e) => {
                   e.stopPropagation()
                   window.open(`/api/download-folder?service=${activeServiceId}&root=${type}&prefix=${encodeURIComponent(node.prefix || (prefix + node.name))}`, '_blank')
@@ -84,7 +89,7 @@ function Node({ node, prefix, level, type, forceExpand }: { node: TreeNode, pref
   }
 
   return (
-    <div 
+    <div
       className="flex items-center justify-between gap-4 py-1 pr-2 hover:bg-muted/50 group rounded-md transition-colors"
       style={{ paddingLeft: `${level * 16 + 32}px` }}
     >
@@ -119,12 +124,13 @@ function Node({ node, prefix, level, type, forceExpand }: { node: TreeNode, pref
           {node.sync_status === 'local' && <Badge variant="outline" className="px-1.5 py-0 h-5 text-[10px] bg-blue-500/10 text-blue-600 border-blue-500/20 shadow-none"><HardDrive className="w-3 h-3 mr-1"/> Local</Badge>}
           {node.sync_status === 'cloud' && <Badge variant="outline" className="px-1.5 py-0 h-5 text-[10px] bg-purple-500/10 text-purple-600 border-purple-500/20 shadow-none"><Cloud className="w-3 h-3 mr-1"/> Cloud</Badge>}
           {!node.sync_status && node.is_cloud && <Badge variant="outline" className="px-1.5 py-0 h-5 text-[10px] bg-purple-500/10 text-purple-600 border-purple-500/20 shadow-none"><Cloud className="w-3 h-3 mr-1"/> Cloud</Badge>}
-          
+
           {node.key && (
-            <Button 
-              variant="ghost" 
-              size="icon" 
-              className="h-6 w-6 text-muted-foreground transition-opacity" 
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={`Download ${node.name}`}
+              className="h-6 w-6 text-muted-foreground transition-opacity"
               onClick={(e) => {
                 e.stopPropagation()
                 window.open(`/api/download?service=${activeServiceId}&key=${encodeURIComponent(node.key as string)}`, '_blank')
@@ -216,9 +222,9 @@ export function FileBrowser({ type }: { type: 'iceberg' | 'raw' }) {
           >
             <RefreshCw className={cn("h-3.5 w-3.5", isRefreshing && "animate-spin")} />
           </Button>
-          <Button 
-            variant="outline" 
-            size="sm" 
+          <Button
+            variant="outline"
+            size="sm"
             className="h-7 text-[10px] px-2 font-semibold shadow-none border-muted/60 bg-background"
             onClick={() => setForceExpand(prev => prev === undefined ? true : !prev)}
           >

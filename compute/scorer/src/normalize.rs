@@ -142,16 +142,53 @@ fn category_for(first_segment: &str) -> &'static str {
     "other"
 }
 
+/// Decode percent-encoded sequences (%XX → byte) into a UTF-8 string.
+/// Mirrors Python's `urllib.parse.unquote` behaviour for the URL-encoded
+/// characters that appear in real-world paths. Required so the Rust
+/// scorer's category matching keeps parity with the Python normalizer —
+/// without this, an attacker can submit `/%61dmin` and bypass the
+/// `admin` category match downstream. See audit finding 013.
+fn percent_decode(s: &str) -> String {
+    let mut bytes = Vec::with_capacity(s.len());
+    let mut i = s.bytes();
+    while let Some(b) = i.next() {
+        if b == b'%' {
+            let mut clone = i.clone();
+            if let (Some(h1), Some(h2)) = (clone.next(), clone.next()) {
+                if let (Some(n1), Some(n2)) = ((h1 as char).to_digit(16), (h2 as char).to_digit(16))
+                {
+                    bytes.push(((n1 << 4) | n2) as u8);
+                    i = clone;
+                    continue;
+                }
+            }
+        }
+        bytes.push(b);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// Normalize a URL to its (canonical route, category) pair.
 pub fn normalize(url: &str) -> Route {
-    let path = strip_query(url);
+    let raw_path = strip_query(url);
+    let decoded_path = percent_decode(raw_path);
+    let path = decoded_path.as_str();
     if path.is_empty() || path == "/" {
         return Route {
             path: "/".to_string(),
             category: "home".to_string(),
         };
     }
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut segments: Vec<&str> = Vec::new();
+    for s in path.split('/').filter(|s| !s.is_empty()) {
+        if s == "." {
+            continue;
+        } else if s == ".." {
+            segments.pop();
+        } else {
+            segments.push(s);
+        }
+    }
     if segments.is_empty() {
         return Route {
             path: "/".to_string(),
@@ -197,6 +234,13 @@ mod tests {
         assert_eq!(normalize("/").path, "/");
         assert_eq!(normalize("").path, "/");
         assert_eq!(normalize("/home").path, "/home");
+    }
+
+    #[test]
+    fn dot_segment_collapse() {
+        assert_eq!(normalize("/static/../admin").path, "/admin");
+        assert_eq!(normalize("/static/../admin").category, "admin");
+        assert_eq!(normalize("/a/./b/../c").path, "/a/c");
     }
 
     #[test]
@@ -286,6 +330,15 @@ mod tests {
         assert_eq!(normalize("/admin/dashboard").category, "admin");
         assert_eq!(normalize("/blog/post").category, "content");
         assert_eq!(normalize("/about-us").category, "other");
+    }
+
+    #[test]
+    fn percent_decoding_matches_python_normalizer() {
+        // Audit finding 013: ensure encoded characters in the path are
+        // decoded before category matching + segment collapse so the
+        // scorer can't be evaded with `/%61dmin` / `/%2e%2e/`.
+        assert_eq!(normalize("/%61dmin").category, "admin");
+        assert_eq!(normalize("/a/%2e%2e/b").path, "/b");
     }
 
     #[test]

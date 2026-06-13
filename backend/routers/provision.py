@@ -8,9 +8,11 @@ import os
 import re
 import urllib.error
 import urllib.request
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from backend.utils.router_utils import SSE_HEADERS as _SSE_HEADERS
 from backend.utils.router_utils import sse_flush_preamble as _sse_flush
@@ -56,7 +58,9 @@ def provision_list_services(token: str = Query(...)):
             if s.get("type", "vcl") == "vcl"
         ]
     except Exception as e:
-        raise HTTPException(status_code=400, detail={"error": str(e)})
+        from backend.utils.router_utils import raise_internal
+
+        raise_internal(logger, e, code="list_services_failed", status=400)
 
 
 @router.post("/validate")
@@ -109,7 +113,9 @@ def provision_validate(body: dict):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail={"error": str(e)})
+        from backend.utils.router_utils import raise_internal
+
+        raise_internal(logger, e, code="provision_validate_failed", status=400)
 
 
 @router.get("/check-domain")
@@ -132,14 +138,20 @@ def provision_check_domain(prefix: str = Query(...)):
     return result
 
 
-@router.get("/check-fos")
-def provision_check_fos(
-    bucket: str = Query(...),
-    region: str = Query(...),
-    access_key: str = Query(...),
-    secret_key: str = Query(...),
-):
+class CheckFosRequest(BaseModel):
+    bucket: str
+    region: str
+    access_key: str
+    secret_key: str
+
+
+@router.post("/check-fos")
+def provision_check_fos(req: CheckFosRequest):
     """Validate FOS credentials by attempting to list objects."""
+    bucket = req.bucket
+    region = req.region
+    access_key = req.access_key
+    secret_key = req.secret_key
     import botocore.exceptions
 
     from backend.core.duckdb import _get_fos_client
@@ -249,15 +261,9 @@ def provision_teardown(req: Request, body: dict | None = None):
     if not state:
         raise HTTPException(status_code=404, detail={"error": "No service config found."})
 
-    # Security: destructive teardown (logging / CDN / bucket) requires a
-    # caller-supplied Fastly token with the ``global`` scope and access to
-    # this service. Cache-only teardown (all three destructive flags false)
-    # is a local-cleanup operation and does not touch Fastly, so it does not
-    # require token validation. The /api/provision/ middleware gate ensures
-    # only local admin requests reach this endpoint regardless.
-    has_destructive = bool(remove_logging or remove_cdn or remove_bucket)
-    if has_destructive:
-        validate_destructive_token(token, service_id=service_id or "")
+    # Security: teardown requires a caller-supplied Fastly token with the
+    # ``global`` scope and access to this service.
+    validate_destructive_token(token, service_id=service_id or "")
 
     opts = {
         "remove_logging": remove_logging,
@@ -375,17 +381,26 @@ def provision_teardown(req: Request, body: dict | None = None):
     return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
-@router.get("/lake-info")
-def provision_lake_info(
-    bucket: str = Query(...),
-    region: str = Query(...),
-    access_key: str = Query(...),
-    secret_key: str = Query(...),
-    prefix: str = Query(default=""),
-    endpoint: str | None = Query(default=None),
-    iceberg_metadata_location: str | None = Query(default=None),
-):
+class LakeInfoRequest(BaseModel):
+    bucket: str
+    region: str
+    access_key: str
+    secret_key: str
+    prefix: str = ""
+    endpoint: str | None = None
+    iceberg_metadata_location: str | None = None
+
+
+@router.post("/lake-info")
+def provision_lake_info(req: LakeInfoRequest):
     """Return Iceberg table range and calendar for a given bucket/credentials without registering it."""
+    bucket = req.bucket
+    region = req.region
+    access_key = req.access_key
+    secret_key = req.secret_key
+    prefix = req.prefix
+    endpoint = req.endpoint
+    iceberg_metadata_location = req.iceberg_metadata_location
     import hashlib
 
     from backend.models.lake import fetch_lake_info
@@ -467,7 +482,7 @@ def provision_execute(req: ProvisionExecuteRequest):
 
         service_name = svcconfig.fetch_service_name(service_id, token) or service_id
 
-    cfg = {
+    cfg: dict[str, Any] = {
         "admin_token": token,
         "logging_service_id": service_id,
         "name": service_name,
@@ -505,6 +520,13 @@ def provision_execute(req: ProvisionExecuteRequest):
         raise HTTPException(
             status_code=400,
             detail={"error": f"Invalid bucket name: '{bucket}'. Use 3-63 alphanumeric characters or single hyphens."},
+        )
+
+    prefix = cfg.get("fos_prefix", "")
+    if prefix and not re.match(r"^[A-Za-z0-9/_-]*$", prefix):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Invalid prefix. Use alphanumerics, /, _, -."},
         )
 
     if cfg.get("cdn_url"):
@@ -664,7 +686,10 @@ def provision_ingest(body: dict):
             fos_key_id = existing["access_key"]
         else:
             try:
-                new_key = ensure_fos_access_key(desc, body, token, buckets=[body.get("fos_bucket_name")])
+                bucket_name = body.get("fos_bucket_name")
+                if not bucket_name:
+                    raise HTTPException(status_code=400, detail={"error": "fos_bucket_name required"})
+                new_key = ensure_fos_access_key(desc, body, token, buckets=[bucket_name])
                 fos_access_key = new_key["access_key"]
                 fos_secret_key = new_key["secret_key"]
                 fos_key_id = new_key["id"]
@@ -701,13 +726,10 @@ def provision_ingest(body: dict):
         "provisioning": {"fos_key_id": fos_key_id},
     }
 
-    if body.get("log_fields"):
+    log_fields_raw = body.get("log_fields")
+    if log_fields_raw:
         try:
-            state["log_fields"] = (
-                json.loads(body.get("log_fields"))
-                if isinstance(body.get("log_fields"), str)
-                else body.get("log_fields")
-            )
+            state["log_fields"] = json.loads(log_fields_raw) if isinstance(log_fields_raw, str) else log_fields_raw
         except Exception:
             pass
 
@@ -956,8 +978,9 @@ def provision_ngwaf_workspaces(
             )
         raise HTTPException(status_code=400, detail={"error": f"NGWAF API error: {exc.code} — {body[:300]}"})
     except Exception as e:
-        logger.warning("[ngwaf-workspaces] exception: %s", e)
-        raise HTTPException(status_code=400, detail={"error": str(e)})
+        from backend.utils.router_utils import raise_internal
+
+        raise_internal(logger, e, code="ngwaf_workspaces_failed", status=400)
 
 
 @router.patch("/services/{service_id}/ngwaf-workspace")

@@ -27,6 +27,7 @@ ChartMetric = Literal[
 class AggregatesRequest(FilteredRequest):
     chart_interval: str = "1 minute"
     chart_metric: ChartMetric = "requests"
+    fields: list[str] | None = None
 
 
 class FieldTopEntry(BaseModel):
@@ -184,6 +185,7 @@ class Session(BaseModel):
     reqs_5xx: int | None = None
     total_bytes: int | None = None
     median_rtt_ms: float | None = None
+    edge_sid: str | None = None
     flagged: bool
 
 
@@ -195,6 +197,7 @@ class SessionsResponse(BaseResponse):
     has_rtt: bool
     has_ja4: bool
     has_edge: bool
+    has_edge_sid: bool = False
     min_reqs_flag: int
     min_4xx_pct_flag: float
 

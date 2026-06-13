@@ -31,6 +31,12 @@ export function ViewSelector() {
   const { activeServiceId } = useServiceStore()
   const queryClient = useQueryClient()
 
+  // Perf audit Phase D: useBootstrap seeds ['views', service_id] in
+  // its queryFn. Gate on bootstrap pending so this query hits the
+  // seeded cache on cold load instead of racing the seed.
+  const bootstrapState = queryClient.getQueryState(['bootstrap'])
+  const bootstrapPending = bootstrapState !== undefined && bootstrapState.status === 'pending'
+
   const { data: views } = useQuery({
     queryKey: ['views', activeServiceId],
     queryFn: async () => {
@@ -40,7 +46,7 @@ export function ViewSelector() {
       })
       return data as any
     },
-    enabled: !!activeServiceId
+    enabled: !!activeServiceId && !bootstrapPending,
   })
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
@@ -65,7 +71,7 @@ export function ViewSelector() {
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger 
+      <PopoverTrigger
         render={
           <Button
             variant="outline"
@@ -95,6 +101,7 @@ export function ViewSelector() {
                   <Button
                     variant="ghost"
                     size="icon"
+                    aria-label={`Delete view ${view.name}`}
                     className="h-6 w-6 text-muted-foreground hover:text-destructive"
                     onClick={(e) => handleDelete(e, view.id!)}
                   >

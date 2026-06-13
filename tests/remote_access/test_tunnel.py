@@ -2,9 +2,8 @@
 lifecycle, multi-device boot, validate_session timeouts, persistence
 round-trip via share_db, panic, and start_sharing input validation.
 
-SSH subprocess spawning is NOT exercised — the test asserts the
-``_port_in_use`` pre-flight failure instead, which short-circuits before
-any process is forked.
+The SSH-to-localhost.run code path was removed in v2.0 — only direct-mode
+(HTTPS public_endpoint) is exercised here.
 """
 
 from __future__ import annotations
@@ -285,27 +284,27 @@ def test_panic_boots_all_and_writes_audit():
 def test_start_sharing_rejects_bare_http():
     mgr = tunnel.get_tunnel_manager()
     with pytest.raises(ValueError, match="HTTPS"):
-        mgr.start_sharing(use_tunnel=False, public_endpoint="http://insecure.example.com")
+        mgr.start_sharing(public_endpoint="http://insecure.example.com")
 
 
-def test_start_sharing_requires_public_endpoint_when_not_tunneling():
+def test_start_sharing_requires_public_endpoint():
     mgr = tunnel.get_tunnel_manager()
     with pytest.raises(ValueError, match="public_endpoint"):
-        mgr.start_sharing(use_tunnel=False, public_endpoint=None)
+        mgr.start_sharing(public_endpoint=None)
 
 
-def test_start_sharing_tunnel_requires_port_bound():
-    """When no process is listening on the forward port, refuse to spawn SSH."""
+def test_start_sharing_rejects_use_tunnel_true():
+    """SSH-tunnel mode was removed in v2.0; the flag must be rejected."""
     mgr = tunnel.get_tunnel_manager()
-    # Port 1 is not bound in any sane environment.
-    with pytest.raises(RuntimeError, match="not bound"):
-        mgr.start_sharing(use_tunnel=True, forward_port=1)
+    with pytest.raises(ValueError, match="SSH-tunnel mode"):
+        mgr.start_sharing(use_tunnel=True, public_endpoint="https://demo.example.com")
 
 
 def test_direct_expose_https_records_audit_and_returns_url():
     mgr = tunnel.get_tunnel_manager()
-    out = mgr.start_sharing(use_tunnel=False, public_endpoint="https://demo.example.com")
+    out = mgr.start_sharing(public_endpoint="https://demo.example.com")
     assert out["public_url"] == "https://demo.example.com"
+    assert out["tunnel_url"] is None
     audits = share_db.get_share_audit_logs()
     assert any(a["event_type"] == "SHARE_START" for a in audits)
     mgr.stop_sharing()
@@ -380,7 +379,7 @@ def test_rate_limit_snapshot_prunes_expired_lockouts(monkeypatch):
 
 def test_telemetry_records_uptime_history_on_stop():
     mgr = tunnel.get_tunnel_manager()
-    mgr.start_sharing(use_tunnel=False, public_endpoint="https://demo.example.com")
+    mgr.start_sharing(public_endpoint="https://demo.example.com")
     mgr.stop_sharing()
     history = mgr.get_telemetry()["tunnel_uptime_history"]
     assert len(history) == 1
@@ -392,7 +391,7 @@ def test_telemetry_records_uptime_history_on_stop():
 
 def test_telemetry_records_uptime_history_on_panic():
     mgr = tunnel.get_tunnel_manager()
-    mgr.start_sharing(use_tunnel=False, public_endpoint="https://demo.example.com")
+    mgr.start_sharing(public_endpoint="https://demo.example.com")
     mgr.panic()
     history = mgr.get_telemetry()["tunnel_uptime_history"]
     assert any(entry["reason"] == "panic" for entry in history)
@@ -402,7 +401,7 @@ def test_telemetry_history_is_bounded():
     mgr = tunnel.get_tunnel_manager()
     # Cycle the tunnel 55 times; ring should retain only the last 50.
     for _ in range(55):
-        mgr.start_sharing(use_tunnel=False, public_endpoint="https://demo.example.com")
+        mgr.start_sharing(public_endpoint="https://demo.example.com")
         mgr.stop_sharing()
     # Internal buffer is bounded; the exposed slice is the last 20.
     assert len(mgr._tunnel_uptime_history) == 50
@@ -412,7 +411,7 @@ def test_telemetry_history_is_bounded():
 def test_telemetry_current_uptime_reflects_running_tunnel():
     mgr = tunnel.get_tunnel_manager()
     assert mgr.get_telemetry()["current_uptime_s"] is None
-    mgr.start_sharing(use_tunnel=False, public_endpoint="https://demo.example.com")
+    mgr.start_sharing(public_endpoint="https://demo.example.com")
     uptime = mgr.get_telemetry()["current_uptime_s"]
     assert uptime is not None and uptime >= 0
     mgr.stop_sharing()
@@ -451,3 +450,50 @@ def test_get_share_audit_logs_filters_by_time_window():
     # `until` before window excludes everything.
     rows = share_db.get_share_audit_logs(until=before, email_substr="t@example.com")
     assert not rows
+
+
+# ── LRU Eviction Under Capacity ────────────────────────────────────────────
+
+
+def test_rate_limiter_lru_eviction(monkeypatch):
+    from backend.utils.tunnel import rate_limiter
+
+    # Set MAX_TRACKED_IPS to 3 for testing.
+    monkeypatch.setattr(rate_limiter, "MAX_TRACKED_IPS", 3)
+
+    rl = rate_limiter._LoginRateLimiter()
+
+    # Record 1 failure for 3 different IPs.
+    rl.record_failure("1.1.1.1")
+    rl.record_failure("2.2.2.2")
+    rl.record_failure("3.3.3.3")
+
+    # Order of self._failures should be: "1.1.1.1", "2.2.2.2", "3.3.3.3"
+    assert list(rl._failures.keys()) == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+
+    # Touch "1.1.1.1" again (moves it to the end/MRU).
+    rl.record_failure("1.1.1.1")
+    assert list(rl._failures.keys()) == ["2.2.2.2", "3.3.3.3", "1.1.1.1"]
+
+    # Record failure for a 4th IP. "2.2.2.2" (oldest/LRU) should be evicted.
+    rl.record_failure("4.4.4.4")
+    assert list(rl._failures.keys()) == ["3.3.3.3", "1.1.1.1", "4.4.4.4"]
+    assert "2.2.2.2" not in rl._failures
+
+    # Trigger lockout for 3 different IPs.
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("3.3.3.3")
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("1.1.1.1")
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("4.4.4.4")
+
+    # Order of lockouts should be: "3.3.3.3", "1.1.1.1", "4.4.4.4"
+    assert list(rl._lockouts.keys()) == ["3.3.3.3", "1.1.1.1", "4.4.4.4"]
+
+    # Trigger a lockout for "5.5.5.5". "3.3.3.3" (oldest lockout) should be evicted.
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("5.5.5.5")
+
+    assert list(rl._lockouts.keys()) == ["1.1.1.1", "4.4.4.4", "5.5.5.5"]
+    assert "3.3.3.3" not in rl._lockouts

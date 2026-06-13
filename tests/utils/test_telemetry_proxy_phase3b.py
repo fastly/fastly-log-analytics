@@ -221,7 +221,7 @@ def test_s3fs_through_proxy_carries_per_call_process_context(proxy_server, moto_
     from s3fs import S3FileSystem
 
     from backend.core import iceberg as _ic
-    from backend.utils.telemetry import set_process_context
+    from backend.utils.telemetry import _set_process_context_for_tests
 
     moto_endpoint, moto_host_port, _ = moto_s3_server
     source = {
@@ -262,9 +262,9 @@ def test_s3fs_through_proxy_carries_per_call_process_context(proxy_server, moto_
             # refresh=True is load-bearing — fsspec.DirCache short-circuits
             # the second ls without an S3 call, so the second context never
             # gets a chance to ride a request through the proxy.
-            set_process_context("ctx-A")
+            _set_process_context_for_tests("ctx-A")
             fs.ls("test-bucket/", refresh=True)
-            set_process_context("ctx-B")
+            _set_process_context_for_tests("ctx-B")
             fs.ls("test-bucket/", refresh=True)
             proxy_server._flush_log_writes_for_tests()
     finally:

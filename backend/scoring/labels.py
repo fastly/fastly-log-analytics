@@ -21,12 +21,54 @@ endpoints want.
 from __future__ import annotations
 
 import uuid
+from contextvars import ContextVar
 from typing import Literal
 
 from backend.core.metadata_db import get_con
 
 Label = Literal["good", "bad", "neutral"]
 ALLOWED_LABELS: frozenset[str] = frozenset({"good", "bad", "neutral"})
+
+# Per-request memoization for list_labels / counts_by_label. The same
+# /admin/session-scoring page composite fires these against the same
+# (service_id) from 10+ endpoints (status panel, evaluation, top-flagged,
+# score-distribution, compliance-breakdown, threshold-preview, …); each
+# was independently opening the per-service SQLite handle and running the
+# same SELECT. Per the 2026-06-11 perf audit that was 10-26 redundant
+# label reads per page even after the analytics TTL cache.
+#
+# Lifecycle: the FastAPI telemetry_middleware in backend/main.py sets
+# this ContextVar to {} at request start and to None at request end (the
+# same scope as start_call_tracking). Outside a request — cron jobs,
+# tests, ad-hoc CLI — the var is None and every call falls through to
+# the live SQLite read so no caller sees stale state.
+#
+# Cache is busted on save/update/delete below — same-request writes
+# always see their own changes.
+_REQUEST_LABELS_CACHE: ContextVar[dict | None] = ContextVar("_REQUEST_LABELS_CACHE", default=None)
+
+
+def init_request_cache() -> None:
+    """Open a per-request memoization scope; called from middleware on entry."""
+    _REQUEST_LABELS_CACHE.set({})
+
+
+def clear_request_cache() -> None:
+    """Close the per-request memoization scope; called from middleware on exit."""
+    _REQUEST_LABELS_CACHE.set(None)
+
+
+def _bust_cache(service_id: str) -> None:
+    """Drop cached entries for this service so a same-request read after
+    write returns the new state. Idempotent — safe to call from save /
+    update / delete even when no request-scope cache is active. Walks
+    keys to catch any list_labels(limit=…) variants, not just the
+    default-limit entry."""
+    cache = _REQUEST_LABELS_CACHE.get()
+    if cache is not None:
+        to_drop = [k for k in cache if isinstance(k, tuple) and len(k) >= 2 and k[1] == service_id]
+        for k in to_drop:
+            cache.pop(k, None)
 
 
 def _row_to_dict(r) -> dict:
@@ -88,6 +130,7 @@ def save_label(
         (new_id, service_id, sid, label, notes, flagged_by, sample_ip, sample_ua, sample_url),
     )
     con.commit()
+    _bust_cache(service_id)
     # Re-read so we return whatever row landed (could be the existing one
     # if this was an UPDATE path, with its original id).
     row = con.execute(
@@ -100,6 +143,16 @@ def save_label(
 def list_labels(service_id: str, limit: int = 500) -> list[dict]:
     """Most-recent first. Limit is a safety cap; expect 0-10k labels total
     per service in any reasonable use."""
+    # Per-request cache: same-request callers reuse the first SELECT's
+    # result. Key includes `limit` so a 500-row caller doesn't surface a
+    # truncated 10-row result to a later all-rows caller (though in
+    # practice every site passes the default).
+    cache = _REQUEST_LABELS_CACHE.get()
+    if cache is not None:
+        cached = cache.get(("list", service_id, int(limit)))
+        if cached is not None:
+            return cached
+
     con = get_con(service_id)
     # ROWID DESC as secondary sort: SQLite's datetime('now') is only
     # second-precision, so rows inserted within the same wall-clock
@@ -110,7 +163,10 @@ def list_labels(service_id: str, limit: int = 500) -> list[dict]:
         "SELECT * FROM scoring_labels WHERE service_id = ? ORDER BY updated_at DESC, ROWID DESC LIMIT ?",
         (service_id, int(limit)),
     ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    result = [_row_to_dict(r) for r in rows]
+    if cache is not None:
+        cache[("list", service_id, int(limit))] = result
+    return result
 
 
 def get_label(service_id: str, sid: str) -> dict | None:
@@ -164,6 +220,7 @@ def update_label(
     params.append(label_id)
     con.execute(f"UPDATE scoring_labels SET {', '.join(sets)} WHERE id = ?", params)
     con.commit()
+    _bust_cache(service_id)
     return get_label_by_id(service_id, label_id) or {}
 
 
@@ -173,12 +230,19 @@ def delete_label(service_id: str, label_id: str) -> dict:
     con = get_con(service_id)
     con.execute("DELETE FROM scoring_labels WHERE id = ?", (label_id,))
     con.commit()
+    _bust_cache(service_id)
     return {"status": "success", "id": label_id}
 
 
 def counts_by_label(service_id: str) -> dict[str, int]:
     """{label: count}. Used by the status panel's "you've labeled N sessions"
     summary. Includes 'good', 'bad', 'neutral' keys with 0 for missing."""
+    cache = _REQUEST_LABELS_CACHE.get()
+    if cache is not None:
+        cached = cache.get(("counts", service_id))
+        if cached is not None:
+            return cached
+
     con = get_con(service_id)
     rows = con.execute(
         "SELECT label, COUNT(*) AS n FROM scoring_labels WHERE service_id = ? GROUP BY label",
@@ -187,4 +251,6 @@ def counts_by_label(service_id: str) -> dict[str, int]:
     out = {"good": 0, "bad": 0, "neutral": 0}
     for r in rows:
         out[r["label"]] = int(r["n"])
+    if cache is not None:
+        cache[("counts", service_id)] = out
     return out

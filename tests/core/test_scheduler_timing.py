@@ -166,14 +166,15 @@ class TestIngestTimingVariableNames:
         import ast
         import pathlib
 
-        src = pathlib.Path("backend/scheduler.py").read_text()
+        # After the cron carve, _run_service_cron lives in backend/cron/jobs/sync.py.
+        src = pathlib.Path("backend/cron/jobs/sync.py").read_text()
         tree = ast.parse(src)
 
         run_cron_fn = next(
             (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_run_service_cron"),
             None,
         )
-        assert run_cron_fn is not None, "_run_service_cron not found in scheduler.py"
+        assert run_cron_fn is not None, "_run_service_cron not found in backend/cron/jobs/sync.py"
 
         bad_subtractions = [
             node

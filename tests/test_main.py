@@ -357,6 +357,41 @@ def test_health_endpoint_does_not_require_service_id(client):
     assert resp.status_code == 200
 
 
+def test_health_endpoint_deep(client):
+    """Deep health check verifies ingest freshness and cron status."""
+    import sqlite3
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    with patch("backend.config.list_service_ids", return_value=["test-svc-1"]):
+        with patch("backend.core.metadata_db.get_con") as mock_get_con:
+            con = sqlite3.connect(":memory:", check_same_thread=False)
+            con.row_factory = sqlite3.Row
+            con.execute("CREATE TABLE ingested_files (source_name TEXT, ingested_at TEXT)")
+            con.execute("CREATE TABLE cron_runs (task TEXT, status TEXT, started_at TEXT, error_message TEXT)")
+            mock_get_con.return_value = con
+
+            # 1. No ingested files -> OK
+            resp = client.get("/api/health?deep=1")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "ok"
+
+            # 2. Fresh ingest (using space separator as SQLite datetime('now') does) -> OK
+            now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+            con.execute("INSERT INTO ingested_files VALUES (?, ?)", ("test-svc-1", now_str))
+            resp = client.get("/api/health?deep=1")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "ok"
+
+            # 3. Stale ingest -> Degraded
+            stale_str = (datetime.now(UTC) - timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S")
+            con.execute("DELETE FROM ingested_files")
+            con.execute("INSERT INTO ingested_files VALUES (?, ?)", ("test-svc-1", stale_str))
+            resp = client.get("/api/health?deep=1")
+            assert resp.status_code == 503
+            assert resp.json()["status"] == "degraded"
+
+
 # ── telemetry middleware: cdn_service_id resolution ────────────────────────
 
 

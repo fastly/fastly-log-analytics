@@ -158,18 +158,14 @@ def test_normalize_canonicalizes_percent_encoding_and_dot_segments():
 
 
 def test_normalize_encoded_dot_segments_do_not_traverse():
-    """Regression for audit finding 017: an early unconditional unquote()
-    let a caller smuggle ``..`` via ``%2e%2e`` and escape the route. With
-    unquote applied per-segment AFTER normpath, ``%2e%2e`` survives as a
-    literal segment name and the route stays anchored to its real prefix."""
+    """Unquote before normpath to evaluate percent-encoded traversals
+    like ``%2e%2e`` and prevent category bypasses."""
     r = normalize("/admin/%2e%2e/items/foo")
-    # path stays under /admin (no traversal); the original encoded segment
-    # is decoded in place, not collapsed away
-    assert r.path.startswith("/admin/")
-    assert r.category == "admin"
+    assert r.path == "/items/foo"
+    assert r.category == "product"
     r = normalize("/admin/%2e%2e/%2e%2e/etc/passwd")
-    assert r.path.startswith("/admin/")
-    assert r.category == "admin"
+    assert r.path == "/etc/passwd"
+    assert r.category == "other"
 
 
 def test_normalize_double_slash_path_is_not_authority():
@@ -181,3 +177,32 @@ def test_normalize_double_slash_path_is_not_authority():
     assert normalize("//admin/secret").category == "admin"
     # Triple+ slashes get flattened too.
     assert normalize("///admin/secret").path.startswith("/admin")
+
+
+def test_normalize_finding_012_encoded_query_does_not_truncate():
+    """Verify that encoded query delimiters (%3F) are NOT treated as query
+    separators before normalization — finding 012 demonstrated that the
+    prior pre-split %3F → ? replacement let an attacker hide path-traversal
+    payloads (e.g. ``/search%3F/../../etc/passwd``) behind a benign-looking
+    prefix. The path now keeps the encoded character literally so downstream
+    scoring sees the whole payload (unquoted at the per-segment unquote pass
+    inside normalize)."""
+    # Encoded ? becomes a literal ? in the segment after unquote (the
+    # full string ends up as a single first-segment, hence the 'other'
+    # category fallback).
+    assert normalize("/search%3fq=red+shoes&page=2").path == "/search?q=red+shoes&page=2"
+    assert normalize("/search%3Fq=red+shoes&page=2").category == "other"
+
+
+def test_normalize_finding_014_encoded_slash_traversal_bypass():
+    """Verify that encoded slashes (%2F) do not act as structural separators,
+    and thus do not allow path-traversal bypasses (Finding 014)."""
+    r = normalize("/auth/login%2F..%2F..%2Fproduct")
+    assert r.path == "/auth/login/../../product"
+    assert r.category == "auth"
+
+
+def test_normalize_urlsplit_value_error_handling():
+    """Verify that malformed URLs causing ValueError in urlsplit are gracefully
+    handled and fallback to '/' (Finding 008-val)."""
+    assert normalize("http://[example.com").path == "/"

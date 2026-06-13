@@ -8,7 +8,8 @@ import { useReportConfig } from '@/hooks/useReportConfig'
 // Mock state we can manipulate
 let mockState = {
   startTime: '',
-  endTime: ''
+  endTime: '',
+  hasSyncedExtents: true
 }
 
 vi.mock('@/stores/filterStore', () => {
@@ -19,7 +20,7 @@ vi.mock('@/stores/filterStore', () => {
 
 describe('useReportConfig', () => {
   beforeEach(() => {
-    mockState = { startTime: '', endTime: '' }
+    mockState = { startTime: '', endTime: '', hasSyncedExtents: true }
   })
 
   it('provides default configuration', () => {
@@ -34,11 +35,11 @@ describe('useReportConfig', () => {
     const now = new Date()
     const start = new Date(now.getTime() - 12 * 3600 * 1000).toISOString()
     const end = now.toISOString()
-    
-    mockState = { startTime: start, endTime: end }
-    
+
+    mockState = { startTime: start, endTime: end, hasSyncedExtents: true }
+
     const { result } = renderHook(() => useReportConfig({ defaultInterval: '1 day' }))
-    
+
     // '1 day' is too large for a 12 hour window, fallback finds '1 minute'
     expect(result.current.config.validIntervals.has('1 day')).toBe(false)
     expect(result.current.chartInterval).toBe('1 minute')
@@ -48,11 +49,11 @@ describe('useReportConfig', () => {
     const now = new Date()
     const start = new Date(now.getTime() - 30 * 60 * 1000).toISOString()
     const end = now.toISOString()
-    
-    mockState = { startTime: start, endTime: end }
-    
+
+    mockState = { startTime: start, endTime: end, hasSyncedExtents: true }
+
     const { result } = renderHook(() => useReportConfig({ defaultInterval: '1 hour' }))
-    
+
     // 30 min window falls back to '1 minute' because span <= 6 hours
     expect(result.current.config.validIntervals.has('1 hour')).toBe(false)
     expect(result.current.chartInterval).toBe('1 minute')
@@ -62,11 +63,11 @@ describe('useReportConfig', () => {
     const now = new Date()
     const start = new Date(now.getTime() - 48 * 3600 * 1000).toISOString()
     const end = now.toISOString()
-    
-    mockState = { startTime: start, endTime: end }
-    
+
+    mockState = { startTime: start, endTime: end, hasSyncedExtents: true }
+
     const { result } = renderHook(() => useReportConfig({ defaultInterval: '1 day' }))
-    
+
     expect(result.current.config.validIntervals.has('1 day')).toBe(true)
     // We should actually manually set it to see if it allows it, because auto-fallback might
     // select something else since manualInterval is null initially.
@@ -85,7 +86,7 @@ describe('useReportConfig', () => {
     const start = new Date(now.getTime() - 24 * 3600 * 1000).toISOString()
     const end = now.toISOString()
 
-    mockState = { startTime: start, endTime: end }
+    mockState = { startTime: start, endTime: end, hasSyncedExtents: true }
 
     const { result } = renderHook(() => useReportConfig({ defaultInterval: '1 hour' }))
 
@@ -97,24 +98,24 @@ describe('useReportConfig', () => {
     const now = new Date()
     const start48 = new Date(now.getTime() - 48 * 3600 * 1000).toISOString()
     const end = now.toISOString()
-    
-    mockState = { startTime: start48, endTime: end }
-    
+
+    mockState = { startTime: start48, endTime: end, hasSyncedExtents: true }
+
     const { result, rerender } = renderHook(() => useReportConfig({ defaultInterval: '1 day' }))
-    
+
     act(() => {
       result.current.setChartInterval('1 day')
     })
-    
+
     expect(result.current.chartInterval).toBe('1 day')
 
     // Shrink window to 6 hours
     const start6 = new Date(now.getTime() - 6 * 3600 * 1000).toISOString()
     act(() => {
-      mockState = { startTime: start6, endTime: end }
+      mockState = { startTime: start6, endTime: end, hasSyncedExtents: true }
     })
     rerender()
-    
+
     expect(result.current.config.validIntervals.has('1 day')).toBe(false)
     // 6 hours exactly triggers the fallback to 1 minute
     expect(result.current.chartInterval).toBe('1 minute')

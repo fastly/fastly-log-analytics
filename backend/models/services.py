@@ -34,8 +34,13 @@ class ServiceCronNgwaf(BaseModel):
 class ServiceConfig(BaseModel):
     service_id: str
     name: str
-    fos_bucket: str
-    fos_region: str
+    # ``fos_bucket`` / ``fos_region`` are operator-internal infra strings —
+    # the analyst-trimmed view in api_services_list strips them out, and the
+    # serializer must not reject the slim payload. Admin responses still carry
+    # populated values; the optional shape only changes the contract for
+    # analyst-scoped reads.
+    fos_bucket: str | None = None
+    fos_region: str | None = None
     log_period: int | None = None
     cdn_url: str | None = None
     cdn_service_id: str | None = None

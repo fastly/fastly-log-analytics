@@ -5,6 +5,12 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useTheme } from 'next-themes'
 import { DashboardMapData } from '@/types/api'
+import countryCodes from '@/lib/country-codes.json'
+
+const alpha3ToAlpha2: Record<string, string> = {}
+Object.entries(countryCodes as Record<string, string>).forEach(([a2, a3]) => {
+  alpha3ToAlpha2[a3.toUpperCase()] = a2.toUpperCase()
+})
 
 interface ChoroplethMapProps {
   data: DashboardMapData[]
@@ -19,7 +25,7 @@ const NORMALIZE_COUNTRY: Record<string, string> = {
   'South Korea': 'South Korea',
   'Vietnam': 'Vietnam',
   'Taiwan': 'Taiwan',
-  // Fastly usually returns plain names like 'United States', 
+  // Fastly usually returns plain names like 'United States',
   // GeoJSON from johan/world.geo.json uses full names for some.
 }
 
@@ -32,6 +38,28 @@ interface TooltipState {
 
 // Instantiate Intl formatters ONCE outside the render loop
 const regionNames = typeof Intl !== 'undefined' ? new Intl.DisplayNames(['en'], { type: 'region' }) : null;
+
+/**
+ * rAF-throttle a function so it fires at most once per animation frame.
+ * MapLibre's per-layer mousemove fires on every native mousemove (60-120
+ * Hz on a trackpad) and each call walks the feature index + triggers a
+ * React render via setTooltip. Coalescing to one call per frame keeps
+ * the latest position and discards intermediates.
+ */
+function rafThrottle<TArgs extends any[]>(fn: (...args: TArgs) => void) {
+  let queued = false
+  let lastArgs: TArgs | null = null
+  return (...args: TArgs) => {
+    lastArgs = args
+    if (queued) return
+    queued = true
+    requestAnimationFrame(() => {
+      queued = false
+      if (lastArgs) fn(...lastArgs)
+      lastArgs = null
+    })
+  }
+}
 
 const getCountryName = (code: string) => {
   if (!code) return code
@@ -49,9 +77,15 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
   const { theme } = useTheme()
-  
+
   const [tooltip, setTooltip] = useState<TooltipState | null>(null)
   const dataMapRef = useRef<Map<string, number>>(new Map())
+  // Reverse lookup: GeoJSON-feature name → alpha-2 country code. Built from
+  // the data array (whose .country IS the alpha-2 code), so it stays in sync
+  // with whatever the backend actually returns. Avoids depending on the
+  // GeoJSON feature id (MapLibre can drop string ids in click events) or on
+  // country-codes.json being complete (it has 168 codes vs 180 features).
+  const nameToCodeRef = useRef<Map<string, string>>(new Map())
   const onCountryClickRef = useRef(onCountryClick)
   useEffect(() => { onCountryClickRef.current = onCountryClick }, [onCountryClick])
 
@@ -100,13 +134,13 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
           }
         })
 
-        // Hover events
-        map.current.on('mousemove', 'countries', (e) => {
+        // Hover events — rAF-throttled to one update per frame.
+        map.current.on('mousemove', 'countries', rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
           if (e.features && e.features.length > 0) {
             const feature = e.features[0]
-            const name = feature.properties.name
+            const name = feature.properties?.name
             const count = dataMapRef.current.get(name) || 0
-            
+
             setTooltip({
               x: e.point.x,
               y: e.point.y,
@@ -115,7 +149,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
             })
             if (map.current) map.current.getCanvas().style.cursor = 'pointer'
           }
-        })
+        }))
 
         map.current.on('mouseleave', 'countries', () => {
           setTooltip(null)
@@ -124,8 +158,15 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
 
         map.current.on('click', 'countries', (e) => {
           if (e.features && e.features.length > 0) {
-            const name = e.features[0].properties.name as string
-            onCountryClickRef.current?.(name)
+            const feature = e.features[0]
+            const name = feature.properties.name as string
+            // Prefer the data-derived name→code map (always alpha-2 matching
+            // what the backend filter expects); fall back to the GeoJSON
+            // feature id's alpha-3 lookup, then to the name as a last resort.
+            const id = feature.id as string | undefined
+            const code = nameToCodeRef.current.get(name)
+              || (id ? alpha3ToAlpha2[id.toUpperCase()] : null)
+            onCountryClickRef.current?.(code || name)
           }
         })
       })
@@ -140,14 +181,17 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
   useEffect(() => {
     if (!map.current || !data) return
 
-    // Update data map for hover lookups
+    // Update data map for hover lookups + reverse map for click-to-code.
     const newDataMap = new Map<string, number>()
+    const newNameToCode = new Map<string, string>()
     data.forEach(d => {
       const englishName = getCountryName(d.country)
       const countryName = NORMALIZE_COUNTRY[englishName] || englishName
       newDataMap.set(countryName, d.count)
+      if (d.country) newNameToCode.set(countryName, d.country.toUpperCase())
     })
     dataMapRef.current = newDataMap
+    nameToCodeRef.current = newNameToCode
 
     const updateData = () => {
       if (!map.current?.getLayer('countries')) {
@@ -199,21 +243,29 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
   const maxCount = data.length > 0 ? Math.max(...data.map(d => d.count)) : 0
 
   useEffect(() => {
-    // A trick to ensure MapLibre accurately captures its container dimensions once mounted.
-    const t = setTimeout(() => map.current?.resize(), 50)
-    return () => clearTimeout(t)
+    // MapLibre's containerSize is captured at construction time and isn't
+    // re-measured automatically when the parent layout changes (a flex
+    // child grown by sibling content, a card collapsing/expanding, etc.).
+    // ResizeObserver wakes us up on any container size change and calls
+    // map.resize() so the canvas re-sizes immediately instead of waiting
+    // for a window resize or a forced re-mount.
+    if (!mapContainer.current) return
+    const el = mapContainer.current
+    const ro = new ResizeObserver(() => map.current?.resize())
+    ro.observe(el)
+    return () => ro.disconnect()
   }, [])
 
   return (
     <div className={`relative min-h-[300px] w-full h-full rounded-lg overflow-hidden bg-background ${className}`}>
       <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
-      
+
       {/* Tooltip */}
       {tooltip && (
-        <div 
+        <div
           className="absolute z-50 pointer-events-none bg-popover/95 backdrop-blur-sm border shadow-lg rounded-md px-3 py-2 text-sm transition-opacity"
-          style={{ 
-            left: Math.min(tooltip.x + 15, (mapContainer.current?.clientWidth || 500) - 160), 
+          style={{
+            left: Math.min(tooltip.x + 15, (mapContainer.current?.clientWidth || 500) - 160),
             top: Math.min(tooltip.y + 15, (mapContainer.current?.clientHeight || 300) - 80)
           }}
         >

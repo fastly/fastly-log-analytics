@@ -1,0 +1,17 @@
+{
+  "_comment": "Baselines for scripts/perf_gate.sh. The CI step runs scripts/emit_perf_latest.py to produce tests/perf/latest.json (100K-row synthetic dataset, ~2 s wall) and the gate compares each scenario against the baseline below: PR fails on >regression_pct_threshold% regression on either. The CI scenarios are deliberately CI-scale; the production targets are documented in production_targets_comment below for traceability but are NOT enforced by this gate.",
+  "schema_version": 1,
+  "baseline_commit": "a530168",
+  "baseline_date_utc": "2026-06-12",
+  "regression_pct_threshold": 50,
+  "production_targets_comment": "v2.0 success-criteria (cleanup_plan.md §Success criteria — concrete): cold_path_36M_1h_iceberg_committed_p95_ms ≤ 2800, warm_path_36M_1h_p50_ms ≤ 1900. Validated separately via scripts/loadtest_generator.py + scripts/dev/loadtest_probe.sh against a representative dataset; not measurable inside a GitHub Actions runner.",
+  "scenarios": {
+    "cold_path_36M_1h_iceberg_committed_p95_ms": 20,
+    "warm_path_36M_1h_p50_ms": 15
+  },
+  "notes": [
+    "Emitter: scripts/emit_perf_latest.py. Gate: scripts/perf_gate.sh.",
+    "CI numbers above are headroom over the 2026-06-12 emit (9 / 6 ms). The 50% threshold gives the gate room for runner-to-runner variance (GH Actions runners shift ~20-30% between runs at this scale) while still catching a 2-3x regression that indicates a real cold-path problem.",
+    "If a synthetic-data improvement legitimately drops the numbers further, refresh both baseline.json and (optionally) tighten the values to keep the gate biting."
+  ]
+}

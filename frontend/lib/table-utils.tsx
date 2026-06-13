@@ -31,29 +31,29 @@ export const makeLatencyColumns = (labelField: string, labelName: string, filter
       )
     }
   },
-  { 
-    accessorKey: 'requests', 
-    header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Reqs</span>, 
-    cell: (info: any) => info.getValue()?.toLocaleString() ?? '0' 
+  {
+    accessorKey: 'requests',
+    header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Reqs</span>,
+    cell: (info: any) => info.getValue()?.toLocaleString() ?? '0'
   },
-  { 
-    accessorKey: 'avg', 
-    header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Avg (ms)</span>, 
-    cell: (info: any) => info.getValue()?.toFixed(2) ?? '0.00' 
+  {
+    accessorKey: 'avg',
+    header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Avg (ms)</span>,
+    cell: (info: any) => info.getValue()?.toFixed(2) ?? '0.00'
   },
-  { 
-    accessorKey: 'p50', 
-    header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P50</span>, 
-    cell: (info: any) => info.getValue()?.toFixed(2) ?? '0.00' 
+  {
+    accessorKey: 'p50',
+    header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P50</span>,
+    cell: (info: any) => info.getValue()?.toFixed(2) ?? '0.00'
   },
-  { 
-    accessorKey: 'p95', 
-    header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P95</span>, 
-    cell: (info: any) => info.getValue()?.toFixed(2) ?? '0.00' 
+  {
+    accessorKey: 'p95',
+    header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P95</span>,
+    cell: (info: any) => info.getValue()?.toFixed(2) ?? '0.00'
   },
-  { 
-    accessorKey: 'p99', 
-    header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P99</span>, 
-    cell: (info: any) => info.getValue()?.toFixed(2) ?? '0.00' 
+  {
+    accessorKey: 'p99',
+    header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P99</span>,
+    cell: (info: any) => info.getValue()?.toFixed(2) ?? '0.00'
   },
 ]

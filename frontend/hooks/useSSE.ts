@@ -9,6 +9,13 @@ export type SSEStatus = 'idle' | 'streaming' | 'done' | 'error'
 export interface SSELine {
   type?: string
   message?: string
+  /**
+   * Monotonic per-stream id assigned at append time. Stable React key for
+   * components rendering an append-only / bounded SSE feed (e.g.
+   * CronLiveLog) — index-based keys cause stale-DOM bleed when the array
+   * is sliced for the visible tail.
+   */
+  _id?: number
   [key: string]: unknown
 }
 
@@ -16,14 +23,16 @@ export function useSSE() {
   const [lines, setLines] = useState<SSELine[]>([])
   const [status, setStatus] = useState<SSEStatus>('idle')
   const [error, setError] = useState<string | null>(null)
-  
+
   // Track the active stream reader
   const readerRef = useRef<ReadableStreamDefaultReader | null>(null)
-  
+
   // Track the current request ID to avoid race conditions from StrictMode
   const requestIdRef = useRef<number>(0)
   // Track if component is mounted
   const mountedRef = useRef<boolean>(true)
+  // Monotonic line counter for stable React keys (see SSELine._id).
+  const lineSeqRef = useRef<number>(0)
 
   const stop = useCallback(() => {
     // 1. Cancel the reader if it exists
@@ -35,7 +44,7 @@ export function useSSE() {
     }
     // 2. Invalidate any pending fetch by incrementing the request ID
     requestIdRef.current++;
-    
+
     if (mountedRef.current) {
       setStatus('idle');
     }
@@ -51,6 +60,7 @@ export function useSSE() {
       setLines([])
       setStatus('streaming')
       setError(null)
+      lineSeqRef.current = 0
     }
 
     const currentReqId = requestIdRef.current
@@ -94,14 +104,14 @@ export function useSSE() {
       if (!reader) {
         throw new Error('Response body is null')
       }
-      
+
       readerRef.current = reader
       const decoder = new TextDecoder()
       let buffer = ''
 
       while (true) {
         const { done, value } = await reader.read()
-        
+
         // Always check if we're still the active request AND still mounted
         if (currentReqId !== requestIdRef.current || !mountedRef.current) {
           if (reader) try { reader.cancel().catch(() => {}); } catch(e) {}
@@ -139,7 +149,8 @@ export function useSSE() {
           }
 
           if (mountedRef.current && newLines.length > 0) {
-            setLines((prev) => [...prev, ...newLines])
+            const stamped = newLines.map((line) => ({ ...line, _id: ++lineSeqRef.current }))
+            setLines((prev) => [...prev, ...stamped])
             if (finalStatus) {
               setStatus(finalStatus)
               if (finalError) setError(finalError)

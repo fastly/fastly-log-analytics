@@ -1,6 +1,9 @@
 import json
+import logging
 import os
 import threading
+
+logger = logging.getLogger(__name__)
 
 CACHE_FILE = "cache/pop_locations.json"
 
@@ -31,8 +34,8 @@ def fetch_pop_locations(api_key: str) -> bool:
         with open(CACHE_FILE, "w") as f:
             json.dump(pops, f)
         return True
-    except Exception as e:
-        print(f"Warning: POP fetch failed: {e}")
+    except Exception:
+        logger.warning("POP fetch failed", exc_info=True)
         return False
 
 

@@ -21,6 +21,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboard/bundle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dashboard Bundle
+         * @description Composite endpoint returning the two queries the dashboard page
+         *     fires on every mount: /api/dashboard/aggregates + /api/security/top-bots.
+         *
+         *     Saves one RTT per cold load — the frontend's useDashboardBundle
+         *     hook fetches this once and seeds the existing
+         *     ``['dashboard', 'aggregates', ...]`` and ``['dashboard',
+         *     'top-bots', ...]`` React Query caches so the dedicated hooks
+         *     return cached data without firing their own POSTs.
+         *
+         *     Sequential execution (not parallel): the two queries share the
+         *     same DuckDB connection from RequestContext, and DuckDB
+         *     connections aren't thread-safe — running concurrently would
+         *     require separate connections, which the connection-pool
+         *     accounting on this endpoint isn't sized for. Sequential is
+         *     correct + safe; the saving is the RTT, not backend wall-clock.
+         *
+         *     Response shape is intentionally untyped (no response_model) so
+         *     the existing dedicated endpoints stay the source of truth for
+         *     AggregatesResponse / SecurityTopBotsResponse schemas — this
+         *     composite passes through whatever those return.
+         */
+        post: operations["dashboard_bundle_api_dashboard_bundle_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/dashboard/raw": {
         parameters: {
             query?: never;
@@ -1175,7 +1214,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/admin/pop-locations": {
+    "/api/admin/bot-sources": {
         parameters: {
             query?: never;
             header?: never;
@@ -1183,10 +1222,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get Pop Locations
-         * @description Return the cached POP locations (code, name, coordinates).
+         * Get Bot Sources Endpoint
+         * @description Return metadata for all bot sources plus rDNS cache stats.
          */
-        get: operations["get_pop_locations_api_admin_pop_locations_get"];
+        get: operations["get_bot_sources_endpoint_api_admin_bot_sources_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1195,7 +1234,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/admin/pop-locations/refresh": {
+    "/api/admin/bot-sources/{source_id}/refresh": {
         parameters: {
             query?: never;
             header?: never;
@@ -1205,146 +1244,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Refresh Pop Locations
-         * @description Refresh the POP locations cache from the Fastly API.
+         * Refresh Bot Source Endpoint
+         * @description Fetch and re-cache a single bot source.
          */
-        post: operations["refresh_pop_locations_api_admin_pop_locations_refresh_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/admin/ingest-logs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Ingest Endpoint */
-        post: operations["ingest_endpoint_api_admin_ingest_logs_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/download-folder": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Download Folder */
-        get: operations["download_folder_api_download_folder_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/admin/raw-tree": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Raw Tree Endpoint */
-        get: operations["raw_tree_endpoint_api_admin_raw_tree_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/admin/iceberg-tree": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Iceberg Tree Endpoint */
-        get: operations["iceberg_tree_endpoint_api_admin_iceberg_tree_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/download": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Download File */
-        get: operations["download_file_api_download_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/download-all": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Download All Files */
-        get: operations["download_all_files_api_download_all_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/sync-status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Sync Status */
-        get: operations["sync_status_api_sync_status_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/admin/ingested-files": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Ingested Files */
-        get: operations["ingested_files_api_admin_ingested_files_get"];
-        put?: never;
-        post?: never;
+        post: operations["refresh_bot_source_endpoint_api_admin_bot_sources__source_id__refresh_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1512,6 +1415,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/download-folder": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download Folder */
+        get: operations["download_folder_api_download_folder_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download File */
+        get: operations["download_file_api_download_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/download-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download All Files */
+        get: operations["download_all_files_api_download_all_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/health-snapshot": {
         parameters: {
             query?: never;
@@ -1528,53 +1482,6 @@ export interface paths {
          *     in-flight cron runs. Uses only stdlib (no psutil dep).
          */
         get: operations["health_snapshot_api_admin_health_snapshot_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/admin/backfill-window": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Backfill Window
-         * @description Force-sync a specific time window from FOS into local cache.
-         *
-         *     Use to fill gaps left by ingestion outages (the normal cron pulls
-         *     'since last sync' and won't reach back past its pointer once recovered).
-         *     Idempotent — files already present in the local cache are skipped.
-         */
-        post: operations["backfill_window_api_admin_backfill_window_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/admin/log-accounting": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Api Log Accounting
-         * @description Reconcile Fastly's authoritative log-line emission count against our
-         *     locally-ingested row counts to surface any gap between emission and ingest.
-         *
-         *     Per-bucket gap is the actionable signal — totals smooth over burst losses.
-         */
-        get: operations["api_log_accounting_api_admin_log_accounting_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1672,27 +1579,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/admin/bot-sources": {
+    "/api/admin/ingest-logs": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Bot Sources Endpoint
-         * @description Return metadata for all bot sources plus rDNS cache stats.
-         */
-        get: operations["get_bot_sources_endpoint_api_admin_bot_sources_get"];
+        get?: never;
         put?: never;
-        post?: never;
+        /** Ingest Endpoint */
+        post: operations["ingest_endpoint_api_admin_ingest_logs_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/admin/bot-sources/{source_id}/refresh": {
+    "/api/admin/backfill-window": {
         parameters: {
             query?: never;
             header?: never;
@@ -1702,10 +1606,177 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Refresh Bot Source Endpoint
-         * @description Fetch and re-cache a single bot source.
+         * Backfill Window
+         * @description Force-sync a specific time window from FOS into local cache.
+         *
+         *     Use to fill gaps left by ingestion outages (the normal cron pulls
+         *     'since last sync' and won't reach back past its pointer once recovered).
+         *     Idempotent — files already present in the local cache are skipped.
          */
-        post: operations["refresh_bot_source_endpoint_api_admin_bot_sources__source_id__refresh_post"];
+        post: operations["backfill_window_api_admin_backfill_window_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/log-accounting": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Log Accounting
+         * @description Reconcile Fastly's authoritative log-line emission count against our
+         *     locally-ingested row counts to surface any gap between emission and ingest.
+         *
+         *     Per-bucket gap is the actionable signal — totals smooth over burst losses.
+         */
+        get: operations["api_log_accounting_api_admin_log_accounting_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/pop-locations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Pop Locations
+         * @description Return the cached POP locations (code, name, coordinates).
+         */
+        get: operations["get_pop_locations_api_admin_pop_locations_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/pop-locations/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Refresh Pop Locations
+         * @description Refresh the POP locations cache from the Fastly API.
+         */
+        post: operations["refresh_pop_locations_api_admin_pop_locations_refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sync-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Sync Status */
+        get: operations["sync_status_api_sync_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/log-extents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Log Extents
+         * @description Return only the earliest/latest log timestamps for the FilterBar.
+         *
+         *     Analyst-safe sibling of ``/api/sync-status``: same cached-status fast
+         *     path but projected down to the two fields the FilterBar actually
+         *     reads. ``/api/sync-status`` is blocked for analysts because it leaks
+         *     ``ngwaf_workspace_id`` and active cron-task state; this endpoint
+         *     drops both, so the middleware lets it through and the FilterBar's
+         *     snap-to-extents UX works for analysts too.
+         *
+         *     Reads only the persisted status snapshot — no DuckDB connection
+         *     grabbed, no contention with cron, no 503 path. The snapshot is
+         *     refreshed by the sync cron every minute so a freshly started
+         *     service sees populated extents within ~60s.
+         */
+        get: operations["log_extents_api_log_extents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/ingested-files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Ingested Files */
+        get: operations["ingested_files_api_admin_ingested_files_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/raw-tree": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Raw Tree Endpoint */
+        get: operations["raw_tree_endpoint_api_admin_raw_tree_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/iceberg-tree": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Iceberg Tree Endpoint */
+        get: operations["iceberg_tree_endpoint_api_admin_iceberg_tree_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1804,6 +1875,156 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/queries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Queries */
+        get: operations["list_queries_api_admin_queries_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/queries/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Queries Summary */
+        get: operations["queries_summary_api_admin_queries_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/slow-queries/count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Count Persisted Slow Queries
+         * @description Cheap row-count for the operations-overview card. Pulls only the
+         *     aggregate (single indexed scan) so the card stays sub-50 ms even on
+         *     services with thousands of persisted rows.
+         */
+        get: operations["count_persisted_slow_queries_api_admin_slow_queries_count_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/slow-queries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Persisted Slow Queries
+         * @description Persistent slow-SQL history from the per-service ``slow_queries``
+         *     SQLite table — the durable backing store for the Notable Slow
+         *     Queries panel beyond the in-memory ring buffer's ~10-30 min /
+         *     restart-bounded window.
+         *
+         *     Server-side filters keep the response payload small:
+         *     ``threshold_ms`` is applied at the SQL level (indexed scan),
+         *     ``kind`` / ``db_type`` are equality filters on low-cardinality
+         *     columns. ``limit`` clamped at 2000 so a runaway client query can't
+         *     page the whole 7-day window in one shot.
+         *
+         *     Sort: ``recent`` (started_at_utc DESC, the panel default) or
+         *     ``duration`` (duration_ms DESC, the "what was slowest" variant).
+         */
+        get: operations["list_persisted_slow_queries_api_admin_slow_queries_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/queries/{qid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Query
+         * @description Fetch the full SQL + attribution for a single in-flight query.
+         *
+         *     Looks up the active row only — completed queries are returned via the
+         *     snapshot endpoint with ``include_completed=true``.
+         */
+        get: operations["get_query_api_admin_queries__qid__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/queries/{qid}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Query */
+        post: operations["cancel_query_api_admin_queries__qid__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/app-config/query-monitor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Query Monitor Config
+         * @description Tiny config endpoint the frontend hits on mount to decide whether to
+         *     render the Live Query Monitor tab. Returns enabled=False (not 404) so
+         *     the nav can render a stable shape regardless of the flag state.
+         */
+        get: operations["query_monitor_config_api_admin_app_config_query_monitor_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/provision/services": {
         parameters: {
             query?: never;
@@ -1862,13 +2083,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        get?: never;
+        put?: never;
         /**
          * Provision Check Fos
          * @description Validate FOS credentials by attempting to list objects.
          */
-        get: operations["provision_check_fos_api_provision_check_fos_get"];
-        put?: never;
-        post?: never;
+        post: operations["provision_check_fos_api_provision_check_fos_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1915,13 +2136,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        get?: never;
+        put?: never;
         /**
          * Provision Lake Info
          * @description Return Iceberg table range and calendar for a given bucket/credentials without registering it.
          */
-        get: operations["provision_lake_info_api_provision_lake_info_get"];
-        put?: never;
-        post?: never;
+        post: operations["provision_lake_info_api_provision_lake_info_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3089,6 +3310,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        get?: never;
+        put?: never;
         /**
          * Share Claim
          * @description One-time-view reveal of an invite's plaintext credentials.
@@ -3099,9 +3322,7 @@ export interface paths {
          *     URL exists to confirm scope and identity to the analyst without
          *     putting credentials in a chat tool that retains history.
          */
-        get: operations["share_claim_api_share_claim__token__get"];
-        put?: never;
-        post?: never;
+        post: operations["share_claim_api_share_claim__token__post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3495,6 +3716,8 @@ export interface components {
              * @enum {string}
              */
             chart_metric: "requests" | "5xx" | "4xx" | "hit_rate" | "p50_latency" | "p95_latency" | "p99_latency" | "throughput" | "req_size" | "ttfb";
+            /** Fields */
+            fields?: string[] | null;
         };
         /** AggregatesResponse */
         AggregatesResponse: {
@@ -3761,6 +3984,26 @@ export interface components {
             views?: {
                 [key: string]: unknown;
             }[];
+            /** Log Fields Catalog */
+            log_fields_catalog?: {
+                [key: string]: unknown;
+            } | null;
+            /** Sync Status */
+            sync_status?: {
+                [key: string]: unknown;
+            } | null;
+            /** Share Banner */
+            share_banner?: {
+                [key: string]: unknown;
+            } | null;
+            /** Header Badge */
+            header_badge?: {
+                [key: string]: unknown;
+            } | null;
+            /** Log Extents */
+            log_extents?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** BootstrapService */
         BootstrapService: {
@@ -3802,6 +4045,24 @@ export interface components {
             /** Sources */
             sources: components["schemas"]["BotSourceMeta"][];
             rdns: components["schemas"]["RdnsStats"];
+        };
+        /** CancelResponse */
+        CancelResponse: {
+            /** State */
+            state: string;
+            /** Query Id */
+            query_id: number;
+        };
+        /** CheckFosRequest */
+        CheckFosRequest: {
+            /** Bucket */
+            bucket: string;
+            /** Region */
+            region: string;
+            /** Access Key */
+            access_key: string;
+            /** Secret Key */
+            secret_key: string;
         };
         /** ClearSqliteResponse */
         ClearSqliteResponse: {
@@ -4447,6 +4708,26 @@ export interface components {
             /** Query End Time */
             query_end_time?: string | null;
         };
+        /** LakeInfoRequest */
+        LakeInfoRequest: {
+            /** Bucket */
+            bucket: string;
+            /** Region */
+            region: string;
+            /** Access Key */
+            access_key: string;
+            /** Secret Key */
+            secret_key: string;
+            /**
+             * Prefix
+             * @default
+             */
+            prefix: string;
+            /** Endpoint */
+            endpoint?: string | null;
+            /** Iceberg Metadata Location */
+            iceberg_metadata_location?: string | null;
+        };
         /** LogAccountingBucket */
         LogAccountingBucket: {
             /** Ts */
@@ -4508,6 +4789,41 @@ export interface components {
             worst_bucket_ts?: string | null;
             /** Worst Bucket Gap Pct */
             worst_bucket_gap_pct?: number | null;
+        };
+        /**
+         * LogExtentsResponse
+         * @description Minimal extents projection for the FilterBar's time-range snap.
+         *
+         *     Sibling of ``SyncStatusResponse`` but strips every field that the
+         *     middleware blocks ``/api/sync-status`` for an analyst over: no
+         *     ``ngwaf_workspace_id``, no ``active_run``, no cron task state, no
+         *     DuckDB size, no storage mode. Just the two timestamps the
+         *     FilterBar needs to snap its range, plus a ``configured`` flag so
+         *     the frontend can short-circuit when a service has no source.
+         */
+        LogExtentsResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Configured
+             * @default true
+             */
+            configured: boolean;
+            /** Earliest Log At */
+            earliest_log_at?: string | null;
+            /** Latest Log At */
+            latest_log_at?: string | null;
         };
         /** LogFieldsConfig */
         LogFieldsConfig: {
@@ -5475,6 +5791,15 @@ export interface components {
             scatter: {
                 [key: string]: unknown;
             }[];
+            /**
+             * Waterfall
+             * @default {}
+             */
+            waterfall: {
+                [key: string]: {
+                    [key: string]: number;
+                };
+            };
         };
         /** PerformanceOriginTsResponse */
         PerformanceOriginTsResponse: {
@@ -5897,6 +6222,27 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /**
+             * H2 Fingerprints
+             * @default []
+             */
+            h2_fingerprints: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Oh Fingerprints
+             * @default []
+             */
+            oh_fingerprints: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Fingerprint Coverage
+             * @default {}
+             */
+            fingerprint_coverage: {
+                [key: string]: number;
+            };
+            /**
              * Req Size Dist
              * @default []
              */
@@ -6002,9 +6348,9 @@ export interface components {
             /** Name */
             name: string;
             /** Fos Bucket */
-            fos_bucket: string;
+            fos_bucket?: string | null;
             /** Fos Region */
-            fos_region: string;
+            fos_region?: string | null;
             /** Log Period */
             log_period?: number | null;
             /** Cdn Url */
@@ -6129,6 +6475,8 @@ export interface components {
             total_bytes?: number | null;
             /** Median Rtt Ms */
             median_rtt_ms?: number | null;
+            /** Edge Sid */
+            edge_sid?: string | null;
             /** Flagged */
             flagged: boolean;
         };
@@ -6237,6 +6585,11 @@ export interface components {
             has_ja4: boolean;
             /** Has Edge */
             has_edge: boolean;
+            /**
+             * Has Edge Sid
+             * @default false
+             */
+            has_edge_sid: boolean;
             /** Min Reqs Flag */
             min_reqs_flag: number;
             /** Min 4Xx Pct Flag */
@@ -6329,7 +6682,7 @@ export interface components {
         ShareStartPayload: {
             /**
              * Use Tunnel
-             * @default true
+             * @default false
              */
             use_tunnel: boolean;
             /** Public Endpoint */
@@ -6339,6 +6692,19 @@ export interface components {
              * @default 3000
              */
             forward_port: number;
+        };
+        /** SnapshotResponse */
+        SnapshotResponse: {
+            /** Last Seq */
+            last_seq: number;
+            /** Active */
+            active: {
+                [key: string]: unknown;
+            }[];
+            /** Completed */
+            completed: {
+                [key: string]: unknown;
+            }[];
         };
         /** SqliteProfilerEntry */
         SqliteProfilerEntry: {
@@ -6359,6 +6725,17 @@ export interface components {
              * @enum {string}
              */
             op: "execute" | "executemany" | "executescript";
+        };
+        /** SummaryResponse */
+        SummaryResponse: {
+            /** Active Total */
+            active_total: number;
+            /** By Db Type */
+            by_db_type: {
+                [key: string]: number;
+            };
+            /** Longest Ms */
+            longest_ms: number;
         };
         /** SustainedLossAlert */
         SustainedLossAlert: {
@@ -6829,6 +7206,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AggregatesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dashboard_bundle_api_dashboard_bundle_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AggregatesRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -9353,7 +9769,7 @@ export interface operations {
             };
         };
     };
-    get_pop_locations_api_admin_pop_locations_get: {
+    get_bot_sources_endpoint_api_admin_bot_sources_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -9368,59 +9784,18 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PopLocationsResponse"];
+                    "application/json": components["schemas"]["BotSourcesResponse"];
                 };
             };
         };
     };
-    refresh_pop_locations_api_admin_pop_locations_refresh_post: {
+    refresh_bot_source_endpoint_api_admin_bot_sources__source_id__refresh_post: {
         parameters: {
-            query?: {
-                token?: string | null;
-            };
+            query?: never;
             header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": components["schemas"]["RefreshPopLocationsRequest"] | null;
+            path: {
+                source_id: string;
             };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PopLocationsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    ingest_endpoint_api_admin_ingest_logs_post: {
-        parameters: {
-            query?: {
-                start_time?: string | null;
-                end_time?: string | null;
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -9432,259 +9807,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    download_folder_api_download_folder_get: {
-        parameters: {
-            query?: {
-                prefix?: string;
-                root?: string;
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    raw_tree_endpoint_api_admin_raw_tree_get: {
-        parameters: {
-            query?: {
-                prefix?: string;
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TreeResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    iceberg_tree_endpoint_api_admin_iceberg_tree_get: {
-        parameters: {
-            query?: {
-                prefix?: string;
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TreeResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    download_file_api_download_get: {
-        parameters: {
-            query?: {
-                key?: string;
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    download_all_files_api_download_all_get: {
-        parameters: {
-            query?: {
-                include?: string;
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    sync_status_api_sync_status_get: {
-        parameters: {
-            query?: {
-                skip_fos?: boolean;
-                force?: boolean;
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SyncStatusResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    ingested_files_api_admin_ingested_files_get: {
-        parameters: {
-            query?: {
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IngestedFilesResponse"];
                 };
             };
             /** @description Validation Error */
@@ -9738,7 +9860,7 @@ export interface operations {
     local_compact_now_api_admin_local_compact_now_post: {
         parameters: {
             query?: {
-                /** @description Compact partitions with strictly more files than this. */
+                /** @description Compact partitions with strictly more files than this. Default 3 = normal cron behaviour. Pass 1 to dedupe the 2-3-file orphan pattern. Pass 0 to force-rewrite every partition through the dedup pipeline (one-shot historical cleanup of intra-file dups in single-parquet partitions). */
                 min_files?: number;
                 /** @description Report what would happen without writing. */
                 dry_run?: boolean;
@@ -9920,6 +10042,115 @@ export interface operations {
             };
         };
     };
+    download_folder_api_download_folder_get: {
+        parameters: {
+            query?: {
+                prefix?: string;
+                root?: string;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_file_api_download_get: {
+        parameters: {
+            query?: {
+                key?: string;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_all_files_api_download_all_get: {
+        parameters: {
+            query?: {
+                include?: string;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     health_snapshot_api_admin_health_snapshot_get: {
         parameters: {
             query?: never;
@@ -9935,83 +10166,9 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    backfill_window_api_admin_backfill_window_post: {
-        parameters: {
-            query: {
-                /** @description ISO 8601 UTC start, e.g. '2026-05-31T23:00:00Z' */
-                start_time: string;
-                /** @description ISO 8601 UTC end, e.g. '2026-06-01T01:00:00Z' */
-                end_time: string;
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    api_log_accounting_api_admin_log_accounting_get: {
-        parameters: {
-            query?: {
-                hours?: number;
-                by?: string;
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LogAccountingResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };
@@ -10156,7 +10313,124 @@ export interface operations {
             };
         };
     };
-    get_bot_sources_endpoint_api_admin_bot_sources_get: {
+    ingest_endpoint_api_admin_ingest_logs_post: {
+        parameters: {
+            query?: {
+                start_time?: string | null;
+                end_time?: string | null;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    backfill_window_api_admin_backfill_window_post: {
+        parameters: {
+            query: {
+                /** @description ISO 8601 UTC start, e.g. '2026-05-31T23:00:00Z' */
+                start_time: string;
+                /** @description ISO 8601 UTC end, e.g. '2026-06-01T01:00:00Z' */
+                end_time: string;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_log_accounting_api_admin_log_accounting_get: {
+        parameters: {
+            query?: {
+                hours?: number;
+                by?: string;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogAccountingResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_pop_locations_api_admin_pop_locations_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -10171,18 +10445,59 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BotSourcesResponse"];
+                    "application/json": components["schemas"]["PopLocationsResponse"];
                 };
             };
         };
     };
-    refresh_bot_source_endpoint_api_admin_bot_sources__source_id__refresh_post: {
+    refresh_pop_locations_api_admin_pop_locations_refresh_post: {
         parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                source_id: string;
+            query?: {
+                token?: string | null;
             };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RefreshPopLocationsRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PopLocationsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sync_status_api_sync_status_get: {
+        parameters: {
+            query?: {
+                skip_fos?: boolean;
+                force?: boolean;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -10193,7 +10508,149 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SyncStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    log_extents_api_log_extents_get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogExtentsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ingested_files_api_admin_ingested_files_get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestedFilesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    raw_tree_endpoint_api_admin_raw_tree_get: {
+        parameters: {
+            query?: {
+                prefix?: string;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TreeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    iceberg_tree_endpoint_api_admin_iceberg_tree_get: {
+        parameters: {
+            query?: {
+                prefix?: string;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TreeResponse"];
                 };
             };
             /** @description Validation Error */
@@ -10434,6 +10891,226 @@ export interface operations {
             };
         };
     };
+    list_queries_api_admin_queries_get: {
+        parameters: {
+            query?: {
+                since_seq?: number;
+                include_completed?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnapshotResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    queries_summary_api_admin_queries_summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SummaryResponse"];
+                };
+            };
+        };
+    };
+    count_persisted_slow_queries_api_admin_slow_queries_count_get: {
+        parameters: {
+            query?: {
+                since_hours?: number;
+                threshold_ms?: number;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_persisted_slow_queries_api_admin_slow_queries_get: {
+        parameters: {
+            query?: {
+                since_hours?: number;
+                threshold_ms?: number;
+                kind?: string | null;
+                db_type?: string | null;
+                sort?: string;
+                limit?: number;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_query_api_admin_queries__qid__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                qid: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_query_api_admin_queries__qid__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                qid: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CancelResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    query_monitor_config_api_admin_app_config_query_monitor_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     provision_list_services_api_provision_services_get: {
         parameters: {
             query: {
@@ -10531,19 +11208,18 @@ export interface operations {
             };
         };
     };
-    provision_check_fos_api_provision_check_fos_get: {
+    provision_check_fos_api_provision_check_fos_post: {
         parameters: {
-            query: {
-                bucket: string;
-                region: string;
-                access_key: string;
-                secret_key: string;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CheckFosRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -10600,22 +11276,18 @@ export interface operations {
             };
         };
     };
-    provision_lake_info_api_provision_lake_info_get: {
+    provision_lake_info_api_provision_lake_info_post: {
         parameters: {
-            query: {
-                bucket: string;
-                region: string;
-                access_key: string;
-                secret_key: string;
-                prefix?: string;
-                endpoint?: string | null;
-                iceberg_metadata_location?: string | null;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LakeInfoRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -10886,9 +11558,7 @@ export interface operations {
     };
     scoring_enable_api_services__service_id__scoring_enable_post: {
         parameters: {
-            query?: {
-                token?: string;
-            };
+            query?: never;
             header?: never;
             path: {
                 /** @description Logging service ID to enable scoring on */
@@ -10896,7 +11566,13 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                } | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -10920,9 +11596,7 @@ export interface operations {
     };
     scoring_disable_api_services__service_id__scoring_disable_post: {
         parameters: {
-            query?: {
-                token?: string;
-            };
+            query?: never;
             header?: never;
             path: {
                 /** @description Logging service ID to disable scoring on */
@@ -10930,7 +11604,13 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                } | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -11526,10 +12206,10 @@ export interface operations {
     };
     scoring_enforce_threshold_get_api_services__service_id__scoring_enforce_threshold_get: {
         parameters: {
-            query?: {
+            query?: never;
+            header?: {
                 token?: string;
             };
-            header?: never;
             path: {
                 service_id: string;
             };
@@ -11562,11 +12242,12 @@ export interface operations {
     scoring_enforce_threshold_put_api_services__service_id__scoring_enforce_threshold_put: {
         parameters: {
             query?: {
-                token?: string;
                 /** @description Set true to actually apply the enforcement change */
                 confirm?: boolean;
             };
-            header?: never;
+            header?: {
+                token?: string;
+            };
             path: {
                 service_id: string;
             };
@@ -11638,11 +12319,12 @@ export interface operations {
     scoring_exclude_regex_put_api_services__service_id__scoring_exclude_regex_put: {
         parameters: {
             query?: {
-                token?: string;
                 /** @description Set true to actually apply the change */
                 confirm?: boolean;
             };
-            header?: never;
+            header?: {
+                token?: string;
+            };
             path: {
                 service_id: string;
             };
@@ -11753,11 +12435,12 @@ export interface operations {
     scoring_enforce_status_code_put_api_services__service_id__scoring_enforce_status_code_put: {
         parameters: {
             query?: {
-                token?: string;
                 /** @description Set true to actually apply the change */
                 confirm?: boolean;
             };
-            header?: never;
+            header?: {
+                token?: string;
+            };
             path: {
                 service_id: string;
             };
@@ -11866,10 +12549,10 @@ export interface operations {
     };
     scoring_rotate_key_api_services__service_id__scoring_rotate_key_post: {
         parameters: {
-            query?: {
+            query?: never;
+            header?: {
                 token?: string;
             };
-            header?: never;
             path: {
                 service_id: string;
             };
@@ -12276,7 +12959,7 @@ export interface operations {
             };
         };
     };
-    share_claim_api_share_claim__token__get: {
+    share_claim_api_share_claim__token__post: {
         parameters: {
             query?: never;
             header?: never;

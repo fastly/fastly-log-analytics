@@ -6,6 +6,24 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
 import { client } from '@/lib/api'
 
+type PoolStats = {
+  service: string
+  max_size: number
+  in_use: number
+  idle: number
+  created_total: number
+  reused_total: number
+  discarded_total: number
+  wait?: {
+    count: number
+    p50_ms: number
+    p95_ms: number
+    p99_ms: number
+    max_ms: number
+    mean_ms: number
+  }
+}
+
 type HealthSnapshot = {
   vcpus?: number | null
   load?: { avg_1m: number; avg_5m: number; avg_15m: number } | null
@@ -21,6 +39,7 @@ type HealthSnapshot = {
     daily_files: number
     avg_files_per_partition: number
   } | null>
+  pool_wait?: PoolStats[]
 }
 
 function Stat({ label, value, sub, tone = 'default' }: {
@@ -88,6 +107,20 @@ export function SystemHealthCard() {
 
   const inFlight = snap.in_flight_runs ?? []
 
+  // Phase 6 in-process sampler — aggregate across services so the card
+  // shows ONE p95 / p99 rather than a per-service breakdown. Per-service
+  // detail is in the expandable section below.
+  const pools = snap.pool_wait ?? []
+  const poolMaxP95 = pools.reduce((acc, p) => Math.max(acc, p.wait?.p95_ms ?? 0), 0)
+  const poolMaxP99 = pools.reduce((acc, p) => Math.max(acc, p.wait?.p99_ms ?? 0), 0)
+  const poolSampleCount = pools.reduce((acc, p) => acc + (p.wait?.count ?? 0), 0)
+  // ADR-03 escalation threshold: >50ms p95 → consider separate-process
+  // cron isolation; <50ms → single-pool is sufficient.
+  const poolTone: 'default' | 'warn' | 'crit' =
+    poolMaxP95 > 200 ? 'crit' :
+    poolMaxP95 > 50 ? 'warn' :
+    'default'
+
   return (
     <AnalyticsCard title="System Health" description="Live snapshot of the host machine — polls every 1s while this page is open.">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -126,6 +159,21 @@ export function SystemHealthCard() {
           value={inFlight.length}
           sub={inFlight.length > 0 ? inFlight.slice(0, 2).map(r => r.task).join(', ') : 'idle'}
         />
+        <Stat
+          label="Pool wait p95"
+          value={poolSampleCount > 0 ? `${poolMaxP95.toFixed(1)}ms` : '–'}
+          sub={poolSampleCount > 0
+            ? `p99 ${poolMaxP99.toFixed(1)}ms · n=${poolSampleCount}`
+            : 'no samples yet'}
+          tone={poolTone}
+        />
+        <Stat
+          label="Pool in-use / idle"
+          value={pools.reduce((acc, p) => acc + p.in_use, 0)}
+          sub={pools.length > 0
+            ? `${pools.reduce((acc, p) => acc + p.idle, 0)} idle · max ${pools.reduce((acc, p) => acc + p.max_size, 0)}`
+            : 'no pools yet'}
+        />
       </div>
 
       {inFlight.length > 0 && (
@@ -137,6 +185,48 @@ export function SystemHealthCard() {
             </Badge>
           ))}
         </div>
+      )}
+
+      {pools.length > 0 && pools.some(p => (p.wait?.count ?? 0) > 0) && (
+        <details className="mt-3 text-xs">
+          <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
+            Per-service pool wait (Phase 6 telemetry)
+          </summary>
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full text-[11px] tabular-nums">
+              <thead className="text-muted-foreground">
+                <tr>
+                  <th className="text-left font-medium pr-3 pb-1">Service</th>
+                  <th className="text-right font-medium px-2 pb-1">In-use</th>
+                  <th className="text-right font-medium px-2 pb-1">Idle</th>
+                  <th className="text-right font-medium px-2 pb-1">Samples</th>
+                  <th className="text-right font-medium px-2 pb-1">p50</th>
+                  <th className="text-right font-medium px-2 pb-1">p95</th>
+                  <th className="text-right font-medium px-2 pb-1">p99</th>
+                  <th className="text-right font-medium px-2 pb-1">max</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pools.map(p => (
+                  <tr key={p.service} className="border-t border-muted/40">
+                    <td className="pr-3 py-1 font-mono">{p.service.slice(0, 22)}</td>
+                    <td className="text-right px-2 py-1">{p.in_use}/{p.max_size}</td>
+                    <td className="text-right px-2 py-1">{p.idle}</td>
+                    <td className="text-right px-2 py-1">{p.wait?.count ?? 0}</td>
+                    <td className="text-right px-2 py-1">{p.wait?.p50_ms?.toFixed(1) ?? '–'}</td>
+                    <td className="text-right px-2 py-1">{p.wait?.p95_ms?.toFixed(1) ?? '–'}</td>
+                    <td className="text-right px-2 py-1">{p.wait?.p99_ms?.toFixed(1) ?? '–'}</td>
+                    <td className="text-right px-2 py-1">{p.wait?.max_ms?.toFixed(1) ?? '–'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="mt-1 text-[10px] text-muted-foreground">
+              Wait-time samples over the last ~1024 checkouts per service. ADR-03 escalation threshold: p95 &gt; 50ms ⇒ consider separate-process cron isolation.
+              Same samples stream to OTel ``app.thread_wait_ms`` for off-box analysis.
+            </p>
+          </div>
+        </details>
       )}
     </AnalyticsCard>
   )

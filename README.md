@@ -69,12 +69,10 @@ The analyst runs their own independent copy of the app on their laptop or server
 
 ### Path B: Live Shared Server (Web-Accessible Host)
 
-You run the application as a central web-accessible server (either on a dedicated VM or from your laptop using a secure tunnel). Your associates connect to your server using a standard web browser and enter a passcode.
+You run the application as a central web-accessible server on a dedicated VM (or a laptop reachable at its own hostname / IP). Your associates connect using a standard web browser and enter a passcode.
 
 #### How it works:
-1. **Admin:** Click **Share Dashboard** in your dashboard. Choose how to make your server reachable over the web:
-   - **SSH Tunnel (via localhost.run):** Easiest for local laptops. Spawns an automatic reverse SSH tunnel to assign you a public `https://*.lhrun.dev` link.
-   - **Your Own Hostname/IP:** Best for public servers. Direct connections via a custom domain name or IP (requires HTTPS setup).
+1. **Admin:** Click **Share Dashboard** in your dashboard. The sharing manager prompts for your server's public URL — a custom domain or IP that the analyst can reach over HTTPS. (The previous SSH-reverse-tunnel mode via `localhost.run` was removed in v2.0; production deployments use direct-mode against a real public endpoint.)
 2. **Admin:** Mint an analyst invitation in the sharing manager by specifying their name, an optional IP allowlist, and a passcode. Give them the public URL and passcode.
 3. **Analyst:** Open the shared link in a standard browser, accept the Terms of Service, enter the passcode, and view the live read-only dashboard. All database queries are executed securely on your host server. You can revoke access or **Sever All Access** instantly.
 
@@ -94,7 +92,7 @@ You run the application as a central web-accessible server (either on a dedicate
 - **Usage & Cost** — live storage breakdown, FOS operation counts, period totals, interactive cost estimator
 - **Log field configuration** — built-in field groups (HTTP, network, geo, TLS, NGWAF) plus custom VCL expressions
 - **Alerts** — threshold-based, webhook-delivered
-- **Live dashboard sharing** — three modes (SSH tunnel, your own hostname, your own IP) with per-analyst passcode invites, IP allowlisting, and instant revoke
+- **Live dashboard sharing** — direct-mode via your own hostname or IP, with per-analyst passcode invites, IP allowlisting, and instant revoke
 - **Session scoring** — edge-computed 0-100 risk score per request combining cookie/timing signals with a PageRank transition matrix, with live threshold enforcement, audit logging, key rotation, and matrix version history. See the [runbook](docs/session_scoring_runbook.md) and [feature reference](docs/features.md)
 
 See [docs/features.md](docs/features.md) for the full feature reference.

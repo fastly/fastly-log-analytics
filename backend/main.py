@@ -43,6 +43,13 @@ logging.basicConfig(
 logging.getLogger("pyiceberg.io").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
+# Install s3fs/botocore monkeypatches before anything else can touch s3fs.
+# Importing the fs submodule has the side-effect of patching S3FileSystem;
+# pyiceberg lazily instantiates S3FileSystem on first table access, so as
+# long as this lands before the first iceberg call we're safe — but the
+# earlier the better, since any future eager import would otherwise win.
+from backend.core.iceberg import fs as _iceberg_fs_patches  # noqa: E402, F401
+
 logger = logging.getLogger("backend.main")
 
 from fastapi import FastAPI, Request
@@ -75,7 +82,7 @@ def _initialize_service(cfg: dict):
     # ContextVar; process_context_scope sets both the ContextVar and pushes
     # onto the global active-contexts stack so the fsspec iothread fallback
     # (get_process_context_with_fallback) attributes this worker's iceberg
-    # I/O correctly. Using set_process_context() here would race with
+    # I/O correctly. A bare ContextVar setter (no scope) would race with
     # concurrent scheduler ticks: their process_context_scope exit pops the
     # empty stack and nulls the mirror, untagging any I/O still in flight.
     from backend.utils.telemetry import process_context_scope
@@ -94,12 +101,54 @@ def _initialize_service(cfg: dict):
                 if n:
                     logging.info("[fastapi] Service %s: reaped %d orphaned cron run(s).", sid, n)
             except Exception as e:
-                logging.warning("[fastapi] Could not reap orphaned cron runs for %s: %s", sid, e)
+                # Transient on the first boot after an unclean shutdown — SQLite
+                # WAL recovery rolls the file forward on the next connection, so
+                # subsequent calls succeed. Log INFO if it's the recoverable
+                # malformed-image case, WARN otherwise.
+                msg = str(e)
+                if "malformed" in msg or "is locked" in msg:
+                    logging.info(
+                        "[fastapi] Service %s: orphan-cron reap deferred (%s); WAL recovery will resolve on the next connection.",
+                        sid,
+                        msg,
+                    )
+                else:
+                    logging.warning("[fastapi] Could not reap orphaned cron runs for %s: %s", sid, e)
 
             src = _db.get_source_for_service(sid)
             if src:
                 _db.refresh_config_status(sid)
                 _ensure_persistent_view(sid, src)
+                # Pre-warm compute_sync_status_cached so the very first
+                # /api/sync-status?skip_fos=true after restart doesn't pay
+                # the ~700ms _get_dir_size walk (19k files on a populated
+                # rollups cache). The FilterBar, header badge, and every
+                # CSR page fires this endpoint within the first second of
+                # nav — landing here cold added 1.7s to /dashboard cold
+                # load in the 2026-06-11 audit.
+                try:
+                    from backend.routers.admin import compute_sync_status_cached
+
+                    compute_sync_status_cached(sid)
+                except Exception as e:
+                    logging.warning("[fastapi] Service %s: sync-status pre-warm failed: %s", sid, e)
+
+                # Force-open the per-service usage_log.db so the one-shot
+                # migration from the legacy metadata.db's usage_log table
+                # (carved out 2026-06-12) runs HERE in a background init
+                # thread instead of inside the first user request. On a
+                # service with ~800k usage_log rows the copy takes ~10 s
+                # of holding the per-service _init_lock — any concurrent
+                # get_con() call during that window times out (the
+                # lock's timeout=10 is much shorter than the migration).
+                # Running here means user requests after startup find
+                # the file already populated and the lock held for ~0 s.
+                try:
+                    from backend.core.metadata import usage_log_db as _usage_log_db
+
+                    _usage_log_db.get_con(sid)
+                except Exception as e:
+                    logging.warning("[fastapi] Service %s: usage_log_db pre-warm failed: %s", sid, e)
                 # Data migrations: queues any pending one-time setup work
                 # (e.g. the initial rollups backfill) onto a daemon thread
                 # per service. Returns immediately so startup isn't gated
@@ -222,9 +271,9 @@ def _background_startup():
     """Run initialisation tasks that should not block the web server startup."""
     # Tag everything done here so the s3fs/boto3 hooks attribute their
     # telemetry rows to "startup" instead of falling back to the thread name.
-    # MUST be process_context_scope (not set_process_context): the scheduler
-    # starts below and its first cron's process_context_scope exit would pop
-    # the active-contexts stack and null the mirror, untagging any in-flight
+    # MUST be process_context_scope (the context manager): the scheduler
+    # starts below and its first cron's scope exit would pop the
+    # active-contexts stack and null the mirror, untagging any in-flight
     # iceberg I/O from the init_service workers. The scope keeps "startup" on
     # the stack as a base so the mirror falls back to "startup" instead of
     # None when nested scopes (cron, init_service) exit.
@@ -403,7 +452,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Fastly Log Analytics API",
-    version="1.2.0",
+    version="2.0.0",
     description=(
         "FastAPI backend for the Fastly Log Analytics tool. "
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."
@@ -411,56 +460,131 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — permissive during development; tighten origins to the deployed domain in production.
+# ── Middleware stack ──────────────────────────────────────────────────────────
+#
+# Declared order (outermost → innermost). Asserted at boot below via
+# assert_middleware_order(); a divergence crashes startup rather than
+# shipping a silently-broken request pipeline. See ADR-04 for the rationale
+# behind each layer's position.
+MIDDLEWARE_ORDER = (
+    "CompressMiddleware",  # outermost — sees final response body
+    "TelemetryResponseBodyMiddleware",  # JSON-body backstop for debug panel
+    "RemoteAccessMiddleware",  # analyst firewall — rejects before CORS, sets analyst_session
+    "BaseHTTPMiddleware",  # @app.middleware('http') telemetry decorator — INSIDE RemoteAccess so analyst_session is populated
+    "CORSMiddleware",  # innermost — closest to FastAPI routing
+)
+
+
+def assert_middleware_order(_app: FastAPI) -> None:
+    """Boot-time assertion that middleware order matches ADR-04.
+
+    Crashes on mismatch — a reorder that compiles is no longer enough to
+    ship. ``user_middleware`` is in outermost-first order (Starlette
+    reverses the add-order internally), so the comparison is direct.
+    """
+    # getattr fallback because starlette types `m.cls` as `_MiddlewareFactory[P]`
+    # which has no static `__name__`; at runtime middleware classes always do.
+    actual = tuple(getattr(m.cls, "__name__", repr(m.cls)) for m in _app.user_middleware)
+    if actual != MIDDLEWARE_ORDER:
+        raise RuntimeError(f"Middleware order violation (ADR-04). expected={MIDDLEWARE_ORDER} actual={actual}")
+
+
+# INVARIANT: CORSMiddleware is innermost (see ADR-04).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,http://localhost:13002,http://127.0.0.1:13002",
+    ).split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# Remote-analyst firewall: classifies each request as local vs remote and
-# enforces session, fingerprint, IP-whitelist, read-only, service-scope, and
-# SSE allow-listing. Local-admin requests pass through unchanged.
-# Must run BEFORE telemetry_middleware so blocked analyst requests don't
-# pollute usage_log with admin-scoped rows.
-from backend.utils.remote_access import RemoteAccessMiddleware  # noqa: E402
-
-app.add_middleware(RemoteAccessMiddleware)
-
-
-# M1 — telemetry backstop. Auto-injects _debug_queries / _debug_calls /
-# _is_cached into JSON dict responses that don't already carry them, so
-# a newly-added endpoint that returns a plain dict can't accidentally
-# drop the Debug Panel for that request. MUST register INNER to Gzip
-# (i.e. via add_middleware BEFORE the GZip line below — Starlette's
-# stack treats later add_middleware calls as OUTER) so the body it
-# reads isn't already compressed. Gated on DEBUG_RESPONSES, same flag
-# BaseResponse uses; off by default in prod.
-from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware  # noqa: E402
-
-app.add_middleware(TelemetryResponseBodyMiddleware)
-
-
+# INVARIANT: BaseHTTPMiddleware (the telemetry decorator) is INNER to
+# RemoteAccessMiddleware (see ADR-04 + audit finding 003). Registered
+# first here so it ends up innermost relative to RemoteAccess — that
+# way ``request.state.analyst_session`` is already populated by the
+# time the dispatch reads it for attribution. Pre-fix, telemetry sat
+# OUTSIDE RemoteAccess and silently misattributed every analyst
+# request to a generic admin-by-client-host.
 @app.middleware("http")
 async def telemetry_middleware(request: Request, call_next):
     """Initialise call tracking, set process context, and flush FOS/CDN ops after the request.
 
-    Uses process_context_scope (not set_process_context) so the global
+    Uses process_context_scope (the context manager) so the global
     _LATEST_PROCESS_CONTEXT mirror reverts when the request exits. Otherwise
     out-of-thread readers — fsspec iothread, pyiceberg pool — keep reading
     the last-completed request's context and attribute cron-driven CDN
     reads to whichever API request happened most recently (observed in
     the 2026-05-24 audit: dashboard's cdn.miss rows landed tagged as
     `api:GET /api/debug/recent-sqlite` because the debug poller ran last).
+
+    Also sets the Live Query Monitor's :data:`current_attribution`
+    ContextVar here (NOT in :func:`build_request_context`) so the value
+    propagates to sync dependencies and the route handler via FastAPI's
+    ``run_in_threadpool`` — each threadpool call copies the parent
+    context, and a ContextVar set INSIDE a dep doesn't flow forward to
+    the route's separate threadpool call. Setting from the middleware
+    avoids that gap.
+
+    Registered INSIDE RemoteAccessMiddleware so ``request.state.analyst_session``
+    is populated by the time we read it for attribution — see ADR-04 + audit
+    finding 003. As a side benefit, blocked-by-RemoteAccess analyst requests
+    no longer reach this layer, so they no longer pollute usage_log with
+    admin-scoped rows.
     """
     from backend import config as svcconfig
+    from backend.core.query_attribution import (
+        Attribution as _Attribution,
+    )
+    from backend.core.query_attribution import (
+        current_attribution as _current_attribution,
+    )
+    from backend.scoring import labels as _scoring_labels
     from backend.utils.telemetry import process_context_scope, start_call_tracking
 
     start_call_tracking()
+    # Open a per-request memoization scope for scoring_labels. The
+    # /admin/session-scoring composite fires list_labels / counts_by_label
+    # against the same service_id from 10+ sub-handlers; without this each
+    # one independently opens the per-service SQLite handle and runs the
+    # same SELECT. Cleared in the finally below so cron / test paths fall
+    # through to the live DB read.
+    _scoring_labels.init_request_cache()
     ctx_name = f"api:{request.method} {request.url.path}"
+
+    # Best-effort attribution: analyst_session is set by RemoteAccessMiddleware
+    # (which now sits OUTSIDE this middleware). Falls back to admin when
+    # the request is local-only / non-analyst.
+    analyst_session = getattr(request.state, "analyst_session", None)
+    request_path = request.url.path
+    try:
+        from opentelemetry import trace as _otel_trace
+
+        _span = _otel_trace.get_current_span()
+        _sctx = _span.get_span_context() if _span is not None else None
+        request_id = format(_sctx.trace_id, "032x") if _sctx and _sctx.is_valid else None
+    except Exception:
+        request_id = None
+    if analyst_session is not None:
+        attr = _Attribution.analyst(
+            analyst_id=getattr(analyst_session, "session_id", None) or "unknown",
+            analyst_name=getattr(analyst_session, "name", None) or None,
+            request_path=request_path,
+            request_id=request_id,
+        )
+    else:
+        client_host = request.client.host if request.client else "unknown"
+        attr = _Attribution.admin(
+            admin_id=client_host or "admin",
+            request_path=request_path,
+            request_id=request_id,
+        )
+    _prev_attr = _current_attribution.get()
+    _current_attribution.set(attr)
+
     with process_context_scope(ctx_name):
         try:
             response = await call_next(request)
@@ -482,23 +606,84 @@ async def telemetry_middleware(request: Request, call_next):
                     flush_usage_log(sid)
             except Exception:
                 pass
+    # Restore the prior attribution value AFTER process_context_scope has
+    # popped — so any final iothread drain still sees this request's
+    # attribution, mirroring the rationale documented above for
+    # _LATEST_PROCESS_CONTEXT.
+    try:
+        _current_attribution.set(_prev_attr)
+    except Exception:
+        pass
+    # Close the scoring_labels per-request cache. Setting to None means
+    # any post-response background work (or a subsequent request reusing
+    # the same thread) sees a clean state and falls through to live reads
+    # instead of stale cached rows.
+    try:
+        _scoring_labels.clear_request_cache()
+    except Exception:
+        pass
     return response
 
 
-# Brotli / zstd / gzip compression for analyst responses. CompressMiddleware
-# negotiates the best available encoding from the client's Accept-Encoding
-# header (zstd > br > gzip > identity). Skips text/event-stream (SSE) and
-# any response already carrying a Content-Encoding header, so the streaming
-# routers in routers/services/core.py and routers/provision.py pass through
-# uncompressed. Registered LAST so it is the OUTERMOST middleware — the
-# decorator-style telemetry_middleware above uses Starlette's
-# BaseHTTPMiddleware, which buffers the response and re-emits it; that
-# re-emit strips the Content-Encoding header from any inner middleware.
-# Audit on 2026-06-09 confirmed every Accept-Encoding variant came back
-# uncompressed (11490 B raw, no content-encoding) when Compress sat
-# inside BaseHTTPMiddleware. Keeping it outermost preserves the encoded
-# response all the way to the client.
+# INVARIANT: RemoteAccessMiddleware sits OUTSIDE the telemetry decorator
+# (see ADR-04 + audit finding 003). Blocks analyst requests before they
+# reach the telemetry layer so blocked analyst hits don't pollute
+# usage_log with admin-scoped rows AND sets analyst_session early so
+# the inner telemetry middleware can attribute correctly.
+from backend.utils.remote_access import RemoteAccessMiddleware  # noqa: E402
+
+app.add_middleware(RemoteAccessMiddleware)
+
+
+# INVARIANT: TelemetryResponseBodyMiddleware inside Compress, outside
+# RemoteAccess (see ADR-04). Reads uncompressed JSON bodies to inject
+# debug fields; gated on DEBUG_RESPONSES.
+from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware  # noqa: E402
+
+app.add_middleware(TelemetryResponseBodyMiddleware)
+
+
+from fastapi.responses import JSONResponse  # noqa: E402
+
+from backend.core.metadata.base import InvalidServiceIdError  # noqa: E402
+
+
+@app.exception_handler(InvalidServiceIdError)
+async def _invalid_service_id_handler(request: Request, exc: InvalidServiceIdError) -> JSONResponse:
+    """Convert ``InvalidServiceIdError`` raised by ``metadata.base.db_path`` into
+    a 422 instead of letting it bubble as an opaque 500 ``sqlite3.OperationalError:
+    unable to open database file``. Triggered by routes whose ``service_id`` path
+    parameter contains characters that would traverse the data directory or that
+    APFS / strict Linux filesystems reject (e.g. unassigned-plane Unicode
+    codepoints surfacing as ``OSError(Errno 92): Illegal byte sequence``).
+
+    Body shape matches FastAPI's own ``HTTPValidationError`` schema so the
+    response stays conformant to the OpenAPI spec.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {
+                    "loc": ["path", "service_id"],
+                    "msg": str(exc),
+                    "type": "value_error.invalid_service_id",
+                }
+            ],
+        },
+    )
+
+
+# INVARIANT: CompressMiddleware is outermost (see ADR-04). Must wrap the
+# final response body so Content-Encoding survives all the way to the
+# client; an inner placement gets stripped by BaseHTTPMiddleware's
+# buffer-and-reemit (audited 2026-06-09: 11490 B raw uncompressed when
+# Compress sat inside the telemetry decorator).
 app.add_middleware(CompressMiddleware, minimum_size=1024)
+
+# Boot-time middleware-order assertion. Crashes on violation rather than
+# shipping a silently-broken stack. See ADR-04 + assert_middleware_order().
+assert_middleware_order(app)
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
@@ -518,6 +703,7 @@ app.include_router(origin.router)
 
 from backend.routers import (
     admin,
+    admin_queries,
     bootstrap,
     debug,
     provision,
@@ -532,6 +718,7 @@ app.include_router(bootstrap.router)
 app.include_router(services.router)
 app.include_router(usage.router)
 app.include_router(admin.router)
+app.include_router(admin_queries.router)
 app.include_router(provision.router)
 app.include_router(session_scoring.router)
 app.include_router(debug.router)
@@ -601,9 +788,12 @@ def health_check(
             # A brand-new service legitimately has no ingest yet; don't flag
             # it as degraded. Only flag services that have ingested at least
             # once AND fell behind the cutoff.
-            if last_ingest and last_ingest < cutoff and svc_state["status"] == "ok":
-                svc_state["status"] = "degraded"
-                svc_state["reason"] = f"no ingest since {last_ingest} (cutoff {cutoff})"
+            if last_ingest and svc_state["status"] == "ok":
+                norm_last = str(last_ingest).replace(" ", "T").rstrip("Z")
+                norm_cutoff = str(cutoff).replace(" ", "T").rstrip("Z")
+                if norm_last < norm_cutoff:
+                    svc_state["status"] = "degraded"
+                    svc_state["reason"] = f"no ingest since {last_ingest} (cutoff {cutoff})"
         except Exception as e:
             svc_state["status"] = "degraded"
             svc_state["reason"] = f"metadata_db query failed: {e}"

@@ -1,7 +1,9 @@
 'use client'
 
 import React from 'react'
-import { usePageContext } from '@/hooks/usePageContext'
+import { useActiveService } from '@/hooks/useActiveService'
+import { useTimeRange } from '@/hooks/useTimeRange'
+import { useTimezone } from '@/hooks/useTimezone'
 import { useReportConfig, type ReportConfiguration } from '@/hooks/useReportConfig'
 import { useFilterPayload } from '@/hooks/useFilterPayload'
 import { useUrlFilterSync } from '@/hooks/useUrlFilterSync'
@@ -11,7 +13,7 @@ import { INTERVAL_SECONDS, type ChartInterval } from '@/lib/constants'
 import { ChartIntervalButtons } from '@/components/ChartIntervalButtons'
 import { type LucideIcon } from 'lucide-react'
 
-interface ReportLayoutProps {
+interface ReportLayoutProps<TData = unknown> {
   title: string
   description: string
   icon: LucideIcon
@@ -21,11 +23,11 @@ interface ReportLayoutProps {
     endTime: string | null
     filters: any
     bucketSeconds: number
-  }) => Promise<any>
+  }) => Promise<TData | undefined>
   defaultInterval?: ChartInterval
   headerActions?: React.ReactNode
   children: (props: {
-    data: any
+    data: TData | undefined
     isLoading: boolean
     isFetching: boolean
     config: ReportConfiguration
@@ -42,7 +44,7 @@ interface ReportLayoutProps {
   }) => React.ReactNode
 }
 
-export function ReportLayout({
+export function ReportLayout<TData = unknown>({
   title,
   description,
   icon,
@@ -51,23 +53,25 @@ export function ReportLayout({
   defaultInterval = '1 hour',
   headerActions,
   children
-}: ReportLayoutProps) {
-  const { startTime, endTime, activeServiceId, timezone } = usePageContext()
+}: ReportLayoutProps<TData>) {
+  const { startTime, endTime } = useTimeRange()
+  const { activeServiceId } = useActiveService()
+  const timezone = useTimezone()
   const { config, setChartInterval, trend, setTrend } = useReportConfig({ defaultInterval })
   const filterPayload = useFilterPayload()
-  
+
   useUrlFilterSync()
 
   const bucketSeconds = INTERVAL_SECONDS[config.effectiveInterval as keyof typeof INTERVAL_SECONDS] ?? 3600
 
-  const query = useServiceQuery(
+  const query = useServiceQuery<TData | undefined>(
     [queryKey || 'report', 'aggregates', activeServiceId, startTime, endTime, filterPayload, bucketSeconds],
     () => apiCall ? apiCall({
       startTime,
       endTime,
       filters: filterPayload,
       bucketSeconds
-    }) : Promise.resolve(null),
+    }) : Promise.resolve(undefined),
     { enabled: !!apiCall }
   )
 

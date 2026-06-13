@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from backend.deps import AnalyticsDeps
+from backend.core.request_context import RequestContext, build_request_context
 from backend.models.common import FilteredRequest, Limit100, Seconds14400
 from backend.models.network import NetworkHealthResponse, NetworkQualityResponse
 from backend.repositories import network as repo
@@ -26,10 +26,10 @@ class NetworkQualityRequest(FilteredRequest):
 
 @router.post("/network-health", response_model=NetworkHealthResponse)
 @query_errors()
-def network_health(req: NetworkHealthRequest, deps: AnalyticsDeps = Depends()):
+def network_health(req: NetworkHealthRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_health(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,
@@ -46,8 +46,8 @@ def network_health(req: NetworkHealthRequest, deps: AnalyticsDeps = Depends()):
         from backend.repositories import origin as _origin
 
         shielding = _origin.get_shielding_analysis(
-            con=deps.con,
-            src=deps.source,
+            con=ctx.con,
+            src=ctx.source,
             start_time=req.start_time,
             end_time=req.end_time,
             filters=req.filters,
@@ -63,10 +63,10 @@ def network_health(req: NetworkHealthRequest, deps: AnalyticsDeps = Depends()):
 
 @router.post("/network-quality", response_model=NetworkQualityResponse)
 @query_errors()
-def network_quality(req: NetworkQualityRequest, deps: AnalyticsDeps = Depends()):
+def network_quality(req: NetworkQualityRequest, ctx: RequestContext = Depends(build_request_context)):
     res = repo.get_quality(
-        con=deps.con,
-        src=deps.source,
+        con=ctx.con,
+        src=ctx.source,
         start_time=req.start_time,
         end_time=req.end_time,
         filters=req.filters,

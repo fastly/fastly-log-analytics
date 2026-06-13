@@ -58,6 +58,7 @@ export function AnalyticsCard({
               <Button
                 variant="ghost"
                 size="icon"
+                aria-label="About this chart"
                 className="h-6 w-6 text-muted-foreground hover:text-foreground"
                 onClick={() => setIsHelpOpen(true)}
                 title="About this chart"
@@ -70,9 +71,16 @@ export function AnalyticsCard({
       </CardHeader>
       <CardContent className={cn("p-4 flex-1 relative min-h-0", contentClassName)}>
         {isLoading ? (
-          <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10 backdrop-blur-[1px]">
+          // bg-background (opaque) rather than bg-background/50: when data is
+          // undefined the children render their unit suffixes anyway (e.g.
+          // `summary.data?.ottfb_p50_ms?.toFixed(1)}ms` becomes literal "ms"),
+          // which bled through the half-transparent overlay during cold load
+          // and made the card look half-broken. Opaque overlay hides them.
+          // The refetch-with-old-data UX is preserved by the separate
+          // `isFetching && !isLoading` opacity-40 branch on the children below.
+          <div className="absolute inset-0 flex items-center justify-center bg-background z-10">
             <div className="flex flex-col items-center gap-2">
-              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+              <Loader2 className="h-6 w-6 animate-spin text-primary" aria-hidden="true" />
               <span className="text-xs text-muted-foreground animate-pulse font-medium">Loading data...</span>
             </div>
           </div>

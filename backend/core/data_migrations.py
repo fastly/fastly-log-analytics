@@ -94,6 +94,146 @@ def _rollups_hour_bundling_backfill(service_id: str, source: dict) -> str | None
     return f"rollups: bundled {n} hour(s) into hour_bundled/"
 
 
+def _rollups_time_series_backfill(service_id: str, source: dict) -> str | None:
+    """Build the per-hour 1-minute time_series.parquet bundles for every
+    closed hour that doesn't yet have one.
+
+    The dashboard chart's rollup fast-path
+    (``QueryRunner.try_time_series_from_rollup``) requires a
+    ``time_series.parquet`` for EVERY closed hour in the requested
+    window — one missing hour disqualifies the whole range and falls
+    back to a raw Iceberg scan that costs ~16-19 s for 30d.
+
+    The writer ``build_time_series_bundles`` only ever runs against
+    hours TOUCHED by the most recent sync tick, so services that
+    pre-date the time_series feature (added late) have a giant gap of
+    historical hours with no time_series.parquet. This migration
+    closes the gap once per service.
+
+    Idempotent: ``backfill_time_series_bundles`` only builds for hours
+    that don't already have a ``time_series.parquet``, so re-running
+    after a partial failure is cheap.
+    """
+    from backend.core import rollups
+
+    n = rollups.backfill_time_series_bundles(service_id, source)
+    return f"rollups: built time_series.parquet for {n} historical hour(s)"
+
+
+def _rollups_day_bundling_backfill(service_id: str, source: dict) -> str | None:
+    """Bundle per-field per-day rollup parquets into one parquet per day.
+
+    Same pattern as :func:`_rollups_hour_bundling_backfill` but one
+    tier coarser. Reduces the dashboard reader's per-day file opens
+    from ``~fields_count`` per day to 1. On a 30-day window
+    pre-bundling this dropped opens from ~1,200 to ~30 and cut
+    ``top_n_rollups:rolled_res`` from ~4 s to <1 s on prod (per the
+    perf audit).
+
+    Idempotent: bundle_days skips up-to-date bundles via mtime.
+    Non-destructive: the per-field per-day tree stays in place, and
+    the reader falls back to it when a day bundle is missing.
+    """
+    from backend.core import rollups
+
+    n = rollups.backfill_day_bundles(service_id, source)
+    return f"rollups: bundled {n} day(s) into day_bundled/"
+
+
+def _rollups_virtual_field_backfill(service_id: str, source: dict) -> str | None:
+    """Backfill rollups for virtual (CSV-unnest) fields.
+
+    waf_sig_ind / edge_score_reason_ind used to be computed at query
+    time via ``unnest(string_split(...))`` over the live window — costing
+    ~1.2 s + ~0.7 s on prod 30d (per the perf audit). The rollup writer
+    now pre-aggregates them at hour granularity via
+    ``_build_virtual_field_copy_query``; this migration backfills the
+    historical hours so the dashboard reader picks them up immediately
+    instead of waiting for new traffic.
+
+    Idempotent: ``ensure_field_backfills`` checks per-field markers in
+    ``<cache>/rollups/backfill_markers.json`` and only re-runs COPY for
+    fields without a marker. Virtual fields lack markers from before
+    this commit shipped, so they're backfilled on first run.
+    """
+    from backend.core import rollups
+
+    rollups.ensure_field_backfills(service_id, source)
+    return "rollups: virtual-field backfill complete"
+
+
+def _rollups_virtual_field_rebundle(service_id: str, source: dict) -> str | None:
+    """Force-rebuild hour and day bundles to include virtual fields.
+
+    The 2026-06-11 virtual-field migration above wrote new per-(field,
+    hour) parquets for ``waf_sig_ind`` / ``edge_score_reason_ind`` but
+    didn't touch the existing ``hour_bundled/`` and ``day_bundled/``
+    all_fields.parquet files. ``bundle_hours`` only rebuilds a hour's
+    bundle when the cron's ``recompute_touched_hours`` runs for that
+    hour — and closed historical hours never get touched again — so
+    the bundles served by the dashboard reader stay missing virtual
+    fields indefinitely. With virtual fields absent from the bundle,
+    ``execute_top_n_rollups`` returns 0 rows for them and the
+    dashboard falls back to the runtime unnest the rollup was supposed
+    to eliminate.
+
+    Fix: delete each ``all_fields.parquet`` and let
+    ``backfill_*_bundles`` walk the per-field tree (which now includes
+    virtual fields) and rewrite the bundle. One-shot; bounded by the
+    service's rollup history (~30 days).
+    """
+    import os
+
+    from backend.core import rollups
+
+    bundled_hour = rollups._hour_bundled_root(source)
+    bundled_day = rollups._day_bundled_root(source)
+    for root in (bundled_hour, bundled_day):
+        if not os.path.isdir(root):
+            continue
+        for entry in os.listdir(root):
+            if not (entry.startswith("hour=") or entry.startswith("day=")):
+                continue
+            p = os.path.join(root, entry, "all_fields.parquet")
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+    n_h = rollups.backfill_hour_bundles(service_id, source)
+    n_d = rollups.backfill_day_bundles(service_id, source)
+    return f"rollups: rebundled {n_h} hour(s) + {n_d} day(s) to include virtual fields"
+
+
+def _rollups_sessions_backfill(service_id: str, source: dict) -> str | None:
+    """Build the per-hour sessions.parquet rollup for every closed hour
+    that doesn't yet have one.
+
+    The ``/api/sessions`` rollup-served path (rolled out alongside this
+    migration) requires a ``sessions.parquet`` for every closed hour in
+    the requested window. The writer is wired into the cron tick, so
+    new hours land automatically — this migration catches up the
+    historical hours that pre-date the rollup.
+
+    Idempotent: ``backfill_session_bundles`` only builds for hours that
+    don't already have a ``sessions.parquet``, so re-running after a
+    partial failure is cheap.
+
+    Hot-path safety: the empty-hour reader tolerance from F1 already
+    differentiates "no rollup file because the hour had no data" from
+    "no rollup file because the writer hasn't covered it." For the
+    sessions reader to apply that same tolerance, this migration's
+    completion isn't a strict prerequisite — but until it runs, every
+    sessions request whose window touches an un-rolled-up data hour
+    falls back to the raw 14+ s scan.
+    """
+    from backend.core import rollups
+
+    n = rollups.backfill_session_bundles(service_id, source)
+    return f"rollups: built sessions.parquet for {n} historical hour(s)"
+
+
 # Ordered registry. Append-only — never remove or reorder entries.
 # Names must be globally unique and stable; the DB matches by name.
 MIGRATIONS: list[Migration] = [
@@ -106,6 +246,31 @@ MIGRATIONS: list[Migration] = [
         name="2026-06-08_rollups_hour_bundling",
         description="Bundle per-field hour rollups into one parquet per hour (40x fewer file opens)",
         fn=_rollups_hour_bundling_backfill,
+    ),
+    Migration(
+        name="2026-06-10_rollups_time_series_backfill",
+        description="Backfill time_series.parquet for all closed hours so the dashboard chart's rollup fast-path covers 7d/30d",
+        fn=_rollups_time_series_backfill,
+    ),
+    Migration(
+        name="2026-06-10_rollups_sessions_backfill",
+        description="Backfill sessions.parquet for all closed hours so /api/sessions can serve 7d windows from the rollup instead of a 14+ s raw window-function scan",
+        fn=_rollups_sessions_backfill,
+    ),
+    Migration(
+        name="2026-06-11_rollups_day_bundling_backfill",
+        description="Bundle per-field per-day rollup parquets into one parquet per day so the dashboard reader opens 1 file per day instead of ~40 (drops top_n_rollups:rolled_res ~4 s on 30d)",
+        fn=_rollups_day_bundling_backfill,
+    ),
+    Migration(
+        name="2026-06-11_rollups_virtual_field_backfill",
+        description="Backfill rollups for virtual (CSV-unnest) fields (waf_sig_ind, edge_score_reason_ind) so the dashboard skips the runtime unnest scan",
+        fn=_rollups_virtual_field_backfill,
+    ),
+    Migration(
+        name="2026-06-11_rollups_virtual_field_rebundle",
+        description="Force-rebuild hour/day bundles so they include the virtual-field rollups from the previous migration (the bundle mtime check would otherwise skip closed hours forever)",
+        fn=_rollups_virtual_field_rebundle,
     ),
 ]
 

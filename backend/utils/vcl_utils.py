@@ -14,17 +14,18 @@ def log_format_to_vcl_log(raw: str) -> str:
         {"literal"} + vcl_expr + {"literal"} ...
     which is what Fastly generates internally when it compiles the logging endpoint.
     """
-    # 0. Unescape Fastly-specific escapes \{ and \} which are used in the template
-    # but are invalid in raw VCL expressions.
-    raw = raw.replace("\\{", "{").replace("\\}", "}")
-
-    # 1. Split by macros %{...}V
+    # 1. Split FIRST on the raw template (with \{ / \} escapes intact). We
+    # cannot pre-unescape: macro-content validation below relies on being
+    # able to tell raw `{` / `}` (suspicious; injection vector) from
+    # `\{` / `\}` (legitimate Fastly literal-brace escape, used in patterns
+    # like `strftime(\{"format"\}, time.start)`). See audit finding 008.
     parts = re.split(r"%\{(.*?)\}V", raw, flags=re.DOTALL)
     vcl_parts = []
     for i, part in enumerate(parts):
         if i % 2 == 0:
-            # Literal text — wrap as a VCL heredoc string literal {"..."}
-            # These do NOT need escaping for \ or "
+            # Literal text — unescape Fastly's \{ / \} into real braces,
+            # then wrap as a VCL heredoc string literal {"..."}.
+            part = part.replace("\\{", "{").replace("\\}", "}")
             if part:
                 # We only need to worry if the literal text itself contains the
                 # heredoc closing delimiter "}. This is extremely rare in JSON
@@ -34,9 +35,17 @@ def log_format_to_vcl_log(raw: str) -> str:
                     part = part.replace('"}', '"} + {"}')
                 vcl_parts.append(f'{{"{part}"}}')
         else:
-            # VCL expression — use verbatim but unescape internal quotes if any
-            # (though normally quotes inside macros are NOT escaped in the template)
-            var = part.strip().replace('\\"', '"')
+            # VCL expression — reject macro content containing a raw `;`
+            # OR an unescaped `{` / `}` (a brace not preceded by `\`).
+            # Those are the building blocks of the VCL-injection attack
+            # from audit finding 008: `;` terminates the surrounding log
+            # statement, then `}` closes the vcl_log block, then `{`
+            # opens a new attacker-controlled subroutine. Legitimate
+            # heredoc patterns like `strftime(\{"format"\}, ...)` use
+            # `\{` / `\}` escapes and pass cleanly.
+            if ";" in part or re.search(r"(?<!\\)[{}]", part):
+                raise ValueError("VCL macro contains invalid characters (;, unescaped {, unescaped })")
+            var = part.replace("\\{", "{").replace("\\}", "}").strip().replace('\\"', '"')
             vcl_parts.append(var)
 
     # Use + for concatenation to satisfy Falco/modern VCL
@@ -79,7 +88,10 @@ def lint_log_format(format_str: str, snippets: dict[str, str] | None = None) -> 
     if not shutil.which("falco"):
         return True, "Valid JSON (falco linter not found in PATH for VCL validation)"
 
-    log_body = log_format_to_vcl_log(format_str)
+    try:
+        log_body = log_format_to_vcl_log(format_str)
+    except ValueError as e:
+        return False, f"VCL Error: {str(e)}"
 
     # Minimal Fastly VCL file that exercises the log statement and any snippets.
     # Includes the subroutines falco expects so it does not complain about missing hooks.

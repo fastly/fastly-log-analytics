@@ -1,6 +1,6 @@
 [project]
 name = "fastly-log-analytics"
-version = "1.2.0"
+version = "2.0.0"
 description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB"
 requires-python = ">=3.10"
 dependencies = [
@@ -11,6 +11,13 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
+    # Phase 3.5 centralised env-var loader (backend/core/settings.py) uses
+    # pydantic-settings. Previously the lockfile carried it as a transitive
+    # dep, so local development worked; production builds with --frozen
+    # excluded it whenever the import wasn't reachable from app startup.
+    # The live query monitor's admin router imports Settings at startup,
+    # so the dep is now load-bearing on prod — make it explicit.
+    "pydantic-settings>=2.5",
     "apscheduler>=3.10,<4",
     "pyiceberg[s3fs,pyarrow,sql-sqlite]>=0.8",
     "pyarrow>=17.0",
@@ -23,10 +30,45 @@ dependencies = [
     # to import" the moment they ran `WHERE timestamp >= now() - INTERVAL`.
     # Don't drop again without confirming DuckDB no longer needs it.
     "pytz>=2026.1.post1",
-    "aiohttp>=3.9",
+    # Upper bound: vcrpy 8.1.1 inherits the removed `streams.AsyncStreamReaderMixin`
+    # symbol from aiohttp 3.14; lift the cap when vcrpy 8.1.2 ships (PR #996).
+    "aiohttp>=3.9,<3.14",
     "cryptography>=42",
     "python-multipart>=0.0.9",
     "starlette-compress>=1.7",
+    # v2.0 Phase 1: OpenTelemetry + structlog replace the four fragmented
+    # custom telemetry surfaces (see pending-docs/telemetry_map.md). Phase
+    # ships with the console exporter only; adding Jaeger/Tempo/etc. is a
+    # post-v2.0 deploy-config decision (no SaaS subscription).
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-botocore>=0.48b0",
+    "opentelemetry-instrumentation-aiohttp-client>=0.48b0",
+    "structlog>=24.4",
+    # v2.0 Phase 1.4a: aiodns + aiosqlite implement concurrent reverse DNS
+    # with FCrDNS verification and a single-transaction bulk SQLite write
+    # per pending-docs/design_rdns_async.md. aiosqlite is scoped to
+    # rdns_cache.py only — every other SQLite call site stays sync.
+    "aiodns>=3.2",
+    "aiosqlite>=0.20",
+    # v2.0 Phase 3: tenacity provides standardized declarative retry
+    # decorators replacing fragile custom try/except loops in
+    # provision/fastly_api.py + utils/ngwaf.py + SQLite write paths.
+    "tenacity>=9.0",
+    # argon2-cffi provides argon2id passcode hashing per OWASP 2026
+    # guidance. Used by backend.core.share_db.passcode for new invite
+    # passcode hashes; the legacy scrypt verify branch stays in place so
+    # pre-cutover hashes keep working until each user next logs in
+    # (transparent rehash-on-login upgrades them to argon2id).
+    "argon2-cffi>=23.1",
+    # Phase 10.5: rich + typer power the provision CLI. rich.console
+    # owns the ANSI emit + colour markup for backend/provision/utils.py
+    # (the public info/ok/warn/fail helpers); typer wraps the handler
+    # functions in backend/provision/cli.py as subcommands so
+    # `python -m backend.provision.cli` exposes a real --help.
+    "rich>=13.7",
+    "typer>=0.12",
 ]
 
 [dependency-groups]
@@ -35,6 +77,11 @@ dev = [
     "pytest-cov>=5.0",
     "httpx>=0.28",
     "mypy>=1.15",
+    # mypy-baseline pins pre-existing errors so pre-commit + CI fail only
+    # on net-new errors. Burndown plan + scoping in
+    # pending-docs/session_2026-06-10_otel_dump_and_log_extents.md.
+    "mypy-baseline>=0.7",
+    "types-python-dateutil",
     "ruff>=0.11",
     "pre-commit>=4.0",
     "moto[s3,server]>=5.0",
@@ -64,6 +111,14 @@ testpaths = ["tests"]
 # swap. -n 4 caps the worker pool at 4 regardless of CPU count.
 addopts = "-q -n 4"
 asyncio_mode = "auto"
+markers = [
+    # Tests deriving from an audit-findings/ fix or covering a security
+    # invariant the v2.0 cleanup must not silently regress. CI asserts the
+    # count is monotonically >= the Phase 0 baseline so a refactor can't
+    # delete coverage of a verified fix without surfacing the change.
+    # Phase 0 floor: 24 marked tests (derives from the 24 verified findings).
+    "security_regression: tests covering a verified security fix; CI gates on count",
+]
 # Test-only suppression: FastAPI's TestClient runs requests in worker
 # threads that open metadata_db SQLite connections. Most of them are
 # closed by close_all_connections() in tests/conftest.py, but a handful
@@ -101,25 +156,75 @@ ignore_missing_imports = true
 implicit_optional = true
 exclude = ["frontend/", "docs/", "scripts/"]
 
-# Ignore pre-existing errors in large files not yet annotated
+# ignore_errors burndown — Phase 10.13.
+#
+# This list is the **explicit** set of backend modules that still have
+# pre-existing type errors mypy is suppressing. Each subsequent burndown
+# session picks one module, fixes its errors, removes it from the list.
+# Plan target: ≤ 3 entries by v2.0.0 tag.
+#
+# History:
+#   - r1: broad wildcards (backend.routers.*, backend.utils.*, etc.) —
+#     silently covered 120 files in those packages even though 98 were
+#     already clean by default mypy. Effectively zero coverage on those
+#     packages because the patterns ate everything.
+#   - r2 (this commit): wildcards replaced with the per-file list of the
+#     22 files that actually have errors today. Net effect: 93 files
+#     that had no real mypy coverage are now type-checked. The remaining
+#     28 entries below are the actual burndown list.
+#
+# Refresh procedure when burning down an entry:
+#   1. Remove the line from this list.
+#   2. Run `uv run mypy backend/` — fix or annotate the errors.
+#   3. Run `make test` to make sure no behavior changed.
+#   4. Commit the fix + the override removal in the same commit.
+# NOTE: per the v2.0 zero-tech-debt goal (cleanup_plan §10.13), this
+# block is intentionally empty — every backend module now type-checks
+# under the default settings. Re-add a module here ONLY as a last resort
+# when a fix is genuinely impractical, and document why in a comment
+# alongside the entry.
+[[tool.mypy.overrides]]
+module = []
+ignore_errors = true
+
+# Per-module mypy-strict ratchet (cleanup_plan §10.14). Modules listed
+# below are checked with `disallow_untyped_defs` + friends — every
+# function declares its parameter and return types, no `Any` return
+# leakage from declared concrete types, no unused `# type: ignore` slips.
+# Add a module here once it's clean under default checks AND has the
+# annotations to support the stricter set; new files in these packages
+# inherit the stricter checks automatically.
 [[tool.mypy.overrides]]
 module = [
-    "backend.core.duckdb",
-    "backend.core.iceberg",
-    "backend.core.ingest",
-    "backend.scheduler",
-    "backend.routers.*",
-    "backend.repositories.*",
-    "backend.cron_progress",
-    "backend.utils.*",
-    "backend.models.*",
-    "backend.deps",
-    "backend.provision",
-    "backend.provision.*",
-    "backend.core.log_fields",
-    "backend.config",
+    "backend.core.query_registry",
+    "backend.core.query_instrumentation",
+    "backend.core.query_attribution",
+    "backend.core.metadata.reconciliation",
+    "backend.cron.jobs.compaction",
+    "backend.repositories.session_scoring",
+    "backend.routers.admin_queries",
+    "backend.utils.tunnel.state",
+    # v2.0 final wave (2026-06-12): post-split modules with fresh test
+    # coverage. Each verified clean under the strict flags below before
+    # opt-in; new files in these packages inherit the stricter checks
+    # automatically.
+    "backend.core.rollups._common",
+    "backend.core.rollups.sessions",
+    "backend.core.rollups.time_series",
+    "backend.core.rollups.day_bundles",
+    "backend.core.rollups.hour_bundles",
+    "backend.core.rollups.recompute",
+    "backend.core.rollups.wellknown_bots",
+    "backend.routers.admin.ingest",
+    "backend.routers.admin.log_accounting",
+    "backend.routers.admin.sync_status",
+    "backend.routers.admin.health",
 ]
-ignore_errors = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = true
 
 [tool.ruff]
 line-length = 120
@@ -134,7 +239,7 @@ exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP"]
+select = ["E", "F", "W", "I", "UP", "T201"]
 ignore = [
     "E501",   # line too long — not enforced
     "E701",   # multiple statements on one line — existing codebase style
@@ -142,3 +247,11 @@ ignore = [
     "E402",   # module import not at top — scripts need sys.path setup first
     "F841",   # local variable assigned but never used — often intentional guards
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# CLI tools and one-off scripts legitimately print to stdout.
+"scripts/*" = ["T201"]
+"backend/provision/cli.py" = ["T201"]
+"backend/provision/utils.py" = ["T201"]
+# Tests can print benchmark timings, debug dumps, etc. — not production code.
+"tests/*" = ["T201"]

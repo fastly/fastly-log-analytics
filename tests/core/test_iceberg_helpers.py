@@ -109,6 +109,46 @@ def test_tombstone_buffer_files_writes_sidecar_marker_and_leaves_parquet(tmp_pat
         assert os.path.exists(p + ".consumed-1717000000"), f"tombstone sidecar missing for {p}"
 
 
+def test_tombstone_buffer_files_does_not_fallback_to_immediate_unlink_on_failure(tmp_path):
+    """Regression: a prior implementation fell back to ``os.remove(path)``
+    whenever marker creation raised. That fallback re-opened the race the
+    grace window was added to close — a query bound to the parquet path
+    just before the failed tombstone could read a half-deleted file. The
+    contract is now log-and-skip: the parquet stays on disk, the next
+    commit cycle retries the tombstone, and the failed path is NOT
+    counted as tombstoned (so callers comparing lengths see the gap).
+    """
+    from backend.core import iceberg
+
+    src, paths = _make_buffer(tmp_path, "batch_fail.parquet")
+    target_marker = paths[0] + ".consumed-3000000000"
+
+    real_open = open
+
+    def open_that_blocks_only_the_marker(file, mode="r", *args, **kwargs):
+        if file == target_marker and mode == "x":
+            raise PermissionError("simulated tombstone creation failure")
+        return real_open(file, mode, *args, **kwargs)
+
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)),
+        patch("builtins.open", side_effect=open_that_blocks_only_the_marker),
+    ):
+        tombstoned = iceberg.tombstone_buffer_files(src, paths, ts=3_000_000_000)
+
+    # Failed path stays on disk — no fallback unlink.
+    assert os.path.exists(paths[0]), (
+        "parquet was unlinked despite tombstone failure — the immediate-unlink "
+        "fallback was reintroduced. That fallback re-opens the in-flight-query "
+        "race the tombstone grace window exists to prevent."
+    )
+    # And callers must see this path is NOT in the success list.
+    assert paths[0] not in tombstoned, (
+        "failed tombstone reported as success — callers comparing "
+        "len(tombstoned) == len(paths) lose their atomicity check."
+    )
+
+
 def test_buffer_files_excludes_tombstoned_parquets(tmp_path):
     """``buffer_files()`` must filter out parquets that have a tombstone
     sibling. View rebuilds rely on this to stop binding paths that are
@@ -246,26 +286,39 @@ def test_tombstone_then_query_race_keeps_parquet_readable_during_grace(tmp_path)
         con.close()
 
 
-def test_tombstone_falls_back_to_unlink_on_marker_write_failure(tmp_path):
-    """If creating the sidecar fails (disk full, EROFS, etc.) the buffer
-    file falls back to immediate unlink. Without this fallback, a
-    persistent tombstone failure would let the buffer dir grow without
-    bound — preferable to leak the race fix once than to wedge the
-    pipeline forever."""
+def test_tombstone_logs_and_skips_on_marker_write_failure(tmp_path):
+    """If creating the sidecar fails (disk full, EROFS, etc.), the
+    parquet stays on disk and the failed path is NOT reported as
+    tombstoned. The prior implementation fell back to immediate
+    ``os.remove(path)``, which re-opened the in-flight-query race the
+    grace window was designed to close — a query bound to the parquet
+    just before the failed tombstone could read a half-deleted file.
+    The new contract is log-and-skip: the next commit cycle retries
+    the tombstone naturally, and an unbounded buffer dir size becomes
+    the operational signal.
+    """
     from backend.core import iceberg
 
     src, paths = _make_buffer(tmp_path, "batch_failwrite.parquet")
+    target_marker = paths[0] + ".consumed-1717000000"
+    real_open = open
 
-    def _boom_open(*_args, **_kwargs):
-        raise OSError("simulated EROFS")
+    def _selective_boom(file, mode="r", *args, **kwargs):
+        if file == target_marker and mode == "x":
+            raise OSError("simulated EROFS")
+        return real_open(file, mode, *args, **kwargs)
 
     with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
-        with patch("builtins.open", side_effect=_boom_open):
+        with patch("builtins.open", side_effect=_selective_boom):
             tombstoned = iceberg.tombstone_buffer_files(src, paths, ts=1717_000_000)
 
-    assert tombstoned == paths
-    assert not os.path.exists(paths[0]), "fallback should have unlinked the parquet"
-    assert not os.path.exists(paths[0] + ".consumed-1717000000"), "no sidecar should exist after failure"
+    # Failed path stays on disk — no fallback unlink.
+    assert os.path.exists(paths[0]), (
+        "parquet was unlinked despite tombstone failure — the immediate-unlink "
+        "fallback was reintroduced, re-opening the in-flight-query race."
+    )
+    # And it must not appear in the success list.
+    assert paths[0] not in tombstoned
 
 
 # ── get_arrow_schema / get_schema_field_names ────────────────────────────
@@ -833,7 +886,7 @@ def test_write_to_buffer_creates_buffer_dir_if_missing(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(target)),
         patch("backend.core.iceberg._align_to_schema", return_value=fake_table),
-        patch("backend.core.iceberg.pq.write_table") as mock_write,
+        patch("backend.core.iceberg.buffer.pq.write_table") as mock_write,
     ):
         out = write_to_buffer({"name": "svc"}, fake_table, "x.parquet")
 
@@ -857,7 +910,7 @@ def test_write_to_buffer_uses_zstd_compression_level_1():
     with (
         patch("backend.core.duckdb._cache_dir", return_value="/tmp/x"),
         patch("backend.core.iceberg._align_to_schema", return_value=fake_table),
-        patch("backend.core.iceberg.pq.write_table") as mock_write,
+        patch("backend.core.iceberg.buffer.pq.write_table") as mock_write,
         patch("os.makedirs"),
     ):
         write_to_buffer({"name": "svc"}, fake_table, "x.parquet")

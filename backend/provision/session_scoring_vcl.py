@@ -83,18 +83,18 @@ SCORING_FETCH_PRIORITY = 1
 # override falls back to this default.
 DEFAULT_ASSET_EXT_REGEX = (
     # Anchored at the start AND restricted to the path segment via
-    # ``[^?]*`` (any non-``?`` chars). Without the anchor + path-only
+    # ``[^?#;]*`` (any non-``?``, ``#``, or ``;`` chars). Without the anchor + path-only
     # restriction, ``/api/login?file=.png`` would also match — the
     # extension test would see ``.png`` in the query string and skip
     # scoring entirely, letting an attacker bypass session scoring on
     # any dynamic endpoint by appending an asset extension to the
     # query string. The fix bounds the match to the URL path.
-    r"^[^?]*"
+    r"^[^?#;]*"
     r"\.(aif|aiff|au|avi|bin|bmp|cab|carb|cct|cdf|class|css|dcr|doc|"
     r"dtd|exe|flv|gcf|gff|gif|grv|hdml|hqx|ico|ini|jpeg|jpg|js|mov|"
     r"mp3|mp4|nc|pct|pdf|png|ppc|pws|svg|swa|swf|txt|vbs|w32|wav|"
     r"wbmp|wml|wmlc|wmls|wmlsc|xsd|zip|webp|woff|woff2|ttf|bz2|gz|"
-    r"tgz|tar|lzma|rar|war|bz|7z|ts|m3u8)($|\?)"
+    r"tgz|tar|lzma|rar|war|bz|7z|ts|m3u8)($|\?|#)"
 )
 
 # Backwards-compat alias for tests / external callers that referenced
