@@ -35,7 +35,28 @@ DUCKDB_PATH = "logs.duckdb"  # overridden per-service
 STORAGE_MODE = "cloud"  # always cloud for new services
 ACCESS_LEVEL = "read_write"  # per-service from config
 
-_ORPHAN_THRESHOLD_MINS = 5
+# Status-display busy window. ``_duckdb_status`` shows a service as
+# "busy" while a cron row started inside this window is still running.
+# Intentionally short (5 min) so the status badge in the admin UI
+# reflects "actually busy right now" rather than "started something an
+# hour ago". DIFFERENT from
+# ``backend.core.metadata.base._ORPHAN_THRESHOLD_MINS`` (60 min) which
+# is the orphan-reaper / collision-check threshold for the cron run
+# log itself.
+_STATUS_BUSY_WINDOW_MINS = 5
+
+
+# Map each cron task to the cfg block whose ``log_enabled`` flag governs
+# logging for it. Tasks not in the map always log — the prior
+# ``"cron_sync" if task == "sync" else "cron_compact"`` ternary silently
+# coupled metadata_cleanup / optimize / expire / full_sync / gap_heal /
+# alerts / ngwaf_sync to cron_compact's log_enabled, so setting
+# cron_compact.log_enabled=false on a service would suppress success
+# rows for every task except sync.
+_TASK_TO_CRON_KEY = {
+    "sync": "cron_sync",
+    "local_compact": "cron_compact",
+}
 
 
 # Cached per-process constants — computed once, reused on every connection open.
@@ -919,8 +940,8 @@ def start_cron_run(source: dict, task: str) -> int | None:
     service_id = source["name"]
     cfg = svcconfig.load_config(service_id) or {}
     prov = cfg.get("provisioning", {})
-    cron_key = "cron_sync" if task == "sync" else "cron_compact"
-    cron_cfg = prov.get(cron_key, {})
+    cron_key = _TASK_TO_CRON_KEY.get(task)
+    cron_cfg = prov.get(cron_key, {}) if cron_key else {}
     retention_days = int(cron_cfg.get("log_retention_days", 7))
 
     if retention_days > 0:
@@ -960,16 +981,6 @@ def log_cron_run(
     service_id = source["name"]
     cfg = svcconfig.load_config(service_id) or {}
     prov = cfg.get("provisioning", {})
-    # Map each cron task to the cfg block whose log_enabled flag governs it.
-    # Tasks not in the map always log — the prior ``"cron_sync" if task ==
-    # "sync" else "cron_compact"`` ternary silently coupled metadata_cleanup,
-    # optimize, expire, full_sync, gap_heal, alerts, ngwaf_sync, etc. to
-    # cron_compact's log_enabled. Setting cron_compact.log_enabled=false on
-    # a service would suppress success rows for every task except sync.
-    _TASK_TO_CRON_KEY = {
-        "sync": "cron_sync",
-        "local_compact": "cron_compact",
-    }
     cron_key = _TASK_TO_CRON_KEY.get(task)
     log_enabled = prov.get(cron_key, {}).get("log_enabled", True) if cron_key else True
 

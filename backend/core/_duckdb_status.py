@@ -349,7 +349,7 @@ def get_sync_status(
     try:
         cron_stats = {}
         time_cutoff = (
-            (datetime.now(UTC) - timedelta(minutes=_db_main._ORPHAN_THRESHOLD_MINS))
+            (datetime.now(UTC) - timedelta(minutes=_db_main._STATUS_BUSY_WINDOW_MINS))
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z")
         )

@@ -378,13 +378,6 @@ class _Pool:
         if errored:
             self._discard(con)
             return
-        try:
-            self._cleanup_temp_tables(con)
-        except Exception as e:
-            # Cleanup failure means the connection is in unknown state — discard.
-            logger.debug("[pool] %s: cleanup failed, discarding: %s", self.service_key, e)
-            self._discard(con)
-            return
         with self._cond:
             try:
                 self._idle.put_nowait(con)
@@ -537,23 +530,6 @@ class _Pool:
             )
         except Exception:
             _set_conn_state(con, view_fingerprint=None, buffer_mtime=None)
-
-    def _cleanup_temp_tables(self, con: duckdb.DuckDBPyConnection) -> None:
-        """Drop any t_<uuid>-style temp tables left behind by repositories
-        whose ``temp_table`` context manager exited cleanly does the DROP
-        itself; this is belt-and-suspenders for the failure paths."""
-        try:
-            rows = con.execute(
-                "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main' AND temporary = true"
-            ).fetchall()
-        except Exception:
-            return
-        for (name,) in rows:
-            try:
-                con.execute(f'DROP TABLE IF EXISTS "{name}"')
-            except Exception:
-                # Best-effort — if a single table fails to drop, keep going.
-                pass
 
     def _record_wait_sample(self, wait_ms: float) -> None:
         """Append a checkout wait-time sample to the bounded ring buffer.

@@ -561,10 +561,15 @@ def test_start_cron_run_purges_old_runs_before_starting():
     assert purge_calls == [("svc-1", "sync", 14)]
 
 
-def test_start_cron_run_uses_cron_compact_retention_for_non_sync_tasks():
-    """Tasks other than `sync` use `cron_compact.log_retention_days`.
-    Pinned because admin commit/optimize/expire tasks should respect
-    their own retention setting."""
+def test_start_cron_run_uses_default_retention_for_non_mapped_tasks():
+    """Tasks not in ``_TASK_TO_CRON_KEY`` (commit / optimize / expire /
+    metadata_cleanup / alerts / ngwaf_sync / ...) fall back to the
+    7-day default rather than picking up cron_compact's setting.
+
+    The previous ``"cron_sync" if task == "sync" else "cron_compact"``
+    ternary silently coupled every non-sync task to cron_compact's
+    log_retention_days; this test pins the corrected behavior so the
+    coupling can't quietly come back."""
     from backend.core.duckdb import start_cron_run
 
     purge_calls = []
@@ -582,7 +587,8 @@ def test_start_cron_run_uses_cron_compact_retention_for_non_sync_tasks():
     ):
         start_cron_run({"name": "svc-1"}, "commit")
 
-    assert purge_calls == [("svc-1", "commit", 30)]
+    # 7 (the default), NOT 30 (cron_compact's setting).
+    assert purge_calls == [("svc-1", "commit", 7)]
 
 
 def test_start_cron_run_skips_purge_when_retention_days_zero():

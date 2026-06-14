@@ -342,14 +342,29 @@ class _InstrumentedRecordReader:
 
 
 def _safe_weakref(obj: Any) -> Callable[[], Any] | None:
-    """Return a weakref to ``obj`` if possible. Mirrors the same fallback
-    pattern as :func:`backend.core.query_registry._safe_weakref` — see
-    that docstring for the rationale. Returns ``None`` if the object can't
-    be weakref'd and we don't want to hold a strong reference."""
+    """Return a no-arg callable that dereferences to ``obj`` (or ``None``
+    once ``obj`` is gone).
+
+    Tries ``weakref.ref(obj)`` first — preferred so we never prevent the
+    pool from freeing a connection on error. DuckDB connections support
+    weakref; sqlite3 connections do not. For non-weakref-able objects we
+    fall back to a strong-reference closure: the closure (and the strong
+    ref) are collected when the caller drops its own reference. This
+    matches the same shape as ``backend.core.query_registry._safe_weakref``
+    so the instrumentation path doesn't silently no-op on sqlite3 cursors.
+    """
     try:
         return weakref.ref(obj)
     except TypeError:
-        return None
+        try:
+            ref = obj  # closure captures a strong reference
+
+            def _strong_ref() -> Any:
+                return ref
+
+            return _strong_ref
+        except Exception:
+            return None
 
 
 def _parse_memory_mb(value: Any) -> float | None:
