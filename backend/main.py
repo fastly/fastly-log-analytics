@@ -224,17 +224,26 @@ def _ensure_pop_cache():
 
 
 def _ensure_scoring_matrix():
-    """Pull the trained scoring matrix from FOS at startup for any
-    service that has scoring enabled.
+    """Pull the trained scoring matrix from FOS at startup for every
+    scoring-enabled service.
 
     Without this, the /scoring/evaluation endpoint falls back to the
     bundled matrix.default.json (empty transitions → AUC ≈ 0.5) until
-    an operator manually drops compute/scorer/matrix.json into the
-    container. The fetch is best-effort: missing FOS object, no scoring
-    enabled, S3 timeout — all silently no-op so a slow FOS doesn't
-    block startup.
+    an operator manually drops a matrix into the container. The fetch
+    is best-effort per service: missing FOS object, no scoring enabled,
+    S3 timeout — all silently no-op so a slow FOS doesn't block startup.
+
+    Each service's matrix lands at the tenant-scoped path
+    ``matrix_{sid}.json`` (matches what ``_load_matrix`` checks first in
+    [backend/routers/session_scoring.py](session_scoring.py)) so multiple
+    scoring-enabled services don't trample each other. Pre-audit-finding-005
+    the loop wrote everyone to the shared ``matrix.json`` and broke after
+    the first success; service A's matrix would then serve service B until
+    B's first retrain.
     """
     try:
+        import json as _json
+
         from backend.provision.session_scoring_orchestrator import _MATRIX_PATH
         from backend.state_sync import fetch_matrix_from_fos
 
@@ -242,25 +251,22 @@ def _ensure_scoring_matrix():
             if not (cfg.get("scoring") or {}).get("enabled"):
                 continue
             sid = cfg.get("service_id") or cfg.get("name")
+            if not sid:
+                continue
             try:
                 matrix = fetch_matrix_from_fos(sid)
                 if not matrix:
                     continue
-                _MATRIX_PATH.parent.mkdir(parents=True, exist_ok=True)
-                with _MATRIX_PATH.open("w") as f:
-                    import json as _json
-
+                tenant_path = _MATRIX_PATH.with_name(f"{_MATRIX_PATH.stem}_{sid}{_MATRIX_PATH.suffix}")
+                tenant_path.parent.mkdir(parents=True, exist_ok=True)
+                with tenant_path.open("w") as f:
                     _json.dump(matrix, f)
                 logging.info(
-                    "[fastapi] Pulled scoring matrix from FOS for %s (version=%s)",
+                    "[fastapi] Pulled scoring matrix from FOS for %s (version=%s) → %s",
                     sid,
                     matrix.get("version", "?"),
+                    tenant_path.name,
                 )
-                # First-write-wins: with multiple scoring-enabled services,
-                # the matrix file is global. They SHOULD all be the same
-                # matrix (one trainer, one deploy), but if they differ
-                # we use whichever loaded first and log a warning above.
-                break
             except Exception as e:
                 logging.warning("[fastapi] Could not pull scoring matrix for %s: %s", sid, e)
     except Exception as e:

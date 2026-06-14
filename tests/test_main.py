@@ -283,6 +283,96 @@ def test_ensure_pop_cache_swallows_unexpected_exceptions():
         _ensure_pop_cache()  # must not raise
 
 
+# ── _ensure_scoring_matrix ──────────────────────────────────────────────────
+
+
+def test_ensure_scoring_matrix_writes_tenant_scoped_paths_for_each_service(tmp_path):
+    """Pre-audit-finding-005 the boot helper wrote every service's FOS-pulled
+    matrix to the shared ``matrix.json`` and broke after the first success,
+    so service A's matrix would silently serve service B until B's first
+    retrain. Pin the tenant-scoped path + no-early-break behaviour so the
+    cross-tenant leak can't come back."""
+    from backend.main import _ensure_scoring_matrix
+
+    fake_matrix_path = tmp_path / "matrix.json"
+    configs = [
+        {"service_id": "svc-a", "scoring": {"enabled": True}},
+        {"service_id": "svc-b", "scoring": {"enabled": True}},
+        {"service_id": "svc-c", "scoring": {"enabled": False}},  # skipped
+    ]
+    matrices = {
+        "svc-a": {"version": "a-v1", "vocab_size": 10},
+        "svc-b": {"version": "b-v1", "vocab_size": 20},
+    }
+
+    with (
+        patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_matrix_path),
+        patch("backend.config.list_configs", return_value=configs),
+        patch("backend.state_sync.fetch_matrix_from_fos", side_effect=lambda sid: matrices.get(sid)),
+    ):
+        _ensure_scoring_matrix()
+
+    # Both enabled services land in their own tenant-scoped file —
+    # NOT the shared matrix.json.
+    assert (tmp_path / "matrix_svc-a.json").exists()
+    assert (tmp_path / "matrix_svc-b.json").exists()
+    assert not fake_matrix_path.exists(), "shared matrix.json must not be written"
+
+    import json as _json
+
+    assert _json.loads((tmp_path / "matrix_svc-a.json").read_text())["version"] == "a-v1"
+    assert _json.loads((tmp_path / "matrix_svc-b.json").read_text())["version"] == "b-v1"
+
+
+def test_ensure_scoring_matrix_tolerates_per_service_failure(tmp_path):
+    """One service's FOS fetch failing must not break the others —
+    startup is best-effort, partial coverage > no coverage."""
+    from backend.main import _ensure_scoring_matrix
+
+    fake_matrix_path = tmp_path / "matrix.json"
+
+    def fetch(sid):
+        if sid == "svc-bad":
+            raise RuntimeError("FOS unreachable")
+        return {"version": "v1", "vocab_size": 5}
+
+    configs = [
+        {"service_id": "svc-bad", "scoring": {"enabled": True}},
+        {"service_id": "svc-good", "scoring": {"enabled": True}},
+    ]
+
+    with (
+        patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_matrix_path),
+        patch("backend.config.list_configs", return_value=configs),
+        patch("backend.state_sync.fetch_matrix_from_fos", side_effect=fetch),
+    ):
+        _ensure_scoring_matrix()  # must not raise
+
+    assert (tmp_path / "matrix_svc-good.json").exists()
+    assert not (tmp_path / "matrix_svc-bad.json").exists()
+
+
+def test_ensure_scoring_matrix_skips_services_without_scoring_enabled(tmp_path):
+    """Services with no ``scoring`` block or ``enabled: false`` must not
+    trigger a FOS fetch — bounds per-restart FOS calls to actual scorers."""
+    from backend.main import _ensure_scoring_matrix
+
+    fake_matrix_path = tmp_path / "matrix.json"
+    configs = [
+        {"service_id": "svc-off", "scoring": {"enabled": False}},
+        {"service_id": "svc-none"},
+    ]
+
+    with (
+        patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_matrix_path),
+        patch("backend.config.list_configs", return_value=configs),
+        patch("backend.state_sync.fetch_matrix_from_fos") as mock_fetch,
+    ):
+        _ensure_scoring_matrix()
+
+    mock_fetch.assert_not_called()
+
+
 # ── _background_startup ────────────────────────────────────────────────────
 
 
