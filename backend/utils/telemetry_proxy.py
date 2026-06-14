@@ -43,6 +43,15 @@ _RUNNER: web.AppRunner | None = None
 _LOOP: asyncio.AbstractEventLoop | None = None
 _SESSION: aiohttp.ClientSession | None = None
 _READY = threading.Event()
+# Serialises the "is the server already up / do we need to start it"
+# decision in :func:`start_proxy_server`. Concurrent first-callers used
+# to race: thread A would see ``_SERVER_THREAD is None``, spawn the
+# server, and start waiting on _READY; thread B would see the just-
+# spawned thread alive, early-return without waiting, then hit
+# ``proxy_endpoint()`` while ``_PORT`` was still None — surfacing as
+# "proxy server is not running" on every concurrent first-caller after
+# the first.
+_START_LOCK = threading.Lock()
 
 # Upstream call timeouts. The wall-clock `total` is the safety net for
 # requests that get wedged past Fastly's 60s first_byte_timeout (a stuck
@@ -677,12 +686,24 @@ def _run_server() -> None:
 
 def start_proxy_server() -> None:
     global _SERVER_THREAD
-    if _SERVER_THREAD is not None and _SERVER_THREAD.is_alive():
+    # Fast path: server is up and serving. ``_PORT`` is set inside
+    # ``_run_server`` after the server has bound, so testing it (not just
+    # ``_SERVER_THREAD.is_alive()``) is what tells us a concurrent caller
+    # is safe to read ``proxy_endpoint()`` immediately.
+    if _PORT is not None and _SERVER_THREAD is not None and _SERVER_THREAD.is_alive():
         return
-    _READY.clear()
-    _SERVER_THREAD = threading.Thread(target=_run_server, daemon=True, name="telemetry-proxy")
-    _SERVER_THREAD.start()
-    # Anything beyond ~2s is a bind failure; fail loud rather than racing.
+    with _START_LOCK:
+        # Re-check under the lock. The first caller spawns the thread;
+        # every subsequent caller falls through to ``_READY.wait`` below
+        # without re-spawning so we don't have N threads each starting
+        # their own server (which would also leak module globals).
+        if _SERVER_THREAD is None or not _SERVER_THREAD.is_alive():
+            _READY.clear()
+            _SERVER_THREAD = threading.Thread(target=_run_server, daemon=True, name="telemetry-proxy")
+            _SERVER_THREAD.start()
+    # Wait OUTSIDE the lock so concurrent callers all block in parallel
+    # rather than serialising. Anything beyond ~2s is a bind failure;
+    # fail loud rather than racing.
     if not _READY.wait(timeout=2.0):
         raise RuntimeError("telemetry proxy failed to start within 2s")
 
