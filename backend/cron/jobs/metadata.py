@@ -71,10 +71,6 @@ def _run_metadata_sync(
             return
 
     cleanup_progress_and_reap()
-    try:
-        pass
-    except Exception:
-        pass
 
     # For manual runs (run_id is not None), we ignore the default limit unless
     # it was explicitly passed in. If a manual run is triggered without
@@ -325,11 +321,6 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
     svc_display = cfg.get("name", service_id)
     logger.info("▶️  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job started.", svc_display)
 
-    try:
-        pass
-    except Exception:
-        pass
-
     prov = cfg.get("provisioning", {})
     retention_days = int(prov.get("cron_ngwaf", {}).get("log_retention_days", 30))
     server_name_filter = cfg.get("server_name") or None
@@ -519,11 +510,6 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
     _svc_name = _display_name(src, service_id)
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
     logger.info("▶️  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job started.", _display)
-
-    try:
-        pass
-    except Exception:
-        pass
 
     # Fetch alerts from per-service metadata SQLite (no DuckDB needed).
     alerts = alert_repo.get_alerts(service_id=service_id)

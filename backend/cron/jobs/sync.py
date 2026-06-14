@@ -64,11 +64,6 @@ def _run_service_cron(
     if src.get("access_level") == "read_only" and not force:
         return
 
-    try:
-        pass
-    except Exception:
-        pass
-
     prov = cfg.get("provisioning", {})
     sync_cfg = prov.get("cron_sync", {})
 

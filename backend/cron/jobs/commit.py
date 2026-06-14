@@ -48,11 +48,6 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
     if src.get("access_level") == "read_only" and not force:
         return
 
-    try:
-        pass
-    except Exception:
-        pass
-
     prov = cfg.get("provisioning", {})
     sync_cfg = prov.get("cron_sync", {})
     if not sync_cfg.get("enabled", True) and not force:

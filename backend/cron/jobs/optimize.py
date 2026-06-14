@@ -31,11 +31,6 @@ def _run_optimize(service_id: str) -> None:
         return
 
     try:
-        pass
-    except Exception:
-        pass
-
-    try:
         run_id = start_cron_run(src, "optimize")
     except RuntimeError as e:
         logger.info("⏭️  \x1b[92m[optimize]\x1b[0m %s: skipping — %s", service_id, str(e))
