@@ -62,7 +62,7 @@ def test_lake_info_returns_fetched_payload(client):
         "latest": "2026-05-18T00:00:00Z",
         "calendar": {},
     }
-    with patch("backend.models.lake.fetch_lake_info", return_value=fake_info) as mock_fetch:
+    with patch("backend.core.iceberg.lake_info.fetch_lake_info", return_value=fake_info) as mock_fetch:
         resp = client.get(
             f"/api/services/{MOCK_SERVICE_ID}/lake-info",
             headers={"x-fastly-service-id": MOCK_SERVICE_ID},

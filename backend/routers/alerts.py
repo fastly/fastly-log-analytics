@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from backend.deps import get_con, get_service_id
 from backend.models.alerts import Alert, AlertListResponse, AlertPreviewResponse, AlertResponse
 from backend.repositories import alerts as repo
-from backend.utils.router_utils import sync_admin_state
+from backend.routers._state_sync import sync_admin_state
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 

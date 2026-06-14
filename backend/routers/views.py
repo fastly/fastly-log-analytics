@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from backend.deps import get_service_id
 from backend.models.views import SavedView
 from backend.repositories import views as repo
-from backend.utils.router_utils import sync_admin_state
+from backend.routers._state_sync import sync_admin_state
 
 router = APIRouter(prefix="/api/views", tags=["views"])
 

@@ -67,7 +67,7 @@ def api_services_list(request: Request, service_id: str | None = Depends(get_ser
 @router.get("/services/{service_id}/lake-info")
 def get_service_lake_info(source: dict = Depends(get_source)):
     """Return Iceberg table range and calendar for a configured service."""
-    from backend.models.lake import fetch_lake_info
+    from backend.core.iceberg.lake_info import fetch_lake_info
 
     return fetch_lake_info(source, use_temp_cache=False)
 

@@ -403,7 +403,7 @@ def provision_lake_info(req: LakeInfoRequest):
     iceberg_metadata_location = req.iceberg_metadata_location
     import hashlib
 
-    from backend.models.lake import fetch_lake_info
+    from backend.core.iceberg.lake_info import fetch_lake_info
 
     # Use a deterministic name to isolate catalog caches from real services.
     h = hashlib.md5(f"{bucket}:{prefix}".encode()).hexdigest()[:12]

@@ -725,7 +725,7 @@ def _read_metadata_pointer(source: dict, identifier: tuple) -> str | None:
 
     try:
         from backend.core.duckdb import _get_fos_client
-        from backend.models.lake import _safe_cdn_url
+        from backend.core.iceberg.lake_info import _safe_cdn_url
 
         s3 = _get_fos_client(source)
         bucket = source["bucket"]

@@ -107,33 +107,9 @@ def sse_event(payload: dict, pad: int = 256):
         yield f": {' ' * pad}\n\n"
 
 
-# ── State sync ────────────────────────────────────────────────────────────────
-
-
-def sync_admin_state(service_id: str | None) -> None:
-    """Fire-and-forget admin state export after alert/view mutations.
-
-    Also nudges the scheduler so that toggling alert count between 0 and >0
-    immediately registers or removes the alerts evaluation cron — otherwise
-    a user who just created their first alert would wait until the next
-    process restart for evaluation to start.
-
-    Swallows all exceptions so a sync failure never breaks the primary request.
-    """
-    if not service_id:
-        return
-    try:
-        from backend.state_sync import export_admin_state
-
-        export_admin_state(service_id)
-    except Exception:
-        pass
-    try:
-        from backend.scheduler import get_scheduler
-
-        get_scheduler().reload()
-    except Exception:
-        pass
+# ``sync_admin_state`` moved to ``backend.routers._state_sync`` — its two
+# transitive imports (state_sync, scheduler) sit above ``utils`` in the
+# layering, and the only callers are routers anyway.
 
 
 def query_errors(status_code: int = 400):

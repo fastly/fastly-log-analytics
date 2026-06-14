@@ -264,7 +264,7 @@ def _cdn_get(source: dict, key: str) -> bytes:
     import urllib.parse
     import urllib.request
 
-    from backend.models.lake import _safe_cdn_url
+    from backend.core.iceberg.lake_info import _safe_cdn_url
     from backend.utils.telemetry import record_cdn_call
 
     # SSRF guard: ``cdn_url`` is user-supplied at provision time. Reject
