@@ -64,8 +64,10 @@ def dashboard_bundle(req: AggregatesRequest, ctx: RequestContext = Depends(build
     composite passes through whatever those return.
     """
     from backend.repositories import security as security_repo
+    from backend.repositories._base import SectionTimer
 
-    section_timings: list[dict] = []
+    timer = SectionTimer()
+    section_timings = timer.entries
     t0 = time.perf_counter()
     aggregates = repo.get_aggregates(
         con=ctx.con,
@@ -77,7 +79,7 @@ def dashboard_bundle(req: AggregatesRequest, ctx: RequestContext = Depends(build
         chart_metric=req.chart_metric,
         fields_filter=req.fields,
     )
-    section_timings.append({"section": "bundle:aggregates", "time_ms": round((time.perf_counter() - t0) * 1000, 2)})
+    timer.mark("bundle:aggregates", t0)
     t1 = time.perf_counter()
     if req.fields is not None and not any(f in req.fields for f in ("_bot_name", "_ngwaf_bot_name")):
         top_bots: dict[str, Any] = {"bots": [], "ngwaf_bots": []}
@@ -89,7 +91,7 @@ def dashboard_bundle(req: AggregatesRequest, ctx: RequestContext = Depends(build
             end_time=req.end_time,
             filters=req.filters,
         )
-    section_timings.append({"section": "bundle:top_bots", "time_ms": round((time.perf_counter() - t1) * 1000, 2)})
+    timer.mark("bundle:top_bots", t1)
     # Rename nested `section_timings` → `_section_timings` so the bundle
     # response mirrors what the dedicated /aggregates and /top-bots
     # endpoints emit (those go through Pydantic with

@@ -10,7 +10,7 @@ from typing import Any
 import duckdb
 
 from backend.models.common import FiltersDict
-from backend.repositories._base import QueryRunner, _safe_table, empty_schema_response
+from backend.repositories._base import QueryRunner, SectionTimer, _safe_table, empty_schema_response
 from backend.repositories._sql import sessions as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.pagination import calc_offset
@@ -450,10 +450,8 @@ def get_sessions(
     # so the perf harness can attribute wall time inside /api/sessions
     # without re-running ad-hoc instrumentation. Mirrors the pattern in
     # dashboard.py / bootstrap.py.
-    section_timings: list[dict] = []
-
-    def _phase(name: str, t0: float) -> None:
-        section_timings.append({"section": name, "time_ms": round((time.perf_counter() - t0) * 1000, 2)})
+    timer = SectionTimer()
+    section_timings = timer.entries
 
     runner = QueryRunner(con, src)
     table_name = _safe_table(src["name"])
@@ -461,7 +459,7 @@ def get_sessions(
 
     _t = time.perf_counter()
     actual_cols = set(runner.get_schema_cols())
-    _phase("get_schema_cols", _t)
+    timer.mark("get_schema_cols", _t)
     if not actual_cols:
         return empty_schema_response(
             sessions=[],
@@ -489,7 +487,7 @@ def get_sessions(
 
     _t = time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols))
-    _phase("build_where_clause", _t)
+    timer.mark("build_where_clause", _t)
 
     has_ja4 = "ja4" in actual_cols
     has_asn = "asn" in actual_cols
@@ -550,7 +548,7 @@ def get_sessions(
                 section_timings=section_timings,
                 rollup_filters=filters,
             )
-            _phase("sessions_rollup_attempt", _t)
+            timer.mark("sessions_rollup_attempt", _t)
             if rollup_result is not None:
                 return rollup_result
 
@@ -642,7 +640,7 @@ def get_sessions(
     )
     _t = time.perf_counter()
     result = runner.execute_with_retry(data_sql, params)
-    _phase("sessions_query", _t)
+    timer.mark("sessions_query", _t)
     if result is None:
         return empty_schema_response(
             sessions=[],
@@ -658,7 +656,7 @@ def get_sessions(
 
     _t = time.perf_counter()
     rows = result.fetchall()
-    _phase("fetchall", _t)
+    timer.mark("fetchall", _t)
     col_names = [desc[0] for desc in con.description]
 
     sessions: list[dict] = []
@@ -678,7 +676,7 @@ def get_sessions(
             flagged_filter=flagged_filter,
         )
         total = runner.execute(count_sql, params).fetchone()[0]
-        _phase("count_query", _t)
+        timer.mark("count_query", _t)
 
     return {
         "sessions": sessions,

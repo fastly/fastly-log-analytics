@@ -22,6 +22,7 @@ from backend.models.usage import (
     UsageOperationsResponse,
 )
 from backend.repositories import usage as repo
+from backend.repositories._base import SectionTimer
 from backend.utils.router_utils import query_errors
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
@@ -71,10 +72,8 @@ async def prefill(source: dict = Depends(get_source)):
     # Per-phase timings — /api/usage/prefill clocks ~1.4 s p50 per perf
     # audit; section_timings shows whether the cost is in the Fastly
     # endpoint chain, the /stats fetch, or the DuckDB edge-ratio hop.
-    section_timings: list[dict] = []
-
-    def _phase(name: str, t0: float) -> None:
-        section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
+    timer = SectionTimer()
+    section_timings = timer.entries
 
     global_rates = svcconfig.load_usage_logging_config()
 
@@ -264,7 +263,7 @@ async def prefill(source: dict = Depends(get_source)):
         try:
             _t = _time.perf_counter()
             chain_updates, payload = await asyncio.gather(_resolve_endpoint_chain(), _fetch_stats())
-            _phase("fastly_chain_and_stats", _t)
+            timer.mark("fastly_chain_and_stats", _t)
             # Chain updates feed into the response shape's existing keys
             # — overrides any defaults set above and any cron_sync values
             # set from the local config, matching the prior precedence
@@ -315,7 +314,7 @@ async def prefill(source: dict = Depends(get_source)):
 
             _t = _time.perf_counter()
             edge_ratio, debug_queries = await asyncio.to_thread(_edge_ratio_blocking)
-            _phase("edge_ratio_query", _t)
+            timer.mark("edge_ratio_query", _t)
             if edge_ratio is not None:
                 result["edge_ratio"] = edge_ratio
         except Exception:

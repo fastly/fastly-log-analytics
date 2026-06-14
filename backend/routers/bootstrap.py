@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.deps import get_con, get_service_id, get_source
 from backend.models.common import BootstrapResponse
+from backend.repositories._base import SectionTimer
 from backend.utils.router_utils import query_errors
 
 router = APIRouter(prefix="/api", tags=["bootstrap"])
@@ -17,8 +18,6 @@ def bootstrap(
     request: Request,
     service_id: str | None = Depends(get_service_id),
 ):
-    import time as _time
-
     from backend.core import duckdb as _db
     from backend.core.duckdb import STORAGE_MODE
     from backend.services.service_manager import get_enriched_services
@@ -29,14 +28,8 @@ def bootstrap(
     # which section owns the bootstrap wall time. Each entry is
     # {"section": str, "time_ms": float} and surfaces via
     # BootstrapResponse._section_timings.
-    section_timings: list[dict] = []
-
-    def _timed(name: str, fn):
-        t0 = _time.monotonic()
-        try:
-            return fn()
-        finally:
-            section_timings.append({"section": name, "time_ms": round((_time.monotonic() - t0) * 1000, 2)})
+    timer = SectionTimer()
+    section_timings = timer.entries
 
     # /api/bootstrap is in _UNAUTH_ANALYST_PATHS so anonymous remote visitors
     # can get a stub response telling the frontend to redirect them to
@@ -53,7 +46,7 @@ def bootstrap(
             def _validate():
                 return get_tunnel_manager().validate_session(sid)
 
-            analyst_session = _timed("validate_analyst_session", _validate)
+            analyst_session = timer.call("validate_analyst_session", _validate)
             if analyst_session is not None:
                 request.state.analyst_session = analyst_session
 
@@ -72,9 +65,9 @@ def bootstrap(
 
     src: dict | None = None
     if service_id:
-        src = _timed("get_source_for_service", lambda: _db.get_source_for_service(service_id))
+        src = timer.call("get_source_for_service", lambda: _db.get_source_for_service(service_id))
 
-    services = _timed("get_enriched_services", lambda: get_enriched_services(service_id))
+    services = timer.call("get_enriched_services", lambda: get_enriched_services(service_id))
 
     # Analyst path: filter services to those scoped on the invite and force
     # access_level=read_only regardless of what get_source_for_service returned.
@@ -102,7 +95,7 @@ def bootstrap(
             return active_svc["status"].get("schema", []) or []
         return []
 
-    schema = _timed("schema_lookup", _resolve_schema)
+    schema = timer.call("schema_lookup", _resolve_schema)
 
     # NOTE: the previous fallback opened a read-only DuckDB connection here
     # and ran get_schema() against the source on cold-cache loads. That call
@@ -114,7 +107,7 @@ def bootstrap(
     # renders without a hint banner; the user can refresh once the cron
     # has run (typically <60s after startup).
 
-    pops = _timed("get_pop_lat_lon_map", get_pop_lat_lon_map)
+    pops = timer.call("get_pop_lat_lon_map", get_pop_lat_lon_map)
 
     # Per the perf audit (F6): bootstrap's custom_fields_catalog was a
     # ~10-15 KB duplicate of what every chart page already fetches
@@ -145,7 +138,7 @@ def bootstrap(
             cf["name"] for cf in lf_config.get("custom_fields", []) if cf.get("enabled", True)
         ]
 
-    _timed("custom_fields_catalog", _resolve_custom_fields)
+    timer.call("custom_fields_catalog", _resolve_custom_fields)
 
     # Perf audit Phase D: fold the log-fields catalog into the
     # bootstrap response so the frontend can seed its
@@ -163,7 +156,7 @@ def bootstrap(
             return
         log_fields_catalog_payload = _compute_log_fields_catalog(valid_active_id)
 
-    _timed("log_fields_catalog", _resolve_log_fields_catalog)
+    timer.call("log_fields_catalog", _resolve_log_fields_catalog)
 
     # Phase D-2: fold the cached sync-status into bootstrap for admin
     # callers. The dedicated /api/sync-status endpoint is admin-only
@@ -188,7 +181,7 @@ def bootstrap(
 
         sync_status_payload = compute_sync_status_cached(valid_active_id)
 
-    _timed("sync_status", _resolve_sync_status)
+    timer.call("sync_status", _resolve_sync_status)
 
     # Phase D-3: fold the lean share-status banner into bootstrap so
     # the header banner has its initial state on first render and
@@ -214,7 +207,7 @@ def bootstrap(
             # if the tunnel manager is in a transient state.
             pass
 
-    _timed("share_banner", _resolve_share_banner)
+    timer.call("share_banner", _resolve_share_banner)
 
     # Header badge + log extents: analyst-safe payloads projected
     # from the cached sync-status snapshot. Both available to BOTH
@@ -263,7 +256,7 @@ def bootstrap(
             "latest_log_at": cached_status.get("latest_log_at"),
         }
 
-    _timed("header_badge_and_extents", _resolve_header_badge_and_extents)
+    timer.call("header_badge_and_extents", _resolve_header_badge_and_extents)
 
     views: list[dict] = []
 
@@ -279,7 +272,7 @@ def bootstrap(
             # must not break /api/bootstrap.
             return []
 
-    views = _timed("views", _resolve_views)
+    views = timer.call("views", _resolve_views)
 
     # Force read_only for analyst sessions regardless of underlying source.
     if analyst_session is not None:

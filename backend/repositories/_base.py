@@ -15,6 +15,33 @@ from typing import Any
 
 import duckdb
 
+
+class SectionTimer:
+    """Per-request wall-clock timer that builds the ``_section_timings``
+    list the perf harness reads.
+
+    Replaces the per-function ``_phase(name, t0)`` / ``_timed(name, fn)``
+    closures that several repos and routers each defined inline. Pass
+    an existing list to ``entries`` to share the sink with a caller (for
+    helpers that take an optional ``section_timings`` argument).
+    """
+
+    __slots__ = ("entries",)
+
+    def __init__(self, entries: list[dict] | None = None) -> None:
+        self.entries: list[dict] = entries if entries is not None else []
+
+    def mark(self, name: str, t0: float) -> None:
+        self.entries.append({"section": name, "time_ms": round((time.perf_counter() - t0) * 1000, 2)})
+
+    def call(self, name: str, fn):
+        t0 = time.perf_counter()
+        try:
+            return fn()
+        finally:
+            self.mark(name, t0)
+
+
 # Pre-compile once; called per ``runner.execute`` invocation.
 _PARQUET_LIST_RE = re.compile(r"read_parquet\(\[\s*('[^']+'\s*(?:,\s*'[^']+'\s*)*)\]")
 

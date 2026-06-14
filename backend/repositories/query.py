@@ -9,7 +9,7 @@ from typing import Any
 
 import duckdb
 
-from backend.repositories._base import _compact_sql_for_debug, _get_schema, _safe_table
+from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _get_schema, _safe_table
 from backend.repositories._sql import query as SQL
 from backend.utils.sql_validator import (
     SQLValidationError,
@@ -33,17 +33,15 @@ def execute_query(
     # Per-phase wall-clock timings — complements the existing
     # _debug_queries (per-SQL granularity) with a higher-level view of
     # where validate / explain / execute / serialize each contribute.
-    section_timings: list[dict] = []
-
-    def _phase(name: str, t0: float) -> None:
-        section_timings.append({"section": name, "time_ms": round((time.monotonic() - t0) * 1000, 2)})
+    timer = SectionTimer()
+    section_timings = timer.entries
 
     if src:
         table_name = _safe_table(src["name"])
         if table_name != "logs":
             sql = re.sub(r"\blogs\b", table_name, sql, flags=re.IGNORECASE)
 
-    _t = time.monotonic()
+    _t = time.perf_counter()
     try:
         validate_user_sql(
             sql,
@@ -54,7 +52,7 @@ def execute_query(
     except SQLValidationError as exc:
         # PermissionError is what the route handler maps to HTTP 403.
         raise PermissionError(exc.message) from exc
-    _phase("validate_user_sql", _t)
+    timer.mark("validate_user_sql", _t)
 
     # Execution-side defense-in-depth: cap memory and timeout on the
     # connection before running the user query. Independent of parse
@@ -69,14 +67,14 @@ def execute_query(
 
     explain_plan: str | None = None
     if want_explain:
-        t_exp = time.monotonic()
+        t_exp = time.perf_counter()
         explain_sql = SQL.EXPLAIN_WRAPPER.format(sql=sql)
         plan_rows = con.execute(explain_sql).fetchall()
         explain_plan = "\n".join(r[1] for r in plan_rows if r[1])
         _debug_queries.append(
-            {"sql": _compact_sql_for_debug(explain_sql), "time_ms": round((time.monotonic() - t_exp) * 1000, 2)}
+            {"sql": _compact_sql_for_debug(explain_sql), "time_ms": round((time.perf_counter() - t_exp) * 1000, 2)}
         )
-        _phase("explain", t_exp)
+        timer.mark("explain", t_exp)
 
     # Auto-apply LIMIT max_rows+1 when the query doesn't already have one.
     # Without this, `SELECT * FROM logs ORDER BY timestamp DESC` materializes
@@ -96,13 +94,13 @@ def execute_query(
         inner = sql.rstrip().rstrip(";")
         exec_sql = SQL.AUTO_LIMIT_WRAPPER.format(inner=inner, limit=max_rows + 1)
 
-    t0 = time.monotonic()
+    t0 = time.perf_counter()
     result = con.execute(exec_sql)
-    _t_fetch = time.monotonic()
-    _phase("execute", t0)
+    _t_fetch = time.perf_counter()
+    timer.mark("execute", t0)
     df = result.fetchdf()
-    _phase("fetchdf", _t_fetch)
-    elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
+    timer.mark("fetchdf", _t_fetch)
+    elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
     _debug_queries.append({"sql": _compact_sql_for_debug(exec_sql.strip()), "time_ms": elapsed_ms})
 
     fetched_rows = len(df)
@@ -122,10 +120,10 @@ def execute_query(
             df = df.head(max_rows)
         total_rows = fetched_rows
 
-    _t_serialize = time.monotonic()
+    _t_serialize = time.perf_counter()
     columns = list(df.columns)
     records: list[dict[str, Any]] = json.loads(df.to_json(orient="records", date_format="iso"))
-    _phase("serialize_json", _t_serialize)
+    timer.mark("serialize_json", _t_serialize)
 
     resp: dict[str, Any] = {
         "columns": columns,

@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.deps import get_service_id, get_source
 from backend.models.services import LogFieldsUpdateRequest, ServicesListResponse
+from backend.repositories._base import SectionTimer
 from backend.utils.router_utils import SSE_HEADERS as _SSE_HEADERS
 from backend.utils.router_utils import sse_flush_preamble as _sse_flush
 
@@ -481,10 +482,8 @@ def api_service_logging_settings(service_id: str):
     # settings is ~742 ms on the alerts page; section_timings tells us
     # how that splits between get_active_version / GET endpoint /
     # find_condition so the caching work targets the right call.
-    section_timings: list[dict] = []
-
-    def _phase(name: str, t0: float) -> None:
-        section_timings.append({"section": name, "time_ms": round((_time.perf_counter() - t0) * 1000, 2)})
+    timer = SectionTimer()
+    section_timings = timer.entries
 
     cached_fields = _logging_settings_cache.get(service_id)
     if cached_fields is not None:
@@ -506,13 +505,13 @@ def api_service_logging_settings(service_id: str):
 
         _t = _time.perf_counter()
         active_ver = get_active_version(service_id, token)
-        _phase("get_active_version", _t)
+        timer.mark("get_active_version", _t)
         if not active_ver:
             raise HTTPException(status_code=400, detail={"error": "No active version found"})
         encoded_name = urllib.parse.quote(endpoint_name, safe="")
         _t = _time.perf_counter()
         ep = fastly("GET", f"/service/{service_id}/version/{active_ver}/logging/s3/{encoded_name}", token=token)
-        _phase("get_logging_endpoint", _t)
+        timer.mark("get_logging_endpoint", _t)
         sample_rate = 100
         edge_only = False
         custom_condition = ""
@@ -520,7 +519,7 @@ def api_service_logging_settings(service_id: str):
         if cond_name:
             _t = _time.perf_counter()
             cond = find_condition(cond_name, service_id, active_ver, token)
-            _phase("find_condition", _t)
+            timer.mark("find_condition", _t)
             stmt = cond.get("statement", "") if cond else ""
             m = re.search("randombool\\((\\d+),", stmt)
             if m:

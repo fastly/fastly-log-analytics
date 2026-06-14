@@ -16,6 +16,7 @@ from backend.models.common import FiltersDict
 from backend.repositories._base import (
     CANONICAL_METRICS,
     QueryRunner,
+    SectionTimer,
     _get_schema,
     _safe_table,
     get_source_extent,
@@ -150,19 +151,13 @@ def get_aggregates(
     # _section_timings so we can attribute the cold dashboard wall
     # without re-running ad-hoc instrumentation. Matches the
     # bootstrap.py pattern. Negligible overhead (perf_counter is ~50ns).
-    section_timings: list[dict] = []
-
-    def _timed(name: str, fn):
-        t0 = time.perf_counter()
-        try:
-            return fn()
-        finally:
-            section_timings.append({"section": name, "time_ms": round((time.perf_counter() - t0) * 1000, 2)})
+    timer = SectionTimer()
+    section_timings = timer.entries
 
     runner = QueryRunner(con, src)
     interval = "1 minute"
 
-    actual_cols = _timed("get_schema_cols", runner.get_schema_cols)
+    actual_cols = timer.call("get_schema_cols", runner.get_schema_cols)
     if not actual_cols:
         empty = {f: {"top": [], "total": 0} for f in fields}
         return {
@@ -177,7 +172,7 @@ def get_aggregates(
             **runner.telemetry(),
         }
 
-    params, where_clause = _timed(
+    params, where_clause = timer.call(
         "build_where_clause",
         lambda: build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True),
     )
@@ -327,7 +322,7 @@ def get_aggregates(
         narrow_cols_str = ", ".join(narrow) if narrow else "*"
         live_temp = f"t_live_hour_{uuid.uuid4().hex}"
         sql = f"CREATE TEMP TABLE {live_temp} AS SELECT {narrow_cols_str} FROM {table_name} WHERE {where_clause}"
-        if _timed("live_temp_create", lambda: runner.create_temp_table(sql, params)):
+        if timer.call("live_temp_create", lambda: runner.create_temp_table(sql, params)):
             table_name = live_temp
             where_clause = "1=1"
             params = []
@@ -340,7 +335,7 @@ def get_aggregates(
         # This prevents DuckDB from re-scanning the underlying files for every branch of the UNION ALL.
         temp_table = f"t_{uuid.uuid4().hex}"
         sql = f"CREATE TEMP TABLE {temp_table} AS SELECT {cols_str} FROM {table_name} WHERE {where_clause}"
-        if not _timed("wide_temp_create", lambda: runner.create_temp_table(sql, params)):
+        if not timer.call("wide_temp_create", lambda: runner.create_temp_table(sql, params)):
             empty = {f: {"top": [], "total": 0} for f in fields}
             return {
                 "data": empty,
@@ -413,11 +408,11 @@ def get_aggregates(
                 for i, field in enumerate(valid_fields):
                     field_totals[field] = count_res[i + 1]
 
-        total_rows_total, earliest_log_at, latest_log_at = _timed(
+        total_rows_total, earliest_log_at, latest_log_at = timer.call(
             "source_extent", lambda: get_source_extent(runner, src, orig_table_name)
         )
 
-        schema_types = _timed("schema_types", lambda: {col["name"]: col["type"] for col in _get_schema(con, src)})
+        schema_types = timer.call("schema_types", lambda: {col["name"]: col["type"] for col in _get_schema(con, src)})
 
         # When use_rollups=True, field_totals is empty here — populate it
         # below from the rollup query results. Use the full eligible field
@@ -461,7 +456,7 @@ def get_aggregates(
             # field list — it normally is via FIELDS, but the explicit
             # add guards a future change to FIELDS.
             _batch_with_country = batch_fields if "country" in batch_fields else batch_fields + ["country"]
-            all_top_res, field_order = _timed(
+            all_top_res, field_order = timer.call(
                 "top_n_rollups",
                 lambda: runner.execute_top_n_rollups(
                     _batch_with_country,
@@ -481,7 +476,7 @@ def get_aggregates(
             for f_name, _f_val, f_count in all_top_res:
                 field_totals[f_name] = field_totals.get(f_name, 0) + int(f_count)
         else:
-            all_top_res, field_order = _timed(
+            all_top_res, field_order = timer.call(
                 "top_n_batch",
                 lambda: runner.execute_top_n_batch(batch_fields, table_name, actual_cols, schema_types, limit=10),
             )
@@ -501,7 +496,7 @@ def get_aggregates(
             if asn_list:
                 from backend.core import duckdb as _db
 
-                asn_names = _timed("asn_names_lookup", lambda: _db.get_asn_names(src["name"], asn_list))
+                asn_names = timer.call("asn_names_lookup", lambda: _db.get_asn_names(src["name"], asn_list))
 
             # Per-panel cap at 10. execute_top_n_rollups may return more
             # than 10 for fields with per_field_limits (e.g. country=500
@@ -575,8 +570,10 @@ def get_aggregates(
             else:
                 results[virtual_id] = {"top": [], "total": 0}
 
-        _timed("waf_sig_ind_explode", lambda: _exploded_top_n("waf_sig_ind", "waf_sig"))
-        _timed("edge_score_reason_ind_explode", lambda: _exploded_top_n("edge_score_reason_ind", "edge_score_reason"))
+        timer.call("waf_sig_ind_explode", lambda: _exploded_top_n("waf_sig_ind", "waf_sig"))
+        timer.call(
+            "edge_score_reason_ind_explode", lambda: _exploded_top_n("edge_score_reason_ind", "edge_score_reason")
+        )
 
         # Special handling for conn_requests (bucketed histogram)
         t_conn_req_0 = time.perf_counter()
