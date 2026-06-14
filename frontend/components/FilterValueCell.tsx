@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuShortcut,
 } from '@/components/ui/dropdown-menu'
 
 export interface FilterValueCellFilter {
@@ -67,6 +68,7 @@ export function FilterValueCell({
   const onDashboard = pathname === '/dashboard'
   const pageLabel = pageLabelFor(pathname)
   const shownValue = display ?? filters[0]?.value ?? ''
+  const [open, setOpen] = React.useState(false)
 
   const handleFilterHere = React.useCallback(() => {
     for (const f of filters) addFilter(f.column, f.value, 'include')
@@ -81,8 +83,23 @@ export function FilterValueCell({
     if (v) navigator.clipboard?.writeText(v).catch(() => {})
   }, [filters])
 
+  // Modifier-key shortcut: cmd/ctrl-click on the whole cell triggers
+  // "Filter this page" directly, bypassing the menu. Caught on mousedown
+  // so we can preventDefault BEFORE base-ui's trigger flips the open
+  // state on the subsequent click event. Keep the menu-on-plain-click
+  // path intact for users who want the full action list.
+  const handleMouseDown = React.useCallback(
+    (e: React.MouseEvent) => {
+      if (e.metaKey || e.ctrlKey) {
+        e.preventDefault()
+        e.stopPropagation()
+        handleFilterHere()
+      }
+    },
+    [handleFilterHere],
+  )
+
   if (filters.length === 0 || shownValue === '' || shownValue == null) {
-    // Empty cell — render the display (or empty) without a trigger.
     return (
       <div className={cn('flex items-center gap-2', containerClassName)}>
         <span className={cn('truncate block', className)}>{shownValue}</span>
@@ -91,37 +108,44 @@ export function FilterValueCell({
   }
 
   return (
-    <div className={cn('flex items-center gap-2 group', containerClassName)}>
-      <span className={cn('truncate block', className)}>{shownValue}</span>
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <button
-              type="button"
-              aria-label={`Filter actions for ${filters[0].value}`}
-              className="opacity-0 group-hover:opacity-100 data-[popup-open]:opacity-100 transition-opacity shrink-0 inline-flex items-center justify-center h-5 w-5 rounded text-muted-foreground hover:text-foreground hover:bg-accent"
-            />
-          }
-        >
-          <ChevronDown className="h-3 w-3" aria-hidden="true" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" sideOffset={2} className="min-w-[180px]">
-          <DropdownMenuItem onClick={handleFilterHere}>
-            <Filter className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Filter {pageLabel} page</span>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            aria-label={`Filter actions for ${filters[0].value}`}
+            title="Click for actions · ⌘/Ctrl-click to filter this page"
+            onMouseDown={handleMouseDown}
+            className={cn(
+              'group flex items-center gap-2 text-left rounded-sm -mx-1 px-1 py-0.5 hover:bg-accent/60 data-[popup-open]:bg-accent/60 transition-colors w-full min-w-0',
+              containerClassName,
+            )}
+          />
+        }
+      >
+        <span className={cn('truncate block flex-1', className)}>{shownValue}</span>
+        <ChevronDown
+          className="h-3 w-3 opacity-0 group-hover:opacity-70 data-[popup-open]:opacity-100 shrink-0 text-muted-foreground transition-opacity"
+          aria-hidden="true"
+        />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" sideOffset={2} className="min-w-[200px]">
+        <DropdownMenuItem onClick={handleFilterHere}>
+          <Filter className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>Filter {pageLabel} page</span>
+          <DropdownMenuShortcut>⌘+Click</DropdownMenuShortcut>
+        </DropdownMenuItem>
+        {!onDashboard && (
+          <DropdownMenuItem onClick={handleOpenInDashboard}>
+            <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Open in dashboard</span>
           </DropdownMenuItem>
-          {!onDashboard && (
-            <DropdownMenuItem onClick={handleOpenInDashboard}>
-              <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Open in dashboard</span>
-            </DropdownMenuItem>
-          )}
-          <DropdownMenuItem onClick={handleCopy}>
-            <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Copy value</span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
+        )}
+        <DropdownMenuItem onClick={handleCopy}>
+          <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>Copy value</span>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }

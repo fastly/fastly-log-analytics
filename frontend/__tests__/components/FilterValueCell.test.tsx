@@ -99,4 +99,20 @@ describe('FilterValueCell', () => {
     expect(screen.getByText('—')).toBeInTheDocument()
     expect(container.querySelector('button')).toBeNull()
   })
+
+  it('cmd/ctrl-click on the cell bypasses the menu and calls addFilter directly', () => {
+    const addFilterSpy = vi.spyOn(useFilterStore.getState(), 'addFilter')
+    render(<FilterValueCell filters={[{ column: 'pop', value: 'JFK' }]} />)
+    const trigger = screen.getByRole('button', { name: /Filter actions for JFK/i })
+    fireEvent.mouseDown(trigger, { metaKey: true })
+    expect(addFilterSpy).toHaveBeenCalledWith('pop', 'JFK', 'include')
+    expect(screen.queryByText(/Open in dashboard/i)).not.toBeInTheDocument()
+  })
+
+  it('plain click on the cell still opens the menu', () => {
+    render(<FilterValueCell filters={[{ column: 'pop', value: 'JFK' }]} />)
+    const trigger = screen.getByRole('button', { name: /Filter actions for JFK/i })
+    fireEvent.click(trigger)
+    expect(screen.getByText(/Filter origin page/i)).toBeInTheDocument()
+  })
 })
