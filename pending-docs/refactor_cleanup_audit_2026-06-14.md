@@ -8,7 +8,16 @@
 
 ## Execution log
 
-**2026-06-14 — Session 1 (calibration scope):** Pre-flight + PR-1 only. Operator declined the per-bucket prod-deploy cadence for the full 14-bucket sweep in a single agent session; remaining buckets will be picked up in follow-up sessions. Pre-flight corrections landed:
+**2026-06-14 — Session 1 (calibration scope):** Pre-flight + PR-1 only. Operator declined the per-bucket prod-deploy cadence for the full 14-bucket sweep in a single agent session; remaining buckets will be picked up in follow-up sessions.
+
+PR-1 landed and prod-verified at 2026-06-14T21:05Z:
+- `27b2ef9` cron: drop dead try/pass residue (c1)
+- `2e2a70e` deps: share source-resolution body via `_resolve_source_or_400` (r9)
+- `60d55fb` repositories: hoist `_base` imports + fold origin TS into `TIME_SERIES` (b5 + b8); deletes `backend/repositories/_sql/performance.py` + its sole test
+- Net delta: -92 LOC; full pytest + scoped pytest green; pre-commit (mypy, ruff, gen-openapi, secret-scan) green; regen-openapi confirmed no API shape change. Dev smoke (localhost:18002) + prod smoke (VM curl on :8000) both green for `/api/health`, `/api/services`, `/api/origin/aggregates`, `/api/origin/timeseries`, `/api/performance/origin-ts`.
+- Adjacent latent bug surfaced and **not fixed in PR-1** (left in place per behavior-preserving constraint, flagged with in-code TODO at `backend/repositories/performance.py` near the metric_col-missing branch): the original `get_origin_timeseries` ttfb-fallback assignment is unreachable because of a misindented unconditional empty return. Recommend folding into PR-3 (origin consolidation) or filing as a standalone follow-up.
+
+Pre-flight corrections landed:
 - (a) Frontend types regen command confirmed as `cd frontend && npm run gen:types` (runs `uv run python3 ../scripts/generate_openapi.py openapi.json && node ../scripts/refresh_api_types.js`). Section 7 updated.
 - (b) Five cited pytest paths didn't exist at HEAD and have been replaced with real ones (`tests/core/test_metadata_db_pool.py`, `tests/core/test_share_db_connection.py`, `tests/core/test_usage_log_db.py`, `tests/cron/test_commit.py|test_sync.py`, `tests/utils/tunnel/`, `tests/routers/test_share_admin*.py`, `tests/repositories/test__base*.py`, `tests/core/test_sqlite_migrations*.py`, `tests/routers/admin/`). Section 8 PR scope tables and per-finding test lines updated.
 - (c) Golden-payload capture moved to PR-3 prep (capturing them in pre-flight is wasted: dev data drifts before PR-3, breaking the diff). Documented at PR-3 entry.
@@ -81,13 +90,13 @@ The four xs-effort P0 items ([b5](#b5), [c1](#c1), [b8](#b8), [r9](#r9)) make a 
 | [b3-iceberg-pointer-key](#b3-iceberg-pointer-key) | Slash-vs-dot namespace fallback hardcoded 5 places | Reuse | xs | yes | PR-10 |
 | [b3-iceberg-package-proxy](#b3-iceberg-package-proxy) | 2 module-class-swap shims | Reuse | xs | yes | PR-10 |
 | [b4](#b4) | Origin TS metric builder duplicated | Reuse | s | yes (folds into b1) | PR-3 |
-| [b5](#b5) | `empty_schema_response` re-imported 30+ times | Reuse | xs | yes | PR-1 |
+| [b5](#b5) | `empty_schema_response` re-imported 30+ times | Reuse | xs | yes | PR-1 [done 60d55fb] |
 | [b7](#b7) | `TLS/H2/OH_FINGERPRINTS` byte-identical except column | Redundancy | s | yes | PR-12 |
-| [b8](#b8) | `ORIGIN_TIMESERIES` near-duplicate of `TIME_SERIES` | Redundancy | xs | yes (with `timestamp IS NOT NULL` no-op note) | PR-1 |
+| [b8](#b8) | `ORIGIN_TIMESERIES` near-duplicate of `TIME_SERIES` | Redundancy | xs | yes (with `timestamp IS NOT NULL` no-op note) | PR-1 [done 60d55fb] |
 | [b9](#b9) | Origin bespoke `_response_cache` vs `BoundedTTLCache` | Reuse | m | yes | PR-11 |
 | [b10](#b10) | `SUMMARY_GROUPING_SETS` consumed by positional indices | Bad logic | s | yes | PR-12 |
 | [b11](#b11) | Dashboard cache disabled but key-build still runs | Inefficiency | xs | yes | PR-12 |
-| [c1](#c1) | 6 `try: pass / except: pass` blocks in cron jobs | Dead code | xs | yes | PR-1 |
+| [c1](#c1) | 6 `try: pass / except: pass` blocks in cron jobs | Dead code | xs | yes | PR-1 [done 27b2ef9] |
 | [c3](#c3) | `finalize_cron_duration` boilerplate in 5 `finally:` | Reuse | s | yes | PR-10 |
 | [c4](#c4) | `invalidate_service(name)` in dashboard repo | Reuse | s | yes | PR-10 |
 | [c5](#c5) | `refresh_view_and_warm_pool` in commit.py + sync.py | Reuse | s | latent bug fix in sync.py | PR-10 |
@@ -111,7 +120,7 @@ The four xs-effort P0 items ([b5](#b5), [c1](#c1), [b8](#b8), [r9](#r9)) make a 
 | [r6](#r6) | SSE headers inlined in compaction.py | Reuse | xs | yes | PR-12 |
 | [r7](#r7) | `_phase` pattern in 4 routers | Reuse | s | yes (folds into b2) | PR-5 |
 | [r8](#r8) | `start_or_resume_cron` triple | Reuse | s | yes | PR-10 |
-| [r9](#r9) | `_resolve_source` duplicates `get_source` body | Reuse | xs | yes | PR-1 |
+| [r9](#r9) | `_resolve_source` duplicates `get_source` body | Reuse | xs | yes | PR-1 [done 2e2a70e] |
 | [u1](#u1) | `backend/utils/retry.py` — 0 production callers | Legacy removal | s | yes (delete path) | PR-4 |
 | [u2](#u2) | `iso_z_now()` ignored in 9 utils sites | Reuse | s | yes (byte-identical) | PR-2 |
 | [u4](#u4) | `backend/utils/cdn.py` — imported only by tests | Legacy removal | s | yes (delete path) | PR-4 |
