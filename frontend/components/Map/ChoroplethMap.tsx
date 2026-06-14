@@ -39,28 +39,6 @@ interface TooltipState {
 // Instantiate Intl formatters ONCE outside the render loop
 const regionNames = typeof Intl !== 'undefined' ? new Intl.DisplayNames(['en'], { type: 'region' }) : null;
 
-/**
- * rAF-throttle a function so it fires at most once per animation frame.
- * MapLibre's per-layer mousemove fires on every native mousemove (60-120
- * Hz on a trackpad) and each call walks the feature index + triggers a
- * React render via setTooltip. Coalescing to one call per frame keeps
- * the latest position and discards intermediates.
- */
-function rafThrottle<TArgs extends any[]>(fn: (...args: TArgs) => void) {
-  let queued = false
-  let lastArgs: TArgs | null = null
-  return (...args: TArgs) => {
-    lastArgs = args
-    if (queued) return
-    queued = true
-    requestAnimationFrame(() => {
-      queued = false
-      if (lastArgs) fn(...lastArgs)
-      lastArgs = null
-    })
-  }
-}
-
 const getCountryName = (code: string) => {
   if (!code) return code
   try {
@@ -134,8 +112,14 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
           }
         })
 
-        // Hover events — rAF-throttled to one update per frame.
-        map.current.on('mousemove', 'countries', rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
+        // Hover events. Previously wrapped in a rAF-throttle helper, but
+        // Turbopack's minifier was inlining the throttle's closures as
+        // bare outer-scope assignments that collided with the click
+        // handler's `e` parameter — the mousemove handler silently never
+        // fired in prod while click on the same layer worked fine.
+        // Re-throttle inline if the per-frame setState becomes a profile
+        // hot spot; today's setTooltip is cheap enough to run unthrottled.
+        map.current.on('mousemove', 'countries', (e: maplibregl.MapLayerMouseEvent) => {
           if (e.features && e.features.length > 0) {
             const feature = e.features[0]
             const name = feature.properties?.name
@@ -149,7 +133,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
             })
             if (map.current) map.current.getCanvas().style.cursor = 'pointer'
           }
-        }))
+        })
 
         map.current.on('mouseleave', 'countries', () => {
           setTooltip(null)
