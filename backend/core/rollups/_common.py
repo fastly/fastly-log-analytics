@@ -12,6 +12,11 @@ import logging
 import os
 import re
 import uuid
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import duckdb
 
 logger = logging.getLogger(__name__)
 
@@ -341,3 +346,76 @@ def _time_series_bundle_path(source: dict, hour: str) -> str:
 
 def _sessions_bundle_path(source: dict, hour: str) -> str:
     return os.path.join(_hour_bundled_root(source), f"hour={hour}", SESSIONS_BUNDLE_FILENAME)
+
+
+def parse_hour_token(h: str) -> datetime | None:
+    """Parse a rollup hour partition token (``"YYYY-MM-DD-HH"``) to a
+    tz-aware UTC datetime, or ``None`` if the string doesn't match."""
+    try:
+        return datetime.strptime(h, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def discover_closed_hours(source: dict) -> set[str]:
+    """Return every ``"YYYY-MM-DD-HH"`` partition that exists under
+    ``_rollups_root(source)`` and is strictly before the active hour.
+
+    Skips field directories that don't begin with ``"field="``; tolerates
+    missing roots and unreadable sub-directories by treating them as
+    empty (the rollups jobs already handle the "no data yet" case).
+    """
+    hour_root = _rollups_root(source)
+    if not os.path.isdir(hour_root):
+        return set()
+
+    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    all_hours: set[str] = set()
+    try:
+        for field_entry in os.listdir(hour_root):
+            if not field_entry.startswith("field="):
+                continue
+            field_dir = os.path.join(hour_root, field_entry)
+            try:
+                for hour_entry in os.listdir(field_dir):
+                    if not hour_entry.startswith("hour="):
+                        continue
+                    hour = hour_entry[len("hour=") :]
+                    if hour >= active_hour:
+                        continue
+                    all_hours.add(hour)
+            except OSError:
+                continue
+    except OSError:
+        return set()
+    return all_hours
+
+
+def describe_columns(
+    con: duckdb.DuckDBPyConnection,
+    source: dict,
+    table_ident: str,
+    *,
+    logger: logging.Logger | None = None,
+    log_label: str = "",
+) -> set[str] | None:
+    """Run ``DESCRIBE <table_ident>`` against ``con`` with the standard
+    stale-view-retry hop, returning the set of column names. Returns
+    ``None`` and (optionally) warns through ``logger`` if DuckDB raises —
+    callers treat that as "view not ready, skip this round".
+    """
+    from backend.core.iceberg import execute_with_stale_view_retry
+
+    try:
+        rows = execute_with_stale_view_retry(
+            con,
+            source,
+            lambda c: c.execute(f"DESCRIBE {table_ident}").fetchall(),
+        )
+    except Exception as e:  # noqa: BLE001 — DuckDB raises typed errors but iceberg may wrap them
+        if logger is not None:
+            service_id = source.get("name", "default")
+            label = f"{log_label}: " if log_label else ""
+            logger.warning("[rollups] %s: %s%s: %s", service_id, label, table_ident, e)
+        return None
+    return {row[0] for row in rows}

@@ -27,6 +27,8 @@ from ._common import (
     _rollups_root,
     _safe_table_for,
     _save_markers,
+    describe_columns,
+    parse_hour_token,
 )
 from .hour_bundles import bundle_hours
 from .sessions import build_session_bundles
@@ -56,10 +58,11 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
     for h in hours:
         if h == active_hour:
             continue
-        try:
-            parsed.append((h, datetime.strptime(h, "%Y-%m-%d-%H").replace(tzinfo=UTC)))
-        except ValueError:
+        dt = parse_hour_token(h)
+        if dt is None:
             logger.warning("[rollups] skipping malformed hour token: %r", h)
+            continue
+        parsed.append((h, dt))
     if not parsed:
         return
 
@@ -226,17 +229,8 @@ def _run_per_field_copy(
 
     con = get_connection(source=source, read_only=True)
     try:
-        try:
-            from backend.core.iceberg import execute_with_stale_view_retry
-
-            cols = {
-                c[0]
-                for c in execute_with_stale_view_retry(
-                    con, source, lambda c: c.execute(f"DESCRIBE {table_ident}").fetchall()
-                )
-            }
-        except duckdb.Error as e:
-            logger.warning("[rollups] %s: could not describe %s: %s", service_id, table_ident, e)
+        cols = describe_columns(con, source, table_ident, logger=logger, log_label="could not describe")
+        if cols is None:
             return
 
         for field in fields:

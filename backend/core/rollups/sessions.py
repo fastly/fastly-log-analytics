@@ -10,8 +10,10 @@ from datetime import UTC, datetime, timedelta
 from ._common import (
     SESSIONS_BUNDLE_FILENAME,
     _hour_bundled_root,
-    _rollups_root,
     _safe_table_for,
+    describe_columns,
+    discover_closed_hours,
+    parse_hour_token,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,9 +69,7 @@ def build_session_bundles(service_id: str, source: dict, hours: list[str]) -> in
     for h in hours:
         if h == active_hour:
             continue
-        try:
-            datetime.strptime(h, "%Y-%m-%d-%H")
-        except ValueError:
+        if parse_hour_token(h) is None:
             logger.warning("[rollups] skipping malformed hour token: %r", h)
             continue
         target_hours.append(h)
@@ -86,22 +86,8 @@ def build_session_bundles(service_id: str, source: dict, hours: list[str]) -> in
 
     con = get_connection(source=source, read_only=True)
     try:
-        try:
-            from backend.core.iceberg import execute_with_stale_view_retry
-
-            cols = {
-                c[0]
-                for c in execute_with_stale_view_retry(
-                    con, source, lambda c: c.execute(f"DESCRIBE {table_ident}").fetchall()
-                )
-            }
-        except duckdb.Error as e:
-            logger.warning(
-                "[rollups] %s: cannot describe %s for sessions bundle: %s",
-                service_id,
-                table_ident,
-                e,
-            )
+        cols = describe_columns(con, source, table_ident, logger=logger, log_label="cannot describe sessions bundle")
+        if cols is None:
             return 0
 
         if "timestamp" not in cols or "ip" not in cols:
@@ -238,30 +224,8 @@ def backfill_session_bundles(service_id: str, source: dict, max_hours: int | Non
     rollup written), then calls :func:`build_session_bundles` on the
     subset that doesn't already have a sessions file.
     """
-    hour_root = _rollups_root(source)
     bundled_root = _hour_bundled_root(source)
-    if not os.path.isdir(hour_root):
-        return 0
-
-    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-    all_hours: set[str] = set()
-    try:
-        for field_entry in os.listdir(hour_root):
-            if not field_entry.startswith("field="):
-                continue
-            field_dir = os.path.join(hour_root, field_entry)
-            try:
-                for hour_entry in os.listdir(field_dir):
-                    if not hour_entry.startswith("hour="):
-                        continue
-                    hour = hour_entry[len("hour=") :]
-                    if hour >= active_hour:
-                        continue
-                    all_hours.add(hour)
-            except OSError:
-                continue
-    except OSError:
-        return 0
+    all_hours = discover_closed_hours(source)
 
     to_build: list[str] = []
     for hour in sorted(all_hours):

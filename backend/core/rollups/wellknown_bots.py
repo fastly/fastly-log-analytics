@@ -28,7 +28,7 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from ._common import _safe_table_for
+from ._common import _safe_table_for, describe_columns, parse_hour_token
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +78,7 @@ def recompute_wellknown_bots_rollup(
     for h in hours:
         if h == active_hour:
             continue
-        try:
-            datetime.strptime(h, "%Y-%m-%d-%H")
-        except ValueError:
+        if parse_hour_token(h) is None:
             continue
         parsed.append(h)
     if not parsed:
@@ -101,17 +99,8 @@ def recompute_wellknown_bots_rollup(
     try:
         # Validate the source has the columns we need before per-hour
         # work — saves N×(failed COPY) on services without UA/IP fields.
-        try:
-            from backend.core.iceberg import execute_with_stale_view_retry
-
-            cols = {
-                c[0]
-                for c in execute_with_stale_view_retry(
-                    con, source, lambda c: c.execute(f"DESCRIBE {table_ident}").fetchall()
-                )
-            }
-        except duckdb.Error as e:
-            logger.warning("[rollups] %s: bot-rollup DESCRIBE failed: %s", service_id, e)
+        cols = describe_columns(con, source, table_ident, logger=logger, log_label="bot-rollup DESCRIBE failed")
+        if cols is None:
             return 0
         if "ua" not in cols or "ip" not in cols:
             return 0

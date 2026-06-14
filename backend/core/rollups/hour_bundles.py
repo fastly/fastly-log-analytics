@@ -12,7 +12,7 @@ import shutil
 import uuid
 from datetime import UTC, datetime
 
-from ._common import _hour_bundled_root, _rollups_root
+from ._common import _hour_bundled_root, _rollups_root, discover_closed_hours, parse_hour_token
 from .time_series import backfill_time_series_bundles
 
 logger = logging.getLogger(__name__)
@@ -63,9 +63,7 @@ def bundle_hours(service_id: str, source: dict, hours: list[str]) -> int:
                 continue
             # Validate hour token format defensively — string lands in
             # filesystem paths and SQL string literals below.
-            try:
-                datetime.strptime(hour, "%Y-%m-%d-%H")
-            except ValueError:
+            if parse_hour_token(hour) is None:
                 continue
 
             # Enumerate per-field parquets for this hour.
@@ -282,30 +280,8 @@ def backfill_hour_bundles(service_id: str, source: dict, max_hours: int | None =
     """
     # _rollups_root already returns <cache>/rollups/hour — see comment
     # in bundle_hours about the naming.
-    hour_root = _rollups_root(source)
     bundled_root = _hour_bundled_root(source)
-    if not os.path.isdir(hour_root):
-        return 0
-
-    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-    all_hours: set[str] = set()
-    try:
-        for field_entry in os.listdir(hour_root):
-            if not field_entry.startswith("field="):
-                continue
-            field_dir = os.path.join(hour_root, field_entry)
-            try:
-                for hour_entry in os.listdir(field_dir):
-                    if not hour_entry.startswith("hour="):
-                        continue
-                    hour = hour_entry[len("hour=") :]
-                    if hour >= active_hour:
-                        continue
-                    all_hours.add(hour)
-            except OSError:
-                continue
-    except OSError:
-        return 0
+    all_hours = discover_closed_hours(source)
 
     # Skip hours that already have a bundle.
     to_bundle = []
