@@ -84,13 +84,15 @@ export function FilterValueCell({
   }, [filters])
 
   // Modifier-key shortcut: cmd/ctrl-click on the whole cell triggers
-  // "Filter this page" directly, bypassing the menu. Caught on mousedown
-  // so we can preventDefault BEFORE base-ui's trigger flips the open
-  // state on the subsequent click event. Keep the menu-on-plain-click
-  // path intact for users who want the full action list.
+  // "Filter this page" directly, bypassing the menu. Tracked across both
+  // mousedown and click because base-ui opens the menu on click and
+  // preventDefault on mousedown alone doesn't stop the React click event.
+  // Plain click still opens the menu — the modifier path is the override.
+  const modifierRef = React.useRef(false)
   const handleMouseDown = React.useCallback(
     (e: React.MouseEvent) => {
-      if (e.metaKey || e.ctrlKey) {
+      modifierRef.current = e.metaKey || e.ctrlKey
+      if (modifierRef.current) {
         e.preventDefault()
         e.stopPropagation()
         handleFilterHere()
@@ -98,6 +100,14 @@ export function FilterValueCell({
     },
     [handleFilterHere],
   )
+  const handleClick = React.useCallback((e: React.MouseEvent) => {
+    if (modifierRef.current) {
+      e.preventDefault()
+      e.stopPropagation()
+      modifierRef.current = false
+      setOpen(false)
+    }
+  }, [])
 
   if (filters.length === 0 || shownValue === '' || shownValue == null) {
     return (
@@ -116,6 +126,7 @@ export function FilterValueCell({
             aria-label={`Filter actions for ${filters[0].value}`}
             title="Click for actions · ⌘/Ctrl-click to filter this page"
             onMouseDown={handleMouseDown}
+            onClick={handleClick}
             className={cn(
               'group flex items-center gap-2 text-left rounded-sm -mx-1 px-1 py-0.5 hover:bg-accent/60 data-[popup-open]:bg-accent/60 transition-colors w-full min-w-0',
               containerClassName,
