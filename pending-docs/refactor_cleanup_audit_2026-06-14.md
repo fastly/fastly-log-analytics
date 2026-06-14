@@ -40,6 +40,15 @@ PR-4 landed and prod-verified:
 
 **Pre-existing test flake** (not caused by this branch): `tests/core/test_duckdb_concurrency.py::test_concurrent_readers_against_held_writer` fails deterministically against telemetry_proxy thread state ("This event loop is already running" / "Call runner.setup() before making a site"). Reproduced at `f27aeac` (the commit before any of this session's work landed), so the regression is upstream of PR-1. Followed up via pytest with `--ignore` to keep the verification loop moving; recommend filing as a separate issue against the telemetry_proxy / duckdb concurrency machinery.
 
+**PR-3 (partial) landed and prod-verified:**
+- `5d77e67` origin: collapse 6 TEMP_* templates into the live ones (b1/b4 partial)
+- **Scope landed:** deleted TEMP_TIMESERIES / TEMP_SLOW_URLS / TEMP_STATUS_CODES / TEMP_PATH_BREAKDOWN / TEMP_POP_LATENCY / TEMP_IP_HEALTH and rewired the six `_origin_*_from_temp` callers to render the live SQL templates with `table=<temp_table>`, `where='1=1'`, `lat_val='lat_us'`. Net -213 LOC.
+- **Scope deferred:**
+  1. **TEMP_SUMMARY_ROLLUP** kept — output column shape distinct from SUMMARY_GROUPING_SETS. Cleanly folding it requires moving the summary path to cursor.description dict access, which is b10's job (currently PR-12). Recommend running b10 and the final TEMP_SUMMARY_ROLLUP deletion as one focused PR after PR-12 lands.
+  2. **TEMP_SUMMARY_BY_EDGE** intentionally preserved (no live equivalent; audit doc already flagged this).
+  3. **Python pair collapse** (audit b1 commit 2) deferred — `get_xxx` and `_origin_xxx_from_temp` remain distinct functions; they now call the SAME SQL template with different substitutions, so the drift risk is gone, but the pair-of-functions pattern is preserved. Folding into a single `_query_xxx(table, where, params, lat_val, ...)` helper is a follow-up.
+- **Behavior preservation verified:** byte-identical closed-window two-run on local dev (`/api/origin/summary`, `/status-codes`, `/path-breakdown` on 2026-06-12T00 → 2026-06-13T00 returned matching bytes across consecutive curls); open-window diffs against prod-captured goldens at `local-docs/origin-payloads-{before,after}/` were ingest-tick data drift only (matching JSON keys, small numeric movement in counts/percentiles consistent with 1-2 minutes of additional log volume). Prod `/api/origin/aggregates` returns full composite payload (5189 timeseries points, 20 slow_urls, 9 status_codes, 2 path_breakdown rows, 30 each of pop_latency + ip_health).
+
 ---
 
 ## Methodology
@@ -91,7 +100,7 @@ The four xs-effort P0 items ([b5](#b5), [c1](#c1), [b8](#b8), [r9](#r9)) make a 
 
 | ID | Title | Category | Effort | Behavior-preserving | PR |
 |---|---|---|---|---|---|
-| [b1](#b1) | Origin per-card live/temp template pairs | Redundancy | l | yes | PR-3 |
+| [b1](#b1) | Origin per-card live/temp template pairs | Redundancy | l | yes | PR-3 [partial 5d77e67] |
 | [b2](#b2) | `_phase(name, t0)` boilerplate in 8+ repos | Reuse | s | yes | PR-5 |
 | [b3](#b3) | `_hour_had_any_data` walk duplicated | Reuse | s | yes | PR-6 |
 | [b3-pool](#b3-pool) | 3 near-identical SQLite thread-local pools | Redundancy | l | yes (with `on_borrow` hook) | PR-9 |
@@ -104,7 +113,7 @@ The four xs-effort P0 items ([b5](#b5), [c1](#c1), [b8](#b8), [r9](#r9)) make a 
 | [b3-iceberg-cdn-purge](#b3-iceberg-cdn-purge) | `purge_surrogate_key` 2 sites with drifted exceptions | Reuse | xs | yes | PR-10 |
 | [b3-iceberg-pointer-key](#b3-iceberg-pointer-key) | Slash-vs-dot namespace fallback hardcoded 5 places | Reuse | xs | yes | PR-10 |
 | [b3-iceberg-package-proxy](#b3-iceberg-package-proxy) | 2 module-class-swap shims | Reuse | xs | yes | PR-10 |
-| [b4](#b4) | Origin TS metric builder duplicated | Reuse | s | yes (folds into b1) | PR-3 |
+| [b4](#b4) | Origin TS metric builder duplicated | Reuse | s | yes (folds into b1) | PR-3 [partial 5d77e67] |
 | [b5](#b5) | `empty_schema_response` re-imported 30+ times | Reuse | xs | yes | PR-1 [done 60d55fb] |
 | [b7](#b7) | `TLS/H2/OH_FINGERPRINTS` byte-identical except column | Redundancy | s | yes | PR-12 |
 | [b8](#b8) | `ORIGIN_TIMESERIES` near-duplicate of `TIME_SERIES` | Redundancy | xs | yes (with `timestamp IS NOT NULL` no-op note) | PR-1 [done 60d55fb] |
