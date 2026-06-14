@@ -392,38 +392,26 @@ def _build_security_response(
         except Exception:
             return 0.0
 
-    # 1. TLS Fingerprints (Cipher SHA + IP Spread)
-    if "tls_ciphers_sha" in actual_cols and "ip" in actual_cols:
-        q = SQL.TLS_FINGERPRINTS.format(temp_table=temp_table)
-        _t = _time.perf_counter()
-        res = runner.execute(q).fetchall()
-        timer.mark("tls_fingerprints", _t)
-        results["tls_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
-        fingerprint_coverage["tls_ciphers_sha"] = _coverage_for("tls_ciphers_sha")
-    else:
-        results["tls_fingerprints"] = []
-
-    # 1.1 H2 Fingerprints
-    if "h2_fingerprint" in actual_cols and "ip" in actual_cols:
-        q = SQL.H2_FINGERPRINTS.format(temp_table=temp_table)
-        _t = _time.perf_counter()
-        res = runner.execute(q).fetchall()
-        timer.mark("h2_fingerprints", _t)
-        results["h2_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
-        fingerprint_coverage["h2_fingerprint"] = _coverage_for("h2_fingerprint")
-    else:
-        results["h2_fingerprints"] = []
-
-    # 1.2 OH Fingerprints
-    if "oh_fingerprint" in actual_cols and "ip" in actual_cols:
-        q = SQL.OH_FINGERPRINTS.format(temp_table=temp_table)
-        _t = _time.perf_counter()
-        res = runner.execute(q).fetchall()
-        timer.mark("oh_fingerprints", _t)
-        results["oh_fingerprints"] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
-        fingerprint_coverage["oh_fingerprint"] = _coverage_for("oh_fingerprint")
-    else:
-        results["oh_fingerprints"] = []
+    # Fingerprint top-N leaderboards: TLS / HTTP-2 / Original Header.
+    # All three share the same SQL shape (column-only difference), so
+    # render the unified template once per column and key results by the
+    # explicit (column → result-key) map below — the key isn't derivable
+    # from the column name by suffix manipulation.
+    _FP_RESULT_KEYS = (
+        ("tls_ciphers_sha", "tls_fingerprints"),
+        ("h2_fingerprint", "h2_fingerprints"),
+        ("oh_fingerprint", "oh_fingerprints"),
+    )
+    for col, result_key in _FP_RESULT_KEYS:
+        if col in actual_cols and "ip" in actual_cols:
+            q = SQL.FINGERPRINT_TOP_N.format(col=col, temp_table=temp_table)
+            _t = _time.perf_counter()
+            res = runner.execute(q).fetchall()
+            timer.mark(result_key, _t)
+            results[result_key] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
+            fingerprint_coverage[col] = _coverage_for(col)
+        else:
+            results[result_key] = []
 
     results["fingerprint_coverage"] = fingerprint_coverage
 

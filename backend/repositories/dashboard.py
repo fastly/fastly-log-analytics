@@ -140,20 +140,25 @@ def get_aggregates(
     else:
         fields = all_fields
 
-    _key_payload = json.dumps(
-        {
-            "s": start_time,
-            "e": end_time,
-            "f": {k: (v.mode, sorted(str(x) for x in v.values)) for k, v in sorted(filters.items())},
-            "ci": chart_interval,
-            "cm": chart_metric,
-            "fields": sorted(fields_filter) if fields_filter is not None else None,
-        },
-        separators=(",", ":"),
-    )
-    cache_key = hashlib.sha256(f"{_key_payload}:{source_name}".encode()).hexdigest()
+    # Cache is hard-disabled today (DASHBOARD_CACHE_TTL = 0). Gate the
+    # key-build + read together so the SHA-256 over the filter payload
+    # doesn't run on every request just to be discarded — saves a small
+    # per-request cost while keeping the legacy rollback hatch intact.
+    cache_key: str | None = None
     now = time.time()
     if DASHBOARD_CACHE_TTL > 0:
+        _key_payload = json.dumps(
+            {
+                "s": start_time,
+                "e": end_time,
+                "f": {k: (v.mode, sorted(str(x) for x in v.values)) for k, v in sorted(filters.items())},
+                "ci": chart_interval,
+                "cm": chart_metric,
+                "fields": sorted(fields_filter) if fields_filter is not None else None,
+            },
+            separators=(",", ":"),
+        )
+        cache_key = hashlib.sha256(f"{_key_payload}:{source_name}".encode()).hexdigest()
         # BoundedTTLCache's ``__contains__`` / ``[]`` already enforce TTL
         # internally, so an entry that reads as present is by definition
         # still fresh — no need for the legacy ``now - cached_at`` check.

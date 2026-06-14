@@ -190,14 +190,6 @@ def get_con(source: dict = Depends(get_source)) -> Iterator[duckdb.DuckDBPyConne
         yield con
 
 
-# ``AnalyticsDeps`` (bundle of get_source + get_con) was removed at the
-# v2.0 cut. Routes now take :class:`backend.core.request_context.RequestContext`
-# directly via ``Depends(build_request_context)`` — same connection +
-# source surface, with structural tenancy enforcement on every route
-# (the old bundle skipped it because ``require_service_access`` was
-# never wired in as a sibling dep).
-
-
 # ── Tenant-scope enforcement (security) ─────────────
 
 
@@ -232,11 +224,3 @@ def require_service_access(
             detail={"error": "service_not_authorized", "service": service_id},
         )
     return service_id
-
-
-# ``get_meta_con`` (skip-view-update parallel path) removed at v2.0 cut.
-# After the Phase 4 iceberg carve + duckdb_pool fingerprint check
-# (backend/core/duckdb_pool.py:299), pool checkouts skip update_iceberg_view
-# when the (view_cache identity, buffer mtime) tuple is unchanged — making
-# the skip-on-purpose path of the old helper structurally unnecessary for
-# the metadata-shaped read paths that used it.

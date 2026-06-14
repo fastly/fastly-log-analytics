@@ -124,20 +124,27 @@ Requires the SQLite ``ngwaf_cache`` database to be ATTACHed.
 
 # ── TLS fingerprints ──────────────────────────────────────────────────────────
 
-TLS_FINGERPRINTS = """
-            SELECT tls_ciphers_sha,
+FINGERPRINT_TOP_N = """
+            SELECT "{col}",
                    count(DISTINCT ip) as ip_count,
                    count(*) as req_count
             FROM {temp_table}
-            WHERE tls_ciphers_sha IS NOT NULL AND tls_ciphers_sha != ''
+            WHERE "{col}" IS NOT NULL AND "{col}" != ''
             GROUP BY 1 ORDER BY 3 DESC LIMIT 20
         """
-"""Top-20 TLS cipher fingerprints by request volume, with IP spread.
+"""Top-20 fingerprints for a single column, with IP spread.
+
+Used by all three fingerprint-card endpoints (TLS / HTTP-2 / origin-header)
+which differ only in the column name; sharing one template keeps the
+trio from drifting (the prior `TLS_FINGERPRINTS` / `H2_FINGERPRINTS` /
+`OH_FINGERPRINTS` separately-named templates were byte-identical except
+for the column).
 
 Inputs (trusted-identifier substitutions only):
+- ``{col}`` — fingerprint column name (``tls_ciphers_sha`` / ``h2_fingerprint`` / ``oh_fingerprint``).
 - ``{temp_table}`` — filtered TEMP TABLE name.
 
-Output rows: ``(tls_ciphers_sha: str, ip_count: int, req_count: int)``.
+Output rows: ``(<fingerprint>: str, ip_count: int, req_count: int)``.
 
 The empty-string filter (``!= ''``) is load-bearing: the VCL emits
 ``""`` (not NULL) for requests whose fingerprint isn't applicable
@@ -145,42 +152,6 @@ The empty-string filter (``!= ''``) is load-bearing: the VCL emits
 connections). Without this filter the top-N's #1 row would be an
 empty-string fingerprint with the bulk of request volume — useless
 for analyst-facing leaderboards.
-"""
-
-H2_FINGERPRINTS = """
-            SELECT h2_fingerprint,
-                   count(DISTINCT ip) as ip_count,
-                   count(*) as req_count
-            FROM {temp_table}
-            WHERE h2_fingerprint IS NOT NULL AND h2_fingerprint != ''
-            GROUP BY 1 ORDER BY 3 DESC LIMIT 20
-        """
-"""Top-20 HTTP/2 fingerprints by request volume, with IP spread.
-
-Inputs (trusted-identifier substitutions only):
-- ``{temp_table}`` — filtered TEMP TABLE name.
-
-Output rows: ``(h2_fingerprint: str, ip_count: int, req_count: int)``.
-
-See ``TLS_FINGERPRINTS`` for why the empty-string filter matters.
-"""
-
-OH_FINGERPRINTS = """
-            SELECT oh_fingerprint,
-                   count(DISTINCT ip) as ip_count,
-                   count(*) as req_count
-            FROM {temp_table}
-            WHERE oh_fingerprint IS NOT NULL AND oh_fingerprint != ''
-            GROUP BY 1 ORDER BY 3 DESC LIMIT 20
-        """
-"""Top-20 Original Header fingerprints by request volume, with IP spread.
-
-Inputs (trusted-identifier substitutions only):
-- ``{temp_table}`` — filtered TEMP TABLE name.
-
-Output rows: ``(oh_fingerprint: str, ip_count: int, req_count: int)``.
-
-See ``TLS_FINGERPRINTS`` for why the empty-string filter matters.
 """
 
 # Coverage check used to drive the FE "low coverage" hint per fingerprint card.
@@ -340,9 +311,7 @@ __all__ = [
     "VERIFIED_BOTS_TS",
     "NGWAF_VERIFIED_BOTS",
     "NGWAF_VERIFIED_BOTS_TS",
-    "TLS_FINGERPRINTS",
-    "H2_FINGERPRINTS",
-    "OH_FINGERPRINTS",
+    "FINGERPRINT_TOP_N",
     "FINGERPRINT_COVERAGE",
     "REQ_HEADER_SIZE_DIST",
     "TOP_IPS_BY_MAX_HEADER",

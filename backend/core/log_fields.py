@@ -4,21 +4,17 @@ Every loggable field is defined here: its VCL expression, DuckDB type, typical
 byte cost, and which insights require it.  Nothing else in the codebase should
 hard-code VCL log format strings.
 
-Phase 7 migration in progress
------------------------------
-A new frozen-dataclass view of this catalog lives at
+Relationship to ``backend.core.field_registry``
+-----------------------------------------------
+A frozen-dataclass view of this catalog lives at
 ``backend/core/field_registry.py`` (`REGISTRY`, `BY_CODE`, `BY_GROUP`,
-`WIRE_ORDER`). The new module is derived from `LOG_FIELD_CATALOG` below at
+`WIRE_ORDER`); the registry is derived from `LOG_FIELD_CATALOG` below at
 import time and stays byte-for-byte equivalent — a parity test in
-``tests/core/test_field_registry.py`` guards both views.
-
-Callers are migrating one-at-a-time per the order in
-``pending-docs/phase_7_field_registry_migration.md``. While the migration
-is in flight DO NOT add a new field by editing only the new registry: add
-it here (as a dict) and the registry will pick it up automatically. After
-the final caller migrates, the legacy `LOG_FIELD_CATALOG` literal will
-be rewritten in place as `LogField(...)` calls and this module will shed
-the dict layer.
+``tests/core/test_field_registry.py`` guards both views. The dual surface
+is intentional, not a transitional state: this module is the canonical
+data source, and the registry exposes the same data in a typed shape for
+callers that prefer that ergonomics. New fields must be added HERE (as a
+dict entry); the registry picks them up automatically.
 
 Usage
 -----

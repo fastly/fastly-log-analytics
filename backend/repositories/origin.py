@@ -5,9 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import threading
-import time
-from collections import OrderedDict
 from typing import Any
 
 import duckdb
@@ -22,6 +19,7 @@ from backend.repositories._base import (
 )
 from backend.repositories._sql import origin as SQL
 from backend.repositories.utils.filters import build_where_clause
+from backend.utils.bounded_cache import BoundedTTLCache
 
 # ── Response memo cache ───────────────────────────────────────────────────────
 # Frontend Origin page fires 6 endpoints in parallel; on cold load each one
@@ -37,8 +35,7 @@ from backend.repositories.utils.filters import build_where_clause
 # for an interactive analytics view.
 _RESPONSE_CACHE_TTL = 30.0
 _RESPONSE_CACHE_MAXSIZE = 256
-_response_cache: OrderedDict[str, tuple[float, dict]] = OrderedDict()
-_response_cache_lock = threading.Lock()
+_response_cache: BoundedTTLCache = BoundedTTLCache(maxsize=_RESPONSE_CACHE_MAXSIZE, ttl_seconds=_RESPONSE_CACHE_TTL)
 
 
 def _bucket_time_to_minute(ts: str | None) -> str | None:
@@ -77,21 +74,15 @@ def _response_cache_key(
 
 
 def _response_cache_get(key: str) -> dict | None:
-    with _response_cache_lock:
-        cached = _response_cache.get(key)
-        if cached is None:
-            return None
-        cached_at, value = cached
-        if time.time() - cached_at >= _RESPONSE_CACHE_TTL:
-            _response_cache.pop(key, None)
-            return None
-        _response_cache.move_to_end(key)
-        result = value.copy()
-        # Pydantic BaseResponse field is `is_cached` (no underscore);
-        # serialization_alias renders it as `_is_cached` in JSON.
-        # Setting the underscored key here would be silently dropped.
-        result["is_cached"] = True
-        return result
+    cached = _response_cache.get(key)
+    if cached is None:
+        return None
+    result = cached.copy()
+    # Pydantic BaseResponse field is `is_cached` (no underscore);
+    # serialization_alias renders it as `_is_cached` in JSON.
+    # Setting the underscored key here would be silently dropped.
+    result["is_cached"] = True
+    return result
 
 
 def _response_cache_put(key: str, value: dict) -> None:
@@ -99,11 +90,7 @@ def _response_cache_put(key: str, value: dict) -> None:
     # per-request and would leak across requests if kept in the cache.
     # Also don't cache `is_cached` itself — it's a per-response marker.
     sanitised = {k: v for k, v in value.items() if k not in ("debug_queries", "debug_calls", "is_cached", "_is_cached")}
-    with _response_cache_lock:
-        _response_cache[key] = (time.time(), sanitised)
-        _response_cache.move_to_end(key)
-        while len(_response_cache) > _RESPONSE_CACHE_MAXSIZE:
-            _response_cache.popitem(last=False)
+    _response_cache[key] = sanitised
 
 
 # ── POP location helpers ──────────────────────────────────────────────────────

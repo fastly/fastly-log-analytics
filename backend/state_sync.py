@@ -8,10 +8,18 @@ from backend.core.duckdb import _get_fos_client, get_source_for_service
 logger = logging.getLogger(__name__)
 
 
-def get_admin_state_key(source: dict) -> str:
+def _iceberg_meta_prefix(source: dict) -> str:
+    """Return the ``iceberg/meta/`` (or ``<prefix>/iceberg/meta/``) prefix
+    under which admin_state, scoring matrix, and scoring matrix history
+    live. Shared so the four key-builder helpers don't drift from each
+    other on the prefix-resolution rule."""
     base_prefix = source.get("prefix", "").strip("/")
     iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-    return f"{iceberg_root}/meta/admin_state.json"
+    return f"{iceberg_root}/meta/"
+
+
+def get_admin_state_key(source: dict) -> str:
+    return f"{_iceberg_meta_prefix(source)}admin_state.json"
 
 
 def get_scoring_matrix_key(source: dict) -> str:
@@ -21,9 +29,7 @@ def get_scoring_matrix_key(source: dict) -> str:
     not in admin_state.custom_fields). Lives under the same iceberg/meta/ prefix
     so analyst hosts read the same blob the admin host wrote.
     """
-    base_prefix = source.get("prefix", "").strip("/")
-    iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-    return f"{iceberg_root}/meta/scoring_matrix.json"
+    return f"{_iceberg_meta_prefix(source)}scoring_matrix.json"
 
 
 def get_scoring_matrix_history_key(source: dict, version: str) -> str:
@@ -33,9 +39,7 @@ def get_scoring_matrix_history_key(source: dict, version: str) -> str:
     so the operator can list past matrices and roll back to a known-good
     one if a fresh retrain regresses AUC.
     """
-    base_prefix = source.get("prefix", "").strip("/")
-    iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-    return f"{iceberg_root}/meta/scoring_matrix_history/{version}.json"
+    return f"{_iceberg_meta_prefix(source)}scoring_matrix_history/{version}.json"
 
 
 def list_scoring_matrix_versions(service_id: str) -> list[dict]:
@@ -48,9 +52,7 @@ def list_scoring_matrix_versions(service_id: str) -> list[dict]:
     source = get_source_for_service(service_id)
     if not source:
         return []
-    base_prefix = source.get("prefix", "").strip("/")
-    iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-    prefix = f"{iceberg_root}/meta/scoring_matrix_history/"
+    prefix = f"{_iceberg_meta_prefix(source)}scoring_matrix_history/"
     try:
         s3 = _get_fos_client(source)
         out: list[dict] = []
