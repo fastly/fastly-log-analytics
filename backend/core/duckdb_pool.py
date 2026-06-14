@@ -88,6 +88,37 @@ def _pool_conn_memory_limit() -> str | None:
     return os.getenv("DUCKDB_POOL_CONN_MEMORY_LIMIT") or None
 
 
+def _pool_api_rebind_lock_timeout_s() -> float:
+    """Per-service iceberg-view rebind lock timeout for API pool checkouts.
+
+    Per ADR-03 §28 cron and API are meant to be process-isolated; today they
+    share the per-service rebind lock in [iceberg/view.py](iceberg/view.py).
+    When cron exceeds its 300s hard cap and the cron decorator abandons the
+    worker thread ([cron/decorators.py](cron/decorators.py)), Python can't
+    kill the thread — it keeps holding the rebind lock while its slow S3
+    manifest read is in flight. With the lock_timeout default of 5s, every
+    API pool checkout serialises on that lock, the pool's outer 10s wait
+    budget runs out across concurrent waiters, and dashboard endpoints
+    cascade into 503 (DBBusy → _PoolBusy → deps.py raises HTTPException).
+
+    The view-rebind code has a graceful fallback chain on lock timeout
+    (cached SQL → persistent view → continue with last-known view), so a
+    short timeout on the API side just trades freshness for liveness:
+    requests get a possibly-seconds-stale view until cron releases the
+    lock, but never block the pool. Cron's own update_iceberg_view calls
+    continue to use the 5s default — they're the writer, they actually
+    need to win the lock.
+
+    Tuneable via DUCKDB_POOL_API_REBIND_LOCK_TIMEOUT_MS (default 500ms).
+    Set to 0 to restore the old blocking behaviour for emergency rollback.
+    """
+    raw = os.getenv("DUCKDB_POOL_API_REBIND_LOCK_TIMEOUT_MS", "500")
+    try:
+        return max(0.0, float(raw) / 1000.0)
+    except (TypeError, ValueError):
+        return 0.5
+
+
 def _pool_conn_threads() -> int | None:
     """Optional per-pool-connection DuckDB thread count.
 
@@ -160,6 +191,34 @@ def _safe_buffer_mtime(src: dict | None) -> float | None:
 _WAIT_SAMPLES_MAX = 1024  # ~last 17 minutes at 1 req/s; ~3.5 minutes at 5 req/s
 
 
+def _percentile_summary(samples: collections.deque[float], lock: threading.Lock) -> dict:
+    """Nearest-rank percentile snapshot over a bounded sample deque.
+
+    Returns a stable shape (zeros when empty) so admin UI consumers don't
+    have to conditionally render. Cost is a single sort over the snapshot
+    — well under 1ms at the ring buffer's 1024-sample bound.
+    """
+    with lock:
+        snap = list(samples)
+    n = len(snap)
+    if n == 0:
+        return {"count": 0, "p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "max_ms": 0.0, "mean_ms": 0.0}
+    snap.sort()
+
+    def _pct(p: float) -> float:
+        idx = min(n - 1, max(0, int(round(p * (n - 1)))))
+        return round(snap[idx], 2)
+
+    return {
+        "count": n,
+        "p50_ms": _pct(0.50),
+        "p95_ms": _pct(0.95),
+        "p99_ms": _pct(0.99),
+        "max_ms": round(snap[-1], 2),
+        "mean_ms": round(sum(snap) / n, 2),
+    }
+
+
 class _Pool:
     """Per-service pool. Not exposed directly — use ``checkout_connection``."""
 
@@ -185,6 +244,15 @@ class _Pool:
         # regardless of throughput.
         self._wait_samples: collections.deque[float] = collections.deque(maxlen=_WAIT_SAMPLES_MAX)
         self._wait_samples_lock = threading.Lock()
+        # Time spent inside ``_prepare_checkout``'s call to
+        # ``update_iceberg_view`` — the per-service rebind RLock that cron's
+        # commit path also acquires. Non-zero samples here are the symptom
+        # of API/cron lock contention (see _pool_api_rebind_lock_timeout_s
+        # for the full story). Tracked separately from _wait_samples so the
+        # operator can attribute pool latency to "waiting for a slot" vs.
+        # "waiting for cron to release the view lock".
+        self._rebind_wait_samples: collections.deque[float] = collections.deque(maxlen=_WAIT_SAMPLES_MAX)
+        self._rebind_wait_samples_lock = threading.Lock()
 
     def acquire(self, src: dict, max_wait: float) -> duckdb.DuckDBPyConnection:
         # Phase 6 telemetry: time how long this checkout spends WAITING for
@@ -376,7 +444,18 @@ class _Pool:
                 # View AND underlying buffer set match what we bound last
                 # time — nothing to do.
                 return con
-            iceberg_view.update_iceberg_view(con, src)
+            # Time the rebind call. Non-zero wait here is API/cron lock
+            # contention — see _pool_api_rebind_lock_timeout_s for context.
+            # Pass the short API-side lock_timeout so a long-running cron
+            # rebuild can't cascade pool checkouts into 503s; the view-side
+            # fallback chain (cached SQL / persistent view) handles the
+            # contended case without raising.
+            t_rebind_start = time.monotonic()
+            try:
+                iceberg_view.update_iceberg_view(con, src, lock_timeout=_pool_api_rebind_lock_timeout_s())
+            finally:
+                rebind_ms = (time.monotonic() - t_rebind_start) * 1000.0
+                self._record_rebind_wait_sample(rebind_ms)
             self._stamp_fingerprint(con, src)
             return con
         except Exception as e:
@@ -486,6 +565,17 @@ class _Pool:
         with self._wait_samples_lock:
             self._wait_samples.append(wait_ms)
 
+    def _record_rebind_wait_sample(self, wait_ms: float) -> None:
+        """Append a view-rebind wait-time sample to the bounded ring buffer.
+
+        Mirrors ``_record_wait_sample`` for the iceberg-view RLock wait
+        inside ``_prepare_checkout``. Separate buffer + separate lock so
+        the operator can attribute pool latency to the two distinct
+        contention sources independently.
+        """
+        with self._rebind_wait_samples_lock:
+            self._rebind_wait_samples.append(wait_ms)
+
     def _wait_stats(self) -> dict:
         """Return percentile summary over the recent-samples ring buffer.
 
@@ -496,26 +586,18 @@ class _Pool:
         operator can tell whether a green p95 reflects "no contention"
         or "no samples yet".
         """
-        with self._wait_samples_lock:
-            snap = list(self._wait_samples)
-        n = len(snap)
-        if n == 0:
-            return {"count": 0, "p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "max_ms": 0.0, "mean_ms": 0.0}
-        snap.sort()
+        return _percentile_summary(self._wait_samples, self._wait_samples_lock)
 
-        # Nearest-rank percentile — fine at this sample count.
-        def _pct(p: float) -> float:
-            idx = min(n - 1, max(0, int(round(p * (n - 1)))))
-            return round(snap[idx], 2)
+    def _rebind_wait_stats(self) -> dict:
+        """Percentile summary over recent iceberg-view rebind wait times.
 
-        return {
-            "count": n,
-            "p50_ms": _pct(0.50),
-            "p95_ms": _pct(0.95),
-            "p99_ms": _pct(0.99),
-            "max_ms": round(snap[-1], 2),
-            "mean_ms": round(sum(snap) / n, 2),
-        }
+        Same shape as ``_wait_stats``. A green p95 here means rebinds
+        finish fast (cron and API aren't contending the lock). A red p95
+        is the signal to investigate cron health — typically a leaked
+        watchdog-abandoned worker still holding the lock during a slow
+        S3 read.
+        """
+        return _percentile_summary(self._rebind_wait_samples, self._rebind_wait_samples_lock)
 
     def stats(self) -> dict:
         with self._cond:
@@ -528,10 +610,11 @@ class _Pool:
                 "reused_total": self._reused_total,
                 "discarded_total": self._discarded_total,
             }
-        # Wait-stats snapshot OUTSIDE the pool lock — its own lock guards
-        # the sample deque, and the call would otherwise tie checkout
-        # waiters up behind a sort.
+        # Wait-stats snapshots OUTSIDE the pool lock — their own locks
+        # guard the sample deques, and the calls would otherwise tie
+        # checkout waiters up behind a sort.
         base["wait"] = self._wait_stats()
+        base["rebind_wait"] = self._rebind_wait_stats()
         return base
 
 

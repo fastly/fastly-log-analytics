@@ -197,3 +197,107 @@ def test_wait_stats_percentiles_track_ring_contents():
     assert stats["p95_ms"] == 100.0
     # p50 of 5 samples → index 2 → 3.0
     assert stats["p50_ms"] == 3.0
+
+
+# ── rebind-wait telemetry + short API lock timeout ───────────────────────────
+
+
+def _checkout_idle_conn_with_rebind(pool: _Pool, mock_conn: MagicMock) -> dict:
+    """Helper: put ``mock_conn`` idle, run acquire(), return the captured
+    update_iceberg_view kwargs. Patches the iceberg view module so the
+    rebind path runs without touching real DuckDB or S3."""
+    pool._idle.put_nowait(mock_conn)
+    pool._in_use = 1
+
+    captured: dict = {}
+
+    def _capture(con, src, **kwargs):
+        captured["con"] = con
+        captured["src"] = src
+        captured["kwargs"] = kwargs
+
+    with (
+        patch("backend.core.iceberg.view._view_cache", {}),
+        patch("backend.core.iceberg.view.update_iceberg_view", side_effect=_capture) as mock_uiv,
+    ):
+        pool.acquire(src={"name": pool.service_key, "bucket": "b"}, max_wait=0.5)
+        captured["call_count"] = mock_uiv.call_count
+    return captured
+
+
+def test_prepare_checkout_passes_short_lock_timeout_by_default():
+    """API pool checkouts must pass a sub-second ``lock_timeout`` to
+    update_iceberg_view so a leaked cron worker holding the per-service
+    rebind RLock can't cascade pool waits into a 503 storm. Pinned because
+    losing the short-timeout would re-open the failure-mode from the
+    2026-06-14 incident where cron_sync exceeded the 300s hard cap and
+    dashboard endpoints went 503 until the backend was restarted."""
+    pool = _Pool(service_key="test_rebind_timeout", max_size=1)
+    mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
+
+    captured = _checkout_idle_conn_with_rebind(pool, mock_conn)
+    assert captured["call_count"] == 1
+    # 500ms is the default (matches _pool_api_rebind_lock_timeout_s); upper
+    # bound here pins "sub-second" so any future tweak that pushes it
+    # back over 1s trips the test before it ships.
+    assert "lock_timeout" in captured["kwargs"], (
+        "update_iceberg_view called without lock_timeout — pool would inherit "
+        "the 5s default and re-open the 503-cascade window"
+    )
+    assert 0 < captured["kwargs"]["lock_timeout"] < 1.0
+
+
+def test_prepare_checkout_lock_timeout_honors_env_override(monkeypatch):
+    """DUCKDB_POOL_API_REBIND_LOCK_TIMEOUT_MS overrides the default. Lets
+    operators dial up the timeout temporarily (e.g. during a cron-tuning
+    push) without a redeploy."""
+    monkeypatch.setenv("DUCKDB_POOL_API_REBIND_LOCK_TIMEOUT_MS", "1750")
+    pool = _Pool(service_key="test_rebind_env", max_size=1)
+    mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
+
+    captured = _checkout_idle_conn_with_rebind(pool, mock_conn)
+    assert captured["kwargs"]["lock_timeout"] == 1.75
+
+
+def test_prepare_checkout_records_rebind_wait_sample():
+    """Every checkout that traverses the rebind path records a sample so
+    the admin pool-stats UI can attribute pool latency to "cron is
+    holding the view lock" vs. just "no idle slot available"."""
+    pool = _Pool(service_key="test_rebind_sample", max_size=1)
+    mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
+
+    _checkout_idle_conn_with_rebind(pool, mock_conn)
+    stats = pool.stats()
+    assert "rebind_wait" in stats, "stats() must expose rebind_wait alongside wait"
+    assert stats["rebind_wait"]["count"] == 1
+    assert stats["rebind_wait"]["max_ms"] >= 0.0
+
+
+def test_rebind_wait_stats_empty_buffer_returns_stable_zero_shape():
+    """Empty rebind_wait buffer returns the same key shape as wait so admin
+    UI binds the same template to both panels."""
+    pool = _Pool(service_key="test_rebind_empty", max_size=1)
+    rebind = pool._rebind_wait_stats()
+    assert rebind == {"count": 0, "p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "max_ms": 0.0, "mean_ms": 0.0}
+
+
+def test_rebind_wait_sample_failure_still_records_sample():
+    """When the rebind raises, the sample is still recorded — operators
+    need to see contention duration even when it ends in a discard, not
+    only when it ends in a successful checkout."""
+    pool = _Pool(service_key="test_rebind_fail", max_size=1)
+    mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
+    pool._idle.put_nowait(mock_conn)
+    pool._in_use = 1
+
+    with (
+        patch("backend.core.iceberg.view._view_cache", {}),
+        patch("backend.core.iceberg.view.update_iceberg_view", side_effect=RuntimeError("boom")),
+    ):
+        try:
+            pool.acquire(src={"name": "test_rebind_fail", "bucket": "b"}, max_wait=0.1)
+        except RuntimeError:
+            pass
+
+    stats = pool.stats()
+    assert stats["rebind_wait"]["count"] == 1
