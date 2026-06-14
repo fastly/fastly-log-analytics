@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from backend.core import metadata_db
 from backend.core.metadata import reconciliation
+from backend.core.metadata import usage_log_db as _usage_log_db
 
 
 def _con(service_id: str):
@@ -19,8 +20,13 @@ def _con(service_id: str):
 
 
 def _seed_usage_log(service_id: str, rows: int, days_ago: int = 0) -> None:
-    """Insert ``rows`` usage_log entries dated ``days_ago`` in the past."""
-    con = _con(service_id)
+    """Insert ``rows`` usage_log entries dated ``days_ago`` in the past.
+
+    ``usage_log`` lives in its own per-service SQLite (v2.0 cutover); seed
+    via :func:`backend.core.metadata.usage_log_db.get_con` so the row
+    counts/cleanup paths see them.
+    """
+    con = _usage_log_db.get_con(service_id)
     con.executemany(
         "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, bytes, count) "
         f"VALUES (datetime('now', '-{days_ago} days'), ?, 'A', 'PUT_OBJECT', 0, 1)",

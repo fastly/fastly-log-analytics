@@ -15,6 +15,7 @@ import sqlite3
 import time as _t
 from collections.abc import Callable
 
+from backend.core.metadata import usage_log_db as _usage_log_db
 from backend.core.metadata.base import db_path, get_con
 from backend.core.metadata.usage_log import DEFAULT_METADATA_RETENTION
 
@@ -22,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 
 # Tables surfaced in the storage stats endpoint. Order matters for the UI.
+# ``usage_log`` lives in its own per-service file since the v2.0 cutover
+# (see :mod:`backend.core.metadata.usage_log_db`); the stats helper opens
+# that file separately so admins still see a unified row count + bytes
+# entry for it under the same key.
 _STATS_TABLES = (
     "usage_log",
     "ingested_files",
@@ -40,6 +45,10 @@ _STATS_TABLES = (
 # ISO/datetime string, so the standard ``datetime('now', '-Nd')``
 # comparison the loop uses below would silently skip every row. The
 # loop special-cases this table — see ``_SLOW_QUERIES_TABLE``.
+# ``usage_log`` is special-cased separately: it lives in its own
+# per-service SQLite file rather than the metadata.db, so the loop
+# routes its DELETE through ``usage_log_db`` instead of the metadata
+# connection.
 _CLEANUP_TABLES = (
     ("usage_log", "usage_log_days", "timestamp"),
     ("ingested_files", "ingested_files_days", "ingested_at"),
@@ -50,6 +59,25 @@ _CLEANUP_TABLES = (
 # Handled with an epoch-cutoff DELETE instead of the standard
 # ``datetime('now', '-Nd')`` comparison the other tables use.
 _SLOW_QUERIES_TABLE = "slow_queries"
+# Table whose backing file is the per-service usage_log SQLite, not the
+# metadata.db this module otherwise targets. Stats reads + cleanup
+# DELETEs route through ``usage_log_db`` for this one.
+_USAGE_LOG_TABLE = "usage_log"
+
+
+def _open_usage_log(service_id: str) -> sqlite3.Connection | None:
+    """Open the per-service usage_log file if it exists; else None.
+
+    A service that hasn't logged a single call yet has no usage_log.db
+    on disk; ``usage_log_db.get_con`` would create+initialise an empty
+    file, which is wasted I/O when the caller just wants a row count.
+    Use the read-only opener instead and treat ``OperationalError`` as
+    "no rows yet".
+    """
+    try:
+        return _usage_log_db.open_readonly(service_id)
+    except sqlite3.OperationalError:
+        return None
 
 
 def get_metadata_storage_stats(service_id: str) -> dict:
@@ -64,6 +92,23 @@ def get_metadata_storage_stats(service_id: str) -> dict:
     con = get_con(service_id)
     out: dict[str, dict] = {}
     for t in _STATS_TABLES:
+        if t == _USAGE_LOG_TABLE:
+            # Lives in its own per-service file. Reported under the same
+            # key for UI continuity; a missing usage_log.db reads as 0/0.
+            usage_log_con = _open_usage_log(service_id)
+            if usage_log_con is None:
+                out[t] = {"rows": 0, "bytes": 0}
+                continue
+            try:
+                rows = usage_log_con.execute("SELECT count(*) FROM usage_log").fetchone()[0]
+                row = usage_log_con.execute("SELECT sum(pgsize) FROM dbstat WHERE name = ?", ("usage_log",)).fetchone()
+                bytes_: int | None = int(row[0]) if row and row[0] is not None else 0
+            except sqlite3.OperationalError:
+                rows, bytes_ = 0, None
+            finally:
+                usage_log_con.close()
+            out[t] = {"rows": int(rows or 0), "bytes": bytes_}
+            continue
         try:
             rows = con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
         except sqlite3.OperationalError:
@@ -178,6 +223,13 @@ def cleanup_metadata(
     con = get_con(service_id)
     t0 = _t.time()
 
+    def _con_for(table: str) -> sqlite3.Connection:
+        # usage_log lives in its own per-service file (v2.0 cutover);
+        # every other trimmable table is in the metadata.db.
+        if table == _USAGE_LOG_TABLE:
+            return _usage_log_db.get_con(service_id)
+        return con
+
     # Steps: 3 deletes + 1 vacuum + 1 post-count = 5. Set up the progress
     # framing so the modal can render a determinate bar.
     total_steps = len(_CLEANUP_TABLES) + 2
@@ -186,7 +238,7 @@ def cleanup_metadata(
     before: dict[str, int] = {}
     for table, _, _ in _CLEANUP_TABLES:
         try:
-            before[table] = int(con.execute(f"SELECT count(*) FROM {table}").fetchone()[0] or 0)
+            before[table] = int(_con_for(table).execute(f"SELECT count(*) FROM {table}").fetchone()[0] or 0)
         except sqlite3.OperationalError:
             before[table] = 0
 
@@ -209,6 +261,7 @@ def cleanup_metadata(
             )
             continue
         _emit({"type": "status", "message": f"Trimming {table} (older than {days_int}d)…"})
+        table_con = _con_for(table)
         try:
             if table == _SLOW_QUERIES_TABLE:
                 # Unix-epoch REAL cutoff for slow_queries — see
@@ -216,17 +269,17 @@ def cleanup_metadata(
                 # window length as the others; the only difference is
                 # the column type / comparison.
                 cutoff_epoch = _t.time() - days_int * 86400
-                cur = con.execute(
+                cur = table_con.execute(
                     f"DELETE FROM {table} WHERE {ts_col} < ?",
                     (cutoff_epoch,),
                 )
             else:
-                cur = con.execute(
+                cur = table_con.execute(
                     f"DELETE FROM {table} WHERE {ts_col} < datetime('now', ?)",
                     (f"-{days_int} days",),
                 )
             deleted[table] = int(cur.rowcount or 0)
-            con.commit()
+            table_con.commit()
             _emit(
                 {
                     "type": "progress",
@@ -297,7 +350,7 @@ def cleanup_metadata(
     after: dict[str, int] = {}
     for table, _, _ in _CLEANUP_TABLES:
         try:
-            after[table] = int(con.execute(f"SELECT count(*) FROM {table}").fetchone()[0] or 0)
+            after[table] = int(_con_for(table).execute(f"SELECT count(*) FROM {table}").fetchone()[0] or 0)
         except sqlite3.OperationalError:
             after[table] = 0
     _emit(
