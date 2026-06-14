@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.4
+
 # --- OpenAPI Schema Generation Stage ---
 # Needs the Python backend to introspect FastAPI routes and emit openapi.json.
 FROM python:3.12-slim-bookworm AS api-schema
@@ -7,7 +9,8 @@ COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-RUN uv sync --no-dev --frozen --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --no-dev --frozen --no-install-project
 
 COPY backend/ ./backend/
 COPY scripts/generate_openapi.py ./scripts/
@@ -26,7 +29,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+# Cache mount keeps npm's tarball cache across builds — entries are keyed by the
+# SHA-512 integrity hash from package-lock.json and verified before extraction,
+# so a hit returns the same bytes as a fresh download. node_modules itself is
+# still rebuilt from scratch by `npm ci`.
+RUN --mount=type=cache,target=/root/.npm npm ci
 
 COPY frontend/ .
 
@@ -63,7 +70,24 @@ ENV NEXT_TELEMETRY_DISABLED=1
 # match THIS build's actual chunks. Cost: ~doubles the builder-stage
 # time (~60s → ~120s). Worth it — saves ~300-700ms per first
 # dashboard load that uses the plotly chart.
-RUN npx next build && node scripts/build-preload-manifest.mjs && npx next build
+# Cache mount keeps Webpack's filesystem cache + SWC's compiled-module cache
+# across builds. Entries are keyed by source content hash, compiler config hash,
+# Next/Webpack version, and NODE_ENV, so any source or config change invalidates
+# the affected entries. Output chunk hashes are derived from module content
+# (Webpack contenthash), not cache state — byte-identical source produces
+# byte-identical chunks whether the cache was warm or cold. The cache mount is
+# stripped from the final image (only .next/standalone and .next/static are
+# copied to the runner stage).
+#
+# Between the two passes below, build-preload-manifest.mjs rewrites
+# lib/_preload-chunks.json. Webpack sees the changed content hash and
+# invalidates its cached compilation of that module + dependents, so pass 2's
+# SSG picks up the new hashes correctly.
+#
+# If a build ever produces unexpected output, nuking the cache is the first
+# diagnostic: `docker buildx prune --filter type=exec.cachemount`.
+RUN --mount=type=cache,target=/app/.next/cache \
+    npx next build && node scripts/build-preload-manifest.mjs && npx next build
 
 # --- Production Stage ---
 FROM node:24-slim AS runner

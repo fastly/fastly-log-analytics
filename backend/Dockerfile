@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.4
+
 # --- Build Stage ---
 FROM python:3.12-slim-bookworm AS builder
 
@@ -20,7 +22,11 @@ COPY pyproject.toml uv.lock ./
 
 # Install dependencies into a virtual environment
 # We use --frozen to ensure exact versions from uv.lock
-RUN uv sync --no-dev --frozen --no-install-project
+# Cache mount keeps uv's downloaded wheel cache across builds — content-addressable
+# by package hash, so a hit returns a hash-verified artifact identical to a fresh
+# download. The cache is never copied into the final image.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --no-dev --frozen --no-install-project
 
 # --- Production Stage ---
 FROM python:3.12-slim-bookworm AS runner
