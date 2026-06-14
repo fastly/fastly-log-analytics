@@ -372,6 +372,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       {/* Desktop Sidebar */}
       <TooltipProvider delay={200} closeDelay={0}>
       <aside
+        id="app-sidebar"
         data-collapsed={sidebarCollapsed || undefined}
         className={cn(
           "hidden md:flex flex-col border-r bg-muted/40 transition-[width] duration-200 ease-out",
@@ -422,40 +423,6 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               />
             ))}
           </nav>
-          {/* Collapse toggle. Tooltip-wrapped when collapsed so the
-              shortcut hint stays discoverable in icon-only mode. */}
-          {sidebarCollapsed ? (
-            <Tooltip>
-              <TooltipTrigger render={
-                <button
-                  type="button"
-                  onClick={toggleSidebar}
-                  aria-label="Expand sidebar"
-                  aria-expanded={false}
-                  aria-keyshortcuts="Control+B Meta+B"
-                  className="flex items-center justify-center h-9 w-9 mx-auto mt-2 rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
-                />
-              }>
-                <PanelLeftOpen className="h-4 w-4" aria-hidden="true" />
-              </TooltipTrigger>
-              <TooltipContent side="right" className="text-xs font-medium">
-                Expand sidebar <span className="opacity-60 ml-1">⌘B</span>
-              </TooltipContent>
-            </Tooltip>
-          ) : (
-            <button
-              type="button"
-              onClick={toggleSidebar}
-              aria-label="Collapse sidebar"
-              aria-expanded={true}
-              aria-keyshortcuts="Control+B Meta+B"
-              className="flex items-center gap-3 w-full mt-2 px-3 py-2 rounded-md text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
-            >
-              <PanelLeftClose className="h-4 w-4 shrink-0" aria-hidden="true" />
-              <span>Collapse</span>
-              <span className="ml-auto opacity-60 font-mono text-[10px]">⌘B</span>
-            </button>
-          )}
           {!sidebarCollapsed && (
             <div className="mt-4 mb-1 text-[10px] text-muted-foreground/50 text-center font-mono select-all">
               v{packageJson.version}
@@ -484,11 +451,35 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           )}
         </div>
       </aside>
-      </TooltipProvider>
 
       {/* Main Content */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        <header className="flex h-14 items-center gap-4 border-b bg-muted/40 px-4 shrink-0">
+        <header className="flex h-14 items-center gap-2 border-b bg-muted/40 px-4 shrink-0">
+          {/* Sidebar toggle — VSCode-style: lives in the app header
+              so the position never shifts between expanded/collapsed
+              states. Hidden on mobile since the sidebar itself is
+              hidden below md. */}
+          <Tooltip>
+            <TooltipTrigger render={
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                aria-expanded={!sidebarCollapsed}
+                aria-controls="app-sidebar"
+                aria-keyshortcuts="Control+B Meta+B"
+                className="hidden md:flex items-center justify-center h-8 w-8 rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors -ml-1 mr-1"
+              />
+            }>
+              {sidebarCollapsed
+                ? <PanelLeftOpen className="h-4 w-4" aria-hidden="true" />
+                : <PanelLeftClose className="h-4 w-4" aria-hidden="true" />}
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs font-medium">
+              {sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              <span className="opacity-60 ml-2 font-mono">⌘B</span>
+            </TooltipContent>
+          </Tooltip>
           <ServiceSwitcher />
           <div className="ml-auto flex items-center gap-2">
             <SyncStatusBadge />
@@ -514,6 +505,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           <DebugPanel />
         </main>
       </div>
+      </TooltipProvider>
       </div>
     </div>
   )
