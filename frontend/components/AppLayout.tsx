@@ -17,11 +17,19 @@ import {
   Timer,
   Shield,
   Bell,
-  Server
+  Server,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
 import { useFilterUrlSync } from '@/hooks/useFilterUrlSync'
 import { TimezoneSwitcher } from '@/components/TimezoneSwitcher/TimezoneSwitcher'
@@ -93,9 +101,10 @@ interface NavLinkProps {
   name: string
   isActive: boolean
   disabled?: boolean
+  collapsed?: boolean
 }
 
-function NavLink({ href, icon: Icon, name, isActive, disabled, activeServiceId, router }: NavLinkProps & { activeServiceId?: string | null; router: ReturnType<typeof useRouter> }) {
+function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, activeServiceId, router }: NavLinkProps & { activeServiceId?: string | null; router: ReturnType<typeof useRouter> }) {
   const finalHref = activeServiceId && !href.startsWith('/admin')
     ? `${href}?service=${activeServiceId}`
     : href
@@ -110,24 +119,38 @@ function NavLink({ href, icon: Icon, name, isActive, disabled, activeServiceId, 
     if (!disabled) router.prefetch(finalHref)
   }, [disabled, finalHref, router])
 
-  return (
+  const link = (
     <Link
       href={finalHref}
       prefetch={false}
       onMouseEnter={handleMouseEnter}
       aria-disabled={disabled || undefined}
+      aria-current={isActive ? 'page' : undefined}
+      aria-label={collapsed ? name : undefined}
       tabIndex={disabled ? -1 : undefined}
       className={cn(
-        "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+        "flex items-center rounded-md text-sm font-medium transition-colors",
+        collapsed ? "justify-center h-9 w-9 mx-auto" : "gap-3 px-3 py-2",
         disabled
           ? "text-muted-foreground opacity-50 cursor-not-allowed pointer-events-none"
           : "hover:bg-accent hover:text-accent-foreground",
         !disabled && isActive ? "bg-primary text-primary-foreground shadow-sm" : !disabled ? "text-muted-foreground" : ""
       )}
     >
-      <Icon className="h-4 w-4" aria-hidden="true" />
-      {name}
+      <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+      {!collapsed && <span className="truncate">{name}</span>}
     </Link>
+  )
+
+  if (!collapsed) return link
+
+  return (
+    <Tooltip>
+      <TooltipTrigger render={link} />
+      <TooltipContent side="right" className="text-xs font-medium">
+        {name}
+      </TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -139,6 +162,43 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   // Populated by <RawQueryModeProbe> inside the Suspense boundary below
   // so we don't have to call useSearchParams() directly here.
   const [isRawQueryMode, setIsRawQueryMode] = React.useState(false)
+
+  // Sidebar collapsed state, persisted across reloads. Synchronous
+  // localStorage read in the useState initializer so first paint matches
+  // the user's saved preference (matches the [[use-card-visibility]] pattern).
+  // SSR returns false; the client initializer overrides during hydration.
+  const [sidebarCollapsed, setSidebarCollapsed] = React.useState(() => {
+    if (typeof window === 'undefined') return false
+    try {
+      return localStorage.getItem('fla.sidebarCollapsed') === '1'
+    } catch {
+      return false
+    }
+  })
+  const toggleSidebar = React.useCallback(() => {
+    setSidebarCollapsed(prev => {
+      const next = !prev
+      try { localStorage.setItem('fla.sidebarCollapsed', next ? '1' : '0') } catch {}
+      return next
+    })
+  }, [])
+  // Cmd/Ctrl+B toggles the sidebar. Skip when an editable surface is
+  // focused so the Query page's SQL editor (and any future text inputs
+  // that want ⌘B for bold) keep their own binding.
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== 'b' || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return
+      const target = e.target as HTMLElement | null
+      if (target) {
+        const tag = target.tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) return
+      }
+      e.preventDefault()
+      toggleSidebar()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [toggleSidebar])
 
   // Persist filter state to URL so back-nav, refresh, and shared links
   // all round-trip the user's current dashboard view.
@@ -310,24 +370,39 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       <PlotlyPrewarm />
       <MapPrewarm />
       {/* Desktop Sidebar */}
-      <aside className="hidden md:flex w-64 flex-col border-r bg-muted/40">
-        <div className="flex h-14 items-center justify-center border-b px-4 py-2 shrink-0">
+      <TooltipProvider delay={200} closeDelay={0}>
+      <aside
+        data-collapsed={sidebarCollapsed || undefined}
+        className={cn(
+          "hidden md:flex flex-col border-r bg-muted/40 transition-[width] duration-200 ease-out",
+          sidebarCollapsed ? "w-14" : "w-64"
+        )}
+      >
+        <div className="flex h-14 items-center justify-center border-b px-2 py-2 shrink-0">
           <Link
             href={hasServices ? (activeServiceId ? `/dashboard?service=${activeServiceId}` : "/dashboard") : "/admin"}
             className="flex flex-col items-center justify-center hover:opacity-80 transition-opacity mt-1"
+            aria-label="Fastly Log Analytics — home"
           >
-             <img src="/fastly.svg" alt="Fastly" className="h-5 dark:invert" />
-             <span className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground mt-0.5">Log Analytics</span>
+             <img
+               src="/fastly.svg"
+               alt="Fastly"
+               className={cn("dark:invert transition-[height] duration-200", sidebarCollapsed ? "h-4" : "h-5")}
+             />
+             {!sidebarCollapsed && (
+               <span className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground mt-0.5">Log Analytics</span>
+             )}
           </Link>
         </div>
         <ScrollArea className="flex-1">
-          <nav className="grid gap-1 p-2">
+          <nav className="grid gap-1 p-2" aria-label="Primary">
             {visibleNav.map((item) => (
               <NavLink
                 key={item.href}
                 {...item}
                 isActive={pathname === item.href}
                 disabled={!hasServices}
+                collapsed={sidebarCollapsed}
                 activeServiceId={activeServiceId}
                 router={router}
               />
@@ -335,21 +410,58 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           </nav>
         </ScrollArea>
         <div className="mt-auto p-2 border-t bg-muted/20">
-          <nav className="grid gap-1">
+          <nav className="grid gap-1" aria-label="System">
             {visibleSystemNav.map((item) => (
               <NavLink
                 key={item.href}
                 {...item}
                 isActive={pathname === item.href}
+                collapsed={sidebarCollapsed}
                 activeServiceId={activeServiceId}
                 router={router}
               />
             ))}
           </nav>
-          <div className="mt-4 mb-1 text-[10px] text-muted-foreground/50 text-center font-mono select-all">
-            v{packageJson.version}
-          </div>
-          {isAnalyst && (analystEmail || analystName) && (
+          {/* Collapse toggle. Tooltip-wrapped when collapsed so the
+              shortcut hint stays discoverable in icon-only mode. */}
+          {sidebarCollapsed ? (
+            <Tooltip>
+              <TooltipTrigger render={
+                <button
+                  type="button"
+                  onClick={toggleSidebar}
+                  aria-label="Expand sidebar"
+                  aria-expanded={false}
+                  aria-keyshortcuts="Control+B Meta+B"
+                  className="flex items-center justify-center h-9 w-9 mx-auto mt-2 rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                />
+              }>
+                <PanelLeftOpen className="h-4 w-4" aria-hidden="true" />
+              </TooltipTrigger>
+              <TooltipContent side="right" className="text-xs font-medium">
+                Expand sidebar <span className="opacity-60 ml-1">⌘B</span>
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              aria-label="Collapse sidebar"
+              aria-expanded={true}
+              aria-keyshortcuts="Control+B Meta+B"
+              className="flex items-center gap-3 w-full mt-2 px-3 py-2 rounded-md text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+            >
+              <PanelLeftClose className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>Collapse</span>
+              <span className="ml-auto opacity-60 font-mono text-[10px]">⌘B</span>
+            </button>
+          )}
+          {!sidebarCollapsed && (
+            <div className="mt-4 mb-1 text-[10px] text-muted-foreground/50 text-center font-mono select-all">
+              v{packageJson.version}
+            </div>
+          )}
+          {!sidebarCollapsed && isAnalyst && (analystEmail || analystName) && (
             <div
               data-testid="analyst-watermark"
               data-analyst-email={analystEmail || ''}
@@ -358,8 +470,21 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               Viewing as <span className="font-medium">{analystName || analystEmail}</span>
             </div>
           )}
+          {/* When collapsed, keep the analyst watermark in the DOM (tests
+              and audit hooks key off data-analyst-email) but visually
+              hidden — the expanded copy is the user-facing one. */}
+          {sidebarCollapsed && isAnalyst && (analystEmail || analystName) && (
+            <div
+              data-testid="analyst-watermark"
+              data-analyst-email={analystEmail || ''}
+              className="sr-only"
+            >
+              Viewing as {analystName || analystEmail}
+            </div>
+          )}
         </div>
       </aside>
+      </TooltipProvider>
 
       {/* Main Content */}
       <div className="flex flex-1 flex-col overflow-hidden">
