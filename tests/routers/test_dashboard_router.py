@@ -77,10 +77,15 @@ def test_bundle_returns_both_subresponses(client, stub_aggregates, stub_top_bots
     assert "bundle:top_bots" in sections
 
 
-def test_bundle_short_circuits_top_bots_when_fields_filter_excludes(client, stub_aggregates, stub_top_bots):
-    """When the request's fields filter doesn't include _bot_name /
-    _ngwaf_bot_name, top_bots returns the empty-list shape without
-    even hitting the repository (saves the COUNT scan)."""
+def test_bundle_always_fetches_top_bots_even_when_fields_filter_excludes(client, stub_aggregates, stub_top_bots):
+    """The dashboard always renders the two bot cards independent of
+    which other top-N cards the lazy fields list is hydrating. The
+    previous short-circuit (skip when fields excludes _bot_name /
+    _ngwaf_bot_name) fired on every lazy load and seeded the React
+    Query cache with empty bot arrays — leaving the dashboard cards
+    visually blank even though the backend had bot rows available.
+    Pin the always-fetch behavior so the short-circuit can't quietly
+    come back."""
     resp = client.post(
         "/api/dashboard/bundle",
         json={
@@ -94,10 +99,10 @@ def test_bundle_short_circuits_top_bots_when_fields_filter_excludes(client, stub
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["top_bots"] == {"bots": [], "ngwaf_bots": []}
-    # Stub never invoked because the short-circuit fired first.
-    stub_top_bots.assert_not_called()
-    # Aggregates still ran.
+    # The stub-returned top_bots payload (whatever its shape) is what
+    # comes out — the router doesn't substitute an empty placeholder.
+    stub_top_bots.assert_called_once()
+    assert body["top_bots"] == stub_top_bots.return_value
     stub_aggregates.assert_called_once()
 
 

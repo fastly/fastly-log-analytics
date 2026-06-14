@@ -81,16 +81,23 @@ def dashboard_bundle(req: AggregatesRequest, ctx: RequestContext = Depends(build
     )
     timer.mark("bundle:aggregates", t0)
     t1 = time.perf_counter()
-    if req.fields is not None and not any(f in req.fields for f in ("_bot_name", "_ngwaf_bot_name")):
-        top_bots: dict[str, Any] = {"bots": [], "ngwaf_bots": []}
-    else:
-        top_bots = security_repo.get_top_bots(
-            con=ctx.con,
-            src=ctx.source,
-            start_time=req.start_time,
-            end_time=req.end_time,
-            filters=req.filters,
-        )
+    # The dashboard ALWAYS shows the two bot cards (Fastly Bots + NGWAF
+    # Verified Bots), independent of which other top-N cards the lazy
+    # fields list is hydrating. The prior gate (skip when fields is set
+    # and doesn't include _bot_name/_ngwaf_bot_name) was checking the
+    # wrong thing — the dashboard sends a lazy fields list that excludes
+    # the bot virtual fields, so the gate fired in the common case and
+    # seeded the React Query cache with empty bot arrays. The standalone
+    # /api/security/top-bots refetch then read the seeded blank from the
+    # cache instead of replacing it, leaving both cards visually empty
+    # even though the backend had bot rows available.
+    top_bots: dict[str, Any] = security_repo.get_top_bots(
+        con=ctx.con,
+        src=ctx.source,
+        start_time=req.start_time,
+        end_time=req.end_time,
+        filters=req.filters,
+    )
     timer.mark("bundle:top_bots", t1)
     # Rename nested `section_timings` → `_section_timings` so the bundle
     # response mirrors what the dedicated /aggregates and /top-bots
