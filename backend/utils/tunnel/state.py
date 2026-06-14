@@ -76,7 +76,7 @@ def restore_direct_state(state: TunnelState) -> bool:
 
     Returns ``True`` iff a public_endpoint was successfully restored.
     """
-    from backend.core import share_db
+    from backend.utils.date_utils import iso_z_now
 
     try:
         import json
@@ -94,7 +94,7 @@ def restore_direct_state(state: TunnelState) -> bool:
         state.public_endpoint = endpoint
         state.forward_port = data.get("forward_port", 3000)
         state.direct_socket_addr = "0.0.0.0"
-        state.started_at = share_db.iso_z_now()
+        state.started_at = iso_z_now()
         logger.info("[tunnel] restored direct-mode share state for %s", endpoint)
         return True
     except Exception:

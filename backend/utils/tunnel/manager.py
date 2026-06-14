@@ -22,6 +22,7 @@ import threading
 from datetime import UTC, datetime
 
 from backend.core import share_db
+from backend.utils.date_utils import iso_z_now
 
 from .fingerprint import compute_fingerprint
 from .rate_limiter import LOGIN_FAILURE_WINDOW_S, _LoginRateLimiter
@@ -151,7 +152,7 @@ class TunnelManager:
                 except Exception:
                     logger.exception("[tunnel] failed to record SESSION_BOOT for %s", prev.session_id)
 
-            now = share_db.iso_z_now()
+            now = iso_z_now()
             session = AnalystSession(
                 session_id=secrets.token_urlsafe(32),
                 invite_id=invite_id,
@@ -188,7 +189,7 @@ class TunnelManager:
             session = self._sessions.get(session_id)
             if session is None:
                 return False
-            session.last_active_time = share_db.iso_z_now()
+            session.last_active_time = iso_z_now()
             if last_activity is not None:
                 session.last_activity = last_activity
             if new_ip is not None and new_ip != session.ip_address:
@@ -247,7 +248,7 @@ class TunnelManager:
             if invite is None or invite.get("revoked"):
                 self._evict(session, reason="invite revoked or removed", event="SESSION_BOOT")
                 return None
-            if invite.get("expires_at") and invite["expires_at"] < share_db.iso_z_now():
+            if invite.get("expires_at") and invite["expires_at"] < iso_z_now():
                 self._evict(session, reason="invite expired", event="SESSION_TIMEOUT")
                 return None
 
@@ -412,7 +413,7 @@ class TunnelManager:
             self._state.public_endpoint = public_endpoint
             self._state.forward_port = forward_port
             self._state.direct_socket_addr = "0.0.0.0"
-            self._state.started_at = share_db.iso_z_now()
+            self._state.started_at = iso_z_now()
             # Persist so a backend restart re-arms automatically.
             persist_direct_state(self._state)
 
@@ -481,7 +482,7 @@ class TunnelManager:
             self._tunnel_uptime_history.append(
                 {
                     "started_at": self._state.started_at,
-                    "ended_at": share_db.iso_z_now(),
+                    "ended_at": iso_z_now(),
                     "duration_s": max(0, int((ended - started).total_seconds())),
                     "reason": reason,
                 }
