@@ -259,89 +259,10 @@ def test_temp_summary_by_edge_placeholders_pinned():
     assert _placeholders(SQL.TEMP_SUMMARY_BY_EDGE) == sorted(["lat_val", "temp_table"])
 
 
-def test_temp_timeseries_renders():
-    rendered = SQL.TEMP_TIMESERIES.format(
-        interval="INTERVAL '1' minutes",
-        agg_expr="MEDIAN(lat_us)",
-        unit_conv="/ 1000.0",
-        edge_col="",
-        temp_table="t_origin_deadbeef",
-        lat_expr="lat_us",
-        edge_group="",
-    )
-    assert "time_bucket(INTERVAL '1' minutes, \"timestamp\")" in rendered
-    assert "FROM t_origin_deadbeef" in rendered
-    assert "MEDIAN(lat_us) / 1000.0" in rendered
-    assert "GROUP BY ts" in rendered
-
-
-def test_temp_timeseries_placeholders_pinned():
-    assert _placeholders(SQL.TEMP_TIMESERIES) == sorted(
-        [
-            "interval",
-            "agg_expr",
-            "unit_conv",
-            "edge_col",
-            "temp_table",
-            "lat_expr",
-            "edge_group",
-        ]
-    )
-
-
-def test_temp_slow_urls_renders():
-    rendered = SQL.TEMP_SLOW_URLS.format(temp_table="t_origin_deadbeef")
-    assert "FROM t_origin_deadbeef" in rendered
-    assert "MEDIAN(lat_us) / 1000.0" in rendered
-    assert "HAVING COUNT(*) >= ?" in rendered
-    assert rendered.rstrip().endswith("LIMIT ?")
-
-
-def test_temp_slow_urls_placeholders_pinned():
-    assert _placeholders(SQL.TEMP_SLOW_URLS) == ["temp_table"]
-
-
-def test_temp_status_codes_renders():
-    rendered = SQL.TEMP_STATUS_CODES.format(temp_table="t_origin_deadbeef")
-    assert "FROM t_origin_deadbeef" in rendered
-    assert '"ost"' in rendered
-    assert "OVER ()" in rendered
-
-
-def test_temp_status_codes_placeholders_pinned():
-    assert _placeholders(SQL.TEMP_STATUS_CODES) == ["temp_table"]
-
-
-def test_temp_path_breakdown_renders():
-    rendered = SQL.TEMP_PATH_BREAKDOWN.format(temp_table="t_origin_deadbeef")
-    assert "FROM t_origin_deadbeef" in rendered
-    assert 'GROUP BY "edge"' in rendered
-    assert "APPROX_QUANTILE(lat_us, 0.95)" in rendered
-
-
-def test_temp_path_breakdown_placeholders_pinned():
-    assert _placeholders(SQL.TEMP_PATH_BREAKDOWN) == ["temp_table"]
-
-
-def test_temp_pop_latency_renders():
-    rendered = SQL.TEMP_POP_LATENCY.format(temp_table="t_origin_deadbeef")
-    assert "FROM t_origin_deadbeef" in rendered
-    assert 'GROUP BY "pop"' in rendered
-    assert "ORDER BY p95_ms DESC" in rendered
-    assert rendered.rstrip().endswith("LIMIT ?")
-
-
-def test_temp_pop_latency_placeholders_pinned():
-    assert _placeholders(SQL.TEMP_POP_LATENCY) == ["temp_table"]
-
-
-def test_temp_ip_health_renders():
-    rendered = SQL.TEMP_IP_HEALTH.format(temp_table="t_origin_deadbeef")
-    assert "FROM t_origin_deadbeef" in rendered
-    assert 'GROUP BY "oip"' in rendered
-    assert "HAVING COUNT(*) >= 10" in rendered
-    assert "ORDER BY error_pct DESC" in rendered
-
-
-def test_temp_ip_health_placeholders_pinned():
-    assert _placeholders(SQL.TEMP_IP_HEALTH) == ["temp_table"]
+# The TEMP_TIMESERIES / TEMP_SLOW_URLS / TEMP_STATUS_CODES /
+# TEMP_PATH_BREAKDOWN / TEMP_POP_LATENCY / TEMP_IP_HEALTH templates were
+# deleted. Their consumers in origin.py now render the live templates
+# (SLOW_URLS, PATH_BREAKDOWN, POP_LATENCY, IP_HEALTH, STATUS_CODES,
+# TIMESERIES_BUCKETED) with ``table=<temp_table>``, ``where='1=1'``,
+# ``lat_val='lat_us'``. The live-template render + placeholder tests
+# above pin the SQL shape both call sites depend on.

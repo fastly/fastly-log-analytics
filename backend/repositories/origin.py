@@ -850,12 +850,13 @@ def _origin_timeseries_from_temp(
     edge_group = ', "edge"' if (split_by_leg and "edge" in actual_cols_set) else ""
 
     rows = runner.execute(
-        SQL.TEMP_TIMESERIES.format(
+        SQL.TIMESERIES_BUCKETED.format(
             interval=interval,
             agg_expr=agg_expr,
             unit_conv=unit_conv,
             edge_col=edge_col,
-            temp_table=temp_table,
+            table=temp_table,
+            where="1=1",
             lat_expr=lat_expr,
             edge_group=edge_group,
         )
@@ -887,7 +888,7 @@ def _origin_slow_urls_from_temp(
     # Use the pre-computed lat_us column so percentile sorts can leverage
     # column-store layout instead of paying COALESCE per row.
     rows = runner.execute(
-        SQL.TEMP_SLOW_URLS.format(temp_table=temp_table),
+        SQL.SLOW_URLS.format(lat_val="lat_us", table=temp_table, where="1=1"),
         [min_requests, limit],
     ).fetchall()
     return {
@@ -899,7 +900,7 @@ def _origin_slow_urls_from_temp(
 def _origin_status_codes_from_temp(runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str]) -> dict:
     if "ost" not in set(actual_cols):
         return {"has_data": False, "rows": []}
-    rows = runner.execute(SQL.TEMP_STATUS_CODES.format(temp_table=temp_table)).fetchall()
+    rows = runner.execute(SQL.STATUS_CODES.format(table=temp_table, where="1=1")).fetchall()
     if not rows:
         return {"has_data": False, "rows": []}
     return {
@@ -912,7 +913,7 @@ def _origin_path_breakdown_from_temp(runner: QueryRunner, temp_table: str, actua
     actual_cols_set = set(actual_cols)
     if "edge" not in actual_cols_set:
         return {"has_data": False, "shielding_detected": False, "rows": []}
-    rows = runner.execute(SQL.TEMP_PATH_BREAKDOWN.format(temp_table=temp_table)).fetchall()
+    rows = runner.execute(SQL.PATH_BREAKDOWN.format(lat_val="lat_us", table=temp_table, where="1=1")).fetchall()
     if not rows:
         return {"has_data": False, "shielding_detected": False, "rows": []}
     shielding_detected = any(r[0] is False for r in rows)
@@ -930,7 +931,7 @@ def _origin_pop_latency_from_temp(
     if "pop" not in actual_cols_set:
         return {"has_data": False, "requires_group_c": True, "rows": []}
     rows = runner.execute(
-        SQL.TEMP_POP_LATENCY.format(temp_table=temp_table),
+        SQL.POP_LATENCY.format(lat_val="lat_us", table=temp_table, where="1=1"),
         [limit],
     ).fetchall()
     if not rows:
@@ -961,7 +962,7 @@ def _origin_ip_health_from_temp(
     if "oip" not in actual_cols_set or "ost" not in actual_cols_set:
         return {"has_data": False, "rows": []}
     rows = runner.execute(
-        SQL.TEMP_IP_HEALTH.format(temp_table=temp_table),
+        SQL.IP_HEALTH.format(lat_val="lat_us", table=temp_table, where="1=1"),
         [limit],
     ).fetchall()
     if not rows:

@@ -333,145 +333,16 @@ Output columns per row: ``(edge, requests, p50_ms, p95_ms)``
 """
 
 
-TEMP_TIMESERIES = """
-        SELECT
-          time_bucket({interval}, "timestamp")                              AS ts,
-          COUNT(*)                                                          AS miss_count,
-          {agg_expr} {unit_conv}                                            AS value
-          {edge_col}
-        FROM {temp_table}
-        WHERE ({lat_expr} IS NOT NULL)
-        GROUP BY ts {edge_group}
-        ORDER BY ts
-        """
-"""Time-series against the TEMP TABLE.
-
-Inputs (all trusted-identifier substitutions):
-- ``{interval}`` — ``INTERVAL '<n>' seconds|minutes`` literal
-- ``{agg_expr}`` — pre-built ``MEDIAN``/``APPROX_QUANTILE`` expression
-- ``{unit_conv}`` — ``"/ 1000.0"`` or ``"* 1000.0"``
-- ``{edge_col}`` — ``', "edge"'`` when splitting, else ``""``
-- ``{temp_table}`` — TEMP TABLE name
-- ``{lat_expr}`` — latency expression matching ``agg_expr``
-- ``{edge_group}`` — ``', "edge"'`` when splitting, else ``""``
-
-Output columns per row: ``(ts, miss_count, value[, edge])``
-"""
-
-
-TEMP_SLOW_URLS = """
-        SELECT
-          "url",
-          COUNT(*)                                                         AS requests,
-          MEDIAN(lat_us) / 1000.0                                          AS p50_ms,
-          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                           AS p95_ms,
-          APPROX_QUANTILE(lat_us, 0.99) / 1000.0                           AS p99_ms
-        FROM {temp_table}
-        WHERE lat_us IS NOT NULL AND "url" IS NOT NULL
-        GROUP BY "url"
-        HAVING COUNT(*) >= ?
-        ORDER BY p95_ms DESC
-        LIMIT ?
-        """
-"""Slow URLs against the TEMP TABLE (uses the precomputed ``lat_us`` column).
-
-Inputs:
-- ``{temp_table}`` — TEMP TABLE name
-
-The two ``?`` placeholders bind, in order: ``min_requests``, ``limit``.
-
-Output columns per row: ``(url, requests, p50_ms, p95_ms, p99_ms)``
-"""
-
-
-TEMP_STATUS_CODES = """
-        SELECT
-          CASE
-            WHEN "ost" BETWEEN 100 AND 599 THEN "ost"
-            ELSE -1
-          END                                               AS status,
-          COUNT(*)                                          AS count,
-          COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()          AS pct
-        FROM {temp_table}
-        WHERE "ost" IS NOT NULL
-        GROUP BY 1
-        ORDER BY count DESC
-        """
-"""Status-code distribution against the TEMP TABLE.
-
-Inputs:
-- ``{temp_table}`` — TEMP TABLE name
-
-Output columns per row: ``(status, count, pct)``
-"""
-
-
-TEMP_PATH_BREAKDOWN = """
-        SELECT
-          "edge",
-          COUNT(*)                                                          AS requests,
-          MEDIAN(lat_us) / 1000.0                                           AS p50_ms,
-          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                            AS p95_ms
-        FROM {temp_table}
-        WHERE lat_us IS NOT NULL
-        GROUP BY "edge"
-        """
-"""Edge-leg breakdown against the TEMP TABLE.
-
-Inputs:
-- ``{temp_table}`` — TEMP TABLE name
-
-Output columns per row: ``(edge, requests, p50_ms, p95_ms)``
-"""
-
-
-TEMP_POP_LATENCY = """
-        SELECT
-          "pop",
-          COUNT(*)                                                          AS requests,
-          MEDIAN(lat_us) / 1000.0                                           AS p50_ms,
-          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                            AS p95_ms
-        FROM {temp_table}
-        WHERE lat_us IS NOT NULL AND "pop" IS NOT NULL AND "pop" != ''
-        GROUP BY "pop"
-        ORDER BY p95_ms DESC
-        LIMIT ?
-        """
-"""POP latency against the TEMP TABLE.
-
-Inputs:
-- ``{temp_table}`` — TEMP TABLE name
-
-The trailing ``?`` placeholder binds ``limit``.
-
-Output columns per row: ``(pop, requests, p50_ms, p95_ms)``
-"""
-
-
-TEMP_IP_HEALTH = """
-        SELECT
-          "oip",
-          COUNT(*)                                                            AS requests,
-          MEDIAN(lat_us) / 1000.0                                             AS p50_ms,
-          APPROX_QUANTILE(lat_us, 0.95) / 1000.0                              AS p95_ms,
-          ROUND(COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0
-            / NULLIF(COUNT(*), 0), 1)                                         AS error_pct
-        FROM {temp_table}
-        WHERE "oip" IS NOT NULL AND "oip" != '' AND "ost" IS NOT NULL
-        GROUP BY "oip"
-        HAVING COUNT(*) >= 10
-        ORDER BY error_pct DESC
-        LIMIT ?
-        """
-"""Origin IP health against the TEMP TABLE.
-
-Inputs:
-- ``{temp_table}`` — TEMP TABLE name
-
-The trailing ``?`` placeholder binds ``limit``.
-
-Output columns per row: ``(oip, requests, p50_ms, p95_ms, error_pct)``
-"""
+# The TEMP-table mirror templates (TEMP_TIMESERIES / TEMP_SLOW_URLS /
+# TEMP_STATUS_CODES / TEMP_PATH_BREAKDOWN / TEMP_POP_LATENCY /
+# TEMP_IP_HEALTH) were dropped — the live templates above already
+# carry the ``{lat_val}`` / ``{table}`` / ``{where}`` placeholders we
+# need for the per-request TEMP-table reads. Callers in origin.py now
+# render the live templates with ``table=<temp_table>``,
+# ``where='1=1'``, ``lat_val='lat_us'``. TEMP_SUMMARY_ROLLUP and
+# TEMP_SUMMARY_BY_EDGE below remain — the former still needs a column
+# shape distinct from SUMMARY_GROUPING_SETS, the latter has no live
+# equivalent.
 
 
 __all__ = [
@@ -486,10 +357,4 @@ __all__ = [
     "AGGREGATES_CREATE_TEMP",
     "TEMP_SUMMARY_ROLLUP",
     "TEMP_SUMMARY_BY_EDGE",
-    "TEMP_TIMESERIES",
-    "TEMP_SLOW_URLS",
-    "TEMP_STATUS_CODES",
-    "TEMP_PATH_BREAKDOWN",
-    "TEMP_POP_LATENCY",
-    "TEMP_IP_HEALTH",
 ]
