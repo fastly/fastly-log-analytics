@@ -5,6 +5,7 @@ import type { DehydratedState } from '@tanstack/react-query'
 import { useState } from 'react'
 import dynamic from 'next/dynamic'
 import { NuqsAdapter } from 'nuqs/adapters/next/app'
+import { hydrateFilterStoreFromUrl } from '@/lib/urlFilterHydration'
 
 const ReactQueryDevtools = dynamic(
   () => import('@tanstack/react-query-devtools').then(m => ({ default: m.ReactQueryDevtools })),
@@ -21,6 +22,17 @@ interface QueryProviderProps {
 }
 
 export default function QueryProvider({ children, dehydratedState }: QueryProviderProps) {
+  // Lazy initializer runs synchronously on first render — i.e. BEFORE
+  // child components render. By the time any page-level hook reads
+  // filterStore, the URL params have been written. Without this, the
+  // URL→store sync lives in useFilterUrlSync's useEffect (post-render),
+  // so the first React Query keys use store defaults and any SSR'd
+  // cache misses. See [lib/urlFilterHydration.ts](lib/urlFilterHydration.ts).
+  useState(() => {
+    hydrateFilterStoreFromUrl()
+    return null
+  })
+
   const [queryClient] = useState(() => new QueryClient({
     defaultOptions: {
       queries: {

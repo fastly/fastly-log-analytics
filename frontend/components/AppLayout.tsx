@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import { usePathname, useSearchParams } from 'next/navigation'
 import {
@@ -34,10 +35,25 @@ import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
 import { useFilterUrlSync } from '@/hooks/useFilterUrlSync'
 import { TimezoneSwitcher } from '@/components/TimezoneSwitcher/TimezoneSwitcher'
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle'
-import { FilterBar } from '@/components/FilterBar/FilterBar'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
-import { DebugPanel } from '@/components/DebugPanel'
+import { useDebugStore } from '@/stores/debugStore'
+
+// FilterBar is hidden on /admin, /logs, /insights, /alerts, raw-query mode,
+// and the no-services onboarding state. Dynamic-import so those routes
+// never download the FilterBar chunk (the bar + its three dialogs is one
+// of the heaviest client surfaces outside of charts).
+const FilterBar = dynamic(
+  () => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.FilterBar })),
+)
+
+// DebugPanel only renders when the user has opted into debug mode via
+// useDebugStore (off by default, persisted in localStorage). Dynamic-import
+// with ssr:false and a mount-gate so non-debug users never pay the chunk.
+const DebugPanel = dynamic(
+  () => import('@/components/DebugPanel').then(m => ({ default: m.DebugPanel })),
+  { ssr: false },
+)
 import { PlotlyPrewarm } from '@/components/PlotlyChart/PlotlyPrewarm'
 import { MapPrewarm } from '@/components/Map/MapPrewarm'
 
@@ -216,6 +232,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
   const activeServiceId = useServiceStore(state => state.activeServiceId)
   const services = useServiceStore(state => state.services)
+  const debugEnabled = useDebugStore(state => state.enabled)
   const activeService = services.find(s => s.id === activeServiceId)
   const bootstrapSettings = bootstrapData?.settings as Record<string, unknown> | undefined
   const isAnalyst =
@@ -502,7 +519,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               redirect at lines 163-188 has time to fire without
               flashing a half-loaded page. */}
           {!hasServices && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login') ? null : children}
-          <DebugPanel />
+          {debugEnabled && <DebugPanel />}
         </main>
       </div>
       </TooltipProvider>
