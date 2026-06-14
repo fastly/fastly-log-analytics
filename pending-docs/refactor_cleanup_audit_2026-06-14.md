@@ -40,6 +40,36 @@ PR-4 landed and prod-verified:
 
 **Pre-existing test flake** (not caused by this branch): `tests/core/test_duckdb_concurrency.py::test_concurrent_readers_against_held_writer` fails deterministically against telemetry_proxy thread state ("This event loop is already running" / "Call runner.setup() before making a site"). Reproduced at `f27aeac` (the commit before any of this session's work landed), so the regression is upstream of PR-1. Followed up via pytest with `--ignore` to keep the verification loop moving; recommend filing as a separate issue against the telemetry_proxy / duckdb concurrency machinery.
 
+**PR-5 landed and prod-verified:**
+- `200b1ad` repositories+routers: share section timings via SectionTimer (b2 + r7). Extracts `SectionTimer` into `backend.repositories._base`, migrates all 12 `_phase(name, t0)` / `_timed(name, fn)` closures + standardises `query.py` off `time.monotonic` onto `time.perf_counter`. `section_timings = timer.entries` keeps the existing `section_timings.append(...)` callers pointing at the same list.
+
+**PR-6 landed and prod-verified:**
+- `c274d21` rollups: lift `describe_columns` / `discover_closed_hours` / `parse_hour_token` into `_common.py` (b3-describe + b3-discover + b3-rollups-hour-token).
+- **Deferred from PR-6:** b3 (`collect_hourly_bundle_paths` extraction — 2 sites only) and b3-migration (`apply_pending` in `sqlite_migrations` vs `share_db/schema` lives in different packages; needs a different home than `rollups/_common.py`).
+
+**PR-7 landed and prod-verified:**
+- `a9ec6a1` metadata: delete legacy usage_log + migration_003 + metadata.db migrate path (b3-usage-log). Drops the 138-LOC table + 3 triggers + 4 covering indexes, the `migrate_from_metadata_db` first-open copy, `_migration_003_rebuild_usage_log_hourly_summary` (gap at key 3 in `MIGRATIONS` is deliberate; `apply_pending` tolerates it). Rewires `get_latest_reconciliation_ts` onto `usage_log_db.open_readonly` (the audit-flagged latent bug fix). Net -453 LOC.
+
+**PR-8 landed and prod-verified:**
+- `10fe196` share: drop tunnel `use_tunnel` / `tunnel_url` and scrypt passcode path (u7 + b3-scrypt). Removes the always-False/always-None tunnel-mode fields from `TunnelState`, `share_admin` /status payload, `remote_access` host-allowed checks, and `start_sharing`'s signature. Strips the scrypt verify branch, `PASSCODE_DEFAULT_ALGO_KEY`, and `_migration_003_passcode_algo_marker`. Frontend regen via `npm run gen:types` (only the removed fields change).
+- **Deviation from audit:** kept the rehash-on-login block in `invites.py:188-203` — after the scrypt branches are gone, `needs_rehash` still handles future argon2-cost rotations cleanly, so the block has independent value.
+
+**PR-13 landed and prod-verified:**
+- `43858f5` file structure: move lake.py into core/iceberg/, sync_admin_state into routers/ (m1 + u9). `backend/models/lake.py` had zero classes and triggered a layering inversion (core imported `_safe_cdn_url` back from models) — moved to `backend/core/iceberg/lake_info.py` and updated 4 import sites. `sync_admin_state` moved out of `utils/router_utils` into `backend/routers/_state_sync.py` (both its deferred imports — `state_sync`, `scheduler` — sit above utils/).
+
+**PR-14 landed and prod-verified:**
+- `abd7909` core: behavior-change cleanups — promote shared bits, drop fictional safety net (core-3 + core-5 + core-9 + core-15). Four explicit behavior changes; commit message + this log call them out.
+  - **core-3 deviation from audit:** `duckdb._ORPHAN_THRESHOLD_MINS` (5) and `metadata.base._ORPHAN_THRESHOLD_MINS` (60) had the same NAME but measured two unrelated things — busy-status freshness vs orphan-reaper cutoff. The audit recommended "pick one canonical value", but consolidating to either would break operations (5 kills long-running crons; 60 freezes the busy badge). Renamed the duckdb side to `_STATUS_BUSY_WINDOW_MINS`; metadata.base keeps the original name.
+  - **core-9:** `_TASK_TO_CRON_KEY` promoted to module scope in `duckdb.py` and used by both `start_cron_run` and `log_cron_run`. The buggy ternary `"cron_sync" if task == "sync" else "cron_compact"` in `start_cron_run` silently grouped every non-sync task under `cron_compact.log_retention_days`. Fix: non-mapped tasks fall back to the 7-day default. Test pin updated.
+  - **core-5:** `query_instrumentation._safe_weakref` gained the strong-ref-closure fallback the registry version had — previously it returned None for non-weakref-able sqlite3 cursors, so the memory probe silently no-op'd whenever instrumentation wrapped one.
+  - **core-15:** Deleted `duckdb_pool._cleanup_temp_tables` and its per-release sweep. The "safety net for the failure path" is fictional — `release(con, errored=True)` discards before calling cleanup, so the sweep only ever ran on clean-exit paths that already DROPped their own temp tables.
+
+**Deferred (not landed this session):**
+- **PR-9** (b3-pool / ThreadLocalPool extraction) — 3 pool implementations share shape but the `on_borrow` PRAGMA re-assertion in `share_db` + the quarantine-aware `connect_fn` + the share_db observability flip (queries become visible in Live Query Monitor) all need careful sequencing across 4 sub-commits. Out of remaining-context scope.
+- **PR-10** (router & cron helpers) — 7 findings: r3 (load_service_config in 16+ sites), r8 (start_or_resume_cron triple), c3 (finalize_cron_duration in 5 finally blocks), c4 (invalidate_service), c5 (refresh_view_and_warm_pool, includes the latent sync.py status-log-on-failure bug fix), b3-iceberg-cdn-purge, b3-iceberg-pointer-key.
+- **PR-11** (b9 / ResponseCache for origin) — wrap `BoundedTTLCache` and migrate origin's ~6 endpoints incrementally.
+- **PR-12** (17 smaller cleanups) — b7, b10, b11, c8, c10, core-10, core-11, core-13, core-14, m4, m5, r5, r6, u5, u6, u10, b3-iceberg-package-proxy.
+
 **PR-3 (partial) landed and prod-verified:**
 - `5d77e67` origin: collapse 6 TEMP_* templates into the live ones (b1/b4 partial)
 - **Scope landed:** deleted TEMP_TIMESERIES / TEMP_SLOW_URLS / TEMP_STATUS_CODES / TEMP_PATH_BREAKDOWN / TEMP_POP_LATENCY / TEMP_IP_HEALTH and rewired the six `_origin_*_from_temp` callers to render the live SQL templates with `table=<temp_table>`, `where='1=1'`, `lat_val='lat_us'`. Net -213 LOC.
@@ -101,59 +131,59 @@ The four xs-effort P0 items ([b5](#b5), [c1](#c1), [b8](#b8), [r9](#r9)) make a 
 | ID | Title | Category | Effort | Behavior-preserving | PR |
 |---|---|---|---|---|---|
 | [b1](#b1) | Origin per-card live/temp template pairs | Redundancy | l | yes | PR-3 [partial 5d77e67] |
-| [b2](#b2) | `_phase(name, t0)` boilerplate in 8+ repos | Reuse | s | yes | PR-5 |
-| [b3](#b3) | `_hour_had_any_data` walk duplicated | Reuse | s | yes | PR-6 |
-| [b3-pool](#b3-pool) | 3 near-identical SQLite thread-local pools | Redundancy | l | yes (with `on_borrow` hook) | PR-9 |
-| [b3-usage-log](#b3-usage-log) | 138-LOC dead `usage_log` DDL + triggers | Legacy removal | s | yes (fresh installs) | PR-7 |
-| [b3-scrypt](#b3-scrypt) | Scrypt passcode legacy path | Legacy removal | s | yes (fresh installs) | PR-8 |
-| [b3-describe](#b3-describe) | DESCRIBE+stale-view-retry across 4 rollup writers | Reuse | xs | yes | PR-6 |
-| [b3-discover](#b3-discover) | `discover_closed_hours` in 3 places | Reuse | xs | yes | PR-6 |
-| [b3-migration](#b3-migration) | 2 duplicate `apply_pending` migration runners | Reuse | xs | yes | PR-6 |
-| [b3-rollups-hour-token](#b3-rollups-hour-token) | `parse_hour_token` repeated 5+ times | Reuse | xs | yes | PR-6 |
-| [b3-iceberg-cdn-purge](#b3-iceberg-cdn-purge) | `purge_surrogate_key` 2 sites with drifted exceptions | Reuse | xs | yes | PR-10 |
-| [b3-iceberg-pointer-key](#b3-iceberg-pointer-key) | Slash-vs-dot namespace fallback hardcoded 5 places | Reuse | xs | yes | PR-10 |
-| [b3-iceberg-package-proxy](#b3-iceberg-package-proxy) | 2 module-class-swap shims | Reuse | xs | yes | PR-10 |
+| [b2](#b2) | `_phase(name, t0)` boilerplate in 8+ repos | Reuse | s | yes | [done 200b1ad] |
+| [b3](#b3) | `_hour_had_any_data` walk duplicated | Reuse | s | yes | PR-6 — deferred (collect_hourly_bundle_paths extraction NOT done; b3-describe/discover/migration/hour-token all landed in 200b1ad/c274d21) |
+| [b3-pool](#b3-pool) | 3 near-identical SQLite thread-local pools | Redundancy | l | yes (with `on_borrow` hook) | PR-9 — deferred (3 pools share shape but on_borrow/connect_fn hooks and share_db observability flip need careful sequencing; out of session scope) |
+| [b3-usage-log](#b3-usage-log) | 138-LOC dead `usage_log` DDL + triggers | Legacy removal | s | yes (fresh installs) | [done a9ec6a1] |
+| [b3-scrypt](#b3-scrypt) | Scrypt passcode legacy path | Legacy removal | s | yes (fresh installs) | [done 10fe196] |
+| [b3-describe](#b3-describe) | DESCRIBE+stale-view-retry across 4 rollup writers | Reuse | xs | yes | [done c274d21] |
+| [b3-discover](#b3-discover) | `discover_closed_hours` in 3 places | Reuse | xs | yes | [done c274d21] |
+| [b3-migration](#b3-migration) | 2 duplicate `apply_pending` migration runners | Reuse | xs | yes | PR-6 — deferred (two apply_pending lives in different packages — sqlite_migrations vs share_db/schema; cross-package extraction out of PR-6 scope) |
+| [b3-rollups-hour-token](#b3-rollups-hour-token) | `parse_hour_token` repeated 5+ times | Reuse | xs | yes | [done c274d21] |
+| [b3-iceberg-cdn-purge](#b3-iceberg-cdn-purge) | `purge_surrogate_key` 2 sites with drifted exceptions | Reuse | xs | yes | PR-10 — deferred |
+| [b3-iceberg-pointer-key](#b3-iceberg-pointer-key) | Slash-vs-dot namespace fallback hardcoded 5 places | Reuse | xs | yes | PR-10 — deferred |
+| [b3-iceberg-package-proxy](#b3-iceberg-package-proxy) | 2 module-class-swap shims | Reuse | xs | yes | PR-12 — deferred |
 | [b4](#b4) | Origin TS metric builder duplicated | Reuse | s | yes (folds into b1) | PR-3 [partial 5d77e67] |
 | [b5](#b5) | `empty_schema_response` re-imported 30+ times | Reuse | xs | yes | PR-1 [done 60d55fb] |
-| [b7](#b7) | `TLS/H2/OH_FINGERPRINTS` byte-identical except column | Redundancy | s | yes | PR-12 |
+| [b7](#b7) | `TLS/H2/OH_FINGERPRINTS` byte-identical except column | Redundancy | s | yes | PR-12 — deferred |
 | [b8](#b8) | `ORIGIN_TIMESERIES` near-duplicate of `TIME_SERIES` | Redundancy | xs | yes (with `timestamp IS NOT NULL` no-op note) | PR-1 [done 60d55fb] |
-| [b9](#b9) | Origin bespoke `_response_cache` vs `BoundedTTLCache` | Reuse | m | yes | PR-11 |
-| [b10](#b10) | `SUMMARY_GROUPING_SETS` consumed by positional indices | Bad logic | s | yes | PR-12 |
-| [b11](#b11) | Dashboard cache disabled but key-build still runs | Inefficiency | xs | yes | PR-12 |
+| [b9](#b9) | Origin bespoke `_response_cache` vs `BoundedTTLCache` | Reuse | m | yes | PR-11 — deferred |
+| [b10](#b10) | `SUMMARY_GROUPING_SETS` consumed by positional indices | Bad logic | s | yes | PR-12 — deferred |
+| [b11](#b11) | Dashboard cache disabled but key-build still runs | Inefficiency | xs | yes | PR-12 — deferred |
 | [c1](#c1) | 6 `try: pass / except: pass` blocks in cron jobs | Dead code | xs | yes | PR-1 [done 27b2ef9] |
-| [c3](#c3) | `finalize_cron_duration` boilerplate in 5 `finally:` | Reuse | s | yes | PR-10 |
-| [c4](#c4) | `invalidate_service(name)` in dashboard repo | Reuse | s | yes | PR-10 |
-| [c5](#c5) | `refresh_view_and_warm_pool` in commit.py + sync.py | Reuse | s | latent bug fix in sync.py | PR-10 |
-| [c8](#c8) | `shim_attr(name, fallback)` self-import dance in 4 sites | Reuse | xs | yes | PR-12 |
-| [c10](#c10) | v2.0 tombstone comments in `deps.py` | Legacy removal | xs | yes | PR-12 |
+| [c3](#c3) | `finalize_cron_duration` boilerplate in 5 `finally:` | Reuse | s | yes | PR-10 — deferred |
+| [c4](#c4) | `invalidate_service(name)` in dashboard repo | Reuse | s | yes | PR-10 — deferred |
+| [c5](#c5) | `refresh_view_and_warm_pool` in commit.py + sync.py | Reuse | s | latent bug fix in sync.py | PR-10 — deferred (includes the latent sync.py bug fix; needs careful handling) |
+| [c8](#c8) | `shim_attr(name, fallback)` self-import dance in 4 sites | Reuse | xs | yes | PR-12 — deferred |
+| [c10](#c10) | v2.0 tombstone comments in `deps.py` | Legacy removal | xs | yes | PR-12 — deferred |
 | [c12](#c12) | `backend/services/__init__.py` empty | File structure | xs | yes | (skip) |
 | [core-1](#core-1) | `backend/core/settings.py` — 1 of 11 consumers | Legacy removal | s | yes | PR-4 [done 1598356] |
-| [core-3](#core-3) | `_ORPHAN_THRESHOLD_MINS = 5` vs `60` | Bad logic | xs | **no** — operational decision | PR-14 |
-| [core-5](#core-5) | `_safe_weakref` defined twice, divergent behavior | Bad logic | xs | **no** — fixes instrumentation | PR-14 |
-| [core-9](#core-9) | Promote `_TASK_TO_CRON_KEY` | Reuse | xs | **no** — fixes latent retention bug | PR-14 |
-| [core-10](#core-10) | `_atomic_write_json` helper duplicated | Reuse | xs | yes | PR-12 |
-| [core-11](#core-11) | `_get_cfg_field` triplet | Reuse | xs | yes | PR-12 |
-| [core-13](#core-13) | Dual fastly name fetcher | Reuse | s | partially (latency) | PR-12 |
-| [core-14](#core-14) | `log_fields.py` Phase 7 docstring stale | Cleanup | xs | yes | PR-12 |
-| [core-15](#core-15) | `_cleanup_temp_tables` runs unconditionally | Inefficiency | xs | **no** — removes safety net | PR-14 |
-| [m1](#m1) | `backend/models/lake.py` not a models module | File structure | s | yes | PR-13 |
-| [m4](#m4) | `LogExtentsMixin` opportunity | Reuse | xs | yes | PR-12 |
-| [m5](#m5) | `OkResponse` mixin opportunity | Reuse | xs | yes | PR-12 |
-| [r3](#r3) | `load_service_config / 404` written 16+ times | Reuse | s | yes | PR-10 |
-| [r5](#r5) | `client_ip(request, default=...)` — 11+ sites | Reuse | s | yes | PR-12 |
-| [r6](#r6) | SSE headers inlined in compaction.py | Reuse | xs | yes | PR-12 |
-| [r7](#r7) | `_phase` pattern in 4 routers | Reuse | s | yes (folds into b2) | PR-5 |
-| [r8](#r8) | `start_or_resume_cron` triple | Reuse | s | yes | PR-10 |
+| [core-3](#core-3) | `_ORPHAN_THRESHOLD_MINS = 5` vs `60` | Bad logic | xs | **no** — operational decision | [done abd7909 — renamed instead of consolidated; see commit] |
+| [core-5](#core-5) | `_safe_weakref` defined twice, divergent behavior | Bad logic | xs | **no** — fixes instrumentation | [done abd7909] |
+| [core-9](#core-9) | Promote `_TASK_TO_CRON_KEY` | Reuse | xs | **no** — fixes latent retention bug | [done abd7909] |
+| [core-10](#core-10) | `_atomic_write_json` helper duplicated | Reuse | xs | yes | PR-12 — deferred |
+| [core-11](#core-11) | `_get_cfg_field` triplet | Reuse | xs | yes | PR-12 — deferred |
+| [core-13](#core-13) | Dual fastly name fetcher | Reuse | s | partially (latency) | PR-12 — deferred |
+| [core-14](#core-14) | `log_fields.py` Phase 7 docstring stale | Cleanup | xs | yes | PR-12 — deferred |
+| [core-15](#core-15) | `_cleanup_temp_tables` runs unconditionally | Inefficiency | xs | **no** — removes safety net | [done abd7909] |
+| [m1](#m1) | `backend/models/lake.py` not a models module | File structure | s | yes | [done 43858f5] |
+| [m4](#m4) | `LogExtentsMixin` opportunity | Reuse | xs | yes | PR-12 — deferred |
+| [m5](#m5) | `OkResponse` mixin opportunity | Reuse | xs | yes | PR-12 — deferred |
+| [r3](#r3) | `load_service_config / 404` written 16+ times | Reuse | s | yes | PR-10 — deferred |
+| [r5](#r5) | `client_ip(request, default=...)` — 11+ sites | Reuse | s | yes | PR-12 — deferred |
+| [r6](#r6) | SSE headers inlined in compaction.py | Reuse | xs | yes | PR-12 — deferred |
+| [r7](#r7) | `_phase` pattern in 4 routers | Reuse | s | yes (folds into b2) | [done 200b1ad] |
+| [r8](#r8) | `start_or_resume_cron` triple | Reuse | s | yes | PR-10 — deferred |
 | [r9](#r9) | `_resolve_source` duplicates `get_source` body | Reuse | xs | yes | PR-1 [done 2e2a70e] |
 | [u1](#u1) | `backend/utils/retry.py` — 0 production callers | Legacy removal | s | yes (delete path) | PR-4 [done 6900c40] |
 | [u2](#u2) | `iso_z_now()` ignored in 9 utils sites | Reuse | s | yes (byte-identical) | PR-2 [done a2b0eb1] |
 | [u4](#u4) | `backend/utils/cdn.py` — imported only by tests | Legacy removal | s | yes (delete path) | PR-4 [done 7a04d01] |
-| [u5](#u5) | `_iceberg_meta_prefix(source)` in state_sync.py | Reuse | xs | yes | PR-12 |
-| [u6](#u6) | `_run_falco_lint` extraction | Reuse | s | yes (fixes a documented bug) | PR-12 |
-| [u7](#u7) | `TunnelState.use_tunnel` / `tunnel_url` expired | Legacy removal | s | yes | PR-8 |
-| [u8](#u8) | Replace `share_db.iso_z_now()` re-exports in tunnel | Reuse | xs | yes | PR-2 [done 8b2a8df] |
-| [u9](#u9) | `sync_admin_state` misplaced in `utils/` | File structure | s | yes | PR-13 |
-| [u10](#u10) | Promote `_is_full_miss` / `build_cdn_miss_synth_row` | Reuse | xs | yes | PR-12 |
+| [u5](#u5) | `_iceberg_meta_prefix(source)` in state_sync.py | Reuse | xs | yes | PR-12 — deferred |
+| [u6](#u6) | `_run_falco_lint` extraction | Reuse | s | yes (fixes a documented bug) | PR-12 — deferred |
+| [u7](#u7) | `TunnelState.use_tunnel` / `tunnel_url` expired | Legacy removal | s | yes | [done 10fe196] |
+| [u8](#u8) | Replace `share_db.iso_z_now()` re-exports in tunnel | Reuse | xs | yes | [done 8b2a8df] |
+| [u9](#u9) | `sync_admin_state` misplaced in `utils/` | File structure | s | yes | [done 43858f5] |
+| [u10](#u10) | Promote `_is_full_miss` / `build_cdn_miss_synth_row` | Reuse | xs | yes | PR-12 — deferred |
 
 `PR-N` references the PR boundaries in [§4 Implementation Plan](#4-implementation-plan).
 
