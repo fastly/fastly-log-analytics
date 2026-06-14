@@ -50,7 +50,7 @@ const COLUMNS = {
       id: 'oip', meta: { label: 'Origin IP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Origin IP</span>,
       cell: (info: any) => (
         <FilterValueCell
-          filters={[{ column: 'origin_ip', value: info.getValue() }]}
+          filters={[{ column: 'oip', value: info.getValue() }]}
           className="font-mono text-xs"
         />
       )

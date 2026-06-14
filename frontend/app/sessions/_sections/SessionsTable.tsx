@@ -91,8 +91,9 @@ export function SessionsTable({
         accessorKey: 'asn',
         header: 'ASN',
         cell: ({ row }) => {
-          const asn = row.getValue('asn') as number | undefined
-          return asn ? `AS${asn}` : '—'
+          const r = row.original as { asn?: number | null; asn_label?: string | null }
+          if (r.asn_label) return r.asn_label
+          return r.asn ? `AS${r.asn}` : '—'
         },
       },
       {

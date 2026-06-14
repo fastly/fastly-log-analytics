@@ -6455,6 +6455,8 @@ export interface components {
             country?: string | null;
             /** Asn */
             asn?: number | null;
+            /** Asn Label */
+            asn_label?: string | null;
             /** Session Start */
             session_start: string;
             /** Session End */

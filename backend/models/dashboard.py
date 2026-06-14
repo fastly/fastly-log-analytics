@@ -175,6 +175,7 @@ class Session(BaseModel):
     ja4: str | None = None
     country: str | None = None
     asn: int | None = None
+    asn_label: str | None = None
     session_start: str
     session_end: str
     req_count: int

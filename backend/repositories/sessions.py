@@ -668,6 +668,22 @@ def get_sessions(
         sessions.append(d)
     total = len(sessions)
 
+    # Resolve ASN → "<org name> (<asn>)" labels in one batched lookup so the
+    # frontend can render e.g. "Comcast Cable Communications (7922)" instead
+    # of bare "AS7922". Matches the enrichment pattern used by performance /
+    # network / dashboard responses. Cold-cache WHOIS resolutions go through
+    # the per-service asn_names SQLite cache and are amortised on subsequent
+    # session list loads.
+    asn_ints = sorted({int(sess["asn"]) for sess in sessions if sess.get("asn") is not None})
+    if asn_ints:
+        from backend.core import duckdb as _db
+
+        asn_names = _db.get_asn_names(src["name"], asn_ints)
+        for sess in sessions:
+            asn_val = sess.get("asn")
+            if asn_val is not None:
+                sess["asn_label"] = _db.format_asn_label(int(asn_val), asn_names.get(int(asn_val), ""))
+
     if not rows and offset > 0:
         _t = time.perf_counter()
         count_sql = SQL.SESSIONS_COUNT_WRAPPER.format(

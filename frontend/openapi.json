@@ -19883,6 +19883,17 @@
             ],
             "title": "Asn"
           },
+          "asn_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asn Label"
+          },
           "session_start": {
             "type": "string",
             "title": "Session Start"

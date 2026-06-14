@@ -100,11 +100,12 @@ describe('Origin page dashboard links', () => {
     expect(filterKeysFrom(url)).toContain('filter_pop')
   })
 
-  it('origin IP filter uses filter_origin_ip (not filter_oip)', () => {
-    // The origin page uses filter_origin_ip to match the column display name
-    const url = `/dashboard?filter_origin_ip=${encodeURIComponent('10.0.0.1')}`
+  it('origin IP filter uses filter_oip (the actual schema column)', () => {
+    // Backend filters on the real column name "oip"; the prior filter_origin_ip
+    // pattern silently produced no rows because the table has no origin_ip column.
+    const url = `/dashboard?filter_oip=${encodeURIComponent('10.0.0.1')}`
     assertFilterFormat(url)
-    expect(filterKeysFrom(url)).toContain('filter_origin_ip')
+    expect(filterKeysFrom(url)).toContain('filter_oip')
   })
 })
 
