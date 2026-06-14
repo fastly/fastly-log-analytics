@@ -170,7 +170,15 @@ function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, active
   )
 }
 
-export function AppLayout({ children }: { children: React.ReactNode }) {
+export const SIDEBAR_COLLAPSED_COOKIE = 'fla.sidebarCollapsed'
+
+export function AppLayout({
+  children,
+  initialCollapsed = false,
+}: {
+  children: React.ReactNode
+  initialCollapsed?: boolean
+}) {
   const pathname = usePathname()
   const router = useRouter()
   const { data: bootstrapData, isSuccess, isLoading } = useBootstrap()
@@ -179,22 +187,16 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   // so we don't have to call useSearchParams() directly here.
   const [isRawQueryMode, setIsRawQueryMode] = React.useState(false)
 
-  // Sidebar collapsed state, persisted across reloads. Synchronous
-  // localStorage read in the useState initializer so first paint matches
-  // the user's saved preference (matches the [[use-card-visibility]] pattern).
-  // SSR returns false; the client initializer overrides during hydration.
-  const [sidebarCollapsed, setSidebarCollapsed] = React.useState(() => {
-    if (typeof window === 'undefined') return false
-    try {
-      return localStorage.getItem('fla.sidebarCollapsed') === '1'
-    } catch {
-      return false
-    }
-  })
+  // Sidebar collapsed state, persisted across reloads via cookie. The
+  // initial value is read server-side in app/layout.tsx and passed in as
+  // `initialCollapsed`, so SSR paints the correct width on first render
+  // (no expand-then-collapse flash). The toggle writes the cookie
+  // directly; the server picks up the new value on the next request.
+  const [sidebarCollapsed, setSidebarCollapsed] = React.useState(initialCollapsed)
   const toggleSidebar = React.useCallback(() => {
     setSidebarCollapsed(prev => {
       const next = !prev
-      try { localStorage.setItem('fla.sidebarCollapsed', next ? '1' : '0') } catch {}
+      document.cookie = `${SIDEBAR_COLLAPSED_COOKIE}=${next ? '1' : '0'}; path=/; max-age=31536000; samesite=lax`
       return next
     })
   }, [])

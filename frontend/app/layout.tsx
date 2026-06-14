@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import { cookies } from "next/headers";
 import { QueryClient, dehydrate } from "@tanstack/react-query";
 import type { DehydratedState } from "@tanstack/react-query";
 import "./globals.css";
 import QueryProvider from "@/components/QueryProvider";
 import ThemeProvider from "@/components/ThemeProvider";
-import { AppLayout } from "@/components/AppLayout";
+import { AppLayout, SIDEBAR_COLLAPSED_COOKIE } from "@/components/AppLayout";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { getPreloadChunks } from "@/lib/preload-manifest";
@@ -35,6 +36,14 @@ export default async function RootLayout({
   // Modulepreload links from the build-time manifest (returns [] at
   // SSG-time since the manifest is generated AFTER next build).
   const preloadChunks = getPreloadChunks();
+
+  // Read the sidebar-collapsed cookie server-side so SSR paints the
+  // correct width on first render. Without this, the client useState
+  // initializer (which reads the cookie in the browser) would flip the
+  // sidebar from expanded → collapsed during hydration, producing a
+  // visible flash on every page load for users with a collapsed pref.
+  const initialSidebarCollapsed =
+    (await cookies()).get(SIDEBAR_COLLAPSED_COOKIE)?.value === "1";
 
   // Per-request SSR fetch of /api/bootstrap. Pre-seeds React Query so
   // useBootstrap (and every hook that reads bootstrap.* via
@@ -111,7 +120,7 @@ export default async function RootLayout({
         >
           <QueryProvider dehydratedState={dehydratedState}>
             <TooltipProvider delay={0} closeDelay={0}>
-              <AppLayout>
+              <AppLayout initialCollapsed={initialSidebarCollapsed}>
                 <ErrorBoundary>{children}</ErrorBoundary>
               </AppLayout>
             </TooltipProvider>
