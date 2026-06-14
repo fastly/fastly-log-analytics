@@ -51,6 +51,18 @@ Customisation hooks
     the lock (used by :mod:`tests.core.test_metadata_db_concurrency`) keeps
     working. If omitted, an internal lock owned by the pool is used.
 
+``initialized_provider() -> set[str]``
+    Callable that returns the path-set used to gate one-shot schema init.
+    Same rationale as ``init_lock_provider`` — pytest fixtures (see
+    :mod:`tests.conftest`) monkeypatch a module-level ``_initialized`` and
+    expect the swap to take effect. If omitted, an internal set owned by
+    the pool is used.
+
+``local_provider() -> threading.local``
+    Callable that returns the per-thread cache anchor. Same rationale as
+    above. If omitted, an internal ``threading.local`` owned by the pool
+    is used.
+
 Behavior preserved across the three callers
 -------------------------------------------
 * Default ``sqlite3.connect`` keyword arguments — no ``isolation_level``
@@ -114,6 +126,8 @@ class ThreadLocalPool:
         connect_fn: Callable[[str], sqlite3.Connection] | None = None,
         on_borrow_fn: Callable[[sqlite3.Connection], sqlite3.Connection | None] | None = None,
         init_lock_provider: Callable[[], threading.Lock] | None = None,
+        initialized_provider: Callable[[], set[str]] | None = None,
+        local_provider: Callable[[], threading.local] | None = None,
         init_lock_timeout: float = 10.0,
         connect_timeout: float = 30.0,
         pragmas: Sequence[str] = DEFAULT_PRAGMAS,
@@ -131,24 +145,29 @@ class ThreadLocalPool:
         self._stamp_service_id = stamp_service_id
         self._local_attr = local_attr
 
-        # Owned lock used when no external provider is supplied. When an
-        # external provider IS supplied, the pool reads its lock through
-        # the provider on every call so monkeypatched module-level locks
-        # still take effect.
+        # Owned state used when no external provider is supplied. When a
+        # provider IS supplied, the pool reads through it on every call so
+        # monkeypatched module-level state still takes effect (a fixture
+        # rebinding ``module._initialized = set()`` to clear cross-test
+        # state would otherwise be invisible to the pool).
         self._owned_lock = threading.Lock()
-        self._init_lock_provider = init_lock_provider or (lambda: self._owned_lock)
+        self._owned_initialized: set[str] = set()
+        self._owned_local = threading.local()
 
-        self._local = threading.local()
-        self._initialized: set[str] = set()
+        self._init_lock_provider = init_lock_provider or (lambda: self._owned_lock)
+        self._initialized_provider = initialized_provider or (lambda: self._owned_initialized)
+        self._local_provider = local_provider or (lambda: self._owned_local)
+
         self._all_connections: list[sqlite3.Connection] = []
         self._all_connections_lock = threading.Lock()
 
     # ── Per-thread cache ────────────────────────────────────────────────
 
     def _conns(self) -> dict[Any, sqlite3.Connection]:
-        if not hasattr(self._local, self._local_attr):
-            setattr(self._local, self._local_attr, {})
-        return getattr(self._local, self._local_attr)
+        local = self._local_provider()
+        if not hasattr(local, self._local_attr):
+            setattr(local, self._local_attr, {})
+        return getattr(local, self._local_attr)
 
     # ── Public surface ─────────────────────────────────────────────────
 
@@ -199,9 +218,10 @@ class ThreadLocalPool:
                 con.row_factory = sqlite3.Row
                 for pragma in self._pragmas:
                     con.execute(pragma)
-                if path not in self._initialized:
+                initialized = self._initialized_provider()
+                if path not in initialized:
                     self._schema_fn(con)
-                    self._initialized.add(path)
+                    initialized.add(path)
             except Exception:
                 try:
                     con.close()
@@ -242,8 +262,9 @@ class ThreadLocalPool:
                 except Exception:
                     pass
             self._all_connections.clear()
-        if hasattr(self._local, self._local_attr):
-            getattr(self._local, self._local_attr).clear()
+        local = self._local_provider()
+        if hasattr(local, self._local_attr):
+            getattr(local, self._local_attr).clear()
 
     def teardown(self, key: Any) -> None:
         """Close any thread-local connection and discard the init marker.
@@ -263,7 +284,7 @@ class ThreadLocalPool:
             path = self._path_fn(key)
         except Exception:
             return
-        self._initialized.discard(path)
+        self._initialized_provider().discard(path)
 
     def reset(self) -> None:
         """Drop the in-memory init cache and close all connections.
@@ -272,7 +293,7 @@ class ThreadLocalPool:
         avoid carrying over a connection bound to the previous test's path.
         """
         self.close_all()
-        self._initialized.clear()
+        self._initialized_provider().clear()
 
     # ── Internal helpers ───────────────────────────────────────────────
 
