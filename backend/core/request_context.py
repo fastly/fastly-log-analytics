@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 from fastapi import Depends, HTTPException, Request
 
 from backend.core.request_telemetry import RequestTelemetry
-from backend.deps import _ConnectionHolder, get_service_id
+from backend.deps import _ConnectionHolder, _resolve_source_or_400, get_service_id
 
 if TYPE_CHECKING:
     import duckdb
@@ -168,18 +168,7 @@ def build_request_context(
 
 
 def _resolve_source(service_id: str) -> dict:
-    """Inline copy of the source-resolution body from
-    :func:`backend.deps.get_source`. Kept local so we don't reach inside
-    the FastAPI-decorated dep just to call its body."""
-    from backend.core import duckdb as db
-
-    src = db.get_source_for_service(service_id)
-    if src:
-        return src
-    raise HTTPException(
-        status_code=400,
-        detail={
-            "error": "No active service configured. Please configure a service first.",
-            "no_service": True,
-        },
-    )
+    """Thin alias for :func:`backend.deps._resolve_source_or_400` — kept
+    as a module-local name so existing test patches on
+    ``backend.core.request_context._resolve_source`` continue to work."""
+    return _resolve_source_or_400(service_id)

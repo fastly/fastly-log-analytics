@@ -58,11 +58,9 @@ def get_service_id(
     return svcconfig.get_active_service_id()
 
 
-def get_source(service_id: str | None = Depends(get_service_id)) -> dict:
-    """Return the source config dict for the active service.
-
-    Raises 400 if no service is configured.
-    """
+def _resolve_source_or_400(service_id: str | None) -> dict:
+    """Look up ``service_id``'s source dict, or raise 400 with the canonical
+    ``no_service`` detail the frontend checks for."""
     if service_id:
         src = db.get_source_for_service(service_id)
         if src:
@@ -71,6 +69,14 @@ def get_source(service_id: str | None = Depends(get_service_id)) -> dict:
         status_code=400,
         detail={"error": "No active service configured. Please configure a service first.", "no_service": True},
     )
+
+
+def get_source(service_id: str | None = Depends(get_service_id)) -> dict:
+    """Return the source config dict for the active service.
+
+    Raises 400 if no service is configured.
+    """
+    return _resolve_source_or_400(service_id)
 
 
 # ── DuckDB connection ─────────────────────────────────────────────────────────
