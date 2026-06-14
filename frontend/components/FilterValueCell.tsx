@@ -83,34 +83,30 @@ export function FilterValueCell({
     if (v) navigator.clipboard?.writeText(v).catch(() => {})
   }, [filters])
 
-  // Modifier-key shortcut: cmd/ctrl-click on the whole cell triggers
-  // "Filter this page" directly, bypassing the menu. Tracked across both
-  // mousedown and click because base-ui opens the menu on click and
-  // preventDefault on mousedown alone doesn't stop the React click event.
-  // Plain click still opens the menu — the modifier path is the override.
-  const modifierRef = React.useRef(false)
+  // Modifier-key shortcut: cmd/ctrl-click on the cell triggers "Filter
+  // this page" directly without opening the menu. base-ui's Trigger has
+  // its own pointer handler that flips open AFTER our React handlers and
+  // any setTimeout we queue, so direct setOpen(false) loses the race.
+  // Instead, gate onOpenChange: when the modifier was pressed on mousedown,
+  // swallow the next "open=true" callback from base-ui entirely.
+  const skipNextOpenRef = React.useRef(false)
   const handleMouseDown = React.useCallback(
     (e: React.MouseEvent) => {
-      modifierRef.current = e.metaKey || e.ctrlKey
-      if (modifierRef.current) {
+      if (e.metaKey || e.ctrlKey) {
         e.preventDefault()
         e.stopPropagation()
+        skipNextOpenRef.current = true
         handleFilterHere()
       }
     },
     [handleFilterHere],
   )
-  const handleClick = React.useCallback((e: React.MouseEvent) => {
-    if (modifierRef.current) {
-      e.preventDefault()
-      e.stopPropagation()
-      modifierRef.current = false
-      // base-ui's Trigger flips open AFTER React's synthetic click event
-      // (via its own pointer-down handler). Calling setOpen(false) inside
-      // this handler races against base-ui's setOpen(true). Queue the close
-      // for the next tick so it always wins.
-      setTimeout(() => setOpen(false), 0)
+  const handleOpenChange = React.useCallback((next: boolean) => {
+    if (next && skipNextOpenRef.current) {
+      skipNextOpenRef.current = false
+      return
     }
+    setOpen(next)
   }, [])
 
   if (filters.length === 0 || shownValue === '' || shownValue == null) {
@@ -122,7 +118,7 @@ export function FilterValueCell({
   }
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
+    <DropdownMenu open={open} onOpenChange={handleOpenChange}>
       <DropdownMenuTrigger
         render={
           <button
@@ -130,7 +126,6 @@ export function FilterValueCell({
             aria-label={`Filter actions for ${filters[0].value}`}
             title="Click for actions · ⌘/Ctrl-click to filter this page"
             onMouseDown={handleMouseDown}
-            onClick={handleClick}
             className={cn(
               'group flex items-center gap-2 text-left rounded-sm -mx-1 px-1 py-0.5 hover:bg-accent/60 data-[popup-open]:bg-accent/60 transition-colors w-full min-w-0',
               containerClassName,
