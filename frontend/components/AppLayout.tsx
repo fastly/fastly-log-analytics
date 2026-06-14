@@ -64,6 +64,7 @@ import { useRouter } from 'next/navigation'
 import packageJson from '../package.json'
 import { useShareStatusBanner } from '@/hooks/useShareStatusBanner'
 import { useAnalystHeartbeat } from '@/hooks/useAnalystHeartbeat'
+import { SIDEBAR_COLLAPSED_COOKIE } from '@/lib/sidebar-cookie'
 
 // `analystVisible` controls visibility for FOS-sharing analysts (those
 // running their own copy of the app locally against the admin's FOS
@@ -169,8 +170,6 @@ function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, active
     </Tooltip>
   )
 }
-
-export const SIDEBAR_COLLAPSED_COOKIE = 'fla.sidebarCollapsed'
 
 export function AppLayout({
   children,
