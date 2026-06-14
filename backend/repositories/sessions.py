@@ -210,6 +210,25 @@ def _build_rollup_filter_sql(rollup_filters: FiltersDict | None) -> str:
     return " AND " + " AND ".join(parts)
 
 
+def _enrich_sessions_with_asn_labels(sessions: list[dict], src: dict) -> None:
+    """Mutate session dicts in place to add an "asn_label" key.
+
+    Batches the lookup so a 100-row page is one cache+resolve cycle. Cold
+    asn_names cache entries trigger WHOIS resolution and amortise on later
+    requests. Same path used by network/performance/dashboard responses.
+    """
+    asn_ints = sorted({int(sess["asn"]) for sess in sessions if sess.get("asn") is not None})
+    if not asn_ints:
+        return
+    from backend.core import duckdb as _db
+
+    asn_names = _db.get_asn_names(src["name"], asn_ints)
+    for sess in sessions:
+        asn_val = sess.get("asn")
+        if asn_val is not None:
+            sess["asn_label"] = _db.format_asn_label(int(asn_val), asn_names.get(int(asn_val), ""))
+
+
 def _get_sessions_from_rollup(
     runner: QueryRunner,
     con: duckdb.DuckDBPyConnection,
@@ -407,6 +426,7 @@ def _get_sessions_from_rollup(
         d.pop("rtt_count", None)
         sessions.append(d)
     total = len(sessions)
+    _enrich_sessions_with_asn_labels(sessions, src)
 
     return {
         "sessions": sessions,
@@ -668,21 +688,7 @@ def get_sessions(
         sessions.append(d)
     total = len(sessions)
 
-    # Resolve ASN → "<org name> (<asn>)" labels in one batched lookup so the
-    # frontend can render e.g. "Comcast Cable Communications (7922)" instead
-    # of bare "AS7922". Matches the enrichment pattern used by performance /
-    # network / dashboard responses. Cold-cache WHOIS resolutions go through
-    # the per-service asn_names SQLite cache and are amortised on subsequent
-    # session list loads.
-    asn_ints = sorted({int(sess["asn"]) for sess in sessions if sess.get("asn") is not None})
-    if asn_ints:
-        from backend.core import duckdb as _db
-
-        asn_names = _db.get_asn_names(src["name"], asn_ints)
-        for sess in sessions:
-            asn_val = sess.get("asn")
-            if asn_val is not None:
-                sess["asn_label"] = _db.format_asn_label(int(asn_val), asn_names.get(int(asn_val), ""))
+    _enrich_sessions_with_asn_labels(sessions, src)
 
     if not rows and offset > 0:
         _t = time.perf_counter()
