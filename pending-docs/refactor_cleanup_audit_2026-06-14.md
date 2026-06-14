@@ -25,6 +25,21 @@ Pre-flight corrections landed:
 
 PR-14 added to Implementation Plan (core-3 / core-5 / core-9 / core-15, deliberate behavior changes per executor mandate).
 
+**2026-06-14 — Session 1 continued:**
+
+PR-2 landed and prod-verified:
+- `a2b0eb1` utils: adopt iso_z_now / iso_z across stale strftime sites (u2)
+- `8b2a8df` tunnel: import iso_z_now directly instead of via share_db re-export (u8)
+- Deviation from audit: ngwaf.py:206 left as raw strftime — input is a DuckDB-returned naive datetime that represents UTC; iso_z() would astimezone() it and silently shift timestamps by the host's local-to-UTC offset. Format pin moved from test_rdns_cache to test_date_utils.
+
+PR-4 landed and prod-verified:
+- `6900c40` utils: delete retry.py (u1) — never adopted
+- `7a04d01` utils: delete cdn.py (u4) — only its test imported it
+- `1598356` core: inline query_monitor_enabled, delete settings.py + pydantic-settings dep (core-1)
+- Net: -1063 LOC, pydantic-settings dropped from pyproject.toml + uv.lock.
+
+**Pre-existing test flake** (not caused by this branch): `tests/core/test_duckdb_concurrency.py::test_concurrent_readers_against_held_writer` fails deterministically against telemetry_proxy thread state ("This event loop is already running" / "Call runner.setup() before making a site"). Reproduced at `f27aeac` (the commit before any of this session's work landed), so the regression is upstream of PR-1. Followed up via pytest with `--ignore` to keep the verification loop moving; recommend filing as a separate issue against the telemetry_proxy / duckdb concurrency machinery.
+
 ---
 
 ## Methodology
@@ -103,7 +118,7 @@ The four xs-effort P0 items ([b5](#b5), [c1](#c1), [b8](#b8), [r9](#r9)) make a 
 | [c8](#c8) | `shim_attr(name, fallback)` self-import dance in 4 sites | Reuse | xs | yes | PR-12 |
 | [c10](#c10) | v2.0 tombstone comments in `deps.py` | Legacy removal | xs | yes | PR-12 |
 | [c12](#c12) | `backend/services/__init__.py` empty | File structure | xs | yes | (skip) |
-| [core-1](#core-1) | `backend/core/settings.py` — 1 of 11 consumers | Legacy removal | s | yes | PR-4 |
+| [core-1](#core-1) | `backend/core/settings.py` — 1 of 11 consumers | Legacy removal | s | yes | PR-4 [done 1598356] |
 | [core-3](#core-3) | `_ORPHAN_THRESHOLD_MINS = 5` vs `60` | Bad logic | xs | **no** — operational decision | PR-14 |
 | [core-5](#core-5) | `_safe_weakref` defined twice, divergent behavior | Bad logic | xs | **no** — fixes instrumentation | PR-14 |
 | [core-9](#core-9) | Promote `_TASK_TO_CRON_KEY` | Reuse | xs | **no** — fixes latent retention bug | PR-14 |
@@ -121,13 +136,13 @@ The four xs-effort P0 items ([b5](#b5), [c1](#c1), [b8](#b8), [r9](#r9)) make a 
 | [r7](#r7) | `_phase` pattern in 4 routers | Reuse | s | yes (folds into b2) | PR-5 |
 | [r8](#r8) | `start_or_resume_cron` triple | Reuse | s | yes | PR-10 |
 | [r9](#r9) | `_resolve_source` duplicates `get_source` body | Reuse | xs | yes | PR-1 [done 2e2a70e] |
-| [u1](#u1) | `backend/utils/retry.py` — 0 production callers | Legacy removal | s | yes (delete path) | PR-4 |
-| [u2](#u2) | `iso_z_now()` ignored in 9 utils sites | Reuse | s | yes (byte-identical) | PR-2 |
-| [u4](#u4) | `backend/utils/cdn.py` — imported only by tests | Legacy removal | s | yes (delete path) | PR-4 |
+| [u1](#u1) | `backend/utils/retry.py` — 0 production callers | Legacy removal | s | yes (delete path) | PR-4 [done 6900c40] |
+| [u2](#u2) | `iso_z_now()` ignored in 9 utils sites | Reuse | s | yes (byte-identical) | PR-2 [done a2b0eb1] |
+| [u4](#u4) | `backend/utils/cdn.py` — imported only by tests | Legacy removal | s | yes (delete path) | PR-4 [done 7a04d01] |
 | [u5](#u5) | `_iceberg_meta_prefix(source)` in state_sync.py | Reuse | xs | yes | PR-12 |
 | [u6](#u6) | `_run_falco_lint` extraction | Reuse | s | yes (fixes a documented bug) | PR-12 |
 | [u7](#u7) | `TunnelState.use_tunnel` / `tunnel_url` expired | Legacy removal | s | yes | PR-8 |
-| [u8](#u8) | Replace `share_db.iso_z_now()` re-exports in tunnel | Reuse | xs | yes | PR-2 |
+| [u8](#u8) | Replace `share_db.iso_z_now()` re-exports in tunnel | Reuse | xs | yes | PR-2 [done 8b2a8df] |
 | [u9](#u9) | `sync_admin_state` misplaced in `utils/` | File structure | s | yes | PR-13 |
 | [u10](#u10) | Promote `_is_full_miss` / `build_cdn_miss_synth_row` | Reuse | xs | yes | PR-12 |
 
