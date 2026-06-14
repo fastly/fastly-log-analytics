@@ -243,38 +243,15 @@ def _run_service_cron(
                         # cadence. CREATE OR REPLACE VIEW is metadata-only (no cloud
                         # reads), so this is cheap.
                         if done_event.get("rows_inserted", 0) > 0:
-                            _t0 = time.time()
-                            try:
-                                from backend.core import iceberg as _ice
-                                from backend.core.duckdb import get_connection as _get_conn
-                                from backend.core.duckdb_pool import warm_pool_for_service as _warm
+                            from backend.cron.jobs._common import refresh_view_and_warm_pool
 
-                                con_v = _get_conn(source=src, read_only=False)
-                                try:
-                                    # force=True: sync KNOWS the buffer changed, so
-                                    # skip the fast-path no-op attempt and go straight
-                                    # to the slow path under the per-service lock.
-                                    _ice.update_iceberg_view(con_v, src, force=True)
-                                    # Pre-bind every idle pool connection to the now-
-                                    # current view so dashboard panel checkouts skip
-                                    # the rebuild entirely on the request path.
-                                    _warm(service_id, src)
-                                finally:
-                                    con_v.close()
-                            except Exception as _e:
-                                logger.warning(
-                                    "[scheduler] %s: post-sync view refresh failed: %s",
-                                    service_id,
-                                    _e,
-                                )
-                            _log_and_add_progress(
-                                run_id,
+                            refresh_view_and_warm_pool(
+                                src,
                                 service_id,
-                                job_name="sync",
-                                event={
-                                    "type": "status",
-                                    "message": f"{elapsed()} View refresh + warm: {int((time.time() - _t0) * 1000)}ms",
-                                },
+                                log_prefix=f"{elapsed()} ",
+                                progress_log=lambda ev: _log_and_add_progress(
+                                    run_id, service_id, job_name="sync", event=ev
+                                ),
                             )
 
                         touched_hours = done_event.get("touched_hours", [])
@@ -400,13 +377,11 @@ def _run_service_cron(
     _t0 = time.time()
     _invalidated = 0
     try:
-        from backend.repositories.dashboard import _dashboard_cache
+        from backend.repositories.dashboard import _dashboard_cache, invalidate_service
 
         src_name = src.get("name", "")
-        stale_keys = [k for k in _dashboard_cache if k.endswith(f":{src_name}")]
-        _invalidated = len(stale_keys)
-        for k in stale_keys:
-            del _dashboard_cache[k]
+        _invalidated = sum(1 for k in list(_dashboard_cache) if k.endswith(f":{src_name}"))
+        invalidate_service(src_name)
     except Exception:
         pass
     if run_id is not None and _invalidated:

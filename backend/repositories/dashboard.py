@@ -56,6 +56,29 @@ DASHBOARD_CACHE_TTL = 0  # seconds; 0 disables read+write
 _dashboard_cache: BoundedTTLCache = BoundedTTLCache(maxsize=500, ttl_seconds=max(DASHBOARD_CACHE_TTL, 1))
 
 
+def invalidate_service(service_name: str) -> None:
+    """Drop every cached dashboard response keyed to ``service_name``.
+
+    Public surface for cron / admin callers that need to invalidate after
+    an ingest tick or a config change — keeps them out of the private
+    ``_dashboard_cache`` deque so its internal shape can change without
+    breaking three out-of-package callers.
+    """
+    if not service_name:
+        return
+    stale = [k for k in list(_dashboard_cache) if k.endswith(f":{service_name}")]
+    for k in stale:
+        try:
+            del _dashboard_cache[k]
+        except KeyError:
+            pass
+    # Also drop a direct-keyed entry (the admin ingest path uses .pop(name)).
+    try:
+        _dashboard_cache.pop(service_name, None)
+    except (KeyError, AttributeError):
+        pass
+
+
 # ── aggregates ────────────────────────────────────────────────────────────────
 
 # Phase 7 caller migration: read field codes from the frozen-dataclass

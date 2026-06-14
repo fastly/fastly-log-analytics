@@ -135,29 +135,14 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
             # rebuild under a lock that ingest also contends for. Doing both
             # the cache refresh and the pool warm on the commit thread keeps
             # the request path on the fast path.
-            try:
-                from backend.core import iceberg as _ice
-                from backend.core.duckdb import get_connection as _get_conn
-                from backend.core.duckdb_pool import warm_pool_for_service as _warm
+            from backend.cron.jobs._common import refresh_view_and_warm_pool
 
-                _t0 = time.time()
-                con_v = _get_conn(source=src, read_only=False)
-                try:
-                    _ice.update_iceberg_view(con_v, src, force=True)
-                    _warm(service_id, src)
-                finally:
-                    con_v.close()
-                _log_and_add_progress(
-                    run_id,
-                    service_id,
-                    job_name="commit",
-                    event={
-                        "type": "status",
-                        "message": f"View refresh + warm: {int((time.time() - _t0) * 1000)}ms",
-                    },
-                )
-            except Exception as _e:
-                logger.warning("[scheduler] %s: post-commit view refresh failed: %s", service_id, _e)
+            refresh_view_and_warm_pool(
+                src,
+                service_id,
+                log_prefix="",
+                progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="commit", event=ev),
+            )
 
             # ── On-demand Sync ──
             # Since we just committed new data to the cloud, trigger a sync

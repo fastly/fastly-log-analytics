@@ -225,11 +225,9 @@ def _run_metadata_sync(
 
         # ── 6. Invalidate dashboard cache ─────────────────────────────────────
         try:
-            from backend.repositories.dashboard import _dashboard_cache
+            from backend.repositories.dashboard import invalidate_service
 
-            stale_keys = [k for k in _dashboard_cache if k.endswith(f":{src['name']}")]
-            for k in stale_keys:
-                del _dashboard_cache[k]
+            invalidate_service(src["name"])
         except Exception:
             pass
 

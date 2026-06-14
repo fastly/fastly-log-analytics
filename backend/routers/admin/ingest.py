@@ -21,11 +21,11 @@ def ingest_endpoint(
 
     from backend.core.duckdb import start_cron_run
     from backend.cron_progress import list_active_runs, start_progress
-    from backend.repositories.dashboard import _dashboard_cache
+    from backend.repositories.dashboard import invalidate_service
     from backend.scheduler import _run_metadata_sync, _run_service_cron
 
     src = source
-    _dashboard_cache.pop(src["name"], None)
+    invalidate_service(src["name"])
     is_readonly = source.get("access_level") == "read_only"
 
     if is_readonly:

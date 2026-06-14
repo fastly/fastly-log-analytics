@@ -543,23 +543,7 @@ def _write_table_summary_async(source: dict, table=None) -> None:
             logger.debug("[iceberg] Wrote table summary to %s", summary_key)
 
             # Also purge CDN if configured
-            cdn_service_id = source.get("cdn_service_id", "")
-            if cdn_service_id:
-                try:
-                    from backend import config as _cfg
-
-                    api_key = _cfg.get_fastly_api_key(source.get("name", ""))
-                    if api_key:
-                        from backend.core.fastly.client import fastly as _fastly
-
-                        _fastly(
-                            "POST",
-                            f"/service/{cdn_service_id}/purge/iceberg-table-summary",
-                            token=api_key,
-                            expect_empty=True,
-                        )
-                except Exception:
-                    pass
+            _purge_surrogate_key(source, "iceberg-table-summary")
         except Exception as e:
             logger.warning("[iceberg] Failed to write async table summary: %s", e)
 
@@ -640,6 +624,34 @@ def _load_table_cached(source: dict, identifier: tuple, catalog=None):
     return table
 
 
+def _purge_surrogate_key(source: dict, key: str) -> None:
+    """Fire-and-forget CDN surrogate-key purge against the service's
+    Fastly. No-op when no ``cdn_service_id`` is configured or no API
+    key is available. Logs at debug on success and at warning on
+    failure; never raises (CDN unreachability must not block the
+    writer that called us)."""
+    cdn_service_id = source.get("cdn_service_id", "")
+    if not cdn_service_id:
+        return
+    try:
+        from backend import config as _cfg
+
+        api_key = _cfg.get_fastly_api_key(source.get("name", ""))
+        if not api_key:
+            return
+        from backend.core.fastly.client import fastly as _fastly
+
+        _fastly(
+            "POST",
+            f"/service/{cdn_service_id}/purge/{key}",
+            token=api_key,
+            expect_empty=True,
+        )
+        logger.debug("[iceberg] Purged CDN surrogate key %s", key)
+    except Exception as e:
+        logger.warning("[iceberg] CDN purge failed for surrogate key %s (non-fatal): %s", key, e)
+
+
 def _write_metadata_pointer(source: dict, location: str, table=None) -> None:
     """Write a pointer to the latest metadata.json to FOS.
 
@@ -682,24 +694,7 @@ def _write_metadata_pointer(source: dict, location: str, table=None) -> None:
         _write_table_summary_async(source, table=table)
 
         # Purge the CDN surrogate key so the next read always gets the new pointer.
-        cdn_service_id = source.get("cdn_service_id", "")
-        if cdn_service_id:
-            try:
-                from backend import config as _cfg
-
-                api_key = _cfg.get_fastly_api_key(source.get("name", ""))
-                if api_key:
-                    from backend.core.fastly.client import fastly as _fastly
-
-                    _fastly(
-                        "POST",
-                        f"/service/{cdn_service_id}/purge/iceberg-metadata-pointer",
-                        token=api_key,
-                        expect_empty=True,
-                    )
-                    logger.debug("[iceberg] Purged CDN surrogate key iceberg-metadata-pointer")
-            except Exception as e:
-                logger.warning("[iceberg] CDN purge failed (non-fatal): %s", e)
+        _purge_surrogate_key(source, "iceberg-metadata-pointer")
     except Exception as e:
         logger.warning("[iceberg] Failed to write metadata pointer: %s", e)
 
