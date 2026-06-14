@@ -7,7 +7,7 @@ import { client } from '@/lib/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { UpdatingBadge } from '@/components/UpdatingBadge'
-import { DashboardLinkCell } from '@/components/DashboardLinkCell'
+import { FilterValueCell } from '@/components/FilterValueCell'
 import { downloadAsCsv } from '@/lib/utils'
 import { cn } from '@/lib/utils'
 import dynamic from 'next/dynamic'
@@ -47,8 +47,7 @@ import { StatCard } from '@/components/ui/stat-card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { SkeletonGrid } from '@/components/ui/skeleton-grid'
-import { Network as NetworkIcon, AlertCircle, Globe, Zap, Activity, Shield, ExternalLink, Download } from 'lucide-react'
-import Link from 'next/link'
+import { Network as NetworkIcon, AlertCircle, Globe, Zap, Activity, Shield, Download } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 
 // Static — module-level keeps the reference stable across renders without
@@ -335,18 +334,10 @@ export default function NetworkPage() {
                     return (
                       <tr key={asn.asn} className="border-b last:border-0 hover:bg-muted/50 transition-colors">
                         <td className="px-4 py-3 font-medium">
-                          <div className="flex items-center gap-2 group">
-                            <span>{asn.label}</span>
-                            <Link
-                              href={`/dashboard?filter_asn=${encodeURIComponent(asn.asn)}`}
-                              className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-                              title="View in Dashboard"
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              <ExternalLink className="h-3 w-3 text-muted-foreground hover:text-primary" />
-                            </Link>
-                          </div>
+                          <FilterValueCell
+                            filters={[{ column: 'asn', value: String(asn.asn) }]}
+                            display={asn.label}
+                          />
                         </td>
                         <td className="px-4 py-3 text-right font-mono text-xs">{(asn.total_reqs ?? 0).toLocaleString()}</td>
                         <td className="px-4 py-3 text-right"><HealthBadge score={asn.health_score_now} /></td>
@@ -412,20 +403,18 @@ export default function NetworkPage() {
                     {(data?.metro_leaderboard ?? []).map((m: any) => (
                       <tr key={`${m.city}-${m.region}-${m.country}`} className="border-b last:border-0 hover:bg-muted/50 transition-colors">
                         <td className="px-4 py-3 font-medium">
-                          <div className="flex items-center gap-2 group">
+                          {m.raw_city ? (
+                            <FilterValueCell
+                              filters={[
+                                { column: 'city', value: m.raw_city },
+                                ...(m.region ? [{ column: 'region', value: m.region }] : []),
+                                ...(m.country ? [{ column: 'country', value: m.country }] : []),
+                              ]}
+                              display={m.city}
+                            />
+                          ) : (
                             <span>{m.city}</span>
-                            {m.raw_city && (
-                              <Link
-                                href={`/dashboard?filter_city=${encodeURIComponent(m.raw_city)}${m.region ? `&filter_region=${encodeURIComponent(m.region)}` : ''}${m.country ? `&filter_country=${encodeURIComponent(m.country)}` : ''}`}
-                                className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-                                title="View in Dashboard"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                              >
-                                <ExternalLink className="h-3 w-3 text-muted-foreground hover:text-primary" />
-                              </Link>
-                            )}
-                          </div>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-right font-mono text-xs">{(m.total_reqs ?? 0).toLocaleString()}</td>
                         <td className="px-4 py-3 text-right"><HealthBadge score={m.health_score} /></td>

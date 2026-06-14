@@ -5,7 +5,7 @@ import type { VisibilityState } from '@tanstack/react-table'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { DashboardLinkCell } from '@/components/DashboardLinkCell'
+import { FilterValueCell } from '@/components/FilterValueCell'
 import { formatDate } from '@/lib/date'
 import {
   SECURITY_INFO,
@@ -150,9 +150,9 @@ export function BotsSection({
       cell: (info: any) => {
         const row = info.row.original
         return (
-          <DashboardLinkCell
-            value={row.name}
-            href={`/dashboard?filter__wellknown_bot_id=${encodeURIComponent(row.id)}`}
+          <FilterValueCell
+            filters={[{ column: '_wellknown_bot_id', value: row.id }]}
+            display={row.name}
             className="font-medium"
             containerClassName="max-w-[200px]"
           />
@@ -210,9 +210,9 @@ export function BotsSection({
       cell: (info: any) => {
         const row = info.row.original as NgwafVerifiedBot
         return (
-          <DashboardLinkCell
-            value={row.bot_name}
-            href={`/dashboard?filter__ngwaf_bot_name=${encodeURIComponent(row.bot_name || '')}`}
+          <FilterValueCell
+            filters={[{ column: '_ngwaf_bot_name', value: row.bot_name || '' }]}
+            display={row.bot_name}
             className="font-medium"
             containerClassName="max-w-[200px]"
           />
@@ -234,9 +234,8 @@ export function BotsSection({
       accessorKey: 'fingerprint',
       header: 'Cipher Fingerprint (SHA)',
       cell: (info: any) => (
-        <DashboardLinkCell
-          value={info.getValue()}
-          href={`/dashboard?filter_tls_client_hello=${encodeURIComponent(info.getValue())}`}
+        <FilterValueCell
+          filters={[{ column: 'tls_client_hello', value: info.getValue() }]}
           className="font-mono text-[10px]"
           containerClassName="max-w-[200px]"
         />
@@ -251,9 +250,8 @@ export function BotsSection({
       accessorKey: 'fingerprint',
       header: 'HTTP/2 Fingerprint',
       cell: (info: any) => (
-        <DashboardLinkCell
-          value={info.getValue()}
-          href={`/dashboard?filter_h2_fingerprint=${encodeURIComponent(info.getValue())}`}
+        <FilterValueCell
+          filters={[{ column: 'h2_fingerprint', value: info.getValue() }]}
           className="font-mono text-[10px]"
           containerClassName="max-w-[200px]"
         />
@@ -268,9 +266,8 @@ export function BotsSection({
       accessorKey: 'fingerprint',
       header: 'Original Header Fingerprint',
       cell: (info: any) => (
-        <DashboardLinkCell
-          value={info.getValue()}
-          href={`/dashboard?filter_oh_fingerprint=${encodeURIComponent(info.getValue())}`}
+        <FilterValueCell
+          filters={[{ column: 'oh_fingerprint', value: info.getValue() }]}
           className="font-mono text-[10px]"
           containerClassName="max-w-[200px]"
         />

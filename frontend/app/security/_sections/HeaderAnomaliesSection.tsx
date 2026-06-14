@@ -5,7 +5,7 @@ import type { VisibilityState } from '@tanstack/react-table'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { DashboardLinkCell } from '@/components/DashboardLinkCell'
+import { FilterValueCell } from '@/components/FilterValueCell'
 import { SECURITY_INFO, TOP_IP_COLUMN_IDS } from './securityInfo'
 import type { components } from '@/types/api.generated'
 
@@ -46,9 +46,8 @@ export function HeaderAnomaliesSection({
       accessorKey: 'ip',
       header: 'IP Address',
       cell: (info: any) => (
-        <DashboardLinkCell
-          value={info.getValue()}
-          href={`/dashboard?filter_client_ip=${encodeURIComponent(info.getValue())}`}
+        <FilterValueCell
+          filters={[{ column: 'client_ip', value: info.getValue() }]}
           className="font-mono text-xs"
         />
       )

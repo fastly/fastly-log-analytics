@@ -1,6 +1,6 @@
 import React from "react";
 import { Badge } from "@/components/ui/badge";
-import { DashboardLinkCell } from "@/components/DashboardLinkCell";
+import { FilterValueCell } from "@/components/FilterValueCell";
 import { cn } from "@/lib/utils";
 import { Activity, Shield, AlertTriangle, Search, ActivitySquare, AlertCircle, Globe, Zap, Network as NetworkIcon } from "lucide-react";
 export const GlobalHealthHelp = () => (
@@ -180,9 +180,8 @@ export const SHIELDING_COLUMNS = [
     accessorKey: 'edge_pop',
     id: 'edge_pop', meta: { label: 'Edge POP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Edge POP</span>,
     cell: (info: any) => (
-      <DashboardLinkCell
-        value={info.getValue()}
-        href={`/dashboard?filter_pop=${encodeURIComponent(info.getValue())}`}
+      <FilterValueCell
+        filters={[{ column: 'pop', value: info.getValue() }]}
         className={cn('font-bold', info.row.original.anomaly_static ? 'text-destructive' : '')}
       />
     )
@@ -191,9 +190,8 @@ export const SHIELDING_COLUMNS = [
     accessorKey: 'shield_pop',
     id: 'shield_pop', meta: { label: 'Shield POP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Shield POP</span>,
     cell: (info: any) => (
-      <DashboardLinkCell
-        value={info.getValue()}
-        href={`/dashboard?filter_shield_pop=${encodeURIComponent(info.getValue())}`}
+      <FilterValueCell
+        filters={[{ column: 'shield_pop', value: info.getValue() }]}
         className="font-bold text-purple-500"
       />
     )

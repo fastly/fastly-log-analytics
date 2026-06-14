@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
-import { DashboardLinkCell } from '@/components/DashboardLinkCell'
+import { FilterValueCell } from '@/components/FilterValueCell'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { cn, formatBytes } from '@/lib/utils'
 import { Server, MapPin, Globe } from 'lucide-react'
@@ -13,9 +13,8 @@ const COLUMNS = {
       accessorKey: 'url',
       id: 'url', meta: { label: 'URL' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">URL</span>,
       cell: (info: any) => (
-        <DashboardLinkCell
-          value={info.getValue()}
-          href={`/dashboard?filter_url=${encodeURIComponent(info.getValue())}`}
+        <FilterValueCell
+          filters={[{ column: 'url', value: info.getValue() }]}
           className="font-mono text-xs"
           containerClassName="max-w-[400px]"
         />
@@ -31,9 +30,8 @@ const COLUMNS = {
       accessorKey: 'pop',
       id: 'pop', meta: { label: 'POP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">POP</span>,
       cell: (info: any) => (
-        <DashboardLinkCell
-          value={info.getValue()}
-          href={`/dashboard?filter_pop=${encodeURIComponent(info.getValue())}`}
+        <FilterValueCell
+          filters={[{ column: 'pop', value: info.getValue() }]}
           className="font-bold"
         />
       )
@@ -51,9 +49,8 @@ const COLUMNS = {
       accessorKey: 'oip',
       id: 'oip', meta: { label: 'Origin IP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Origin IP</span>,
       cell: (info: any) => (
-        <DashboardLinkCell
-          value={info.getValue()}
-          href={`/dashboard?filter_origin_ip=${encodeURIComponent(info.getValue())}`}
+        <FilterValueCell
+          filters={[{ column: 'origin_ip', value: info.getValue() }]}
           className="font-mono text-xs"
         />
       )

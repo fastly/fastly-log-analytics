@@ -1,10 +1,10 @@
 import React from 'react'
-import Link from 'next/link'
-import { ExternalLink } from 'lucide-react'
 import { ColumnDef } from '@tanstack/react-table'
+import { FilterValueCell } from '@/components/FilterValueCell'
 
 /**
- * Creates standard performance/latency columns with a dashboard drill-down link.
+ * Creates standard performance/latency columns with a filter-value drill-down
+ * cell (filter the current page or open the dashboard in a new tab).
  */
 export const makeLatencyColumns = (labelField: string, labelName: string, filterField: string): ColumnDef<any>[] => [
   {
@@ -13,21 +13,16 @@ export const makeLatencyColumns = (labelField: string, labelName: string, filter
     cell: (info: any) => {
       const val = info.row.original[filterField]
       const displayVal = info.getValue()
+      if (val == null) {
+        return <span className="font-mono text-xs truncate block max-w-[300px]">{displayVal}</span>
+      }
       return (
-        <div className="flex items-center gap-2 group max-w-[300px]">
-          <span className="font-mono text-xs truncate">{displayVal}</span>
-          {val != null && (
-            <Link
-              href={`/dashboard?filter_${filterField}=${encodeURIComponent(val)}`}
-              className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-              title="View in Dashboard"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <ExternalLink className="h-3 w-3 text-muted-foreground hover:text-primary" />
-            </Link>
-          )}
-        </div>
+        <FilterValueCell
+          filters={[{ column: filterField, value: String(val) }]}
+          display={displayVal}
+          className="font-mono text-xs"
+          containerClassName="max-w-[300px]"
+        />
       )
     }
   },
