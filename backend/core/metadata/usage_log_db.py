@@ -29,9 +29,6 @@ Public surface
   reader can never block a cron commit.
 - :func:`teardown` — drop the file + WAL/SHM siblings.
 - :func:`close_all_connections` — pytest fixture support.
-- :func:`migrate_from_metadata_db` — one-shot copy from the legacy
-  metadata.db tables; idempotent, no-op when the destination already
-  has rows.
 
 Cross-table joins
 -----------------
@@ -39,10 +36,6 @@ None — usage_log and usage_log_hourly_summary only reference each other,
 and the existing SQL in :mod:`backend.core.metadata.usage_log` does not
 join either to ``audit_logs`` / ``views`` / ``scoring_labels`` / etc.
 The split is therefore self-contained.
-
-The legacy table in metadata.db is left intact for one release as a
-rollback backstop; readers and writers no longer touch it. The next
-release can drop it.
 """
 
 from __future__ import annotations
@@ -50,17 +43,23 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import sys
 import threading
 
 from backend.core.metadata.base import _DATA_DIR, _SERVICE_ID_RE, InvalidServiceIdError
+from backend.core.sqlite_pool import ThreadLocalPool
 
 logger = logging.getLogger(__name__)
 
+# Kept as module-level attributes for the pytest fixture in
+# ``tests/conftest.py`` (and the migration-shape tests under
+# ``tests/core/test_metadata_db_migrations.py``) that monkeypatch them
+# between cases. The pool reads through ``_module_*`` lookups on every
+# call so the swaps take effect — see the ``initialized_provider`` /
+# ``local_provider`` arguments to :class:`ThreadLocalPool`.
 _local = threading.local()
 _init_lock = threading.Lock()
 _initialized: set[str] = set()
-_all_connections: list[sqlite3.Connection] = []
-_all_connections_lock = threading.Lock()
 
 
 def db_path(service_id: str) -> str:
@@ -77,10 +76,25 @@ def db_path(service_id: str) -> str:
     return os.path.join(_DATA_DIR, f"{service_id}.usage_log.db")
 
 
-def _connections() -> dict[str, sqlite3.Connection]:
-    if not hasattr(_local, "usage_log_conns"):
-        _local.usage_log_conns = {}
-    return _local.usage_log_conns
+def _init_schema(con: sqlite3.Connection) -> None:
+    for stmt in _SCHEMA:
+        con.execute(stmt)
+    con.commit()
+
+
+# Resolve through ``sys.modules`` so a ``monkeypatch.setattr(usage_log_db,
+# "_init_lock", ...)`` (used by future concurrency tests, mirroring the
+# metadata.base side) takes effect on every cold-open.
+_module = sys.modules[__name__]
+_pool = ThreadLocalPool(
+    name="usage_log_db",
+    path_fn=db_path,
+    schema_fn=_init_schema,
+    init_lock_provider=lambda: _module._init_lock,
+    initialized_provider=lambda: _module._initialized,
+    local_provider=lambda: _module._local,
+    local_attr="usage_log_conns",
+)
 
 
 def get_con(service_id: str) -> sqlite3.Connection:
@@ -92,57 +106,7 @@ def get_con(service_id: str) -> sqlite3.Connection:
     held across connect+PRAGMA so concurrent first-opens don't collide
     on ``PRAGMA journal_mode=WAL``.
     """
-    pool = _connections()
-    con = pool.get(service_id)
-    if con is not None:
-        return con
-
-    path = db_path(service_id)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if not _init_lock.acquire(timeout=10):
-        raise sqlite3.OperationalError(
-            f"usage_log_db._init_lock contended >10s for {service_id} — another thread is stuck inside connect+PRAGMA"
-        )
-    try:
-        from backend.utils.sqlite_profiler import InstrumentedConnection
-
-        con = sqlite3.connect(path, timeout=30.0, factory=InstrumentedConnection)
-        # Stash service_id on the connection so the Live Query Monitor's
-        # sqlite_profiler can surface it in the `service` column for the
-        # dedicated per-service usage_log.db connections (same mechanism
-        # as ``metadata.base.get_con`` — see that comment for context).
-        # Without this, usage_log writes show up as `service: null` on
-        # /admin/queries even though they target a specific service's db.
-        con._service_id = service_id  # type: ignore[attr-defined]
-        with _all_connections_lock:
-            _all_connections.append(con)
-        try:
-            con.row_factory = sqlite3.Row
-            con.execute("PRAGMA journal_mode=WAL")
-            con.execute("PRAGMA synchronous=NORMAL")
-            con.execute("PRAGMA foreign_keys=ON")
-            # 64 MB page cache, matching base.py rationale. usage_log is
-            # the largest hot table in this process (millions of rows on
-            # active services); the SUM(CASE) aggregate over a 24h window
-            # for the /admin/usage-log page pays for the cache header
-            # multiple times over.
-            con.execute("PRAGMA cache_size=-64000")
-            con.execute("PRAGMA busy_timeout=30000")
-
-            if path not in _initialized:
-                _init_schema(con)
-                _initialized.add(path)
-        except Exception:
-            try:
-                con.close()
-            except Exception:
-                pass
-            raise
-    finally:
-        _init_lock.release()
-
-    pool[service_id] = con
-    return con
+    return _pool.get(service_id)
 
 
 def open_readonly(service_id: str) -> sqlite3.Connection:
@@ -158,35 +122,17 @@ def open_readonly(service_id: str) -> sqlite3.Connection:
     rows yet" and return an empty result (the writer creates the file
     on first ``log_usage_calls`` call).
     """
-    path = db_path(service_id)
-    uri = f"file:{path}?mode=ro"
-    con = sqlite3.connect(uri, uri=True, timeout=5.0)
-    con.row_factory = sqlite3.Row
-    return con
+    return _pool.open_readonly(service_id, timeout=5.0)
 
 
 def close_all_connections() -> None:
-    with _all_connections_lock:
-        for con in _all_connections:
-            try:
-                con.close()
-            except Exception:
-                pass
-        _all_connections.clear()
+    _pool.close_all()
 
 
 def teardown(service_id: str) -> None:
     """Close any thread-local connection and delete the file + WAL siblings."""
-    pool = _connections()
-    con = pool.pop(service_id, None)
-    if con is not None:
-        try:
-            con.close()
-        except Exception:
-            pass
-
+    _pool.teardown(service_id)
     path = db_path(service_id)
-    _initialized.discard(path)
     for suffix in ("", "-wal", "-shm", "-journal"):
         target = path + suffix
         try:
@@ -287,9 +233,3 @@ _SCHEMA = [
                       last_updated = excluded.last_updated;
     END""",
 ]
-
-
-def _init_schema(con: sqlite3.Connection) -> None:
-    for stmt in _SCHEMA:
-        con.execute(stmt)
-    con.commit()
