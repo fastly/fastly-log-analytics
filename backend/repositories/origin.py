@@ -13,7 +13,13 @@ from typing import Any
 import duckdb
 
 from backend.models.common import FiltersDict
-from backend.repositories._base import QueryRunner, _safe_table, safe_iso
+from backend.repositories._base import (
+    QueryRunner,
+    _safe_table,
+    empty_schema_response,
+    origin_latency_us_expr,
+    safe_iso,
+)
 from backend.repositories._sql import origin as SQL
 from backend.repositories.utils.filters import build_where_clause
 
@@ -173,7 +179,6 @@ def get_summary(
 
     table_name = _safe_table(src["name"])
     actual_cols = runner.get_schema_cols()
-    from backend.repositories._base import empty_schema_response
 
     if not actual_cols:
         return empty_schema_response(
@@ -190,8 +195,6 @@ def get_summary(
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
 
     # Unified latency expression: prefer ottfb (micros), fallback to ttfb (seconds)
-    from backend.repositories._base import origin_latency_us_expr
-
     lat_val = origin_latency_us_expr(actual_cols)
 
     # N-8: return a ratio (0.0–1.0), NOT a percentage. The frontend at
@@ -349,7 +352,6 @@ def get_timeseries(
 
     table_name = _safe_table(src["name"])
     actual_cols = runner.get_schema_cols()
-    from backend.repositories._base import empty_schema_response
 
     if not actual_cols:
         return empty_schema_response(has_data=False, series=[], **runner.telemetry())
@@ -440,13 +442,9 @@ def get_slow_urls(
     table_name = _safe_table(src["name"])
     actual_cols = runner.get_schema_cols()
     if not actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(has_data=False, rows=[], **runner.telemetry())
 
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    from backend.repositories._base import origin_latency_us_expr
 
     lat_val = origin_latency_us_expr(actual_cols)
 
@@ -479,8 +477,6 @@ def get_status_codes(
     table_name = _safe_table(src["name"])
     actual_cols = runner.get_schema_cols()
     if not actual_cols or "ost" not in actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(has_data=False, rows=[], **runner.telemetry())
 
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
@@ -519,13 +515,9 @@ def get_path_breakdown(
     table_name = _safe_table(src["name"])
     actual_cols = runner.get_schema_cols()
     if not actual_cols or "edge" not in actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(has_data=False, shielding_detected=False, rows=[], **runner.telemetry())
 
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    from backend.repositories._base import origin_latency_us_expr
 
     lat_val = origin_latency_us_expr(actual_cols)
 
@@ -569,13 +561,9 @@ def get_pop_latency(
     table_name = _safe_table(src["name"])
     actual_cols = runner.get_schema_cols()
     if not actual_cols or "pop" not in actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(has_data=False, requires_group_c=True, rows=[], **runner.telemetry())
 
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    from backend.repositories._base import origin_latency_us_expr
 
     lat_val = origin_latency_us_expr(actual_cols)
 
@@ -627,13 +615,9 @@ def get_ip_health(
     table_name = _safe_table(src["name"])
     actual_cols = runner.get_schema_cols()
     if not actual_cols or "oip" not in actual_cols or "ost" not in actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(has_data=False, rows=[], **runner.telemetry())
 
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    from backend.repositories._base import origin_latency_us_expr
 
     lat_val = origin_latency_us_expr(actual_cols)
 
@@ -672,16 +656,12 @@ def get_shielding_analysis(
     table_name = _safe_table(src["name"])
     actual_cols = runner.get_schema_cols()
     if not actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(has_data=False, rows=[], **runner.telemetry())
 
     # We need rid, prid, edge, pop, ottfb for this analysis
     required = {"rid", "prid", "edge", "pop", "ottfb"}
     missing = required - set(actual_cols)
     if missing:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(has_data=False, requires_fields=list(missing), rows=[], **runner.telemetry())
 
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
@@ -1046,8 +1026,6 @@ def get_aggregates(
     # SLOWER than per-endpoint parquet scans because the COALESCE
     # forces per-row evaluation during percentile sort.
     import uuid as _uuid
-
-    from backend.repositories._base import origin_latency_us_expr
 
     actual_set = set(actual_cols)
     wanted_cols = [

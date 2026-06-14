@@ -8,12 +8,13 @@ from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
     _safe_table,
+    empty_schema_response,
     percentile_ms_expr,
     safe_interval,
     safe_iso,
     time_bucket_select,
 )
-from backend.repositories._sql import performance as SQL
+from backend.repositories._sql import dashboard as SQL_DASHBOARD
 from backend.repositories.utils.filters import build_where_clause
 
 
@@ -31,8 +32,6 @@ def get_performance_aggregates(
 
     actual_cols = runner.get_schema_cols()
     if not actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(
             latency_ts=[], top_urls=[], top_asns=[], ttl_dist=[], scatter=[], **runner.telemetry()
         )
@@ -42,8 +41,6 @@ def get_performance_aggregates(
     cols = ["timestamp", "url", "asn", "ttfb", "elapsed", "cache", "ttl", "ottfb", "ottlb"]
     with runner.temp_table(cols, actual_cols, table_name, where_clause, params) as temp_table:
         if temp_table is None:
-            from backend.repositories._base import empty_schema_response
-
             return empty_schema_response(
                 latency_ts=[], top_urls=[], top_asns=[], ttl_dist=[], scatter=[], **runner.telemetry()
             )
@@ -271,8 +268,6 @@ def get_origin_ts(
 
     actual_cols = runner.get_schema_cols()
     if not actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(timeseries=[], **runner.telemetry())
 
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
@@ -285,8 +280,11 @@ def get_origin_ts(
         if origin_metric == "ttfb" and "ttfb" in actual_cols:
             metric_col = "ttfb"
             is_microseconds = False
-        else:
-            from backend.repositories._base import empty_schema_response
+        # TODO(refactor/cleanup follow-up): the misindentation at the prior
+        # ``else:`` made this return unconditional inside the outer ``if``,
+        # so the fallback branch sets metric_col/is_microseconds and is then
+        # discarded by the empty-schema return below. Preserved here for
+        # behavior parity; fix as a separate change.
         return empty_schema_response(timeseries=[], **runner.telemetry())
 
     pct_val = {"p50": 0.5, "p95": 0.95, "p99": 0.99}.get(origin_percentile, 0.95)
@@ -298,17 +296,15 @@ def get_origin_ts(
         # Seconds to Milliseconds
         val_expr = f'ROUND(COALESCE(PERCENTILE_CONT({pct_val}) WITHIN GROUP (ORDER BY "{metric_col}") * 1000.0, 0), 2)'
 
-    q = SQL.ORIGIN_TIMESERIES.format(
+    q = SQL_DASHBOARD.TIME_SERIES.format(
         time_bucket_select=time_bucket_select(interval_str),
         value_expr=val_expr,
-        table=table_name,
+        table_name=table_name,
+        extra_where=f' AND "{metric_col}" IS NOT NULL',
         where_clause=where_clause,
-        metric_col=metric_col,
     )
     res_cursor = runner.execute_with_retry(q, params)
     if res_cursor is None:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(timeseries=[], **runner.telemetry())
 
     res = res_cursor.fetchall()

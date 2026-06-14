@@ -7,7 +7,13 @@ import os
 import duckdb
 
 from backend.models.common import FiltersDict
-from backend.repositories._base import QueryRunner, _safe_table, safe_iso, time_bucket_select
+from backend.repositories._base import (
+    QueryRunner,
+    _safe_table,
+    empty_schema_response,
+    safe_iso,
+    time_bucket_select,
+)
 from backend.repositories._sql import security as SQL
 from backend.repositories.utils.filters import build_where_clause
 
@@ -37,8 +43,6 @@ def get_top_bots(
     actual_cols = runner.get_schema_cols()
     _phase("top_bots:get_schema_cols", _t)
     if not actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(bots=[], ngwaf_bots=[])
 
     _t = _time.perf_counter()
@@ -212,8 +216,6 @@ def get_security_aggregates(
     actual_cols = runner.get_schema_cols()
     _phase("get_schema_cols", _t)
     if not actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(
             tls_fingerprints=[],
             req_size_dist=[],
