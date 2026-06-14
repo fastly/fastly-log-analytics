@@ -101,21 +101,25 @@ def test_ngwaf_verified_bots_ts_pins_placeholders():
     assert _placeholders(SQL.NGWAF_VERIFIED_BOTS_TS) == ["bucket_seconds", "temp_table"]
 
 
-# ── TLS_FINGERPRINTS ──────────────────────────────────────────────────────────
+# ── FINGERPRINT_TOP_N ─────────────────────────────────────────────────────────
+# Shared template used by all three fingerprint cards (TLS / HTTP-2 / origin-
+# header). The previously separate TLS_FINGERPRINTS / H2_FINGERPRINTS /
+# OH_FINGERPRINTS constants were byte-identical except for the column name;
+# the consolidation lives in backend/repositories/_sql/security.py.
 
 
-def test_tls_fingerprints_renders_with_temp_table():
-    rendered = SQL.TLS_FINGERPRINTS.format(temp_table="t_filtered_xyz")
-    assert "SELECT tls_ciphers_sha" in rendered
+def test_fingerprint_top_n_renders_for_tls_column():
+    rendered = SQL.FINGERPRINT_TOP_N.format(temp_table="t_filtered_xyz", col="tls_ciphers_sha")
+    assert 'SELECT "tls_ciphers_sha"' in rendered
     assert "count(DISTINCT ip) as ip_count" in rendered
     assert "count(*) as req_count" in rendered
     assert "FROM t_filtered_xyz" in rendered
-    assert "WHERE tls_ciphers_sha IS NOT NULL" in rendered
+    assert 'WHERE "tls_ciphers_sha" IS NOT NULL' in rendered
     assert "GROUP BY 1 ORDER BY 3 DESC LIMIT 20" in rendered
 
 
-def test_tls_fingerprints_pins_placeholders():
-    assert _placeholders(SQL.TLS_FINGERPRINTS) == ["temp_table"]
+def test_fingerprint_top_n_pins_placeholders():
+    assert _placeholders(SQL.FINGERPRINT_TOP_N) == ["col", "temp_table"]
 
 
 # ── REQ_HEADER_SIZE_DIST ──────────────────────────────────────────────────────
