@@ -18,24 +18,28 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 import threading
+
+from backend.core.sqlite_pool import ThreadLocalPool
 
 logger = logging.getLogger(__name__)
 
+# These four module globals are part of the long-standing test surface.
+# - ``_DATA_DIR`` is read by ``db_path`` (below) on every call so the
+#   ``tests/conftest.py:isolate_metadata_db`` monkeypatch keeps taking
+#   effect after the ThreadLocalPool extraction.
+# - ``_init_lock`` / ``_initialized`` / ``_local`` are surfaced to the
+#   pool through providers (see ``_pool`` further down) so the same
+#   conftest patches plus ``tests/core/test_metadata_db_concurrency.py``
+#   continue to swap them in fresh per-test.
+# - ``_all_connections`` is owned by the pool itself; the module-level
+#   name is retained as a passthrough alias used only by retrospective
+#   helpers that walked it directly.
 _DATA_DIR = "data/services"
 _local = threading.local()
 _init_lock = threading.Lock()
 _initialized: set[str] = set()
-
-# Process-global registry of every connection handed out by ``get_con``,
-# regardless of which thread opened it. ``_local.conns`` is the fast path for
-# per-thread reuse; ``_all_connections`` exists so cleanup code (notably the
-# pytest fixture in tests/conftest.py) can close connections opened on
-# FastAPI TestClient worker threads, which are otherwise invisible to the
-# main thread's ``_local``. Without it, those connections live until GC and
-# emit ``ResourceWarning: unclosed database`` during interpreter shutdown.
-_all_connections: list[sqlite3.Connection] = []
-_all_connections_lock = threading.Lock()
 
 # Process-wide cache of {service_id: set[file_name]} for ingest dedup.
 # ``get_ingested_filenames`` populates lazily on the first bounded read
@@ -127,10 +131,25 @@ def db_path(service_id: str) -> str:
     return os.path.join(_DATA_DIR, f"{service_id}.metadata.db")
 
 
-def _connections() -> dict[str, sqlite3.Connection]:
-    if not hasattr(_local, "conns"):
-        _local.conns = {}
-    return _local.conns
+# Resolve through ``sys.modules`` so a ``monkeypatch.setattr(metadata_db,
+# "_init_lock", ...)`` (used by tests/core/test_metadata_db_concurrency.py
+# to force-time-out the cold path's lock) actually takes effect on every
+# subsequent call — the providers re-read the module attribute each time.
+_module = sys.modules[__name__]
+_pool = ThreadLocalPool(
+    name="metadata_db",
+    path_fn=lambda sid: db_path(sid),
+    schema_fn=lambda con: _init_schema(con),
+    init_lock_provider=lambda: _module._init_lock,
+    initialized_provider=lambda: _module._initialized,
+    local_provider=lambda: _module._local,
+    local_attr="conns",
+)
+
+# Exposed for the small handful of legacy spots (and the metadata_db shim's
+# _MIRRORED_TO_BASE list) that walked the connection registry directly.
+_all_connections = _pool._all_connections
+_all_connections_lock = _pool._all_connections_lock
 
 
 def get_con(service_id: str) -> sqlite3.Connection:
@@ -143,75 +162,11 @@ def get_con(service_id: str) -> sqlite3.Connection:
     lock to switch from the default (delete) journal mode. If N threads
     open a brand-new service file simultaneously, they collide on that
     PRAGMA and one raises ``OperationalError: database is locked`` despite
-    the connection's 30s timeout. We hold ``_init_lock`` across the
+    the connection's 30s timeout. The pool holds ``_init_lock`` across the
     connect+PRAGMA window so cold-start is serialised once per process;
     subsequent calls hit the thread-local pool early and pay nothing.
     """
-    pool = _connections()
-    con = pool.get(service_id)
-    if con is not None:
-        return con
-
-    path = db_path(service_id)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if not _init_lock.acquire(timeout=10):
-        raise sqlite3.OperationalError(
-            f"metadata_db._init_lock contended >10s for {service_id} — another thread is stuck inside connect+PRAGMA"
-        )
-    try:
-        # InstrumentedConnection subclasses sqlite3.Connection to time and
-        # capture every statement into a process-global ring buffer for the
-        # Debug Panel. ~5us per statement; bounded ring buffer. See
-        # backend/utils/sqlite_profiler.py for the capture/read API.
-        from backend.utils.sqlite_profiler import InstrumentedConnection
-
-        con = sqlite3.connect(path, timeout=30.0, factory=InstrumentedConnection)
-        # Stash the service_id on the connection so the Live Query Monitor's
-        # sqlite_profiler can surface it in the `service` column. The C-typed
-        # ``sqlite3.Connection`` base rejects arbitrary attribute assignment,
-        # but the ``InstrumentedConnection`` subclass allows it. Read back
-        # in ``_live_register`` via ``getattr(con, "_service_id", None)`` so
-        # any caller that bypasses ``get_con`` (test fixtures, etc.) gracefully
-        # falls back to no service tag rather than KeyError.
-        con._service_id = service_id  # type: ignore[attr-defined]
-        # Register the raw connection IMMEDIATELY so any exception below
-        # (e.g. a concurrent teardown deletes the file mid-PRAGMA) doesn't
-        # leak an unclosed SQLite handle. Production sees this rarely; the
-        # test suite hits it under ``test_metadata_db_concurrency``.
-        with _all_connections_lock:
-            _all_connections.append(con)
-        try:
-            con.row_factory = sqlite3.Row
-            con.execute("PRAGMA journal_mode=WAL")
-            con.execute("PRAGMA synchronous=NORMAL")
-            con.execute("PRAGMA foreign_keys=ON")
-            # 64MB page cache. Default is 2MB which forces the per-service
-            # cron's repeated SUM/COUNT scans (usage_log, ingested_files)
-            # to repeatedly re-read pages from disk. 64MB fits the largest
-            # tables we currently maintain in-memory and is a single-digit
-            # MB cost per connection. Architecture-review Dimension 2.
-            con.execute("PRAGMA cache_size=-64000")
-            # Belt-and-suspenders alongside Python's timeout=30.0 above:
-            # busy_timeout is the kernel-level wait that gets honored when
-            # WAL writers are committing; the Python timeout is a wrapper
-            # around it but the explicit PRAGMA ensures consistent behavior
-            # across the Python and C call paths.
-            con.execute("PRAGMA busy_timeout=30000")
-
-            if path not in _initialized:
-                _init_schema(con)
-                _initialized.add(path)
-        except Exception:
-            try:
-                con.close()
-            except Exception:
-                pass
-            raise
-    finally:
-        _init_lock.release()
-
-    pool[service_id] = con
-    return con
+    return _pool.get(service_id)
 
 
 def close_all_connections() -> None:
@@ -221,13 +176,7 @@ def close_all_connections() -> None:
     opened on FastAPI TestClient worker threads — the fixture only has
     access to its own thread's ``_local`` and would otherwise leak those.
     """
-    with _all_connections_lock:
-        for con in _all_connections:
-            try:
-                con.close()
-            except Exception:
-                pass
-        _all_connections.clear()
+    _pool.close_all()
 
 
 def teardown(service_id: str) -> None:
@@ -237,18 +186,10 @@ def teardown(service_id: str) -> None:
     even if the file does not exist or other threads still hold connections —
     other threads will reopen lazily and re-init schema if the file is missing.
     """
-    pool = _connections()
-    con = pool.pop(service_id, None)
-    if con is not None:
-        try:
-            con.close()
-        except Exception:
-            pass
-
-    path = db_path(service_id)
-    _initialized.discard(path)
+    _pool.teardown(service_id)
     _clear_ingested_filenames_cache(service_id)
 
+    path = db_path(service_id)
     for suffix in ("", "-wal", "-shm", "-journal"):
         target = path + suffix
         try:
