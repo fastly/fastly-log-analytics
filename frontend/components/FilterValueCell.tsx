@@ -105,7 +105,11 @@ export function FilterValueCell({
       e.preventDefault()
       e.stopPropagation()
       modifierRef.current = false
-      setOpen(false)
+      // base-ui's Trigger flips open AFTER React's synthetic click event
+      // (via its own pointer-down handler). Calling setOpen(false) inside
+      // this handler races against base-ui's setOpen(true). Queue the close
+      // for the next tick so it always wins.
+      setTimeout(() => setOpen(false), 0)
     }
   }, [])
 
