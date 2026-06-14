@@ -32,8 +32,6 @@ _EXPECTED_TABLES = {
     "views",
     "alerts",
     "scoring_labels",
-    "usage_log",
-    "usage_log_hourly_summary",
     "local_compacted_files",
 }
 
@@ -45,12 +43,6 @@ _EXPECTED_INDEXES = {
     "idx_audit_source",
     "idx_scoring_labels_svc_sid",
     "idx_scoring_labels_svc_label",
-    "idx_usage_timestamp",
-    "idx_usage_dedup",
-    "idx_usage_reconcile",
-    "idx_usage_process_context_ts",
-    "idx_usage_service_ts",
-    "idx_usage_hourly_svc_hour",
 }
 
 
@@ -100,13 +92,10 @@ def test_alerts_table_has_evaluation_scope_column():
     assert "comparison_period_min" in cols  # also late-added
 
 
-def test_usage_log_has_operation_class_and_bytes():
-    sid = "svc-schema-usage"
-    con = metadata_db.get_con(sid)
-    cols = _columns(con, "usage_log")
-    assert "operation_class" in cols
-    assert "bytes" in cols
-    assert "service_id" in cols
+# The legacy usage_log table in metadata.db was deleted alongside its
+# DDL + triggers. Per-service usage rows live in the dedicated
+# usage_log SQLite (backend.core.metadata.usage_log_db); its shape is
+# pinned by tests/routers/test_usage_log.py.
 
 
 # ── Idempotency: re-running init must not lose data ──────────────────────────

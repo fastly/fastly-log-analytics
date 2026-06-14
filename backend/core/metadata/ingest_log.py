@@ -416,16 +416,29 @@ def get_latest_reconciliation_ts(service_id: str) -> str | None:
     """Return ISO timestamp of the most recent ``fastly.reconciliation`` row
     for the service, or ``None`` if none exist. Used by
     ``reconcile_fastly_stats`` to gate hourly so we don't burn Fastly API
-    quota + run the per-class SUBSTR scans on every cron tick."""
-    con = get_con(service_id)
-    row = con.execute(
-        """
-        SELECT max(timestamp) AS latest
-        FROM usage_log
-        WHERE service_id = ? AND function_name = 'fastly.reconciliation'
-        """,
-        (service_id,),
-    ).fetchone()
+    quota + run the per-class SUBSTR scans on every cron tick.
+
+    Reconciliation rows live in the per-service usage_log SQLite (since
+    the v2.0 cutover); the legacy metadata.db.usage_log table is gone.
+    """
+    from backend.core.metadata import usage_log_db as _usage_log_db
+
+    try:
+        con = _usage_log_db.open_readonly(service_id)
+    except sqlite3.OperationalError:
+        # Fresh service before the writer has created the file — no rows.
+        return None
+    try:
+        row = con.execute(
+            """
+            SELECT max(timestamp) AS latest
+            FROM usage_log
+            WHERE service_id = ? AND function_name = 'fastly.reconciliation'
+            """,
+            (service_id,),
+        ).fetchone()
+    finally:
+        con.close()
     if not row:
         return None
     return row["latest"] if row["latest"] else None

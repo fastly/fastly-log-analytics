@@ -75,8 +75,11 @@ def test_apply_pending_brings_seeded_db_to_latest(tmp_path):
         assert "error_count" not in _columns(con, "ingested_files")
 
         applied = sqlite_migrations.apply_pending(con)
-        assert applied == sqlite_migrations.LATEST_VERSION, (
-            f"expected {sqlite_migrations.LATEST_VERSION} migration(s) to apply, got {applied}"
+        # MIGRATIONS has a deliberate gap at key 3 (the retired
+        # usage_log_hourly_summary rebuild), so the applied COUNT can be
+        # less than LATEST_VERSION even on a fresh DB.
+        assert applied == len(sqlite_migrations.MIGRATIONS), (
+            f"expected {len(sqlite_migrations.MIGRATIONS)} migration(s) to apply, got {applied}"
         )
 
         # Post-condition: error_count exists, version bumped
@@ -108,7 +111,7 @@ def test_apply_pending_is_idempotent(tmp_path):
     try:
         first = sqlite_migrations.apply_pending(con)
         second = sqlite_migrations.apply_pending(con)
-        assert first == sqlite_migrations.LATEST_VERSION
+        assert first == len(sqlite_migrations.MIGRATIONS)
         assert second == 0, "expected zero migrations on the second pass"
         assert sqlite_migrations.get_current_version(con) == sqlite_migrations.LATEST_VERSION
     finally:
@@ -264,186 +267,11 @@ def test_init_schema_on_legacy_db_upgrades_in_place(tmp_path, monkeypatch):
         metadata_db.close_all_connections()
 
 
-# ── _migration_003_rebuild_usage_log_hourly_summary ──────────────────────────
-
-
-def _seed_usage_log_with_corrupted_rollup(con: sqlite3.Connection, service_id: str) -> None:
-    """Seed raw ``usage_log`` rows AND a deliberately inflated rollup, then
-    re-arm ``user_version`` to 2 so apply_pending re-runs v3.
-
-    Mirrors the prod corruption: the rollup carries higher counts than the
-    raw table because previous DELETE+INSERT cycles only fired the INSERT
-    trigger.
-    """
-    con.execute(
-        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("2026-06-05T13:00:00Z", service_id, "A", "RECONCILE_A", 23839, 0),
-    )
-    con.execute(
-        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("2026-06-05T13:15:00Z", service_id, "A", "PUT_OBJECT", 1, 4096),
-    )
-    con.execute(
-        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("2026-06-05T14:00:00Z", service_id, "B", "GET_OBJECT", 1, 100),
-    )
-    # Overwrite the rollup rows the INSERT trigger just wrote with inflated
-    # values that match the prod symptom (~5x raw).
-    con.execute(
-        "UPDATE usage_log_hourly_summary SET count = ? "
-        "WHERE service_id = ? AND hour = '2026-06-05T13' AND operation_type = 'RECONCILE_A'",
-        (119396, service_id),
-    )
-    # Force v3 to re-run on next apply_pending.
-    con.execute("PRAGMA user_version = 2")
-    con.commit()
-
-
-def test_migration_003_rebuilds_corrupted_rollup(tmp_path, monkeypatch):
-    """A DB with raw usage_log rows AND an inflated rollup must arrive at
-    LATEST_VERSION with the rollup matching SUM(count) over raw — the prod
-    fix for the Class A overcount."""
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(tmp_path / "services"))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
-
-    sid = "svc-rollup-fix"
-    con = metadata_db.get_con(sid)
-    try:
-        _seed_usage_log_with_corrupted_rollup(con, sid)
-        # Sanity: corruption is in place.
-        assert sqlite_migrations.get_current_version(con) == 2
-        bad = con.execute(
-            "SELECT count FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-05T13' AND operation_type='RECONCILE_A'",
-            (sid,),
-        ).fetchone()[0]
-        assert bad == 119396
-
-        # Run pending migrations in-place — v3 must rebuild the rollup.
-        sqlite_migrations.apply_pending(con)
-
-        assert sqlite_migrations.get_current_version(con) == sqlite_migrations.LATEST_VERSION
-
-        # Rollup must exactly mirror the raw SUM(count) per (hour, class, type).
-        raw_a = con.execute("SELECT COALESCE(SUM(count), 0) FROM usage_log WHERE operation_class='A'").fetchone()[0]
-        roll_a = con.execute(
-            "SELECT COALESCE(SUM(count), 0) FROM usage_log_hourly_summary WHERE operation_class='A'"
-        ).fetchone()[0]
-        assert raw_a == roll_a, f"Class A drift after v3: raw={raw_a} rollup={roll_a}"
-        # The seed had 23839 + 1 = 23840 Class A, NOT the inflated 119396.
-        assert raw_a == 23840
-    finally:
-        metadata_db.close_all_connections()
-
-
-def test_usage_log_delete_trigger_decrements_rollup(tmp_path, monkeypatch):
-    """A DELETE+INSERT cycle (the reconcile_fastly_stats pattern) must leave
-    the rollup matching the new INSERT, not the sum of old + new. This is
-    the load-bearing property the missing trigger used to violate."""
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(tmp_path / "services"))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
-
-    sid = "svc-delete-trig"
-    con = metadata_db.get_con(sid)
-    try:
-        # Insert initial RECONCILE_A row (count=100).
-        con.execute(
-            "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("2026-06-08T10:00:00Z", sid, "A", "RECONCILE_A", 100, 0),
-        )
-        con.commit()
-        row = con.execute(
-            "SELECT count FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-08T10' AND operation_type='RECONCILE_A'",
-            (sid,),
-        ).fetchone()
-        assert row[0] == 100
-
-        # Reconcile pattern: DELETE existing, INSERT new with bigger count.
-        for _ in range(3):
-            con.execute(
-                "DELETE FROM usage_log "
-                "WHERE service_id=? AND timestamp='2026-06-08T10:00:00Z' AND operation_type='RECONCILE_A'",
-                (sid,),
-            )
-            con.execute(
-                "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                ("2026-06-08T10:00:00Z", sid, "A", "RECONCILE_A", 175, 0),
-            )
-        con.commit()
-
-        # After 3 DELETE+INSERT cycles, rollup must show 175, NOT 100+175*3.
-        row = con.execute(
-            "SELECT count FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-08T10' AND operation_type='RECONCILE_A'",
-            (sid,),
-        ).fetchone()
-        assert row[0] == 175, f"DELETE trigger missed: rollup carries {row[0]}"
-    finally:
-        metadata_db.close_all_connections()
-
-
-def test_usage_log_update_trigger_applies_delta(tmp_path, monkeypatch):
-    """Defensive: an UPDATE that mutates count/bytes must shift the rollup
-    by the delta. No current code path UPDATEs usage_log, but the trigger
-    protects future writers."""
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(tmp_path / "services"))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
-
-    sid = "svc-update-trig"
-    con = metadata_db.get_con(sid)
-    try:
-        con.execute(
-            "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("2026-06-08T11:00:00Z", sid, "A", "PUT_OBJECT", 10, 1024),
-        )
-        con.commit()
-
-        # Same-bucket count/bytes change.
-        con.execute(
-            "UPDATE usage_log SET count = 25, bytes = 5120 "
-            "WHERE service_id=? AND timestamp='2026-06-08T11:00:00Z' AND operation_type='PUT_OBJECT'",
-            (sid,),
-        )
-        con.commit()
-        row = con.execute(
-            "SELECT count, bytes FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-08T11' AND operation_type='PUT_OBJECT'",
-            (sid,),
-        ).fetchone()
-        assert (row[0], row[1]) == (25, 5120), f"UPDATE trigger delta wrong: {tuple(row)}"
-
-        # Cross-bucket move: change operation_type. Old bucket must decrement;
-        # new bucket must appear with the row's count/bytes.
-        con.execute(
-            "UPDATE usage_log SET operation_type = 'POST' "
-            "WHERE service_id=? AND timestamp='2026-06-08T11:00:00Z' AND operation_type='PUT_OBJECT'",
-            (sid,),
-        )
-        con.commit()
-        old = con.execute(
-            "SELECT count FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-08T11' AND operation_type='PUT_OBJECT'",
-            (sid,),
-        ).fetchone()
-        new = con.execute(
-            "SELECT count, bytes FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-08T11' AND operation_type='POST'",
-            (sid,),
-        ).fetchone()
-        assert old[0] == 0, f"old bucket not decremented: {old[0]}"
-        assert (new[0], new[1]) == (25, 5120), f"new bucket wrong: {tuple(new)}"
-    finally:
-        metadata_db.close_all_connections()
+# The legacy metadata.db.usage_log table + its INSERT/DELETE/UPDATE
+# triggers + the _migration_003 rebuilder were all retired alongside
+# the v2.0 cutover to the per-service usage_log SQLite. The trigger
+# behavior tests + the migration_003 corruption-fix test had no
+# remaining production behavior to pin and were removed with the DDL.
 
 
 def test_legacy_db_with_active_writer_pattern_still_inserts(tmp_path, monkeypatch):
