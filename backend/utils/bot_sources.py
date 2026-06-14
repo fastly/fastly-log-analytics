@@ -9,8 +9,9 @@ import re
 import threading
 import urllib.request
 from collections.abc import Callable
-from datetime import UTC, datetime
 from pathlib import Path
+
+from backend.utils.date_utils import iso_z_now
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ def fetch_and_cache_source(source_id: str) -> dict:
 
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     envelope = {
-        "last_updated": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "last_updated": iso_z_now(),
         "entry_count": len(entries),
         "entries": entries,
     }

@@ -37,13 +37,14 @@ import sqlite3
 import sys
 import threading
 from collections.abc import Iterator
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiodns
 import aiosqlite
 import tenacity
+
+from backend.utils.date_utils import iso_z_now
 
 if TYPE_CHECKING:
     pass
@@ -389,7 +390,7 @@ def _run_async_resolve(ips: list[str]) -> dict[str, int]:
             logger.warning("[rdns_cache] async resolve fallback: running event loop detected")
             results = {ip: _do_lookup(ip) for ip in ips}
 
-    now = _now()
+    now = iso_z_now()
     records = [(hostname, status, int(fcrdns), now, ip) for ip, (hostname, status, fcrdns) in results.items()]
 
     if records:
@@ -474,7 +475,7 @@ def enrich_batch_gen(limit: int = 200):
         logger.error("[rdns_cache] Discovery pass failed: %s", e)
         yield {"type": "error", "message": f"Discovery failed: {e}"}
 
-    _last_enrichment_at = _now()
+    _last_enrichment_at = iso_z_now()
     yield {
         "type": "done",
         "message": f"Enrichment complete. Resolved: {resolved}, Errors: {errors}, New IPs found: {discovered_count}",
@@ -510,7 +511,7 @@ def enrich_batch(limit: int = 200) -> dict:
     except Exception as e:
         logger.error("[rdns_cache] Discovery pass failed: %s", e)
 
-    _last_enrichment_at = _now()
+    _last_enrichment_at = iso_z_now()
     summary_out = {"resolved": resolved, "errors": errors, "discovered": discovered}
     if resolved > 0 or errors > 0 or discovered > 0:
         logger.info("🌐 \x1b[34m[rdns]\x1b[0m enrich_batch complete: %s", summary_out)
@@ -593,10 +594,6 @@ def classify(
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
-
-
-def _now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _select_ips_with_status(status: str, *, limit: int) -> list[tuple[str]]:

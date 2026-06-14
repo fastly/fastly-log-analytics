@@ -262,8 +262,9 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
         from datetime import UTC, datetime
 
         from backend.core.metadata import usage_log_db as _usage_log_db
+        from backend.utils.date_utils import iso_z
 
-        start_iso = datetime.fromtimestamp(start_ts, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        start_iso = iso_z(datetime.fromtimestamp(start_ts, UTC))
         # Raw string compare on timestamp (no datetime() wrapping) so the
         # composite idx_usage_process_context_ts can be used end-to-end.
         # Safe because every row written since commit 08a485c uses

@@ -448,15 +448,8 @@ def test_enrich_batch_gen_yields_error_event_on_discovery_failure():
 # ── _now ────────────────────────────────────────────────────────────────────
 
 
-def test_now_returns_iso8601_z_format():
-    """ISO 8601 with Z suffix (UTC). Pinned because the SQL filter
-    ``looked_up_at < datetime('now', '-48 hours')`` keys on this
-    exact format — using a different one would silently break the
-    stale-entry refresh path."""
-    out = rdns_cache._now()
-    assert out.endswith("Z")
-    assert "T" in out
-    assert len(out) == 20  # YYYY-MM-DDTHH:MM:SSZ
+# The local _now() helper was replaced by backend.utils.date_utils.iso_z_now();
+# the ISO 8601 Z-suffix format is pinned by tests/utils/test_date_utils.py.
 
 
 # ── backfill_from_sources ──────────────────────────────────────────────────
