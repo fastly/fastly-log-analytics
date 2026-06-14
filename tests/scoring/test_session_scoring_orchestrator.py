@@ -171,8 +171,10 @@ def test_enable_scoring_happy_path_runs_all_stages(monkeypatch, tmp_path):
     assert result["scoring_service_id"] == SCORE_SVC
     assert result["logging_service_active_version"] == 101
 
-    # Wasm deploy was triggered.
-    wasm_mock.assert_called_once_with(SCORE_SVC, TOKEN, status_cb=None)
+    # Wasm deploy was triggered with the logging service id threaded
+    # through so the tenant-scoped matrix gets embedded (not the legacy
+    # shared matrix.json — see audit finding #005).
+    wasm_mock.assert_called_once_with(SCORE_SVC, TOKEN, LOG_SVC, status_cb=None)
 
     # Config was saved with the scoring block + custom fields.
     saved_calls = save_mock.call_args_list
@@ -497,3 +499,142 @@ def test_disable_scoring_full_teardown_when_enabled(monkeypatch):
     # Custom fields stripped (only user_id remains)
     final_field_names = [cf["name"] for cf in saved[-1].get("log_fields", {}).get("custom_fields", [])]
     assert final_field_names == ["user_id"]
+
+
+# ── _resolve_tenant_matrix_for_deploy ────────────────────────────────────────
+
+
+def test_resolve_tenant_matrix_prefers_local_tenant_path(tmp_path, monkeypatch):
+    """Local ``matrix_{sid}.json`` wins without an FOS round-trip — keeps
+    deploys fast on the host that just ran retrain."""
+    import json as _json
+
+    fake_root = tmp_path / "matrix.json"
+    monkeypatch.setattr(sso, "_MATRIX_PATH", fake_root)
+
+    tenant_path = sso._tenant_matrix_path(LOG_SVC)
+    tenant_path.parent.mkdir(parents=True, exist_ok=True)
+    tenant_path.write_text(_json.dumps({"vocab_size": 7, "version": "local-1"}))
+
+    with patch("backend.state_sync.fetch_matrix_from_fos") as mock_fetch:
+        resolved = sso._resolve_tenant_matrix_for_deploy(LOG_SVC)
+
+    assert resolved == tenant_path
+    mock_fetch.assert_not_called()
+
+
+def test_resolve_tenant_matrix_fetches_from_fos_when_local_missing(tmp_path, monkeypatch):
+    """No local file → fall back to FOS for this tenant and materialise
+    it locally. Covers the cross-host case: retrain ran on a different
+    backend than the one now invoking enable_scoring."""
+    import json as _json
+
+    fake_root = tmp_path / "matrix.json"
+    monkeypatch.setattr(sso, "_MATRIX_PATH", fake_root)
+
+    fos_matrix = {"vocab_size": 11, "version": "fos-1"}
+    with patch("backend.state_sync.fetch_matrix_from_fos", return_value=fos_matrix) as mock_fetch:
+        resolved = sso._resolve_tenant_matrix_for_deploy(LOG_SVC)
+
+    expected = sso._tenant_matrix_path(LOG_SVC)
+    assert resolved == expected
+    mock_fetch.assert_called_once_with(LOG_SVC)
+    assert _json.loads(expected.read_text())["version"] == "fos-1"
+
+
+def test_resolve_tenant_matrix_returns_none_when_nothing_trained(tmp_path, monkeypatch):
+    """No local file AND FOS returns nothing → None, deploy proceeds with
+    empty default. Pinned because returning the legacy shared
+    ``matrix.json`` here would re-introduce the cross-tenant leak audit
+    finding #005 closed."""
+    fake_root = tmp_path / "matrix.json"
+    monkeypatch.setattr(sso, "_MATRIX_PATH", fake_root)
+
+    # Pre-fix code would have picked this up — make sure we don't.
+    fake_root.write_text('{"vocab_size": 99, "version": "leaked-from-another-tenant"}')
+
+    with patch("backend.state_sync.fetch_matrix_from_fos", return_value=None):
+        resolved = sso._resolve_tenant_matrix_for_deploy(LOG_SVC)
+
+    assert resolved is None
+
+
+def test_resolve_tenant_matrix_returns_none_when_fos_returns_empty_vocab(tmp_path, monkeypatch):
+    """vocab_size==0 means an untrained default; treat it as no matrix
+    so deploy_wasm.sh's vocab-size guard isn't tripped."""
+    fake_root = tmp_path / "matrix.json"
+    monkeypatch.setattr(sso, "_MATRIX_PATH", fake_root)
+
+    with patch("backend.state_sync.fetch_matrix_from_fos", return_value={"vocab_size": 0}):
+        resolved = sso._resolve_tenant_matrix_for_deploy(LOG_SVC)
+
+    assert resolved is None
+    assert not sso._tenant_matrix_path(LOG_SVC).exists()
+
+
+# ── _deploy_wasm: tenant-scoped matrix wiring ────────────────────────────────
+
+
+def test_deploy_wasm_passes_tenant_matrix_to_script(tmp_path, monkeypatch):
+    """When the tenant has a trained matrix locally, the script receives
+    --matrix pointing at the tenant-scoped file (NOT the shared
+    matrix.json) so the Wasm only ever carries this tenant's data."""
+    import json as _json
+    import subprocess as _subprocess
+
+    fake_root = tmp_path / "matrix.json"
+    monkeypatch.setattr(sso, "_MATRIX_PATH", fake_root)
+    monkeypatch.setattr(sso, "_DEPLOY_WASM_SCRIPT", tmp_path / "deploy_wasm.sh")
+    (tmp_path / "deploy_wasm.sh").write_text("#!/bin/sh\nexit 0\n")
+    (tmp_path / "deploy_wasm.sh").chmod(0o755)
+
+    tenant_path = sso._tenant_matrix_path(LOG_SVC)
+    tenant_path.parent.mkdir(parents=True, exist_ok=True)
+    tenant_path.write_text(_json.dumps({"vocab_size": 5, "version": "tenant-only"}))
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch.object(sso.subprocess, "run", side_effect=fake_run):
+        sso._deploy_wasm(SCORE_SVC, TOKEN, LOG_SVC)
+
+    assert "--matrix" in captured["cmd"]
+    matrix_arg_idx = captured["cmd"].index("--matrix") + 1
+    assert captured["cmd"][matrix_arg_idx] == str(tenant_path)
+
+
+def test_deploy_wasm_omits_matrix_flag_when_no_tenant_matrix(tmp_path, monkeypatch):
+    """Pre-#005 the deploy would silently embed another tenant's matrix
+    from the shared path. Now: no tenant matrix → script runs WITHOUT
+    --matrix → deploys with the empty default (L2 self-disables)."""
+    import subprocess as _subprocess
+
+    fake_root = tmp_path / "matrix.json"
+    monkeypatch.setattr(sso, "_MATRIX_PATH", fake_root)
+    monkeypatch.setattr(sso, "_DEPLOY_WASM_SCRIPT", tmp_path / "deploy_wasm.sh")
+    (tmp_path / "deploy_wasm.sh").write_text("#!/bin/sh\nexit 0\n")
+    (tmp_path / "deploy_wasm.sh").chmod(0o755)
+
+    # Adversarial: leftover legacy shared matrix from a pre-#005 retrain.
+    # MUST NOT be embedded into this tenant's wasm.
+    fake_root.write_text('{"vocab_size": 99, "version": "leaked"}')
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with (
+        patch.object(sso.subprocess, "run", side_effect=fake_run),
+        patch("backend.state_sync.fetch_matrix_from_fos", return_value=None),
+    ):
+        sso._deploy_wasm(SCORE_SVC, TOKEN, LOG_SVC)
+
+    assert "--matrix" not in captured["cmd"], (
+        "deploy must NOT embed the legacy shared matrix.json — it could "
+        "carry another tenant's transitions (audit finding #005)."
+    )

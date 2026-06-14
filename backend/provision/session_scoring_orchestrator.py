@@ -63,6 +63,55 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _MATRIX_PATH = _REPO_ROOT / "compute" / "scorer" / "matrix.json"
 _DEPLOY_WASM_SCRIPT = _REPO_ROOT / "scripts" / "scoring" / "deploy_wasm.sh"
 
+
+def _tenant_matrix_path(logging_service_id: str) -> Path:
+    """Per-tenant matrix path used by retrain / boot / deploy.
+
+    Mirrors what ``_load_matrix`` checks first in
+    [backend/routers/session_scoring.py](../routers/session_scoring.py)
+    so writers and readers agree on the same location.
+    """
+    return _MATRIX_PATH.with_name(f"{_MATRIX_PATH.stem}_{logging_service_id}{_MATRIX_PATH.suffix}")
+
+
+def _resolve_tenant_matrix_for_deploy(logging_service_id: str) -> Path | None:
+    """Return a local path containing this tenant's trained matrix, or None.
+
+    Resolution order:
+      1. ``matrix_{sid}.json`` already on local disk → use as-is.
+      2. Fetch from FOS (``iceberg/meta/scoring_matrix.json``) and
+         materialise to the tenant path → use that.
+      3. Nothing trained anywhere → return None (caller deploys the
+         empty default and L2 self-disables, same as pre-fix behaviour).
+
+    NOT consulted: the legacy shared ``matrix.json`` path. Embedding
+    that would re-open the cross-tenant leak audit finding #005
+    closed — service B's wasm would carry whichever tenant last
+    retrained before #005 shipped.
+    """
+    import json as _json
+
+    tenant_path = _tenant_matrix_path(logging_service_id)
+    if tenant_path.exists():
+        return tenant_path
+
+    try:
+        from backend.state_sync import fetch_matrix_from_fos
+
+        matrix = fetch_matrix_from_fos(logging_service_id)
+    except Exception:
+        logger.debug("fetch_matrix_from_fos failed during deploy resolve", exc_info=True)
+        matrix = None
+
+    if not matrix or matrix.get("vocab_size", 0) <= 0:
+        return None
+
+    tenant_path.parent.mkdir(parents=True, exist_ok=True)
+    with tenant_path.open("w") as f:
+        _json.dump(matrix, f)
+    return tenant_path
+
+
 # Custom-field definitions the orchestrator adds/removes when enabling/
 # disabling scoring. Kept as a single source of truth so disable_scoring
 # can find them by name to undo cleanly.
@@ -149,13 +198,26 @@ _SCORING_CUSTOM_FIELDS: list[dict[str, Any]] = [
 _SCORING_FIELD_NAMES = {cf["name"] for cf in _SCORING_CUSTOM_FIELDS}
 
 
-def _deploy_wasm(scoring_service_id: str, token: str, status_cb=None) -> None:
+def _deploy_wasm(
+    scoring_service_id: str,
+    token: str,
+    logging_service_id: str,
+    status_cb=None,
+) -> None:
     """Invoke scripts/scoring/deploy_wasm.sh as a subprocess.
 
-    If the trained matrix exists (`compute/scorer/matrix.json` with
-    vocab_size > 0) it gets embedded; otherwise we deploy with the empty
-    default and L2 self-disables. The script's `trap EXIT` restores the
+    If the tenant has a trained matrix anywhere (local
+    ``matrix_{sid}.json`` or FOS ``scoring_matrix.json``) it gets
+    embedded in the Wasm; otherwise we deploy with the empty default
+    and L2 self-disables. The script's ``trap EXIT`` restores the
     default placeholder afterward so the working tree stays clean.
+
+    ``logging_service_id`` scopes the matrix lookup to this tenant —
+    audit finding #005 isolated retrain writes to ``matrix_{sid}.json``,
+    so the pre-fix behaviour of reading the legacy shared
+    ``matrix.json`` here either found nothing (post-#005 retrains) or
+    silently embedded another tenant's matrix (pre-#005 leftovers).
+    Resolution chain lives in ``_resolve_tenant_matrix_for_deploy``.
     """
     info("Building + deploying Wasm to the scoring Compute service")
     if status_cb:
@@ -169,28 +231,23 @@ def _deploy_wasm(scoring_service_id: str, token: str, status_cb=None) -> None:
         "--service-id",
         scoring_service_id,
     ]
-    # Only pass --matrix if a trained one exists; otherwise the script
-    # uses the empty default (and refuses to deploy a real-matrix-required
-    # path, which is correct for the first enable when nothing's trained
-    # yet). We pre-check vocab_size to give a clear error if a malformed
-    # matrix is sitting in the path.
-    if _MATRIX_PATH.exists():
+    matrix_path = _resolve_tenant_matrix_for_deploy(logging_service_id)
+    if matrix_path is not None:
         import json as _json
 
         try:
-            with _MATRIX_PATH.open() as f:
+            with matrix_path.open() as f:
                 m = _json.load(f)
-            if m.get("vocab_size", 0) > 0:
-                cmd.extend(["--matrix", str(_MATRIX_PATH)])
-                info(f"  using trained matrix (vocab_size={m['vocab_size']}, version={m.get('version')})")
-            else:
-                info("  trained matrix is empty; deploying with default-empty (L2 disabled)")
+            cmd.extend(["--matrix", str(matrix_path)])
+            info(
+                f"  using trained matrix at {matrix_path.name} "
+                f"(vocab_size={m.get('vocab_size')}, version={m.get('version')})"
+            )
         except Exception:
-            warn("  matrix.json present but unreadable; falling back to default-empty")
+            warn(f"  {matrix_path.name} present but unreadable; falling back to default-empty")
+    else:
+        info("  no trained matrix for this tenant (local or FOS); deploying with default-empty (L2 disabled)")
 
-    # If no real matrix, the script's vocab_size==0 check would fail. Skip
-    # passing --matrix entirely so it just rebuilds with whatever's in
-    # matrix.default.json (i.e. the tracked empty default).
     env = os.environ.copy()
     env["FASTLY_API_TOKEN"] = token
     proc = subprocess.run(
@@ -430,7 +487,7 @@ def enable_scoring(
         info("Healed missing request_secret in scoring_keys store")
 
     # ── Stage 2: build + deploy Wasm. ───────────────────────────────────────
-    _deploy_wasm(scoring_service_id, token, status_cb=status_cb)
+    _deploy_wasm(scoring_service_id, token, logging_service_id, status_cb=status_cb)
 
     # ── Stage 3: write scoring metadata into the LOGGING service config. ────
     # Preserve operator-tunable overrides across re-enables — the previous
@@ -631,13 +688,20 @@ def enable_scoring(
         # the /scoring/evaluation endpoint falls back to the default-empty
         # matrix on read_only hosts and reports AUC ≈ 0.5 even though the
         # live scorer is using a real trained one.
+        #
+        # Reads from the tenant-scoped path (audit finding #005); the
+        # legacy shared ``matrix.json`` would have either been empty
+        # (post-#005 retrains all write tenant-scoped) or held another
+        # tenant's matrix (pre-#005 leftovers from a prior retrain on
+        # this host).
         try:
             from backend.state_sync import publish_matrix_to_fos
 
-            if _MATRIX_PATH.exists():
+            tenant_matrix_path = _tenant_matrix_path(logging_service_id)
+            if tenant_matrix_path.exists():
                 import json as _json
 
-                with _MATRIX_PATH.open() as f:
+                with tenant_matrix_path.open() as f:
                     matrix = _json.load(f)
                 publish_matrix_to_fos(logging_service_id, matrix)
                 ok(f"Published scoring matrix to FOS (version={matrix.get('version', '?')})")
