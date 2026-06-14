@@ -1,9 +1,8 @@
 """``share_settings`` KV accessors used by the admin + scheduler paths.
 
 Today's known keys: ``max_concurrent_analyst_sessions`` (seeded by
-migration 001), ``share_audit_retention_days`` (read by the audit-log
-purge cron), and ``passcode_default_algo`` (set by migration 003 to
-``argon2id``).
+migration 001) and ``share_audit_retention_days`` (read by the
+audit-log purge cron).
 """
 
 from __future__ import annotations
@@ -16,7 +15,6 @@ from backend.core.share_db.connection import get_global_share_con
 # (admin payloads, scheduler crons, migrations) all reference the same name.
 MAX_CONCURRENT_ANALYST_SESSIONS_KEY = "max_concurrent_analyst_sessions"
 SHARE_AUDIT_RETENTION_DAYS_KEY = "share_audit_retention_days"
-PASSCODE_DEFAULT_ALGO_KEY = "passcode_default_algo"
 
 
 def get_setting(key: str, default: str | None = None, *, con: sqlite3.Connection | None = None) -> str | None:

@@ -65,8 +65,6 @@ def share_status():
         logger.exception("[share_admin] could not list services")
     return {
         "sharing_active": mgr.is_sharing_active(),
-        "use_tunnel": state.use_tunnel,
-        "tunnel_url": state.tunnel_url,
         "public_endpoint": state.public_endpoint,
         "public_url": mgr.public_url(),
         "forward_port": state.forward_port,
@@ -109,10 +107,6 @@ def audit_logs(
 
 
 class ShareStartPayload(BaseModel):
-    # Direct-mode only since v2.0; the SSH-to-localhost.run path was
-    # removed. The field stays in the payload schema so old clients don't
-    # 422, but any truthy value will be rejected by the manager.
-    use_tunnel: bool = False
     public_endpoint: str | None = None
     forward_port: int = 3000
 
@@ -122,7 +116,6 @@ def share_start(payload: ShareStartPayload):
     mgr = get_tunnel_manager()
     try:
         result = mgr.start_sharing(
-            use_tunnel=payload.use_tunnel,
             public_endpoint=payload.public_endpoint,
             forward_port=payload.forward_port,
         )

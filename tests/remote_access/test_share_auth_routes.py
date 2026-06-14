@@ -44,7 +44,7 @@ def _seed_invite(**overrides) -> dict:
 
 
 def _activate_share():
-    tunnel.get_tunnel_manager().start_sharing(use_tunnel=False, public_endpoint="https://testserver")
+    tunnel.get_tunnel_manager().start_sharing(public_endpoint="https://testserver")
 
 
 # ── /api/share/login ───────────────────────────────────────────────────────

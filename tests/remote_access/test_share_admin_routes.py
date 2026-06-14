@@ -40,8 +40,6 @@ def test_status_returns_expected_keys(client):
     body = r.json()
     for key in (
         "sharing_active",
-        "use_tunnel",
-        "tunnel_url",
         "public_endpoint",
         "public_url",
         "active_session_count",
@@ -85,7 +83,7 @@ def test_audit_logs_endpoint_rejects_bad_limit(client):
 def test_start_direct_mode_validates_https(client):
     r = client.post(
         "/api/admin/share/start",
-        json={"use_tunnel": False, "public_endpoint": "http://example.com"},
+        json={"public_endpoint": "http://example.com"},
     )
     assert r.status_code == 400
     assert r.json()["detail"]["error"] == "invalid_request"
@@ -94,7 +92,7 @@ def test_start_direct_mode_validates_https(client):
 def test_start_direct_mode_happy_path(client):
     r = client.post(
         "/api/admin/share/start",
-        json={"use_tunnel": False, "public_endpoint": "https://share.example.com"},
+        json={"public_endpoint": "https://share.example.com"},
     )
     assert r.status_code == 200, r.text
     assert r.json()["public_url"] == "https://share.example.com"

@@ -1,16 +1,10 @@
 """Passcode hashing, verification, strength validation, and wordphrase
 generation for the share flow.
 
-Algorithm policy:
-- New hashes (``hash_passcode``) use argon2id with OWASP 2026 parameters.
-  Stored format is the PasswordHasher modular-crypt string, which starts
-  with ``$argon2id$``.
-- ``verify_passcode`` accepts BOTH the new argon2id format and the legacy
-  ``scrypt$N$r$p$saltHex$digestHex`` format so pre-cutover invites keep
-  working. ``needs_rehash`` returns True for any stored hash that isn't
-  argon2id at the current cost — the login handler (``get_remote_invite_
-  by_email_passcode``) uses that signal to transparently rehash on
-  successful login.
+Argon2id with OWASP 2026 parameters. ``verify_passcode`` accepts the
+argon2 PasswordHasher modular-crypt string format; ``needs_rehash``
+returns True for argon2 hashes whose parameters fall below the current
+``_HASHER`` cost so the login handler can rotate on successful login.
 
 Timing equalization: ``_equalize_passcode_timing`` runs one verify against
 a dummy hash so the no-email-match branch has the same ~30ms cost as the
@@ -20,20 +14,16 @@ function so a future cost-parameter change is automatically reflected.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import secrets
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHash, VerifyMismatchError
 
-# ── argon2id (current default) ──────────────────────────────────────────────
+# ── argon2id ────────────────────────────────────────────────────────────────
 
 # OWASP 2026 recommended argon2id parameters. memory_cost is in KiB —
 # 65536 = 64 MiB per hash. time_cost=3 lands at ~30ms on the GCE
-# n2-standard-2 (matches the scrypt cost the timing-equalization path
-# was tuned for). parallelism=4 fits the typical 2-4 vCPU prod sizing.
-# hash_len=32 matches the legacy scrypt dklen.
+# n2-standard-2. parallelism=4 fits the typical 2-4 vCPU prod sizing.
 _HASHER = PasswordHasher(
     memory_cost=65536,
     time_cost=3,
@@ -41,101 +31,48 @@ _HASHER = PasswordHasher(
     hash_len=32,
 )
 
-# ── Legacy scrypt parameters (verify-only) ──────────────────────────────────
-
-# Kept so the verify branch can parse pre-cutover stored hashes. New
-# hashes go through argon2 — these constants are no longer used to
-# produce hashes from the public API.
-_SCRYPT_N = 2**14
-_SCRYPT_R = 8
-_SCRYPT_P = 1
-_SCRYPT_DKLEN = 32
-
 
 def hash_passcode(passcode: str) -> str:
-    """Hash via argon2id (current default).
+    """Hash via argon2id.
 
     Returns the argon2 PasswordHasher modular-crypt string
-    (``$argon2id$v=19$m=...,t=...,p=...$saltB64$digestB64``). ``verify_
-    passcode`` accepts this format alongside the legacy ``scrypt$...``
-    format so pre-cutover stored hashes keep working.
+    (``$argon2id$v=19$m=...,t=...,p=...$saltB64$digestB64``).
     """
     return _HASHER.hash(passcode)
 
 
-def _verify_scrypt(passcode: str, stored: str) -> bool:
-    """Constant-time verify against the legacy ``scrypt$N$r$p$saltHex$digestHex`` format."""
-    try:
-        parts = stored.split("$")
-        if len(parts) != 6 or parts[0] != "scrypt":
-            return False
-        _, n, r, p, salt_hex, digest_hex = parts
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(digest_hex)
-        candidate = hashlib.scrypt(
-            passcode.encode("utf-8"),
-            salt=salt,
-            n=int(n),
-            r=int(r),
-            p=int(p),
-            dklen=len(expected),
-        )
-        return hmac.compare_digest(candidate, expected)
-    except (ValueError, TypeError):
-        return False
-
-
 def verify_passcode(passcode: str, stored: str) -> bool:
-    """Constant-time verify. Accepts argon2id AND legacy scrypt formats.
+    """Constant-time verify against an argon2id stored hash.
 
     Returns False for any unrecognized prefix, malformed payload, or
     mismatch. The caller (``get_remote_invite_by_email_passcode``) can
-    then check ``needs_rehash(stored)`` to opportunistically upgrade
-    legacy scrypt hashes to argon2id on successful login.
+    then check ``needs_rehash(stored)`` to opportunistically rotate
+    argon2 hashes whose cost parameters fall below the current default.
     """
-    if not stored:
+    if not stored or not stored.startswith("$argon2"):
         return False
-    # argon2 hashes always start with $argon2 — the PasswordHasher emits
-    # both ``$argon2id$`` (default) and ``$argon2i$``/``$argon2d$``
-    # depending on type; we accept whatever argon2-cffi can parse.
-    if stored.startswith("$argon2"):
-        try:
-            _HASHER.verify(stored, passcode)
-            return True
-        except (VerifyMismatchError, InvalidHash):
-            return False
-        except Exception:
-            # Defensive: any unexpected argon2 error treated as mismatch
-            # rather than re-raised, matching the legacy scrypt branch's
-            # behavior (return False on any parse / compute failure).
-            return False
-    if stored.startswith("scrypt$"):
-        return _verify_scrypt(passcode, stored)
-    return False
+    try:
+        _HASHER.verify(stored, passcode)
+        return True
+    except (VerifyMismatchError, InvalidHash):
+        return False
+    except Exception:
+        # Defensive: any unexpected argon2 error treated as mismatch
+        # rather than re-raised.
+        return False
 
 
 def needs_rehash(stored: str) -> bool:
-    """True when ``stored`` is on an older algorithm or weaker params than the current default.
-
-    Used by the login flow to transparently upgrade scrypt → argon2id on
-    successful login. Returns True for:
-    - Any legacy ``scrypt$...`` hash (always upgrade off scrypt).
-    - Any argon2 hash whose parameters fall below the current ``_HASHER``
-      cost (argon2-cffi tells us this via ``check_needs_rehash``).
-    Returns False if the hash is already at the current default or if the
-    string isn't a recognised hash at all (no point trying to rotate
-    something we can't even parse).
+    """True when ``stored`` is an argon2 hash whose parameters fall below
+    the current ``_HASHER`` cost (argon2-cffi tells us via
+    ``check_needs_rehash``). Returns False otherwise.
     """
-    if not stored:
+    if not stored or not stored.startswith("$argon2"):
         return False
-    if stored.startswith("scrypt$"):
-        return True
-    if stored.startswith("$argon2"):
-        try:
-            return _HASHER.check_needs_rehash(stored)
-        except InvalidHash:
-            return False
-    return False
+    try:
+        return _HASHER.check_needs_rehash(stored)
+    except InvalidHash:
+        return False
 
 
 # ── Passcode entropy validation ──────────────────────────────────────────────

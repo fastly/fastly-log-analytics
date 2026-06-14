@@ -20452,11 +20452,6 @@
       },
       "ShareStartPayload": {
         "properties": {
-          "use_tunnel": {
-            "type": "boolean",
-            "title": "Use Tunnel",
-            "default": false
-          },
           "public_endpoint": {
             "anyOf": [
               {

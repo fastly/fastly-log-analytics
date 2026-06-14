@@ -121,27 +121,9 @@ def _migration_002_seed_initial_tos(con: sqlite3.Connection) -> None:
         )
 
 
-def _migration_003_passcode_algo_marker(con: sqlite3.Connection) -> None:
-    """Stamp ``passcode_default_algo=argon2id`` in share_settings.
-
-    No DDL change — uses the existing share_settings KV. Lets future
-    migrations key off the moment argon2id became the default for new
-    invites; existing scrypt hashes keep verifying via the legacy branch
-    in ``passcode.verify_passcode`` until each user next logs in (the
-    rehash-on-login path upgrades them in place).
-    """
-    row = con.execute("SELECT 1 FROM share_settings WHERE key=?", ("passcode_default_algo",)).fetchone()
-    if row is None:
-        con.execute(
-            "INSERT INTO share_settings(key, value) VALUES(?, ?)",
-            ("passcode_default_algo", "argon2id"),
-        )
-
-
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_001_seed_default_settings,
     2: _migration_002_seed_initial_tos,
-    3: _migration_003_passcode_algo_marker,
 }
 
 LATEST_VERSION = max(MIGRATIONS) if MIGRATIONS else 0

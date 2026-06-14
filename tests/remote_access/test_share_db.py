@@ -63,7 +63,6 @@ def test_share_setting_constants_match_seeded_keys(fresh_share_con):
     """Module constants stay aligned with the keys migrations seed into the table."""
     keys = {r[0] for r in fresh_share_con.execute("SELECT key FROM share_settings").fetchall()}
     assert share_db.MAX_CONCURRENT_ANALYST_SESSIONS_KEY in keys
-    assert share_db.PASSCODE_DEFAULT_ALGO_KEY in keys
 
 
 # ── Corruption self-heal ────────────────────────────────────────────────────
@@ -127,30 +126,7 @@ def test_verify_rejects_malformed_stored():
     assert not share_db.verify_passcode("anything", "")
 
 
-# ── Legacy scrypt verify + transparent rehash-on-login ──────────────────────
-
-
-def _make_legacy_scrypt_hash(passcode: str) -> str:
-    """Build a ``scrypt$N$r$p$saltHex$digestHex`` string the way the
-    pre-argon2 ``hash_passcode`` did. Used to populate the DB with a
-    legacy row so we can prove the verify branch + rehash-on-login path
-    work for users created before the cutover.
-    """
-    import hashlib
-    import secrets
-
-    salt = secrets.token_bytes(16)
-    dk = hashlib.scrypt(passcode.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32)
-    return f"scrypt$16384$8$1${salt.hex()}${dk.hex()}"
-
-
-@pytest.mark.security_regression
-def test_legacy_scrypt_hash_still_verifies():
-    """A scrypt-format stored hash continues to verify after the argon2 cutover."""
-    legacy = _make_legacy_scrypt_hash("ocean-breeze-cabin-42")
-    assert legacy.startswith("scrypt$")
-    assert share_db.verify_passcode("ocean-breeze-cabin-42", legacy)
-    assert not share_db.verify_passcode("wrong-passcode-here", legacy)
+# ── Argon2id ────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.security_regression
@@ -162,49 +138,16 @@ def test_argon2id_hash_verifies():
 
 
 @pytest.mark.security_regression
-def test_needs_rehash_flags_legacy_scrypt_but_not_argon2id():
-    legacy = _make_legacy_scrypt_hash("ocean-breeze-cabin-42")
+def test_needs_rehash_only_flags_lower_cost_argon2():
     current = share_db.hash_passcode("ocean-breeze-cabin-42")
-    assert share_db.needs_rehash(legacy) is True
     assert share_db.needs_rehash(current) is False
     assert share_db.needs_rehash("") is False
     assert share_db.needs_rehash("garbage-not-a-hash") is False
-
-
-@pytest.mark.security_regression
-def test_login_rehashes_legacy_scrypt_in_place():
-    """A successful login against a scrypt-stored invite upgrades the row to argon2id.
-
-    The next read of the row shows the new ``$argon2id$...`` hash; the
-    next login keeps working because verify accepts both formats.
-    """
-    inv = share_db.create_remote_invite(
-        name="Drew",
-        email="legacy@example.com",
-        passcode="ocean-breeze-cabin-42",
-        expires_at_utc=None,
-        ip_whitelist=None,
-        service_ids=[],
-    )
-    # Stamp the row with a legacy scrypt hash to simulate a pre-cutover
-    # invite that has not yet been logged into.
-    legacy = _make_legacy_scrypt_hash("ocean-breeze-cabin-42")
-    con = share_db.get_global_share_con()
-    con.execute("UPDATE remote_invites SET passcode=? WHERE id=?", (legacy, inv["id"]))
-    con.commit()
-    assert (
-        con.execute("SELECT passcode FROM remote_invites WHERE id=?", (inv["id"],)).fetchone()[0].startswith("scrypt$")
-    )
-
-    # Login succeeds AND the row is rehashed to argon2id in place.
-    found = share_db.get_remote_invite_by_email_passcode("legacy@example.com", "ocean-breeze-cabin-42")
-    assert found is not None
-    stored_after = con.execute("SELECT passcode FROM remote_invites WHERE id=?", (inv["id"],)).fetchone()[0]
-    assert stored_after.startswith("$argon2id$"), stored_after
-
-    # A second login still works against the now-argon2id row.
-    found2 = share_db.get_remote_invite_by_email_passcode("legacy@example.com", "ocean-breeze-cabin-42")
-    assert found2 is not None
+    # Legacy scrypt format is no longer recognised — verify returns False
+    # and needs_rehash returns False (nothing to rehash from a string we
+    # can't even parse). The scrypt cutover is long since complete.
+    assert share_db.needs_rehash("scrypt$16384$8$1$deadbeef$cafebabe") is False
+    assert share_db.verify_passcode("anything", "scrypt$16384$8$1$deadbeef$cafebabe") is False
 
 
 # ── Passcode strength validator ─────────────────────────────────────────────

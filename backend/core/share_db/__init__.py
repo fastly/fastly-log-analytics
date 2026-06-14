@@ -81,7 +81,6 @@ from backend.core.share_db.sessions import (
 )
 from backend.core.share_db.settings import (
     MAX_CONCURRENT_ANALYST_SESSIONS_KEY,
-    PASSCODE_DEFAULT_ALGO_KEY,
     SHARE_AUDIT_RETENTION_DAYS_KEY,
     get_max_concurrent_sessions,
     get_setting,
@@ -175,5 +174,4 @@ __all__ = [
     "get_max_concurrent_sessions",
     "MAX_CONCURRENT_ANALYST_SESSIONS_KEY",
     "SHARE_AUDIT_RETENTION_DAYS_KEY",
-    "PASSCODE_DEFAULT_ALGO_KEY",
 ]

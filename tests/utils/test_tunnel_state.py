@@ -32,8 +32,6 @@ def state_file(monkeypatch, tmp_path: Path) -> Path:
 
 def test_tunnel_state_default_values():
     s = TunnelState()
-    assert s.use_tunnel is False
-    assert s.tunnel_url is None
     assert s.public_endpoint is None
     assert s.forward_port == 3000
     assert s.direct_socket_addr is None
@@ -46,7 +44,6 @@ def test_persist_then_restore_round_trip(state_file: Path):
     assert state_file.exists()
     data = json.loads(state_file.read_text())
     assert data == {
-        "use_tunnel": False,
         "public_endpoint": "share.example.com",
         "forward_port": 8080,
     }
@@ -56,8 +53,6 @@ def test_persist_then_restore_round_trip(state_file: Path):
     assert ok is True
     assert restored.public_endpoint == "share.example.com"
     assert restored.forward_port == 8080
-    assert restored.use_tunnel is False
-    assert restored.tunnel_url is None
     assert restored.direct_socket_addr == "0.0.0.0"
     # started_at is a recent ISO timestamp string.
     assert isinstance(restored.started_at, str)
@@ -105,7 +100,7 @@ def test_restore_returns_false_when_no_file(state_file: Path):
 
 
 def test_restore_returns_false_when_endpoint_empty(state_file: Path):
-    state_file.write_text(json.dumps({"use_tunnel": False, "forward_port": 3000}))
+    state_file.write_text(json.dumps({"forward_port": 3000}))
     s = TunnelState()
     assert restore_direct_state(s) is False
     assert s.public_endpoint is None

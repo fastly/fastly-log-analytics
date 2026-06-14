@@ -9,8 +9,6 @@ export type TunnelHistoryEntry = {
 
 export type ShareStatus = {
   sharing_active: boolean
-  use_tunnel: boolean
-  tunnel_url: string | null
   public_endpoint: string | null
   public_url: string | null
   forward_port: number | null

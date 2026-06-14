@@ -300,8 +300,6 @@ def _remote_host_allowed(host_header: str) -> bool:
         return False
     base = host_header.split(":")[0].lower()
     candidates: list[str] = []
-    if state.tunnel_url:
-        candidates.append(state.tunnel_url.lower())
     if state.public_endpoint:
         from urllib.parse import urlparse
 
@@ -322,8 +320,6 @@ def _origin_allowed(origin: str) -> bool:
         return False
     mgr = get_tunnel_manager()
     state = mgr.state
-    if state.tunnel_url and state.tunnel_url.lower() == host:
-        return True
     if state.public_endpoint:
         pe = urlparse(state.public_endpoint)
         if pe.hostname and pe.hostname.lower() == host:

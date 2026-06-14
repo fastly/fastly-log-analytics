@@ -37,10 +37,9 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
 
   const handleStart = async () => {
     onError('')
-    const useTunnel = mode === 'tunnel'
     const raw = mode === 'hostname' ? hostnameValue : mode === 'ip' ? ipValue : ''
-    const publicEndpoint = useTunnel ? null : buildEndpoint(mode, raw)
-    if (!useTunnel && !publicEndpoint) {
+    const publicEndpoint = buildEndpoint(mode, raw)
+    if (!publicEndpoint) {
       onError(
         mode === 'hostname'
           ? 'Enter a hostname (e.g. logs.example.com).'
@@ -48,7 +47,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
       )
       return
     }
-    if (mode === 'ip' && publicEndpoint && !IPV4_RE.test(raw.trim())) {
+    if (mode === 'ip' && !IPV4_RE.test(raw.trim())) {
       onError('Expected an IPv4 address, optionally with a port (e.g. 203.0.113.42:8443).')
       return
     }
@@ -56,7 +55,6 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
     try {
       await client.POST('/api/admin/share/start' as any, {
         body: {
-          use_tunnel: useTunnel,
           public_endpoint: publicEndpoint,
           forward_port: 3000,
         },

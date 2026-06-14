@@ -2,15 +2,10 @@
 
 Backend restarts (deploys, crashes) would otherwise drop the registered
 ``public_endpoint``, causing analyst traffic to start failing
-host-allowed checks. Persisting the three fields needed to rebuild
-direct-mode state (``use_tunnel=False``, ``public_endpoint``,
-``forward_port``) on every change and reloading on ``TunnelManager``
-``__init__`` re-arms the public endpoint automatically.
-
-The legacy ``use_tunnel`` / ``tunnel_url`` fields stay on
-:class:`TunnelState` for one release for back-compat (they're now always
-``False`` / ``None``); a future cleanup can drop them once every reader
-has been updated.
+host-allowed checks. Persisting the two fields needed to rebuild
+direct-mode state (``public_endpoint``, ``forward_port``) on every
+change and reloading on ``TunnelManager`` ``__init__`` re-arms the
+public endpoint automatically.
 """
 
 from __future__ import annotations
@@ -24,13 +19,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TunnelState:
-    # Legacy: always False after the SSH-tunnel removal. Kept on the
-    # dataclass surface for one release so readers (e.g. share_admin's
-    # /status endpoint) continue to import without breaking.
-    use_tunnel: bool = False
-    # Legacy: always None after the SSH-tunnel removal. Kept on the
-    # dataclass surface for one release; still read by remote_access.py.
-    tunnel_url: str | None = None
     public_endpoint: str | None = None
     started_at: str | None = None
     forward_port: int = 3000
@@ -51,7 +39,6 @@ def persist_direct_state(state: TunnelState) -> None:
         with open(_state_file_path(), "w") as f:
             json.dump(
                 {
-                    "use_tunnel": False,
                     "public_endpoint": state.public_endpoint,
                     "forward_port": state.forward_port,
                 },
@@ -89,8 +76,6 @@ def restore_direct_state(state: TunnelState) -> bool:
         endpoint = data.get("public_endpoint")
         if not endpoint:
             return False
-        state.use_tunnel = False
-        state.tunnel_url = None
         state.public_endpoint = endpoint
         state.forward_port = data.get("forward_port", 3000)
         state.direct_socket_addr = "0.0.0.0"

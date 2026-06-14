@@ -377,23 +377,13 @@ class TunnelManager:
         *,
         public_endpoint: str | None = None,
         forward_port: int = 3000,
-        use_tunnel: bool = False,
     ) -> dict:
         """Start direct-mode sharing.
 
         Validates that ``public_endpoint`` is HTTPS (analyst cookies require
         ``secure=True``). Persists state so a backend restart re-arms the
         endpoint automatically.
-
-        The legacy ``use_tunnel`` keyword is accepted for back-compat (the
-        admin UI and a handful of tests still pass ``use_tunnel=False``)
-        but the SSH-to-localhost.run code path was removed in v2.0 — any
-        truthy value is rejected with ``ValueError``.
         """
-        if use_tunnel:
-            raise ValueError(
-                "SSH-tunnel mode was removed in v2.0; only direct-mode (HTTPS public_endpoint) is supported."
-            )
         if not public_endpoint:
             raise ValueError(
                 "public_endpoint is required — provide either a hostname "
@@ -408,8 +398,6 @@ class TunnelManager:
             )
 
         with self._lock:
-            self._state.use_tunnel = False
-            self._state.tunnel_url = None
             self._state.public_endpoint = public_endpoint
             self._state.forward_port = forward_port
             self._state.direct_socket_addr = "0.0.0.0"
@@ -426,13 +414,11 @@ class TunnelManager:
             )
         except Exception:
             logger.exception("[tunnel] failed to write SHARE_START audit")
-        return {"public_url": self.public_url(), "tunnel_url": None}
+        return {"public_url": self.public_url()}
 
     def stop_sharing(self) -> None:
         with self._lock:
             self._record_uptime_history(reason="stop")
-            self._state.use_tunnel = False
-            self._state.tunnel_url = None
             self._state.public_endpoint = None
             self._state.started_at = None
             # Clear persisted state so a restart doesn't re-arm.
@@ -456,8 +442,6 @@ class TunnelManager:
             n = len(self._sessions)
             self._record_uptime_history(reason="panic")
             self.clear_all_sessions(reason="panic")
-            self._state.use_tunnel = False
-            self._state.tunnel_url = None
             self._state.public_endpoint = None
             self._state.started_at = None
             clear_persisted_state()

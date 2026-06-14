@@ -6680,11 +6680,6 @@ export interface components {
         };
         /** ShareStartPayload */
         ShareStartPayload: {
-            /**
-             * Use Tunnel
-             * @default false
-             */
-            use_tunnel: boolean;
             /** Public Endpoint */
             public_endpoint?: string | null;
             /**

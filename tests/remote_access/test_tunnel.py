@@ -293,18 +293,11 @@ def test_start_sharing_requires_public_endpoint():
         mgr.start_sharing(public_endpoint=None)
 
 
-def test_start_sharing_rejects_use_tunnel_true():
-    """SSH-tunnel mode was removed in v2.0; the flag must be rejected."""
-    mgr = tunnel.get_tunnel_manager()
-    with pytest.raises(ValueError, match="SSH-tunnel mode"):
-        mgr.start_sharing(use_tunnel=True, public_endpoint="https://demo.example.com")
-
-
 def test_direct_expose_https_records_audit_and_returns_url():
     mgr = tunnel.get_tunnel_manager()
     out = mgr.start_sharing(public_endpoint="https://demo.example.com")
     assert out["public_url"] == "https://demo.example.com"
-    assert out["tunnel_url"] is None
+    assert "tunnel_url" not in out
     audits = share_db.get_share_audit_logs()
     assert any(a["event_type"] == "SHARE_START" for a in audits)
     mgr.stop_sharing()

@@ -165,7 +165,7 @@ def _seed_invite(service_ids=None, ip_whitelist=None) -> dict:
 def _start_share():
     """Mark the tunnel manager as sharing so X-Remote-Analyst is honored."""
     mgr = tunnel.get_tunnel_manager()
-    mgr.start_sharing(use_tunnel=False, public_endpoint="https://testserver")
+    mgr.start_sharing(public_endpoint="https://testserver")
     return mgr
 
 
