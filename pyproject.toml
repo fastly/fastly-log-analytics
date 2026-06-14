@@ -11,13 +11,6 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
-    # Phase 3.5 centralised env-var loader (backend/core/settings.py) uses
-    # pydantic-settings. Previously the lockfile carried it as a transitive
-    # dep, so local development worked; production builds with --frozen
-    # excluded it whenever the import wasn't reachable from app startup.
-    # The live query monitor's admin router imports Settings at startup,
-    # so the dep is now load-bearing on prod — make it explicit.
-    "pydantic-settings>=2.5",
     "apscheduler>=3.10,<4",
     "pyiceberg[s3fs,pyarrow,sql-sqlite]>=0.8",
     "pyarrow>=17.0",

@@ -18,6 +18,7 @@ to 0 if the registry ever causes load pressure.
 
 from __future__ import annotations
 
+import os
 import time
 from collections import deque
 from typing import Any
@@ -27,20 +28,22 @@ from pydantic import BaseModel
 
 from backend.core import metadata as _meta_mod
 from backend.core.query_registry import query_registry
-from backend.core.settings import Settings
 from backend.deps import get_service_id
 
 router = APIRouter(prefix="/api/admin", tags=["admin", "query-monitor"])
 
 
 def _enabled() -> bool:
-    # Re-evaluate per request so an env flip (mostly for incident response)
-    # takes effect without a restart. Settings() construction cost is in
-    # the microseconds.
-    try:
-        return Settings().query_monitor_enabled
-    except Exception:
-        return True
+    # Re-evaluated per request so an env flip (mostly for incident response)
+    # takes effect without a restart. Matches the truthy/falsy set
+    # pydantic-settings used to handle here.
+    return os.environ.get("QUERY_MONITOR_ENABLED", "true").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+        "off",
+        "",
+    )
 
 
 def _ensure_enabled() -> None:
