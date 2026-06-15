@@ -72,11 +72,13 @@ export default function AlertsPage() {
     },
     enabled: !!activeServiceId,
     // M4: this endpoint chains 3 sequential Fastly calls (~200ms total)
-    // to resolve the active version + S3 endpoint + sampling condition.
-    // None of that changes between window focuses, so cache the result
-    // for 30s — eliminates the per-focus refetch on this page and on
-    // every alerts-page mount within the window.
-    staleTime: 30_000,
+    // — and on a cold cache the upstream Fastly latency can spike to
+    // 700-900 ms. The `period` field we read out of it is the logging
+    // tile's evaluation interval; that only changes when the admin
+    // edits service config, not within an interactive session. Bump
+    // staleTime from 30 s to 5 min so the call drops out of the
+    // /alerts cold path entirely after first render.
+    staleTime: 5 * 60_000,
   })
 
   const logPeriodSeconds = (loggingSettings as any)?.period || 30
@@ -96,7 +98,24 @@ export default function AlertsPage() {
       }
     },
     refetchInterval: logPeriodSeconds * 1000,
+    // Drop background polling — alerts are a foreground UI; the focus
+    // refetch below picks up changes when the operator returns to the
+    // tab. Backgrounded tabs at 1000-deep tab parks were eating an
+    // entire backend worker on metadata.db reads otherwise.
+    refetchIntervalInBackground: false,
   })
+
+  // Refetch on focus so re-entering the tab surfaces fresh alert state
+  // without polling in the background. The default behavior would
+  // refresh on focus AND on a refetchInterval cadence; pairing focus
+  // with the background-off above gets the right shape.
+  React.useEffect(() => {
+    const onFocus = () => {
+      queryClient.invalidateQueries({ queryKey: ['alerts', activeServiceId] })
+    }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [queryClient, activeServiceId])
 
   const alerts = alertsRes?.data || []
   const lastChecked = alertsRes?.evaluated_at || new Date().toISOString()
