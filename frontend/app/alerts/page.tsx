@@ -70,7 +70,10 @@ export default function AlertsPage() {
       })
       return data as any
     },
-    enabled: !!activeServiceId,
+    // Analysts never edit alerts and the redirect dance can't surface
+    // logging settings to them anyway — skip the call entirely so the
+    // Fastly Stats chain doesn't burn a request on a doomed page load.
+    enabled: !!activeServiceId && !isAnalyst,
     // M4: this endpoint chains 3 sequential Fastly calls (~200ms total)
     // — and on a cold cache the upstream Fastly latency can spike to
     // 700-900 ms. The `period` field we read out of it is the logging
@@ -97,6 +100,12 @@ export default function AlertsPage() {
         return data
       }
     },
+    // Analysts don't manage alerts. Without this gate the page on the
+    // analyst-fronting Fastly path fires /api/alerts (slow, often
+    // 503-ing the first byte timeout) only for the redirect dance to
+    // immediately bounce them to /dashboard — stop the request at the
+    // source.
+    enabled: !isAnalyst,
     refetchInterval: logPeriodSeconds * 1000,
     // Drop background polling — alerts are a foreground UI; the focus
     // refetch below picks up changes when the operator returns to the
