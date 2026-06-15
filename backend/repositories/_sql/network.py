@@ -181,8 +181,8 @@ Output columns per row: ``(asn, c_speed, cnt)``.
 
 RTT_PERCENTILES_BY_ASN = """
                 SELECT asn,
-                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY tcp_rtt) AS p95_us,
-                    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY tcp_rtt) AS p99_us
+                    APPROX_QUANTILE(tcp_rtt, 0.95) AS p95_us,
+                    APPROX_QUANTILE(tcp_rtt, 0.99) AS p99_us
                 FROM {table}
                 WHERE {where} AND asn IN ({placeholders})
                   AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
