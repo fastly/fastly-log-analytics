@@ -61,6 +61,12 @@ tests/fixtures/scoring/
 # scripts/scoring/train.py against a fresh trace extract.
 compute/scorer/matrix.json
 
+# Per-tenant matrices pulled from FOS on every backend startup
+# (see backend/main.py:_ensure_scoring_matrix). matrix.default.json
+# stays tracked — that's the in-repo fallback the scoring endpoint
+# uses when neither the shared matrix.json nor a tenant matrix exists.
+compute/scorer/matrix_*.json
+
 # Rust build artifacts.
 compute/scorer/target/
 compute/scorer/bin/
