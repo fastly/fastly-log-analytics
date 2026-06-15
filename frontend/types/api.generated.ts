@@ -6342,20 +6342,12 @@ export interface components {
             name: string;
             /** Fos Bucket */
             fos_bucket?: string | null;
-            /** Fos Region */
-            fos_region?: string | null;
             /** Log Period */
             log_period?: number | null;
-            /** Cdn Url */
-            cdn_url?: string | null;
-            /** Cdn Service Id */
-            cdn_service_id?: string | null;
             /** Access Level */
             access_level?: string | null;
             /** Storage Mode */
             storage_mode?: string | null;
-            /** Duckdb Exists */
-            duckdb_exists?: boolean | null;
             /** Duckdb Size Bytes */
             duckdb_size_bytes?: number | null;
             /** Cache File Count */
@@ -6367,10 +6359,6 @@ export interface components {
             cron_sync?: components["schemas"]["ServiceCronSync"] | null;
             cron_compact?: components["schemas"]["ServiceCronCompact"] | null;
             cron_ngwaf?: components["schemas"]["ServiceCronNgwaf"] | null;
-            /** Status */
-            status?: {
-                [key: string]: unknown;
-            } | null;
             /** Ngwaf Workspace Id */
             ngwaf_workspace_id?: string | null;
         };

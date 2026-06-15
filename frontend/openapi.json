@@ -19408,17 +19408,6 @@
             ],
             "title": "Fos Bucket"
           },
-          "fos_region": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Fos Region"
-          },
           "log_period": {
             "anyOf": [
               {
@@ -19429,28 +19418,6 @@
               }
             ],
             "title": "Log Period"
-          },
-          "cdn_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cdn Url"
-          },
-          "cdn_service_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cdn Service Id"
           },
           "access_level": {
             "anyOf": [
@@ -19473,17 +19440,6 @@
               }
             ],
             "title": "Storage Mode"
-          },
-          "duckdb_exists": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Duckdb Exists"
           },
           "duckdb_size_bytes": {
             "anyOf": [
@@ -19558,18 +19514,6 @@
                 "type": "null"
               }
             ]
-          },
-          "status": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Status"
           },
           "ngwaf_workspace_id": {
             "anyOf": [

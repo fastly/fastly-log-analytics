@@ -34,19 +34,15 @@ class ServiceCronNgwaf(BaseModel):
 class ServiceConfig(BaseModel):
     service_id: str
     name: str
-    # ``fos_bucket`` / ``fos_region`` are operator-internal infra strings —
-    # the analyst-trimmed view in api_services_list strips them out, and the
-    # serializer must not reject the slim payload. Admin responses still carry
-    # populated values; the optional shape only changes the contract for
+    # ``fos_bucket`` is an operator-internal infra string — the analyst-
+    # trimmed view in api_services_list strips it out, and the serializer
+    # must not reject the slim payload. Admin responses still carry the
+    # populated value; the optional shape only changes the contract for
     # analyst-scoped reads.
     fos_bucket: str | None = None
-    fos_region: str | None = None
     log_period: int | None = None
-    cdn_url: str | None = None
-    cdn_service_id: str | None = None
     access_level: str | None = None
     storage_mode: str | None = None
-    duckdb_exists: bool | None = None
     duckdb_size_bytes: int | None = None
     cache_file_count: int | None = None
     log_row_count: int | None = None
@@ -54,7 +50,6 @@ class ServiceConfig(BaseModel):
     cron_sync: ServiceCronSync | None = None
     cron_compact: ServiceCronCompact | None = None
     cron_ngwaf: ServiceCronNgwaf | None = None
-    status: dict[str, Any] | None = None
     ngwaf_workspace_id: str | None = None
 
 
