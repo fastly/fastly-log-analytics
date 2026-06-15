@@ -48,7 +48,6 @@ def get_storage_stats(
 
 
 def get_log_activity(
-    con: duckdb.DuckDBPyConnection,
     src: dict,
     start_str: str,
     end_str: str,
@@ -56,13 +55,13 @@ def get_log_activity(
 ) -> dict:
     """Return time-bucketed log activity (rows and bytes ingested per bucket).
 
-    Reads from the per-service SQLite ``ingested_files`` table (DuckDB no longer
-    holds operational metadata). The ``con`` argument is kept for signature
-    parity with sibling repository functions but is unused here.
+    Reads from the per-service SQLite ``ingested_files`` table — no DuckDB
+    work involved. The router no longer asks the deps for a connection,
+    which means each call skips one ``get_connection()`` lookup +
+    ``update_iceberg_view`` rebind it never actually used.
     """
     from backend.core import metadata_db
 
     service_id = src.get("name") or src.get("service_id", "")
-    runner = QueryRunner(con, src)
     out = metadata_db.get_log_activity(service_id, start_str, end_str, by)
-    return {**out, **runner.telemetry()}
+    return {**out, "_debug_queries": [], "_debug_calls": []}

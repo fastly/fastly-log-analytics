@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 logger = logging.getLogger(__name__)
 
 from backend.core.fastly.utils import FASTLY_LOG_FIELDS
-from backend.deps import get_con, get_source
+from backend.deps import get_source
 from backend.models.usage import (
     CurrentStorageResponse,
     PrefillResponse,
@@ -636,7 +636,6 @@ def usage_bandwidth(
 @query_errors()
 def usage_log_activity(
     source: dict = Depends(get_source),
-    con=Depends(get_con),
     start: str = Query(default=""),
     end: str = Query(default=""),
     by: str = Query(default="hour"),
@@ -652,7 +651,10 @@ def usage_log_activity(
     now = datetime.now(UTC)
     start_str, end_str = parse_date_window(start, end)
 
-    res = repo.get_log_activity(con, source, start_str, end_str, by)
+    # Dropped the Depends(get_con) — repo reads metadata SQLite only, never
+    # touched the DuckDB connection. Saves one get_connection() lookup
+    # + update_iceberg_view rebind per call.
+    res = repo.get_log_activity(source, start_str, end_str, by)
 
     # Fetch Fastly API stats for the logging service to compare generated vs processed
     api_key = get_fastly_api_key(source.get("logging_service_id", ""))
