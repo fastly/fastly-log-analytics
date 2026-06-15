@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://api.fastly.com"
 
 
-def fastly(method, path, body=None, *, token, expect_empty=False, max_retries=3):
+def fastly(method, path, body=None, *, token, expect_empty=False, max_retries=3, timeout=30):
     """Make a Fastly API request and return parsed JSON."""
     try:
         from backend.utils.telemetry import tracked_call
@@ -29,7 +29,7 @@ def fastly(method, path, body=None, *, token, expect_empty=False, max_retries=3)
         for attempt in range(max_retries + 1):
             req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     raw = resp.read().decode()
                     if expect_empty or not raw.strip():
                         return {}

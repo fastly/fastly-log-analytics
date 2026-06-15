@@ -34,7 +34,6 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any
 
 _ROOT_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -320,34 +319,22 @@ def config_to_source(cfg: dict) -> dict:
 
 def fetch_service_name(service_id: str, api_key: str) -> str | None:
     """Fetch the human-readable service name from the Fastly API.
-    Returns None on failure (caller should use cached name).
+
+    Routes through the shared ``fastly()`` client with ``timeout=10`` +
+    ``max_retries=1`` so the worst-case cold-path tail stays bounded
+    (~21 s vs the client default of ~127 s). The caller is behind a
+    300 s name cache (see :func:`refresh_service_name`) so steady-state
+    cost is one call per service per 5 min.
+
+    Returns None on failure (caller should use the cached name).
     """
-    tracked_call: Any | None
+    from backend.core.fastly.client import fastly
+
     try:
-        from backend.utils.telemetry import tracked_call as _tc
-
-        tracked_call = _tc
-    except ImportError:
-        tracked_call = None
-
-    def _do_fetch():
-        try:
-            import urllib.request
-
-            req = urllib.request.Request(
-                f"https://api.fastly.com/service/{service_id}",
-                headers={"Fastly-Key": api_key, "Accept": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return data.get("name")
-        except Exception:
-            return None
-
-    if tracked_call is not None:
-        with tracked_call("GET", f"/service/{service_id}", service="Fastly API"):
-            return _do_fetch()
-    return _do_fetch()
+        data = fastly("GET", f"/service/{service_id}", token=api_key, timeout=10, max_retries=1)
+        return data.get("name")
+    except Exception:
+        return None
 
 
 def refresh_service_name(service_id: str, api_key: str | None = None) -> str:
