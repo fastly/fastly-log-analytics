@@ -70,7 +70,7 @@ _ERR_TRUNCATE = 512
 # cost is ~500B (truncated SQL + attribution + a handful of timestamps),
 # so 2000 entries ≈ 1 MB resident. Cheap; the alternative (per-db_type
 # ring buffers) was rejected as more complex without a measured win.
-_HISTORY_CAP = 2000
+_HISTORY_CAP = 400
 
 # Persist completed queries above this threshold to the per-service
 # ``slow_queries`` SQLite table — see ``_migration_005_slow_queries``.
