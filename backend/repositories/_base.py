@@ -779,6 +779,8 @@ class QueryRunner:
         limit: int = 10,
         per_field_limits: dict[str, int] | None = None,
         _phase_log: list[dict] | None = None,
+        actual_cols: list[str] | None = None,
+        schema_types: dict[str, str] | None = None,
     ) -> tuple[list[tuple[str, Any, int]], list[str]]:
         """Compute per-field top-N from rollup parquets + the live active
         hour from the base table. Returns merged (field, value, count)
@@ -1163,8 +1165,13 @@ class QueryRunner:
         live_res: list[tuple] = []
         # Defined here so the partial-day block below can reuse them
         # without re-fetching if the active-hour block populated them.
-        actual_cols: list[str] = []
-        schema_types: dict[str, str] = {}
+        # Callers (dashboard repo) already computed these once for the
+        # request; the kwargs above let them seed both so we skip the
+        # duplicate get_schema_cols() / _get_schema() round-trip below.
+        actual_cols_seed = actual_cols
+        schema_types_seed = schema_types
+        actual_cols = []
+        schema_types = {}
 
         # Clamp the live window to the intersection of (active hour) and
         # (requested window). Without this, a partial-hour request like
@@ -1187,14 +1194,20 @@ class QueryRunner:
         if should_query_live:
             # We run a standard execute_top_n_batch query on the base table for just the active hour
             try:
-                actual_cols = self.get_schema_cols()
+                # Reuse caller-supplied seeds when present (dashboard repo
+                # already paid this cost once for the request); fall back
+                # to the schema lookups otherwise.
+                actual_cols = actual_cols_seed if actual_cols_seed is not None else self.get_schema_cols()
                 # _get_schema is module-local (line ~106); the prior code
                 # imported it from backend.core.duckdb which does NOT
                 # export this symbol — the ImportError silently broke the
                 # live merge for an indeterminate time, so the per-field
                 # top-N was missing the current hour entirely. Use the
                 # module-local function directly.
-                schema_types = {col["name"]: col["type"] for col in _get_schema(self.con, self.src)}
+                if schema_types_seed is not None:
+                    schema_types = schema_types_seed
+                else:
+                    schema_types = {col["name"]: col["type"] for col in _get_schema(self.con, self.src)}
 
                 # To prevent creating a massive UNION, we'll create a temp table for just the live hour.
                 # Live branch must fetch up to the WIDEST per-field limit so the

@@ -493,6 +493,11 @@ def get_aggregates(
                     limit=10,
                     per_field_limits={"country": 500},
                     _phase_log=section_timings,
+                    # Seed the live-active-hour branch's schema lookups so
+                    # it skips a redundant get_schema_cols() + _get_schema()
+                    # round-trip — these were already computed above.
+                    actual_cols=list(actual_cols),
+                    schema_types=schema_types,
                 ),
             )
             # Derive field_totals from the rollup result (cheap Python sum).
