@@ -196,8 +196,8 @@ def test_rtt_percentiles_by_asn_renders_with_placeholders():
         where="1=1",
         placeholders="?,?",
     )
-    assert "PERCENTILE_CONT(0.95)" in rendered
-    assert "PERCENTILE_CONT(0.99)" in rendered
+    assert "APPROX_QUANTILE(tcp_rtt, 0.95)" in rendered
+    assert "APPROX_QUANTILE(tcp_rtt, 0.99)" in rendered
     assert "asn IN (?,?)" in rendered
     assert "GROUP BY asn" in rendered
 

@@ -44,8 +44,17 @@ def _response_cache_key(
     top_n: int,
     map_asn: str,
 ) -> str:
+    def _filter_attr(v, attr):
+        # Filters arrive as either FilterSpec objects (attribute access) OR
+        # plain dicts (tests, internal callers). ``getattr(dict, "values", ...)``
+        # returns the bound dict ``.values`` method, NOT the "values" key —
+        # that bug raised ``TypeError: 'builtin_function_or_method' object
+        # is not iterable`` the moment a non-Pydantic filter reached this
+        # cache-key serializer.
+        return v.get(attr) if isinstance(v, dict) else getattr(v, attr, None)
+
     serialised_filters = {
-        k: (getattr(v, "mode", None), sorted(str(x) for x in (getattr(v, "values", None) or [])))
+        k: (_filter_attr(v, "mode"), sorted(str(x) for x in (_filter_attr(v, "values") or [])))
         for k, v in sorted((filters or {}).items())
     }
     payload = json.dumps(
