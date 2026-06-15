@@ -457,7 +457,7 @@ class track_query:
             pass
 
 
-def _is_full_miss(x_cache: str | None) -> bool:
+def is_full_miss(x_cache: str | None) -> bool:
     """Return True if every value in an X-Cache header chain is MISS or PASS.
 
     Fastly returns chains like "HIT, HIT" (edge HIT, shield HIT — no FOS read),
@@ -471,6 +471,26 @@ def _is_full_miss(x_cache: str | None) -> bool:
     if not parts:
         return False
     return all(p in ("MISS", "PASS") for p in parts)
+
+
+# Back-compat alias for the legacy underscored name; used by
+# backend.utils.telemetry_proxy before the audit consolidation.
+_is_full_miss = is_full_miss
+
+
+def build_cdn_miss_synth_details(bytes_count: int | None) -> str:
+    """Format the ``details`` string for the synthesised FOS GET_OBJECT row
+    written when a CDN read was a full MISS.
+
+    Both consumers (this module's :func:`record_cdn_call` and
+    :mod:`backend.utils.telemetry_proxy`) used to compose this string by
+    hand with drifted prefixes — one prepended bytes via f-string
+    concatenation, the other inlined it into the format. Funnel here so
+    both sides stay aligned.
+    """
+    if bytes_count is not None:
+        return f"{bytes_count:,} bytes · Class B · synthesized from CDN MISS"
+    return "Class B · synthesized from CDN MISS"
 
 
 def record_cdn_call(
@@ -520,7 +540,7 @@ def record_cdn_call(
         bytes_count=bytes_count,
     )
 
-    if _is_full_miss(x_cache):
+    if is_full_miss(x_cache):
         # Fastly's typical behavior on a cache MISS against an object-storage
         # origin is to issue a GET to the origin (fetching the full body to
         # populate cache) regardless of whether the client sent HEAD or GET —
@@ -529,16 +549,13 @@ def record_cdn_call(
         # by tracing single-file ingest paths: client HEAD MISS → CDN GETs
         # populated cache but never resulted in a paired FOS GET_OBJECT row
         # because every CDN GET after the HEAD was a HIT.)
-        synth_details = "Class B · synthesized from CDN MISS"
-        if bytes_count is not None:
-            synth_details = f"{bytes_count:,} bytes · Class B · synthesized from CDN MISS"
         record_call(
             "GET_OBJECT",
             key,
             elapsed_ms,
             status=status,
             service="FOS",
-            details=synth_details,
+            details=build_cdn_miss_synth_details(bytes_count),
             caller=caller or "cdn.miss",
             bytes_count=bytes_count,
         )

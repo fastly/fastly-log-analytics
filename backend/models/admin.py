@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, RootModel
 
-from backend.models.common import BaseResponse
+from backend.models.common import BaseResponse, LogExtentsMixin
 
 
 class TreeNode(BaseModel):
@@ -46,14 +46,12 @@ class IngestedFilesResponse(BaseResponse):
     files: list[IngestedFile]
 
 
-class SyncStatus(BaseModel):
+class SyncStatus(LogExtentsMixin):
     configured: bool = True
     busy: bool = False
     storage_mode: str | None = None
     access_level: str | None = None
     local_rows: int | None = None
-    earliest_log_at: str | None = None
-    latest_log_at: str | None = None
     latest_ingested_file_at: str | None = None
     latest_available_file_at: str | None = None
     duckdb_size_bytes: int | None = None
@@ -66,7 +64,7 @@ class SyncStatusResponse(BaseResponse, SyncStatus):
     pass
 
 
-class LogExtentsResponse(BaseResponse):
+class LogExtentsResponse(BaseResponse, LogExtentsMixin):
     """Minimal extents projection for the FilterBar's time-range snap.
 
     Sibling of ``SyncStatusResponse`` but strips every field that the
@@ -78,8 +76,6 @@ class LogExtentsResponse(BaseResponse):
     """
 
     configured: bool = True
-    earliest_log_at: str | None = None
-    latest_log_at: str | None = None
 
 
 class BotSourceMeta(BaseModel):

@@ -248,7 +248,7 @@ def is_request_remote(request: Request) -> bool:
     localhost:3000 → localhost:8000). Direct admin connections never set this
     header, so the gate stays closed for them.
     """
-    host = request.client.host if request.client else "127.0.0.1"
+    host = client_ip(request, default="127.0.0.1")
 
     # Caddy-proxied request: uvicorn has rewritten the peer to the real
     # client IP via --proxy-headers, so any non-loopback/non-private peer is
@@ -269,19 +269,34 @@ def is_request_remote(request: Request) -> bool:
     return False
 
 
-def get_client_ip(request: Request, *, is_remote: bool) -> str:
-    """Return the trusted client IP.
+def client_ip(request: Request, *, default: str = "0.0.0.0") -> str:
+    """Return ``request.client.host`` if present, else ``default``.
 
+    Centralises the ``... if request.client else "<marker>"`` pattern
+    written 11+ times across the request-handling tree with 4 different
+    no-client markers (``"0.0.0.0"``, ``"127.0.0.1"``, ``"unknown"``,
+    ``"admin"``). Callers continue to pass the marker they need; the
+    helper only collapses the conditional shape.
+
+    Security: we never re-parse the X-Forwarded-For header ourselves —
+    that was the bypass that made leftmost-XFF spoofing exploitable.
     With uvicorn running ``--proxy-headers --forwarded-allow-ips=127.0.0.1``
-    the framework already populates ``request.client.host`` from X-Forwarded-For
-    when the TCP peer is loopback (i.e., Caddy on this host). For all other
-    peers, ``request.client.host`` IS the socket peer. We never re-parse the
-    XFF header ourselves — that's what made exploitable. The
-    ``is_remote`` parameter is kept for backwards compatibility but no longer
-    influences the result.
+    the framework already populates ``request.client.host`` from XFF
+    when the TCP peer is loopback (i.e. Caddy on this host); for all
+    other peers, ``request.client.host`` IS the socket peer.
+    """
+    return request.client.host if request.client else default
+
+
+def get_client_ip(request: Request, *, is_remote: bool) -> str:
+    """Backwards-compatible alias for :func:`client_ip` with the
+    pre-extraction ``0.0.0.0`` default.
+
+    The ``is_remote`` parameter is vestigial — it stopped influencing
+    the result when the XFF-parsing path was removed.
     """
     del is_remote  # signal: parameter intentionally ignored, kept for ABI stability
-    return request.client.host if request.client else "0.0.0.0"
+    return client_ip(request)
 
 
 def _local_host_allowed(host_header: str) -> bool:
@@ -675,7 +690,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             # request activity with an [admin] tag so it's easy to grep
             # "who hit what" across both auth modes.
             try:
-                peer = request.client.host if request.client else "127.0.0.1"
+                peer = client_ip(request, default="127.0.0.1")
                 logging.getLogger("backend.access.admin").info(
                     "[admin] [%s] %s %s -> %d",
                     peer,
@@ -827,12 +842,12 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         # alongside uvicorn's default access log (which only shows IP).
         # Surface email + name + IP + path → trivial to grep by user.
         try:
-            client_ip = get_client_ip(request, is_remote=True)
+            analyst_peer = get_client_ip(request, is_remote=True)
             logging.getLogger("backend.access.analyst").info(
                 "[analyst] %s (%s) [%s] %s %s -> %d",
                 session.email,
                 session.name or "no-name",
-                client_ip,
+                analyst_peer,
                 method,
                 path,
                 response.status_code,

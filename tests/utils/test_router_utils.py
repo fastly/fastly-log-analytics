@@ -87,7 +87,10 @@ def test_sse_headers_disable_buffering_for_proxies():
     buffer to fill, defeating the "real-time progress" UX."""
     assert router_utils.SSE_HEADERS["X-Accel-Buffering"] == "no"
     assert router_utils.SSE_HEADERS["Content-Type"] == "text/event-stream"
-    assert router_utils.SSE_HEADERS["Cache-Control"] == "no-cache"
+    # ``no-transform`` was added when consolidating the inlined SSE_HEADERS
+    # variant from admin/compaction.py (audit r6) — pure additive guard
+    # against intermediate proxies that recompress/rewrite the body.
+    assert router_utils.SSE_HEADERS["Cache-Control"] == "no-cache, no-transform"
 
 
 def test_sse_flush_preamble_emits_count_chunks_of_padding():

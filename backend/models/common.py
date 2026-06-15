@@ -132,6 +132,30 @@ class HasDataMixin(BaseModel):
     total: int = 0
 
 
+class LogExtentsMixin(BaseModel):
+    """Mixin for responses that expose the per-service log time-extents.
+
+    ``earliest_log_at`` / ``latest_log_at`` appear together on four
+    response models (admin status + dashboard variants) — the audit
+    flagged them as a one-shape pair worth co-locating so a new field
+    on this pair (e.g. ``coverage_pct``) lands in one place.
+    """
+
+    earliest_log_at: str | None = None
+    latest_log_at: str | None = None
+
+
+class OkResponse(BaseModel):
+    """Mixin for "ack" endpoints that only return ``{"ok": True}``.
+
+    Six share-auth response models all carry ``ok: bool = True`` as
+    their first field — promoted here so the field's default + name
+    can't drift across the set.
+    """
+
+    ok: bool = True
+
+
 # 038: telemetry payloads (raw SQL + outbound API URL/timing) are useful
 # during development and incident response but they're an information-leak
 # surface in normal operation — every analyst dashboard fetch echoes the

@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from backend.models.common import BaseResponse, FilteredRequest, Limit500, PaginationMixin
+from backend.models.common import BaseResponse, FilteredRequest, Limit500, LogExtentsMixin, PaginationMixin
 
 # ── Dashboard aggregates ──────────────────────────────────────────────────────
 
@@ -53,7 +53,7 @@ class MapPoint(BaseModel):
     count: int
 
 
-class AggregatesResponse(BaseResponse):
+class AggregatesResponse(BaseResponse, LogExtentsMixin):
     data: dict[str, FieldAggregate]
     time_series: list[TimeSeriesPoint]
     map_data: list[MapPoint]
@@ -62,8 +62,6 @@ class AggregatesResponse(BaseResponse):
     metric: str
     total_rows: int
     total_rows_total: int
-    earliest_log_at: str | None = None
-    latest_log_at: str | None = None
 
 
 # ── Dashboard raw ─────────────────────────────────────────────────────────────
@@ -75,15 +73,13 @@ class RawRequest(FilteredRequest, PaginationMixin):
     columns: list[str] = []
 
 
-class RawResponse(BaseResponse):
+class RawResponse(BaseResponse, LogExtentsMixin):
     columns: list[str]
     data: list[dict[str, Any]]
     total_rows: int
     total_rows_total: int
     page: int
     limit: int
-    earliest_log_at: str | None = None
-    latest_log_at: str | None = None
 
 
 # ── Dashboard field values ────────────────────────────────────────────────────

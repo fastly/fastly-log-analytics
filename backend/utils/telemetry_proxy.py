@@ -599,19 +599,16 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
             # method (so subsequent reads hit cache), so the underlying
             # FOS op is always GET_OBJECT, not HEAD_OBJECT. The MISS, HIT
             # chain (edge missed, shield hit) does NOT touch FOS.
-            from backend.utils.telemetry import _is_full_miss
+            from backend.utils.telemetry import build_cdn_miss_synth_details, is_full_miss
 
-            if service == "CDN" and _is_full_miss(x_cache):
-                synth_details = "Class B · synthesized from CDN MISS"
-                if bytes_received:
-                    synth_details = f"{bytes_received:,} bytes · " + synth_details
+            if service == "CDN" and is_full_miss(x_cache):
                 synth_row = {
                     "method": "GET_OBJECT",
                     "path": request.path_qs,
                     "bytes": bytes_received,
                     "status": status_str,
                     "service": "FOS",
-                    "details": synth_details,
+                    "details": build_cdn_miss_synth_details(bytes_received or None),
                     "caller": "cdn.miss",
                     "time_ms": elapsed_ms,
                 }

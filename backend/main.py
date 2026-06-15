@@ -582,9 +582,10 @@ async def telemetry_middleware(request: Request, call_next):
             request_id=request_id,
         )
     else:
-        client_host = request.client.host if request.client else "unknown"
+        from backend.utils.remote_access import client_ip as _client_ip
+
         attr = _Attribution.admin(
-            admin_id=client_host or "admin",
+            admin_id=_client_ip(request, default="unknown") or "admin",
             request_path=request_path,
             request_id=request_id,
         )

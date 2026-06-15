@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from backend import config as svcconfig
 from backend.core import share_db
+from backend.utils.remote_access import client_ip
 from backend.utils.tunnel import get_tunnel_manager
 
 logger = logging.getLogger(__name__)
@@ -182,7 +183,7 @@ def create_invite(payload: InvitePayload, request: Request):
     share_db.log_share_audit_event(
         event_type="INVITE_CREATE",
         email=invite["email"],
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=f"invite_id={invite['id']} services={','.join(payload.service_ids)}",
     )
     return invite
@@ -221,7 +222,7 @@ def update_invite_passcode(invite_id: str, payload: PasscodePayload, request: Re
     share_db.log_share_audit_event(
         event_type="INVITE_PASSCODE_UPDATE",
         email=None,
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=f"invite_id={invite_id}",
     )
     return {"ok": True}
@@ -235,7 +236,7 @@ def revoke_invite(invite_id: str, request: Request):
     share_db.log_share_audit_event(
         event_type="INVITE_REVOKE",
         email=None,
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=f"invite_id={invite_id} booted_sessions={booted}",
     )
     return {"ok": True, "booted_sessions": booted}
@@ -254,7 +255,7 @@ def delete_invite(invite_id: str, request: Request):
     share_db.log_share_audit_event(
         event_type="INVITE_DELETE",
         email=None,
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=f"invite_id={invite_id} booted_sessions={booted}",
     )
     return {"ok": True, "booted_sessions": booted}
@@ -297,7 +298,7 @@ def backup_export(payload: BackupExportPayload, request: Request):
     share_db.log_share_audit_event(
         event_type="BACKUP_EXPORTED",
         email=None,
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=f"bytes={len(blob)}",
     )
     return Response(
@@ -326,7 +327,7 @@ async def backup_import(
     share_db.log_share_audit_event(
         event_type="BACKUP_IMPORTED",
         email=None,
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=str(result),
     )
     return result

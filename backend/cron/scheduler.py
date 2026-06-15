@@ -191,15 +191,12 @@ def _log_and_add_progress(
         prefix = f"{icon}{c}[{job_name}]{c_end}"
         # Resolve through the ``backend.scheduler`` shim so tests that
         # ``patch("backend.scheduler.logger")`` continue to intercept these
-        # calls. We fall back to the module-local logger if the shim is
-        # not yet (or no longer) importable, which keeps unit tests for
-        # this module isolated from the shim layer.
-        try:
-            import backend.scheduler as _shim
+        # calls. The helper falls back to the module-local logger if the
+        # shim is not yet (or no longer) importable, which keeps unit
+        # tests for this module isolated from the shim layer.
+        from backend.cron.jobs._common import shim_attr
 
-            log = getattr(_shim, "logger", logger)
-        except Exception:
-            log = logger
+        log = shim_attr("logger", logger)
         if t == "error":
             log.error("%s %s: %s", prefix, display, msg)
         elif t == "warning":

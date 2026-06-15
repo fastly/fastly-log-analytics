@@ -62,17 +62,13 @@ def cron_task(name: str):
                         flush_usage_log(service_id)
 
             # Read the cap at call time so tests can monkeypatch it without
-            # re-decorating the function under test. Resolve through the
-            # ``backend.scheduler`` shim so existing tests that do
-            # ``monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", ...)``
-            # continue to take effect, while still falling back to the
-            # value defined in this module.
-            try:
-                import backend.scheduler as _shim
+            # Resolve through the backend.scheduler shim so existing tests
+            # that do ``monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S",
+            # ...)`` continue to take effect, while still falling back to
+            # the value defined in this module.
+            from backend.cron.jobs._common import shim_attr
 
-                cap = getattr(_shim, "_CRON_HARD_CAP_S", _CRON_HARD_CAP_S)
-            except Exception:
-                cap = _CRON_HARD_CAP_S
+            cap = shim_attr("_CRON_HARD_CAP_S", _CRON_HARD_CAP_S)
             ex = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"cron-{name}-{service_id}")
             shutdown_wait = True
             try:

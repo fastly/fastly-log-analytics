@@ -3721,6 +3721,10 @@ export interface components {
         };
         /** AggregatesResponse */
         AggregatesResponse: {
+            /** Earliest Log At */
+            earliest_log_at?: string | null;
+            /** Latest Log At */
+            latest_log_at?: string | null;
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
@@ -3752,10 +3756,6 @@ export interface components {
             total_rows: number;
             /** Total Rows Total */
             total_rows_total: number;
-            /** Earliest Log At */
-            earliest_log_at?: string | null;
-            /** Latest Log At */
-            latest_log_at?: string | null;
         };
         /** Alert */
         Alert: {
@@ -4802,6 +4802,10 @@ export interface components {
          *     the frontend can short-circuit when a service has no source.
          */
         LogExtentsResponse: {
+            /** Earliest Log At */
+            earliest_log_at?: string | null;
+            /** Latest Log At */
+            latest_log_at?: string | null;
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
@@ -4820,10 +4824,6 @@ export interface components {
              * @default true
              */
             configured: boolean;
-            /** Earliest Log At */
-            earliest_log_at?: string | null;
-            /** Latest Log At */
-            latest_log_at?: string | null;
         };
         /** LogFieldsConfig */
         LogFieldsConfig: {
@@ -6097,6 +6097,10 @@ export interface components {
         };
         /** RawResponse */
         RawResponse: {
+            /** Earliest Log At */
+            earliest_log_at?: string | null;
+            /** Latest Log At */
+            latest_log_at?: string | null;
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
@@ -6124,10 +6128,6 @@ export interface components {
             page: number;
             /** Limit */
             limit: number;
-            /** Earliest Log At */
-            earliest_log_at?: string | null;
-            /** Latest Log At */
-            latest_log_at?: string | null;
         };
         /** RdnsStats */
         RdnsStats: {
@@ -6747,6 +6747,10 @@ export interface components {
         };
         /** SyncStatusResponse */
         SyncStatusResponse: {
+            /** Earliest Log At */
+            earliest_log_at?: string | null;
+            /** Latest Log At */
+            latest_log_at?: string | null;
             /**
              * Configured
              * @default true
@@ -6763,10 +6767,6 @@ export interface components {
             access_level?: string | null;
             /** Local Rows */
             local_rows?: number | null;
-            /** Earliest Log At */
-            earliest_log_at?: string | null;
-            /** Latest Log At */
-            latest_log_at?: string | null;
             /** Latest Ingested File At */
             latest_ingested_file_at?: string | null;
             /** Latest Available File At */

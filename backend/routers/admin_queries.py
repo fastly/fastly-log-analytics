@@ -78,7 +78,9 @@ def _check_cancel_rate(admin_id: str) -> bool:
 def _admin_id_from_request(request: Request) -> str:
     """Same logic as :func:`backend.core.request_context._build_attribution_from_request`
     — keep them in sync if the admin-id derivation ever moves."""
-    return (request.client.host if request.client else "unknown") or "admin"
+    from backend.utils.remote_access import client_ip
+
+    return client_ip(request, default="unknown") or "admin"
 
 
 # ── Response models ─────────────────────────────────────────────────────────

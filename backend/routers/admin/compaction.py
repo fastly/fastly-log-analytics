@@ -246,12 +246,6 @@ def metadata_cleanup_now(source: dict = Depends(get_source)):
                 break
             yield f"data: {_json.dumps(event)}\n\n"
 
-    return StreamingResponse(
-        stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+    from backend.utils.router_utils import SSE_HEADERS
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=SSE_HEADERS)

@@ -27,17 +27,12 @@ PENDING_COOKIE_NAME = "analyst_pending_session_id"
 
 
 def _client_ip(request: Request) -> str:
-    """Extract the real client IP.
+    """Extract the real client IP. Delegates to the shared helper —
+    see :func:`backend.utils.remote_access.client_ip` for the
+    XFF-safety rationale."""
+    from backend.utils.remote_access import client_ip
 
-    With uvicorn running ``--proxy-headers --forwarded-allow-ips=127.0.0.1``
-    (see docker-compose.prod.yml), ``request.client.host`` is already the
-    real client IP for Caddy-proxied traffic and the loopback address for
-    direct admin connections. We never re-parse X-Forwarded-For ourselves —
-    that was the leftmost-XFF spoofing vector.
-    """
-    if request.client and request.client.host:
-        return request.client.host
-    return "0.0.0.0"
+    return client_ip(request)
 
 
 class ShareLoginPayload(BaseModel):

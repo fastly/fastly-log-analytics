@@ -13495,6 +13495,28 @@
       },
       "AggregatesResponse": {
         "properties": {
+          "earliest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Log At"
+          },
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          },
           "_debug_queries": {
             "items": {
               "$ref": "#/components/schemas/DebugQuery"
@@ -13562,28 +13584,6 @@
           "total_rows_total": {
             "type": "integer",
             "title": "Total Rows Total"
-          },
-          "earliest_log_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Earliest Log At"
-          },
-          "latest_log_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Latest Log At"
           }
         },
         "type": "object",
@@ -16338,6 +16338,28 @@
       },
       "LogExtentsResponse": {
         "properties": {
+          "earliest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Log At"
+          },
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          },
           "_debug_queries": {
             "items": {
               "$ref": "#/components/schemas/DebugQuery"
@@ -16369,28 +16391,6 @@
             "type": "boolean",
             "title": "Configured",
             "default": true
-          },
-          "earliest_log_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Earliest Log At"
-          },
-          "latest_log_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Latest Log At"
           }
         },
         "type": "object",
@@ -18890,6 +18890,28 @@
       },
       "RawResponse": {
         "properties": {
+          "earliest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Log At"
+          },
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          },
           "_debug_queries": {
             "items": {
               "$ref": "#/components/schemas/DebugQuery"
@@ -18947,28 +18969,6 @@
           "limit": {
             "type": "integer",
             "title": "Limit"
-          },
-          "earliest_log_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Earliest Log At"
-          },
-          "latest_log_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Latest Log At"
           }
         },
         "type": "object",
@@ -20618,6 +20618,28 @@
       },
       "SyncStatusResponse": {
         "properties": {
+          "earliest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Log At"
+          },
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          },
           "configured": {
             "type": "boolean",
             "title": "Configured",
@@ -20660,28 +20682,6 @@
               }
             ],
             "title": "Local Rows"
-          },
-          "earliest_log_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Earliest Log At"
-          },
-          "latest_log_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Latest Log At"
           },
           "latest_ingested_file_at": {
             "anyOf": [

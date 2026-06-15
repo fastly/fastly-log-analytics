@@ -150,7 +150,12 @@ def format_debug_request(
 
 SSE_HEADERS: dict[str, str] = {
     "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
+    # ``no-transform`` defends against intermediate proxies that recompress
+    # or otherwise rewrite the body — Fastly's CDN respects it for the SSE
+    # streams that pass through. Added when consolidating the inlined
+    # variant from admin/compaction.py (audit r6); pure additive contract,
+    # no behavior change for the other consumers.
+    "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
 }

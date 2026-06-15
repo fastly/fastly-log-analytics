@@ -9,14 +9,15 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from backend.models.common import OkResponse
+
 
 class TosDocument(BaseModel):
     version: str
     text: str
 
 
-class ShareLoginResponse(BaseModel):
-    ok: bool = True
+class ShareLoginResponse(OkResponse):
     session_id: str
     name: str
     email: str
@@ -26,22 +27,20 @@ class ShareLoginResponse(BaseModel):
     redirect: str
 
 
-class ShareLogoutResponse(BaseModel):
-    ok: bool = True
+class ShareLogoutResponse(OkResponse):
+    pass
 
 
-class ShareAcknowledgeResponse(BaseModel):
-    ok: bool = True
+class ShareAcknowledgeResponse(OkResponse):
+    pass
 
 
-class ShareHeartbeatResponse(BaseModel):
-    ok: bool = True
+class ShareHeartbeatResponse(OkResponse):
     session_id: str
     last_active: str | float
 
 
-class ShareClaimResponse(BaseModel):
-    ok: bool = True
+class ShareClaimResponse(OkResponse):
     name: str | None = None
     email: str | None = None
     expires_at: str | None = None
