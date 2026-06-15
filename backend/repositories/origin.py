@@ -12,6 +12,7 @@ import duckdb
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
+    SectionTimer,
     _safe_table,
     empty_schema_response,
     origin_latency_us_expr,
@@ -989,10 +990,24 @@ def get_aggregates(
         table=table_name,
         where_clause=where_clause,
     )
+    # Per-phase wall-clock timings surface in the response under
+    # ``section_timings`` so the perf harness can attribute time inside
+    # /api/origin/aggregates without re-running ad-hoc instrumentation —
+    # mirrors the pattern used by dashboard.py, network.py, etc.
+    import time as _time
+
+    timer = SectionTimer()
+    section_timings = timer.entries
+
+    _t = _time.perf_counter()
     if not runner.create_temp_table(create_sql, params):
         return {**empty_payload, **runner.telemetry()}
+    timer.mark("temp_table_create", _t)
     try:
+        _t = _time.perf_counter()
         summary = _origin_summary_from_temp(runner, temp_table, actual_set)
+        timer.mark("summary", _t)
+        _t = _time.perf_counter()
         timeseries = _origin_timeseries_from_temp(
             runner,
             temp_table,
@@ -1002,11 +1017,22 @@ def get_aggregates(
             timeseries_metric,
             timeseries_percentile,
         )
+        timer.mark("timeseries", _t)
+        _t = _time.perf_counter()
         slow_urls = _origin_slow_urls_from_temp(runner, temp_table, actual_set, slow_urls_min_requests, slow_urls_limit)
+        timer.mark("slow_urls", _t)
+        _t = _time.perf_counter()
         status_codes = _origin_status_codes_from_temp(runner, temp_table, actual_set)
+        timer.mark("status_codes", _t)
+        _t = _time.perf_counter()
         path_breakdown = _origin_path_breakdown_from_temp(runner, temp_table, actual_set)
+        timer.mark("path_breakdown", _t)
+        _t = _time.perf_counter()
         pop_latency = _origin_pop_latency_from_temp(runner, temp_table, actual_set, pop_latency_limit)
+        timer.mark("pop_latency", _t)
+        _t = _time.perf_counter()
         ip_health = _origin_ip_health_from_temp(runner, temp_table, actual_set, ip_health_limit)
+        timer.mark("ip_health", _t)
 
         return {
             "has_data": summary.get("has_data", False),
@@ -1017,6 +1043,7 @@ def get_aggregates(
             "path_breakdown": path_breakdown,
             "pop_latency": pop_latency,
             "ip_health": ip_health,
+            "section_timings": section_timings,
             **runner.telemetry(),
         }
     finally:
