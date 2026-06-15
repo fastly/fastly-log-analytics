@@ -344,12 +344,15 @@ def get_cron_runs(
     # doesn't read total on the since_id branch (only the cron-history
     # page's full-load path uses it), and the writer-side lock contention
     # this query competes with happens precisely when delta polls are
-    # firing fastest. Caller opts out via with_total=False.
+    # firing fastest. Caller opts out via with_total=False. When skipped,
+    # ``total`` is filled in from ``len(entries)`` below so callers (and
+    # tests) see a truthful row count for the page they got back, rather
+    # than a misleading 0.
     if with_total:
         total_row = con.execute(f"SELECT count(*) AS n FROM cron_runs {where_sql}", params).fetchone()
         total = int(total_row["n"]) if total_row else 0
     else:
-        total = 0
+        total = None  # filled in after rows are fetched
 
     valid_sort_cols = {"started_at", "duration_s", "task", "status"}
     sort_col_safe = sort_col if sort_col in valid_sort_cols else "started_at"
@@ -385,6 +388,8 @@ def get_cron_runs(
         }
         for r in rows
     ]
+    if total is None:
+        total = len(entries)
     return total, entries
 
 
