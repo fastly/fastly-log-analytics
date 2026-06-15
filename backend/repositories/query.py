@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import time
 from typing import Any
@@ -98,16 +97,16 @@ def execute_query(
     result = con.execute(exec_sql)
     _t_fetch = time.perf_counter()
     timer.mark("execute", t0)
-    df = result.fetchdf()
-    timer.mark("fetchdf", _t_fetch)
+    arrow_table = result.fetch_arrow_table()
+    timer.mark("fetch_arrow", _t_fetch)
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
     _debug_queries.append({"sql": _compact_sql_for_debug(exec_sql.strip()), "time_ms": elapsed_ms})
 
-    fetched_rows = len(df)
+    fetched_rows = arrow_table.num_rows
     if is_simple_select:
         truncated = fetched_rows > max_rows
         if truncated:
-            df = df.head(max_rows)
+            arrow_table = arrow_table.slice(0, max_rows)
         # With the +1 trick we don't have an exact total. Report -1 as the
         # "unknown total" sentinel; frontend treats this as ``Showing N rows
         # (more available)``. Avoids the cost of re-running COUNT(*).
@@ -117,12 +116,18 @@ def execute_query(
         # materialized and is small by construction. Apply the cap defensively.
         truncated = fetched_rows > max_rows
         if truncated:
-            df = df.head(max_rows)
+            arrow_table = arrow_table.slice(0, max_rows)
         total_rows = fetched_rows
 
+    # Arrow → Python natives in one pass, sidestepping the prior
+    # ``df.to_json(...) → json.loads(...)`` round-trip (pandas serialised
+    # the full result to a JSON string only for us to parse it back into
+    # dicts before FastAPI re-serialised it for the wire). pyarrow's
+    # ``to_pylist`` materialises ``datetime.datetime`` for timestamps and
+    # ``None`` for nulls — both handled by the default JSON encoder.
     _t_serialize = time.perf_counter()
-    columns = list(df.columns)
-    records: list[dict[str, Any]] = json.loads(df.to_json(orient="records", date_format="iso"))
+    columns = list(arrow_table.schema.names)
+    records: list[dict[str, Any]] = arrow_table.to_pylist()
     timer.mark("serialize_json", _t_serialize)
 
     resp: dict[str, Any] = {
