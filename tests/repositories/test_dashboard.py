@@ -130,7 +130,10 @@ def test_get_aggregates_rollup_path_map_data_uses_per_field_limits(in_memory_duc
     # Track every execute_top_n_rollups call: (fields, limit, per_field_limits).
     calls: list[tuple] = []
 
-    def spy_top_n(self, fields, start_time, end_time, limit=10, per_field_limits=None, _phase_log=None):
+    def spy_top_n(self, fields, start_time, end_time, limit=10, per_field_limits=None, _phase_log=None, **_kwargs):
+        # **_kwargs absorbs new schema-seed kwargs (actual_cols, schema_types)
+        # added by perf commit 6e6a5f9 so this spy stays compatible with future
+        # signature growth without re-pinning the test on each plumbing change.
         calls.append((tuple(fields), limit, dict(per_field_limits or {})))
         # Return 12 country entries to confirm the panel caps at 10 but
         # map_data sees all 12.

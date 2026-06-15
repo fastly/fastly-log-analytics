@@ -22,6 +22,26 @@ import pytest
 from backend.core import metadata_db
 
 
+@pytest.fixture(autouse=True)
+def _clear_log_accounting_ttl_caches():
+    """Clear the module-level Fastly + DuckDB count caches between tests.
+
+    ``compute_log_accounting`` memoises both fetches by
+    ``(service, from_ts, to_ts, by)`` to silence repeated polls in prod.
+    Tests in this file share the same ``hours=4 by=hour`` window so the
+    second test to run would otherwise receive the FIRST test's mocked
+    payload from the TTL cache. Clear on both setUp and tearDown so the
+    leak can't bleed into unrelated test modules either.
+    """
+    from backend.routers.admin import log_accounting as _la
+
+    _la._FASTLY_COUNTS_CACHE.clear()
+    _la._DUCKDB_COUNTS_CACHE.clear()
+    yield
+    _la._FASTLY_COUNTS_CACHE.clear()
+    _la._DUCKDB_COUNTS_CACHE.clear()
+
+
 @pytest.fixture
 def log_accounting_source():
     return {

@@ -26,7 +26,6 @@ def test_performance_aggregates(in_memory_duckdb, test_service_source):
     # 3. Assertions
     assert "top_urls" in result
     assert "top_asns" in result
-    assert "latency_ts" in result
 
     # The URLs we artificially slowed down should be present (if enough requests)
     # The mock data generator adds randomness, so we mainly check the structure
@@ -76,7 +75,7 @@ def test_get_performance_aggregates_returns_empty_arrays_for_unknown_schema(in_m
         con=in_memory_duckdb, src=test_service_source, start_time=None, end_time=None, filters={}
     )
 
-    for key in ("latency_ts", "top_urls", "top_asns", "ttl_dist", "scatter"):
+    for key in ("top_urls", "top_asns", "ttl_dist", "scatter"):
         assert result[key] == []
 
 

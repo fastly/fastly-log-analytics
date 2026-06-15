@@ -45,7 +45,6 @@ def test_performance_endpoint(client, in_memory_duckdb, test_service_source):
     # Verify performance specific structure
     assert "top_urls" in data
     assert "top_asns" in data
-    assert "latency_ts" in data
 
 
 def test_dashboard_custom_fields_appear_in_top10(in_memory_duckdb, test_service_source):

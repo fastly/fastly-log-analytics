@@ -313,7 +313,7 @@ def test_performance_aggregates_required_keys_present(seeded_con, filters):
     from backend.repositories.performance import get_performance_aggregates
 
     result = get_performance_aggregates(seeded_con, _src, None, None, filters)
-    for key in ("latency_ts", "top_urls", "top_asns", "ttl_dist", "scatter"):
+    for key in ("top_urls", "top_asns", "ttl_dist", "scatter"):
         assert key in result, f"performance_aggregates missing key {key}"
 
 

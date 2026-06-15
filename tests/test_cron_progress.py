@@ -18,14 +18,22 @@ from backend import cron_progress
 
 @pytest.fixture(autouse=True)
 def _reset_progress_state():
-    """Clear the module-level dicts between tests — they're process-global."""
+    """Clear the module-level dicts between tests — they're process-global.
+
+    Includes ``_terminal_run_ids`` (the cron_runs terminal-state memo added
+    in perf commit 2e29ac3). Without clearing it, a test that observed
+    run_id=N as terminal would short-circuit subsequent tests that reuse
+    the same run_id with a non-terminal mock.
+    """
     cron_progress._progress.clear()
     cron_progress._last_update.clear()
     cron_progress._run_metadata.clear()
+    cron_progress._terminal_run_ids.clear()
     yield
     cron_progress._progress.clear()
     cron_progress._last_update.clear()
     cron_progress._run_metadata.clear()
+    cron_progress._terminal_run_ids.clear()
 
 
 # ── start_progress + add_progress ────────────────────────────────────────────

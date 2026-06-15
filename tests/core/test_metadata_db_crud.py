@@ -610,7 +610,11 @@ def test_get_usage_logs_aggregates_and_breaks_down_in_one_pass(sid):
     con.commit()
 
     _entries, total, agg = metadata_db.get_usage_logs(sid, "2026-05-25T00:00:00Z", "2026-05-25T23:59:59Z")
-    assert total == 6
+    # ``total`` is the sum of the ``count`` column across matched rows
+    # (2+3+1+5+7+4 = 22) — derived from the same grouped aggregate the
+    # agg.* fields are built from, so the page query doesn't need a
+    # separate COUNT(*). See usage_log.py:586-592 for the perf rationale.
+    assert total == 22
     assert agg["total_class_a"] == 6  # 2+3+1
     assert agg["total_class_b"] == 5
     assert agg["total_cdn_downloads"] == 11  # 7+4

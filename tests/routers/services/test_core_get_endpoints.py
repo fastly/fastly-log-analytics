@@ -18,7 +18,23 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tests.conftest import MOCK_SERVICE_ID
+
+
+@pytest.fixture(autouse=True)
+def _clear_cron_schedule_ttl_cache():
+    """``api_cron_schedule`` memoises by service_id with a 5 s TTL via a
+    module-level dict. Tests in this file all hit MOCK_SERVICE_ID within
+    that window so the second test would receive the first test's
+    payload — masking real route behaviour. Clear on enter and exit."""
+    from backend.routers.services import core as _core
+
+    _core._cron_schedule_cache.clear()
+    yield
+    _core._cron_schedule_cache.clear()
+
 
 # ── GET /services ───────────────────────────────────────────────────────────
 
