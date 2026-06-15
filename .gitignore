@@ -39,6 +39,7 @@ node_modules/
 .osv-scanner.toml
 
 /.antigravitycli
+/.agents/
 
 # Local Swival tool state (REPL history, per-session audit dirs). Per-user.
 .swival/
