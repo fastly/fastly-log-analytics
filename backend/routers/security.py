@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.models.common import FilteredRequest
@@ -19,7 +19,11 @@ class SecurityAggregatesRequest(FilteredRequest):
 
 @router.post("/aggregates", response_model=SecurityAggregatesResponse)
 @query_errors()
-def security_aggregates(req: SecurityAggregatesRequest, ctx: RequestContext = Depends(build_request_context)):
+def security_aggregates(
+    req: SecurityAggregatesRequest,
+    response: Response,
+    ctx: RequestContext = Depends(build_request_context),
+):
     res = repo.get_security_aggregates(
         con=ctx.con,
         src=ctx.source,
@@ -28,6 +32,11 @@ def security_aggregates(req: SecurityAggregatesRequest, ctx: RequestContext = De
         filters=req.filters,
         bucket_seconds=req.bucket_seconds,
     )
+    # 30-s edge cache + 120-s stale-while-revalidate. Aggregates are
+    # hourly-bucketed at minimum, so 30 s staleness is well inside
+    # what the UI already expects from the React Query layer. Range-
+    # tweak round-trips collapse from 3-14 s to near-zero.
+    response.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=120"
     return SecurityAggregatesResponse.with_telemetry(**res)
 
 
