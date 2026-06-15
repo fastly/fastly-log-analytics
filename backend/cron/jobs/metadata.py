@@ -259,13 +259,9 @@ def _run_metadata_sync(
     finally:
         end_progress(run_id)
 
-    if run_id is not None:
-        try:
-            from backend.core.duckdb import update_cron_duration
+    from backend.cron.jobs._common import finalize_cron_duration
 
-            update_cron_duration(src, run_id, time.time() - start_time_exec)
-        except Exception:
-            pass
+    finalize_cron_duration(src, run_id, start_time_exec)
 
     logger.info("⏹️  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job finished.", _display)
 
@@ -627,13 +623,9 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
             run_id=run_id,
         )
     finally:
-        if run_id is not None:
-            try:
-                from backend.core.duckdb import update_cron_duration
+        from backend.cron.jobs._common import finalize_cron_duration
 
-                update_cron_duration(src, run_id, time.monotonic() - start)
-            except Exception:
-                pass
+        finalize_cron_duration(src, run_id, start, clock=time.monotonic)
 
 
 # ── _run_metadata_cleanup ────────────────────────────────────────────────────

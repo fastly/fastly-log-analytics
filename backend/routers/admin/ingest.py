@@ -15,66 +15,26 @@ def ingest_endpoint(
     end_time: str | None = Query(default=None),
     source: dict = Depends(get_source),
 ) -> dict:
-    import threading
-
-    from fastapi import HTTPException
-
-    from backend.core.duckdb import start_cron_run
-    from backend.cron_progress import list_active_runs, start_progress
     from backend.repositories.dashboard import invalidate_service
     from backend.scheduler import _run_metadata_sync, _run_service_cron
+    from backend.utils.router_utils import start_or_resume_cron
 
     src = source
     invalidate_service(src["name"])
-    is_readonly = source.get("access_level") == "read_only"
-
-    if is_readonly:
-        try:
-            run_id = start_cron_run(source, "metadata_sync")
-            start_progress(run_id, service_id=source["name"], task="metadata_sync")
-            t = threading.Thread(
-                target=_run_metadata_sync,
-                args=(source["name"],),
-                kwargs={"run_id": run_id, "start_time": start_time, "end_time": end_time},
-                daemon=True,
-            )
-            t.start()
-        except RuntimeError as e:
-            run_id = None
-            for entry in list_active_runs():
-                if entry.get("service_id") == source["name"] and entry.get("task") == "metadata_sync":
-                    run_id = entry["run_id"]
-                    break
-            if run_id is None:
-                raise HTTPException(status_code=503, detail={"error": str(e), "busy": True})
-            return {"ok": True, "message": "Metadata sync already running.", "run_id": run_id}
-
-        return {"ok": True, "message": "Metadata sync started.", "run_id": run_id}
-
-    else:
-        try:
-            run_id = start_cron_run(src, "sync")
-            start_progress(run_id, service_id=src["name"], task="sync")
-            t = threading.Thread(
-                target=_run_service_cron,
-                args=(src["name"],),
-                kwargs={
-                    "force": True,
-                    "run_id": run_id,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                },
-                daemon=True,
-            )
-            t.start()
-        except RuntimeError as e:
-            run_id = None
-            for entry in list_active_runs():
-                if entry.get("service_id") == src["name"] and entry.get("task") == "sync":
-                    run_id = entry["run_id"]
-                    break
-            if run_id is None:
-                raise HTTPException(status_code=503, detail={"error": str(e), "busy": True})
-            return {"ok": True, "message": "Ingestion already running.", "run_id": run_id}
-
-        return {"ok": True, "message": "Ingestion started.", "run_id": run_id}
+    if source.get("access_level") == "read_only":
+        return start_or_resume_cron(
+            source,
+            "metadata_sync",
+            _run_metadata_sync,
+            target_kwargs={"start_time": start_time, "end_time": end_time},
+            success_msg="Metadata sync started.",
+            in_progress_msg="Metadata sync already running.",
+        )
+    return start_or_resume_cron(
+        src,
+        "sync",
+        _run_service_cron,
+        target_kwargs={"force": True, "start_time": start_time, "end_time": end_time},
+        success_msg="Ingestion started.",
+        in_progress_msg="Ingestion already running.",
+    )

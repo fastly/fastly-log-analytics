@@ -652,6 +652,47 @@ def _purge_surrogate_key(source: dict, key: str) -> None:
         logger.warning("[iceberg] CDN purge failed for surrogate key %s (non-fatal): %s", key, e)
 
 
+def _iceberg_root_prefix(source: dict) -> str:
+    """Return the FOS-root iceberg prefix for ``source`` (e.g.
+    ``"prefix/iceberg"`` or ``"iceberg"``).
+
+    The strip+conditional was hand-rolled at 4 sites in this file
+    (write_pointer, read_pointer, the read-pointer search-fallback,
+    register_table). Centralises the empty-prefix special case so a
+    future "default prefix" decision lands in one place.
+    """
+    base_prefix = source.get("prefix", "").strip("/")
+    return f"{base_prefix}/iceberg" if base_prefix else "iceberg"
+
+
+def _metadata_pointer_candidates(source: dict, namespace: str, table_name: str) -> list[str]:
+    """Slash- and dot-namespace variants for the metadata-pointer object key.
+
+    Some writers used ``namespace/table_name``, others ``namespace.table_name``
+    (the divergence pre-dates the standardisation on the slash form).
+    Readers try both so any historic on-disk shape resolves; writers use
+    the first variant.
+    """
+    root = _iceberg_root_prefix(source)
+    return [
+        f"{root}/{namespace}/{table_name}/metadata_location.txt",
+        f"{root}/{namespace}.{table_name}/metadata_location.txt",
+    ]
+
+
+def _metadata_search_prefixes(source: dict, namespace: str, table_name: str) -> list[str]:
+    """Slash- and dot-namespace variants for listing ``metadata.json`` files.
+
+    Same rationale as :func:`_metadata_pointer_candidates` — both variants
+    are tried by the discovery fallbacks (register_table + read_pointer).
+    """
+    root = _iceberg_root_prefix(source)
+    return [
+        f"{root}/{namespace}/{table_name}/metadata/",
+        f"{root}/{namespace}.{table_name}/metadata/",
+    ]
+
+
 def _write_metadata_pointer(source: dict, location: str, table=None) -> None:
     """Write a pointer to the latest metadata.json to FOS.
 
@@ -670,12 +711,13 @@ def _write_metadata_pointer(source: dict, location: str, table=None) -> None:
 
         s3 = _get_fos_client(source)
         bucket = source["bucket"]
-        base_prefix = source.get("prefix", "").strip("/")
         namespace, table_name = _table_identifier(source)
 
-        iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-        # Write to e.g. iceberg/default/logs/metadata_location.txt
-        pointer_key = f"{iceberg_root}/{namespace}/{table_name}/metadata_location.txt"
+        # Write to e.g. iceberg/default/logs/metadata_location.txt — the
+        # canonical slash-namespace variant. Readers try both this and the
+        # dot-namespace fallback (see ``_metadata_pointer_candidates``) so
+        # historic dot-form files keep resolving until they get rewritten.
+        pointer_key = _metadata_pointer_candidates(source, namespace, table_name)[0]
 
         s3.put_object(
             Bucket=bucket,
@@ -724,17 +766,12 @@ def _read_metadata_pointer(source: dict, identifier: tuple) -> str | None:
 
         s3 = _get_fos_client(source)
         bucket = source["bucket"]
-        base_prefix = source.get("prefix", "").strip("/")
         # SSRF guard: only follow ``cdn_url`` when it parses as an https
         # Fastly hostname. Otherwise fall through to the S3 SDK.
         cdn_url = _safe_cdn_url((source.get("cdn_url") or "").rstrip("/"))
         cdn_secret = source.get("cdn_secret") or ""
 
-        iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-        pointer_keys = [
-            f"{iceberg_root}/{namespace}/{table_name}/metadata_location.txt",
-            f"{iceberg_root}/{namespace}.{table_name}/metadata_location.txt",
-        ]
+        pointer_keys = _metadata_pointer_candidates(source, namespace, table_name)
 
         resolved: str | None = None
         for pointer_key in pointer_keys:
@@ -775,10 +812,7 @@ def _read_metadata_pointer(source: dict, identifier: tuple) -> str | None:
 
         if resolved is None:
             # Fallback: try listing the bucket
-            search_prefixes = [
-                f"{iceberg_root}/{namespace}/{table_name}/metadata/",
-                f"{iceberg_root}/{namespace}.{table_name}/metadata/",
-            ]
+            search_prefixes = _metadata_search_prefixes(source, namespace, table_name)
             for search_prefix in search_prefixes:
                 resp = s3.list_objects_v2(Bucket=bucket, Prefix=search_prefix)
                 metadata_files = [
@@ -882,14 +916,9 @@ def _try_register_from_fos(catalog, source: dict, identifier: tuple):
 
         s3 = _get_fos_client(source)
         bucket = source["bucket"]
-        base_prefix = source.get("prefix", "").strip("/")
         _, table_name = identifier
 
-        iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-        search_prefixes = [
-            f"{iceberg_root}/{namespace}/{table_name}/metadata/",
-            f"{iceberg_root}/{namespace}.{table_name}/metadata/",
-        ]
+        search_prefixes = _metadata_search_prefixes(source, namespace, table_name)
 
         for search_prefix in search_prefixes:
             resp = s3.list_objects_v2(Bucket=bucket, Prefix=search_prefix)

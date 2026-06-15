@@ -20,6 +20,76 @@ from fastapi import HTTPException
 logger = logging.getLogger(__name__)
 
 
+def start_or_resume_cron(
+    source: dict,
+    task: str,
+    target,
+    *,
+    target_kwargs: dict | None = None,
+    success_msg: str = "",
+    in_progress_msg: str = "",
+) -> dict:
+    """Start a cron task in a daemon thread; resume the active run if already
+    in progress; surface 503 with ``busy: True`` if neither path matches.
+
+    Consolidates the 3 hand-rolled copies of this routine across
+    ``backend.routers.admin.ingest`` (metadata_sync + sync) and
+    ``backend.routers.admin.iceberg`` (commit). Each used to duplicate the
+    same ``try: start_cron_run -> spawn thread -> return {ok}; except
+    RuntimeError: scan list_active_runs -> return {ok, in_progress_msg};
+    else: raise HTTPException(503)`` shape with only the task name +
+    target kwargs varying.
+    """
+    import threading
+
+    from backend.core.duckdb import start_cron_run
+    from backend.cron_progress import list_active_runs, start_progress
+
+    service_id = source["name"]
+    try:
+        run_id = start_cron_run(source, task)
+        start_progress(run_id, service_id=service_id, task=task)
+        threading.Thread(
+            target=target,
+            args=(service_id,),
+            kwargs={"run_id": run_id, **(target_kwargs or {})},
+            daemon=True,
+        ).start()
+        return {"ok": True, "message": success_msg, "run_id": run_id}
+    except RuntimeError as e:
+        for entry in list_active_runs():
+            if entry.get("service_id") == service_id and entry.get("task") == task:
+                return {"ok": True, "message": in_progress_msg, "run_id": entry["run_id"]}
+        raise HTTPException(status_code=503, detail={"error": str(e), "busy": True}) from e
+
+
+def load_service_config(service_id: str) -> dict:
+    """Load a service's config or raise :class:`HTTPException` 404.
+
+    The ``cfg = svcconfig.load_config(service_id); if not cfg: raise
+    HTTPException(404, ...)`` preamble was written 16+ times across the
+    router tree with two existing drift cases (a ``raise ValueError`` at
+    services/core.py:87, a JSON-encoded SSE error yield at
+    services/core.py:874). One funnel removes both drift surfaces and
+    the per-call boilerplate.
+
+    Callers that intentionally want the "empty-dict fallback on missing
+    config" semantic (``load_config(service_id) or {}``) should keep
+    calling ``load_config`` directly — this helper is for the strict
+    "service must exist or 404" path that is the common case in
+    request-time routes.
+    """
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id)
+    if not cfg:
+        # Keep the exact ``detail={"error": "Service not found"}`` shape
+        # the migrated callers used — frontend code keys on this exact
+        # message via ``error.detail.error === "Service not found"``.
+        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    return cfg
+
+
 def raise_internal(
     log: Logger,
     exc: BaseException,

@@ -14,6 +14,7 @@ from backend.deps import get_service_id, get_source
 from backend.models.services import LogFieldsUpdateRequest, ServicesListResponse
 from backend.repositories._base import SectionTimer
 from backend.utils.router_utils import SSE_HEADERS as _SSE_HEADERS
+from backend.utils.router_utils import load_service_config
 from backend.utils.router_utils import sse_flush_preamble as _sse_flush
 
 router = APIRouter(prefix="/api", tags=["services"])
@@ -141,9 +142,7 @@ def api_service_clear_time_range(service_id: str):
     """
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     prov = cfg.get("provisioning", {})
     if "time_range" not in prov:
         return {"ok": True, "message": "No time_range was set."}
@@ -361,9 +360,7 @@ def api_service_update_credentials(request: Request, service_id: str, body: dict
         if service_id not in set(analyst_session.service_ids or []):
             raise HTTPException(status_code=403, detail={"error": "Access denied"})
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     is_admin = cfg.get("access_level") == "read_write"
     region = cfg.get("fos_region", "us-east-1")
     bucket = cfg.get("fos_bucket", "")
@@ -437,9 +434,7 @@ def api_service_update_credentials(request: Request, service_id: str, body: dict
 def api_service_rename(service_id: str, body: dict):
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     name = body.get("name", "").strip()
     if not name:
         raise HTTPException(status_code=400, detail={"error": "Name is required"})
@@ -475,8 +470,6 @@ def api_service_logging_settings(service_id: str):
     import time as _time
     import urllib.parse
 
-    from backend import config as svcconfig
-
     # Per-phase wall-clock for the two-three Fastly API round-trips this
     # endpoint makes. Per perf audit /api/services/{service_id}/logging-
     # settings is ~742 ms on the alerts page; section_timings tells us
@@ -494,9 +487,7 @@ def api_service_logging_settings(service_id: str):
             **cached_fields,
         )
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     token = cfg.get("fastly_api_key", "")
     endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
     try:
@@ -581,13 +572,10 @@ from backend.models.services import LogFieldsResponse
 @router.get("/services/{service_id}/log-fields", response_model=LogFieldsResponse)
 def api_service_log_fields_get(service_id: str):
 
-    from backend import config as svcconfig
     from backend.core import duckdb as _db
     from backend.core import field_registry as lf
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     log_fields_config = lf.get_lf_config(cfg)
     if not log_fields_config.get("groups"):
         log_fields_config = {"groups": lf.PRESETS["standard"]["groups"], "field_overrides": {}}
@@ -651,9 +639,7 @@ def api_service_log_fields_set(service_id: str, body: LogFieldsUpdateRequest):
     from backend import config as svcconfig
     from backend.core import field_registry as lf
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     new_lf = body.log_fields
     if not new_lf:
         raise HTTPException(status_code=400, detail={"error": "log_fields is required"})
@@ -723,9 +709,7 @@ def api_service_update_logging_settings(
 ):
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     prov = cfg.setdefault("provisioning", {})
     old_period = int(cfg.get("log_period", 60))
     old_sample_rate = int(prov.get("sample_rate", 100))
@@ -963,11 +947,8 @@ from backend.models.custom_fields import (
 
 @router.get("/services/{service_id}/custom-fields", response_model=CustomFieldsListResponse)
 def api_list_custom_fields(service_id: str):
-    from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     from backend.core import field_registry as lf_module
 
     lf = lf_module.get_lf_config(cfg)
@@ -1022,9 +1003,7 @@ def api_create_custom_field(service_id: str, body: CustomFieldCreate):
     from backend import provision
     from backend.core import field_registry as lf_module
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
     existing = lf.get("custom_fields", [])
     existing_names = [cf["name"] for cf in existing]
@@ -1070,9 +1049,7 @@ def api_update_custom_field(service_id: str, field_name: str, body: CustomFieldU
     from backend.core import duckdb as _db
     from backend.core import field_registry as lf_module
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
     existing = lf.get("custom_fields", [])
     idx = next((i for i, cf in enumerate(existing) if cf["name"] == field_name), None)
@@ -1148,9 +1125,7 @@ def api_delete_custom_field(service_id: str, field_name: str):
     from backend import config as svcconfig
     from backend.core import field_registry as lf_module
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
     existing = lf.get("custom_fields", [])
     field = next((cf for cf in existing if cf["name"] == field_name), None)
@@ -1176,13 +1151,10 @@ def api_delete_custom_field(service_id: str, field_name: str):
 
 @router.post("/services/{service_id}/custom-fields/validate-vcl", response_model=VclLintResponse)
 def api_validate_custom_vcl(service_id: str, body: VclLintRequest):
-    from backend import config as svcconfig
     from backend import provision
     from backend.core import field_registry as lf_module
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
     candidate = {
         "name": "lint_check",
@@ -1216,12 +1188,9 @@ def api_validate_custom_vcl(service_id: str, body: VclLintRequest):
 def api_export_custom_fields(service_id: str):
     import json
 
-    from backend import config as svcconfig
     from backend.core import field_registry as lf_module
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
     return StreamingResponse(
         iter([json.dumps({"custom_fields": lf.get("custom_fields", [])})]),
@@ -1238,9 +1207,7 @@ def api_import_custom_fields(service_id: str, body: dict):
     from backend import provision
     from backend.core import field_registry as lf_module
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
     fields_to_import = body.get("custom_fields", [])
     if not isinstance(fields_to_import, list):
         raise HTTPException(status_code=400, detail={"error": "custom_fields must be a list"})

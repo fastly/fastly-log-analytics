@@ -489,21 +489,21 @@ def _run_service_cron(
         )
 
     # ── 5. Final duration record ──────────────────────────────────────────────
-    if (sync_enabled or force) and run_id is not None:
-        try:
-            from backend.core.duckdb import update_cron_duration
+    # The initial log_cron_run snapshot was taken before phases 1.5-4 (view
+    # refresh, refresh_config_status, cache invalidate, usage_log) emitted
+    # their per-phase timing events — refresh log_output too. silent=False
+    # so a failed update surfaces in the log stream (other cron jobs swallow,
+    # but sync is the high-frequency tick where divergence matters).
+    if sync_enabled or force:
+        from backend.cron.jobs._common import finalize_cron_duration
 
-            # Refresh log_output too — the initial log_cron_run snapshot was
-            # taken before phases 1.5-4 (view refresh, refresh_config_status,
-            # cache invalidate, usage_log) emitted their per-phase timing events.
-            update_cron_duration(
-                src,
-                run_id,
-                time.time() - start_time_exec,
-                log_output=_extract_log_text(run_id),
-            )
-        except Exception as e:
-            logger.warning("Failed to update full cron duration: %s", e)
+        finalize_cron_duration(
+            src,
+            run_id,
+            start_time_exec,
+            log_output=_extract_log_text(run_id) if run_id is not None else None,
+            silent=False,
+        )
 
     logger.info("⏹️  \x1b[94m[sync]\x1b[0m %s: Sync job finished.", _display)
 

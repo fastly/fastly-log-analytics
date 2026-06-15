@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import Depends, HTTPException, Query
+from fastapi import Depends, Query
 from fastapi.responses import StreamingResponse
 
 from backend.deps import get_source
@@ -83,11 +83,10 @@ def update_metadata_retention(body: dict, source: dict = Depends(get_source)):
     from backend import config as svcconfig
     from backend.core import metadata_db as _mdb
     from backend.core.metadata_db import DEFAULT_METADATA_RETENTION
+    from backend.utils.router_utils import load_service_config
 
     service_id = source["name"]
-    cfg = svcconfig.load_config(service_id)
-    if cfg is None:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
 
     from backend.core.metadata_db import is_ingested_files_dedup_active
 

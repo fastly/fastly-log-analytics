@@ -37,33 +37,17 @@ def iceberg_calendar_endpoint(source: dict = Depends(get_source)):
 @router.post("/admin/commit-iceberg")
 def iceberg_commit_endpoint(source: dict = Depends(get_source)):
     """Manually flush the local buffer to the Iceberg table."""
-    import threading
-
-    from backend.core.duckdb import start_cron_run
     from backend.scheduler import _run_commit
+    from backend.utils.router_utils import start_or_resume_cron
 
-    try:
-        run_id = start_cron_run(source, "commit")
-        from backend.cron_progress import start_progress
-
-        start_progress(run_id, service_id=source["name"], task="commit")
-        t = threading.Thread(
-            target=_run_commit, args=(source["name"],), kwargs={"force": True, "run_id": run_id}, daemon=True
-        )
-        t.start()
-        return {"ok": True, "message": "Commit started.", "run_id": run_id}
-
-    except RuntimeError as e:
-        from backend.cron_progress import list_active_runs
-
-        run_id = None
-        for entry in list_active_runs():
-            if entry.get("service_id") == source["name"] and entry.get("task") == "commit":
-                run_id = entry["run_id"]
-                break
-        if run_id is None:
-            raise HTTPException(status_code=503, detail={"error": str(e), "busy": True})
-        return {"ok": True, "message": "Commit already running.", "run_id": run_id}
+    return start_or_resume_cron(
+        source,
+        "commit",
+        _run_commit,
+        target_kwargs={"force": True},
+        success_msg="Commit started.",
+        in_progress_msg="Commit already running.",
+    )
 
 
 @router.post("/admin/rebuild-local-view")

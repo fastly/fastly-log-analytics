@@ -1008,10 +1008,9 @@ def provision_set_ngwaf_workspace(
 
     from backend import config as svcconfig
     from backend.utils.fastly_auth import validate_destructive_token
+    from backend.utils.router_utils import load_service_config
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
 
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[len("bearer ") :].strip()

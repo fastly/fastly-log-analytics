@@ -127,12 +127,8 @@ def _run_optimize(service_id: str) -> None:
     finally:
         end_progress(run_id)
 
-    if run_id is not None:
-        try:
-            from backend.core.duckdb import update_cron_duration
+    from backend.cron.jobs._common import finalize_cron_duration
 
-            update_cron_duration(src, run_id, time.time() - start_time)
-        except Exception:
-            pass
+    finalize_cron_duration(src, run_id, start_time)
 
     logger.info("⏹️  \x1b[92m[optimize]\x1b[0m %s: Optimize job finished.", _display)

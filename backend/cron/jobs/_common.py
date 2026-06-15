@@ -46,3 +46,41 @@ def refresh_view_and_warm_pool(
             )
     except Exception as e:
         logger.warning("[scheduler] %s: post-%s view refresh failed: %s", service_id, log_prefix.strip(": "), e)
+
+
+def finalize_cron_duration(
+    src: dict,
+    run_id: int | None,
+    t_start: float,
+    *,
+    log_output: str | None = None,
+    silent: bool = True,
+    clock: Callable[[], float] = time.time,
+) -> None:
+    """Update the cron-run row's ``duration_s`` (and optionally ``log_output``).
+
+    Shared by the five ``backend/cron/jobs/*`` modules whose ``finally:``
+    blocks all ended in the same six-line ``if run_id is not None: try: ...
+    update_cron_duration(...) except: pass``. The two variations live as
+    keyword args: ``log_output`` is set on the sync job (the initial
+    log_cron_run snapshot pre-dates phases 1.5-4), and ``silent`` controls
+    whether a failed update logs a warning (sync) or stays quiet (commit,
+    optimize, metadata).
+
+    ``clock`` is injected so the metadata-cleanup site that times with
+    ``time.monotonic()`` keeps that semantic without forcing every caller
+    onto monotonic.
+    """
+    if run_id is None:
+        return
+    try:
+        elapsed = clock() - t_start
+        from backend.core.duckdb import update_cron_duration
+
+        if log_output is not None:
+            update_cron_duration(src, run_id, elapsed, log_output=log_output)
+        else:
+            update_cron_duration(src, run_id, elapsed)
+    except Exception as e:
+        if not silent:
+            logger.warning("Failed to update full cron duration: %s", e)
