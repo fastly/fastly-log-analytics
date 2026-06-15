@@ -5,6 +5,93 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Cleanup
+
+Post-2.0.0 cleanup sweep applying an in-tree audit's recommendations.
+The pattern across the work was the same on every front: kill the dual
+maintenance that survived the package carve-up.
+
+- **Three SQLite pools collapse into one.** `metadata.base`,
+  `metadata.usage_log_db`, and `share_db.connection` all owned
+  identical thread-local pool machinery (same module globals, same
+  PRAGMAs, same init lock). They now share `ThreadLocalPool` in
+  `backend/core/sqlite_pool.py`. share_db queries flow through
+  `InstrumentedConnection` for the first time — they now appear in
+  the Live Query Monitor under `service=__global_share__`.
+- **Origin summary's per-query templates collapse into one path.**
+  `TEMP_SUMMARY_ROLLUP` + `TEMP_SUMMARY_BY_EDGE` are gone; the live
+  and TEMP-table paths both use `SUMMARY_GROUPING_SETS` through a
+  shared `_shape_summary` helper that reads rows by column name
+  (`cursor.description` dict access) instead of positional indices.
+- **Cron job tails consolidated.** Five `finally:` blocks ending in
+  the same `if run_id: update_cron_duration ... except: pass`
+  boilerplate route through `finalize_cron_duration`. The 16+
+  `load_config / 404` preambles funnel through `load_service_config`.
+  Three `start_cron_run → spawn-thread → 503` triples collapse into
+  one `start_or_resume_cron`. Per-hour bundle walks
+  (`collect_hourly_bundle_paths`) and the two cross-package migration
+  runners (`run_pending_migrations`) get the same treatment.
+- **Mixins + helpers for the small repeated shapes.**
+  `LogExtentsMixin` (`earliest_log_at` + `latest_log_at`),
+  `OkResponse` (`ok: bool = True`), `_atomic_write_json`,
+  `_get_cfg_field`, `client_ip`, `shim_attr`, plus iceberg
+  `_iceberg_root_prefix` + `_metadata_pointer_candidates`.
+
+### Fixed
+
+- `start_proxy_server` race that surfaced as
+  "proxy server is not running" when N reader threads called
+  `get_connection` simultaneously on a cold process. Concurrent
+  first-callers now serialise the thread-start decision and wait
+  on `_READY` outside the lock so every caller reads `_PORT` after
+  the server has bound.
+- `get_metadata_storage_stats` + `cleanup_metadata` silently
+  ignored the `usage_log` table on every fresh service after
+  the v2.0 per-service-file split — the helpers still read
+  `metadata.db`. Routed through `usage_log_db` so admin storage
+  stats and the retention cleanup job actually see the rows.
+- `sync.py` cron tail used to emit a misleading
+  "View refresh + warm: Xms" status event even on failure (the
+  success log sat outside the try/except). The shared
+  `refresh_view_and_warm_pool` puts the success log inside the
+  try/except so failure means no event.
+- `start_cron_run` non-sync task types fell back to
+  `cron_compact.log_retention_days` via a buggy ternary; the
+  promoted `_TASK_TO_CRON_KEY` mapping plus a default 7-day
+  fallback gets the correct retention applied per task.
+- `query_instrumentation._safe_weakref` silently no-op'd the
+  memory probe when wrapping non-weakref-able cursors; promoted
+  the registry-version's strong-ref-closure fallback so the probe
+  always tracks.
+- `local_compaction` hour-tier tests were flaky on any clock more
+  than 30 days past the hardcoded sample dates — the fixture now
+  pins both `_DAILY_TIER_AGE_DAYS` and `_WEEKLY_TIER_AGE_DAYS` so
+  neither tier sweeps the test partitions out from under the
+  assertions.
+
+### Removed
+
+- `backend/utils/retry.py`, `backend/utils/cdn.py`,
+  `backend/core/settings.py` (Path-B removal of three migration
+  scaffolds that never adopted in tree). `pydantic-settings`
+  dropped from `pyproject.toml` + `uv.lock` (was the sole
+  consumer).
+- Legacy `usage_log` DDL + 3 triggers + 4 indexes in
+  `metadata.base._SCHEMA` (the table moved to its own per-service
+  file pre-2.0). `migrate_from_metadata_db` and
+  `_migration_003_rebuild_usage_log_hourly_summary` deleted.
+- Scrypt passcode verify path + `PASSCODE_DEFAULT_ALGO_KEY` +
+  `_migration_003_passcode_algo_marker` (cutover happened
+  pre-2.0; fresh installs have no scrypt rows).
+- `TunnelState.use_tunnel` + `tunnel_url` + the
+  `share_admin` response keys that exposed them (always
+  False/None since v2.0 deleted the SSH path).
+- Per-checkin `_cleanup_temp_tables` sweep in `duckdb_pool` —
+  the "safety net" was unreachable because the failure path
+  discards the connection before the sweep can run.
+
 ## [2.0.0] - 2026-06-12
 
 Architecture cleanup release. The post-`v1.2.0` perf branch closed the

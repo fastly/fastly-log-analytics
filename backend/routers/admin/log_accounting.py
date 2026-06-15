@@ -6,6 +6,7 @@ and the gap-heal cron in scheduler.py — see those module's imports.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 from fastapi import Depends, HTTPException, Query
@@ -20,6 +21,22 @@ from backend.models.admin import (
 )
 
 from ._router import router
+
+# Short-TTL memo for the Fastly Stats API fetch (the dominant cost
+# inside compute_log_accounting: ~1.8 s p95). Key includes the (already
+# hour-aligned) from_ts/to_ts so different windows don't collide; the
+# admin UsageChart polls at 60 s and the React Query layer staleTime is
+# 30 s, so a 30 s server-side TTL is well inside any user-visible
+# staleness budget and removes the spinner feel.
+_FASTLY_COUNTS_TTL = 30.0
+_FASTLY_COUNTS_CACHE: dict[tuple[str, int, int, str], tuple[float, tuple[dict[str, int], str | None]]] = {}
+
+# Same TTL on the per-bucket DuckDB COUNT(*) since the function arguments
+# are functions of (service name, window, by) and the answer is stable
+# for the same input within the TTL window. Keyed on the same shape so a
+# single round of clears would invalidate both halves of the response.
+_DUCKDB_COUNTS_TTL = 30.0
+_DUCKDB_COUNTS_CACHE: dict[tuple[str, int, int, str], tuple[float, dict[str, int]]] = {}
 
 
 @router.post("/admin/backfill-window")
@@ -47,11 +64,21 @@ def _fetch_fastly_log_counts(
     Bucket key is the UTC ISO string at the same width the local SQL bucket
     uses (`YYYY-MM-DDTHH` for hour, `YYYY-MM-DD` for day) so the outer-join
     in api_log_accounting can key on string equality directly.
+
+    Memoised for ``_FASTLY_COUNTS_TTL`` s on
+    ``(logging_svc_id, from_ts, to_ts, by)``. Inputs are hour-aligned, so
+    repeats from the admin poll loop (every 30-60 s) hit cache.
     """
     import logging
     from datetime import UTC, datetime
 
     from backend.core.fastly.client import fastly
+
+    cache_key = (logging_svc_id, from_ts, to_ts, by)
+    now_mono = time.monotonic()
+    cached = _FASTLY_COUNTS_CACHE.get(cache_key)
+    if cached is not None and (now_mono - cached[0]) < _FASTLY_COUNTS_TTL:
+        return cached[1]
 
     payload = fastly(
         "GET",
@@ -83,7 +110,9 @@ def _fetch_fastly_log_counts(
             )
             missing_logged = True
         out[bucket] = out.get(bucket, 0) + chosen
-    return out, field_used
+    result = (out, field_used)
+    _FASTLY_COUNTS_CACHE[cache_key] = (now_mono, result)
+    return result
 
 
 # Sustained-loss thresholds — referenced by both api_log_accounting (so the
@@ -108,6 +137,17 @@ def _duckdb_row_counts_per_bucket(source: dict, start: datetime, end: datetime, 
     from backend.core import duckdb as _ddb
     from backend.deps import _ConnectionHolder
 
+    cache_key = (
+        source.get("name", ""),
+        int(start.timestamp()),
+        int(end.timestamp()),
+        by,
+    )
+    now_mono = time.monotonic()
+    cached = _DUCKDB_COUNTS_CACHE.get(cache_key)
+    if cached is not None and (now_mono - cached[0]) < _DUCKDB_COUNTS_TTL:
+        return cached[1]
+
     table_name = _ddb._safe_table_name(source["name"])
     # Bucket key MUST match metadata_db.get_log_accounting_counts: hourly
     # uses ``YYYY-MM-DDTHH`` (T separator, from the .log.gz basename's
@@ -128,7 +168,9 @@ def _duckdb_row_counts_per_bucket(source: dict, start: datetime, end: datetime, 
                 f"  AND timestamp <  TIMESTAMP '{end_iso}' "
                 f"GROUP BY 1"
             ).fetchall()
-        return {b: int(n) for b, n in rows}
+        result = {b: int(n) for b, n in rows}
+        _DUCKDB_COUNTS_CACHE[cache_key] = (now_mono, result)
+        return result
     except Exception as e:
         import logging as _logging
 
