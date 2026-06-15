@@ -54,7 +54,7 @@ export default function SessionsPage() {
         }, [startTime, endTime])
 
         const qc = useQueryClient()
-        const { labelBySid, labels } = useScoringLabels(activeServiceId || '', {
+        const { labelBySid, idBySid, labels } = useScoringLabels(activeServiceId || '', {
           enabled: !!activeServiceId,
         })
         const onFlagged = React.useCallback(() => {
@@ -125,6 +125,7 @@ export default function SessionsPage() {
               isFetching={isFetching}
               labels={labels}
               labelBySid={labelBySid}
+              idBySid={idBySid}
               onFlagged={onFlagged}
               onRowClick={setSelectedSession}
             />

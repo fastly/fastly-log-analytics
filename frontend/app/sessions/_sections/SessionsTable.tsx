@@ -27,6 +27,7 @@ interface SessionsTableProps {
   isFetching: boolean
   labels: LabelRow[]
   labelBySid: Map<string, LabelValue>
+  idBySid: Map<string, string>
   onFlagged: () => void
   onRowClick: (row: SessionRow) => void
 }
@@ -38,6 +39,7 @@ export function SessionsTable({
   isFetching,
   labels,
   labelBySid,
+  idBySid,
   onFlagged,
   onRowClick,
 }: SessionsTableProps) {
@@ -159,7 +161,6 @@ export function SessionsTable({
         cell: ({ row }) => {
           const sid = row.original.edge_sid ?? undefined
           if (!sid) return null
-          const labelRow = labels.find((l) => l.sid === sid)
           return (
             <FlagSessionPopover
               serviceId={activeServiceId || ''}
@@ -167,7 +168,7 @@ export function SessionsTable({
               sampleIp={row.original.ip}
               sampleUa={row.original.ua ?? undefined}
               currentLabel={labelBySid.get(sid) ?? null}
-              currentLabelId={labelRow?.id ?? null}
+              currentLabelId={idBySid.get(sid) ?? null}
               onFlagged={onFlagged}
             />
           )
@@ -186,7 +187,7 @@ export function SessionsTable({
     })
 
     return cols
-  }, [data, relative, full, abbr, labels, labelBySid, activeServiceId, onFlagged, onRowClick])
+  }, [data, relative, full, abbr, labels, labelBySid, idBySid, activeServiceId, onFlagged, onRowClick])
 
   return (
     <div className={cn("border rounded-lg transition-opacity duration-100", isFetching && !isLoadingInitial && "opacity-40 pointer-events-none")}>

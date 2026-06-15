@@ -24,6 +24,10 @@ export interface ScoringLabelsResult {
   labels: LabelRow[]
   counts: Record<LabelValue, number>
   labelBySid: Map<string, LabelValue>
+  /** sid → label id, for callers that need the row id (delete / patch
+   *  paths). Avoids the per-row labels.find(l => l.sid === sid) scan
+   *  the SessionsTable Flag column was doing on every render. */
+  idBySid: Map<string, string>
   isLoading: boolean
   isFetching: boolean
 }
@@ -55,16 +59,21 @@ export function useScoringLabels(serviceId: string, opts: Opts = {}): ScoringLab
     },
   })
 
-  const labelBySid = React.useMemo(() => {
-    const m = new Map<string, LabelValue>()
-    for (const l of q.data?.labels ?? []) m.set(l.sid, l.label)
-    return m
+  const { labelBySid, idBySid } = React.useMemo(() => {
+    const lab = new Map<string, LabelValue>()
+    const id = new Map<string, string>()
+    for (const l of q.data?.labels ?? []) {
+      lab.set(l.sid, l.label)
+      id.set(l.sid, l.id)
+    }
+    return { labelBySid: lab, idBySid: id }
   }, [q.data])
 
   return {
     labels: q.data?.labels ?? [],
     counts: q.data?.counts ?? { good: 0, bad: 0, neutral: 0 },
     labelBySid,
+    idBySid,
     isLoading: q.isLoading,
     isFetching: q.isFetching,
   }
