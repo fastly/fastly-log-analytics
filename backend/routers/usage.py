@@ -306,7 +306,10 @@ async def prefill(source: dict = Depends(get_source)):
             # Wrapped in asyncio.to_thread so this sync I/O doesn't block
             # the event loop now that prefill is an async handler.
             def _edge_ratio_blocking() -> tuple:
-                con = get_connection(source=source, max_wait=5, read_only=True)
+                # EDGE_RATIO is a coarse count-filter; a few seconds of
+                # view-resolution staleness is fine here, so skip the
+                # rebind step on this code path (saves ~80-150 ms/call).
+                con = get_connection(source=source, max_wait=5, read_only=True, skip_view_update=True)
                 try:
                     return repo.get_edge_ratio(con, source)
                 finally:
