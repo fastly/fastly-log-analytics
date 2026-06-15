@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 import duckdb
@@ -11,7 +13,74 @@ from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
 from backend.repositories._sql import network as SQL
 from backend.repositories.utils.filters import build_where_clause
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.geo import format_city_label
+
+# ── Response memo cache ───────────────────────────────────────────────────────
+# /api/network-health does a per-request TEMP TABLE build (19 cols, multi-second
+# on 30d windows) followed by 6+ aggregate scans. Re-renders triggered by
+# mapAsn toggle / filter tweak / refetch tick re-do the entire pipeline even
+# when (src, start_time, end_time, filters, bucket_seconds, top_n, map_asn) is
+# unchanged. Same standing rule as origin's response cache: "a little behind
+# the data" beats "redo the cloud read" — 30 s is well below ingest cadence.
+_RESPONSE_CACHE_TTL = 30.0
+_RESPONSE_CACHE_MAXSIZE = 128
+_response_cache: BoundedTTLCache = BoundedTTLCache(maxsize=_RESPONSE_CACHE_MAXSIZE, ttl_seconds=_RESPONSE_CACHE_TTL)
+
+
+def _bucket_time_to_minute(ts: str | None) -> str | None:
+    if not ts or len(ts) < 16:
+        return ts
+    return ts[:16]
+
+
+def _response_cache_key(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    metric: str,
+    bucket_seconds: int,
+    top_n: int,
+    map_asn: str,
+) -> str:
+    serialised_filters = {
+        k: (getattr(v, "mode", None), sorted(str(x) for x in (getattr(v, "values", None) or [])))
+        for k, v in sorted((filters or {}).items())
+    }
+    payload = json.dumps(
+        {
+            "s": _bucket_time_to_minute(start_time),
+            "e": _bucket_time_to_minute(end_time),
+            "f": serialised_filters,
+            "metric": metric,
+            "bs": bucket_seconds,
+            "tn": top_n,
+            "ma": map_asn,
+        },
+        separators=(",", ":"),
+        default=str,
+    )
+    svc = src.get("name") or src.get("service_id") or ""
+    return hashlib.sha256(f"{payload}:{svc}".encode()).hexdigest()
+
+
+def _response_cache_get(key: str) -> dict | None:
+    cached = _response_cache.get(key)
+    if cached is None:
+        return None
+    result = cached.copy()
+    result["is_cached"] = True
+    return result
+
+
+def _response_cache_put(key: str, value: dict) -> None:
+    sanitised = {
+        k: v
+        for k, v in value.items()
+        if k not in ("debug_queries", "debug_calls", "is_cached", "_is_cached", "section_timings")
+    }
+    _response_cache[key] = sanitised
 
 
 def _avg_hs(buckets_data: dict, keys: list[str]) -> float | None:
@@ -58,6 +127,16 @@ def get_health(
     # without ad-hoc instrumentation. Mirrors dashboard.py.
     timer = SectionTimer()
     section_timings = timer.entries
+
+    # Short-TTL response memo (30 s). Cuts the mapAsn toggle / filter
+    # tweak / refetch tick cost from the full ~13 s 30d pipeline to
+    # ~50 µs. Cache key excludes section_timings + debug envelope so
+    # the per-request telemetry stays request-scoped.
+    cache_key = _response_cache_key(src, start_time, end_time, filters, metric, bucket_seconds, top_n, map_asn)
+    cached = _response_cache_get(cache_key)
+    if cached is not None:
+        runner = QueryRunner(con, src)
+        return {**cached, **runner.telemetry()}
 
     table_name = _safe_table(src["name"])
 
@@ -512,7 +591,7 @@ def get_health(
                 label = format_city_label(wc.get("city"), wc["country"])
                 worst_country = {"label": label, "score": wc["health_score"]}
 
-        return {
+        payload = {
             "available": True,
             "metric": metric,
             "bucket_seconds": bucket_seconds,
@@ -533,6 +612,8 @@ def get_health(
             "section_timings": section_timings,
             **runner.telemetry(),
         }
+        _response_cache_put(cache_key, payload)
+        return payload
 
     finally:
         try:
