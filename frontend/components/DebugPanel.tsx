@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { useDebugStore } from '@/stores/debugStore'
 import { Button } from '@/components/ui/button'
@@ -21,6 +21,14 @@ export function DebugPanel() {
   const queryClient = useQueryClient()
   const [queries, setQueries] = useState<any[]>([])
   const [calls, setCalls] = useState<any[]>([])
+  // Mirror the latest state inside the subscribe callback so we can bail
+  // out when the new extraction is semantically equal. Every cache event
+  // (sqliteQuery's 5s poll + every API response) used to re-create the
+  // arrays and call setQueries/setCalls with fresh references, which
+  // re-rendered, which re-fired the cache subscribers, which looped to
+  // "Maximum update depth exceeded" in dev.
+  const queriesRef = useRef<any[]>([])
+  const callsRef = useRef<any[]>([])
 
   // SQLite ring-buffer poll. Only active when SQL debug is on AND the
   // browser tab is focused (skip when hidden). Refetched every 5s — was
@@ -51,11 +59,28 @@ export function DebugPanel() {
 
   useEffect(() => {
     if (!enabled && !apiCallsEnabled) {
-      setTimeout(() => {
+      if (queriesRef.current.length > 0 || callsRef.current.length > 0) {
+        queriesRef.current = []
+        callsRef.current = []
         setQueries([])
         setCalls([])
-      }, 0)
+      }
       return
+    }
+
+    const sameQueries = (a: any[], b: any[]) => {
+      if (a.length !== b.length) return false
+      for (let i = 0; i < a.length; i++) {
+        if (a[i].sql !== b[i].sql || a[i].time_ms !== b[i].time_ms || a[i].is_cached !== b[i].is_cached) return false
+      }
+      return true
+    }
+    const sameCalls = (a: any[], b: any[]) => {
+      if (a.length !== b.length) return false
+      for (let i = 0; i < a.length; i++) {
+        if (a[i].service !== b[i].service || a[i].method !== b[i].method || a[i].path !== b[i].path || a[i].time_ms !== b[i].time_ms) return false
+      }
+      return true
     }
 
     const updateDebugInfo = () => {
@@ -119,9 +144,14 @@ export function DebugPanel() {
         }
       }
 
+      const queriesChanged = !sameQueries(extractedQueries, queriesRef.current)
+      const callsChanged = !sameCalls(extractedCalls, callsRef.current)
+      if (!queriesChanged && !callsChanged) return
+      queriesRef.current = extractedQueries
+      callsRef.current = extractedCalls
       setTimeout(() => {
-        setQueries(extractedQueries)
-        setCalls(extractedCalls)
+        if (queriesChanged) setQueries(extractedQueries)
+        if (callsChanged) setCalls(extractedCalls)
       }, 0)
     }
 
