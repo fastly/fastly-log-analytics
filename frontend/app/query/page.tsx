@@ -114,7 +114,14 @@ function QueryPageInner() {
 
   // ── SQL editor + run controls ─────────────────────────────────────────────
   const [rawSql, setRawSql] = useState('SELECT * FROM logs LIMIT 100')
-  const [maxRows, setMaxRows] = useState<number>(10000)
+  // Default maxRows 100, not 10000. The previous default forced the page
+  // to fetch up to 19 MB of JSON on cold load (analyst-30d clocked 17.9 s
+  // p50 + occasional Fastly 503 on the synthesized timeout), and the
+  // overwhelming majority of users never scroll past the first few
+  // rows. Power users can still type 10000 (or higher) in the
+  // SQL Controls input; the DataTable's scroll-fetch (when added) can
+  // also page in more rows on demand.
+  const [maxRows, setMaxRows] = useState<number>(100)
   const [explain, setExplain] = useState<boolean>(false)
   const [history, setHistory] = useState<{ sql: string; ts: number }[]>([])
 
