@@ -19,7 +19,6 @@ export interface CardGridProps {
   collapsedSections: Set<string>
   toggleSectionCollapsed: (id: string) => void
   onRowClick: (column: string, value: string | number) => void
-  loadingCards?: Set<string>
 }
 
 export function CardGrid({
@@ -34,7 +33,6 @@ export function CardGrid({
   collapsedSections,
   toggleSectionCollapsed,
   onRowClick,
-  loadingCards,
 }: CardGridProps) {
   // ── Aggregation cards ── //
   // When the catalog query hasn't returned yet ``visibleCardList`` is
@@ -108,10 +106,7 @@ export function CardGrid({
     const isCardLoading =
       !isReady ||
       !aggregates ||
-      (loadingCards && (
-        loadingCards.has(card.id) ||
-        ((card.id === '_bot_name' || card.id === '_ngwaf_bot_name') && !topBotsData)
-      ))
+      ((card.id === '_bot_name' || card.id === '_ngwaf_bot_name') && !topBotsData)
 
     if (isCardLoading) {
       return (
