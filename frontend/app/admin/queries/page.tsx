@@ -131,10 +131,19 @@ export default function QueryMonitorPage() {
   // and per-load hits reduction). Returning a function from
   // refetchInterval is React Query's supported way to drive cadence off
   // the current data without flipping queryKeys.
+  // Live-only view only renders ``filteredActive``; the Completed and
+  // Slow-Queries sections are hidden (viewMode !== 'live' gates below).
+  // Dropping the heavy ``completed`` array from the snapshot when the
+  // user isn't looking at it shrinks the per-poll wire payload ~90 %.
+  // The just-finished promotion in ``filteredActive`` loses its 10 s
+  // window in this mode (no completed → no justFinished), which is the
+  // explicit tradeoff for Live-only.
+  const includeCompleted = viewMode !== 'live'
   const snapshotQuery = useQuery<SnapshotResponse>({
-    queryKey: ['admin', 'query-monitor', 'snapshot'],
+    queryKey: ['admin', 'query-monitor', 'snapshot', includeCompleted],
     queryFn: async ({ signal }) => {
-      const r = await fetch('/api/admin/queries?include_completed=true', { signal })
+      const qs = includeCompleted ? '?include_completed=true' : ''
+      const r = await fetch(`/api/admin/queries${qs}`, { signal })
       if (!r.ok) throw new Error(`status ${r.status}`)
       return r.json()
     },
