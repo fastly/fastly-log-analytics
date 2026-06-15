@@ -151,6 +151,141 @@ def _enrich_with_distance(row: dict) -> dict:
     return row
 
 
+def _shape_summary(
+    runner: QueryRunner,
+    table: str,
+    where: str,
+    params: list,
+    lat_val: str,
+    actual_cols: set[str] | list[str],
+) -> dict:
+    """Render SUMMARY_GROUPING_SETS against ``table``, return the payload dict.
+
+    Shared between :func:`get_summary` (live path, full base table) and
+    :func:`_origin_summary_from_temp` (per-request TEMP TABLE path,
+    ``table='<temp_table>'``, ``where='1=1'``, ``lat_val='lat_us'``).
+    The two paths used to be byte-identical Python with different SQL
+    templates (TEMP_SUMMARY_ROLLUP + TEMP_SUMMARY_BY_EDGE on the TEMP
+    side); folded to one template + one helper so the column shape can
+    only drift in one place.
+
+    Rows are consumed via ``cursor.description`` dict access rather than
+    positional indices. The previous shape (``row[3]``, ``row[5]``, …)
+    silently shifted every downstream column when SUMMARY_GROUPING_SETS
+    gained a new column without a matching update here — the offset-by-N
+    footgun the b10 audit finding flagged.
+    """
+    actual_cols_set = set(actual_cols)
+
+    # N-8: return a ratio (0.0–1.0), NOT a percentage. The frontend at
+    # ``frontend/app/origin/_sections/Aggregates.tsx`` already multiplies
+    # the value by 100 to render; the prior ``* 100.0`` here made the
+    # display show 2181.11% on a real 21.81% error rate. Also clamp the
+    # 5xx filter to (500-599) — counting any "ost >= 500" let buggy
+    # synthetic codes leak in (origin status 829 was observed in prod).
+    ost_5xx = (
+        'COUNT(*) FILTER (WHERE "ost" >= 500 AND "ost" < 600) * 1.0 / '
+        'NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
+        if "ost" in actual_cols_set
+        else "NULL"
+    )
+    ottlb_p50 = 'MEDIAN("ottlb") / 1000.0' if "ottlb" in actual_cols_set else "NULL"
+    ottlb_p95 = 'APPROX_QUANTILE("ottlb", 0.95) / 1000.0' if "ottlb" in actual_cols_set else "NULL"
+    cdn_ovh = (
+        'MEDIAN("elapsed" - "ottlb") / 1000.0'
+        if "elapsed" in actual_cols_set and "ottlb" in actual_cols_set
+        else "NULL"
+    )
+    obytes_p50 = 'MEDIAN("obytes")' if "obytes" in actual_cols_set else "NULL"
+
+    # Combine the rollup-totals query AND the per-edge breakdown into ONE
+    # scan using GROUPING SETS. DuckDB computes the () grouping (overall
+    # totals) and the ("edge") grouping in a single pass, halving the
+    # wall-clock — the previous two-scan shape did 138 ms + 132 ms = 270 ms
+    # on prod 1 h windows; the combined scan does the same work in ~150 ms.
+    #
+    # When the schema has no ``edge`` column (rare — older services), fall
+    # back to a single () grouping. GROUPING() requires a real column
+    # reference, so we can't use it in the no-edge branch.
+    has_edge = "edge" in actual_cols_set
+    if has_edge:
+        edge_select = '"edge"'
+        grouping_clause = 'GROUP BY GROUPING SETS ((), ("edge"))'
+        grouping_expr = 'GROUPING("edge")'
+    else:
+        edge_select = "NULL"
+        grouping_clause = ""  # single rollup row, no need for GROUPING SETS
+        grouping_expr = "1"  # always-rollup
+
+    cur = runner.execute(
+        SQL.SUMMARY_GROUPING_SETS.format(
+            edge_select=edge_select,
+            grouping_expr=grouping_expr,
+            lat_val=lat_val,
+            ottlb_p50=ottlb_p50,
+            ottlb_p95=ottlb_p95,
+            cdn_ovh=cdn_ovh,
+            ost_5xx=ost_5xx,
+            obytes_p50=obytes_p50,
+            table=table,
+            where=where,
+            grouping_clause=grouping_clause,
+        ),
+        params,
+    )
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r, strict=False)) for r in cur.fetchall()]
+    rollup_row = next((r for r in rows if r["is_total"] == 1), None)
+    edge_rows = [r for r in rows if r["is_total"] == 0] if has_edge else []
+
+    # ``ottfb_p50_ms`` being NULL is the canonical "no data" signal — it's
+    # MEDIAN(lat_val), so it can only be non-NULL if at least one row
+    # matched ``lat_val IS NOT NULL``.
+    has_data = rollup_row is not None and rollup_row["ottfb_p50_ms"] is not None
+
+    if not has_data:
+        return {
+            "has_data": False,
+            "total_misses": None,
+            "total_passes": None,
+            "ottfb_p50_ms": None,
+            "ottfb_p75_ms": None,
+            "ottfb_p95_ms": None,
+            "ottfb_p99_ms": None,
+            "ottlb_p50_ms": None,
+            "ottlb_p95_ms": None,
+            "cdn_overhead_p50_ms": None,
+            "origin_error_rate": None,
+            "obytes_p50": None,
+            "by_leg": [],
+        }
+
+    assert rollup_row is not None  # has_data check above narrowed this
+    return {
+        "has_data": True,
+        "total_misses": rollup_row["total_misses"],
+        "total_passes": rollup_row["total_passes"],
+        "ottfb_p50_ms": rollup_row["ottfb_p50_ms"],
+        "ottfb_p75_ms": rollup_row["ottfb_p75_ms"],
+        "ottfb_p95_ms": rollup_row["ottfb_p95_ms"],
+        "ottfb_p99_ms": rollup_row["ottfb_p99_ms"],
+        "ottlb_p50_ms": rollup_row["ottlb_p50_ms"],
+        "ottlb_p95_ms": rollup_row["ottlb_p95_ms"],
+        "cdn_overhead_p50_ms": rollup_row["cdn_overhead_p50_ms"],
+        "origin_error_rate": rollup_row["origin_error_rate"],
+        "obytes_p50": rollup_row["obytes_p50"],
+        "by_leg": [
+            {
+                "edge": r["edge_group"],
+                "requests": r["requests"],
+                "p50_ms": r["ottfb_p50_ms"],
+                "p95_ms": r["ottfb_p95_ms"],
+            }
+            for r in edge_rows
+        ],
+    }
+
+
 def get_summary(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -180,132 +315,9 @@ def get_summary(
         )
 
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    # Unified latency expression: prefer ottfb (micros), fallback to ttfb (seconds)
+    # Unified latency expression: prefer ottfb (micros), fallback to ttfb (seconds).
     lat_val = origin_latency_us_expr(actual_cols)
-
-    # N-8: return a ratio (0.0–1.0), NOT a percentage. The frontend at
-    # ``frontend/app/origin/_sections/Aggregates.tsx`` already multiplies
-    # the value by 100 to render; the prior ``* 100.0`` here made the
-    # display show 2181.11% on a real 21.81% error rate. Also clamp the
-    # 5xx filter to (500-599) — counting any "ost >= 500" let buggy
-    # synthetic codes leak in (origin status 829 was observed in prod).
-    ost_5xx = (
-        'COUNT(*) FILTER (WHERE "ost" >= 500 AND "ost" < 600) * 1.0 / '
-        'NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
-        if "ost" in actual_cols
-        else "NULL"
-    )
-    ottlb_p50 = 'MEDIAN("ottlb") / 1000.0' if "ottlb" in actual_cols else "NULL"
-    ottlb_p95 = 'APPROX_QUANTILE("ottlb", 0.95) / 1000.0' if "ottlb" in actual_cols else "NULL"
-    cdn_ovh = 'MEDIAN("elapsed" - "ottlb") / 1000.0' if "elapsed" in actual_cols and "ottlb" in actual_cols else "NULL"
-    obytes_p50 = 'MEDIAN("obytes")' if "obytes" in actual_cols else "NULL"
-
-    # Combine the rollup-totals query AND the per-edge breakdown into ONE
-    # scan using GROUPING SETS. DuckDB computes the () grouping (overall
-    # totals) and the ("edge") grouping in a single pass, halving the
-    # wall-clock — the previous two-scan shape did 138 ms + 132 ms = 270 ms
-    # on prod 1 h windows; the combined scan does the same work in ~150 ms.
-    #
-    # When the schema has no ``edge`` column (rare — older services), fall
-    # back to a single () grouping. GROUPING() requires a real column
-    # reference, so we can't use it in the no-edge branch.
-    has_edge = "edge" in actual_cols
-    if has_edge:
-        edge_select = '"edge"'
-        grouping_clause = 'GROUP BY GROUPING SETS ((), ("edge"))'
-        grouping_expr = 'GROUPING("edge")'
-    else:
-        edge_select = "NULL"
-        grouping_clause = ""  # single rollup row, no need for GROUPING SETS
-        grouping_expr = "1"  # always-rollup
-    rows = runner.execute(
-        SQL.SUMMARY_GROUPING_SETS.format(
-            edge_select=edge_select,
-            grouping_expr=grouping_expr,
-            lat_val=lat_val,
-            ottlb_p50=ottlb_p50,
-            ottlb_p95=ottlb_p95,
-            cdn_ovh=cdn_ovh,
-            ost_5xx=ost_5xx,
-            obytes_p50=obytes_p50,
-            table=table_name,
-            where=where,
-            grouping_clause=grouping_clause,
-        ),
-        params,
-    ).fetchall()
-
-    # GROUPING("edge") returns 1 for the () grouping (the rollup row) and 0
-    # for per-edge rows. Without an "edge" column we emit a single rollup
-    # row with is_total=1 (the literal expression).
-    rollup_row = next((r for r in rows if r[1] == 1), None)
-    edge_rows = [r for r in rows if r[1] == 0] if has_edge else []
-
-    # ottfb_p50_ms (index 5) being NULL is the canonical "no data" signal —
-    # it's the median of the latency expression, so it can only be non-NULL
-    # if at least one row matched ``lat_val IS NOT NULL``. Same semantics
-    # as the previous two-scan shape.
-    has_data = rollup_row is not None and rollup_row[5] is not None
-
-    if not has_data:
-        payload: dict[str, Any] = {
-            "has_data": False,
-            "total_misses": None,
-            "total_passes": None,
-            "ottfb_p50_ms": None,
-            "ottfb_p75_ms": None,
-            "ottfb_p95_ms": None,
-            "ottfb_p99_ms": None,
-            "ottlb_p50_ms": None,
-            "ottlb_p95_ms": None,
-            "cdn_overhead_p50_ms": None,
-            "origin_error_rate": None,
-            "obytes_p50": None,
-            "by_leg": [],
-        }
-        _response_cache_put(cache_key, payload)
-        return {**payload, **runner.telemetry()}
-
-    # Map rollup-row column indices to the previous variable names so the
-    # payload construction below reads the same. Column order: 0=edge_group,
-    # 1=is_total, 2=requests, 3=total_misses, 4=total_passes, 5-8=ottfb
-    # p50/p75/p95/p99, 9=ottlb_p50, 10=ottlb_p95, 11=cdn_overhead_p50,
-    # 12=origin_error_rate, 13=obytes_p50.
-    assert rollup_row is not None  # has_data check above narrowed this
-    row = (
-        rollup_row[3],  # total_misses
-        rollup_row[4],  # total_passes
-        rollup_row[5],  # ottfb_p50_ms
-        rollup_row[6],  # ottfb_p75_ms
-        rollup_row[7],  # ottfb_p95_ms
-        rollup_row[8],  # ottfb_p99_ms
-        rollup_row[9],  # ottlb_p50_ms
-        rollup_row[10],  # ottlb_p95_ms
-        rollup_row[11],  # cdn_overhead_p50_ms
-        rollup_row[12],  # origin_error_rate
-        rollup_row[13],  # obytes_p50
-    )
-    # Per-edge row columns: 0=edge value, 1=is_total (=0), 2=requests,
-    # 5=p50_ms, 7=p95_ms. The other aggregates exist but the by_leg payload
-    # historically only surfaced (edge, requests, p50_ms, p95_ms).
-    edge_rows = [(r[0], r[2], r[5], r[7]) for r in edge_rows]
-
-    payload = {
-        "has_data": True,
-        "total_misses": row[0],
-        "total_passes": row[1],
-        "ottfb_p50_ms": row[2],
-        "ottfb_p75_ms": row[3],
-        "ottfb_p95_ms": row[4],
-        "ottfb_p99_ms": row[5],
-        "ottlb_p50_ms": row[6],
-        "ottlb_p95_ms": row[7],
-        "cdn_overhead_p50_ms": row[8],
-        "origin_error_rate": row[9],
-        "obytes_p50": row[10],
-        "by_leg": [{"edge": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3]} for r in edge_rows],
-    }
+    payload: dict[str, Any] = _shape_summary(runner, table_name, where, params, lat_val, actual_cols)
     _response_cache_put(cache_key, payload)
     return {**payload, **runner.telemetry()}
 
@@ -722,82 +734,17 @@ def get_shielding_analysis(
 
 
 def _origin_summary_from_temp(runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str]) -> dict:
-    """Mirror of get_summary's SQL, parameterised against the TEMP TABLE.
+    """get_summary against the per-request TEMP TABLE.
 
     Uses the pre-computed ``lat_us`` column populated when the TEMP TABLE
     was created — saves the per-row COALESCE evaluation that turned the
-    composite into a regression on local benchmarks.
+    composite into a regression on local benchmarks. Otherwise byte-
+    identical to :func:`get_summary`'s SQL via the shared
+    :func:`_shape_summary` helper (the TEMP-specific templates
+    ``TEMP_SUMMARY_ROLLUP`` / ``TEMP_SUMMARY_BY_EDGE`` were folded into
+    ``SUMMARY_GROUPING_SETS`` per the b10 audit finding).
     """
-    actual_cols_set = set(actual_cols)
-    lat_val = "lat_us"
-
-    # N-8: same fix as get_summary above — return ratio not percentage,
-    # clamp the 5xx filter to (500-599) so synthetic origin status codes
-    # like 829 don't inflate the count.
-    ost_5xx = (
-        'COUNT(*) FILTER (WHERE "ost" >= 500 AND "ost" < 600) * 1.0 / '
-        'NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
-        if "ost" in actual_cols_set
-        else "NULL"
-    )
-    ottlb_p50 = 'MEDIAN("ottlb") / 1000.0' if "ottlb" in actual_cols_set else "NULL"
-    ottlb_p95 = 'APPROX_QUANTILE("ottlb", 0.95) / 1000.0' if "ottlb" in actual_cols_set else "NULL"
-    cdn_ovh = (
-        'MEDIAN("elapsed" - "ottlb") / 1000.0'
-        if "elapsed" in actual_cols_set and "ottlb" in actual_cols_set
-        else "NULL"
-    )
-    obytes_p50 = 'MEDIAN("obytes")' if "obytes" in actual_cols_set else "NULL"
-
-    row = runner.execute(
-        SQL.TEMP_SUMMARY_ROLLUP.format(
-            lat_val=lat_val,
-            ottlb_p50=ottlb_p50,
-            ottlb_p95=ottlb_p95,
-            cdn_ovh=cdn_ovh,
-            ost_5xx=ost_5xx,
-            obytes_p50=obytes_p50,
-            temp_table=temp_table,
-        )
-    ).fetchone()
-
-    has_data = row is not None and row[2] is not None
-    if not has_data:
-        return {
-            "has_data": False,
-            "total_misses": None,
-            "total_passes": None,
-            "ottfb_p50_ms": None,
-            "ottfb_p75_ms": None,
-            "ottfb_p95_ms": None,
-            "ottfb_p99_ms": None,
-            "ottlb_p50_ms": None,
-            "ottlb_p95_ms": None,
-            "cdn_overhead_p50_ms": None,
-            "origin_error_rate": None,
-            "obytes_p50": None,
-            "by_leg": [],
-        }
-
-    edge_rows = []
-    if "edge" in actual_cols_set:
-        edge_rows = runner.execute(SQL.TEMP_SUMMARY_BY_EDGE.format(lat_val=lat_val, temp_table=temp_table)).fetchall()
-
-    return {
-        "has_data": True,
-        "total_misses": row[0],
-        "total_passes": row[1],
-        "ottfb_p50_ms": row[2],
-        "ottfb_p75_ms": row[3],
-        "ottfb_p95_ms": row[4],
-        "ottfb_p99_ms": row[5],
-        "ottlb_p50_ms": row[6],
-        "ottlb_p95_ms": row[7],
-        "cdn_overhead_p50_ms": row[8],
-        "origin_error_rate": row[9],
-        "obytes_p50": row[10],
-        "by_leg": [{"edge": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3]} for r in edge_rows],
-    }
+    return _shape_summary(runner, temp_table, "1=1", [], "lat_us", actual_cols)
 
 
 def _origin_timeseries_from_temp(

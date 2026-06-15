@@ -215,54 +215,13 @@ def test_aggregates_create_temp_placeholders_pinned():
     )
 
 
-def test_temp_summary_rollup_renders():
-    rendered = SQL.TEMP_SUMMARY_ROLLUP.format(
-        lat_val="lat_us",
-        ottlb_p50='MEDIAN("ottlb") / 1000.0',
-        ottlb_p95='APPROX_QUANTILE("ottlb", 0.95) / 1000.0',
-        cdn_ovh="NULL",
-        ost_5xx="NULL",
-        obytes_p50='MEDIAN("obytes")',
-        temp_table="t_origin_deadbeef",
-    )
-    assert "FROM t_origin_deadbeef" in rendered
-    assert "MEDIAN(lat_us) / 1000.0" in rendered
-    assert "AS ottfb_p99_ms" in rendered
-    assert "WHERE (lat_us IS NOT NULL)" in rendered
-
-
-def test_temp_summary_rollup_placeholders_pinned():
-    assert _placeholders(SQL.TEMP_SUMMARY_ROLLUP) == sorted(
-        [
-            "lat_val",
-            "ottlb_p50",
-            "ottlb_p95",
-            "cdn_ovh",
-            "ost_5xx",
-            "obytes_p50",
-            "temp_table",
-        ]
-    )
-
-
-def test_temp_summary_by_edge_renders():
-    rendered = SQL.TEMP_SUMMARY_BY_EDGE.format(
-        lat_val="lat_us",
-        temp_table="t_origin_deadbeef",
-    )
-    assert "FROM t_origin_deadbeef" in rendered
-    assert 'GROUP BY "edge"' in rendered
-    assert "APPROX_QUANTILE(lat_us, 0.95)" in rendered
-
-
-def test_temp_summary_by_edge_placeholders_pinned():
-    assert _placeholders(SQL.TEMP_SUMMARY_BY_EDGE) == sorted(["lat_val", "temp_table"])
-
-
-# The TEMP_TIMESERIES / TEMP_SLOW_URLS / TEMP_STATUS_CODES /
-# TEMP_PATH_BREAKDOWN / TEMP_POP_LATENCY / TEMP_IP_HEALTH templates were
-# deleted. Their consumers in origin.py now render the live templates
-# (SLOW_URLS, PATH_BREAKDOWN, POP_LATENCY, IP_HEALTH, STATUS_CODES,
+# TEMP_SUMMARY_ROLLUP, TEMP_SUMMARY_BY_EDGE and the per-card TEMP mirrors
+# (TEMP_TIMESERIES / TEMP_SLOW_URLS / TEMP_STATUS_CODES /
+# TEMP_PATH_BREAKDOWN / TEMP_POP_LATENCY / TEMP_IP_HEALTH) were all
+# deleted. Their consumers in :mod:`backend.repositories.origin` now
+# render the live templates (SUMMARY_GROUPING_SETS, SLOW_URLS,
+# PATH_BREAKDOWN, POP_LATENCY, IP_HEALTH, STATUS_CODES,
 # TIMESERIES_BUCKETED) with ``table=<temp_table>``, ``where='1=1'``,
-# ``lat_val='lat_us'``. The live-template render + placeholder tests
-# above pin the SQL shape both call sites depend on.
+# ``lat_val='lat_us'`` — see ``_shape_summary`` in that module. The
+# live-template render + placeholder tests above pin the SQL shape both
+# call sites depend on.

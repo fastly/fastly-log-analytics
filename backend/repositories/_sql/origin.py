@@ -282,67 +282,17 @@ Inputs (all trusted-identifier substitutions):
 """
 
 
-TEMP_SUMMARY_ROLLUP = """
-        SELECT
-          COUNT(*) FILTER (WHERE "cache" ILIKE 'MISS%')                                    AS total_misses,
-          COUNT(*) FILTER (WHERE "cache" ILIKE 'PASS%')                                    AS total_passes,
-          MEDIAN({lat_val}) / 1000.0                                                       AS ottfb_p50_ms,
-          APPROX_QUANTILE({lat_val}, 0.75) / 1000.0                                        AS ottfb_p75_ms,
-          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                                        AS ottfb_p95_ms,
-          APPROX_QUANTILE({lat_val}, 0.99) / 1000.0                                        AS ottfb_p99_ms,
-          {ottlb_p50}                                                                       AS ottlb_p50_ms,
-          {ottlb_p95}                                                                       AS ottlb_p95_ms,
-          {cdn_ovh}                                                                         AS cdn_overhead_p50_ms,
-          {ost_5xx}                                                                         AS origin_error_rate,
-          {obytes_p50}                                                                      AS obytes_p50
-        FROM {temp_table}
-        WHERE ({lat_val} IS NOT NULL)
-        """
-"""Rollup totals against the per-request TEMP TABLE (no GROUPING SETS).
-
-Inputs (trusted-identifier substitutions only):
-- ``{lat_val}`` — typically the literal ``"lat_us"`` (the precomputed column)
-- ``{ottlb_p50}`` / ``{ottlb_p95}`` / ``{cdn_ovh}`` / ``{ost_5xx}`` /
-  ``{obytes_p50}`` — same shape as ``SUMMARY_GROUPING_SETS``: either
-  ``"NULL"`` or the matching aggregate expression
-- ``{temp_table}`` — TEMP TABLE name
-
-Output columns per row (one row total):
-``(total_misses, total_passes, ottfb_p50_ms, ottfb_p75_ms, ottfb_p95_ms,
-   ottfb_p99_ms, ottlb_p50_ms, ottlb_p95_ms, cdn_overhead_p50_ms,
-   origin_error_rate, obytes_p50)``
-"""
-
-
-TEMP_SUMMARY_BY_EDGE = """
-            SELECT "edge",
-              COUNT(*)                                                     AS requests,
-              MEDIAN({lat_val}) / 1000.0                                   AS p50_ms,
-              APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                    AS p95_ms
-            FROM {temp_table}
-            WHERE ({lat_val} IS NOT NULL)
-            GROUP BY "edge"
-            """
-"""Per-edge breakdown against the TEMP TABLE.
-
-Inputs:
-- ``{lat_val}`` — typically the literal ``"lat_us"``
-- ``{temp_table}`` — TEMP TABLE name
-
-Output columns per row: ``(edge, requests, p50_ms, p95_ms)``
-"""
-
-
 # The TEMP-table mirror templates (TEMP_TIMESERIES / TEMP_SLOW_URLS /
 # TEMP_STATUS_CODES / TEMP_PATH_BREAKDOWN / TEMP_POP_LATENCY /
-# TEMP_IP_HEALTH) were dropped — the live templates above already
-# carry the ``{lat_val}`` / ``{table}`` / ``{where}`` placeholders we
-# need for the per-request TEMP-table reads. Callers in origin.py now
-# render the live templates with ``table=<temp_table>``,
-# ``where='1=1'``, ``lat_val='lat_us'``. TEMP_SUMMARY_ROLLUP and
-# TEMP_SUMMARY_BY_EDGE below remain — the former still needs a column
-# shape distinct from SUMMARY_GROUPING_SETS, the latter has no live
-# equivalent.
+# TEMP_IP_HEALTH / TEMP_SUMMARY_ROLLUP / TEMP_SUMMARY_BY_EDGE) were
+# dropped — the live templates above already carry the
+# ``{lat_val}`` / ``{table}`` / ``{where}`` placeholders we need for the
+# per-request TEMP-table reads. Callers in origin.py render the live
+# templates with ``table=<temp_table>``, ``where='1=1'``,
+# ``lat_val='lat_us'``. The summary path uses SUMMARY_GROUPING_SETS for
+# both live and TEMP via :func:`backend.repositories.origin._shape_summary`,
+# which switched to ``cursor.description``-based dict access so column
+# additions can't silently shift downstream consumers (the b10 footgun).
 
 
 __all__ = [
@@ -355,6 +305,4 @@ __all__ = [
     "IP_HEALTH",
     "SHIELDING_ANALYSIS",
     "AGGREGATES_CREATE_TEMP",
-    "TEMP_SUMMARY_ROLLUP",
-    "TEMP_SUMMARY_BY_EDGE",
 ]

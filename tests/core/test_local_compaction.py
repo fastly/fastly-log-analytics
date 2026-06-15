@@ -64,9 +64,16 @@ def patched_cache_dir(tmp_path, monkeypatch):
         return source["_test_cache_root"]
 
     monkeypatch.setattr("backend.core.duckdb._cache_dir", fake_cache_dir)
-    # Insulate hourly compaction tests from temporal drift by forcing the daily
-    # tier threshold to 30 days.
-    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 30)
+    # Insulate the hourly tests from temporal drift. Tests use fixed date
+    # strings like "2026-05-15"; without these pins, once those dates drift
+    # past the default _DAILY_TIER_AGE_DAYS=30 / _WEEKLY_TIER_AGE_DAYS=30
+    # boundaries the daily/weekly tiers silently roll up the hour partitions
+    # and the hour-tier tests fail. Pin both to 365 so neither tier
+    # activates for any test that doesn't explicitly want it; tests that DO
+    # want daily/weekly behavior already override the relevant constant
+    # locally.
+    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 365)
+    monkeypatch.setattr("backend.core.local_compaction._WEEKLY_TIER_AGE_DAYS", 365)
     return src
 
 
