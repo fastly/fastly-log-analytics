@@ -106,6 +106,47 @@ export default function NetworkPage() {
     return data.leaderboard.map((a: any) => ({ value: String(a.asn), label: a.label }))
   }, [data?.leaderboard])
 
+  // Pre-memoise the ASN leaderboard rows so toggling the metric / mapAsn
+  // selectors (which re-render the parent) doesn't rebuild the
+  // 30-row × 7-column subtree every time. Row identity is keyed on
+  // `data?.leaderboard` so a real data refetch still re-renders.
+  const asnLeaderboardRows = React.useMemo(() => {
+    return (data?.leaderboard ?? []).map((asn: any) => {
+      const delta = (asn.health_score_now ?? 0) - (asn.health_score_1h_ago ?? 0)
+      return (
+        <tr key={asn.asn} className="border-b last:border-0 hover:bg-muted/50 transition-colors">
+          <td className="px-4 py-3 font-medium">
+            <FilterValueCell
+              filters={[{ column: 'asn', value: String(asn.asn) }]}
+              display={asn.label}
+            />
+          </td>
+          <td className="px-4 py-3 text-right font-mono text-xs">{(asn.total_reqs ?? 0).toLocaleString()}</td>
+          <td className="px-4 py-3 text-right"><HealthBadge score={asn.health_score_now} /></td>
+          <td className="px-4 py-3 text-right font-mono text-xs">
+            {asn.p95_rtt_us != null ? `${(asn.p95_rtt_us / 1000).toFixed(1)}ms` : '—'}
+          </td>
+          <td className="px-4 py-3 text-right font-mono text-xs">
+            {asn.p99_rtt_us != null ? `${(asn.p99_rtt_us / 1000).toFixed(1)}ms` : '—'}
+          </td>
+          <td className="px-4 py-3 text-right font-mono text-xs">
+            <span className={delta > 0 ? 'text-green-500' : delta < 0 ? 'text-red-500' : 'text-muted-foreground'}>
+              {delta > 0 ? '+' : ''}{delta.toFixed(1)}
+            </span>
+          </td>
+          <td className="px-4 py-3 text-right">
+            <Badge
+              variant={asn.trend === 'degrading' ? 'destructive' : 'outline'}
+              className={cn("text-[10px]", asn.trend === 'improving' ? 'text-green-600 dark:text-green-400 border-green-300 dark:border-green-700' : '')}
+            >
+              {(asn.trend ?? 'stable').toUpperCase()}
+            </Badge>
+          </td>
+        </tr>
+      )
+    })
+  }, [data?.leaderboard])
+
   const heatmapData = React.useMemo(() => {
     if (!data?.heatmap?.length || !data.buckets?.length) return null
     const yLabels = data.heatmap.map((d: any) => d.label)
@@ -328,42 +369,7 @@ export default function NetworkPage() {
                     <th className="h-10 px-4 text-right font-medium text-muted-foreground">Trend</th>
                   </tr>
                 </thead>
-                <tbody>
-                  {(data?.leaderboard ?? []).map((asn: any) => {
-                    const delta = (asn.health_score_now ?? 0) - (asn.health_score_1h_ago ?? 0)
-                    return (
-                      <tr key={asn.asn} className="border-b last:border-0 hover:bg-muted/50 transition-colors">
-                        <td className="px-4 py-3 font-medium">
-                          <FilterValueCell
-                            filters={[{ column: 'asn', value: String(asn.asn) }]}
-                            display={asn.label}
-                          />
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono text-xs">{(asn.total_reqs ?? 0).toLocaleString()}</td>
-                        <td className="px-4 py-3 text-right"><HealthBadge score={asn.health_score_now} /></td>
-                        <td className="px-4 py-3 text-right font-mono text-xs">
-                          {asn.p95_rtt_us != null ? `${(asn.p95_rtt_us / 1000).toFixed(1)}ms` : '—'}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono text-xs">
-                          {asn.p99_rtt_us != null ? `${(asn.p99_rtt_us / 1000).toFixed(1)}ms` : '—'}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono text-xs">
-                          <span className={delta > 0 ? 'text-green-500' : delta < 0 ? 'text-red-500' : 'text-muted-foreground'}>
-                            {delta > 0 ? '+' : ''}{delta.toFixed(1)}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <Badge
-                            variant={asn.trend === 'degrading' ? 'destructive' : 'outline'}
-                            className={cn("text-[10px]", asn.trend === 'improving' ? 'text-green-600 dark:text-green-400 border-green-300 dark:border-green-700' : '')}
-                          >
-                            {(asn.trend ?? 'stable').toUpperCase()}
-                          </Badge>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
+                <tbody>{asnLeaderboardRows}</tbody>
               </table>
             </div>
           )}
