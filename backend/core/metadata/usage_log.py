@@ -557,7 +557,6 @@ def get_usage_logs(
     page_size: int = 100,
 ) -> tuple[list[dict], int, dict]:
     """Paginated usage log query with aggregates. Used by the Usage Log page."""
-    con = _ul(service_id)
     conditions = ["service_id = ?", "timestamp >= ?", "timestamp <= ?"]
     params: list = [service_id, start, end]
 
@@ -583,47 +582,77 @@ def get_usage_logs(
 
     where = " AND ".join(conditions)
 
-    # Bare paginated SELECT against the (service_id, timestamp DESC)
-    # index — no window function, no COUNT(*) OVER () (which forced a
-    # full filtered scan of the underlying range to materialise the
-    # count column on every page request). The total count comes from
-    # ``grouped`` below — the same aggregate path already runs per
-    # request and its sum-of-counts is the row total. Saves ~4 s p95
-    # on the page query at 500-row windows.
-    offset = (page - 1) * page_size
-    raw_rows = con.execute(
-        f"SELECT * FROM usage_log WHERE {where} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-        params + [page_size, offset],
-    ).fetchall()
-    entries = [dict(r) for r in raw_rows]
-
-    # Aggregate path: prefer the usage_log_hourly_summary rollup when only the
-    # service+timestamp predicates are active (the common admin-page case). The
-    # rollup is maintained incrementally by trg_usage_log_summary_insert, so
-    # it's always consistent — no scheduler needed. We can only use it when no
-    # process_context / operation_type LIKE filters are present (the rollup
-    # doesn't carry those columns); the operation_class filter IS supported
-    # because the rollup stores it as a normalised key. Backfill of any
-    # service that predates the trigger happens lazily on first read.
+    # The hourly-summary backfill writes (idempotently, at most once per
+    # service per process), so it needs the writer connection. After
+    # that, every query below is pure-read — open a short-lived RO
+    # connection so a slow paginated SELECT can't queue behind the
+    # cron writer's WAL commit.
     rollup_eligible = not process_context and not operation_type
     if rollup_eligible:
-        _ensure_usage_log_hourly_backfilled(con, service_id)
-        grouped = _query_usage_log_aggregate_rollup(con, service_id, start, end, usage_type)
-    else:
-        # One GROUP BY (operation_class, operation_type) does the work of both the
-        # 5-CASE-WHEN totals query AND the per-class breakdown — they're the same
-        # 800K-row scan over usage_log, just shaped differently. Doing both in
-        # one query saves a full pass per Usage Log page load (~1s on prod).
-        grouped = con.execute(
-            f"""
-            SELECT operation_class, operation_type,
-                   sum(count) AS c, sum(coalesce(bytes, 0)) AS b
-            FROM usage_log
-            WHERE {where}
-            GROUP BY 1, 2
-            """,
-            params,
+        _ensure_usage_log_hourly_backfilled(_ul(service_id), service_id)
+
+    try:
+        con = _usage_log_db.open_readonly(service_id)
+    except sqlite3.OperationalError:
+        # File doesn't exist yet (first run before any log_usage_calls).
+        return (
+            [],
+            0,
+            {
+                "total_class_a": 0,
+                "total_class_b": 0,
+                "total_cdn_downloads": 0,
+                "total_cdn_bytes": 0,
+                "total_fos_bytes": 0,
+                "class_a_breakdown": {},
+                "class_b_breakdown": {},
+            },
+        )
+
+    try:
+        # Bare paginated SELECT against the (service_id, timestamp DESC)
+        # index — no window function, no COUNT(*) OVER () (which forced a
+        # full filtered scan of the underlying range to materialise the
+        # count column on every page request). The total count comes from
+        # ``grouped`` below — the same aggregate path already runs per
+        # request and its sum-of-counts is the row total. Saves ~4 s p95
+        # on the page query at 500-row windows.
+        offset = (page - 1) * page_size
+        raw_rows = con.execute(
+            f"SELECT * FROM usage_log WHERE {where} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            params + [page_size, offset],
         ).fetchall()
+        entries = [dict(r) for r in raw_rows]
+
+        # Aggregate path: prefer the usage_log_hourly_summary rollup when only the
+        # service+timestamp predicates are active (the common admin-page case). The
+        # rollup is maintained incrementally by trg_usage_log_summary_insert, so
+        # it's always consistent — no scheduler needed. We can only use it when no
+        # process_context / operation_type LIKE filters are present (the rollup
+        # doesn't carry those columns); the operation_class filter IS supported
+        # because the rollup stores it as a normalised key.
+        if rollup_eligible:
+            grouped = _query_usage_log_aggregate_rollup(con, service_id, start, end, usage_type)
+        else:
+            # One GROUP BY (operation_class, operation_type) does the work of both the
+            # 5-CASE-WHEN totals query AND the per-class breakdown — they're the same
+            # 800K-row scan over usage_log, just shaped differently. Doing both in
+            # one query saves a full pass per Usage Log page load (~1s on prod).
+            grouped = con.execute(
+                f"""
+                SELECT operation_class, operation_type,
+                       sum(count) AS c, sum(coalesce(bytes, 0)) AS b
+                FROM usage_log
+                WHERE {where}
+                GROUP BY 1, 2
+                """,
+                params,
+            ).fetchall()
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
     totals = {"A": 0, "B": 0, "CDN": 0}
     bytes_by_class = {"A": 0, "B": 0, "CDN": 0}
