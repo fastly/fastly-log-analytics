@@ -163,6 +163,10 @@ function QueryPageInner() {
       return data as any
     },
     enabled: !!activeServiceId,
+    // Schema only changes when admin adds a custom field — never within
+    // an interactive session. 5 min staleTime removes the RTT (and the
+    // 10-s cold-cache tail variance) from every cross-page navigation.
+    staleTime: 5 * 60_000,
   })
 
   const { data: presets } = useQuery({
@@ -172,6 +176,10 @@ function QueryPageInner() {
       return data as any
     },
     enabled: !!activeServiceId,
+    // Same rationale as schema above — presets list only changes when
+    // someone edits service config. The 45-s analyst-30d outlier this
+    // call has occasionally hit goes away once it's cached past first.
+    staleTime: 5 * 60_000,
   })
 
   const queryMutation = useMutation({
