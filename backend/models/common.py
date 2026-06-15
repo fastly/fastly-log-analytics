@@ -274,4 +274,12 @@ class BootstrapResponse(BaseResponse):
     # not-yet-populated poll continues from useFilterBar for new
     # services where extents land later.
     log_extents: dict | None = None
+    # Whether the backend will populate ``_debug_queries`` /
+    # ``_debug_calls`` envelopes on responses (gated by the
+    # ``DEBUG_RESPONSES`` env var). Folded in so the admin
+    # DiagnosticsPanel can dim the "Query debugging" / "API call"
+    # toggles on first paint instead of paying a separate
+    # /api/debug/state round-trip. ADMIN ONLY — analysts never see
+    # the diagnostics panel and the toggles aren't user-facing.
+    debug_state: dict | None = None
     # section_timings is inherited from BaseResponse.

@@ -4004,6 +4004,10 @@ export interface components {
             log_extents?: {
                 [key: string]: unknown;
             } | null;
+            /** Debug State */
+            debug_state?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** BootstrapService */
         BootstrapService: {

@@ -1,9 +1,8 @@
 'use client'
 import React from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { client } from '@/lib/api'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
+import { useBootstrap } from '@/hooks/useBootstrap'
 import { useDebugStore } from '@/stores/debugStore'
 
 export function DiagnosticsPanel() {
@@ -14,16 +13,15 @@ export function DiagnosticsPanel() {
   // when DEBUG_RESPONSES=false on the server (the prod default per the
   // 2026 security hardening) those arrays are stripped and the panel
   // shows nothing. Surface that so the toggle doesn't silently lie.
-  const { data: debugState } = useQuery({
-    queryKey: ['debug-state'],
-    queryFn: async ({ signal }) => {
-      const { data } = await client.GET('/api/debug/state' as any, { signal, } as any)
-      return data as { debug_responses_enabled: boolean }
-    },
-    staleTime: 5 * 60_000, // env doesn't change without a restart
-  })
+  //
+  // Bootstrap folds the same flag in under ``debug_state`` so this
+  // skips a dedicated /api/debug/state round-trip on every admin page
+  // load. Env doesn't change without a restart, so the value is stable
+  // for the session.
+  const { data: bootstrapData } = useBootstrap()
+  const debugState = (bootstrapData as { debug_state?: { debug_responses_enabled?: boolean } } | undefined)?.debug_state
   // Default to "enabled" on first paint so the toggle isn't briefly dimmed
-  // before the query resolves. Only mark disabled when we have a real
+  // before bootstrap resolves. Only mark disabled when we have a real
   // false from the backend.
   const debugBackendOn = debugState?.debug_responses_enabled !== false
   const debugDisabledTooltip = !debugBackendOn

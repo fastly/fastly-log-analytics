@@ -14290,6 +14290,18 @@
               }
             ],
             "title": "Log Extents"
+          },
+          "debug_state": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Debug State"
           }
         },
         "type": "object",

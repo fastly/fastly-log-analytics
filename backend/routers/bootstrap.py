@@ -258,6 +258,21 @@ def bootstrap(
 
     timer.call("header_badge_and_extents", _resolve_header_badge_and_extents)
 
+    # Admin DiagnosticsPanel dims its debug toggles when DEBUG_RESPONSES
+    # is off on the backend. Folding the flag in here skips the
+    # dedicated /api/debug/state round-trip on every admin page load.
+    debug_state_payload: dict | None = None
+
+    def _resolve_debug_state():
+        nonlocal debug_state_payload
+        if analyst_session is not None:
+            return
+        from backend.models.common import _debug_responses_enabled
+
+        debug_state_payload = {"debug_responses_enabled": _debug_responses_enabled()}
+
+    timer.call("debug_state", _resolve_debug_state)
+
     views: list[dict] = []
 
     def _resolve_views() -> list[dict]:
@@ -303,6 +318,7 @@ def bootstrap(
         share_banner=share_banner_payload,
         header_badge=header_badge_payload,
         log_extents=log_extents_payload,
+        debug_state=debug_state_payload,
         section_timings=section_timings,
     )
 
