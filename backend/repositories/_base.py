@@ -171,29 +171,15 @@ def collect_hourly_bundle_paths(
 
     hour_per_field_root = _rollups_root(src)
     try:
-        field_dirs = [f for f in _cached_listdir(hour_per_field_root) if f.startswith("field=")]
+        field_dirs = [f for f in os.listdir(hour_per_field_root) if f.startswith("field=")]
     except OSError:
         field_dirs = []
 
-    # Pre-collect the union of all hour=… entries across every field dir
-    # in one pass. The previous shape probed os.path.isdir per (hour,
-    # field) inside _hour_had_any_data — on a 7-day window with ~70
-    # fields that's 168 × 70 ≈ 11.8k isdir syscalls per /api/sessions
-    # request, often the dominant cost of rollup_paths_collect. The
-    # union set turns each hour check into an O(1) lookup, and the
-    # per-field listdir hits the 60 s ``_cached_listdir`` cache so
-    # back-to-back requests skip the I/O entirely.
-    all_rollup_hours: set[str] = set()
-    for f in field_dirs:
-        try:
-            for entry in _cached_listdir(os.path.join(hour_per_field_root, f)):
-                if entry.startswith("hour="):
-                    all_rollup_hours.add(entry[len("hour=") :])
-        except OSError:
-            continue
-
     def _hour_had_any_data(h: str) -> bool:
-        return h in all_rollup_hours
+        for f in field_dirs:
+            if os.path.isdir(os.path.join(hour_per_field_root, f, f"hour={h}")):
+                return True
+        return False
 
     active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     paths: list[str] = []
