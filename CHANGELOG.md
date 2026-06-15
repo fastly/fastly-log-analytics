@@ -45,6 +45,14 @@ maintenance that survived the package carve-up.
   `timeout=10` + `max_retries=1` so the cold-path tail caps at ~21 s
   vs the client default of ~127 s. Caller is behind a 300 s name
   cache so steady-state cost is unchanged.
+- **`_run_falco_lint` absorbs the falco subprocess plumbing** shared
+  by `vcl_utils.lint_log_format` (logging-endpoint VCL check) and
+  `vcl_validator.lint_vcl` (scoring-snippet VCL check). Each caller
+  keeps its own falco-not-available handling, timeout budget, and
+  output parser — the helper only owns the tempfile lifecycle,
+  `subprocess.run` invocation, and tempfile-path redaction. The two
+  use cases stay distinct on purpose (logging is best-effort, scoring
+  is a security boundary).
 
 ### Fixed
 
