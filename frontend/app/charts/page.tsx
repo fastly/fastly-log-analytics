@@ -55,8 +55,9 @@ export default function ChartsPage() {
 
   useUrlFilterSync()
 
+  const chartFields = React.useMemo(() => Array.from(CHART_CARD_IDS), [])
   const { data: aggregates, isLoading, isFetching } = useServiceQuery(
-    ['charts', 'aggregates', activeServiceId, startTime, endTime, filterPayload],
+    ['charts', 'aggregates', activeServiceId, startTime, endTime, filterPayload, chartFields],
     async ({ signal }) => {
       const { data } = await client.POST("/api/dashboard/aggregates", { signal,
         body: {
@@ -64,7 +65,12 @@ export default function ChartsPage() {
           end_time: endTime,
           filters: filterPayload,
           chart_interval: '1 hour',
-          chart_metric: 'requests'
+          chart_metric: 'requests',
+          // Charts only renders the fields in CHART_CARD_IDS; pass the
+          // explicit list so the backend's top_n_rollups only computes
+          // those (vs the full ~25-field default — half of which the
+          // chart page throws away). Backend already honours `fields`.
+          fields: chartFields,
         }
       })
       return throwIfStaleAggregates(data)
