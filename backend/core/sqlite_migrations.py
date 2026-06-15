@@ -228,29 +228,44 @@ def get_current_version(con: sqlite3.Connection) -> int:
     return con.execute("PRAGMA user_version").fetchone()[0]
 
 
-def apply_pending(con: sqlite3.Connection) -> int:
-    """Apply every migration whose version is greater than ``user_version``.
+def run_pending_migrations(
+    con: sqlite3.Connection,
+    migrations: dict[int, Callable[[sqlite3.Connection], None]],
+    *,
+    log_prefix: str = "sqlite_migrations",
+) -> int:
+    """Apply every callback in ``migrations`` whose version is greater than
+    the DB's ``user_version``.
 
-    Returns the number of migrations applied. Safe to call on every open —
-    no-op when the DB is already at the latest version.
-
-    Each migration runs inside a transaction. The version bump is the last
-    statement in that transaction, so a failure leaves the DB at the
-    previous version and the next open retries.
+    Shared by :func:`apply_pending` (per-service metadata.db) and
+    :func:`backend.core.share_db.schema.apply_pending` (global share DB) —
+    the two used to be near-identical handwritten loops. Each migration
+    runs inside a transaction; the ``PRAGMA user_version`` bump is the
+    last statement, so a failure leaves the DB at the previous version
+    and the next open retries.
     """
-    current = get_current_version(con)
+    current = con.execute("PRAGMA user_version").fetchone()[0]
     applied = 0
-    for version in sorted(MIGRATIONS):
+    for version in sorted(migrations):
         if version <= current:
             continue
-        func = MIGRATIONS[version]
-        logger.info("[sqlite_migrations] applying v%d (%s)", version, func.__name__)
+        func = migrations[version]
+        logger.info("[%s] applying v%d (%s)", log_prefix, version, func.__name__)
         try:
             with con:
                 func(con)
                 con.execute(f"PRAGMA user_version = {version}")
             applied += 1
         except Exception:
-            logger.exception("[sqlite_migrations] v%d failed — aborting", version)
+            logger.exception("[%s] v%d failed — aborting", log_prefix, version)
             raise
     return applied
+
+
+def apply_pending(con: sqlite3.Connection) -> int:
+    """Apply every per-service metadata.db migration past ``user_version``.
+
+    Safe to call on every open — no-op when the DB is already current.
+    Delegates to :func:`run_pending_migrations`.
+    """
+    return run_pending_migrations(con, MIGRATIONS, log_prefix="sqlite_migrations")

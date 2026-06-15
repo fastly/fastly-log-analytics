@@ -141,6 +141,66 @@ def clear_listdir_cache() -> None:
     _listdir_cache.clear()
 
 
+def collect_hourly_bundle_paths(
+    src: dict,
+    st,
+    et,
+    bundled_root: str,
+    bundle_filename: str,
+) -> tuple[list[str], bool] | None:
+    """Walk ``[st, et)`` by UTC hour, return ``(paths, crosses_active)``.
+
+    Returns the list of per-hour bundle paths that exist on disk plus a
+    ``crosses_active`` flag set when the window extends into (or past)
+    the live hour. Returns ``None`` if any closed hour has per-field
+    rollup data but no bundle on disk — that's the writer-behind case
+    where serving the rollup path would undercount, so the caller falls
+    back to raw.
+
+    Shared between :meth:`QueryRunner.try_time_series_from_rollup` and
+    :func:`backend.repositories.sessions._collect_sessions_rollup_paths`.
+    The two callsites used to maintain identical walk logic with
+    cross-referenced "mirrors X" comments; the dual maintenance is now
+    one helper. The per-field listdir is done inline (callers do not
+    pre-supply it).
+    """
+    import os
+    from datetime import UTC, datetime, timedelta
+
+    from backend.core.rollups import _rollups_root
+
+    hour_per_field_root = _rollups_root(src)
+    try:
+        field_dirs = [f for f in os.listdir(hour_per_field_root) if f.startswith("field=")]
+    except OSError:
+        field_dirs = []
+
+    def _hour_had_any_data(h: str) -> bool:
+        for f in field_dirs:
+            if os.path.isdir(os.path.join(hour_per_field_root, f, f"hour={h}")):
+                return True
+        return False
+
+    active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    paths: list[str] = []
+    cursor = st.replace(minute=0, second=0, microsecond=0)
+    crosses_active = False
+    while cursor < et:
+        hour_str = cursor.strftime("%Y-%m-%d-%H")
+        if hour_str >= active_hour_str:
+            crosses_active = True
+            break
+        path = os.path.join(bundled_root, f"hour={hour_str}", bundle_filename)
+        if not os.path.isfile(path):
+            if _hour_had_any_data(hour_str):
+                return None
+            cursor += timedelta(hours=1)
+            continue
+        paths.append(path)
+        cursor += timedelta(hours=1)
+    return paths, crosses_active
+
+
 def _compact_sql_for_debug(sql: str) -> str:
     """Replace explicit ``read_parquet([...long file list...])`` literals
     with ``read_parquet([N files])`` for transport in the debug-panel
@@ -1273,11 +1333,7 @@ class QueryRunner:
         import os
         from datetime import UTC, datetime, timedelta
 
-        from backend.core.rollups import (
-            TIME_SERIES_BUNDLE_FILENAME,
-            _hour_bundled_root,
-            _rollups_root,
-        )
+        from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME, _hour_bundled_root
         from backend.utils.date_utils import parse_iso_utc
 
         if chart_metric not in self._TS_ROLLUP_METRIC_SQL:
@@ -1307,60 +1363,16 @@ class QueryRunner:
         if not os.path.isdir(bundled_root):
             return None
 
-        # Per-field rollup root, used to distinguish "hour had no data"
-        # (per-field tree is empty for that hour → safe to skip) from
-        # "rollup writer hasn't covered this hour yet" (per-field tree
-        # HAS data → can't skip without undercounting → fall back to raw).
-        # Listing fields once and caching cuts the per-missing-hour cost
-        # from N×listdir to N×isdir.
-        hour_per_field_root = _rollups_root(self.src)
-        try:
-            field_dirs = [f for f in os.listdir(hour_per_field_root) if f.startswith("field=")]
-        except OSError:
-            field_dirs = []
-
-        def _hour_had_any_data(h: str) -> bool:
-            for f in field_dirs:
-                if os.path.isdir(os.path.join(hour_per_field_root, f, f"hour={h}")):
-                    return True
-            return False
-
+        # st is UTC (parse_iso_utc guarantees it). collect_hourly_bundle_paths
+        # returns None when a closed hour has per-field rollup data but no
+        # bundle on disk — that's the writer-behind case where serving the
+        # rollup path would undercount, so we fall back to raw.
         active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
         active_hour_dt = datetime.strptime(active_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
-
-        rollup_paths: list[str] = []
-        # st is UTC (parse_iso_utc guarantees it) so cursor's strftime
-        # produces UTC hour strings that match the on-disk bundle names
-        # and the UTC active_hour_str comparison above. See the comment
-        # at the parse site for the bug history.
-        cursor = st.replace(minute=0, second=0, microsecond=0)
-        crosses_active = False
-        while cursor < et:
-            hour_str = cursor.strftime("%Y-%m-%d-%H")
-            if hour_str >= active_hour_str:
-                crosses_active = True
-                # Don't enumerate beyond the active hour boundary — any
-                # future hours are also "active" from our perspective and
-                # served by the live branch below if they overlap [st, et).
-                break
-            path = os.path.join(bundled_root, f"hour={hour_str}", TIME_SERIES_BUNDLE_FILENAME)
-            if not os.path.isfile(path):
-                # No bundle for this hour. Two cases:
-                #   (a) Hour genuinely had no logs — the per-field rollup
-                #       tree is also empty for that hour. Safe to skip;
-                #       contributes 0 to the chart for this bucket. This
-                #       is the common case for low-traffic services or
-                #       brief gaps between hours of activity.
-                #   (b) Hour had data but the time_series writer hasn't
-                #       covered it (the bundle is missing while per-field
-                #       rollups exist). Can't skip without undercounting
-                #       — fall back to raw.
-                if _hour_had_any_data(hour_str):
-                    return None
-                cursor += timedelta(hours=1)
-                continue
-            rollup_paths.append(path)
-            cursor += timedelta(hours=1)
+        collected = collect_hourly_bundle_paths(self.src, st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        if collected is None:
+            return None
+        rollup_paths, crosses_active = collected
 
         if not rollup_paths and not crosses_active:
             # Window is in the past but no rollup files exist for it (the

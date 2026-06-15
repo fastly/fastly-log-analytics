@@ -45,49 +45,14 @@ def _collect_sessions_rollup_paths(src: dict, st: datetime, et: datetime) -> tup
     gap can span days — local rollup falls back to raw, which is
     expected/correct.
     """
-    from backend.core.rollups import (
-        SESSIONS_BUNDLE_FILENAME,
-        _hour_bundled_root,
-        _rollups_root,
-    )
+    from backend.core.rollups import SESSIONS_BUNDLE_FILENAME, _hour_bundled_root
+    from backend.repositories._base import collect_hourly_bundle_paths
 
     bundled_root = _hour_bundled_root(src)
     if not os.path.isdir(bundled_root):
         return None
 
-    hour_per_field_root = _rollups_root(src)
-    try:
-        field_dirs = [f for f in os.listdir(hour_per_field_root) if f.startswith("field=")]
-    except OSError:
-        field_dirs = []
-
-    def _hour_had_any_data(h: str) -> bool:
-        for f in field_dirs:
-            if os.path.isdir(os.path.join(hour_per_field_root, f, f"hour={h}")):
-                return True
-        return False
-
-    active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-    paths: list[str] = []
-    cursor = st.replace(minute=0, second=0, microsecond=0)
-    crosses_active = False
-    while cursor < et:
-        hour_str = cursor.strftime("%Y-%m-%d-%H")
-        if hour_str >= active_hour_str:
-            crosses_active = True
-            break
-        path = os.path.join(bundled_root, f"hour={hour_str}", SESSIONS_BUNDLE_FILENAME)
-        if not os.path.isfile(path):
-            if _hour_had_any_data(hour_str):
-                # Per-field has data for this hour but the sessions
-                # writer is behind. Fall back to raw rather than
-                # silently losing sessions from this hour.
-                return None
-            cursor += timedelta(hours=1)
-            continue
-        paths.append(path)
-        cursor += timedelta(hours=1)
-    return paths, crosses_active
+    return collect_hourly_bundle_paths(src, st, et, bundled_root, SESSIONS_BUNDLE_FILENAME)
 
 
 def _build_active_hour_session_sql(

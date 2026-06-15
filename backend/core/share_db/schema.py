@@ -134,23 +134,16 @@ def get_current_version(con: sqlite3.Connection) -> int:
 
 
 def apply_pending(con: sqlite3.Connection) -> int:
-    """Apply every migration whose version is greater than the file's ``user_version``."""
-    current = get_current_version(con)
-    applied = 0
-    for version in sorted(MIGRATIONS):
-        if version <= current:
-            continue
-        func = MIGRATIONS[version]
-        logger.info("[share_db] applying migration v%d (%s)", version, func.__name__)
-        try:
-            with con:
-                func(con)
-                con.execute(f"PRAGMA user_version = {version}")
-            applied += 1
-        except Exception:
-            logger.exception("[share_db] migration v%d failed", version)
-            raise
-    return applied
+    """Apply every share-DB migration past ``user_version``.
+
+    Delegates to :func:`backend.core.sqlite_migrations.run_pending_migrations`
+    — same forward-only framework the per-service metadata DBs use, just
+    with this module's ``MIGRATIONS`` registry and the ``share_db`` log
+    prefix so messages stay distinguishable in the log stream.
+    """
+    from backend.core.sqlite_migrations import run_pending_migrations
+
+    return run_pending_migrations(con, MIGRATIONS, log_prefix="share_db")
 
 
 def _init_db(con: sqlite3.Connection) -> None:
