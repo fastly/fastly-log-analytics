@@ -38,6 +38,13 @@ maintenance that survived the package carve-up.
   `OkResponse` (`ok: bool = True`), `_atomic_write_json`,
   `_get_cfg_field`, `client_ip`, `shim_attr`, plus iceberg
   `_iceberg_root_prefix` + `_metadata_pointer_candidates`.
+- **`fetch_service_name` now routes through the shared `fastly()`
+  client** instead of an inline urllib body. Adds a `timeout` keyword
+  to `fastly()` (default 30 s preserves the existing behavior of the
+  ~50 other call sites) and the name-fetch call site pins
+  `timeout=10` + `max_retries=1` so the cold-path tail caps at ~21 s
+  vs the client default of ~127 s. Caller is behind a 300 s name
+  cache so steady-state cost is unchanged.
 
 ### Fixed
 
