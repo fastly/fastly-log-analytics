@@ -40,6 +40,19 @@ export default function SessionsPage() {
       }) => {
         const isReady = useIsDataReady()
 
+        // Mirror backend's 7-day guard client-side so the request never
+        // fires on a too-wide range. Backend rejects with a 400 either
+        // way, but the round-trip costs the user a flash of error toast
+        // + (on the analyst path) 1-2 timed-out pyiceberg CDN GETs per
+        // attempt. Inline empty-state below explains the limit instead.
+        const rangeExceedsSevenDays = React.useMemo(() => {
+          if (!startTime || !endTime) return false
+          const s = Date.parse(startTime)
+          const e = Date.parse(endTime)
+          if (!Number.isFinite(s) || !Number.isFinite(e)) return false
+          return (e - s) / 86_400_000 > 7
+        }, [startTime, endTime])
+
         const qc = useQueryClient()
         const { labelBySid, labels } = useScoringLabels(activeServiceId || '', {
           enabled: !!activeServiceId,
@@ -68,8 +81,21 @@ export default function SessionsPage() {
             })
             return data as SessionsResponse | undefined
           },
-          enabled: isReady
+          enabled: isReady && !rangeExceedsSevenDays
         })
+
+        if (rangeExceedsSevenDays) {
+          return (
+            <>
+              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 sm:gap-4 shrink-0 mb-4 justify-end">
+                <UpdatingBadge />
+              </div>
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+                Sessions view is limited to a 7-day window. Narrow the date range above to see results.
+              </div>
+            </>
+          )
+        }
 
         const isLoadingInitial = isLoading || (isFetching && !data)
 
