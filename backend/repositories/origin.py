@@ -768,7 +768,7 @@ def _origin_timeseries_from_temp(
             return {"has_data": False, "series": []}
 
     if metric == "ttfb" and "ottfb" in actual_cols_set and "ttfb" in actual_cols_set:
-        lat_expr = 'COALESCE("ottfb", "ttfb" * 1000000.0)'
+        lat_expr = '"lat_us"'
         unit_conv = "/ 1000.0"
     else:
         lat_expr = f'"{metric_col}"'
