@@ -33,10 +33,10 @@ import logging
 import re
 import shutil
 import subprocess
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+
+from backend.utils.vcl_utils import _run_falco_lint
 
 logger = logging.getLogger(__name__)
 
@@ -198,34 +198,21 @@ def lint_vcl(
     else:
         full_vcl = snippet
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".vcl", delete=False, encoding="utf-8") as tmp:
-        tmp.write(full_vcl)
-        tmp_path = Path(tmp.name)
-
+    # ``-v`` emits per-warning [WARNING] / [INFO] lines (not just the
+    # rolled-up "N warnings" summary). Without it, the parser below
+    # sees zero diagnostic lines AND zero errors and reports the
+    # snippet as clean — masking real warnings the operator should
+    # see (catalog/regex/etc.). The wrapper above is engineered to
+    # lint cleanly on its own, so any warning that surfaces here is
+    # from the operator's snippet body.
     try:
-        # ``-v`` emits per-warning [WARNING] / [INFO] lines (not just the
-        # rolled-up "N warnings" summary). Without it, the parser below
-        # sees zero diagnostic lines AND zero errors and reports the
-        # snippet as clean — masking real warnings the operator should
-        # see (catalog/regex/etc.). The wrapper above is engineered to
-        # lint cleanly on its own, so any warning that surfaces here is
-        # from the operator's snippet body.
-        proc = subprocess.run(
-            [falco_bin, "-v", "lint", str(tmp_path)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        returncode, out, err = _run_falco_lint(falco_bin, full_vcl, timeout=10, verbose=True)
     except subprocess.TimeoutExpired:
-        tmp_path.unlink(missing_ok=True)
         return LintResult(
             ok=False,
             errors=[f"falco lint timed out after 10s for snippet {snippet_name!r}"],
             warnings=[],
         )
-    finally:
-        tmp_path.unlink(missing_ok=True)
 
     # Falco exits non-zero when there are ANY diagnostics (errors or
     # warnings), so the exit code alone isn't a reliable
@@ -234,8 +221,8 @@ def lint_vcl(
     #     "🔥 N errors, ❗ M warnings, 🔈 K recommendations."
     # We parse the N to decide pass/fail; lines tagged [ERROR] are
     # surfaced as errors, [WARNING] / [INFO] go in warnings.
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
+    out = out.strip()
+    err = err.strip()
     combined = "\n".join(filter(None, [out, err]))
 
     errors: list[str] = []
@@ -260,7 +247,7 @@ def lint_vcl(
             warnings.append(stripped)
 
     summary_errors = int(summary_match.group(1)) if summary_match else None
-    ok = summary_errors == 0 if summary_errors is not None else (proc.returncode == 0 and not errors)
+    ok = summary_errors == 0 if summary_errors is not None else (returncode == 0 and not errors)
 
     # If falco reported a non-zero error count but no parseable
     # [ERROR] line, surface a generic error so the operator isn't
