@@ -73,8 +73,15 @@ export default function UsageLogPage() {
       stop()
     }
   }, [])
-  const startTime = useMemo(() => toQueryDate(new Date(now.getTime() - preset * 3600 * 1000)), [preset, now])
-  const endTime = useMemo(() => toQueryDate(now), [now])
+  // Floor `now` to the minute so the 30 s setInterval tick that drives
+  // `now` doesn't churn the React Query cache key twice a minute on
+  // tabs left open. The aggregate has minute-grain at best and the
+  // user-facing windows are multi-hour; minute-rounding here trades
+  // a ≤60 s lag for halving refetches and bounding the cache leak
+  // on long-lived admin sessions.
+  const nowFlooredMs = Math.floor(now.getTime() / 60_000) * 60_000
+  const startTime = useMemo(() => toQueryDate(new Date(nowFlooredMs - preset * 3600 * 1000)), [preset, nowFlooredMs])
+  const endTime = useMemo(() => toQueryDate(new Date(nowFlooredMs)), [nowFlooredMs])
 
   const exportParams = new URLSearchParams({
     service_id: activeServiceId || '',
