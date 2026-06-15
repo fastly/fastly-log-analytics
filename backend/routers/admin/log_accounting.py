@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from datetime import datetime
 
-from fastapi import Depends, HTTPException, Query
+from fastapi import Depends, HTTPException, Query, Response
 
 from backend.core.fastly.utils import FASTLY_LOG_FIELDS as _FASTLY_LOG_FIELDS
 from backend.deps import get_source
@@ -376,6 +376,7 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
 
 @router.get("/admin/log-accounting", response_model=LogAccountingResponse)
 def api_log_accounting(
+    response: Response,
     source: dict = Depends(get_source),
     hours: int = Query(24, ge=1, le=720),
     by: str = Query("hour", pattern="^(hour|day)$"),
@@ -386,5 +387,10 @@ def api_log_accounting(
     Per-bucket gap is the actionable signal — totals smooth over burst losses.
     """
     result = compute_log_accounting(source, hours=hours, by=by)
-    response: LogAccountingResponse = LogAccountingResponse.with_telemetry(**result)
-    return response
+    payload: LogAccountingResponse = LogAccountingResponse.with_telemetry(**result)
+    # 30 s edge cache aligns with both the backend compute_log_accounting
+    # TTL and the frontend React Query staleTime — short-circuits the
+    # poll round-trip on each paint after the first within the window.
+    # Manual refresh / refetch bypasses HTTP cache via key bumps.
+    response.headers["Cache-Control"] = "private, max-age=30"
+    return payload
