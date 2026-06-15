@@ -6,6 +6,16 @@ _last_update: dict[int, float] = {}
 _run_metadata: dict[int, dict] = {}
 _lock = threading.Lock()
 
+# Run IDs we've already confirmed are in a terminal DB state. Once a
+# cron_runs row reads ``status IN ('success', 'error')`` it never goes
+# back, so the SQLite check per run_id per list_active_runs() call is
+# pure waste from the second invocation onwards. The /admin page polls
+# at 5 s (was 1 s before perf item #12 landed) and the snapshot can
+# contain 100+ candidates; the audit measured 422 cron_runs SELECTs
+# per page load before this cache went in.
+_terminal_run_ids: set[int] = set()
+_TERMINAL_CACHE_CAP = 4096
+
 
 def start_progress(run_id: int | None, service_id: str | None = None, task: str | None = None):
     # run_id can be None when start_cron_run failed to register the run
@@ -66,11 +76,18 @@ def list_active_runs() -> list[dict]:
             candidates.append((run_id, meta))
 
     # DB cross-check happens OUTSIDE the lock so a slow SQLite call
-    # doesn't block other progress operations. The query is cheap
-    # (PK lookup per run_id) and runs once per snapshot poll.
+    # doesn't block other progress operations. Short-circuit on the
+    # _terminal_run_ids memo first — terminal status never reverts, so
+    # the per-poll cron_runs SELECT only needs to run once per run_id
+    # over the process's lifetime (the audit measured 422 of these per
+    # /admin load before this).
     out = []
     for run_id, meta in candidates:
+        if run_id in _terminal_run_ids:
+            continue
         if _db_status_is_terminal(meta.get("service_id"), run_id):
+            if len(_terminal_run_ids) < _TERMINAL_CACHE_CAP:
+                _terminal_run_ids.add(run_id)
             continue
         entry = {"run_id": run_id}
         entry.update(meta)
