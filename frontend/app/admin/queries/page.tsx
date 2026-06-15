@@ -288,7 +288,7 @@ export default function QueryMonitorPage() {
       {enabled && (
         <>
           <div className="flex items-center justify-between gap-3">
-            <SummaryStrip />
+            <SummaryStrip snapshot={snapshotQuery.data} />
             <Button
               variant="ghost"
               size="sm"

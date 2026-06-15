@@ -1,44 +1,40 @@
 'use client'
 
 import * as React from 'react'
-import { useQuery } from '@tanstack/react-query'
 
 import { Badge } from '@/components/ui/badge'
 
-import { durationColor, formatDuration, useDocumentVisible } from '../_helpers'
-import type { SummaryResponse } from '../_types'
+import { durationColor, formatDuration } from '../_helpers'
+import type { SnapshotResponse, SummaryResponse } from '../_types'
+
+interface SummaryStripProps {
+  snapshot: SnapshotResponse | undefined
+}
 
 /** Top-of-page strip with live counts + longest in-flight duration.
- *  Polls the cheap `/api/admin/queries/summary` endpoint independently
- *  from the main snapshot so the badge stays fresh even when the table
- *  hides the row that's driving the "longest" value.
+ *  Derives every value from the snapshot the parent page already polls
+ *  for, so this component piggybacks on that poll instead of firing its
+ *  own duplicate `/api/admin/queries/summary` request at the same
+ *  cadence (which was producing a second backend round-trip per tick).
  *
  *  Includes a screen-reader live region (`role="status"`, `aria-live=polite`)
  *  that announces the count only when it actually changes — without the
- *  memoisation the announcement would re-fire every 300ms poll. */
-export function SummaryStrip() {
-  const visible = useDocumentVisible()
-  const { data } = useQuery<SummaryResponse>({
-    queryKey: ['admin', 'query-monitor', 'summary'],
-    queryFn: async ({ signal }) => {
-      const r = await fetch('/api/admin/queries/summary', { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
-    },
-    enabled: visible,
-    // Adaptive cadence mirrors the snapshot query: 300 ms whenever
-    // anything is running (badge tracks bursts in near-real-time),
-    // 1500 ms when idle so the badge isn't ticking the backend 200x/min
-    // just to read "0 active".
-    refetchInterval: (query) => {
-      const d = query.state.data as SummaryResponse | undefined
-      return (d?.active_total && d.active_total > 0) ? 300 : 1500
-    },
-    refetchIntervalInBackground: false,
-  })
-  // Stable string for the live region. Only re-renders when the count
-  // changes, so screen readers don't fire on every poll. Pluralise so
-  // it reads as English, not "1 active queries".
+ *  memoisation the announcement would re-fire every snapshot tick. */
+export function SummaryStrip({ snapshot }: SummaryStripProps) {
+  const data = React.useMemo<SummaryResponse | null>(() => {
+    if (!snapshot) return null
+    const by_db_type: Record<string, number> = {}
+    let longest_ms = 0
+    for (const row of snapshot.active) {
+      by_db_type[row.db_type] = (by_db_type[row.db_type] ?? 0) + 1
+      if (row.duration_ms > longest_ms) longest_ms = row.duration_ms
+    }
+    return {
+      active_total: snapshot.active.length,
+      by_db_type,
+      longest_ms,
+    }
+  }, [snapshot])
   const liveLabel = React.useMemo(() => {
     if (!data) return ''
     return `${data.active_total} active ${data.active_total === 1 ? 'query' : 'queries'}`
