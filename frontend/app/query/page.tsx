@@ -66,6 +66,13 @@ function QueryPageInner() {
   // structured mode picks them up, then strip the params so subsequent
   // FilterBar edits aren't fighting a stale URL.
   const [hasHydratedFromUrl, setHasHydratedFromUrl] = useState(false)
+  // Gate the Structured-mode auto-run on user intent. A fresh /query
+  // visit (no deep-link params, no Run click) should NOT immediately
+  // fire a backend query — the previous behaviour issued a default
+  // ``SELECT * FROM logs LIMIT 100`` against the cold view on every
+  // navigation. ``hasUserRun`` becomes true on a deep-link hydration
+  // (See Raw Logs CTA) and on an explicit Run button click.
+  const [hasUserRun, setHasUserRun] = useState(false)
   useEffect(() => {
     if (hasHydratedFromUrl) return
     if (typeof window === 'undefined') return
@@ -102,6 +109,9 @@ function QueryPageInner() {
     }
 
     if (mutated) {
+      // Deep-link landings are an explicit user intent — auto-run is
+      // the entire point of the See Raw Logs CTA.
+      setHasUserRun(true)
       const url = new URL(window.location.href)
       url.searchParams.delete('start_time')
       url.searchParams.delete('end_time')
@@ -224,6 +234,10 @@ function QueryPageInner() {
   const handleRun = useCallback(() => {
     const sqlToRun = effectiveSql.trim()
     if (!sqlToRun) return
+    // Mark first-paint auto-run as wanted — subsequent filter / sort /
+    // range edits become live again once the user has explicitly run
+    // once.
+    setHasUserRun(true)
     pushHistory(sqlToRun)
     queryMutation.mutate({ sql: sqlToRun, max_rows: maxRows, explain })
   }, [effectiveSql, maxRows, explain, pushHistory, queryMutation])
@@ -232,16 +246,19 @@ function QueryPageInner() {
   // sort, range, row-cap edits) so the result table tracks the FilterBar
   // live. We deliberately don't auto-run in Raw Mode — the user has typed
   // a custom query and shouldn't see it re-execute on every keystroke.
+  // We also skip the very first paint unless the user signalled intent
+  // (deep-link via See Raw Logs OR explicit Run click) — see hasUserRun.
   useEffect(() => {
     if (mode !== 'structured') return
     if (!activeServiceId) return
     if (!hasHydratedFromUrl) return
+    if (!hasUserRun) return
     pushHistory(structuredSql)
     queryMutation.mutate({ sql: structuredSql, max_rows: maxRows, explain })
     // queryMutation/pushHistory are stable from useMutation/useCallback; we
     // only want to re-fire when the generated SQL or run-time inputs change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [structuredSql, mode, activeServiceId, hasHydratedFromUrl, maxRows, explain])
+  }, [structuredSql, mode, activeServiceId, hasHydratedFromUrl, hasUserRun, maxRows, explain])
 
   const handleExportCSV = useCallback(() => {
     if (!queryMutation.data?.data?.length) return
