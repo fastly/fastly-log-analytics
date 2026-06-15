@@ -6,7 +6,6 @@ from backend.models.common import BaseResponse
 
 
 class PerformanceAggregatesResponse(BaseResponse):
-    latency_ts: list[dict[str, Any]] = []
     top_urls: list[dict[str, Any]] = []
     top_asns: list[dict[str, Any]] = []
     ttl_dist: list[dict[str, Any]] = []

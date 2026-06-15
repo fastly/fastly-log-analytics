@@ -18178,15 +18178,6 @@
             "type": "array",
             "title": "Section Timings"
           },
-          "latency_ts": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Latency Ts",
-            "default": []
-          },
           "top_urls": {
             "items": {
               "additionalProperties": true,

@@ -5757,13 +5757,6 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /**
-             * Latency Ts
-             * @default []
-             */
-            latency_ts: {
-                [key: string]: unknown;
-            }[];
-            /**
              * Top Urls
              * @default []
              */

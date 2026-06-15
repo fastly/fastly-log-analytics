@@ -32,40 +32,27 @@ def get_performance_aggregates(
 
     actual_cols = runner.get_schema_cols()
     if not actual_cols:
-        return empty_schema_response(
-            latency_ts=[], top_urls=[], top_asns=[], ttl_dist=[], scatter=[], **runner.telemetry()
-        )
+        return empty_schema_response(top_urls=[], top_asns=[], ttl_dist=[], scatter=[], **runner.telemetry())
 
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
 
     cols = ["timestamp", "url", "asn", "ttfb", "elapsed", "cache", "ttl", "ottfb", "ottlb"]
     with runner.temp_table(cols, actual_cols, table_name, where_clause, params) as temp_table:
         if temp_table is None:
-            return empty_schema_response(
-                latency_ts=[], top_urls=[], top_asns=[], ttl_dist=[], scatter=[], **runner.telemetry()
-            )
+            return empty_schema_response(top_urls=[], top_asns=[], ttl_dist=[], scatter=[], **runner.telemetry())
 
         results = {**runner.telemetry()}
 
         sort_idx_map = {"avg": 3, "p50": 4, "p95": 5, "p99": 6}
         sort_idx = sort_idx_map.get(sort_by, 6)
 
-        # 1. Latency Time Series (Stacked: Origin TTFB vs Edge Processing)
-        if "ttfb" in actual_cols and "elapsed" in actual_cols:
-            ts_q = f"""
-                SELECT {time_bucket_select("1 minute")},
-                       AVG(CAST(ttfb AS DOUBLE)) * 1000.0 AS origin_ms,
-                       AVG(CAST(elapsed AS DOUBLE) / 1000.0 - CAST(ttfb AS DOUBLE) * 1000.0) AS edge_ms
-                FROM {temp_table}
-                WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL AND (CAST(elapsed AS DOUBLE) / 1000.0) >= (CAST(ttfb AS DOUBLE) * 1000.0)
-                GROUP BY 1 ORDER BY 1
-            """
-            ts_res = runner.execute(ts_q).fetchall()
-            results["latency_ts"] = [{"time": safe_iso(r[0]), "origin": r[1], "edge": r[2]} for r in ts_res]
-        else:
-            results["latency_ts"] = []
-
-        # 2. Top URLs by Latency
+        # 1. Top URLs by Latency
+        # (Was: a "Latency Time Series" query that returned a per-minute
+        # origin_ms / edge_ms pair as `latency_ts`. Frontend never read
+        # that field — only `waterfall.avg`, top_urls, top_asns, ttl_dist
+        # and scatter are rendered. The ts_q scan was ~800 ms on admin-30d
+        # for output the page threw away; deleted along with the
+        # latency_ts response field and its Pydantic model slot.)
         if "url" in actual_cols and "elapsed" in actual_cols:
             url_q = f"""
                 SELECT url,
@@ -180,7 +167,11 @@ def get_performance_aggregates(
         else:
             results["scatter"] = []
 
-        # 7. Waterfall Components
+        # 7. Waterfall Components (AVG-only — frontend reads waterfall.avg
+        # exclusively; the prior p50/p95/p99 branches were 12 unused
+        # percentile aggregations forcing per-component sorts on every
+        # load. Verified via grep: no waterfall.p* references in any
+        # frontend page or component.)
         if "ttfb" in actual_cols and "elapsed" in actual_cols:
             ottfb_expr = "COALESCE(CAST(ottfb AS DOUBLE) / 1000.0, 0)" if "ottfb" in actual_cols else "0"
             ottlb_expr = "COALESCE(CAST(ottlb AS DOUBLE) / 1000.0, 0)" if "ottlb" in actual_cols else "0"
@@ -197,24 +188,9 @@ def get_performance_aggregates(
                 )
                 SELECT
                     AVG(edge_processing),
-                    {percentile_ms_expr("edge_processing", 0.5)},
-                    {percentile_ms_expr("edge_processing", 0.95)},
-                    {percentile_ms_expr("edge_processing", 0.99)},
-
                     AVG(origin_wait),
-                    {percentile_ms_expr("origin_wait", 0.5)},
-                    {percentile_ms_expr("origin_wait", 0.95)},
-                    {percentile_ms_expr("origin_wait", 0.99)},
-
                     AVG(origin_download),
-                    {percentile_ms_expr("origin_download", 0.5)},
-                    {percentile_ms_expr("origin_download", 0.95)},
-                    {percentile_ms_expr("origin_download", 0.99)},
-
-                    AVG(client_download),
-                    {percentile_ms_expr("client_download", 0.5)},
-                    {percentile_ms_expr("client_download", 0.95)},
-                    {percentile_ms_expr("client_download", 0.99)}
+                    AVG(client_download)
                 FROM components
             """
             waterfall_res = runner.execute(waterfall_q).fetchone()
@@ -222,27 +198,9 @@ def get_performance_aggregates(
                 results["waterfall"] = {
                     "avg": {
                         "edge_processing": float(waterfall_res[0] or 0.0),
-                        "origin_wait": float(waterfall_res[4] or 0.0),
-                        "origin_download": float(waterfall_res[8] or 0.0),
-                        "client_download": float(waterfall_res[12] or 0.0),
-                    },
-                    "p50": {
-                        "edge_processing": float(waterfall_res[1] or 0.0),
-                        "origin_wait": float(waterfall_res[5] or 0.0),
-                        "origin_download": float(waterfall_res[9] or 0.0),
-                        "client_download": float(waterfall_res[13] or 0.0),
-                    },
-                    "p95": {
-                        "edge_processing": float(waterfall_res[2] or 0.0),
-                        "origin_wait": float(waterfall_res[6] or 0.0),
-                        "origin_download": float(waterfall_res[10] or 0.0),
-                        "client_download": float(waterfall_res[14] or 0.0),
-                    },
-                    "p99": {
-                        "edge_processing": float(waterfall_res[3] or 0.0),
-                        "origin_wait": float(waterfall_res[7] or 0.0),
-                        "origin_download": float(waterfall_res[11] or 0.0),
-                        "client_download": float(waterfall_res[15] or 0.0),
+                        "origin_wait": float(waterfall_res[1] or 0.0),
+                        "origin_download": float(waterfall_res[2] or 0.0),
+                        "client_download": float(waterfall_res[3] or 0.0),
                     },
                 }
             else:
