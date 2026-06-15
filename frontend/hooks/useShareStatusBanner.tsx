@@ -61,7 +61,22 @@ export function useShareStatusBanner({ enabled }: Options) {
     // bootstrap — bootstrap's share_banner is at most as stale as
     // bootstrap's 5-min cache. The 15-s setInterval below picks up
     // changes within one poll window either way.
-    if (seeded === null) {
+    //
+    // Re-read bootstrap cache HERE (not just from the render-scope
+    // `seeded` closure) — on cold load the bootstrap query may resolve
+    // between this hook's first render and this useEffect, and the
+    // render-time `seeded` snapshot would miss it. Re-reading saves the
+    // RTT on every page mounting AppLayout in that window.
+    const lateBootstrap = queryClient.getQueryData(['bootstrap']) as any
+    const lateSeed = lateBootstrap?.share_banner
+      ? {
+          sharing_active: !!lateBootstrap.share_banner.sharing_active,
+          public_url: lateBootstrap.share_banner.public_url ?? null,
+        }
+      : null
+    if (lateSeed) {
+      setStatus(lateSeed)
+    } else {
       tick()
     }
     const id = setInterval(tick, POLL_MS)
