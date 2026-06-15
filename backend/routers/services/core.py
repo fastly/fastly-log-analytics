@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
@@ -18,6 +19,16 @@ from backend.utils.router_utils import load_service_config
 from backend.utils.router_utils import sse_flush_preamble as _sse_flush
 
 router = APIRouter(prefix="/api", tags=["services"])
+
+# Short TTL on /api/cron-schedule. The page polls every 30 s (after
+# perf item #33 throttled the cron-history pull), but a manual click
+# can hit it within the window. The data is APScheduler state +
+# latest_cron_per_task lookup + count_alerts — all near-pure reads
+# that don't change between polls. 5 s TTL collapses the second poll
+# from ~1 s to <10 ms without breaking the user's perception of
+# "live" schedule data (schedules only change on config edits).
+_CRON_SCHEDULE_TTL = 5.0
+_cron_schedule_cache: dict[str, tuple[float, dict]] = {}
 
 
 # N-2: fields safe to surface to a remote analyst on ``GET /api/services``.
@@ -262,6 +273,10 @@ def api_cron_schedule(source: dict = Depends(get_source)):
 
     sched = get_scheduler()
     service_id = source["name"]
+    now_mono = time.monotonic()
+    cached = _cron_schedule_cache.get(service_id)
+    if cached is not None and (now_mono - cached[0]) < _CRON_SCHEDULE_TTL:
+        return cached[1]
     last_runs: dict[str, dict] = {}
     try:
         per_task = metadata_db.latest_cron_per_task(service_id)
@@ -335,7 +350,9 @@ def api_cron_schedule(source: dict = Depends(get_source)):
     except Exception:
         pass
 
-    return {"schedules": schedules}
+    payload = {"schedules": schedules}
+    _cron_schedule_cache[service_id] = (now_mono, payload)
+    return payload
 
 
 @router.patch("/services/{service_id}/credentials")
