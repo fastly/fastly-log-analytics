@@ -18,6 +18,10 @@ def get_cron_logs(
     sort_dir: str = "DESC",
     since_id: int | None = None,
 ) -> tuple[int, list[dict]]:
+    # Delta polls (since_id is not None) never need the precount — the
+    # /logs page only renders `total` on the full-history path. Skip the
+    # count(*) when delta-polling so the read isn't competing with the
+    # writer-side lock burst that delta polls trigger.
     return metadata_db.get_cron_runs(
         service_id,
         task=task,
@@ -27,6 +31,7 @@ def get_cron_logs(
         sort_col=sort_col,
         sort_dir=sort_dir,
         since_id=since_id,
+        with_total=since_id is None,
     )
 
 

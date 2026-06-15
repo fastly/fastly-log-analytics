@@ -313,6 +313,7 @@ def get_cron_runs(
     sort_col: str = "started_at",
     sort_dir: str = "DESC",
     since_id: int | None = None,
+    with_total: bool = True,
 ) -> tuple[int, list[dict]]:
     """Paginated cron run history. Used by repositories/cron.py.
 
@@ -339,8 +340,16 @@ def get_cron_runs(
         params.append(since_id)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
-    total_row = con.execute(f"SELECT count(*) AS n FROM cron_runs {where_sql}", params).fetchone()
-    total = int(total_row["n"]) if total_row else 0
+    # Skip the count(*) precount for delta polls — the frontend cron poll
+    # doesn't read total on the since_id branch (only the cron-history
+    # page's full-load path uses it), and the writer-side lock contention
+    # this query competes with happens precisely when delta polls are
+    # firing fastest. Caller opts out via with_total=False.
+    if with_total:
+        total_row = con.execute(f"SELECT count(*) AS n FROM cron_runs {where_sql}", params).fetchone()
+        total = int(total_row["n"]) if total_row else 0
+    else:
+        total = 0
 
     valid_sort_cols = {"started_at", "duration_s", "task", "status"}
     sort_col_safe = sort_col if sort_col in valid_sort_cols else "started_at"
