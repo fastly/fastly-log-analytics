@@ -131,7 +131,14 @@ export default function UsageLogPage() {
   }
 
   const agg = data?.aggregate
-  const entries = data?.entries ?? []
+  // service_id is hoisted to the response root (saves ~50 B per row on
+  // the wire). The UsageTable still wants it per-row for its Service
+  // column, so re-inject it from the response context here.
+  const entries = useMemo(() => {
+    const rows = data?.entries ?? []
+    const sid = (data as { service_id?: string | null } | undefined)?.service_id ?? activeServiceId ?? null
+    return rows.map(e => ({ ...e, service_id: sid }))
+  }, [data, activeServiceId])
 
   const renderBreakdown = (breakdown: Record<string, number> | undefined) => {
     if (!breakdown || Object.keys(breakdown).length === 0) return null

@@ -167,7 +167,6 @@ def usage_log_endpoint(
             UsageLogEntry(
                 id=int(r.get("id") or 0),
                 timestamp=str(r["timestamp"]),
-                service_id=r["service_id"],
                 operation_class=r["operation_class"],
                 operation_type=r["operation_type"],
                 url=r["url"],
@@ -195,7 +194,12 @@ def usage_log_endpoint(
         class_b_breakdown=agg_data["class_b_breakdown"],
     )
 
-    return UsageLogResponse.with_telemetry(entries=entries, total=total, aggregate=aggregate)
+    return UsageLogResponse.with_telemetry(
+        service_id=service_id,
+        entries=entries,
+        total=total,
+        aggregate=aggregate,
+    )
 
 
 @router.get("/admin/usage-log/export")

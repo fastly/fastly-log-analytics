@@ -128,9 +128,12 @@ class IcebergTableInfoResponse(BaseResponse, IcebergTableInfo):
 
 
 class UsageLogEntry(BaseModel):
+    # service_id is hoisted to UsageLogResponse — every row in the
+    # response is scoped to a single service anyway, so repeating it
+    # per row was wire-byte overhead. The frontend page mapper
+    # re-injects it into each row for the table renderer.
     id: int
     timestamp: str
-    service_id: str | None = None
     operation_class: str | None = None
     operation_type: str | None = None
     url: str | None = None
@@ -158,6 +161,7 @@ class UsageLogAggregate(BaseModel):
 
 
 class UsageLogResponse(BaseResponse):
+    service_id: str | None = None
     entries: list[UsageLogEntry]
     total: int
     aggregate: UsageLogAggregate

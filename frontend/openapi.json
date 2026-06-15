@@ -21334,17 +21334,6 @@
             "type": "string",
             "title": "Timestamp"
           },
-          "service_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Service Id"
-          },
           "operation_class": {
             "anyOf": [
               {
@@ -21485,6 +21474,17 @@
             },
             "type": "array",
             "title": "Section Timings"
+          },
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
           },
           "entries": {
             "items": {

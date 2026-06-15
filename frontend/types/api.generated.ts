@@ -7020,8 +7020,6 @@ export interface components {
             id: number;
             /** Timestamp */
             timestamp: string;
-            /** Service Id */
-            service_id?: string | null;
             /** Operation Class */
             operation_class?: string | null;
             /** Operation Type */
@@ -7061,6 +7059,8 @@ export interface components {
             _section_timings?: {
                 [key: string]: unknown;
             }[];
+            /** Service Id */
+            service_id?: string | null;
             /** Entries */
             entries: components["schemas"]["UsageLogEntry"][];
             /** Total */
