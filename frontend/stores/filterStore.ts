@@ -55,9 +55,16 @@ export const useFilterStore = create<FilterState>((set) => ({
 
   // Explicit absolute-range selection (custom datetime, chart zoom, saved
   // view). Clears relativeRange — this range no longer corresponds to a
-  // rolling preset.
-  setRange: (startTime, endTime) =>
-    set({ startTime, endTime, isAutoRange: false, relativeRange: null }),
+  // rolling preset. Early-bail when the range hasn't actually changed and
+  // we're already in absolute mode — a re-emit forces subscribers to
+  // re-render (and useQuery to re-fetch with a new key tuple) for no
+  // observable change.
+  setRange: (startTime, endTime) => set((state) => {
+    if (state.startTime === startTime && state.endTime === endTime && !state.isAutoRange && state.relativeRange === null) {
+      return state
+    }
+    return { startTime, endTime, isAutoRange: false, relativeRange: null }
+  }),
 
   // Preset pill click. Records the label so the URL persists as
   // ?range=<label> and reload re-derives [now-duration, now].
@@ -72,6 +79,12 @@ export const useFilterStore = create<FilterState>((set) => ({
   // re-snap, not isAutoRange.
   autoSetRange: (startTime, endTime) => set((state) => {
     if (!state.isAutoRange) return state
+    // Early-bail when extents-snap is identical to current values. The
+    // FilterBar passes the store's own start/end through here when data
+    // is fresh enough to skip the snap — without this short-circuit the
+    // set() re-emits and triggers a duplicate /api/{page}/aggregates
+    // fetch off the new useServiceQuery key reference identity.
+    if (state.startTime === startTime && state.endTime === endTime) return state
     return { startTime, endTime }
   }),
 
