@@ -723,16 +723,34 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
     }
 
 
+# Short-TTL memo for compaction_stats so the 5 s health-snapshot poll
+# in the admin UI doesn't redo a fan-out os.listdir per service per
+# tick. The cron's actual local-compact runs every 2 min, so even a
+# 5 s lag is well inside the staleness budget the dashboard already
+# tolerates.
+_COMPACTION_STATS_TTL = 5.0
+_COMPACTION_STATS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
 def compaction_stats(source: dict) -> dict[str, Any]:
     """Snapshot of file-count distribution across local cache partitions.
 
     Returns counts that downstream metrics / health endpoints can graph
     to spot small-file regressions (e.g., if the cron stops running and
     files start accumulating, ``partitions_above_threshold`` climbs).
+
+    Results are memoised per cache_root for ``_COMPACTION_STATS_TTL`` s
+    so the admin health-snapshot poll doesn't re-walk the data dir on
+    every tick.
     """
     from backend.core.duckdb import _cache_dir
 
     cache_root = _cache_dir(source)
+    now = time.monotonic()
+    cached = _COMPACTION_STATS_CACHE.get(cache_root)
+    if cached is not None and (now - cached[0]) < _COMPACTION_STATS_TTL:
+        return cached[1]
+
     data_dir = os.path.join(cache_root, "data")
     total_files = 0
     partitions = 0
@@ -741,7 +759,7 @@ def compaction_stats(source: dict) -> dict[str, Any]:
     daily_files = 0
     weekly_files = 0
     if not os.path.isdir(data_dir):
-        return {
+        result: dict[str, Any] = {
             "total_files": 0,
             "partitions": 0,
             "partitions_above_3": 0,
@@ -750,6 +768,8 @@ def compaction_stats(source: dict) -> dict[str, Any]:
             "weekly_files": 0,
             "avg_files_per_partition": 0.0,
         }
+        _COMPACTION_STATS_CACHE[cache_root] = (now, result)
+        return result
     for entry in os.listdir(data_dir):
         full = os.path.join(data_dir, entry)
         if not os.path.isdir(full):
@@ -766,7 +786,7 @@ def compaction_stats(source: dict) -> dict[str, Any]:
                 above_3 += 1
             if n > 10:
                 above_10 += 1
-    return {
+    result = {
         "total_files": total_files + daily_files + weekly_files,
         "partitions": partitions,
         "partitions_above_3": above_3,
@@ -775,6 +795,8 @@ def compaction_stats(source: dict) -> dict[str, Any]:
         "weekly_files": weekly_files,
         "avg_files_per_partition": (total_files / partitions) if partitions else 0.0,
     }
+    _COMPACTION_STATS_CACHE[cache_root] = (now, result)
+    return result
 
 
 def _sql_escape(path: str) -> str:

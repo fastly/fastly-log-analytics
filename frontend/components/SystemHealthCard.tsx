@@ -68,17 +68,16 @@ export function SystemHealthCard() {
       const { data } = await client.GET('/api/admin/health-snapshot' as any, {} as any)
       return data as HealthSnapshot
     },
-    // 1s polling. The endpoint is OS-level reads + per-service
-    // compaction_stats (top-level os.listdir, NOT recursive); no DB,
-    // no FOS, no network. Per-service cost is ~5-30ms; at 1-10
-    // services per backend that's ~30-300ms per poll, well under one
-    // worker's capacity. Gives operator-grade live feedback for the
-    // "is the box healthy?" glance — useful during an attack or sync
-    // backlog when load can climb second-to-second. Caveat: a future
-    // change that grows N to 50+ services per backend, or that adds
-    // a recursive walk inside compaction_stats, would need to revisit
-    // this interval.
-    refetchInterval: 1_000,
+    // 5s polling. Drops cold-load /admin networkidle from ~4 s to ~1 s
+    // by cutting 4 of every 5 health-snapshot hits during the capture
+    // window. The endpoint is OS-level reads + per-service
+    // compaction_stats (top-level os.listdir, NOT recursive); 5 s is
+    // still operator-grade for the "is the box healthy?" glance — the
+    // 1 s cadence was overkill given the metrics it surfaces (load,
+    // memory, disk) change on second-to-minute scales, not sub-second.
+    // backend compaction_stats now memoises per service for ~5 s too
+    // so a poll either reads OS state once or returns cached numbers.
+    refetchInterval: 5_000,
     refetchIntervalInBackground: false,
   })
 
