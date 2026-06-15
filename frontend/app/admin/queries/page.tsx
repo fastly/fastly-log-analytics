@@ -125,11 +125,12 @@ export default function QueryMonitorPage() {
 
   const enabled = cfg?.enabled !== false
 
-  // 300ms while the page is open. The snapshot endpoint returns in <1ms
-  // server-side; real analyst/cron queries finish in 0.2-30ms (verified on
-  // prod 2026-06-11), so anything slower than 300ms polling means the
-  // Active list reads empty even when the system is busy. The cost is one
-  // tiny GET every 300ms per admin tab — order of nothing.
+  // Adaptive poll cadence: 300 ms while there's any active query (so the
+  // Active list updates in near-real-time during bursts), 1500 ms when
+  // idle (which is the steady state for most of the day — a 5× wire-byte
+  // and per-load hits reduction). Returning a function from
+  // refetchInterval is React Query's supported way to drive cadence off
+  // the current data without flipping queryKeys.
   const snapshotQuery = useQuery<SnapshotResponse>({
     queryKey: ['admin', 'query-monitor', 'snapshot'],
     queryFn: async ({ signal }) => {
@@ -138,7 +139,10 @@ export default function QueryMonitorPage() {
       return r.json()
     },
     enabled: visible && enabled && !paused,
-    refetchInterval: 300,
+    refetchInterval: (query) => {
+      const d = query.state.data as SnapshotResponse | undefined
+      return (d?.active && d.active.length > 0) ? 300 : 1500
+    },
     refetchIntervalInBackground: false,
   })
 

@@ -26,9 +26,14 @@ export function SummaryStrip() {
       return r.json()
     },
     enabled: visible,
-    // Same 300ms cadence as the snapshot — without it the badge lags the
-    // table and the page feels inconsistent.
-    refetchInterval: 300,
+    // Adaptive cadence mirrors the snapshot query: 300 ms whenever
+    // anything is running (badge tracks bursts in near-real-time),
+    // 1500 ms when idle so the badge isn't ticking the backend 200x/min
+    // just to read "0 active".
+    refetchInterval: (query) => {
+      const d = query.state.data as SummaryResponse | undefined
+      return (d?.active_total && d.active_total > 0) ? 300 : 1500
+    },
     refetchIntervalInBackground: false,
   })
   // Stable string for the live region. Only re-renders when the count
