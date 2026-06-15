@@ -38,12 +38,15 @@ logger = logging.getLogger(__name__)
 # routes which build responses as plain dicts (bypassing BaseResponse's
 # DEBUG_RESPONSES gate) cannot leak operator-side data — concrete examples
 # the QA pass surfaced: raw DuckDB SQL via _debug_queries, Fastly KV store
-# paths via _debug_calls, internal section names via _section_timings,
-# server cache state via _is_cached.
+# paths via _debug_calls, server cache state via _is_cached.
+#
+# ``_section_timings`` carries internal phase names (``summary``,
+# ``timeseries``, ``temp_table_create``, …) without any data / SQL / infra
+# identifiers — it's pure observability that's a force-multiplier for the
+# next perf audit on the analyst path. Kept in the response.
 _ANALYST_STRIPPED_ENVELOPE_KEYS = (
     "_debug_queries",
     "_debug_calls",
-    "_section_timings",
     "_is_cached",
 )
 
