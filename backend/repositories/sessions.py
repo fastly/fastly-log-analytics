@@ -442,6 +442,21 @@ def get_sessions(
     table_name = _safe_table(src["name"])
     offset = calc_offset(page, limit)
 
+    # Max 7-day range guard — hoisted above get_schema_cols() so a too-wide
+    # request rejects before paying the schema-fetch + Iceberg view-resolve
+    # cost. Frontend mirrors this guard so the request never fires on the
+    # happy path; this server-side guard backs up direct API callers.
+    if start_time and end_time:
+        try:
+            from backend.utils.date_utils import parse_iso_utc
+
+            s = parse_iso_utc(str(start_time))
+            e = parse_iso_utc(str(end_time))
+            if s and e and (e - s).days > 7:
+                raise ValueError("Sessions view is limited to 7 days. Please narrow your date range.")
+        except ValueError:
+            raise
+
     _t = time.perf_counter()
     actual_cols = set(runner.get_schema_cols())
     timer.mark("get_schema_cols", _t)
@@ -457,18 +472,6 @@ def get_sessions(
             has_edge_sid=False,
             **runner.telemetry(),
         )
-
-    # Max 7-day range guard
-    if start_time and end_time:
-        try:
-            from backend.utils.date_utils import parse_iso_utc
-
-            s = parse_iso_utc(str(start_time))
-            e = parse_iso_utc(str(end_time))
-            if s and e and (e - s).days > 7:
-                raise ValueError("Sessions view is limited to 7 days. Please narrow your date range.")
-        except ValueError:
-            raise
 
     _t = time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols))
