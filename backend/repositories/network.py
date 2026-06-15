@@ -172,9 +172,12 @@ def get_health(
     )
     timer.mark("build_where_clause", _t)
 
+    # Drop ``dt`` and ``resp_state`` from the temp projection — neither is
+    # read by any downstream SQL template in backend/repositories/_sql/network.py
+    # (verified via grep). Materialising them on every 30d window was 5-15%
+    # of the temp-table create cost.
     all_net_cols = [
         "timestamp",
-        "dt",
         "asn",
         "country",
         "city",
@@ -188,7 +191,6 @@ def get_health(
         "ploss",
         "status",
         "cache",
-        "resp_state",
         "elapsed",
         "resp_bytes",
         "c_speed",
