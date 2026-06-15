@@ -74,14 +74,17 @@ export function useLogsPageState() {
       return data as any
     },
     enabled: !!activeServiceId && activeTab === 'cron',
-    refetchInterval: 5000,
+    // 30 s cadence on the 500-row cron-history pull — three full pulls
+    // per cold load was burning the WAL writer's contention budget
+    // every 5 s. The since_id delta poll (above) covers fresh activity
+    // at 15 s; this big-payload pull only needs to refresh when the
+    // user actively lingers on the cron tab.
+    refetchInterval: 30_000,
     // Match staleTime to refetchInterval so an in-page tab toggle
     // (cron → audit → cron) within a poll window reuses the cached
-    // 500-row / ~181 KB payload instead of paying a fresh /api/cron-runs
-    // round-trip on each remount. QueryProvider already disables
-    // refetchOnWindowFocus globally, so browser-level focus changes
-    // aren't a concern.
-    staleTime: 5_000,
+    // 500-row payload instead of paying a fresh /api/cron-runs
+    // round-trip on each remount.
+    staleTime: 30_000,
   })
 
   // Separate query specifically for checking recent crons (including running) without reloading the entire 500-row table.
@@ -111,8 +114,11 @@ export function useLogsPageState() {
       return data as any
     },
     enabled: !!activeServiceId, // Tab independent polling!
-    refetchInterval: 5000,
-    staleTime: 5_000,
+    // 15 s cadence on the since_id delta poll — passive awareness, no
+    // tight loop required. Drops steady-state network noise ~3× and
+    // takes one round-trip out of the cold-load settle window.
+    refetchInterval: 15_000,
+    staleTime: 15_000,
   })
 
   // Derive currently running crons and loading state from recent crons to keep downstream compatibility intact
