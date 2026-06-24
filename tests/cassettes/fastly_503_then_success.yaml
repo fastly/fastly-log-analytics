@@ -36,3 +36,8 @@ interactions:
       code: 200
       message: OK
 version: 1
+# Hand-authored fixture: 503 then 200, used to pin the tenacity-backed
+# retry policy in backend.core.fastly.client. The status codes are the
+# contract being tested, not the body; refresh after verifying retries
+# still behave the same way against the live endpoint.
+recorded_at: '2026-06-16T00:00:00Z'

@@ -169,6 +169,115 @@ def build_matrix_from_jsonl(path: Path, **kwargs) -> tuple[TransitionMatrix, Mat
     return build_matrix(_read_jsonl(path), **kwargs)
 
 
+# ── FSM1 binary encoding (KV-store payload) ──────────────────────────────────
+#
+# The Rust scorer (compute/scorer/src/matrix.rs) reads the matrix from the KV
+# Store. JSON (1.85 MB) is slow to fetch + parse into nested HashMaps on a COLD
+# Wasm instance — and Fastly Compute is instance-per-request, so every L2
+# request is cold. We encode a compact, sparse-CSR binary instead: ~5.6× smaller
+# and decoded in one pass (no per-entry allocation). The on-disk / FOS matrix
+# stays JSON (Python eval + diffing); only the KV payload is FSM1.
+#
+# Only the fields the Rust scorer actually reads are encoded: version,
+# vocab_size, counts, row_totals. `categories` / `anchors` are NOT read by the
+# scorer and are dropped from the KV payload (they remain in the JSON).
+#
+# Format (little-endian). MUST stay byte-for-byte in lockstep with the Rust
+# decoder `parse_fsm1` in compute/scorer/src/matrix.rs — the cross-language
+# fixture in tests/scoring/test_matrix.py + matrix.rs pins the exact bytes.
+#
+#   magic[4]     = b"FSM1"
+#   fmt_ver  u8  = 1
+#   vocab_size   u32   (Laplace |V| from the trained matrix)
+#   n_routes     u32   (size of the string table)
+#   ver_len  u16 + version[ver_len]   UTF-8
+#   str_off[n_routes+1]  u32 each (cumulative byte offsets into str_blob)
+#   str_blob             concatenated UTF-8 routes, SORTED ascending by raw
+#                        bytes → route id == index → binary-searchable
+#   row_total[n_routes]  uvarint u64 (indexed by route id; 0 if not a prev)
+#   row_off[n_routes+1]  uvarint u32 (cumulative pair index; CSR row pointers)
+#   pairs[total_pairs]   per row, col_id ASCENDING: uvarint(col_id) uvarint(count)
+
+FSM1_MAGIC = b"FSM1"
+FSM1_VERSION = 1
+
+
+def _uvarint(value: int) -> bytes:
+    """LEB128 unsigned varint. Mirrors the Rust reader's `uvarint`."""
+    if value < 0:
+        raise ValueError(f"uvarint cannot encode negative value {value}")
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def serialize_kv(matrix: dict[str, Any]) -> bytes:
+    """Encode a matrix JSON dict into the FSM1 binary KV payload.
+
+    Pure function of the dict's ``version`` / ``vocab_size`` / ``counts`` /
+    ``row_totals`` — so it works identically for train output, FOS-fetched, and
+    restored matrices. Routes are the union of every prev, every dest, and every
+    row_total key, sorted by raw UTF-8 bytes (== code-point order == the Rust
+    `<[u8]>` comparison, since UTF-8 preserves ordering).
+    """
+    version = str(matrix.get("version", ""))
+    vocab_size = int(matrix.get("vocab_size", 0))
+    counts: dict[str, dict[str, int]] = matrix.get("counts", {}) or {}
+    row_totals: dict[str, int] = matrix.get("row_totals", {}) or {}
+
+    routes: set[str] = set(counts.keys()) | set(row_totals.keys())
+    for row in counts.values():
+        routes.update(row.keys())
+    sorted_routes = sorted(routes, key=lambda s: s.encode())
+    rid = {r: i for i, r in enumerate(sorted_routes)}
+    n_routes = len(sorted_routes)
+
+    out = bytearray()
+    out += FSM1_MAGIC
+    out.append(FSM1_VERSION)
+    out += vocab_size.to_bytes(4, "little")
+    out += n_routes.to_bytes(4, "little")
+    ver_bytes = version.encode()
+    out += len(ver_bytes).to_bytes(2, "little")
+    out += ver_bytes
+
+    # String table: fixed-width u32 offsets (binary-searchable) + blob.
+    blob = bytearray()
+    offsets = [0]
+    for r in sorted_routes:
+        blob += r.encode()
+        offsets.append(len(blob))
+    for off in offsets:  # n_routes + 1 entries
+        out += off.to_bytes(4, "little")
+    out += blob
+
+    # Row totals, indexed by route id (uvarint u64; 0 when route is curr-only).
+    for r in sorted_routes:
+        out += _uvarint(int(row_totals.get(r, 0)))
+
+    # CSR: row offsets (uvarint, cumulative) then ascending (col_id, count) pairs.
+    row_off = [0]
+    pair_bytes = bytearray()
+    for r in sorted_routes:
+        row = counts.get(r, {})
+        cols = sorted((rid[c], int(cnt)) for c, cnt in row.items())
+        for col_id, cnt in cols:
+            pair_bytes += _uvarint(col_id)
+            pair_bytes += _uvarint(cnt)
+        row_off.append(row_off[-1] + len(cols))
+    for off in row_off:  # n_routes + 1 entries
+        out += _uvarint(off)
+    out += pair_bytes
+
+    return bytes(out)
+
+
 def write_matrix(matrix: TransitionMatrix, version: str, out: IO[str]) -> None:
     """Serialize the matrix as canonical JSON. Use sort_keys so two runs
     on the same input produce byte-identical output — important for
@@ -184,7 +293,17 @@ def write_matrix_path(matrix: TransitionMatrix, version: str, path: Path) -> Non
 
 
 def default_version() -> str:
-    """Version string in YYYY-MM-DD-a form. The trailing letter slot lets
-    us re-train multiple times in one day (e.g. after a route-template
-    update); the caller bumps the letter on subsequent runs."""
-    return datetime.now(UTC).strftime("%Y-%m-%d-a")
+    """Auto-assigned matrix version, ``YYYY-MM-DD-HHMMSS`` (UTC, second
+    resolution).
+
+    EC-06: the old ``YYYY-MM-DD-a`` form had a constant trailing ``a`` and no
+    caller ever bumped it, so 3+ same-day retrains all minted the *same* version
+    string — the history archive (keyed on the version string) overwrote prior
+    same-day snapshots and two distinct matrices reported an identical
+    ``X-Edge-Matrix-Version``. A sub-day time component makes the auto version
+    strictly monotonic within a day (operator retrains are minutes-to-hours
+    apart, so second resolution is ample). Lexicographically sortable and fixed
+    width, so it orders correctly; legacy ``-a`` versions remain valid (the
+    date prefix dominates cross-day ordering). Operators can still pass an
+    explicit ``--version`` to override entirely."""
+    return datetime.now(UTC).strftime("%Y-%m-%d-%H%M%S")

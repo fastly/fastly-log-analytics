@@ -18,6 +18,10 @@ from fastapi.testclient import TestClient
 from backend import config as svcconfig
 from backend.main import app
 
+# Destructive-teardown auth gate is a verified-fix surface: refactors
+# must preserve the "no fallback to server-stored fastly_api_key" rule.
+pytestmark = pytest.mark.security_regression
+
 
 @pytest.fixture
 def isolated_configs_dir(tmp_path, monkeypatch):
@@ -230,9 +234,9 @@ def test_destructive_teardown_service_in_bound_list_proceeds(isolated_configs_di
     assert r.status_code == 200
 
 
-def test_cache_only_teardown_bypasses_auth_gate(isolated_configs_dir):
+def test_cache_only_teardown_requires_auth_gate(isolated_configs_dir):
     """remove_logging=false + remove_cdn=false + remove_bucket=false = cache-only
-    cleanup. Never touches Fastly, so no token needed.
+    cleanup. Still requires a token to prevent unauthenticated destruction of local state.
     """
     sid = "svc-auth-7"
     _seed_cfg(sid)
@@ -250,8 +254,9 @@ def test_cache_only_teardown_bypasses_auth_gate(isolated_configs_dir):
             },
         )
 
-    # No token, no /tokens/self call expected — endpoint should proceed.
-    assert r.status_code == 200, f"cache-only teardown should bypass auth, got {r.status_code}: {r.text[:300]}"
+    # Cache-only teardown should trigger token_required 401 gate
+    assert r.status_code == 401
+    assert "token_required" in r.json()["detail"]["error"]
 
 
 def test_destructive_teardown_fastly_unreachable_rejects(isolated_configs_dir):
@@ -390,7 +395,7 @@ def test_destructive_teardown_text_plain_content_type_rejected(isolated_configs_
     with TestClient(app) as client:
         r = client.post(
             "/api/provision/teardown",
-            data='{"service_id":"' + sid + '","remove_logging":true}',
+            content='{"service_id":"' + sid + '","remove_logging":true}',
             headers={"Content-Type": "text/plain"},
         )
     assert r.status_code == 415, f"text/plain must be rejected with 415; got {r.status_code}: {r.text[:300]}"

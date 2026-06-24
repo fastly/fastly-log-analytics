@@ -67,6 +67,103 @@ def test_bootstrap_endpoint_success(client, tmp_path, monkeypatch):
     assert "services" in data
 
 
+def test_bootstrap_omits_admin_token_when_env_unset(client, tmp_path, monkeypatch):
+    """ADMIN_SHARED_SECRET unset (the default) → ``settings.admin_token`` is
+    null. Pinned because Phase Q's frontend interceptor MUST no-op in this
+    state — without this contract, the dev frontend would inject empty
+    headers everywhere."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    monkeypatch.delenv("ADMIN_SHARED_SECRET", raising=False)
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    assert response.json()["settings"]["admin_token"] is None
+
+
+def test_bootstrap_exposes_admin_token_to_loopback_admin(client, tmp_path, monkeypatch):
+    """ADMIN_SHARED_SECRET set + admin (loopback, no analyst session) →
+    bootstrap returns the secret in ``settings.admin_token`` so the SPA
+    can inject it on every subsequent admin request."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    monkeypatch.setenv("ADMIN_SHARED_SECRET", "s3cret-value")
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    assert response.json()["settings"]["admin_token"] == "s3cret-value"
+
+
+def test_bootstrap_omits_admin_token_for_authenticated_analyst(client, tmp_path, monkeypatch):
+    """ADMIN_SHARED_SECRET set + analyst session attached →
+    ``settings.admin_token`` is None. Pinned because a refactor that
+    drops the ``analyst_session is None and not is_remote`` gate would
+    hand the admin secret to every Fastly-fronted analyst on the next
+    /api/bootstrap call — a credentials-leak regression no integration
+    test currently covers."""
+    from backend import config
+    from backend.core import share_db
+    from backend.utils import tunnel
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    monkeypatch.setenv("ADMIN_SHARED_SECRET", "s3cret-value")
+    monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "system"))
+    share_db.reset_for_tests()
+    tunnel.reset_for_tests()
+    try:
+        config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+        # Seed an invite + TOS acceptance so /api/share/login succeeds.
+        invite = share_db.create_remote_invite(
+            name="Test Analyst",
+            email="analyst@example.com",
+            passcode="ocean-breeze-cabin-42",
+            expires_at_utc=None,
+            ip_whitelist=None,
+            service_ids=[MOCK_SERVICE_ID],
+        )
+        tos = share_db.get_latest_tos()
+        if tos:
+            share_db.mark_tos_accepted(invite["id"], tos["version"])
+
+        # Start sharing so the X-Remote-Analyst path's Host check passes.
+        tunnel.get_tunnel_manager().start_sharing(public_endpoint="https://testserver")
+
+        login = client.post(
+            "/api/share/login",
+            json={"email": invite["email"], "passcode": "ocean-breeze-cabin-42"},
+            headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+        )
+        assert login.status_code == 200, login.text
+        # L1: the session id is cookie-only now (not in the JSON body). TOS was
+        # accepted above, so login issues the full analyst_session_id cookie;
+        # read it from the response and re-set it explicitly (httpx won't auto
+        # send a Secure cookie back over the http test transport).
+        client.cookies.set("analyst_session_id", login.cookies.get("analyst_session_id"))
+
+        response = client.get(
+            "/api/bootstrap",
+            headers={
+                "X-Remote-Analyst": "1",
+                "Host": "testserver",
+                "x-fastly-service-id": MOCK_SERVICE_ID,
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["settings"]["admin_token"] is None
+        # Sanity check we're actually on the analyst branch — not the loopback
+        # one (which would also yield admin_token=None when env unset).
+        assert body["settings"]["is_remote_analyst"] is True
+    finally:
+        share_db.close_all_connections()
+        tunnel.reset_for_tests()
+
+
 # ── /api/bootstrap: edge cases ──────────────────────────────────────────────
 
 
@@ -306,56 +403,6 @@ def test_bootstrap_views_survives_repo_error(client, tmp_path, monkeypatch):
     assert data["views"] == [], "views must degrade to [] on repo error, not propagate"
 
 
-# ── /api/sources ───────────────────────────────────────────────────────────
-
-
-def test_sources_endpoint_returns_list_of_configured_services(client, tmp_path, monkeypatch):
-    """Returns one entry per configured service with the table_name
-    DuckDB will key on. Pinned because the admin UI reads this to
-    render the per-source ingest stats."""
-    from backend import config
-
-    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
-    config.save_config(
-        "svc-a",
-        {
-            "service_id": "svc-a",
-            "fos_endpoint": "us-east-1.object.fastlystorage.app",
-            "fos_bucket": "bkt-a",
-            "fos_prefix": "logs",
-            "fos_region": "us-east-1",
-        },
-    )
-
-    response = client.get("/api/sources")
-    assert response.status_code == 200
-    data = response.json()
-    assert isinstance(data, list)
-    assert len(data) >= 1
-    svc_a = next((s for s in data if s["name"] == "svc-a"), None)
-    assert svc_a is not None
-    assert svc_a["bucket"] == "bkt-a"
-    assert svc_a["table_name"].startswith("logs_")
-
-
-def test_sources_endpoint_returns_empty_list_with_no_configs(client, tmp_path, monkeypatch):
-    from backend import config
-
-    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
-    response = client.get("/api/sources")
-    assert response.status_code == 200
-    assert response.json() == []
-
-
-def test_sources_endpoint_500s_on_load_failure(client):
-    """If list_configs raises (corrupt config file), return 500 with
-    structured error — frontend renders this in the admin panel."""
-    with patch("backend.config.list_configs", side_effect=RuntimeError("disk failed")):
-        response = client.get("/api/sources")
-    assert response.status_code == 500
-    assert "error" in response.json()["detail"]
-
-
 # ── /api/schema ────────────────────────────────────────────────────────────
 
 
@@ -435,7 +482,11 @@ def test_log_fields_catalog_handles_missing_config_gracefully(client):
 
 
 def test_log_fields_catalog_500s_on_exception(client):
-    with patch("backend.core.log_fields.get_catalog_for_api", side_effect=RuntimeError("oops")):
+    # bootstrap.py calls `fr.get_catalog_for_api`, which is a same-identity
+    # re-export of `log_fields.get_catalog_for_api`. Patching the original
+    # `log_fields` binding does NOT affect the registry's already-bound
+    # reference, so patch the registry's path directly.
+    with patch("backend.core.field_registry.get_catalog_for_api", side_effect=RuntimeError("oops")):
         response = client.get("/api/log-fields/catalog")
     assert response.status_code == 500
 
@@ -470,62 +521,38 @@ def test_insight_availability_marks_unavailable_when_required_cols_missing(
     assert len(unavailable) > 0
 
 
-# ── /api/dma.json ──────────────────────────────────────────────────────────
+def test_bootstrap_remote_unauth_stub_omits_section_timings():
+    """An unauthenticated remote visitor must NOT receive section_timings.
 
+    Shipping the SectionTimer telemetry on the redirect-to-share-login stub
+    gives an unauthenticated caller a microsecond-precision oracle on
+    ``validate_analyst_session`` execution time, which strips network jitter
+    from any timing attack on the session cookie. Pinned so a future change
+    that adds ``section_timings=section_timings`` back to the stub flips
+    this test red.
+    """
+    from unittest.mock import MagicMock
 
-def test_dma_endpoint_serves_file_when_geojson_exists(client, tmp_path, monkeypatch):
-    """If ``data/system/dma_geojson.json`` exists on disk, the endpoint
-    returns it as a file response (the real geojson is large; the
-    file-serving path avoids loading it into Python memory)."""
-    # Create the expected file
-    import os
+    # The handler is now an async coalescing wrapper; the remote-unauth stub
+    # logic lives in the sync body (_bootstrap_sync) that the wrapper runs in
+    # the threadpool. Exercise the body directly — same code path, no event
+    # loop needed.
+    from backend.routers.bootstrap import _bootstrap_sync
 
-    geojson_path = "data/system/dma_geojson.json"
-    os.makedirs("data/system", exist_ok=True)
-    try:
-        with open(geojson_path, "w") as f:
-            f.write('{"type":"FeatureCollection","features":[]}')
+    fake_request = MagicMock()
+    fake_request.state.is_remote = True
+    fake_request.state.analyst_session = None
+    fake_request.cookies = {}
 
-        response = client.get("/api/dma.json")
-        assert response.status_code == 200
-        # FileResponse serves the bytes directly
-        assert "FeatureCollection" in response.text
-    finally:
-        if os.path.exists(geojson_path):
-            os.remove(geojson_path)
+    response = _bootstrap_sync(fake_request, None)
+    payload = response.model_dump(by_alias=True)
 
-
-def test_dma_endpoint_falls_back_to_in_memory_map_when_no_file(client):
-    """No on-disk DMA file → fall back to the built-in mapping
-    (`_get_dma_map`). Pinned because removing the fallback would
-    break the frontend's DMA picker on fresh installs that haven't
-    downloaded the geojson asset."""
-    fake_map = {"803": "Los Angeles, CA", "501": "New York, NY"}
-    with (
-        patch("os.path.exists", return_value=False),
-        patch("backend.core.duckdb._get_dma_map", return_value=fake_map),
-    ):
-        response = client.get("/api/dma.json")
-
-    assert response.status_code == 200
-    # M1 backstop adds _debug_* keys; pull out only the DMA codes (keys
-    # are 3-digit numeric strings; telemetry keys start with underscore).
-    body = response.json()
-    dma_only = {k: v for k, v in body.items() if not k.startswith("_")}
-    assert dma_only == fake_map
-
-
-def test_dma_endpoint_500s_when_in_memory_map_fails(client):
-    """File missing AND fallback raises → 500. Pinned because the
-    frontend explicitly polls this on map mount; a silent empty
-    response would render an empty map without an error message."""
-    with (
-        patch("os.path.exists", return_value=False),
-        patch("backend.core.duckdb._get_dma_map", side_effect=RuntimeError("DMA module broken")),
-    ):
-        response = client.get("/api/dma.json")
-
-    assert response.status_code == 500
+    assert payload["settings"]["is_remote_analyst"] is True
+    assert payload["settings"]["needs_login"] is True
+    # Both the alias (_section_timings) and the field name (section_timings)
+    # must be absent or empty — anything non-empty leaks per-call timing.
+    timings = payload.get("_section_timings") or payload.get("section_timings") or []
+    assert timings == [], f"unauth bootstrap stub leaked section_timings: {timings}"
 
 
 # Silence unused-import warnings

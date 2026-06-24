@@ -104,8 +104,8 @@ class TestIngestStartTimeExec:
         with (
             patch("backend.core.ingest._ensure_source_registered"),
             patch("backend.core.ingest._get_fos_client") as mock_fos,
-            patch("backend.core.metadata_db.get_ingested_filenames", return_value=set()),
-            patch("backend.core.metadata_db.insert_ingested_files"),
+            patch("backend.core.metadata.get_ingested_filenames", return_value=set()),
+            patch("backend.core.metadata.insert_ingested_files"),
             patch("time.time", side_effect=fake_time),
         ):
             # Build a paginator that yields one file

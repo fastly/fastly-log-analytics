@@ -10,11 +10,16 @@
  */
 import { render, screen } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { createTestQueryClient } from '../helpers/query'
 import { expect, test, vi, beforeEach } from 'vitest'
 import React from 'react'
 
-import AlertsPage from '@/app/alerts/page'
+// The route's page.tsx is now an async RSC that pre-fetches alerts
+// server-side and dehydrates the cache for the client island. The unit
+// test exercises the client island directly so it stays compatible with
+// vitest's synchronous render.
+import AlertsClient from '@/app/alerts/_sections/AlertsClient'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
 import { server } from '../../tests/msw/server'
@@ -32,9 +37,7 @@ vi.mock('next/navigation', () => ({
 
 const API_BASE = 'http://127.0.0.1:8000'
 
-const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: false, staleTime: 0 } },
-})
+const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -70,7 +73,7 @@ test('renders alerts page', async () => {
 
   render(
     <QueryClientProvider client={queryClient}>
-      <AlertsPage />
+      <AlertsClient />
     </QueryClientProvider>,
   )
 

@@ -26,6 +26,7 @@ export function StatCard({ title, value, sub, icon: Icon, iconClassName, loading
     <Button
       variant="ghost"
       size="icon"
+      aria-label="About this metric"
       className="h-6 w-6 text-muted-foreground hover:text-foreground"
       onClick={() => setIsHelpOpen(true)}
       title="About this metric"
@@ -34,7 +35,18 @@ export function StatCard({ title, value, sub, icon: Icon, iconClassName, loading
     </Button>
   ) : tooltip ? (
     <Tooltip>
-      <TooltipTrigger render={<span className="text-muted-foreground hover:text-foreground transition-colors shrink-0" />}>
+      {/* A-8 (a11y, WCAG 2.1.1): Button (not span) so keyboard users can
+          tab to the help icon and trigger the tooltip on focus. */}
+      <TooltipTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label="More info"
+            className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+          />
+        }
+      >
         <HelpCircle className="h-4 w-4" />
       </TooltipTrigger>
       <TooltipContent side="top" className="max-w-[200px] text-xs font-normal">

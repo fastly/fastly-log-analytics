@@ -1,0 +1,103 @@
+name: E2E (Playwright)
+
+# R-3d (testing_suite_audit_2026-06-14.md). Runs the Playwright
+# journeys from frontend/e2e/ against a Chromium build with the
+# FastAPI backend booted under FASTLY_MOCK_MODE=1 (see
+# scripts/run_contract_backend.py + frontend/e2e/global-setup.ts).
+#
+# Blocking on every PR. The original audit recommended a 2-week
+# soft-launch with continue-on-error: true; we skipped that grace
+# window deliberately — the trade-off is that the first few weeks
+# may surface flakes as blocking failures (use the uploaded trace
+# artifact to debug), but the alternative was forgetting to flip
+# the gate. To revisit: add `continue-on-error: true` to the job
+# below if a specific test needs a green window to stabilise.
+#
+# Branch protection on `main` now requires status checks to pass before
+# merge (GATE-04, 2026-06-19): `Backend (Python)`, `Frontend (Node)`, and
+# `Scorer (Rust)` are required. The three `Playwright (chromium|firefox|webkit)`
+# contexts are NOT yet required because this workflow lives only on a feature
+# branch — GitHub can't require a context it has never seen reported on `main`
+# (it would deadlock every PR as "Expected — waiting for status"). Once this
+# file merges to `main` and the matrix reports once, append the three Playwright
+# contexts to required_status_checks:
+#   gh api -X PUT repos/{owner}/{repo}/branches/main/protection/required_status_checks \
+#     -f strict=false -f 'contexts[]=Backend (Python)' -f 'contexts[]=Frontend (Node)' \
+#     -f 'contexts[]=Scorer (Rust)' -f 'contexts[]=Playwright (chromium)' \
+#     -f 'contexts[]=Playwright (firefox)' -f 'contexts[]=Playwright (webkit)'
+
+on:
+  push:
+    branches: [main, release/**]
+  pull_request:
+    branches: [main, release/**]
+
+# Cancel superseded runs on the same ref (see ci.yml for the same pattern
+# and rationale). main keeps each push separate; PR refs collapse to one
+# in-flight run so a rapid push doesn't stack three browser matrices.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  playwright:
+    name: Playwright (${{ matrix.browser }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install backend deps
+        run: uv sync
+
+      - name: Setup Node
+        # Aligned with ci.yml (Node 24 + setup-node@v6) — package.json
+        # declares `engines.node: ">=24"`, so Node 22 here would silently
+        # run Playwright on an unsupported version. FORCE_JAVASCRIPT_ACTIONS_TO_NODE24
+        # only affects GitHub's bundled actions infrastructure, not the
+        # Node runtime used by the test step.
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: cd frontend && npm ci
+
+      - name: Install Playwright browser (${{ matrix.browser }}) + system deps
+        run: cd frontend && npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Run Playwright (${{ matrix.browser }})
+        env:
+          CI: "1"
+        run: cd frontend && npx playwright test --project=${{ matrix.browser }}
+
+      - name: Upload Playwright report
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v5
+        with:
+          name: playwright-report-${{ matrix.browser }}
+          path: frontend/playwright-report
+          retention-days: 7
+
+      - name: Upload Playwright traces
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v5
+        with:
+          name: playwright-traces-${{ matrix.browser }}
+          path: frontend/test-results
+          retention-days: 7

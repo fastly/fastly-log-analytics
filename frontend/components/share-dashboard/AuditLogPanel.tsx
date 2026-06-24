@@ -129,12 +129,12 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
         <h4 className="text-sm font-semibold">Filter audit log</h4>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
           <div className="space-y-1">
-            <Label className="text-[10px]">Event type</Label>
+            <Label htmlFor="audit-event-type" className="text-[10px]">Event type</Label>
             <Select
               value={filters.event_type}
               onValueChange={(v) => setFilters((f) => ({ ...f, event_type: v ?? 'ALL' }))}
             >
-              <SelectTrigger>
+              <SelectTrigger id="audit-event-type">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -147,24 +147,27 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
             </Select>
           </div>
           <div className="space-y-1">
-            <Label className="text-[10px]">Email contains</Label>
+            <Label htmlFor="audit-email" className="text-[10px]">Email contains</Label>
             <Input
+              id="audit-email"
               value={filters.email}
               onChange={(e) => setFilters((f) => ({ ...f, email: e.target.value }))}
               placeholder="alice@…"
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-[10px]">Since (ISO-Z)</Label>
+            <Label htmlFor="audit-since" className="text-[10px]">Since (ISO-Z)</Label>
             <Input
+              id="audit-since"
               value={filters.since}
               onChange={(e) => setFilters((f) => ({ ...f, since: e.target.value }))}
               placeholder="2026-05-25T00:00:00Z"
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-[10px]">Until (ISO-Z)</Label>
+            <Label htmlFor="audit-until" className="text-[10px]">Until (ISO-Z)</Label>
             <Input
+              id="audit-until"
               value={filters.until}
               onChange={(e) => setFilters((f) => ({ ...f, until: e.target.value }))}
               placeholder="2026-05-27T23:59:59Z"

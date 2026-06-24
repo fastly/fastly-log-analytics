@@ -60,10 +60,25 @@
   --secondary: oklch(0.96 0.01 255);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.96 0.01 255);
-  --muted-foreground: oklch(0.556 0 0);
+  /* M-9 (a11y): was oklch(0.556 0 0) which measured 4.43 contrast vs sidebar
+     bg (#737373 on #f3f8fc, 11px bold) — just under WCAG AA's 4.5 floor for
+     normal text and a hard fail on the 1.9 ratio used by the v1.2.0 footer.
+     Bumped 0.556 → 0.47.
+     2026-06-16: axe still flagged `text-muted-foreground` on `bg-muted/10`
+     and `bg-muted/20` empty-state cards (effective bg sits at ~0.99
+     lightness because the /10 and /20 opacity steps wash out almost to
+     body bg) — contrast measured 2.21–2.70, well under AA. Bumped again
+     0.47 → 0.40 which clears 5:1 on /20 and stays above 4.5:1 on /10
+     without darkening enough to blur the muted-vs-default text hierarchy. */
+  --muted-foreground: oklch(0.40 0 0);
   --accent: oklch(0.93 0.02 255);
   --accent-foreground: oklch(0.546 0.245 262.881);
-  --destructive: oklch(0.577 0.245 27.325);
+  /* WCAG AA (UX a11y gate): was red-600 (oklch 0.577) — `text-destructive` on a
+     light destructive tint (bg-destructive/5..10, e.g. CardErrorState, the
+     RotateKey button) measured 3.86–4.36:1, under 4.5. Deepen to red-700 so
+     destructive text passes on tint; the solid destructive button (white-on-
+     destructive) only gains contrast. Dark mode (below) is unchanged. */
+  --destructive: oklch(0.505 0.213 27.518);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.546 0.245 262.881);
@@ -142,3 +157,19 @@
     @apply bg-muted-foreground/20 rounded-full hover:bg-muted-foreground/40 transition-colors;
   }
   }
+
+/* A-12 (a11y): honor OS-level reduced-motion preference.
+   WCAG 2.3.3 Animation from Interactions — neutralize the animate-pulse /
+   animate-spin / dialog+popover+tooltip zoom-in/slide-in motion for users
+   who have the prefers-reduced-motion flag set. scroll-behavior falls back
+   to auto so programmatic scrolls also stop smooth-scrolling. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

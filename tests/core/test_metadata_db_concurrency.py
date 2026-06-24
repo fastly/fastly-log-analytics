@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
 
 
 def test_wal_is_enabled_after_get_con():
@@ -257,3 +257,76 @@ def test_get_con_init_lock_times_out_when_held(monkeypatch):
     finally:
         holder_release.set()
         holder.join(timeout=5)
+
+
+# ── journal-mode mismatch on legacy DB (audit follow-up) ────────────────────
+
+
+def test_legacy_delete_mode_db_is_upgraded_to_wal_on_first_open():
+    """A pre-existing service DB file in journal_mode=DELETE (the SQLite
+    default before our pool started forcing WAL) must be upgraded to
+    WAL the first time the pool opens it. Pinned because the upgrade
+    is silent — without this test a regression that dropped the pragma
+    would re-introduce writer-vs-reader contention on any service whose
+    metadata.db was created before the WAL switchover.
+
+    Uses the autouse ``isolate_metadata_db`` sandbox via
+    ``metadata.base.db_path()`` rather than a tmp_path override.
+    """
+    import sqlite3
+
+    from backend.core.metadata import base as metadata_base
+
+    sid = "svc-legacy-upgrade"
+    legacy_path = metadata_base.db_path(sid)
+
+    # 1. Build a legacy DB file in DELETE mode and seed it with a row.
+    legacy = sqlite3.connect(legacy_path)
+    try:
+        legacy.execute("PRAGMA journal_mode = DELETE")
+        before = legacy.execute("PRAGMA journal_mode").fetchone()[0]
+        assert before.lower() == "delete", f"setup failed: legacy mode is {before!r}"
+        legacy.execute("CREATE TABLE legacy_marker (id INTEGER)")
+        legacy.execute("INSERT INTO legacy_marker VALUES (1)")
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    # 2. Open via the pool — must upgrade DELETE → WAL.
+    con = metadata_db.get_con(sid)
+    mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal", f"pool did not upgrade legacy DELETE → WAL; got {mode!r}"
+
+    # 3. Legacy row must still be readable (no data loss in the upgrade).
+    # The pool's connection uses sqlite3.Row factory — coerce to tuples
+    # for the comparison.
+    rows = [tuple(r) for r in con.execute("SELECT id FROM legacy_marker").fetchall()]
+    assert rows == [(1,)], f"legacy row lost across WAL upgrade: {rows!r}"
+
+
+def test_wal_mode_persists_across_reopen():
+    """journal_mode = WAL is baked into the SQLite file header once switched
+    — pin that the persisted value survives a raw sqlite3.connect that
+    issues no pragmas, proving the pool's WAL pragma persisted to the
+    file header (not just to the in-memory connection).
+    """
+    import sqlite3
+
+    from backend.core.metadata import base as metadata_base
+
+    sid = "svc-wal-persist"
+    db_path = metadata_base.db_path(sid)
+
+    # First open via the pool → WAL.
+    con = metadata_db.get_con(sid)
+    first_mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+    assert first_mode.lower() == "wal"
+
+    # Open the same file with raw sqlite3 (no pragmas applied) — the
+    # header alone should report WAL.
+    raw = sqlite3.connect(db_path)
+    try:
+        raw_mode = raw.execute("PRAGMA journal_mode").fetchone()[0]
+        assert raw_mode.lower() == "wal", f"WAL did not persist in file header — raw open reports {raw_mode!r}."
+    finally:
+        raw.close()

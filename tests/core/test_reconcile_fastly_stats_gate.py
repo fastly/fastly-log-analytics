@@ -18,7 +18,7 @@ import pytest
 @pytest.fixture
 def fresh_service():
     """Empty usage_log + ingested_files for a unique service id."""
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     service_id = "recon-svc-1"
     # Touch ingested_files so the DB is initialised cleanly.
@@ -30,9 +30,11 @@ def fresh_service():
 
 
 def _seed_reconciliation_row(service_id: str, ts_iso: str) -> None:
-    from backend.core import metadata_db
+    # usage_log lives in its own per-service SQLite (v2.0 cutover);
+    # ``get_latest_reconciliation_ts`` reads from there too.
+    from backend.core.metadata import usage_log_db as _usage_log_db
 
-    con = metadata_db.get_con(service_id)
+    con = _usage_log_db.get_con(service_id)
     con.execute(
         """
         INSERT INTO usage_log

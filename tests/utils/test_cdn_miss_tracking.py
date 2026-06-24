@@ -22,53 +22,53 @@ def fresh_call_tracking():
 
 class TestIsFullMiss:
     def test_single_hit(self):
-        from backend.utils.telemetry import _is_full_miss
+        from backend.utils.telemetry import is_full_miss
 
-        assert _is_full_miss("HIT") is False
+        assert is_full_miss("HIT") is False
 
     def test_chained_hit_hit(self):
-        from backend.utils.telemetry import _is_full_miss
+        from backend.utils.telemetry import is_full_miss
 
-        assert _is_full_miss("HIT, HIT") is False
+        assert is_full_miss("HIT, HIT") is False
 
     def test_edge_miss_shield_hit(self):
         """MISS at edge but shield served it — no FOS read happened."""
-        from backend.utils.telemetry import _is_full_miss
+        from backend.utils.telemetry import is_full_miss
 
-        assert _is_full_miss("MISS, HIT") is False
+        assert is_full_miss("MISS, HIT") is False
 
     def test_full_miss(self):
-        from backend.utils.telemetry import _is_full_miss
+        from backend.utils.telemetry import is_full_miss
 
-        assert _is_full_miss("MISS, MISS") is True
+        assert is_full_miss("MISS, MISS") is True
 
     def test_pass(self):
         """PASS = uncacheable request, always goes to FOS."""
-        from backend.utils.telemetry import _is_full_miss
+        from backend.utils.telemetry import is_full_miss
 
-        assert _is_full_miss("PASS") is True
+        assert is_full_miss("PASS") is True
 
     def test_pass_pass(self):
-        from backend.utils.telemetry import _is_full_miss
+        from backend.utils.telemetry import is_full_miss
 
-        assert _is_full_miss("PASS, PASS") is True
+        assert is_full_miss("PASS, PASS") is True
 
     def test_mixed_pass_miss(self):
-        from backend.utils.telemetry import _is_full_miss
+        from backend.utils.telemetry import is_full_miss
 
-        assert _is_full_miss("MISS, PASS") is True
+        assert is_full_miss("MISS, PASS") is True
 
     def test_empty(self):
-        from backend.utils.telemetry import _is_full_miss
+        from backend.utils.telemetry import is_full_miss
 
-        assert _is_full_miss("") is False
-        assert _is_full_miss(None) is False
+        assert is_full_miss("") is False
+        assert is_full_miss(None) is False
 
     def test_case_insensitive(self):
-        from backend.utils.telemetry import _is_full_miss
+        from backend.utils.telemetry import is_full_miss
 
-        assert _is_full_miss("miss, miss") is True
-        assert _is_full_miss("Hit, Hit") is False
+        assert is_full_miss("miss, miss") is True
+        assert is_full_miss("Hit, Hit") is False
 
 
 class TestRecordCdnCall:

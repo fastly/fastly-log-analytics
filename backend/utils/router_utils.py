@@ -2,19 +2,235 @@
 
 - ``query_errors``: decorator that wraps a route handler in a standard
   try/except and raises HTTPException on failure.
-- ``SSE_HEADERS``: standard Server-Sent Events response headers.
 - ``sync_admin_state``: fire-and-forget state export after mutations.
 - ``format_debug_request``: format outbound HTTP request metadata for debug output.
+- ``SSE_PASSTHROUGH_HEADERS``: response headers that tell Fastly /
+  Caddy / nginx not to buffer or transform streaming SSE responses.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
+from collections.abc import Callable, Collection
 from functools import wraps
+from logging import Logger
+from typing import NoReturn
 
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
+
+
+# ── SSE pass-through headers ────────────────────────────────────────────────
+#
+# Apply to every EventSourceResponse so intermediaries forward chunks as
+# soon as the backend yields them, rather than buffering until the
+# stream closes (which for SSE is never).
+#
+#  - ``Surrogate-Control: no-store`` is the Fastly-respected hint that
+#    bypasses Varnish-shield caching. Without it, Fastly buffered our
+#    analyst SSE responses indefinitely: client fetch never received
+#    headers, the browser-side hook sat on "starting" forever, and the
+#    "Latest Log" header badge never updated for analyst sessions
+#    (observed 2026-06-15 via the Fastly URL — non-stream
+#    /api/log-extents returned 200 instantly, /api/log-extents/stream
+#    never delivered a single chunk).
+#  - ``Cache-Control: private, no-store, no-transform`` — ``no-transform``
+#    discourages proxies from re-compressing the body, which is a
+#    different reason intermediaries hold onto chunks. ``no-store``
+#    plus ``private`` keeps cookied SSE bodies out of any cache.
+#  - ``X-Accel-Buffering: no`` — nginx/Caddy hint. Caddy already streams
+#    SSE correctly via ``flush_interval -1`` in the Caddyfile, but we
+#    set the header anyway in case the deployment topology changes.
+#
+# Pass via ``EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)``.
+SSE_PASSTHROUGH_HEADERS: dict[str, str] = {
+    "Surrogate-Control": "no-store",
+    "Cache-Control": "private, no-store, no-transform",
+    "X-Accel-Buffering": "no",
+}
+
+
+def start_or_resume_cron(
+    source: dict,
+    task: str,
+    target,
+    *,
+    target_kwargs: dict | None = None,
+    success_msg: str = "",
+    in_progress_msg: str = "",
+) -> dict:
+    """Start a cron task in a daemon thread; resume the active run if already
+    in progress; surface 503 with ``busy: True`` if neither path matches.
+
+    Consolidates the 3 hand-rolled copies of this routine across
+    ``backend.routers.admin.ingest`` (metadata_sync + sync) and
+    ``backend.routers.admin.iceberg`` (commit). Each used to duplicate the
+    same ``try: start_cron_run -> spawn thread -> return {ok}; except
+    RuntimeError: scan list_active_runs -> return {ok, in_progress_msg};
+    else: raise HTTPException(503)`` shape with only the task name +
+    target kwargs varying.
+    """
+    import threading
+
+    from backend.core.duckdb import start_cron_run
+    from backend.cron_progress import list_active_runs, start_progress
+
+    service_id = source["name"]
+    try:
+        run_id = start_cron_run(source, task)
+        start_progress(run_id, service_id=service_id, task=task)
+        threading.Thread(
+            target=target,
+            args=(service_id,),
+            kwargs={"run_id": run_id, **(target_kwargs or {})},
+            daemon=True,
+        ).start()
+        return {"ok": True, "message": success_msg, "run_id": run_id}
+    except RuntimeError as e:
+        for entry in list_active_runs():
+            if entry.get("service_id") == service_id and entry.get("task") == task:
+                return {"ok": True, "message": in_progress_msg, "run_id": entry["run_id"]}
+        raise HTTPException(status_code=503, detail=make_error("cron_busy", str(e), busy=True)) from e
+
+
+def load_service_config(service_id: str) -> dict:
+    """Load a service's config or raise :class:`HTTPException` 404.
+
+    The ``cfg = svcconfig.load_config(service_id); if not cfg: raise
+    HTTPException(404, ...)`` preamble was written 16+ times across the
+    router tree with two existing drift cases (a ``raise ValueError`` at
+    services/core.py:87, a JSON-encoded SSE error yield at
+    services/core.py:874). One funnel removes both drift surfaces and
+    the per-call boilerplate.
+
+    Callers that intentionally want the "empty-dict fallback on missing
+    config" semantic (``load_config(service_id) or {}``) should keep
+    calling ``load_config`` directly — this helper is for the strict
+    "service must exist or 404" path that is the common case in
+    request-time routes.
+    """
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id)
+    if not cfg:
+        # Keep the exact ``detail={"error": "Service not found"}`` shape
+        # the migrated callers used — frontend code keys on this exact
+        # message via ``error.detail.error === "Service not found"``.
+        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    return cfg
+
+
+# ── Standardised error-envelope helpers ───────────────────────────────────────
+#
+# Convention: every router error response carries ``detail = {"error":
+# <machine-readable code>, ...}`` so the frontend's ``extractApiError`` can
+# pattern-match on the ``error`` field rather than substring-matching on
+# free-text. Use these helpers on every HTTPException site so the shape
+# stays uniform across the 18-router surface.
+
+
+def bad_request(code: str) -> dict[str, str]:
+    """Envelope for a 400 ``{"error": code}``. Pair with
+    ``raise HTTPException(status_code=400, detail=bad_request("..."))``."""
+    return {"error": code}
+
+
+def not_found(code: str = "not_found") -> dict[str, str]:
+    """Envelope for a 404 ``{"error": code}``. ``code`` defaults to the
+    generic ``"not_found"`` for resources that have no domain-specific code."""
+    return {"error": code}
+
+
+def validation_failed(code: str, messages: list[str]) -> dict:
+    """Envelope for a 422 ``{"error": code, "messages": [...]}``. Use when a
+    request fails domain validation that Pydantic can't express."""
+    return {"error": code, "messages": messages}
+
+
+def make_error(
+    code: str,
+    message: str | None = None,
+    *,
+    error_id: str | None = None,
+    **extras: object,
+) -> dict[str, object]:
+    """Build the unified error-envelope detail dict.
+
+    Shape: ``{"error": code[, "message": ..., "error_id": ..., **extras]}``.
+    ``None`` fields are omitted so the wire payload doesn't carry empty
+    keys. Pair with::
+
+        raise HTTPException(status_code=400, detail=make_error("bad_input", str(exc)))
+
+    ``code`` is the machine-readable identifier the frontend pattern-matches
+    on; ``message`` carries the human-readable detail (safe-to-echo
+    exception text from controlled call sites — e.g. ``parse_period``
+    ValueError). For exceptions that may leak internal state (DuckDB file
+    paths, upstream API bodies) use :func:`raise_internal` instead, which
+    logs server-side and returns only an ``error_id``."""
+    detail: dict[str, object] = {"error": code}
+    if message is not None:
+        detail["message"] = message
+    if error_id is not None:
+        detail["error_id"] = error_id
+    detail.update(extras)
+    return detail
+
+
+def raise_internal(
+    log: Logger,
+    exc: BaseException,
+    *,
+    code: str = "request_failed",
+    status: int = 500,
+) -> NoReturn:
+    """Log the full exception server-side; raise a generic ``HTTPException``
+    that does NOT echo the original exception message to the client.
+
+    Use at except sites that previously did
+    ``raise HTTPException(status_code=500, detail={"error": str(e)})`` —
+    that pattern leaks upstream API response bodies (e.g. Fastly error
+    text interpolated by ``backend.core.fastly.client.fastly()``) to the
+    caller. ``error_id`` lets operators correlate a client report with
+    the matching server-log line.
+    """
+    error_id = uuid.uuid4().hex[:8]
+    log.exception("%s [error_id=%s]", code, error_id)
+    raise HTTPException(
+        status_code=status,
+        detail={"error": code, "error_id": error_id},
+    ) from exc
+
+
+# ── Section-selector validation ───────────────────────────────────────────────
+
+
+def expand_sections(
+    sections: Collection[str] | None,
+    valid: frozenset[str],
+    *,
+    couple: Callable[[set[str]], set[str]] | None = None,
+) -> set[str] | None:
+    """Validate a section selector against ``valid``; apply optional coupling.
+
+    ``None`` → no selector (full response). Unknown members raise the shared
+    ``400 {"error": "unknown_section", "unknown": [...]}`` envelope. ``couple``
+    lets a router fold in implied sections after validation (e.g. ts+status+path
+    travel together; selecting any fingerprint card also computes coverage).
+    """
+    if sections is None:
+        return None
+    expanded = set(sections)
+    unknown = expanded - valid
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "unknown_section", "unknown": sorted(unknown)},
+        )
+    return couple(expanded) if couple else expanded
+
 
 # ── Debug request formatting ──────────────────────────────────────────────────
 
@@ -47,79 +263,32 @@ def format_debug_request(
     return "\n".join(lines)
 
 
-# ── SSE ───────────────────────────────────────────────────────────────────────
-
-SSE_HEADERS: dict[str, str] = {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-}
-
-
-def sse_flush_preamble(count: int = 8):
-    """Yield empty SSE comment lines to flush nginx/proxy buffers before the first event."""
-    for _ in range(count):
-        yield f": {' ' * 1024}\n\n"
-
-
-def sse_event(payload: dict, pad: int = 256):
-    """Yield one SSE event followed by a padding comment that prevents
-    proxy buffering of trailing events.
-
-    Used by the SSE routers (provision, session_scoring) which all
-    previously defined an identical ``def yj`` locally. ``pad=0`` disables
-    the padding comment for callers that don't need it (e.g. the heartbeat
-    sites in services/core.py)."""
-    import json as _json
-
-    yield f"data: {_json.dumps(payload)}\n\n"
-    if pad:
-        yield f": {' ' * pad}\n\n"
-
-
-# ── State sync ────────────────────────────────────────────────────────────────
-
-
-def sync_admin_state(service_id: str | None) -> None:
-    """Fire-and-forget admin state export after alert/view mutations.
-
-    Also nudges the scheduler so that toggling alert count between 0 and >0
-    immediately registers or removes the alerts evaluation cron — otherwise
-    a user who just created their first alert would wait until the next
-    process restart for evaluation to start.
-
-    Swallows all exceptions so a sync failure never breaks the primary request.
-    """
-    if not service_id:
-        return
-    try:
-        from backend.state_sync import export_admin_state
-
-        export_admin_state(service_id)
-    except Exception:
-        pass
-    try:
-        from backend.scheduler import get_scheduler
-
-        get_scheduler().reload()
-    except Exception:
-        pass
+# ``sync_admin_state`` moved to ``backend.routers._state_sync`` — its two
+# transitive imports (state_sync, scheduler) sit above ``utils`` in the
+# layering, and the only callers are routers anyway.
 
 
 def query_errors(status_code: int = 400):
-    """Decorator that catches exceptions from a route handler and raises a
-    standard ``HTTPException`` with ``{"error": str(e)}``.
+    """Decorator that maps unhandled exceptions to the unified error envelope.
 
-    Security: the previous implementation embedded the full
-    Python traceback under a ``trace`` key in the response body. Public
-    callers could read internal file paths, module structure, and even
-    secret values that leaked into exception messages. The fix is to log
-    the traceback server-side (where operators can read it during triage)
-    and return only the exception message to the client.
+    Three branches:
 
-    Optionally catches ``ValueError`` / ``LookupError`` as 400/404 before
-    the generic fallback.
+    * ``ValueError`` → 400 ``make_error("bad_request", str(e))``. The
+      human-readable text rides on ``detail.message`` where
+      ``extractApiError`` reads it as the user-facing string. Use
+      ``ValueError`` from inside the handler whenever the message is
+      safe to echo (validated input, period parsing, etc.).
+    * ``LookupError`` → 404 ``make_error("not_found", str(e))`` — same
+      shape, different code.
+    * Any other ``Exception`` → ``raise_internal``: logs the full
+      traceback server-side (operator triage) and returns ``{"error":
+      "unhandled_error", "error_id": "..."}`` so upstream API bodies,
+      DuckDB internals, and stack-trace text never reach the client.
+
+    Wearers of the decorator no longer need to think about which exception
+    text is safe to echo: the catch-all path collapses to a generic code +
+    correlation id, and the typed branches put the message under
+    ``detail.message`` instead of the machine-code slot.
 
     Usage::
 
@@ -144,15 +313,11 @@ def query_errors(status_code: int = 400):
                 except HTTPException:
                     raise
                 except ValueError as e:
-                    raise HTTPException(status_code=400, detail={"error": str(e)})
+                    raise HTTPException(status_code=400, detail=make_error("bad_request", str(e)))
                 except LookupError as e:
-                    raise HTTPException(status_code=404, detail={"error": str(e)})
+                    raise HTTPException(status_code=404, detail=make_error("not_found", str(e)))
                 except Exception as e:
-                    logger.exception("[query_errors] unhandled exception in %s", fn.__qualname__)
-                    raise HTTPException(
-                        status_code=status_code,
-                        detail={"error": str(e)},
-                    )
+                    raise_internal(logger, e, code="unhandled_error", status=status_code)
 
             return async_wrapper
 
@@ -163,19 +328,11 @@ def query_errors(status_code: int = 400):
             except HTTPException:
                 raise
             except ValueError as e:
-                raise HTTPException(status_code=400, detail={"error": str(e)})
+                raise HTTPException(status_code=400, detail=make_error("bad_request", str(e)))
             except LookupError as e:
-                raise HTTPException(status_code=404, detail={"error": str(e)})
+                raise HTTPException(status_code=404, detail=make_error("not_found", str(e)))
             except Exception as e:
-                # logger.exception records the traceback to server logs
-                # WITHOUT putting it on the wire. Triage requires opening
-                # the backend log; that's an acceptable cost for the
-                # security gain.
-                logger.exception("[query_errors] unhandled exception in %s", fn.__qualname__)
-                raise HTTPException(
-                    status_code=status_code,
-                    detail={"error": str(e)},
-                )
+                raise_internal(logger, e, code="unhandled_error", status=status_code)
 
         return wrapper
 

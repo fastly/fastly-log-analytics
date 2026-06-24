@@ -1,7 +1,8 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import { expect, test, vi, beforeEach } from 'vitest'
 import InsightsPage from '@/app/insights/page'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { createTestQueryClient } from '../helpers/query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { client } from '@/lib/api'
 import React from 'react'
@@ -13,7 +14,6 @@ vi.mock('@/components/ReportLayout', () => ({
   ReportLayout: ({ children, title }: any) => <div><h1>{title}</h1>{children({ activeServiceId: 'test-svc', startTime: null, endTime: null, filterPayload: {} })}</div>
 }))
 
-// Mock the API client
 vi.mock('@/lib/api', () => ({
   client: {
     GET: vi.fn(),
@@ -24,14 +24,7 @@ vi.mock('@/lib/api', () => ({
   getApiBase: vi.fn(() => 'http://test')
 }))
 
-const queryClient = new QueryClient({
-  defaultOptions: { 
-    queries: { 
-      retry: false,
-      staleTime: 0
-    } 
-  }
-})
+const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -40,7 +33,6 @@ beforeEach(() => {
 })
 
 test('renders insights page and displays insight cards', async () => {
-  // Mock API responses
   vi.mocked(client.GET).mockResolvedValue({ data: { unavailable: [] } } as any)
   vi.mocked(client.POST).mockResolvedValue({
     data: {
@@ -66,7 +58,6 @@ test('renders insights page and displays insight cards', async () => {
     </QueryClientProvider>
   )
 
-  // Verify header
   expect(screen.getByText('Anomaly Detection')).toBeInTheDocument()
 
   // Wait for insights to load

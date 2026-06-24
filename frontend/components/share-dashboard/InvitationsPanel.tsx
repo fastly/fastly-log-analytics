@@ -23,6 +23,7 @@ import {
 import { client, extractApiError } from '@/lib/api'
 
 import { CreateInviteDialog } from './CreateInviteDialog'
+import { useShareMutation } from './useShareMutation'
 import { formatStamp, type ShareStatus } from './utils'
 
 interface InvitationsPanelProps {
@@ -62,7 +63,7 @@ Valid Until:  ${invite.expires_at ? new Date(invite.expires_at).toUTCString() : 
 
 export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }: InvitationsPanelProps) {
   const [createOpen, setCreateOpen] = React.useState(false)
-  const [busy, setBusy] = React.useState(false)
+  const { busy, run } = useShareMutation(onError, onRefresh)
   const [copiedInviteId, setCopiedInviteId] = React.useState<string | null>(null)
   const [qrInviteId, setQrInviteId] = React.useState<string | null>(null)
   const [editingServicesFor, setEditingServicesFor] = React.useState<string | null>(null)
@@ -78,23 +79,17 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
   const services = status?.services || []
   const invites = status?.invites || []
 
-  const handleRevokeInvite = async (id: string) => {
+  const handleRevokeInvite = (id: string) => {
     if (!confirm('Delete this invite and boot any sessions linked to it? This cannot be undone.')) return
-    setBusy(true)
-    try {
-      // DELETE is a strict superset of revoke (also boots active sessions)
-      // and removes the row entirely so it disappears from the list. The
-      // soft-revoke endpoint still exists for callers that want to keep
-      // the row for audit; the trash-icon UX expects "gone".
-      await client.DELETE('/api/admin/share/invites/{invite_id}' as any, {
+    // DELETE is a strict superset of revoke (also boots active sessions)
+    // and removes the row entirely so it disappears from the list. The
+    // soft-revoke endpoint still exists for callers that want to keep
+    // the row for audit; the trash-icon UX expects "gone".
+    run(() =>
+      client.DELETE('/api/admin/share/invites/{invite_id}' as any, {
         params: { path: { invite_id: id } },
-      } as any)
-      await onRefresh()
-    } catch (e: any) {
-      onError(extractApiError(e))
-    } finally {
-      setBusy(false)
-    }
+      } as any),
+    )
   }
 
   const openEditServices = (invite: any) => {
@@ -183,7 +178,9 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                 <div>{invite.name}</div>
                 {onViewAuditLogs && (
                   <button
+                    type="button"
                     onClick={() => onViewAuditLogs(invite.email)}
+                    aria-label={`View audit logs for ${invite.email}`}
                     className="text-[10px] text-primary hover:underline block mt-0.5 text-left font-normal"
                   >
                     view audit logs

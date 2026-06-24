@@ -16,7 +16,8 @@ import sqlite3
 
 import pytest
 
-from backend.core import metadata_db, sqlite_migrations
+from backend.core import metadata as metadata_db
+from backend.core import sqlite_migrations
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -75,8 +76,11 @@ def test_apply_pending_brings_seeded_db_to_latest(tmp_path):
         assert "error_count" not in _columns(con, "ingested_files")
 
         applied = sqlite_migrations.apply_pending(con)
-        assert applied == sqlite_migrations.LATEST_VERSION, (
-            f"expected {sqlite_migrations.LATEST_VERSION} migration(s) to apply, got {applied}"
+        # MIGRATIONS has a deliberate gap at key 3 (the retired
+        # usage_log_hourly_summary rebuild), so the applied COUNT can be
+        # less than LATEST_VERSION even on a fresh DB.
+        assert applied == len(sqlite_migrations.MIGRATIONS), (
+            f"expected {len(sqlite_migrations.MIGRATIONS)} migration(s) to apply, got {applied}"
         )
 
         # Post-condition: error_count exists, version bumped
@@ -108,7 +112,7 @@ def test_apply_pending_is_idempotent(tmp_path):
     try:
         first = sqlite_migrations.apply_pending(con)
         second = sqlite_migrations.apply_pending(con)
-        assert first == sqlite_migrations.LATEST_VERSION
+        assert first == len(sqlite_migrations.MIGRATIONS)
         assert second == 0, "expected zero migrations on the second pass"
         assert sqlite_migrations.get_current_version(con) == sqlite_migrations.LATEST_VERSION
     finally:
@@ -264,188 +268,11 @@ def test_init_schema_on_legacy_db_upgrades_in_place(tmp_path, monkeypatch):
         metadata_db.close_all_connections()
 
 
-# ── _migration_003_rebuild_usage_log_hourly_summary ──────────────────────────
-
-
-def _seed_usage_log_with_corrupted_rollup(con: sqlite3.Connection, service_id: str) -> None:
-    """Seed raw ``usage_log`` rows AND a deliberately inflated rollup, then
-    re-arm ``user_version`` to 2 so apply_pending re-runs v3.
-
-    Mirrors the prod corruption: the rollup carries higher counts than the
-    raw table because previous DELETE+INSERT cycles only fired the INSERT
-    trigger.
-    """
-    con.execute(
-        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("2026-06-05T13:00:00Z", service_id, "A", "RECONCILE_A", 23839, 0),
-    )
-    con.execute(
-        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("2026-06-05T13:15:00Z", service_id, "A", "PUT_OBJECT", 1, 4096),
-    )
-    con.execute(
-        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("2026-06-05T14:00:00Z", service_id, "B", "GET_OBJECT", 1, 100),
-    )
-    # Overwrite the rollup rows the INSERT trigger just wrote with inflated
-    # values that match the prod symptom (~5x raw).
-    con.execute(
-        "UPDATE usage_log_hourly_summary SET count = ? "
-        "WHERE service_id = ? AND hour = '2026-06-05T13' AND operation_type = 'RECONCILE_A'",
-        (119396, service_id),
-    )
-    # Force v3 to re-run on next apply_pending.
-    con.execute("PRAGMA user_version = 2")
-    con.commit()
-
-
-def test_migration_003_rebuilds_corrupted_rollup(tmp_path, monkeypatch):
-    """A DB with raw usage_log rows AND an inflated rollup must arrive at
-    LATEST_VERSION with the rollup matching SUM(count) over raw — the prod
-    fix for the Class A overcount."""
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(tmp_path / "services"))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
-
-    sid = "svc-rollup-fix"
-    con = metadata_db.get_con(sid)
-    try:
-        _seed_usage_log_with_corrupted_rollup(con, sid)
-        # Sanity: corruption is in place.
-        assert sqlite_migrations.get_current_version(con) == 2
-        bad = con.execute(
-            "SELECT count FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-05T13' AND operation_type='RECONCILE_A'",
-            (sid,),
-        ).fetchone()[0]
-        assert bad == 119396
-
-        # Run pending migrations in-place — v3 must rebuild the rollup.
-        sqlite_migrations.apply_pending(con)
-
-        assert sqlite_migrations.get_current_version(con) == sqlite_migrations.LATEST_VERSION
-
-        # Rollup must exactly mirror the raw SUM(count) per (hour, class, type).
-        raw_a = con.execute(
-            "SELECT COALESCE(SUM(count), 0) FROM usage_log WHERE operation_class='A'"
-        ).fetchone()[0]
-        roll_a = con.execute(
-            "SELECT COALESCE(SUM(count), 0) FROM usage_log_hourly_summary WHERE operation_class='A'"
-        ).fetchone()[0]
-        assert raw_a == roll_a, f"Class A drift after v3: raw={raw_a} rollup={roll_a}"
-        # The seed had 23839 + 1 = 23840 Class A, NOT the inflated 119396.
-        assert raw_a == 23840
-    finally:
-        metadata_db.close_all_connections()
-
-
-def test_usage_log_delete_trigger_decrements_rollup(tmp_path, monkeypatch):
-    """A DELETE+INSERT cycle (the reconcile_fastly_stats pattern) must leave
-    the rollup matching the new INSERT, not the sum of old + new. This is
-    the load-bearing property the missing trigger used to violate."""
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(tmp_path / "services"))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
-
-    sid = "svc-delete-trig"
-    con = metadata_db.get_con(sid)
-    try:
-        # Insert initial RECONCILE_A row (count=100).
-        con.execute(
-            "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("2026-06-08T10:00:00Z", sid, "A", "RECONCILE_A", 100, 0),
-        )
-        con.commit()
-        row = con.execute(
-            "SELECT count FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-08T10' AND operation_type='RECONCILE_A'",
-            (sid,),
-        ).fetchone()
-        assert row[0] == 100
-
-        # Reconcile pattern: DELETE existing, INSERT new with bigger count.
-        for _ in range(3):
-            con.execute(
-                "DELETE FROM usage_log "
-                "WHERE service_id=? AND timestamp='2026-06-08T10:00:00Z' AND operation_type='RECONCILE_A'",
-                (sid,),
-            )
-            con.execute(
-                "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                ("2026-06-08T10:00:00Z", sid, "A", "RECONCILE_A", 175, 0),
-            )
-        con.commit()
-
-        # After 3 DELETE+INSERT cycles, rollup must show 175, NOT 100+175*3.
-        row = con.execute(
-            "SELECT count FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-08T10' AND operation_type='RECONCILE_A'",
-            (sid,),
-        ).fetchone()
-        assert row[0] == 175, f"DELETE trigger missed: rollup carries {row[0]}"
-    finally:
-        metadata_db.close_all_connections()
-
-
-def test_usage_log_update_trigger_applies_delta(tmp_path, monkeypatch):
-    """Defensive: an UPDATE that mutates count/bytes must shift the rollup
-    by the delta. No current code path UPDATEs usage_log, but the trigger
-    protects future writers."""
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(tmp_path / "services"))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
-
-    sid = "svc-update-trig"
-    con = metadata_db.get_con(sid)
-    try:
-        con.execute(
-            "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("2026-06-08T11:00:00Z", sid, "A", "PUT_OBJECT", 10, 1024),
-        )
-        con.commit()
-
-        # Same-bucket count/bytes change.
-        con.execute(
-            "UPDATE usage_log SET count = 25, bytes = 5120 "
-            "WHERE service_id=? AND timestamp='2026-06-08T11:00:00Z' AND operation_type='PUT_OBJECT'",
-            (sid,),
-        )
-        con.commit()
-        row = con.execute(
-            "SELECT count, bytes FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-08T11' AND operation_type='PUT_OBJECT'",
-            (sid,),
-        ).fetchone()
-        assert (row[0], row[1]) == (25, 5120), f"UPDATE trigger delta wrong: {tuple(row)}"
-
-        # Cross-bucket move: change operation_type. Old bucket must decrement;
-        # new bucket must appear with the row's count/bytes.
-        con.execute(
-            "UPDATE usage_log SET operation_type = 'POST' "
-            "WHERE service_id=? AND timestamp='2026-06-08T11:00:00Z' AND operation_type='PUT_OBJECT'",
-            (sid,),
-        )
-        con.commit()
-        old = con.execute(
-            "SELECT count FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-08T11' AND operation_type='PUT_OBJECT'",
-            (sid,),
-        ).fetchone()
-        new = con.execute(
-            "SELECT count, bytes FROM usage_log_hourly_summary "
-            "WHERE service_id=? AND hour='2026-06-08T11' AND operation_type='POST'",
-            (sid,),
-        ).fetchone()
-        assert old[0] == 0, f"old bucket not decremented: {old[0]}"
-        assert (new[0], new[1]) == (25, 5120), f"new bucket wrong: {tuple(new)}"
-    finally:
-        metadata_db.close_all_connections()
+# The legacy metadata.db.usage_log table + its INSERT/DELETE/UPDATE
+# triggers + the _migration_003 rebuilder were all retired alongside
+# the v2.0 cutover to the per-service usage_log SQLite. The trigger
+# behavior tests + the migration_003 corruption-fix test had no
+# remaining production behavior to pin and were removed with the DDL.
 
 
 def test_legacy_db_with_active_writer_pattern_still_inserts(tmp_path, monkeypatch):
@@ -483,3 +310,226 @@ def test_legacy_db_with_active_writer_pattern_still_inserts(tmp_path, monkeypatc
         assert ec == 0  # default value applied to insert that didn't specify it
     finally:
         metadata_db.close_all_connections()
+
+
+# ── Crash-recovery semantics ─────────────────────────────────────────────────
+#
+# What happens if a process crashes mid-migration? The existing tests
+# pin the no-version-advance contract via a poison-at-LATEST_VERSION+1
+# pattern, but the audit flagged several adjacent gaps:
+#
+#   1. A migration that DDL-creates a table then DML-fails partway
+#      through must roll back the table too — not just the version.
+#   2. Three pending migrations where the middle one fails: the first
+#      applies AND commits, the middle's effects roll back, the third
+#      is never attempted.
+#   3. After a failed migration, re-opening the DB and calling
+#      apply_pending must retry the failed migration (cleanly, assuming
+#      the root cause is fixed) — not skip it forever.
+#   4. user_version > LATEST_VERSION (someone ran newer code, then
+#      downgraded) is treated as already-applied: apply_pending returns
+#      0 and does NOT attempt any "negative" migrations.
+
+
+def test_failed_migration_leaves_user_version_unchanged_even_when_ddl_survives(tmp_path):
+    """A migration that creates a table then raises mid-body:
+    ``user_version`` MUST stay at the pre-migration value. The
+    user_version bump is the load-bearing recovery signal — the DDL
+    itself may or may not survive (SQLite auto-commits DDL outside an
+    explicit BEGIN, so Python's deferred-transaction wrapper does NOT
+    roll back the CREATE TABLE), but as long as user_version didn't
+    advance, every real migration uses ``IF NOT EXISTS`` /
+    ``ALTER TABLE``-with-column-probe so the retry on next open is
+    idempotent.
+
+    Pinned because the load-bearing invariant is "user_version
+    reflects the LAST successfully completed migration", NOT "every
+    side effect is atomic". A regression that advanced user_version
+    before the body completed would silently strand schema in a broken
+    state — that's the actual recovery-safety property we need."""
+    path = str(tmp_path / "svc.metadata.db")
+    _seed_pre_migration_db(path)
+
+    def _partial_then_fail(con: sqlite3.Connection) -> None:
+        con.execute("CREATE TABLE IF NOT EXISTS half_built (id INTEGER PRIMARY KEY, payload TEXT)")
+        con.execute("INSERT INTO half_built (payload) VALUES ('row 1')")
+        raise RuntimeError("simulated crash mid-body")
+
+    original = sqlite_migrations.MIGRATIONS
+    try:
+        sqlite_migrations.MIGRATIONS = dict(original)
+        sqlite_migrations.MIGRATIONS[sqlite_migrations.LATEST_VERSION + 1] = _partial_then_fail
+
+        con = sqlite3.connect(path)
+        try:
+            with pytest.raises(RuntimeError, match="simulated crash mid-body"):
+                sqlite_migrations.apply_pending(con)
+            # Load-bearing invariant: user_version did NOT advance.
+            assert sqlite_migrations.get_current_version(con) == sqlite_migrations.LATEST_VERSION
+
+            # DML inside the implicit transaction DOES roll back (the
+            # 'row 1' INSERT never lands) even though SQLite auto-
+            # committed the preceding CREATE TABLE. The next retry will
+            # see the empty table via IF NOT EXISTS and re-attempt the
+            # INSERT cleanly — no duplicate rows.
+            rows = con.execute("SELECT COUNT(*) FROM half_built").fetchone()
+            assert rows[0] == 0, (
+                "DML rollback failed — the INSERT survived the raise. The "
+                "next retry would re-INSERT and produce duplicates."
+            )
+        finally:
+            con.close()
+    finally:
+        sqlite_migrations.MIGRATIONS = original
+
+
+def _has_table(con: sqlite3.Connection, name: str) -> bool:
+    row = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def test_middle_failure_in_pending_chain_stops_at_failure(tmp_path):
+    """Three migrations pending, middle one raises: the first must apply
+    and commit, the failing one rolls back to its pre-state, the third
+    must NOT run. The loader stops on first failure — applying the
+    third would invariably break its assumptions about the middle's
+    side effects."""
+    path = str(tmp_path / "svc.metadata.db")
+    _seed_pre_migration_db(path)
+
+    # Bring the DB up to LATEST_VERSION first so the chain we test is
+    # purely the three poison migrations.
+    con = sqlite3.connect(path)
+    try:
+        sqlite_migrations.apply_pending(con)
+    finally:
+        con.close()
+
+    calls: list[int] = []
+
+    def _ok_first(con: sqlite3.Connection) -> None:
+        calls.append(1)
+        con.execute("CREATE TABLE first_ok (id INTEGER PRIMARY KEY)")
+
+    def _bad_middle(_con: sqlite3.Connection) -> None:
+        calls.append(2)
+        raise RuntimeError("middle of chain failed")
+
+    def _never_runs(con: sqlite3.Connection) -> None:
+        calls.append(3)
+        con.execute("CREATE TABLE third (id INTEGER PRIMARY KEY)")
+
+    base = sqlite_migrations.LATEST_VERSION
+    original = sqlite_migrations.MIGRATIONS
+    try:
+        sqlite_migrations.MIGRATIONS = dict(original)
+        sqlite_migrations.MIGRATIONS[base + 1] = _ok_first
+        sqlite_migrations.MIGRATIONS[base + 2] = _bad_middle
+        sqlite_migrations.MIGRATIONS[base + 3] = _never_runs
+
+        con = sqlite3.connect(path)
+        try:
+            with pytest.raises(RuntimeError, match="middle of chain failed"):
+                sqlite_migrations.apply_pending(con)
+
+            # _ok_first committed; _bad_middle rolled back; _never_runs untouched.
+            assert calls == [1, 2], f"expected halt after middle, got call order {calls}"
+            assert _has_table(con, "first_ok")
+            assert not _has_table(con, "third")
+            # Version advanced to base+1 (first succeeded), NOT base+2 or +3.
+            assert sqlite_migrations.get_current_version(con) == base + 1
+        finally:
+            con.close()
+    finally:
+        sqlite_migrations.MIGRATIONS = original
+
+
+def test_retry_after_failure_applies_cleanly_when_root_cause_resolved(tmp_path):
+    """First open: a poison migration raises → version stays at the
+    pre-failure value. Second open (after the operator fixes the
+    underlying issue — modeled here by swapping the poison out for a
+    clean version): apply_pending picks the same version up again and
+    applies it. Pin the contract that a failure is RECOVERABLE — not a
+    one-shot fatal state."""
+    path = str(tmp_path / "svc.metadata.db")
+    _seed_pre_migration_db(path)
+
+    con0 = sqlite3.connect(path)
+    try:
+        sqlite_migrations.apply_pending(con0)
+    finally:
+        con0.close()
+    base = sqlite_migrations.LATEST_VERSION
+
+    poison_calls = []
+
+    def _poison(_con: sqlite3.Connection) -> None:
+        poison_calls.append("called")
+        raise RuntimeError("transient — disk full / lock held / etc.")
+
+    clean_calls = []
+
+    def _clean_after_fix(con: sqlite3.Connection) -> None:
+        clean_calls.append("called")
+        con.execute("CREATE TABLE recovered (id INTEGER PRIMARY KEY)")
+
+    original = sqlite_migrations.MIGRATIONS
+    try:
+        # Pass 1: poison version base+1.
+        sqlite_migrations.MIGRATIONS = dict(original)
+        sqlite_migrations.MIGRATIONS[base + 1] = _poison
+        con1 = sqlite3.connect(path)
+        try:
+            with pytest.raises(RuntimeError):
+                sqlite_migrations.apply_pending(con1)
+            assert sqlite_migrations.get_current_version(con1) == base
+        finally:
+            con1.close()
+
+        # Pass 2: the operator fixes the root cause and the same version
+        # number now points at a clean migration. apply_pending must run
+        # it (not skip because "we already tried").
+        sqlite_migrations.MIGRATIONS = dict(original)
+        sqlite_migrations.MIGRATIONS[base + 1] = _clean_after_fix
+        con2 = sqlite3.connect(path)
+        try:
+            applied = sqlite_migrations.apply_pending(con2)
+            assert applied == 1
+            assert clean_calls == ["called"]
+            assert _has_table(con2, "recovered")
+            assert sqlite_migrations.get_current_version(con2) == base + 1
+        finally:
+            con2.close()
+    finally:
+        sqlite_migrations.MIGRATIONS = original
+
+
+def test_user_version_ahead_of_latest_is_no_op_not_downgrade(tmp_path):
+    """A DB with ``user_version`` HIGHER than ``LATEST_VERSION`` means
+    someone ran a newer code revision against this file and then
+    downgraded back to this one. apply_pending must NOT try to roll
+    back — it's a no-op. Pinned because a regression that compared
+    ``version != LATEST_VERSION`` instead of ``version < LATEST_VERSION``
+    would attempt impossible negative migrations and crash, blocking
+    every read from the same DB."""
+    path = str(tmp_path / "svc.metadata.db")
+    _seed_pre_migration_db(path)
+
+    # Bring to current, then pretend a future code revision bumped past us.
+    con = sqlite3.connect(path)
+    try:
+        sqlite_migrations.apply_pending(con)
+        future = sqlite_migrations.LATEST_VERSION + 99
+        con.execute(f"PRAGMA user_version = {future}")
+        con.commit()
+        assert sqlite_migrations.get_current_version(con) == future
+
+        applied = sqlite_migrations.apply_pending(con)
+        assert applied == 0, "downgrade should be a no-op, not a re-apply"
+        # Version preserved — we did NOT clobber the future-version stamp.
+        assert sqlite_migrations.get_current_version(con) == future
+    finally:
+        con.close()

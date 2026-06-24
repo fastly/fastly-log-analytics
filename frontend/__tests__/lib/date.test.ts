@@ -15,7 +15,7 @@ describe('toUTCDate', () => {
 
 describe('relative time formatting', () => {
   const now = new Date('2024-06-15T12:00:00Z')
-  
+
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(now)

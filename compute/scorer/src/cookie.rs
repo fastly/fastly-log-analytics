@@ -118,7 +118,18 @@ fn pack_payload(state: &SessionState) -> Vec<u8> {
     // of UTF-8 path. We always emit the v2 length prefix even when the
     // path is empty so the decoder can dispatch unambiguously on
     // plaintext length (== 30 → v1 legacy, > 30 → v2).
-    let path_len = state.prev_route_path.floor_char_boundary(PREV_ROUTE_MAX_BYTES);
+    // Largest char boundary <= PREV_ROUTE_MAX_BYTES so we never split a
+    // multi-byte UTF-8 sequence. Equivalent to the unstable
+    // `str::floor_char_boundary`, written with stable `is_char_boundary` so
+    // the crate builds on the pinned rustc (rust-toolchain.toml = 1.90).
+    let path_len = {
+        let s = &state.prev_route_path;
+        let mut i = PREV_ROUTE_MAX_BYTES.min(s.len());
+        while i > 0 && !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
     let path_bytes = state.prev_route_path.as_bytes();
     let mut out = Vec::with_capacity(V1_PLAINTEXT_BYTES + 1 + path_len);
     out.push(state.v);

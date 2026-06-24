@@ -2,15 +2,62 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 import duckdb
 
 from backend.core import duckdb as _db
 from backend.models.common import FiltersDict
-from backend.repositories._base import QueryRunner, _safe_table
-from backend.repositories.utils.filters import build_where_clause
+from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
+from backend.repositories._sql import network as SQL
+from backend.repositories.utils.filters import build_where_clause, filter_spec_attr
+from backend.repositories.utils.response_cache import bucket_time_to_minute, cache_get, cache_put
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.geo import format_city_label
+
+# ── Response memo cache ───────────────────────────────────────────────────────
+# /api/network-health does a per-request TEMP TABLE build (19 cols, multi-second
+# on 30d windows) followed by 6+ aggregate scans. Re-renders triggered by
+# mapAsn toggle / filter tweak / refetch tick re-do the entire pipeline even
+# when (src, start_time, end_time, filters, bucket_seconds, top_n, map_asn) is
+# unchanged. Same standing rule as origin's response cache: "a little behind
+# the data" beats "redo the cloud read" — 30 s is well below ingest cadence.
+_RESPONSE_CACHE_TTL = 30.0
+_RESPONSE_CACHE_MAXSIZE = 128
+_response_cache: BoundedTTLCache = BoundedTTLCache(maxsize=_RESPONSE_CACHE_MAXSIZE, ttl_seconds=_RESPONSE_CACHE_TTL)
+
+
+def _response_cache_key(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    metric: str,
+    bucket_seconds: int,
+    top_n: int,
+    map_asn: str,
+) -> str:
+    serialised_filters = {
+        k: (filter_spec_attr(v, "mode"), sorted(str(x) for x in (filter_spec_attr(v, "values") or [])))
+        for k, v in sorted((filters or {}).items())
+    }
+    payload = json.dumps(
+        {
+            "s": bucket_time_to_minute(start_time),
+            "e": bucket_time_to_minute(end_time),
+            "f": serialised_filters,
+            "metric": metric,
+            "bs": bucket_seconds,
+            "tn": top_n,
+            "ma": map_asn,
+        },
+        separators=(",", ":"),
+        default=str,
+    )
+    svc = src.get("name") or src.get("service_id") or ""
+    return hashlib.sha256(f"{payload}:{svc}".encode()).hexdigest()
 
 
 def _avg_hs(buckets_data: dict, keys: list[str]) -> float | None:
@@ -48,13 +95,50 @@ def get_health(
     bucket_seconds: int = 300,
     top_n: int = 30,
     map_asn: str = "all",
+    sections: set[str] | None = None,
 ) -> dict[str, Any]:
     """Return ASN × time heatmap, world map buckets, metro leaderboard, and ASN leaderboard."""
+    import time as _time
+
+    def _want(name: str) -> bool:
+        return sections is None or name in sections
+
+    # heatmap_rows feeds heatmap + leaderboard + summary (via global_hs +
+    # worst_asn). map_rows feeds cities + map_buckets + summary (via
+    # worst_country). buckets is derived from heatmap_rows. metro_rows
+    # feeds only metro_leaderboard.
+    _want_heatmap_query = _want("heatmap") or _want("leaderboard") or _want("summary") or _want("buckets")
+    _want_map_query = _want("cities") or _want("map_buckets") or _want("summary")
+    _want_metro_query = _want("metro_leaderboard")
+    _want_leaderboard = _want("leaderboard")
+
+    # Per-phase wall-clock timings surface in the response under
+    # _section_timings so the perf harness can attribute /api/network-health
+    # without ad-hoc instrumentation. Mirrors dashboard.py.
+    timer = SectionTimer()
+    section_timings = timer.entries
+
+    # Short-TTL response memo (30 s). Cuts the mapAsn toggle / filter
+    # tweak / refetch tick cost from the full ~13 s 30d pipeline to
+    # ~50 µs. Cache key excludes section_timings + debug envelope so
+    # the per-request telemetry stays request-scoped. Skip the memo when
+    # a section selector is in play — the selector reduces work per call
+    # and cached payloads from prior full requests would over-deliver
+    # (harmless but defeats the parallel-paint signal the FE relies on).
+    cache_key = _response_cache_key(src, start_time, end_time, filters, metric, bucket_seconds, top_n, map_asn)
+    if sections is None:
+        cached = cache_get(_response_cache, cache_key)
+        if cached is not None:
+            runner = QueryRunner(con, src)
+            return {**cached, **runner.telemetry()}
+
     table_name = _safe_table(src["name"])
 
     runner = QueryRunner(con, src)
 
+    _t = _time.perf_counter()
     actual_cols = set(runner.get_schema_cols())
+    timer.mark("get_schema_cols", _t)
 
     if not {"tcp_rtt", "asn"}.issubset(actual_cols):
         return {
@@ -76,13 +160,18 @@ def get_health(
     if map_asn != "all" and "asn" in effective_filters:
         del effective_filters["asn"]
 
+    _t = _time.perf_counter()
     params, where_clause = build_where_clause(
         start_time, end_time, effective_filters, list(actual_cols), inline_params=True
     )
+    timer.mark("build_where_clause", _t)
 
+    # Drop ``dt`` and ``resp_state`` from the temp projection — neither is
+    # read by any downstream SQL template in backend/repositories/_sql/network.py
+    # (verified via grep). Materialising them on every 30d window was 5-15%
+    # of the temp-table create cost.
     all_net_cols = [
         "timestamp",
-        "dt",
         "asn",
         "country",
         "city",
@@ -96,12 +185,13 @@ def get_health(
         "ploss",
         "status",
         "cache",
-        "resp_state",
         "elapsed",
         "resp_bytes",
         "c_speed",
     ]
+    _t = _time.perf_counter()
     temp_table = runner.create_filtered_temp_table(all_net_cols, list(actual_cols), table_name, where_clause, params)
+    timer.mark("temp_table_create", _t)
     if temp_table is None:
         return {
             "available": False,
@@ -114,12 +204,30 @@ def get_health(
     w = "1=1"
     p: list[Any] = []
 
+    # Floor the heatmap/map bucket width so a 5-second bucket on a
+    # 30-day window doesn't synthesise 518k buckets the UI immediately
+    # downsamples anyway. 8640 is the cap on emitted rows per series
+    # (24h × 360 ticks/h ≈ the chart's max meaningful resolution).
+    # max(span / 8640) gives ~10s on 24h, ~70s on 7d, ~300s on 30d —
+    # passthrough for any caller already supplying a sane bucket.
+    try:
+        from backend.utils.date_utils import parse_iso_utc as _parse_iso_utc
+
+        if start_time and end_time:
+            _st = _parse_iso_utc(start_time)
+            _et = _parse_iso_utc(end_time)
+            if _st is not None and _et is not None:
+                span_secs = max(1, int((_et - _st).total_seconds()))
+                bucket_seconds = max(bucket_seconds, span_secs // 8640)
+    except Exception:
+        pass
+
     bucket_ms = bucket_seconds * 1000
 
     ploss_expr = "AVG(ploss)" if has_ploss else "NULL"
-    rtt_min_expr = "MEDIAN(rtt_min)" if has_rtt_min else "NULL"
-    rtt_var_expr = "MEDIAN(rtt_var)" if has_rtt_var else "NULL"
-    congestion_expr = "MEDIAN(COALESCE(tcp_rtt, 0) - COALESCE(rtt_min, 0))" if has_rtt_min else "NULL"
+    rtt_min_expr = "APPROX_QUANTILE(rtt_min, 0.5)" if has_rtt_min else "NULL"
+    rtt_var_expr = "APPROX_QUANTILE(rtt_var, 0.5)" if has_rtt_var else "NULL"
+    congestion_expr = "APPROX_QUANTILE(COALESCE(tcp_rtt, 0) - COALESCE(rtt_min, 0), 0.5)" if has_rtt_min else "NULL"
 
     try:
         # ── Countries list ─────────────────────────────────────────────────
@@ -132,41 +240,38 @@ def get_health(
             countries = [r[0] for r in rows]
 
         # ── Heatmap (ASN × bucket) ─────────────────────────────────────────
-        heatmap_sql = f"""
-            SELECT
-                asn,
-                EPOCH_MS(
-                    CAST((EPOCH_MS(timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
-                )::TIMESTAMP AS bucket,
-                MEDIAN(
-                    CASE WHEN cache LIKE '%HIT%' AND elapsed > 0
-                    THEN resp_bytes * 1000000.0 / elapsed END
-                ) AS throughput_bps,
-                MEDIAN(tcp_rtt)          AS rtt_med_us,
-                {rtt_min_expr}           AS rtt_baseline_us,
-                {congestion_expr}        AS rtt_congestion_us,
-                {ploss_expr}             AS avg_ploss,
-                {rtt_var_expr}           AS rtt_jitter_us,
-                SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END)
-                    * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,
-                COUNT(*) AS reqs
-            FROM {t}
-            WHERE {w}
-              AND asn IS NOT NULL
-              AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
-            GROUP BY asn, bucket
-            ORDER BY reqs DESC
-            LIMIT {top_n * 200}
-        """
-        heatmap_rows = runner.execute(heatmap_sql, p).fetchall()
+        heatmap_rows: list[Any] = []
+        if _want_heatmap_query:
+            heatmap_sql = SQL.HEATMAP_BY_ASN_BUCKET.format(
+                bucket_ms=bucket_ms,
+                rtt_min_expr=rtt_min_expr,
+                congestion_expr=congestion_expr,
+                ploss_expr=ploss_expr,
+                rtt_var_expr=rtt_var_expr,
+                table=t,
+                where=w,
+                row_limit=top_n * 200,
+            )
+            _t = _time.perf_counter()
+            heatmap_rows = runner.execute(heatmap_sql, p).fetchall()
+            timer.mark("heatmap_query", _t)
 
         # ── Map (country × bucket) ─────────────────────────────────────────
         map_rows: list[Any] = []
-        if has_country:
+        if _want_map_query and has_country:
             lat_col = "lat" if has_lat else "NULL"
             lon_col = "lon" if has_lat else "NULL"
             metro_col = "metro" if has_metro else "NULL"
             city_col = "city" if "city" in actual_cols else "''"
+            # Qualified-for-JOIN variants. The 2-pass CTE's ON clause
+            # references the same columns by name on both sides, so
+            # bare ``city`` / ``lat`` etc. are ambiguous to DuckDB's
+            # binder. Prefix with the temp-table name when the column
+            # really exists; keep the NULL / '' literal otherwise.
+            join_city_col = f"{t}.city" if "city" in actual_cols else "''"
+            join_lat_col = f"{t}.lat" if has_lat else "NULL"
+            join_lon_col = f"{t}.lon" if has_lat else "NULL"
+            join_metro_col = f"{t}.metro" if has_metro else "NULL"
 
             map_where = w
             map_params = list(p)
@@ -181,60 +286,54 @@ def get_health(
             # /network cold-load wall time via transfer + JSON parse.
             # Re-sorted by (bucket, reqs DESC) after the cap to preserve
             # the downstream chronological ordering the map expects.
-            map_sql = f"""
-                SELECT * FROM (
-                    SELECT
-                        country,
-                        {city_col} AS city,
-                        {lat_col}  AS lat,
-                        {lon_col}  AS lon,
-                        {metro_col} AS metro,
-                        EPOCH_MS(
-                            CAST((EPOCH_MS(timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
-                        )::TIMESTAMP AS bucket,
-                        MEDIAN(tcp_rtt) AS rtt_med_us,
-                        {ploss_expr}    AS avg_ploss,
-                        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END)
-                            * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,
-                        COUNT(*) AS reqs
-                    FROM {t}
-                    WHERE {map_where}
-                      AND country IS NOT NULL AND country != ''
-                      AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
-                    GROUP BY country, city, lat, lon, metro, bucket
-                    ORDER BY reqs DESC
-                    LIMIT 5000
-                ) ranked
-                ORDER BY bucket, reqs DESC
-            """
-            map_rows = runner.execute(map_sql, map_params).fetchall()
+            map_sql = SQL.MAP_BY_COUNTRY_BUCKET.format(
+                city_col=city_col,
+                lat_col=lat_col,
+                lon_col=lon_col,
+                metro_col=metro_col,
+                join_city_col=join_city_col,
+                join_lat_col=join_lat_col,
+                join_lon_col=join_lon_col,
+                join_metro_col=join_metro_col,
+                bucket_ms=bucket_ms,
+                ploss_expr=ploss_expr,
+                table=t,
+                where=map_where,
+            )
+            _t = _time.perf_counter()
+            # {where} appears twice in the 2-pass CTE shape (CTE WHERE +
+            # outer WHERE), so the asn filter placeholder must be bound
+            # twice. ``map_params`` is at most one element (the asn int)
+            # when ``map_asn != "all"``, empty otherwise.
+            map_rows = runner.execute(map_sql, map_params + map_params).fetchall()
+            timer.mark("map_query", _t)
 
         # ── Metro leaderboard ──────────────────────────────────────────────
         metro_rows: list[Any] = []
-        if has_country:
+        if _want_metro_query and has_country:
             metro_col_m = "metro" if has_metro else "NULL"
             city_col = "city" if "city" in actual_cols else "''"
             region_col = "region" if "region" in actual_cols else "''"
-            metro_sql = f"""
-                SELECT
-                    country,
-                    {city_col}   AS city,
-                    {region_col} AS region,
-                    {metro_col_m} AS metro,
-                    MEDIAN(tcp_rtt) AS rtt_med_us,
-                    {ploss_expr} AS avg_ploss,
-                    SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END)
-                        * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,
-                    COUNT(*) AS reqs
-                FROM {t}
-                WHERE {w}
-                  AND country IS NOT NULL AND country != ''
-                  AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
-                GROUP BY country, city, region, metro
-                ORDER BY reqs DESC
-                LIMIT 100
-            """
+            # Qualified-for-JOIN variants — same disambiguation pattern
+            # as map_query. The 2-pass CTE re-aliases these names on the
+            # top_cells side, so the JOIN ON needs table-qualified refs.
+            join_metro_col = f"{t}.metro" if has_metro else "NULL"
+            join_city_col = f"{t}.city" if "city" in actual_cols else "''"
+            join_region_col = f"{t}.region" if "region" in actual_cols else "''"
+            metro_sql = SQL.METRO_LEADERBOARD.format(
+                city_col=city_col,
+                region_col=region_col,
+                metro_col=metro_col_m,
+                join_city_col=join_city_col,
+                join_region_col=join_region_col,
+                join_metro_col=join_metro_col,
+                ploss_expr=ploss_expr,
+                table=t,
+                where=w,
+            )
+            _t = _time.perf_counter()
             metro_rows = runner.execute(metro_sql, p).fetchall()
+            timer.mark("metro_query", _t)
 
         # ── Derive top ASNs ────────────────────────────────────────────────
         all_asns_seen: dict[int, int] = {}
@@ -246,25 +345,49 @@ def get_health(
             all_asns_seen[asn] = all_asns_seen.get(asn, 0) + reqs
             all_buckets_set.add(bucket)
 
+        # Selector callers that ask for map_buckets/cities WITHOUT heatmap skip
+        # the heatmap query, but the map-bucket assembly still needs the
+        # sorted bucket axis for positional bucket_idx; pull bucket times
+        # from map_rows in that case so the per-bucket map cells survive.
+        if not heatmap_rows and map_rows:
+            for r in map_rows:
+                bucket = r[5].isoformat() if hasattr(r[5], "isoformat") else str(r[5])
+                all_buckets_set.add(bucket)
+
         all_buckets = sorted(all_buckets_set)
         bucket_idx = {b: i for i, b in enumerate(all_buckets)}
         top_asns = sorted(all_asns_seen, key=lambda a: all_asns_seen[a], reverse=True)[:top_n]
         top_asn_set = set(top_asns)
 
         # ── Speed distribution (bulk, one query) ──────────────────────────
+        # Try the per-hour network_speed rollup first for unfiltered
+        # windows >= 48 h. Exact integer SUM across hours (no
+        # approximation), so the rollup result is byte-identical to the
+        # live SQL — just faster (~50 ms vs ~2.9 s on prod 30 d).
         asn_speed_mix: dict[int, dict[str, float]] = {}
-        if has_c_speed and top_asns:
-            placeholders = ",".join(["?"] * len(top_asns))
-            speed_rows = runner.execute(
-                f"""
-                SELECT asn, c_speed, COUNT(*) AS cnt FROM {t}
-                WHERE {w} AND asn IN ({placeholders})
-                  AND c_speed IS NOT NULL AND c_speed != ''
-                GROUP BY asn, c_speed
-                ORDER BY asn, cnt DESC
-                """,
-                p + top_asns,
-            ).fetchall()
+        if _want_leaderboard and has_c_speed and top_asns:
+            _t = _time.perf_counter()
+            rolled_speed = runner.try_network_speed_from_rollup(
+                start_time,
+                end_time,
+                top_asns=top_asns,
+                has_filters=bool(filters),
+            )
+            if rolled_speed is not None:
+                speed_rows = rolled_speed
+                timer.mark("speed_distribution_query_rollup", _t)
+            else:
+                placeholders = ",".join(["?"] * len(top_asns))
+                _t = _time.perf_counter()
+                speed_rows = runner.execute(
+                    SQL.SPEED_DISTRIBUTION_BY_ASN.format(
+                        table=t,
+                        where=w,
+                        placeholders=placeholders,
+                    ),
+                    p + top_asns,
+                ).fetchall()
+                timer.mark("speed_distribution_query", _t)
             asn_speed_rows: dict[int, list[tuple]] = {}
             for r in speed_rows:
                 asn_v = int(r[0])
@@ -277,7 +400,7 @@ def get_health(
                 if total > 0:
                     asn_speed_mix[asn_v] = {cs: round(cnt / total, 3) for cs, cnt in rows}
 
-        asn_names_map = _db.get_asn_names(con, top_asns)
+        asn_names_map = _db.get_asn_names(src["name"], top_asns)
 
         # ── Build heatmap entries ──────────────────────────────────────────
         asn_bucket_data: dict[int, dict[str, dict]] = {}
@@ -324,7 +447,30 @@ def get_health(
             )
 
         # ── World map buckets ──────────────────────────────────────────────
+        # City names ("San Jose", "Los Angeles") repeat heavily across the
+        # 288 buckets in a 30d window — typically 50+ cities per bucket,
+        # often the same ~200 unique cities. Interning the names into a
+        # top-level ``cities`` array (referenced by ``city_idx``) already
+        # cut the payload ~90%. Now hoist ``lat``/``lon`` into the same
+        # interned record so cells stop repeating coordinates that depend
+        # only on the city. SQL GROUP BY at backend/repositories/_sql/
+        # network.py:92 includes ``(city, lat, lon)``, so the same city
+        # name can appear with distinct centroids (duplicate MaxMind
+        # entries); key the intern map by ``(name, lat, lon)`` so each
+        # geocenter still gets its own entry — no positional collapse.
         map_buckets: list[dict] = []
+        cities_list: list[dict[str, Any]] = []
+        cities_index: dict[tuple[str, float | None, float | None], int] = {}
+
+        def _intern_city(name: str, lat: float | None, lon: float | None) -> int:
+            key = (name, lat, lon)
+            idx = cities_index.get(key)
+            if idx is None:
+                idx = len(cities_list)
+                cities_list.append({"name": name, "lat": lat, "lon": lon})
+                cities_index[key] = idx
+            return idx
+
         if map_rows:
             dma_map = _db._get_dma_map() if has_metro else {}
             map_by_bucket: dict[str, list[dict]] = {}
@@ -355,9 +501,7 @@ def get_health(
                 map_by_bucket.setdefault(bucket, []).append(
                     {
                         "country": ctry,
-                        "city": display_city,
-                        "lat": lat,
-                        "lon": lon,
+                        "city_idx": _intern_city(display_city, lat, lon),
                         "metro_code": metro_code,
                         "rtt_med_us": rtt,
                         "avg_ploss": pkt,
@@ -432,27 +576,40 @@ def get_health(
             metro_leaderboard = sorted(seen.values(), key=lambda x: x["total_reqs"], reverse=True)
 
         # ── P95/P99 RTT per ASN (bulk) ─────────────────────────────────────
+        # Try the per-hour network_rtt rollup first for unfiltered windows
+        # >= 48 h — the rollup serves in ~50 ms on prod 30 d vs the live
+        # bulk query's ~5.2 s. The rollup gates on `not filters` so the
+        # filtered path always falls through to the live SQL below.
         asn_rtt_pct: dict[int, dict[str, float | None]] = {}
-        if top_asns:
-            placeholders = ",".join(["?"] * len(top_asns))
-            pct_rows = runner.execute(
-                f"""
-                SELECT asn,
-                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY tcp_rtt) AS p95_us,
-                    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY tcp_rtt) AS p99_us
-                FROM {t}
-                WHERE {w} AND asn IN ({placeholders})
-                  AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
-                GROUP BY asn
-                """,
-                p + top_asns,
-            ).fetchall()
-            for row in pct_rows:
-                asn_v = int(row[0])
-                asn_rtt_pct[asn_v] = {
-                    "p95_rtt_us": round(float(row[1]), 0) if row[1] is not None else None,
-                    "p99_rtt_us": round(float(row[2]), 0) if row[2] is not None else None,
-                }
+        if _want_leaderboard and top_asns:
+            _t = _time.perf_counter()
+            rolled = runner.try_network_rtt_from_rollup(
+                start_time,
+                end_time,
+                top_asns=top_asns,
+                has_filters=bool(filters),
+            )
+            if rolled is not None:
+                asn_rtt_pct = rolled
+                timer.mark("rtt_percentiles_query_rollup", _t)
+            else:
+                placeholders = ",".join(["?"] * len(top_asns))
+                _t = _time.perf_counter()
+                pct_rows = runner.execute(
+                    SQL.RTT_PERCENTILES_BY_ASN.format(
+                        table=t,
+                        where=w,
+                        placeholders=placeholders,
+                    ),
+                    p + top_asns,
+                ).fetchall()
+                timer.mark("rtt_percentiles_query", _t)
+                for row in pct_rows:
+                    asn_v = int(row[0])
+                    asn_rtt_pct[asn_v] = {
+                        "p95_rtt_us": round(float(row[1]), 0) if row[1] is not None else None,
+                        "p99_rtt_us": round(float(row[2]), 0) if row[2] is not None else None,
+                    }
 
         # ── ASN leaderboard ────────────────────────────────────────────────
         leaderboard: list[dict] = []
@@ -527,36 +684,59 @@ def get_health(
         worst_country = None
         if has_country and map_buckets:
             latest_cities = map_buckets[-1]["cities"]
-            sig_countries = [c for c in latest_cities if c["reqs"] > 10]
+            # M-4: the prior ``reqs > 10`` floor frequently left worst_country
+            # blank on low-traffic 24h windows, rendering "Worst Region: --"
+            # alongside a populated Worst ASN. Drop to 1 so the panel
+            # surfaces something whenever the data has any city signal at
+            # all — operators reading "--" assumed the page was broken.
+            sig_countries = [c for c in latest_cities if c["reqs"] >= 1]
             if sig_countries:
                 wc = min(sig_countries, key=lambda c: c["health_score"] if c["health_score"] is not None else 100)
-                label = format_city_label(wc.get("city"), wc["country"])
+                # Resolve the interned city name for the worst-country label.
+                idx = wc.get("city_idx", -1)
+                city_entry = cities_list[idx] if 0 <= idx < len(cities_list) else None
+                city_name = city_entry["name"] if city_entry else ""
+                label = format_city_label(city_name, wc["country"])
                 worst_country = {"label": label, "score": wc["health_score"]}
 
-        return {
+        payload: dict[str, Any] = {
             "available": True,
             "metric": metric,
             "bucket_seconds": bucket_seconds,
-            "buckets": all_buckets,
-            "heatmap": heatmap,
-            "map_buckets": map_buckets,
-            "leaderboard": leaderboard,
-            "metro_leaderboard": metro_leaderboard,
-            "summary": {
+            "countries": countries,
+            "has_metro": has_metro,
+            "section_timings": section_timings,
+            **runner.telemetry(),
+        }
+        if _want("buckets"):
+            payload["buckets"] = all_buckets
+        if _want("heatmap"):
+            payload["heatmap"] = heatmap
+        if _want("map_buckets"):
+            payload["map_buckets"] = map_buckets
+        if _want("cities"):
+            payload["cities"] = cities_list
+        if _want("leaderboard"):
+            payload["leaderboard"] = leaderboard
+        if _want("metro_leaderboard"):
+            payload["metro_leaderboard"] = metro_leaderboard
+        if _want("summary"):
+            payload["summary"] = {
                 "global_health_score": global_hs,
                 "avg_rtt_ms": avg_rtt_ms,
                 "total_reqs": total_reqs,
                 "worst_asn": worst_asn,
                 "worst_country": worst_country,
-            },
-            "countries": countries,
-            "has_metro": has_metro,
-            **runner.telemetry(),
-        }
+            }
+        if sections is None:
+            # network additionally strips section_timings (per-request paint
+            # telemetry) from the stored copy.
+            cache_put(_response_cache, cache_key, payload, strip=("section_timings",))
+        return payload
 
     finally:
         try:
-            runner.execute(f"DROP TABLE IF EXISTS {temp_table}")
+            runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
         except Exception:
             pass
 
@@ -570,11 +750,18 @@ def get_quality(
     region_country: str = "US",
 ) -> dict[str, Any]:
     """Return TCP RTT metrics aggregated by country, ASN, region, PoP, and a scatter sample."""
+    import time as _time
+
+    timer = SectionTimer()
+    section_timings = timer.entries
+
     table_name = _safe_table(src["name"])
 
     runner = QueryRunner(con, src)
 
+    _t = _time.perf_counter()
     actual_cols = set(runner.get_schema_cols())
+    timer.mark("get_schema_cols", _t)
 
     if not actual_cols or "tcp_rtt" not in actual_cols:
         return {
@@ -608,47 +795,58 @@ def get_quality(
         }
 
     def run_bar(group_col: str, extra_where: str = "", extra_params: list | None = None) -> list[dict]:
-        sql = f"""
-            SELECT "{group_col}" AS label, MEDIAN(tcp_rtt) / 1000.0 AS rtt_ms, COUNT(*) AS reqs
-            FROM {table_name}
-            WHERE {rtt_filter}{extra_where}
-              AND "{group_col}" IS NOT NULL AND CAST("{group_col}" AS VARCHAR) != ''
-            GROUP BY "{group_col}"
-            ORDER BY reqs DESC
-            LIMIT 25
-        """
+        sql = SQL.QUALITY_BAR_BY_GROUP.format(
+            group_col=group_col,
+            table=table_name,
+            rtt_filter=rtt_filter,
+            extra_where=extra_where,
+        )
+        _t = _time.perf_counter()
         rows = runner.execute(sql, params + (extra_params or [])).fetchall()
-        return [{"label": str(r[0]), "rtt_ms": round(float(r[1]), 2), "reqs": int(r[2])} for r in rows]
+        timer.mark(f"quality_bar:{group_col}", _t)
+        return [
+            {"value": str(r[0]), "label": str(r[0]), "rtt_ms": round(float(r[1]), 2), "reqs": int(r[2])} for r in rows
+        ]
 
-    countries_sql = f"""
-        SELECT DISTINCT country FROM {table_name}
-        WHERE {where_clause} AND country IS NOT NULL AND country != ''
-        ORDER BY country
-    """
+    countries_sql = SQL.QUALITY_COUNTRIES_DISTINCT.format(
+        table=table_name,
+        where_clause=where_clause,
+    )
+    _t = _time.perf_counter()
     countries = [r[0] for r in runner.execute(countries_sql, params).fetchall()]
+    timer.mark("countries_distinct", _t)
 
     by_country = run_bar("country")
     by_asn = run_bar("asn") if "asn" in actual_cols else []
+    if by_asn:
+        # Mirror the ASN leaderboard / dashboard: display "Name (7922)" instead
+        # of the bare number, keeping `value` as the click-to-filter key.
+        try:
+            _db.enrich_asn_labels(by_asn, src["name"])
+        except Exception:
+            pass
     by_region = (
         run_bar("region", extra_where=" AND country = ?", extra_params=[region_country])
         if "region" in actual_cols
         else []
     )
+    # by_pop rows stay as the bare PoP code (value == label); the frontend
+    # renders the city/region/country via the shared <PopLabel> component
+    # (fed by bootstrap's pop_geo map). See frontend/lib/pop.ts.
     by_pop = run_bar("pop") if "pop" in actual_cols else []
 
     scatter: list[dict] = []
     if "ttfb" in actual_cols:
-        scatter_sql = f"""
-            SELECT tcp_rtt / 1000.0 AS rtt_ms, ttfb * 1000.0 AS ttfb_ms,
-                   COALESCE(cache, 'UNKNOWN') AS cache_state
-            FROM {table_name}
-            WHERE {rtt_filter} AND ttfb IS NOT NULL AND ttfb > 0
-            USING SAMPLE 2000
-        """
+        scatter_sql = SQL.QUALITY_SCATTER.format(
+            table=table_name,
+            rtt_filter=rtt_filter,
+        )
+        _t = _time.perf_counter()
         scatter = [
             {"rtt_ms": round(float(r[0]), 2), "ttfb_ms": round(float(r[1]), 2), "cache": str(r[2])}
             for r in runner.execute(scatter_sql, params).fetchall()
         ]
+        timer.mark("scatter_query", _t)
 
     return {
         "available": True,
@@ -659,5 +857,13 @@ def get_quality(
         "by_pop": by_pop,
         "scatter": scatter,
         "countries": countries,
+        "section_timings": section_timings,
         **runner.telemetry(),
     }
+
+
+# A-3 (CacheRegistry): register the network response cache (also
+# pointed at by R-1's tests/conftest.py follow-on).
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+
+_CacheRegistry.register("network._response_cache", _response_cache)

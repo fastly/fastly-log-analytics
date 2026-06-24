@@ -122,7 +122,8 @@ export function SessionEventsDialog({
 
         <div className="flex-1 overflow-y-auto -mx-6 px-6">
           {isLoading && (
-            <div className="space-y-2">
+            <div className="space-y-2" role="status" aria-busy="true">
+              <span className="sr-only">Loading session events</span>
               {Array.from({ length: 6 }).map((_, i) => (
                 <Skeleton key={i} className="h-12 w-full" />
               ))}

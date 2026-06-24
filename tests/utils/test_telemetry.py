@@ -13,10 +13,10 @@ import threading
 
 from backend.utils.telemetry import (
     _LATEST_PROCESS_CONTEXT_LOCK,
+    _set_process_context_for_tests,
     get_process_context,
     get_process_context_with_fallback,
     process_context_scope,
-    set_process_context,
 )
 
 
@@ -31,7 +31,7 @@ def _reset_global_fallback() -> None:
 
 def test_set_process_context_visible_in_same_thread():
     _reset_global_fallback()
-    set_process_context("cron_alpha")
+    _set_process_context_for_tests("cron_alpha")
     assert get_process_context() == "cron_alpha"
     assert get_process_context_with_fallback() == "cron_alpha"
 
@@ -45,7 +45,7 @@ def test_get_process_context_with_fallback_returns_last_set_in_unrelated_thread(
     caused 86% of pyiceberg.s3fs telemetry rows to land with NULL
     process_context in production."""
     _reset_global_fallback()
-    set_process_context("cron_sync_main_thread")
+    _set_process_context_for_tests("cron_sync_main_thread")
 
     captured: dict[str, object] = {}
 
@@ -65,18 +65,18 @@ def test_get_process_context_with_fallback_returns_last_set_in_unrelated_thread(
 
 
 def test_fallback_reflects_most_recent_setter_across_threads():
-    """Last-writer-wins: thread B's set_process_context overwrites the
+    """Last-writer-wins: thread B's _set_process_context_for_tests overwrites the
     fallback for thread C's reader. Documents the known limitation that
     concurrent crons can misattribute (worst case) — but never NULL."""
     _reset_global_fallback()
-    set_process_context("cron_A")
+    _set_process_context_for_tests("cron_A")
 
     barrier = threading.Barrier(3)
     fallback_reads: list[str | None] = []
 
     def setter_b() -> None:
         barrier.wait()
-        set_process_context("cron_B")
+        _set_process_context_for_tests("cron_B")
 
     def reader_c() -> None:
         barrier.wait()
@@ -100,7 +100,7 @@ def test_fallback_reflects_most_recent_setter_across_threads():
 
 
 def test_fallback_returns_none_when_never_set():
-    """Before any set_process_context call, both readers return None — the
+    """Before any _set_process_context_for_tests call, both readers return None — the
     fallback must not invent a value out of thin air."""
     _reset_global_fallback()
 
@@ -224,7 +224,7 @@ def _read_fallback_from_iothread() -> str | None:
 
 
 def test_process_context_scope_handles_concurrent_setter_outside_scope():
-    """If something calls set_process_context() OUTSIDE the scope (legacy
+    """If something calls _set_process_context_for_tests() OUTSIDE the scope (legacy
     code path or test helper), the scope's exit pops its own name from
     the stack and falls back to the prior stack top — not to the value
     the rogue setter wrote. The rogue value only sticks if the stack is
@@ -236,7 +236,7 @@ def test_process_context_scope_handles_concurrent_setter_outside_scope():
     def worker() -> None:
         with process_context_scope("cron_A"):
             # Legacy code path that doesn't use the scope.
-            set_process_context("rogue_value")
+            _set_process_context_for_tests("rogue_value")
             captured["during"] = _read_fallback_from_iothread()
 
         captured["after"] = _read_fallback_from_iothread()
@@ -265,7 +265,7 @@ def test_query_iothread_calls_does_not_synchronously_flush_proxy(monkeypatch):
     Test asserts the flusher is never called from this function. If a
     future refactor reintroduces a synchronous wait, this fails."""
     _reset_global_fallback()
-    set_process_context("api:GET /api/test")
+    _set_process_context_for_tests("api:GET /api/test")
 
     from backend import config as svcconfig
     from backend.models import common as common_models
@@ -284,7 +284,7 @@ def test_query_iothread_calls_does_not_synchronously_flush_proxy(monkeypatch):
 
     # Make get_con raise so we don't actually touch SQLite — we only
     # care that the proxy flusher isn't called before that.
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     def _boom(*_args, **_kwargs):
         raise RuntimeError("intentionally unreachable in test")

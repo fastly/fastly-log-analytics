@@ -1,0 +1,40 @@
+# serializer version: 1
+# name: test_api_bootstrap_empty_response_shape
+  dict({
+    'active_service_id_is_none_or_str': True,
+    'has_top_level_keys': list([
+      'active_log_field_ids',
+      'active_service_id',
+      'countries',
+      'cron_runs_first_page',
+      'cron_schedule',
+      'custom_dashboard_cards',
+      'custom_fields_catalog',
+      'debug_state',
+      'header_badge',
+      'last_sync',
+      'log_extents',
+      'log_fields_catalog',
+      'ops_overview',
+      'pop_geo',
+      'pops',
+      'schema',
+      'scoring_labels',
+      'services',
+      'settings',
+      'share_banner',
+      'share_status',
+      'sync_status',
+      'table_name',
+      'views',
+    ]),
+    'services_empty_in_sandbox': True,
+    'services_is_list': True,
+  })
+# ---
+# name: test_api_health_response_shape
+  dict({
+    'status': 'ok',
+    'version': '<scrubbed>',
+  })
+# ---

@@ -1,0 +1,11 @@
+{
+  "version": "local-dev-fixture",
+  "built_at": "2026-06-01T00:00:00+00:00",
+  "vocab_size": 3,
+  "session_count": 10,
+  "transition_count": 20,
+  "counts": {"/home": {"/products": 15, "/cart": 5}},
+  "row_totals": {"/home": 20},
+  "categories": {"/home": "home", "/products": "product", "/cart": "cart"},
+  "anchors": ["/home", "/products"]
+}

@@ -3,95 +3,34 @@
 import { useTimeseriesToTraces } from '@/hooks/useTimeseriesToTraces'
 import React from 'react'
 import { client } from '@/lib/api'
+import type { components } from '@/types/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
-import { PlotlyChart } from '@/components/PlotlyChart'
-import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
-import { DashboardLinkCell } from '@/components/DashboardLinkCell'
-import { Server, Activity, MapPin, Globe } from 'lucide-react'
-import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { cn, formatBytes } from '@/lib/utils'
-import { Button } from '@/components/ui/button'
-import { ButtonGroup } from '@/components/ui/button-group'
-import { makeTimeXAxis } from '@/lib/chart-helpers'
+import { Server } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
-import { TRENDS, INTERVAL_SECONDS } from '@/lib/constants'
+import { INTERVAL_SECONDS } from '@/lib/constants'
 import { formatDate } from '@/lib/date'
+import { Aggregates } from './_sections/Aggregates'
+import { Timeseries } from './_sections/Timeseries'
+import { LatencyHeatmap } from './_sections/LatencyHeatmap'
 
-const COLUMNS = {
-  url: [
-    {
-      accessorKey: 'url',
-      id: 'url', meta: { label: 'URL' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">URL</span>,
-      cell: (info: any) => (
-        <DashboardLinkCell
-          value={info.getValue()}
-          href={`/dashboard?filter_url=${encodeURIComponent(info.getValue())}`}
-          className="font-mono text-xs"
-          containerClassName="max-w-[400px]"
-        />
-      )
-    },
-    { accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Reqs</span>, cell: (info: any) => info.getValue().toLocaleString() },
-    { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P50</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-    { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P95</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-    { accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P99</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-  ],
-  pop: [
-    {
-      accessorKey: 'pop',
-      id: 'pop', meta: { label: 'POP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">POP</span>,
-      cell: (info: any) => (
-        <DashboardLinkCell
-          value={info.getValue()}
-          href={`/dashboard?filter_pop=${encodeURIComponent(info.getValue())}`}
-          className="font-bold"
-        />
-      )
-    },
-    { accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Reqs</span>, cell: (info: any) => info.getValue().toLocaleString() },
-    { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P50</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-    { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P95</span>, cell: (info: any) => (
-      <span className={cn(info.row.original.elevated ? "text-destructive font-bold" : "")}>
-        {info.getValue()?.toFixed(1)}ms
-      </span>
-    )},
-  ],
-  ip: [
-    {
-      accessorKey: 'oip',
-      id: 'oip', meta: { label: 'Origin IP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Origin IP</span>,
-      cell: (info: any) => (
-        <DashboardLinkCell
-          value={info.getValue()}
-          href={`/dashboard?filter_origin_ip=${encodeURIComponent(info.getValue())}`}
-          className="font-mono text-xs"
-        />
-      )
-    },
-    { accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Reqs</span>, cell: (info: any) => info.getValue().toLocaleString() },
-    { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P50</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-    { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P95</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-    { accessorKey: 'error_pct', id: 'error_pct', meta: { label: '5xx Errors %' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">5xx %</span>, cell: (info: any) => (
-      <span className={cn(info.getValue() > 1 ? "text-destructive font-bold" : "")}>
-        {info.getValue()}%
-      </span>
-    )},
-  ]
-}
-
-const COLUMN_LABELS: Record<string, string> = {
-  url: 'URL',
-  pop: 'POP',
-  oip: 'Origin IP',
-  requests: 'Requests',
-  p50_ms: 'Median (P50)',
-  p95_ms: 'P95 Latency',
-  p99_ms: 'P99 Latency',
-  error_pct: 'Error Rate %',
-}
-
-const getLabels = (ids: string[]) => ids.map(id => ({ id, label: COLUMN_LABELS[id] || id }))
+// P-4 slice 4: section-selector mirroring /security, /network, /dashboard,
+// /performance. The origin page renders every section, so the list is the
+// constant full set — declared explicitly so the backend's _expand_sections
+// gets the standardized selector contract and a future feature flag can
+// drop a section without an API change. No FE call-split: the shared
+// parquet-scan + lat_us materialization on the backend is the floor cost
+// of the request, and splitting across HTTP requests would re-pay it per
+// call (see commit 9007f9d's 4-branch intra-request fan-out).
+const ORIGIN_SECTIONS: NonNullable<components['schemas']['OriginAggregatesRequest']['sections']> = [
+  'summary',
+  'timeseries',
+  'slow_urls',
+  'status_codes',
+  'path_breakdown',
+  'pop_latency',
+  'ip_health',
+]
 
 function OriginReportContent({
   startTime,
@@ -111,86 +50,73 @@ function OriginReportContent({
   const [popVisibility, setPopVisibility, onPopVisChange] = useColumnVisibility()
   const [ipVisibility, setIpVisibility, onIpVisChange] = useColumnVisibility()
 
-  const summary = useServiceQuery(
-    ['origin', 'summary', activeServiceId, startTime, endTime, filterPayload],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/origin/summary", { signal, 
-        body: { start_time: startTime, end_time: endTime, filters: filterPayload }
-      })
-      return data as any
-    }
-  )
+  // Composite endpoint: one parquet scan → one shared TEMP TABLE → six
+  // sub-aggregations. Backend at /api/origin/aggregates. The granular
+  // /api/origin/{summary,timeseries,slow-urls,status-codes,pop-latency,
+  // ip-health} endpoints still exist on the server for rollback safety
+  // but should no longer fire from this page. Per-card pseudo-query
+  // objects below preserve the {data, isLoading, isFetching} shape the
+  // existing section components consume so the migration is invisible
+  // to <Aggregates>/<Timeseries>/<LatencyHeatmap>.
+  // ChartInterval (backend/models/metrics.py) only emits these 4 values;
+  // any other key here would be dead.
+  const intervalMap: Record<string, number> = {
+    "1 second": 1 / 60,
+    "1 minute": 1,
+    "1 hour": 60,
+    "1 day": 1440,
+  }
+  const bucketMinutes = intervalMap[config.effectiveInterval] || 5
 
-  const originTs = useServiceQuery(
-    ['origin', 'timeseries', activeServiceId, startTime, endTime, filterPayload, config.effectiveInterval, originMetric, originPercentile],
+  const bundle = useServiceQuery(
+    ['origin', 'aggregates', activeServiceId, startTime, endTime, filterPayload, bucketMinutes, originMetric, originPercentile, ORIGIN_SECTIONS],
     async ({ signal }) => {
-      const intervalMap = {
-        "1 second": 1 / 60,
-        "1 minute": 1,
-        "5 minutes": 5,
-        "15 minutes": 15,
-        "30 minutes": 30,
-        "1 hour": 60,
-        "6 hours": 360,
-        "12 hours": 720,
-        "1 day": 1440,
-      }
-      const bucketMinutes = (intervalMap as Record<string, number>)[config.effectiveInterval] || 5
-
-      const { data } = await client.POST('/api/origin/timeseries', { signal, 
+      const { data } = await client.POST('/api/origin/aggregates', { signal,
         body: {
           start_time: startTime,
           end_time: endTime,
           filters: filterPayload,
           bucket_minutes: bucketMinutes,
           split_by_leg: false,
-          metric: originMetric,
-          percentile: originPercentile,
+          timeseries_metric: originMetric,
+          timeseries_percentile: originPercentile,
+          slow_urls_limit: 20,
+          // URLs with <50 reqs in the window almost never make the
+          // top-20 by p95 — a single outlier dominates and the row
+          // isn't statistically meaningful. Raising the HAVING from
+          // 10 to 50 cuts URL-cardinality 60-80 % (Zipfian) on the
+          // GROUP BY + APPROX_QUANTILE sorts; slow_urls section
+          // section on prod-tunnel-admin/7d drops ~1.3 s of the
+          // current ~2.2 s max.
+          slow_urls_min_requests: 50,
+          pop_latency_limit: 30,
+          ip_health_limit: 30,
+          sections: ORIGIN_SECTIONS,
         },
       })
+      // NOTE: the response is intentionally left `as any`. Typing it as
+      // OriginAggregatesResponse cascades into the section consumers below:
+      // every section (summary/timeseries/slow_urls/…) is an opaque
+      // `{ [key: string]: unknown }` dict in the generated schema, so the
+      // local `.series`/`.rows` reads would each need bespoke narrowing.
+      // The body `sections` list above is now typed (a section typo is a
+      // compile error) — that is the type-safety win for this file.
       return data as any
     },
   )
 
-  const slowUrls = useServiceQuery(
-    ['origin', 'slow-urls', activeServiceId, startTime, endTime, filterPayload],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/origin/slow-urls", { signal, 
-        body: { start_time: startTime, end_time: endTime, filters: filterPayload, limit: 20, min_requests: 10 }
-      })
-      return data as any
-    }
-  )
-
-  const statusCodes = useServiceQuery(
-    ['origin', 'status-codes', activeServiceId, startTime, endTime, filterPayload],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/origin/status-codes", { signal, 
-        body: { start_time: startTime, end_time: endTime, filters: filterPayload }
-      })
-      return data as any
-    }
-  )
-
-  const popLatency = useServiceQuery(
-    ['origin', 'pop-latency', activeServiceId, startTime, endTime, filterPayload],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/origin/pop-latency", { signal, 
-        body: { start_time: startTime, end_time: endTime, filters: filterPayload, limit: 30 }
-      })
-      return data as any
-    }
-  )
-
-  const ipHealth = useServiceQuery(
-    ['origin', 'ip-health', activeServiceId, startTime, endTime, filterPayload],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/origin/ip-health", { signal, 
-        body: { start_time: startTime, end_time: endTime, filters: filterPayload, limit: 30 }
-      })
-      return data as any
-    }
-  )
+  // useMemo so identity stays stable across re-renders for the same bundle
+  // tick; the section components are dumb consumers and re-renders fan out
+  // through the existing isLoading/isFetching propagation.
+  const isLoading = bundle.isLoading
+  const isFetching = bundle.isFetching
+  const error = bundle.error
+  const summary = React.useMemo(() => ({ data: bundle.data?.summary, isLoading, isFetching, error }), [bundle.data?.summary, isLoading, isFetching, error])
+  const originTs = React.useMemo(() => ({ data: bundle.data?.timeseries, isLoading, isFetching, error }), [bundle.data?.timeseries, isLoading, isFetching, error])
+  const slowUrls = React.useMemo(() => ({ data: bundle.data?.slow_urls, isLoading, isFetching, error }), [bundle.data?.slow_urls, isLoading, isFetching, error])
+  const statusCodes = React.useMemo(() => ({ data: bundle.data?.status_codes, isLoading, isFetching, error }), [bundle.data?.status_codes, isLoading, isFetching, error])
+  const popLatency = React.useMemo(() => ({ data: bundle.data?.pop_latency, isLoading, isFetching, error }), [bundle.data?.pop_latency, isLoading, isFetching, error])
+  const ipHealth = React.useMemo(() => ({ data: bundle.data?.ip_health, isLoading, isFetching, error }), [bundle.data?.ip_health, isLoading, isFetching, error])
 
   const baseOriginTraces = useTimeseriesToTraces(originTs.data?.series, React.useMemo(() => [
     { key: 'value', name: originMetric === 'ttfb' ? 'Origin TTFB' : 'Origin TTLB', color: '#ef4444', fill: 'tozeroy' }
@@ -219,7 +145,7 @@ function OriginReportContent({
         const actualInterval = config.effectiveInterval
         windowSize = Math.floor((trendMap[trend] ?? 0) / (INTERVAL_SECONDS[actualInterval as keyof typeof INTERVAL_SECONDS] ?? 60))
       }
-      
+
       if (windowSize > 1) {
         const trendY = new Array(n).fill(null)
         for (let i = windowSize - 1; i < n; i++) {
@@ -246,13 +172,17 @@ function OriginReportContent({
 
   const statusData = React.useMemo(() => {
     if (!statusCodes.data?.rows?.length) return []
+    // N-8: backend bucketizes any status outside 100-599 as -1; map to a
+    // single "Other" slice so the donut doesn't fabricate plausible-looking
+    // status codes like "HTTP 829" from synthetic / corrupt origin values.
     return [{
       values: statusCodes.data.rows.map((r: any) => r.count),
-      labels: statusCodes.data.rows.map((r: any) => `HTTP ${r.status}`),
+      labels: statusCodes.data.rows.map((r: any) => r.status === -1 ? 'Other' : `HTTP ${r.status}`),
       type: 'pie',
       hole: 0.4,
       marker: {
         colors: statusCodes.data.rows.map((r: any) =>
+          r.status === -1 ? '#94a3b8' :
           r.status >= 500 ? '#ef4444' :
           r.status >= 400 ? '#f59e0b' :
           r.status >= 300 ? '#3b82f6' : '#10b981'
@@ -278,272 +208,39 @@ function OriginReportContent({
 
   return (
     <>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <AnalyticsCard
-          title="Origin TTFB (P50)"
-          isLoading={summary.isLoading}
-          isFetching={summary.isFetching}
-          className="h-auto"
-          helpContent={<p>Median time taken by your backend to start returning a response after Fastly forwards a request. Lower is better.</p>}
-        >
-          <div className="flex flex-col">
-            <div className="text-3xl font-bold">{summary.data?.ottfb_p50_ms?.toFixed(1)}ms</div>
-            <div className="text-xs text-muted-foreground mt-1">Median backend response time</div>
-          </div>
-        </AnalyticsCard>
-        <AnalyticsCard
-          title="Origin TTFB (P95)"
-          isLoading={summary.isLoading}
-          isFetching={summary.isFetching}
-          helpContent={<p>The 95th percentile of backend response times. Indicates the tail latency experienced by the slowest 5% of requests.</p>}
-        >
-          <div className="flex flex-col">
-            <div className="text-3xl font-bold">{summary.data?.ottfb_p95_ms?.toFixed(1)}ms</div>
-            <div className="text-xs text-muted-foreground mt-1">Tail latency (95th percentile)</div>
-          </div>
-        </AnalyticsCard>
-        <AnalyticsCard
-          title="Origin Error Rate"
-          isLoading={summary.isLoading}
-          isFetching={summary.isFetching}
-          helpContent={<p>Percentage of cache miss/pass requests where the backend returned a 5xx HTTP status code.</p>}
-        >
-          <div className="flex flex-col">
-            <div className={cn("text-3xl font-bold", (summary.data?.origin_error_rate || 0) > 0.01 ? "text-destructive" : "")}>
-              {((summary.data?.origin_error_rate || 0) * 100).toFixed(2)}%
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">Percentage of 5xx responses</div>
-          </div>
-        </AnalyticsCard>
-        <AnalyticsCard
-          title="Fetch Volume"
-          isLoading={summary.isLoading}
-          isFetching={summary.isFetching}
-          helpContent={<p>The total number of requests sent to the backend (cache misses and passes) during this time window.</p>}
-        >
-          <div className="flex flex-col">
-            <div className="text-3xl font-bold">
-              {((summary.data?.total_misses || 0) + (summary.data?.total_passes || 0)).toLocaleString()}
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">Total cache misses & passes</div>
-          </div>
-        </AnalyticsCard>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-        <AnalyticsCard
-          title="Origin Latency"
-          icon={<Activity className="h-4 w-4" />}
-          className="lg:col-span-2 h-[400px]"
-          isLoading={originTs.isLoading}
-          isFetching={originTs.isFetching}
-          helpContent={<p>Time to First Byte (TTFB) measures the time to receive the first byte of the response headers from the origin. Time to Last Byte (TTLB) measures the time to receive the full response body.</p>}
-          headerAction={
-            <div className="flex items-center gap-2">
-              <ButtonGroup>
-                {(['ttfb', 'ttlb'] as const).map(m => (
-                  <Button
-                    key={m}
-                    variant={originMetric === m ? 'default' : 'ghost'}
-                    size="sm"
-                    onClick={() => React.startTransition(() => setOriginMetric(m))}
-                    className={cn(
-                      "h-6 text-[10px] px-2 shadow-none transition-colors uppercase",
-                      originMetric === m ? "bg-primary text-primary-foreground hover:bg-primary/90" : "hover:text-primary hover:bg-muted"
-                    )}
-                  >
-                    {m}
-                  </Button>
-                ))}
-              </ButtonGroup>
-              <ButtonGroup>
-                {(['p50', 'p95', 'p99'] as const).map(p => (
-                  <Button
-                    key={p}
-                    variant={originPercentile === p ? 'default' : 'ghost'}
-                    size="sm"
-                    onClick={() => React.startTransition(() => setOriginPercentile(p))}
-                    className={cn(
-                      "h-6 text-[10px] px-2 shadow-none transition-colors",
-                      originPercentile === p ? "bg-primary text-primary-foreground hover:bg-primary/90" : "hover:text-primary hover:bg-muted"
-                    )}
-                  >
-                    {p}
-                  </Button>
-                ))}
-              </ButtonGroup>
-              <div className="ml-2">
-                {intervalButtons}
-              </div>
-            </div>
-          }
-        >
-          {originTs.isLoading || (originTs.isFetching && originTsChartData.length === 0) ? (
-            <div className="h-[300px] flex items-center justify-center bg-muted/20 rounded-md">
-              <span className="text-muted-foreground text-sm animate-pulse">Crunching logs...</span>
-            </div>
-          ) : originTsChartData.length === 0 ? (
-            <div className="h-[300px] flex items-center justify-center bg-muted/10 border border-dashed rounded-md">
-              <div className="flex flex-col items-center text-muted-foreground">
-                <span className="text-sm font-medium">No data available</span>
-                <span className="text-xs mt-1">No origin timing data found for this period.</span>
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-col h-full">
-              <div className="relative flex-1 mb-4">
-                <PlotlyChart
-                  data={originTsChartData}
-                  layout={{
-                    hovermode: 'x unified',
-                    yaxis: { title: 'ms', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
-                    xaxis: makeTimeXAxis(startTime, endTime, timezone),
-                  }}
-                  height="100%"
-                />
-              </div>
-              <div className="mt-auto pt-2 border-t flex items-center gap-2 relative z-10">
-                <span className="text-[10px] uppercase font-bold text-muted-foreground">Trend:</span>
-                <ButtonGroup className="bg-muted/50 p-1">
-                  {TRENDS.map(t => (
-                    <Button
-                      key={t.value}
-                      variant={trend === t.value ? 'secondary' : 'ghost'}
-                      size="sm"
-                      onClick={() => React.startTransition(() => setTrend(t.value))}
-                      disabled={!config.validTrends.has(t.value)}
-                      className="h-6 text-[10px] px-2 shadow-none disabled:opacity-30"
-                    >
-                      {t.label}
-                    </Button>
-                  ))}
-                </ButtonGroup>
-              </div>
-            </div>
-          )}
-        </AnalyticsCard>
-
-        <AnalyticsCard
-          title="Status Code Distribution"
-          icon={<Activity className="h-4 w-4" />}
-          isLoading={statusCodes.isLoading}
-          isFetching={statusCodes.isFetching}
-          className="h-[400px]"
-          contentClassName="p-2"
-          helpContent={<p>A breakdown of the HTTP status codes returned directly by your backend servers during the selected time period.</p>}
-        >
-          <PlotlyChart
-            data={statusData}
-            height="100%"
-          />
-        </AnalyticsCard>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        <AnalyticsCard
-          title="Slowest URLs at Origin"
-          icon={<Server className="h-4 w-4" />}
-          isLoading={slowUrls.isLoading}
-          isFetching={slowUrls.isFetching}
-          contentClassName="p-0"
-          helpContent={<p>A list of specific URLs that take the longest time to fetch from the origin.</p>}
-          headerAction={
-            <ColumnVisibilityDropdown
-              columns={getLabels(['url', 'requests', 'p50_ms', 'p95_ms', 'p99_ms'])}
-              visibility={urlVisibility}
-              onChange={onUrlVisChange}
-            />
-          }
-        >
-          <DataTable
-            columns={COLUMNS.url}
-            data={slowUrls.data?.rows || []}
-            emptyMessage={slowUrls.isLoading ? "" : "Requires Origin Metrics (Group L) fields to be enabled."}
-            hideToolbar
-            columnVisibility={urlVisibility}
-            onColumnVisibilityChange={setUrlVisibility}
-          />
-        </AnalyticsCard>
-
-        <AnalyticsCard
-          title="Origin Performance by POP"
-          icon={<MapPin className="h-4 w-4" />}
-          isLoading={popLatency.isLoading}
-          isFetching={popLatency.isFetching}
-          contentClassName="p-0"
-          helpContent={<p>Backend latency aggregated by Fastly POP location.</p>}
-          headerAction={
-            <ColumnVisibilityDropdown
-              columns={getLabels(['pop', 'requests', 'p50_ms', 'p95_ms'])}
-              visibility={popVisibility}
-              onChange={onPopVisChange}
-            />
-          }
-        >
-          <DataTable
-            columns={COLUMNS.pop}
-            data={popLatency.data?.rows || []}
-            emptyMessage={popLatency.isLoading ? "" : "Requires Origin Metrics (Group L) and Infrastructure (Group C) fields to be enabled."}
-            hideToolbar
-            columnVisibility={popVisibility}
-            onColumnVisibilityChange={setPopVisibility}
-          />
-        </AnalyticsCard>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <AnalyticsCard
-          title="Origin IP Health"
-          icon={<Globe className="h-4 w-4" />}
-          isLoading={ipHealth.isLoading}
-          isFetching={ipHealth.isFetching}
-          contentClassName="p-0"
-          helpContent={<p>Latency and error rates for individual backend IP addresses.</p>}
-          headerAction={
-            <ColumnVisibilityDropdown
-              columns={getLabels(['oip', 'requests', 'p50_ms', 'p95_ms', 'error_pct'])}
-              visibility={ipVisibility}
-              onChange={onIpVisChange}
-            />
-          }
-        >
-          <DataTable
-            columns={COLUMNS.ip}
-            data={ipHealth.data?.rows || []}
-            emptyMessage={ipHealth.isLoading ? "" : "Requires Origin Metrics (Group L) fields to be enabled."}
-            hideToolbar
-            columnVisibility={ipVisibility}
-            onColumnVisibilityChange={setIpVisibility}
-          />
-        </AnalyticsCard>
-
-        <AnalyticsCard
-          title="Origin Payload Size"
-          icon={<Globe className="h-4 w-4" />}
-          isLoading={summary.isLoading}
-          isFetching={summary.isFetching}
-          helpContent={<p>The median size of the response body transferred from the origin to Fastly.</p>}
-        >
-          <div className="flex flex-col items-center justify-center py-4 text-center">
-            <div className="text-2xl font-bold mb-1">
-              {summary.data?.obytes_p50 != null
-                ? formatBytes(summary.data.obytes_p50)
-                : 'N/A'}
-            </div>
-            <div className="text-xs text-muted-foreground">Median Response Size (obytes)</div>
-            <div className="w-full h-2 bg-muted rounded-full mt-4 overflow-hidden flex">
-              <div
-                className="bg-primary h-full transition-all"
-                style={{ width: `${Math.min(100, (summary.data?.ottfb_p50_ms || 0) / (summary.data?.ottlb_p50_ms || 1) * 100)}%` }}
-              />
-            </div>
-            <div className="flex justify-between w-full mt-1 text-[10px] uppercase font-bold text-muted-foreground">
-              <span>TTFB</span>
-              <span>TTLB</span>
-            </div>
-          </div>
-        </AnalyticsCard>
-      </div>
+      <Aggregates summary={summary} />
+      <Timeseries
+        originTs={originTs}
+        originTsChartData={originTsChartData}
+        statusCodes={statusCodes}
+        statusData={statusData}
+        originMetric={originMetric}
+        setOriginMetric={setOriginMetric}
+        originPercentile={originPercentile}
+        setOriginPercentile={setOriginPercentile}
+        trend={trend}
+        setTrend={setTrend}
+        config={config}
+        intervalButtons={intervalButtons}
+        startTime={startTime}
+        endTime={endTime}
+        timezone={timezone}
+      />
+      <LatencyHeatmap
+        slowUrls={slowUrls}
+        popLatency={popLatency}
+        ipHealth={ipHealth}
+        summary={summary}
+        urlVisibility={urlVisibility}
+        setUrlVisibility={setUrlVisibility}
+        onUrlVisChange={onUrlVisChange}
+        popVisibility={popVisibility}
+        setPopVisibility={setPopVisibility}
+        onPopVisChange={onPopVisChange}
+        ipVisibility={ipVisibility}
+        setIpVisibility={setIpVisibility}
+        onIpVisChange={onIpVisChange}
+      />
     </>
   )
 }

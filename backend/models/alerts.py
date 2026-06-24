@@ -52,3 +52,7 @@ class AlertResponse(BaseResponse):
 class AlertPreviewResponse(BaseResponse):
     data: dict | None = None
     error: str | None = None
+
+
+class _ToggleBody(BaseModel):
+    enabled: bool

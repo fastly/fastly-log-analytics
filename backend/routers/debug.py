@@ -12,9 +12,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Query
 
 from backend.models.debug import ClearSqliteResponse, RecentSqliteResponse
+from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.utils import sqlite_profiler
 
-router = APIRouter(prefix="/api/debug", tags=["debug"])
+router = APIRouter(prefix="/api/debug", tags=["debug"], responses=DEFAULT_ERROR_RESPONSES)
 
 
 @router.get("/recent-sqlite", response_model=RecentSqliteResponse)

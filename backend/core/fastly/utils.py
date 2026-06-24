@@ -80,7 +80,19 @@ sub miss_pass {
         set var.fosHost = var.fosRegion ".object.fastlystorage.app";
 
         set bereq.http.x-amz-content-sha256 = digest.hash_sha256("");
-        set bereq.http.x-amz-date = strftime({"%Y%m%dT%H%M%SZ"}, now);
+        # Round x-amz-date down to the minute (finding 006). The SigV4
+        # signature is computed over this header — making it per-request
+        # invalidates Fastly's per-(URL, method) collapsed-forwarding /
+        # request coalescing: every concurrent request gets its own unique
+        # signed Authorization, so they all forward to FOS in parallel
+        # instead of riding on a single in-flight fetch. Pinning the seconds
+        # to ``00`` collapses all requests within a minute to the SAME
+        # signature, restoring coalescing and capping the per-minute origin
+        # spend regardless of incoming RPS. Still well inside AWS SigV4's
+        # 15-minute validity window. (Audit limited VCL arithmetic — no %
+        # or / operator — so per-minute granularity via strftime format
+        # is the cleanest expression of the rounding.)
+        set bereq.http.x-amz-date = strftime({"%Y%m%dT%H%M00Z"}, now);
         set bereq.http.host = var.fosHost;
 
         # Only prepend bucket if not already present (handles direct S3-style paths from DuckDB/Boto3)
@@ -145,44 +157,47 @@ sub miss_pass {
 }
 
 sub vcl_recv {
+  # Authenticate and take authority over the client IP exactly once, on
+  # the first Fastly POP to handle the request (the edge).
+  # ``fastly.ff.visits_this_service`` is 0 only on that first touch; any
+  # request arriving with it > 0 has already transited — and been
+  # authenticated by — our own edge, so re-running the gate here would
+  # only 401 a legitimately-forwarded request (the ``key`` param is
+  # stripped before forwarding). Unauthenticated requests ``error 401``
+  # at the edge and are never forwarded to the shield. A client cannot
+  # forge ``visits_this_service`` > 0: each ``Fastly-FF`` entry is a
+  # salted hash that only genuine Fastly hops can produce.
   if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+    # A client may supply Fastly-Client-IP; overwrite it with the real
+    # connection IP so downstream logging / rate-limiting can't be spoofed.
     set req.http.Fastly-Client-IP = client.ip;
-  }
 
-  # Block requests that do not provide the correct secret key.
-  # NOTE on the auth fallback: the third argument to ``table.lookup`` is
-  # returned when ``cdn_auth.secret`` is absent from the edge dictionary.
-  # Defaulting to ``""`` is fail-open — an attacker who sends an empty
-  # ``key`` query param trivially matches. ``__FALLBACK_SECRET__`` is
-  # substituted in load_vcl() with ``secrets.token_hex(32)``, which is
-  # never knowable to an attacker and therefore fails closed when the
-  # dictionary is unprovisioned.
-  if (req.restarts == 0 && fastly.ff.visits_this_service == 0 && subfield(req.url.qs, "key", "&") != table.lookup(cdn_auth, "secret", "__FALLBACK_SECRET__") && req.http.x-fastly-key != table.lookup(cdn_auth, "secret", "__FALLBACK_SECRET__")) {
+    # Block requests that do not provide the correct secret key.
+    # NOTE on the auth fallback: the third argument to ``table.lookup`` is
+    # returned when ``cdn_auth.secret`` is absent from the edge dictionary.
+    # Defaulting to ``""`` is fail-open — an attacker who sends an empty
+    # ``key`` query param trivially matches. The literal fallback string
+    # below is substituted in load_vcl() with an unguessable
+    # ``unprovisioned-fallback-`` + ``secrets.token_hex(32)`` value, which
+    # is never knowable to an attacker and therefore fails closed when the
+    # dictionary is unprovisioned. The human-readable prefix makes clear in
+    # the rendered VCL that this is a throwaway placeholder, NOT the real
+    # ``cdn_auth.secret`` (which lives only in the write-only edge dict).
+    if (subfield(req.url.qs, "key", "&") != table.lookup(cdn_auth, "secret", "REPLACE_AT_LOAD_VCL_FALLBACK_SECRET") && req.http.x-fastly-key != table.lookup(cdn_auth, "secret", "REPLACE_AT_LOAD_VCL_FALLBACK_SECRET")) {
 #RATELIMIT_BEGIN
-    declare local var.last_minute INTEGER;
-    set var.last_minute = ratelimit.ratecounter_increment(auth_fail_rc, req.http.Fastly-Client-IP, 1);
-    if (var.last_minute >= 2) {
-      ratelimit.penaltybox_add(auth_fail_pb, req.http.Fastly-Client-IP, 1m);
-    }
+      declare local var.last_minute INTEGER;
+      set var.last_minute = ratelimit.ratecounter_increment(auth_fail_rc, req.http.Fastly-Client-IP, 1);
+      if (var.last_minute >= 2) {
+        ratelimit.penaltybox_add(auth_fail_pb, req.http.Fastly-Client-IP, 1m);
+      }
 #RATELIMIT_END
-    error 401 "Unauthorized";
-  }
-#RATELIMIT_BEGIN
-  if (req.method != "FASTLYPURGE" && req.restarts == 0 && fastly.ff.visits_this_service == 0) {
-    if (ratelimit.penaltybox_has(auth_fail_pb, req.http.Fastly-Client-IP)) {
       error 401 "Unauthorized";
     }
-  }
+#RATELIMIT_BEGIN
+    if (req.method != "FASTLYPURGE" && ratelimit.penaltybox_has(auth_fail_pb, req.http.Fastly-Client-IP)) {
+      error 401 "Unauthorized";
+    }
 #RATELIMIT_END
-
-  # Handle FASTLYPURGE natively. Without this, an unsigned purge on a
-  # cache miss is forwarded to the FOS origin, which returns 403 — and
-  # Fastly caches that 403 for the object's TTL. An attacker can poison
-  # the cache for legitimate clients by issuing purges against arbitrary
-  # keys. ``return(purge)`` short-circuits the pipeline before any
-  # backend fetch happens.
-  if (req.method == "FASTLYPURGE") {
-    return(purge);
   }
 
   # Enable segmented caching for potentially large log or parquet files
@@ -319,12 +334,15 @@ sub vcl_log {
 }"""
     if not rate_limiting:
         vcl = re.sub(r"\s*#RATELIMIT_BEGIN.*?#RATELIMIT_END", "", vcl, flags=re.DOTALL)
-    # Substitute the placeholder with a fresh random fallback secret so
-    # that when ``cdn_auth.secret`` is missing from the edge dictionary,
-    # the lookup returns an unguessable value and the auth check fails
-    # closed instead of allowing empty-key requests through. A new secret
-    # per load_vcl() call is fine: real auth uses the dictionary value
-    # (this fallback is never matched in steady state).
-    fallback_secret = secrets.token_hex(32)
-    vcl = vcl.replace("__FALLBACK_SECRET__", fallback_secret)
+    # Substitute the fallback-secret placeholder with a fresh random
+    # value so that when ``cdn_auth.secret`` is missing from the edge
+    # dictionary, the lookup returns an unguessable value and the auth
+    # check fails closed instead of allowing empty-key requests through.
+    # A new secret per load_vcl() call is fine: real auth uses the
+    # dictionary value (this fallback is never matched in steady state).
+    # The ``unprovisioned-fallback-`` prefix is purely cosmetic — it
+    # self-documents the rendered VCL so the value reads as a placeholder
+    # rather than a leaked secret, while the token_hex tail keeps it
+    # unguessable.
+    vcl = vcl.replace("REPLACE_AT_LOAD_VCL_FALLBACK_SECRET", "unprovisioned-fallback-" + secrets.token_hex(32))
     return vcl

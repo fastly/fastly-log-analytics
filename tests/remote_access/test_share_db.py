@@ -47,9 +47,40 @@ def test_apply_pending_is_idempotent(fresh_share_con):
     assert n == 0  # nothing applied second time
 
 
+def test_publish_tos_version_appends_and_is_idempotent(fresh_share_con):
+    share_db.publish_tos_version("v2", "Updated terms.", con=fresh_share_con)
+    tos = share_db.get_latest_tos(con=fresh_share_con)
+    assert tos["version"] == "v2"
+    assert tos["text"] == "Updated terms."
+
+    # Re-publishing the same version is a no-op (doesn't append a duplicate row).
+    share_db.publish_tos_version("v2", "Anything.", con=fresh_share_con)
+    rows = fresh_share_con.execute("SELECT COUNT(*) FROM share_tos_versions WHERE version=?", ("v2",)).fetchone()
+    assert rows[0] == 1
+
+
+def test_share_setting_constants_have_reader_defaults(fresh_share_con):
+    """Module constants resolve to a usable default even on a fresh DB.
+
+    The legacy migration that seeded ``max_concurrent_analyst_sessions=10``
+    was deleted in commit 8e0a8b6 ("drop legacy share-db migration") on
+    the grounds that ``settings.get_max_concurrent_sessions`` already
+    returns 10 when the row is missing — making the seed pure dev
+    scaffolding. Pin the new contract: the reader hands back a sane
+    integer default on an empty share_settings table.
+    """
+    keys = {r[0] for r in fresh_share_con.execute("SELECT key FROM share_settings").fetchall()}
+    assert share_db.MAX_CONCURRENT_ANALYST_SESSIONS_KEY not in keys, (
+        "post-8e0a8b6 the share-DB no longer seeds this row; if it did, the test contract needs revisiting"
+    )
+    # The reader is the source of truth — must default sensibly.
+    assert share_db.get_max_concurrent_sessions(con=fresh_share_con) == 10
+
+
 # ── Corruption self-heal ────────────────────────────────────────────────────
 
 
+@pytest.mark.security_regression
 def test_quarantines_corrupt_file_and_rebuilds(tmp_path, monkeypatch):
     """A garbage file at the DB path is moved aside and a fresh DB is created."""
     path = tmp_path / "system"
@@ -78,11 +109,16 @@ def test_quarantines_corrupt_file_and_rebuilds(tmp_path, monkeypatch):
 # ── Passcode hashing ────────────────────────────────────────────────────────
 
 
+@pytest.mark.security_regression
 def test_hash_then_verify_succeeds():
     h = share_db.hash_passcode("correct-horse-battery-staple")
+    # New hashes use argon2id (OWASP 2026 default). Legacy ``scrypt$...``
+    # is verify-only; see test_legacy_scrypt_hash_still_verifies below.
+    assert h.startswith("$argon2")
     assert share_db.verify_passcode("correct-horse-battery-staple", h)
 
 
+@pytest.mark.security_regression
 def test_verify_wrong_passcode_fails():
     h = share_db.hash_passcode("right-one-here")
     assert not share_db.verify_passcode("wrong-one-here", h)
@@ -94,14 +130,42 @@ def test_hash_is_unique_per_call():
     assert h1 != h2  # different salt → different ciphertext
 
 
+@pytest.mark.security_regression
 def test_verify_rejects_malformed_stored():
-    assert not share_db.verify_passcode("anything", "not-a-scrypt-hash")
+    assert not share_db.verify_passcode("anything", "not-a-recognised-hash")
     assert not share_db.verify_passcode("anything", "scrypt$bad$format")
+    assert not share_db.verify_passcode("anything", "$argon2id$broken")
+    assert not share_db.verify_passcode("anything", "")
+
+
+# ── Argon2id ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.security_regression
+def test_argon2id_hash_verifies():
+    """The current default produces an argon2id hash that round-trips."""
+    h = share_db.hash_passcode("ocean-breeze-cabin-42")
+    assert h.startswith("$argon2id$")
+    assert share_db.verify_passcode("ocean-breeze-cabin-42", h)
+
+
+@pytest.mark.security_regression
+def test_needs_rehash_only_flags_lower_cost_argon2():
+    current = share_db.hash_passcode("ocean-breeze-cabin-42")
+    assert share_db.needs_rehash(current) is False
+    assert share_db.needs_rehash("") is False
+    assert share_db.needs_rehash("garbage-not-a-hash") is False
+    # Legacy scrypt format is no longer recognised — verify returns False
+    # and needs_rehash returns False (nothing to rehash from a string we
+    # can't even parse). The scrypt cutover is long since complete.
+    assert share_db.needs_rehash("scrypt$16384$8$1$deadbeef$cafebabe") is False
+    assert share_db.verify_passcode("anything", "scrypt$16384$8$1$deadbeef$cafebabe") is False
 
 
 # ── Passcode strength validator ─────────────────────────────────────────────
 
 
+@pytest.mark.security_regression
 @pytest.mark.parametrize(
     "weak",
     [
@@ -117,6 +181,7 @@ def test_validate_passcode_rejects_weak(weak):
         share_db.validate_passcode_strength(weak)
 
 
+@pytest.mark.security_regression
 @pytest.mark.parametrize(
     "ok",
     [
@@ -164,7 +229,7 @@ def test_validate_email_rejects_bad(bad):
 
 
 def test_validate_email_lowercases():
-    assert share_db.validate_email("Drew@Fastly.COM") == "drew@fastly.com"
+    assert share_db.validate_email("Drew@Example.COM") == "drew@example.com"
 
 
 # ── IP whitelist parser ─────────────────────────────────────────────────────
@@ -195,6 +260,93 @@ def test_ip_in_whitelist_cidr_match():
     assert not share_db.ip_in_whitelist("11.5.6.7", "10.0.0.0/8")
 
 
+# ── PII policy validation: reject unenforced controls (silent no-op guard) ───
+
+
+def test_validate_pii_policy_accepts_mask_ips():
+    from backend.core.share_db.validation import validate_pii_policy
+
+    assert validate_pii_policy({"mask_ips": True}) == {"mask_ips": True}
+    assert validate_pii_policy(None) == {"mask_ips": False}
+    assert validate_pii_policy({}) == {"mask_ips": False}
+
+
+def test_validate_pii_policy_rejects_unenforced_controls_when_enabled():
+    """mask_user_agent / mask_geo / redact_fields are not enforced anywhere;
+    enabling them must error rather than be silently accepted-and-ignored."""
+    import pytest
+
+    from backend.core.share_db.validation import InvalidPiiPolicyError, validate_pii_policy
+
+    for policy in (
+        {"mask_user_agent": True},
+        {"mask_geo": True},
+        {"redact_fields": ["ip", "ua"]},
+    ):
+        with pytest.raises(InvalidPiiPolicyError):
+            validate_pii_policy(policy)
+
+
+def test_validate_pii_policy_allows_disabled_unenforced_controls():
+    """Turning the unenforced knobs OFF (or an empty redact_fields) is a
+    harmless no-op — accepted, and dropped from the stored policy."""
+    from backend.core.share_db.validation import validate_pii_policy
+
+    out = validate_pii_policy({"mask_ips": True, "mask_user_agent": False, "mask_geo": False, "redact_fields": []})
+    assert out == {"mask_ips": True}
+
+
+def test_validate_pii_policy_redact_fields_shape_error_precedes_rejection():
+    import pytest
+
+    from backend.core.share_db.validation import InvalidPiiPolicyError, validate_pii_policy
+
+    with pytest.raises(InvalidPiiPolicyError, match="list of strings"):
+        validate_pii_policy({"redact_fields": "ip"})
+
+
+# ── Value-shape PII masking (H2) ─────────────────────────────────────────────
+
+
+def test_mask_ip_is_idempotent_on_already_masked_v4():
+    """The /api/query path masks by value, then the analyst-response middleware
+    runs the key-name masker over the SAME body. Without the idempotency guard
+    an ``ip`` column would degrade from '1.2.3.xxx' to '[redacted]'."""
+    from backend.core.share_db.validation import mask_ip
+
+    assert mask_ip("1.2.3.xxx") == "1.2.3.xxx"
+
+
+def test_mask_ip_values_masks_by_value_not_key():
+    from backend.core.share_db.validation import mask_ip_values
+
+    out = mask_ip_values({"addr": "1.2.3.4", "url": "https://x/var/y", "country": "US"})
+    assert out["addr"] == "1.2.3.xxx"  # masked despite the non-ip column name
+    assert out["url"] == "https://x/var/y"  # non-IP string untouched
+    assert out["country"] == "US"
+
+
+def test_mask_ip_values_handles_ipv6_nested_and_xff():
+    from backend.core.share_db.validation import mask_ip_values
+
+    out = mask_ip_values(
+        {
+            "rows": [
+                {"a": "2001:db8::1"},  # IPv6 → masked
+                {"a": "9.9.9.9, 8.8.8.8"},  # XFF list → each element masked
+                {"a": "not-an-ip"},  # untouched
+                {"a": "256.1.1.1"},  # invalid octet → untouched
+            ],
+            "n": 5,
+        }
+    )
+    assert out["rows"][0]["a"] == "2001:db8::"
+    assert out["rows"][1]["a"] == "9.9.9.xxx, 8.8.8.xxx"
+    assert out["rows"][2]["a"] == "not-an-ip"
+    assert out["rows"][3]["a"] == "256.1.1.1"
+    assert out["n"] == 5  # non-string values pass through
+
+
 # ── Invite CRUD ─────────────────────────────────────────────────────────────
 
 
@@ -214,8 +366,10 @@ def test_create_invite_round_trips():
     assert fetched["service_ids"] == ["svcA", "svcB"]
     assert fetched["pii_policy"] == {"mask_ips": False}
     assert fetched["revoked"] == 0
-    # Passcode is hashed, not stored plaintext.
-    assert fetched["passcode"].startswith("scrypt$")
+    # Passcode is hashed, not stored plaintext. New invites use argon2id;
+    # the legacy ``scrypt$...`` format is verify-only post-cutover.
+    assert fetched["passcode"].startswith("$argon2")
+    assert "ocean-breeze-cabin-42" not in fetched["passcode"]
 
 
 def test_create_invite_weak_passcode_raises():
@@ -536,8 +690,16 @@ def test_mask_ip_v6():
     assert masked.endswith("::")
 
 
-def test_mask_ip_garbage_passes_through():
-    assert share_db.mask_ip("not-an-ip") == "not-an-ip"
+def test_mask_ip_unparseable_fails_closed():
+    """Finding 019: a value that doesn't cleanly parse as an IP must NOT be
+    returned verbatim — that fails open and leaks PII the mask exists to
+    hide. Garbage, malformed octets, an XFF list, and trailing whitespace
+    all redact. Empty/None stay empty (nothing to leak)."""
+    assert share_db.mask_ip("not-an-ip") == "[redacted]"
+    assert share_db.mask_ip("192.168.1.1 ") == "[redacted]"
+    assert share_db.mask_ip("1.2.3.4, 5.6.7.8") == "[redacted]"
+    assert share_db.mask_ip("999.999.999.999") == "[redacted]"
+    assert share_db.mask_ip("") == ""
 
 
 def test_apply_pii_policy_walks_nested_dicts():
@@ -571,16 +733,25 @@ def test_apply_pii_policy_walks_lists_and_arrays():
     assert out["nested_list"][1]["ip_address"] == "192.168.1.xxx"
 
 
+@pytest.mark.security_regression
 def test_get_remote_invite_timing_equalization():
+    """Closes the email-enumeration 2x timing side-channel.
+
+    Patched at the invites module (the actual call site) rather than the
+    share_db package re-export, because ``invites.py`` binds the symbol
+    at import time and would not see a patch applied to the package
+    namespace.
+    """
     from unittest.mock import patch
 
     # 1. Call with a non-existent email -> must equalize timing once
-    with patch("backend.core.share_db._equalize_passcode_timing") as mock_equalize:
+    with patch("backend.core.share_db.invites._equalize_passcode_timing") as mock_equalize:
         res = share_db.get_remote_invite_by_email_passcode("nonexistent@example.com", "some-passcode")
         assert res is None
         mock_equalize.assert_called_once_with("some-passcode")
 
-    # 2. Call with an existing email but wrong passcode -> must NOT equalize timing because we already paid scrypt cost in loop
+    # 2. Call with an existing email but wrong passcode -> must NOT equalize timing because we already paid
+    # verify cost in loop
     share_db.create_remote_invite(
         name="Drew",
         email="existing_timing_test@example.com",
@@ -589,7 +760,7 @@ def test_get_remote_invite_timing_equalization():
         ip_whitelist=None,
         service_ids=[],
     )
-    with patch("backend.core.share_db._equalize_passcode_timing") as mock_equalize:
+    with patch("backend.core.share_db.invites._equalize_passcode_timing") as mock_equalize:
         res = share_db.get_remote_invite_by_email_passcode("existing_timing_test@example.com", "wrong-passcode")
         assert res is None
         mock_equalize.assert_not_called()

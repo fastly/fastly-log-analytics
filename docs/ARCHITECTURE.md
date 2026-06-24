@@ -3,6 +3,10 @@
 
 This document provides a detailed technical overview of how the dashboard and ingest system are architected, how data flows through the application, and the internal design patterns used to maintain high performance, atomic crash safety, and strong security.
 
+Two acronyms recur throughout: **FOS** = Fastly Object Storage (the S3-compatible bucket where raw logs and the Iceberg table live), and **NGWAF** = Fastly's Next-Gen WAF.
+
+Architectural decisions are recorded under [`docs/adr/`](adr/) — see the [ADR index](adr/README.md) for the full list.
+
 ---
 
 ## 1. Directory & Storage Layout
@@ -20,6 +24,15 @@ The system uses a layered storage architecture to optimize for real-time query s
 | **NGWAF Bot Cache** | `data/ngwaf/ngwaf_bot_cache.db` | Shared SQLite database caching known verified bots from Fastly's NGWAF API. |
 | **Live Share State** | `data/system/remote_share.db` | Central SQLite database managing invitations, active shared sessions, and audit records. |
 
+### Module layout
+
+Storage subsystems live as cohesive packages rather than monoliths:
+
+- **Iceberg engine** — [`backend/core/iceberg/`](../backend/core/iceberg/): `_core.py` holds the read/write/commit/optimize/expire paths; `fs.py` holds the `FosS3FileSystem` / `CachedS3FileSystem` filesystem subclasses.
+- **Per-service metadata** — [`backend/core/metadata/`](../backend/core/metadata/): one SQLite submodule per concern (`base`, `alerts`, `views`, `ingest_log`, `cron_log`, `asn_cache`, `usage_log`, `slow_queries`, `reconciliation`, `state`).
+
+Each package's `__init__.py` re-exports the full public surface for backward compatibility; the import-shim mechanics are documented in [AGENTS.md](../AGENTS.md) and [MONKEYPATCHES.md](../MONKEYPATCHES.md).
+
 ### The Unified Logs View
 To provide real-time query speed without waiting for Iceberg table commits, the DuckDB `logs` view dynamically stitches the committed Iceberg table and the local transient Parquet buffers together. Callers run analytical queries against the `logs` view without needing to worry about the underlying storage state.
 
@@ -27,7 +40,7 @@ To provide real-time query speed without waiting for Iceberg table commits, the 
 
 ## 2. Ingest Pipeline & Atomic Guarantees
 
-In-gestion is scheduled using APScheduler. It performs active sync, commit, optimization, and expiration cycles on a per-service level:
+Ingestion is scheduled using APScheduler. It performs active sync, commit, optimization, and expiration cycles on a per-service level:
 
 ```mermaid
 graph TD
@@ -36,6 +49,10 @@ graph TD
     C -->|Commit Interval| D[Iceberg Hour-Partitioned Table]
     C & D -->|Stitched Logs View| E[DuckDB Analytical Engine]
 ```
+
+### Scheduler module layout
+
+The APScheduler lifecycle, watchdog wrapper, and per-job bodies live as cohesive submodules under [`backend/cron/`](../backend/cron/): `scheduler.py` owns the `BackgroundScheduler` lifecycle and `_sync_jobs()` reload, `decorators.py` owns the `@cron_task` decorator (telemetry context + usage-log flush + watchdog hard-cap), and `jobs/` holds one file per job family (`sync.py`, `commit.py`, `compaction.py`, `optimize.py`, `expire.py`, `metadata.py`).
 
 ### Atomic Manifest & Crash Recovery
 To guarantee exactly-once processing and avoid duplicating data during interrupted log transfers, the system uses a write-ahead registry pattern:
@@ -61,7 +78,7 @@ The log formatting engine generates a highly optimized single-line JSON structur
 *   **Group K:** HTTP/3 QUIC Metrics
 *   **Group L:** Origin Performance Metrics (TTFB, Backend response times)
 
-Admins can also define custom log fields using arbitrary VCL expressions. Each custom expression is validated using the Japanese Fastly linter (`falco`) if installed, fallback-matching regular expressions otherwise.
+Admins can also define custom log fields using arbitrary VCL expressions. Each custom expression is validated using the [`falco`](https://github.com/ysugimoto/falco) VCL linter if installed, fallback-matching regular expressions otherwise.
 
 ---
 
@@ -69,16 +86,24 @@ Admins can also define custom log fields using arbitrary VCL expressions. Each c
 
 The **Share Dashboard** feature allows administrators to invite read-only analysts to collaborate on log views. Rather than copying log files, the system exposes a secure, read-only session that feeds from the administrator's running analytical engine.
 
-Three connectivity topologies are supported:
+Two direct-mode connectivity topologies are supported (the SSH-reverse-tunnel via localhost.run was removed in v2.0):
 
 ```text
-1) SSH Reverse Tunnel:   [Analyst] -> (localhost.run) -> [SSH Tunnel] -> [Admin Instance]
-2) Direct Hostname:      [Analyst] -> (https://logs.domain.com) --------> [Admin Instance]
-3) Direct IP Address:    [Analyst] -> (https://IP:Port) ----------------> [Admin Instance]
+1) Direct Hostname:      [Analyst] -> (https://logs.domain.com) --------> [Admin Instance]
+2) Direct IP Address:    [Analyst] -> (https://IP:Port) ----------------> [Admin Instance]
 ```
 
+Both modes share a single backend code path — `ShareStartPayload.use_tunnel=False` plus a `public_endpoint=<https URL>` that the admin supplies. The UI mode selector is presentational; the backend only enforces that `public_endpoint` starts with `https://` (the analyst session cookies need `secure=true`).
+
+### Module layout
+
+The tunnel manager and share-DB are split into cohesive packages:
+
+- [`backend/utils/tunnel/`](../backend/utils/tunnel/) — `manager.py` owns the `TunnelManager` singleton (direct-mode lifecycle, sever-all panic), `session.py` holds `AnalystSession`, `rate_limiter.py` is the sliding-window `_LoginRateLimiter`, `state.py` persists `tunnel_state.json`, `fingerprint.py` computes the session fingerprint.
+- [`backend/core/share_db/`](../backend/core/share_db/) — `connection.py` (pool + corruption self-heal with quarantine), `schema.py` (own MIGRATIONS dict + `apply_pending` + `PRAGMA user_version`), `invites.py`, `sessions.py`, `audit.py`, `passcode.py` (argon2id hashing with a back-compat scrypt verify branch and rehash-on-login upgrade), `tos.py`, `settings.py`, `validation.py`.
+
 ### Security Isolation Layers
-*   **Middleware Enforcement:** The `RemoteAccessMiddleware` intercepts any request coming from shared endpoints or tunnels, strictly blocking administrative endpoints (such as configurations, deletion paths, and credentials) while rate-limiting asset scraping.
-*   **Encrypted Passcodes:** Analyst invites are protected by cryptographically secure, random passcodes scrypt-hashed at rest.
+*   **Middleware Enforcement:** The `RemoteAccessMiddleware` intercepts any request coming from shared endpoints, strictly blocking administrative endpoints (such as configurations, deletion paths, and credentials) while rate-limiting asset scraping. The Caddyfile + compose + middleware trust topology is asserted in pytest so a regression that re-opens the bypass class trips CI.
+*   **Argon2id Passcodes:** Analyst invites are protected by cryptographically secure, random passcodes hashed at rest with argon2id (the 2026 OWASP recommendation). Hashes minted before the cutover still verify via scrypt and are transparently upgraded on the analyst's next login.
 *   **Brute-Force Prevention:** Failed access attempts are tracked. 5 failures within 60 seconds triggers a temporary IP-level lockout.
-*   **Immediate Severance:** Admins can instantly revoke specific invites or execute a **Sever All Access** panic, instantly tearing down SSH processes and evicting active sessions.
+*   **Immediate Severance:** Admins can instantly revoke specific invites or execute a **Sever All Access** panic, instantly evicting active sessions.

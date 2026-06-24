@@ -7,7 +7,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import * as apiLib from '@/lib/api'
 import React from 'react'
 
-// Mock matchMedia
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
   value: vi.fn().mockImplementation(query => ({
@@ -22,10 +21,8 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 })
 
-// Mock scrollIntoView
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
 
-// Mock useSSE
 vi.mock('@/hooks/useSSE', () => ({
   useSSE: () => ({
     lines: [],
@@ -42,8 +39,7 @@ test('LogSettingsModal navigates through wizard steps', async () => {
   const user = userEvent.setup()
   const queryClient = new QueryClient()
   const onOpenChange = vi.fn()
-  
-  // Mock API requests
+
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: any) => {
     if (url.includes('/api/log-fields/catalog')) {
       return { data: { groups: [{ id: 'core', label: 'Core', fields: [] }], fields: [], presets: {} } } as any
@@ -70,9 +66,12 @@ test('LogSettingsModal navigates through wizard steps', async () => {
   // Step 1: Wait for it to load and render "General Settings"
   await waitFor(() => expect(screen.getByText('Log Period')).toBeDefined())
   expect(screen.getByText('1. Standard Fields')).toBeDefined()
-  
-  // Verify custom condition is loaded
-  const customConditionInput = screen.getByLabelText(/Optional Log Condition/i) as HTMLInputElement
+
+  // Verify custom condition is loaded.
+  // LabelWithInfo renders both a <Label> AND an info Button with
+  // aria-label="More info: Optional Log Condition", so a loose regex
+  // matches both. Anchor with ^...$ to scope to the input's label only.
+  const customConditionInput = screen.getByLabelText(/^Optional Log Condition$/i) as HTMLInputElement
   expect(customConditionInput.value).toBe('req.url ~ "test"')
 
   // Modify custom condition. clear()+type() simulates select-all+overtype
@@ -104,7 +103,7 @@ test('LogSettingsModal navigates through wizard steps', async () => {
 
   // Click Back
   await user.click(screen.getByRole('button', { name: /^Back$/i }))
-  
+
   // Back to Step 2
   await waitFor(() => expect(screen.getByText('Define Custom Log Fields')).toBeDefined())
 })
@@ -113,19 +112,18 @@ test('LogSettingsModal shows custom fields in review step', async () => {
   const user = userEvent.setup()
   const queryClient = new QueryClient()
   const onOpenChange = vi.fn()
-  
-  // Mock API requests with a custom field
+
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: any) => {
     if (url.includes('/api/log-fields/catalog')) {
-      return { 
-        data: { 
-          groups: [{ id: 'core', label: 'Core', fields: ['ip'] }], 
+      return {
+        data: {
+          groups: [{ id: 'core', label: 'Core', fields: ['ip'] }],
           fields: [
             { id: 'ip', label: 'IP Address', group: 'core', is_custom: false },
             { id: 'x_custom', label: 'My Custom Field', group: 'custom', is_custom: true }
-          ], 
-          presets: {} 
-        } 
+          ],
+          presets: {}
+        }
       } as any
     }
     return { data: { log_fields: { groups: ['core'] } } } as any
@@ -150,7 +148,7 @@ test('LogSettingsModal shows custom fields in review step', async () => {
 
   // Click Next Step to go to Step 3
   await user.click(screen.getAllByRole('button', { name: /Next Step/i })[0])
-  
+
   // Wait for Review Step header
   await waitFor(() => expect(screen.getByText('Review Log Configuration Changes')).toBeDefined())
 
@@ -229,6 +227,18 @@ test('LogSettingsModal Deploy POSTs body wrapped in { log_fields }', async () =>
 // role, focus management. Disable color-contrast (jsdom can't compute it)
 // and region (Dialog renders into a portal, not into <main>).
 test('LogSettingsModal has no axe-detectable a11y violations', async () => {
+  // Radix Checkbox settles its indicator state on an effect that fires during
+  // axe's async DOM traversal, after the test's awaited renders — producing a
+  // benign, intermittent "not wrapped in act(...)" warning for
+  // CheckboxIndicator. The modal is correct (axe + the wizard-walk tests pass);
+  // filter ONLY that specific React message so this test stays quiet while any
+  // genuine console.error still surfaces.
+  const realError = console.error
+  const actFilter = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    if (typeof args[0] === 'string' && args[0].includes('not wrapped in act')) return
+    realError(...args)
+  })
+
   const queryClient = new QueryClient()
 
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: any) => {
@@ -263,4 +273,5 @@ test('LogSettingsModal has no axe-detectable a11y violations', async () => {
     },
   })
   expect(results).toHaveNoViolations()
+  actFilter.mockRestore()
 })

@@ -129,6 +129,55 @@ describe('useSSE', () => {
     expect(result.current.status).toBe('done')
   })
 
+  it('parses CRLF event boundaries (sse-starlette wire format)', async () => {
+    // sse-starlette flushes events as `data: ...\r\n\r\n` (RFC-spec
+    // CRLF), not `\n\n`. Pre-fix, useSSE split on `\n\n` only — every
+    // chunk arrived fine, but the buffer accumulated forever and no
+    // `data:` line was ever extracted. Symptom: every consumer stuck
+    // on "Waiting for stream..." despite a healthy 200 response.
+    // Pinning the CRLF format here means a regression to LF-only
+    // splitting fails this test even before anyone touches the
+    // backend.
+    const messages = [
+      'data: {"type":"status","message":"starting"}\r\n\r\n',
+      'data: {"type":"file_done","file_name":"a.gz"}\r\n\r\n',
+      'data: {"type":"done","message":"ok"}\r\n\r\n',
+    ]
+    vi.mocked(fetch).mockResolvedValue(makeStreamResponse(messages))
+
+    const { useSSE } = await import('@/hooks/useSSE')
+    const { result } = renderHook(() => useSSE())
+
+    await act(async () => {
+      await result.current.start('/api/some-stream')
+    })
+
+    expect(result.current.status).toBe('done')
+    expect(result.current.lines).toHaveLength(3)
+    expect(result.current.lines[0]).toMatchObject({ type: 'status', message: 'starting' })
+    expect(result.current.lines[1]).toMatchObject({ type: 'file_done', file_name: 'a.gz' })
+    expect(result.current.lines[2]).toMatchObject({ type: 'done', message: 'ok' })
+  })
+
+  it('parses a buffer that mixes CRLF and LF event boundaries', async () => {
+    // Defensive: if a proxy or intermediary normalises CRLF to LF
+    // mid-stream, the parser should still cleanly split both halves.
+    const messages = [
+      'data: {"type":"status","message":"crlf"}\r\n\r\ndata: {"type":"done"}\n\n',
+    ]
+    vi.mocked(fetch).mockResolvedValue(makeStreamResponse(messages))
+
+    const { useSSE } = await import('@/hooks/useSSE')
+    const { result } = renderHook(() => useSSE())
+
+    await act(async () => {
+      await result.current.start('/api/x')
+    })
+
+    expect(result.current.lines.map(l => l.message)).toEqual(['crlf', undefined])
+    expect(result.current.status).toBe('done')
+  })
+
   it('reset() clears state back to idle', async () => {
     vi.mocked(fetch).mockResolvedValue(makeStreamResponse(['data: {"type":"done"}\n\n']))
     const { useSSE } = await import('@/hooks/useSSE')

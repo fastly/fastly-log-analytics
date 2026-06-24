@@ -52,7 +52,7 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
   const [lintResult, setLintResult] = React.useState<LintResult | null>(null)
   const [lintPending, setLintPending] = React.useState(false)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ['scoring-exclude-regex', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
@@ -217,6 +217,7 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
       title="URL exclusion regex"
       icon={<Filter className="h-4 w-4" />}
       description="Requests whose URL matches this regex are NOT sent to the scoring Compute service. The default skips common static-asset extensions; override to scope scoring to specific traffic patterns."
+      error={error as (Error & { status?: number }) | null}
     >
       <div className="space-y-4">
         <div className="space-y-1.5">

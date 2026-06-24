@@ -19,7 +19,7 @@ import sqlite3
 
 import pytest
 
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
 
 _EXPECTED_TABLES = {
     "sources",
@@ -32,8 +32,6 @@ _EXPECTED_TABLES = {
     "views",
     "alerts",
     "scoring_labels",
-    "usage_log",
-    "usage_log_hourly_summary",
     "local_compacted_files",
 }
 
@@ -45,12 +43,6 @@ _EXPECTED_INDEXES = {
     "idx_audit_source",
     "idx_scoring_labels_svc_sid",
     "idx_scoring_labels_svc_label",
-    "idx_usage_timestamp",
-    "idx_usage_dedup",
-    "idx_usage_reconcile",
-    "idx_usage_process_context_ts",
-    "idx_usage_service_ts",
-    "idx_usage_hourly_svc_hour",
 }
 
 
@@ -100,13 +92,10 @@ def test_alerts_table_has_evaluation_scope_column():
     assert "comparison_period_min" in cols  # also late-added
 
 
-def test_usage_log_has_operation_class_and_bytes():
-    sid = "svc-schema-usage"
-    con = metadata_db.get_con(sid)
-    cols = _columns(con, "usage_log")
-    assert "operation_class" in cols
-    assert "bytes" in cols
-    assert "service_id" in cols
+# The legacy usage_log table in metadata.db was deleted alongside its
+# DDL + triggers. Per-service usage rows live in the dedicated
+# usage_log SQLite (backend.core.metadata.usage_log_db); its shape is
+# pinned by tests/routers/test_usage_log.py.
 
 
 # ── Idempotency: re-running init must not lose data ──────────────────────────
@@ -199,3 +188,50 @@ def test_get_con_rejects_non_string_service_id():
     """
     with pytest.raises(TypeError):
         metadata_db.get_con(object())
+
+
+@pytest.mark.parametrize(
+    "bad_sid",
+    [
+        "../etc/passwd",  # path traversal via segment
+        "foo/bar",  # embedded separator
+        "foo\x00bar",  # null byte (truncates fopen on POSIX)
+        "",  # empty produces ".metadata.db" (hidden junk file)
+        "x" * 65,  # over 64-char cap
+        "with space",  # whitespace
+        "foo.bar",  # periods (not in Fastly's documented format)
+        "\U00018d1f",  # plane-1 codepoint APFS rejects with Errno 92
+        "café",  # any non-ASCII Unicode
+    ],
+    ids=["traversal", "slash", "null_byte", "empty", "too_long", "space", "period", "apfs_illegal", "non_ascii"],
+)
+def test_db_path_rejects_malformed_service_id(bad_sid):
+    """The pattern guard rejects any string that could traverse the data
+    directory or hit ``OSError(Errno 92): Illegal byte sequence`` on APFS /
+    strict Linux. Pinned because losing this regresses the FastAPI 422
+    contract — schemathesis fuzzing surfaced the path with %F0%98%B4%9F
+    producing an opaque sqlite3.OperationalError 500.
+    """
+    from backend.core.metadata.base import InvalidServiceIdError
+
+    with pytest.raises(InvalidServiceIdError):
+        metadata_db.db_path(bad_sid)
+
+
+def test_invalid_service_id_in_path_returns_422(client):
+    """A malformed ``service_id`` in a path parameter must surface as 422
+    (validation error) rather than 500 (sqlite OperationalError). The
+    backend exception handler in main.py converts InvalidServiceIdError
+    to a body matching FastAPI's ``HTTPValidationError`` schema so the
+    response stays OpenAPI-conformant (schemathesis verified).
+    """
+    # Use a route that takes service_id as a Path parameter and reaches
+    # the metadata_db layer. /scoring/labels exercises this surface.
+    resp = client.get("/api/services/foo.bar/scoring/labels")
+    assert resp.status_code == 422, f"expected 422, got {resp.status_code}: {resp.text[:200]}"
+    body = resp.json()
+    assert isinstance(body.get("detail"), list), "detail must be a list per HTTPValidationError"
+    err = body["detail"][0]
+    assert err["loc"] == ["path", "service_id"]
+    assert "service_id must match" in err["msg"]
+    assert err["type"] == "value_error.invalid_service_id"

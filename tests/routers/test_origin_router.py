@@ -239,3 +239,62 @@ def test_origin_summary_lookup_error_maps_to_404(client):
             json={"filters": {}},
         )
     assert resp.status_code == 404
+
+
+# ── /api/origin/aggregates: selector contract (P-4 slice 4) ────────────────
+
+
+def test_origin_aggregates_rejects_unknown_section(client, in_memory_duckdb, test_service_source):
+    """sections=['not_a_section'] returns 400 (router) or 422 (Pydantic
+    Literal). Either is an explicit reject so the FE never gets a
+    silently-degraded 200 — pins the standardized selector contract
+    across the 5 P-4 pages."""
+    _seed_origin_table(in_memory_duckdb, test_service_source)
+    resp = client.post(
+        "/api/origin/aggregates",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"filters": {}, "sections": ["not_a_section"]},
+    )
+    assert resp.status_code in (400, 422)
+
+
+def test_origin_aggregates_summary_only_suppresses_other_timings(client, in_memory_duckdb, test_service_source):
+    """sections=['summary'] must skip the other six section reads — the
+    section_timings entries are the load-bearing signal the perf
+    harness reads to attribute time. A phantom mark on a section that
+    didn't actually run would corrupt that attribution."""
+    _seed_origin_table(in_memory_duckdb, test_service_source)
+    resp = client.post(
+        "/api/origin/aggregates",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"filters": {}, "sections": ["summary"]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    timings = {t["section"] for t in data.get("_section_timings", [])}
+    assert "summary" in timings
+    for blocked in ("slow_urls", "timeseries", "status_codes", "path_breakdown", "pop_latency", "ip_health"):
+        assert blocked not in timings, f"summary-only selector leaked {blocked} timing; got {timings}"
+
+
+def test_origin_aggregates_coupling_expands_ts_status_path(client, in_memory_duckdb, test_service_source):
+    """sections=['timeseries'] alone must auto-expand to the
+    {timeseries, status_codes, path_breakdown} triple (they share
+    branch 3's pool conn — splitting them across requests would either
+    add another checkout or serialize work that already shares one)."""
+    _seed_origin_table(in_memory_duckdb, test_service_source)
+    resp = client.post(
+        "/api/origin/aggregates",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"filters": {}, "sections": ["timeseries"]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    timings = {t["section"] for t in data.get("_section_timings", [])}
+    # Coupling rule expanded the request to include the other two on the
+    # same branch — all three must fire.
+    for need in ("timeseries", "status_codes", "path_breakdown"):
+        assert need in timings, f"coupling did not include {need}; got {timings}"
+    # Other branches must NOT fire.
+    for blocked in ("summary", "slow_urls", "pop_latency", "ip_health"):
+        assert blocked not in timings, f"selector did not suppress {blocked}; got {timings}"

@@ -8,14 +8,16 @@ the Fastly API + returned dict.
 Naming convention (from the research doc):
   - service name:   ``Session Scoring Service for {logging_service_id}``
   - domain:         ``fos-{logging_service_id.lower()}-session-scorer.edgecompute.app``
-  - keys store:     ``scoring_keys_{compute_service_id}``
-  - config store:   ``scoring_config_{compute_service_id}``
+  - keys store:     ``scoring_keys_{compute_service_id}``    (ConfigStore)
+  - config store:   ``scoring_config_{compute_service_id}``  (ConfigStore)
+  - matrix store:   ``scoring_matrix_{compute_service_id}``  (KV Store)
 
-The Wasm deploy itself (``fastly compute deploy``) is NOT done here —
-that's the matrix-deploy concern owned by ``scripts/scoring/deploy_wasm.sh``
-and gets invoked separately after a training run produces a matrix. This
-keeps the provisioner small (~5s API calls) and the deploy slow (~30s
-build + upload) as distinct lifecycle stages.
+The Wasm deploy itself is NOT done here. The published Wasm is matrix-less
+and built once (committed ``compute/scorer/pkg/session-scorer.tar.gz``);
+``enable_scoring`` uploads that prebuilt package via the Fastly API and
+writes the trained matrix into the ``scoring_matrix`` KV Store — no Rust
+toolchain on the backend, and retrain becomes a KV write. This provisioner
+just creates + links the stores (~5s of API calls).
 """
 
 from __future__ import annotations
@@ -30,15 +32,40 @@ SCORING_SERVICE_NAME_PREFIX = "Session Scoring Service for "
 SCORING_DOMAIN_TEMPLATE = "fos-{sid_lower}-session-scorer.edgecompute.app"
 KEYS_STORE_NAME_TEMPLATE = "scoring_keys_{sid}"
 CONFIG_STORE_NAME_TEMPLATE = "scoring_config_{sid}"
+MATRIX_STORE_NAME_TEMPLATE = "scoring_matrix_{sid}"
 
-# Resource-link names match the ConfigStore::open() arguments in
-# compute/scorer/src/main.rs. Both must be edited in lockstep.
+# Resource-link names match the store-open() arguments in the Rust scorer:
+# KEYS/CONFIG are ConfigStore::open() in main.rs; MATRIX is
+# KVStore::open(MATRIX_STORE) in matrix.rs. All must be edited in lockstep.
 KEYS_RESOURCE_LINK_NAME = "scoring_keys"
 CONFIG_RESOURCE_LINK_NAME = "scoring_config"
+MATRIX_RESOURCE_LINK_NAME = "scoring_matrix"
+# KV key the matrix is stored under — matches MATRIX_KEY in
+# compute/scorer/src/matrix.rs. Edit in lockstep.
+MATRIX_KEY_NAME = "matrix"
 
 # Initial values for the config stores.
 DEBUG_LOG_KEY = "debug_logging_enabled"
 DEBUG_LOG_DEFAULT = "0"
+# UNIX-epoch (seconds) at which scoring was deployed on this service. Written
+# write-once-if-absent so a re-enable / key rotation / regex change never resets
+# it. NO LONGER an actuator: the Rust scorer does not read this key. It is now
+# purely an advisory *readiness gauge* — the backend surfaces "deployment age ≥ 7
+# days" in the admin UI as a hint that there's enough observed L2 data to opt
+# into enforcement, but it never turns L2 on automatically. The actual L2
+# enforcement gate is the operator's explicit opt-in (see L2_ENFORCE_ENABLED_KEY).
+SCORING_ENABLED_AT_KEY = "scoring_enabled_at"
+# Layer-2 enforcement opt-in (scoring_config). ``l2_enforce_enabled`` is the
+# explicit operator switch the Rust scorer reads to decide whether L2 joins the
+# *enforced* combined score ("1" = on); ``l2_enabled_at`` is the UNIX-epoch
+# anchor the backend stamps on the off→on transition so the scorer can fade L2
+# in over a few days from the moment of consent (NOT from deployment age). Both
+# are written by the ``/scoring/l2-enforce`` admin endpoint, not at provision
+# time — a freshly-provisioned service has neither key, so L2 stays observe-only
+# until an operator explicitly opts in. The 7-day ``scoring_enabled_at`` deploy
+# age above is now only an advisory readiness gauge surfaced in the admin UI.
+L2_ENFORCE_ENABLED_KEY = "l2_enforce_enabled"
+L2_ENABLED_AT_KEY = "l2_enabled_at"
 CURRENT_KEY_HEX = "current_key_hex"
 PREVIOUS_KEY_HEX = "previous_key_hex"  # blank until first rotation
 # Shared secret VCL → Compute. The customer's VCL service embeds this
@@ -47,6 +74,49 @@ PREVIOUS_KEY_HEX = "previous_key_hex"  # blank until first rotation
 # the scorer's edgecompute.app domain from being scored on by anyone
 # who happens to find the hostname.
 REQUEST_SECRET_KEY = "request_secret"
+
+
+def _ensure_scoring_enabled_at(config_store_id: str, token: str) -> None:
+    """Seed the ``scoring_enabled_at`` deployment-age anchor in the scoring_config
+    store IFF absent (write-once). This anchor is now an advisory *readiness gauge*
+    only — the backend reads it to surface "deployment age ≥ 7 days" in the admin
+    UI as a hint that enough L2 data has been observed to opt into enforcement. It
+    does NOT actuate anything (the Rust scorer no longer reads it; L2 enforcement
+    is gated solely by the operator's explicit opt-in). Write-once semantics:
+
+      * a brand-new / freshly-recreated store gets ``now`` → its readiness clock
+        starts now;
+      * an existing anchor is preserved, so a later re-enable / key rotation /
+        exclude-regex change does NOT reset the readiness clock.
+
+    Fail-soft: a missing item GETs as a RuntimeError (404) → fall through and
+    seed; any write failure is warned, never fatal (the readiness gauge simply
+    shows "unknown" when the anchor is absent)."""
+    if not config_store_id:
+        return
+    try:
+        existing = fastly(
+            "GET",
+            f"/resources/stores/config/{config_store_id}/item/{SCORING_ENABLED_AT_KEY}",
+            token=token,
+        )
+        if (existing or {}).get("item_value"):
+            return  # already anchored — preserve the original warm-up start
+    except RuntimeError:
+        pass  # item absent (404) → seed it below
+    import datetime as _dt
+
+    now_epoch = str(int(_dt.datetime.now(_dt.UTC).timestamp()))
+    try:
+        fastly(
+            "POST",
+            f"/resources/stores/config/{config_store_id}/item",
+            {"item_key": SCORING_ENABLED_AT_KEY, "item_value": now_epoch},
+            token=token,
+        )
+        ok(f"Seeded {SCORING_ENABLED_AT_KEY} warm-up anchor ({now_epoch})")
+    except RuntimeError as exc:
+        warn(f"Could not seed {SCORING_ENABLED_AT_KEY} anchor: {exc}")
 
 
 def _scoring_service_name(logging_service_id: str) -> str:
@@ -72,18 +142,60 @@ def _find_scoring_service(logging_service_id: str, token: str) -> dict | None:
     return None
 
 
-def _find_config_store(store_name: str, token: str) -> dict | None:
+def _find_store_by_name(endpoint: str, store_name: str, token: str) -> dict | None:
+    """Find a store named ``store_name`` under ``endpoint`` (idempotency lever).
+
+    Shared body for ``_find_config_store`` / ``_find_kv_store`` — the only
+    difference between the two was the resource path. Fastly's list endpoint
+    returns either a bare list or a ``{"data": [...]}`` envelope depending on
+    the version; tolerate both. Returns the store object ({"id", "name", ...})
+    or None (also None when the list call RuntimeErrors)."""
     try:
-        resp = fastly("GET", "/resources/stores/config", token=token)
+        resp = fastly("GET", endpoint, token=token)
     except RuntimeError:
         return None
-    # Fastly's list endpoint returns either a list or {"data": [...]} depending
-    # on the version; tolerate both.
     items = resp if isinstance(resp, list) else resp.get("data", [])
-    for item in items:
-        if item.get("name") == store_name:
-            return item
-    return None
+    return next((i for i in items if i.get("name") == store_name), None)
+
+
+def _find_config_store(store_name: str, token: str) -> dict | None:
+    return _find_store_by_name("/resources/stores/config", store_name, token)
+
+
+def _find_kv_store(store_name: str, token: str) -> dict | None:
+    """KV-Store analogue of ``_find_config_store`` (idempotency lever)."""
+    return _find_store_by_name("/resources/stores/kv", store_name, token)
+
+
+def _store_id(resp: dict) -> str:
+    """Extract a store id from a create/get response, tolerating both the
+    bare ``{"id": ...}`` shape (ConfigStore) and the ``{"data": {"id": ...}}``
+    envelope the KV API sometimes returns."""
+    if not isinstance(resp, dict):
+        return ""
+    return resp.get("id") or (resp.get("data") or {}).get("id") or ""
+
+
+def _ensure_matrix_kv_store(scoring_service_id: str, token: str, *, status_cb=None) -> dict:
+    """Find-or-create the per-service matrix KV Store. Idempotent.
+
+    Does NOT link the store to a service version — resource links are
+    versioned config, so linking happens where the scoring service version is
+    cloned + activated (``_deploy_wasm_package`` in the orchestrator), which
+    keeps the link on the version that actually ships the package. Returns the
+    store object (normalized to carry ``id``)."""
+    name = MATRIX_STORE_NAME_TEMPLATE.format(sid=scoring_service_id)
+    existing = _find_kv_store(name, token)
+    if existing:
+        return existing
+    created = fastly("POST", "/resources/stores/kv", {"name": name}, token=token)
+    ok(f"Created KV store {name}")
+    if status_cb:
+        status_cb("✅ Created matrix KV store.")
+    # Normalize the {"data": {...}} envelope to a bare store dict.
+    if isinstance(created, dict) and "id" not in created and isinstance(created.get("data"), dict):
+        return created["data"]
+    return created
 
 
 def ensure_scoring_service(
@@ -126,17 +238,45 @@ def ensure_scoring_service(
         scoring_service_id = existing["id"]
         keys_store = _find_config_store(KEYS_STORE_NAME_TEMPLATE.format(sid=scoring_service_id), token)
         cfg_store = _find_config_store(CONFIG_STORE_NAME_TEMPLATE.format(sid=scoring_service_id), token)
+        matrix_store = _find_kv_store(MATRIX_STORE_NAME_TEMPLATE.format(sid=scoring_service_id), token)
+        # Self-heal: a service provisioned before the KV-matrix change won't
+        # have a matrix store yet. Create + link it on reuse so re-enabling
+        # an old service backfills the store rather than failing the KV write.
+        if not matrix_store:
+            matrix_store = _ensure_matrix_kv_store(scoring_service_id, token, status_cb=status_cb)
+        # Self-heal the deployment-age readiness anchor. A service provisioned
+        # before this anchor existed won't have scoring_enabled_at yet; seed it
+        # now (write-once) so the admin readiness gauge has a clock to count
+        # from. It does NOT turn L2 on — enforcement is opt-in only.
+        _ensure_scoring_enabled_at((cfg_store or {}).get("id", ""), token)
+        # The request_secret IS a readable ConfigStore item (unlike the AES
+        # cookie key, which we deliberately never read back). Read it so the
+        # caller embeds the STORE's actual secret into the VCL — the store is
+        # the source of truth. Without this, the orchestrator fell back to
+        # cfg["scoring"]["request_secret"], and a cfg-vs-store drift (e.g.
+        # running enable from a different host) desynced the VCL's
+        # X-Edge-Scorer-Auth from the store, making the scorer 401 every
+        # request → 100% fail-open.
+        store_request_secret = ""
+        if keys_store:
+            try:
+                item = fastly(
+                    "GET",
+                    f"/resources/stores/config/{keys_store['id']}/item/{REQUEST_SECRET_KEY}",
+                    token=token,
+                )
+                store_request_secret = (item or {}).get("item_value", "") or ""
+            except RuntimeError:
+                store_request_secret = ""  # missing → caller heals
         return {
             "scoring_service_id": scoring_service_id,
             "scoring_service_name": name,
             "scoring_domain": domain,
             "scoring_keys_store_id": (keys_store or {}).get("id", ""),
             "scoring_config_store_id": (cfg_store or {}).get("id", ""),
-            "aes_key_hex": "",
-            # On reuse, neither secret is readable back from the store.
-            # The orchestrator falls back to whatever it stashed in
-            # cfg["scoring"]["request_secret"] on a prior provision.
-            "request_secret": "",
+            "scoring_matrix_store_id": _store_id(matrix_store or {}),
+            "aes_key_hex": "",  # AES key stays write-only by policy.
+            "request_secret": store_request_secret,
         }
 
     # 1. Create the wasm Compute service.
@@ -183,6 +323,11 @@ def ensure_scoring_service(
     if status_cb:
         status_cb("✅ Created config stores.")
 
+    # 4b. Create the matrix KV Store (1.8MB trained matrix won't fit a
+    #     ConfigStore's ~8KB item limit). Seeded with the trained matrix by
+    #     enable_scoring via the Fastly API; read at runtime by the scorer.
+    matrix_store = _ensure_matrix_kv_store(scoring_service_id, token, status_cb=status_cb)
+
     # 5. Generate the AES-256 key + request secret and write both to
     #    scoring_keys. The request secret is the shared-secret header
     #    value that VCL embeds in X-Edge-Scorer-Auth so the Compute
@@ -207,6 +352,11 @@ def ensure_scoring_service(
         {"item_key": DEBUG_LOG_KEY, "item_value": DEBUG_LOG_DEFAULT},
         token=token,
     )
+    # Stamp the deployment-age readiness anchor (now) for the admin readiness
+    # gauge. L2 stays observe-only until an operator explicitly opts into
+    # enforcement (the /scoring/l2-enforce endpoint writes the opt-in keys) —
+    # the deploy age never turns L2 on by itself. See _ensure_scoring_enabled_at.
+    _ensure_scoring_enabled_at(cfg_store["id"], token)
     ok("Populated config stores")
 
     # 6. Link both stores to the service version so the Wasm can open them
@@ -223,9 +373,15 @@ def ensure_scoring_service(
         {"name": CONFIG_RESOURCE_LINK_NAME, "resource_id": cfg_store["id"]},
         token=token,
     )
+    fastly(
+        "POST",
+        f"/service/{scoring_service_id}/version/1/resource",
+        {"name": MATRIX_RESOURCE_LINK_NAME, "resource_id": _store_id(matrix_store)},
+        token=token,
+    )
     ok("Linked stores to service v1")
     if status_cb:
-        status_cb("✅ Linked config stores to service v1.")
+        status_cb("✅ Linked config + matrix stores to service v1.")
 
     return {
         "scoring_service_id": scoring_service_id,
@@ -233,6 +389,7 @@ def ensure_scoring_service(
         "scoring_domain": domain,
         "scoring_keys_store_id": keys_store["id"],
         "scoring_config_store_id": cfg_store["id"],
+        "scoring_matrix_store_id": _store_id(matrix_store),
         "aes_key_hex": aes_key_hex,
         "request_secret": request_secret,
     }
@@ -315,11 +472,13 @@ def delete_scoring_service(
     *,
     scoring_keys_store_id: str = "",
     scoring_config_store_id: str = "",
+    scoring_matrix_store_id: str = "",
     token: str,
     status_cb=None,
 ) -> None:
-    """Tear down the Compute service AND both ConfigStores. Idempotent —
-    deleting an already-deleted resource is a no-op.
+    """Tear down the Compute service AND its stores (2 ConfigStores + the
+    matrix KV Store). Idempotent — deleting an already-deleted resource is a
+    no-op.
 
     Order: service first (deactivate → delete), then stores. Service must
     go first because the resource-link tying the stores to the service
@@ -382,6 +541,22 @@ def delete_scoring_service(
                 ok(f"{label} store already deleted")
             else:
                 warn(f"Could not delete {label} store {store_id}: {exc}")
+
+    # 4. Delete the matrix KV Store. KV stores must be empty before deletion,
+    #    so drop the matrix key first, then the store. Both tolerant of 404.
+    if scoring_matrix_store_id:
+        for sub in (f"/keys/{MATRIX_KEY_NAME}", ""):
+            try:
+                fastly(
+                    "DELETE",
+                    f"/resources/stores/kv/{scoring_matrix_store_id}{sub}",
+                    token=token,
+                    expect_empty=True,
+                )
+            except RuntimeError as exc:
+                if "404" not in str(exc):
+                    warn(f"Could not delete matrix KV {sub or 'store'} {scoring_matrix_store_id}: {exc}")
+        ok(f"Deleted matrix KV store ({scoring_matrix_store_id})")
 
     if status_cb:
         status_cb("✅ Scoring service torn down.")

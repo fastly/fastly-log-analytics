@@ -2,9 +2,8 @@
 lifecycle, multi-device boot, validate_session timeouts, persistence
 round-trip via share_db, panic, and start_sharing input validation.
 
-SSH subprocess spawning is NOT exercised — the test asserts the
-``_port_in_use`` pre-flight failure instead, which short-circuits before
-any process is forked.
+The SSH-to-localhost.run code path was removed in v2.0 — only direct-mode
+(HTTPS public_endpoint) is exercised here.
 """
 
 from __future__ import annotations
@@ -207,6 +206,29 @@ def test_touch_session_bumps_last_active_and_ip():
     assert session.last_active_time > original
 
 
+def test_touch_session_ip_roam_does_not_bump_idle_clock():
+    """bump_active=False updates the roamed IP WITHOUT resetting the idle clock.
+
+    The IP-roaming touch fires on every request from a new egress IP — on a
+    rotating-NAT proxy that's nearly every request, so bumping last_active_time
+    there would pin the session alive forever and bypass the X-User-Active idle
+    gate. The IP must still update (whitelist re-validation); the clock must not.
+    """
+    mgr = tunnel.get_tunnel_manager()
+    invite = _seed_invite()
+    session = mgr.create_session(
+        invite=invite,
+        ip_address="1.2.3.4",
+        user_agent="Chrome",
+        headers={"user-agent": "Chrome/126 Mac OS X"},
+    )
+    original = "2026-05-31T20:00:00Z"
+    session.last_active_time = original
+    mgr.touch_session(session.session_id, new_ip="9.9.9.9", bump_active=False)
+    assert session.ip_address == "9.9.9.9", "roamed IP must still update"
+    assert session.last_active_time == original, "IP roam must NOT reset the idle clock"
+
+
 def test_boot_sessions_for_invite_counts_correctly():
     mgr = tunnel.get_tunnel_manager()
     invite = _seed_invite()
@@ -285,27 +307,20 @@ def test_panic_boots_all_and_writes_audit():
 def test_start_sharing_rejects_bare_http():
     mgr = tunnel.get_tunnel_manager()
     with pytest.raises(ValueError, match="HTTPS"):
-        mgr.start_sharing(use_tunnel=False, public_endpoint="http://insecure.example.com")
+        mgr.start_sharing(public_endpoint="http://insecure.example.com")
 
 
-def test_start_sharing_requires_public_endpoint_when_not_tunneling():
+def test_start_sharing_requires_public_endpoint():
     mgr = tunnel.get_tunnel_manager()
     with pytest.raises(ValueError, match="public_endpoint"):
-        mgr.start_sharing(use_tunnel=False, public_endpoint=None)
-
-
-def test_start_sharing_tunnel_requires_port_bound():
-    """When no process is listening on the forward port, refuse to spawn SSH."""
-    mgr = tunnel.get_tunnel_manager()
-    # Port 1 is not bound in any sane environment.
-    with pytest.raises(RuntimeError, match="not bound"):
-        mgr.start_sharing(use_tunnel=True, forward_port=1)
+        mgr.start_sharing(public_endpoint=None)
 
 
 def test_direct_expose_https_records_audit_and_returns_url():
     mgr = tunnel.get_tunnel_manager()
-    out = mgr.start_sharing(use_tunnel=False, public_endpoint="https://demo.example.com")
+    out = mgr.start_sharing(public_endpoint="https://demo.example.com")
     assert out["public_url"] == "https://demo.example.com"
+    assert "tunnel_url" not in out
     audits = share_db.get_share_audit_logs()
     assert any(a["event_type"] == "SHARE_START" for a in audits)
     mgr.stop_sharing()
@@ -380,7 +395,7 @@ def test_rate_limit_snapshot_prunes_expired_lockouts(monkeypatch):
 
 def test_telemetry_records_uptime_history_on_stop():
     mgr = tunnel.get_tunnel_manager()
-    mgr.start_sharing(use_tunnel=False, public_endpoint="https://demo.example.com")
+    mgr.start_sharing(public_endpoint="https://demo.example.com")
     mgr.stop_sharing()
     history = mgr.get_telemetry()["tunnel_uptime_history"]
     assert len(history) == 1
@@ -392,7 +407,7 @@ def test_telemetry_records_uptime_history_on_stop():
 
 def test_telemetry_records_uptime_history_on_panic():
     mgr = tunnel.get_tunnel_manager()
-    mgr.start_sharing(use_tunnel=False, public_endpoint="https://demo.example.com")
+    mgr.start_sharing(public_endpoint="https://demo.example.com")
     mgr.panic()
     history = mgr.get_telemetry()["tunnel_uptime_history"]
     assert any(entry["reason"] == "panic" for entry in history)
@@ -402,7 +417,7 @@ def test_telemetry_history_is_bounded():
     mgr = tunnel.get_tunnel_manager()
     # Cycle the tunnel 55 times; ring should retain only the last 50.
     for _ in range(55):
-        mgr.start_sharing(use_tunnel=False, public_endpoint="https://demo.example.com")
+        mgr.start_sharing(public_endpoint="https://demo.example.com")
         mgr.stop_sharing()
     # Internal buffer is bounded; the exposed slice is the last 20.
     assert len(mgr._tunnel_uptime_history) == 50
@@ -412,7 +427,7 @@ def test_telemetry_history_is_bounded():
 def test_telemetry_current_uptime_reflects_running_tunnel():
     mgr = tunnel.get_tunnel_manager()
     assert mgr.get_telemetry()["current_uptime_s"] is None
-    mgr.start_sharing(use_tunnel=False, public_endpoint="https://demo.example.com")
+    mgr.start_sharing(public_endpoint="https://demo.example.com")
     uptime = mgr.get_telemetry()["current_uptime_s"]
     assert uptime is not None and uptime >= 0
     mgr.stop_sharing()
@@ -451,3 +466,120 @@ def test_get_share_audit_logs_filters_by_time_window():
     # `until` before window excludes everything.
     rows = share_db.get_share_audit_logs(until=before, email_substr="t@example.com")
     assert not rows
+
+
+# ── LRU Eviction Under Capacity ────────────────────────────────────────────
+
+
+def test_rate_limiter_lru_eviction(monkeypatch):
+    from backend.utils.tunnel import rate_limiter
+
+    # Set MAX_TRACKED_IPS to 3 for testing.
+    monkeypatch.setattr(rate_limiter, "MAX_TRACKED_IPS", 3)
+
+    rl = rate_limiter._LoginRateLimiter()
+
+    # Record 1 failure for 3 different IPs.
+    rl.record_failure("1.1.1.1")
+    rl.record_failure("2.2.2.2")
+    rl.record_failure("3.3.3.3")
+
+    # Order of self._failures should be: "1.1.1.1", "2.2.2.2", "3.3.3.3"
+    assert list(rl._failures.keys()) == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+
+    # Touch "1.1.1.1" again (moves it to the end/MRU).
+    rl.record_failure("1.1.1.1")
+    assert list(rl._failures.keys()) == ["2.2.2.2", "3.3.3.3", "1.1.1.1"]
+
+    # Record failure for a 4th IP. "2.2.2.2" (oldest/LRU) should be evicted.
+    rl.record_failure("4.4.4.4")
+    assert list(rl._failures.keys()) == ["3.3.3.3", "1.1.1.1", "4.4.4.4"]
+    assert "2.2.2.2" not in rl._failures
+
+    # Trigger lockout for 3 different IPs.
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("3.3.3.3")
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("1.1.1.1")
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("4.4.4.4")
+
+    # Order of lockouts should be: "3.3.3.3", "1.1.1.1", "4.4.4.4"
+    assert list(rl._lockouts.keys()) == ["3.3.3.3", "1.1.1.1", "4.4.4.4"]
+
+    # Trigger a lockout for "5.5.5.5". "3.3.3.3" (oldest lockout) should be evicted.
+    for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("5.5.5.5")
+
+    assert list(rl._lockouts.keys()) == ["1.1.1.1", "4.4.4.4", "5.5.5.5"]
+    assert "3.3.3.3" not in rl._lockouts
+
+
+# ── F014: mid-session permission revocation propagation ──────────────────
+
+
+def test_validate_session_propagates_explicit_pii_policy_null_revocation(monkeypatch):
+    """An admin who clears ``pii_policy`` (sets it to None on the invite)
+    must immediately downgrade an active session's pii_policy on the next
+    validate_session() call.
+
+    Regression for F014 (audit run 7ba15352): the prior
+    ``if new_pii_policy is not None: session.pii_policy = ...`` silently
+    dropped the revocation. The session kept its cached permissive
+    pii_policy until the 2h-idle / 24h-absolute timeout, which defeats
+    the entire point of mid-session re-sync.
+    """
+    mgr = tunnel.get_tunnel_manager()
+    invite = _seed_invite()
+    session = mgr.create_session(
+        invite=invite,
+        ip_address="1.2.3.4",
+        user_agent="Chrome/126",
+        headers={"user-agent": "Chrome/126 Mac OS X"},
+    )
+    # Pretend the session started with a permissive policy.
+    session.pii_policy = {"mode": "passthrough"}
+
+    # Admin explicitly clears the policy on the invite (None means
+    # "no policy", not "leave alone").
+    fake_invite = {**invite, "pii_policy": None, "service_ids": ["svcA"]}
+    monkeypatch.setattr(share_db, "get_remote_invite", lambda _: fake_invite)
+
+    out = mgr.validate_session(session.session_id)
+    assert out is not None, "session should still be valid; only permissions downgrade"
+    assert out.pii_policy is None, (
+        f"explicit pii_policy=None on the invite must propagate to the session; "
+        f"got {out.pii_policy!r} (F014 regression)"
+    )
+
+
+def test_validate_session_propagates_explicit_service_ids_null_revocation(monkeypatch):
+    """An admin who clears ``service_ids`` (sets it to None on the invite)
+    must immediately empty the session's service_ids on the next
+    validate_session() call — i.e. no services accessible.
+
+    Regression for F014 (audit run 7ba15352): the prior
+    ``if fresh_service_ids is not None: session.service_ids = ...``
+    silently dropped the revocation, leaving the cached permissive list
+    in place until natural session timeout.
+    """
+    mgr = tunnel.get_tunnel_manager()
+    invite = _seed_invite(service_ids=["svcA", "svcB"])
+    session = mgr.create_session(
+        invite=invite,
+        ip_address="1.2.3.4",
+        user_agent="Chrome/126",
+        headers={"user-agent": "Chrome/126 Mac OS X"},
+    )
+    assert session.service_ids == ["svcA", "svcB"]
+
+    # Admin clears service_ids — should empty the session immediately.
+    fake_invite = {**invite, "service_ids": None}
+    monkeypatch.setattr(share_db, "get_remote_invite", lambda _: fake_invite)
+
+    out = mgr.validate_session(session.session_id)
+    assert out is not None, "session is still valid; only permissions downgrade"
+    assert out.service_ids == [], (
+        f"explicit service_ids=None on the invite must empty the session's list; "
+        f"got {out.service_ids!r} (F014 regression)"
+    )

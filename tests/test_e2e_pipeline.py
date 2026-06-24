@@ -630,6 +630,35 @@ def test_full_pipeline_including_raw_gzip_ingest(s3_mock, fos_source, monkeypatc
     assert cache == "HIT"
     assert isinstance(resp_bytes, int) and resp_bytes >= 1024
 
+    # ── Writer-side metadata invariant ─────────────────────────────────
+    # The pipeline above asserted row counts round-trip through DuckDB,
+    # but a refactor that silently dropped the metadata writes would
+    # still pass those asserts while corrupting dedup, status rollup,
+    # and crash recovery in production. Pin the explicit contract:
+    # every successfully-ingested file MUST land in metadata_db's
+    # ``ingested_files`` table, and there MUST be zero leftover rows in
+    # ``ingest_in_flight`` once commit completes.
+    from backend.core import metadata as metadata_db
+
+    service_name = fos_source["name"]
+    ingested = metadata_db.list_ingested_files(service_name)
+    ingested_names = {row["file_name"] for row in ingested}
+    # ingest stores keys as ``s3://<bucket>/<key>``; pin via suffix match
+    # so this assertion is robust to any future change in the prefix.
+    for key, _ in files:
+        assert any(name.endswith(key) for name in ingested_names), (
+            f"metadata_db.ingested_files missing entry ending in {key!r} after "
+            f"successful ingest. Got {sorted(ingested_names)}. A refactor "
+            "that skips metadata_db.insert_ingested_files would break dedup "
+            "and the admin sync-status page without any other test failing."
+        )
+    in_flight = metadata_db.list_in_flight(service_name)
+    assert in_flight == [], (
+        f"ingest_in_flight non-empty after commit: {in_flight}. "
+        "metadata_db.clear_in_flight must run after insert_ingested_files; "
+        "leftover rows here cause double-ingest on next restart."
+    )
+
 
 def test_e2e_readonly_dashboard_query_path(pipeline_env, monkeypatch):
     """Exercises the production RO query path end-to-end: a writer cron
@@ -712,5 +741,74 @@ def test_e2e_readonly_dashboard_query_path(pipeline_env, monkeypatch):
             chart_metric="requests",
         )
         assert out["total_rows"] == 8, f"get_aggregates via RO returned {out['total_rows']} rows; expected 8"
+    finally:
+        ro.close()
+
+
+def test_e2e_readonly_dashboard_cold_cache_path(pipeline_env, monkeypatch):
+    """R-8: same writer/reader split as the warm-cache test above, but
+    the dashboard's read happens AFTER the per-source caches have been
+    evicted — so update_iceberg_view falls into the slow metadata.json
+    scan path. That path is unreachable from local dev (the
+    ``dev-no-crons`` memory: no cron tick in dev means the cache never
+    gets evicted), so production-only regressions there are likely.
+
+    Pins the contract that a fresh RO connection + cleared caches can
+    still rebuild the view via the metadata.json scan + parquet
+    discovery + CREATE OR REPLACE TEMP VIEW path."""
+    import duckdb
+
+    from backend.core import iceberg as ice
+    from backend.repositories._base import _safe_table
+    from backend.repositories.dashboard import _dashboard_cache, get_aggregates
+
+    src = pipeline_env["src"]
+    monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+
+    db_path = os.path.join(pipeline_env["tmpdir"], "e2e_cold.duckdb")
+
+    ice.init_iceberg_table(src)
+    ice.write_to_buffer(src, _make_log_batch(n=8), "batch_ro_cold.parquet")
+    ice.commit_buffer(src)
+    _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
+
+    # Warm the view first so the persistent view exists in the DuckDB file.
+    rw = duckdb.connect(db_path)
+    ice.update_iceberg_view(rw, src)
+    view_name = _safe_table(src["name"])
+    assert rw.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0] == 8
+    rw.close()
+
+    # Evict the per-source caches that drive the fast path. Without these
+    # in memory, update_iceberg_view has to re-discover the snapshot from
+    # the metadata.json on disk + re-enumerate the parquet files — the
+    # cold path the cron tick keeps warm in production.
+    source_key = src["name"]
+    ice._view_cache.pop(source_key, None)
+    ice._snapshot_files_cache.pop(source_key, None)
+
+    ro = duckdb.connect(db_path, read_only=True)
+    try:
+        ice.update_iceberg_view(ro, src)
+
+        ro_rows = ro.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0]
+        assert ro_rows == 8, (
+            f"RO cold-cache query returned {ro_rows} rows but the writer committed 8 — "
+            "the slow-path metadata.json scan + CREATE OR REPLACE TEMP VIEW probably "
+            "broke. This is the production-only regression the dev environment can't "
+            "catch (no cron tick → caches never evict in dev)."
+        )
+
+        _dashboard_cache.clear()
+        out = get_aggregates(
+            con=ro,
+            src=src,
+            start_time=None,
+            end_time=None,
+            filters={},
+            chart_interval="1 hour",
+            chart_metric="requests",
+        )
+        assert out["total_rows"] == 8, f"get_aggregates via RO cold-cache returned {out['total_rows']}; expected 8"
     finally:
         ro.close()

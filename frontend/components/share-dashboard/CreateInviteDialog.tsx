@@ -162,6 +162,7 @@ function CreateInviteDialogInner({
                   type="button"
                   variant="ghost"
                   size="icon"
+                  aria-label={revealPasscode ? 'Hide passcode' : 'Reveal passcode'}
                   onClick={() => setRevealPasscode((r) => !r)}
                   title={revealPasscode ? 'Hide passcode' : 'Reveal passcode'}
                 >
@@ -180,12 +181,12 @@ function CreateInviteDialogInner({
               </div>
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">Expiration</Label>
+              <Label htmlFor="invite-expiration" className="text-xs">Expiration</Label>
               <Select
                 value={String(duration)}
                 onValueChange={(v) => setDuration(Number(v))}
               >
-                <SelectTrigger>
+                <SelectTrigger id="invite-expiration">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -198,12 +199,12 @@ function CreateInviteDialogInner({
               </Select>
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">Query window</Label>
+              <Label htmlFor="invite-query-window" className="text-xs">Query window</Label>
               <Select
                 value={String(queryWindow)}
                 onValueChange={(v) => setQueryWindow(Number(v))}
               >
-                <SelectTrigger>
+                <SelectTrigger id="invite-query-window">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

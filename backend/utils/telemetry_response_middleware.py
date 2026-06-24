@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os as _os
 from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -118,12 +119,37 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             # the request.
             return response
 
+        # 2026-06-10 audit (N-1): never attach telemetry to analyst
+        # responses, regardless of DEBUG_RESPONSES. The envelope leaks the
+        # Fastly KV store ID via _debug_calls and raw SQL via
+        # _debug_queries. Stripping in RemoteAccessMiddleware isn't enough
+        # because this middleware sits OUTSIDE it in the dispatch order
+        # and would re-inject. Honor the same is_remote flag the strip
+        # uses so admin (loopback) keeps the debug panel and analyst gets
+        # clean payloads.
+        if getattr(request.state, "is_remote", False):
+            return response
+
         if not _debug_responses_enabled():
             return response
         if _is_streaming_content_type(response):
             return response
         if not _is_json_response(response):
             return response
+
+        # Per-request opt-in. The envelope is ~40 KB on the cold insights
+        # call and ~5-15 KB on every other admin response — the admin UI
+        # only consumes it when the Debug Panel toggle is on. The
+        # frontend's API client sets ``x-debug-responses: 1`` whenever
+        # the toggle is enabled; without it, strip the envelope on the
+        # way out so the admin path stays slim by default.
+        #
+        # ``DEBUG_RESPONSES_FORCE_INCLUDE=1`` (only set by tests/conftest.py)
+        # short-circuits the header check so existing route-level tests
+        # that assert on the envelope keep working without threading the
+        # header through every single TestClient construction. Production
+        # never sets this env var, so the header opt-in stays load-bearing.
+        opt_in = request.headers.get("x-debug-responses") == "1" or _os.getenv("DEBUG_RESPONSES_FORCE_INCLUDE") == "1"
 
         # Read the full body. BaseHTTPMiddleware wraps the underlying
         # response in a streaming pipe even for non-streaming Responses,
@@ -159,6 +185,25 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             # Top-level lists / primitives can't host the telemetry
             # keys without breaking the endpoint's published shape.
             return _reconstruct(response, body)
+
+        if not opt_in:
+            # Strip any telemetry the endpoint added via BaseResponse
+            # (or by hand). ``_section_timings`` stays — it carries
+            # phase names without secrets and is the next perf audit's
+            # primary signal.
+            stripped = False
+            for k in ("_debug_queries", "_debug_calls", "_is_cached"):
+                if k in parsed:
+                    parsed.pop(k)
+                    stripped = True
+            if not stripped:
+                return _reconstruct(response, body)
+            try:
+                new_body = json.dumps(parsed, default=str).encode("utf-8")
+            except Exception as e:
+                logger.warning("[telemetry-middleware] failed to strip telemetry: %s", e)
+                return _reconstruct(response, body)
+            return _reconstruct(response, new_body)
 
         if "_debug_queries" in parsed:
             # Endpoint already supplied telemetry (BaseResponse or
@@ -229,7 +274,5 @@ def _reconstruct(original: Response, body: bytes) -> Response:
                     pass
                 break
     new = Response(content=body, status_code=original.status_code, media_type=media_type)
-    new.raw_headers.extend(
-        (k, v) for k, v in original.raw_headers if k.lower() not in drop
-    )
+    new.raw_headers.extend((k, v) for k, v in original.raw_headers if k.lower() not in drop)
     return new

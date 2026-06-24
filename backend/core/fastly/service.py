@@ -14,6 +14,32 @@ def get_active_version(service_id: str, token: str) -> int | None:
     return None
 
 
+def get_active_version_info(service_id: str, token: str, *, timeout: int = 8, max_retries: int = 1) -> dict | None:
+    """Return the active version's number + timestamps for a service.
+
+    Like :func:`get_active_version` but keeps the activation timestamp so
+    callers can show *when* the live version went up (Fastly has no dedicated
+    "activated_at"; ``updated_at`` on the active version is the activation/last
+    -change time, ``created_at`` is when the version was cloned). Snappy
+    defaults (1 retry / 8s) because this is called from a polled status path.
+    Returns ``None`` on any error or if no active version exists.
+    """
+    try:
+        versions = fastly(
+            "GET", f"/service/{service_id}/version", token=token, timeout=timeout, max_retries=max_retries
+        )
+    except RuntimeError:
+        return None
+    for v in versions or []:
+        if v.get("active"):
+            return {
+                "number": int(v["number"]),
+                "updated_at": v.get("updated_at"),
+                "created_at": v.get("created_at"),
+            }
+    return None
+
+
 def find_service_by_name(name: str, token: str) -> dict | None:
     try:
         services = fastly("GET", "/service", token=token)

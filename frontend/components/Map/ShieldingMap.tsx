@@ -6,6 +6,8 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useTheme } from 'next-themes'
 import { Shield } from 'lucide-react'
+import { addCountryBaseLayer, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
+import { PopLabel } from '@/components/PopLabel'
 
 interface ShieldingMapProps {
   rows: any[]
@@ -20,9 +22,29 @@ interface TooltipInfo {
   props: Record<string, any>
 }
 
+/**
+ * rAF-throttle a function so it fires at most once per animation frame.
+ * Wrapping MapLibre `mousemove` handlers caps the per-frame re-render
+ * cost to display refresh rate while preserving the latest position.
+ */
+export function rafThrottle<TArgs extends any[]>(fn: (...args: TArgs) => void) {
+  let queued = false
+  let lastArgs: TArgs | null = null
+  return (...args: TArgs) => {
+    lastArgs = args
+    if (queued) return
+    queued = true
+    requestAnimationFrame(() => {
+      queued = false
+      if (lastArgs) fn(...lastArgs)
+      lastArgs = null
+    })
+  }
+}
+
 // ── Geometry helpers ──────────────────────────────────────────────────────────
 
-function greatCirclePoints(
+export function greatCirclePoints(
   lat1: number, lon1: number,
   lat2: number, lon2: number,
   n = 32
@@ -31,14 +53,14 @@ function greatCirclePoints(
   const toDeg = (r: number) => (r * 180) / Math.PI
   const φ1 = toRad(lat1), λ1 = toRad(lon1)
   const φ2 = toRad(lat2), λ2 = toRad(lon2)
-  
+
   // Clamp dot product to [-1, 1] to prevent Math.acos from returning NaN due to floating point inaccuracy
   const dotProduct = Math.sin(φ1) * Math.sin(φ2) + Math.cos(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1)
   const clampedDot = Math.max(-1, Math.min(1, dotProduct))
   const d = Math.acos(clampedDot)
-  
+
   if (isNaN(d) || d < 0.001) return [[lon1, lat1], [lon2, lat2]]
-  
+
   const pts: [number, number][] = []
   let prevLon = lon1
 
@@ -49,7 +71,7 @@ function greatCirclePoints(
     const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2)
     const y = A * Math.cos(φ1) * Math.sin(λ1) + B * Math.cos(φ2) * Math.sin(λ2)
     const z = A * Math.sin(φ1) + B * Math.sin(φ2)
-    
+
     const lat = toDeg(Math.atan2(z, Math.sqrt(x * x + y * y)))
     let lon = toDeg(Math.atan2(y, x))
 
@@ -58,21 +80,21 @@ function greatCirclePoints(
       if (prevLon < 0) lon -= 360
       else lon += 360
     }
-    
+
     pts.push([lon, lat])
     prevLon = lon
   }
   return pts
 }
 
-function efficiencyColor(ratio: number | null): string {
+export function efficiencyColor(ratio: number | null): string {
   if (ratio == null) return '#6366f1'
   if (ratio < 1.5) return '#22c55e'
   if (ratio < 3.0) return '#eab308'
   return '#ef4444'
 }
 
-function lineWidth(requests: number): number {
+export function lineWidth(requests: number): number {
   return Math.max(1.5, Math.min(6, 1.5 + Math.log10(Math.max(1, requests)) * 1.2))
 }
 
@@ -95,8 +117,8 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
       className="bg-popover text-popover-foreground border border-border rounded-lg shadow-xl px-3 py-2.5 font-sans min-w-[180px]"
     >
       <div className="font-semibold text-xs leading-tight">
-        {props.edge_pop} <span className="text-muted-foreground">→</span>{' '}
-        <span className="text-purple-500">{props.shield_pop}</span>
+        <PopLabel code={props.edge_pop} /> <span className="text-muted-foreground">→</span>{' '}
+        <PopLabel code={props.shield_pop} className="text-purple-500" />
       </div>
       <div className="mt-2 space-y-1">
         <div className="flex justify-between gap-4">
@@ -145,14 +167,14 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
 
 // ── GeoJSON builders ──────────────────────────────────────────────────────────
 
-function buildArcFeatures(rows: any[]): GeoJSON.FeatureCollection {
+export function buildArcFeatures(rows: any[]): GeoJSON.FeatureCollection {
   const features: GeoJSON.Feature[] = []
   for (const row of rows) {
     if (
       row.edge_lat == null || row.edge_lon == null ||
       row.shield_lat == null || row.shield_lon == null
     ) continue
-    
+
     // Skip 0-length arcs (same POP or coordinates) to prevent MapLibre WebGL triangulation crashes
     if (Math.abs(row.edge_lat - row.shield_lat) < 0.001 && Math.abs(row.edge_lon - row.shield_lon) < 0.001) {
       continue
@@ -181,7 +203,7 @@ function buildArcFeatures(rows: any[]): GeoJSON.FeatureCollection {
   return { type: 'FeatureCollection', features }
 }
 
-function buildDotFeatures(rows: any[]): GeoJSON.FeatureCollection {
+export function buildDotFeatures(rows: any[]): GeoJSON.FeatureCollection {
   const seen = new Set<string>()
   const features: GeoJSON.Feature[] = []
   for (const row of rows) {
@@ -225,6 +247,12 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
 
   const [mapReady, setMapReady] = useState(false)
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null)
+  // WebGL-unavailable fallback (headless / locked-down browser). MapLibre's
+  // constructor throws `webglcontextcreationerror` with no GL context; left
+  // unguarded that propagates out of the mount effect into the route error
+  // boundary. The sr-only data table below still renders, so degrade to a
+  // placeholder instead.
+  const [mapError, setMapError] = useState(false)
 
   const { theme } = useTheme()
   const isDark = theme === 'dark'
@@ -234,8 +262,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
   // Sync country fill color when theme changes
   useEffect(() => {
     if (!map.current || !mapReady) return
-    map.current.setPaintProperty('countries', 'fill-color', isDark ? '#27272a' : '#e4e4e7')
-    map.current.setPaintProperty('countries', 'fill-outline-color', isDark ? '#3f3f46' : '#d4d4d8')
+    updateCountryBaseLayerTheme(map.current, isDark)
   }, [isDark, mapReady])
 
   // Initialize map once
@@ -243,6 +270,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
     if (!mapContainer.current) return
 
     if (!map.current) {
+      try {
       map.current = new maplibregl.Map({
         container: mapContainer.current,
         renderWorldCopies: true,
@@ -267,19 +295,12 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
       map.current.on('load', () => {
         if (!map.current) return
 
-        map.current.addSource('world', { type: 'geojson', data: '/geo/world.geojson' })
         map.current.addSource('arcs', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
         map.current.addSource('dots', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
 
-        map.current.addLayer({
-          id: 'countries',
-          type: 'fill',
-          source: 'world',
-          paint: {
-            'fill-color': isDarkRef.current ? '#27272a' : '#e4e4e7',
-            'fill-outline-color': isDarkRef.current ? '#3f3f46' : '#d4d4d8',
-            'fill-opacity': 0.8,
-          }
+        addCountryBaseLayer(map.current, {
+          isDark: isDarkRef.current,
+          extraPaint: { 'fill-opacity': 0.8 },
         })
 
         // Arc glow (thicker, transparent)
@@ -341,11 +362,11 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
           const props = e.features[0].properties as Record<string, any>
           setTooltip({ clientX: e.originalEvent.clientX, clientY: e.originalEvent.clientY, props })
         })
-        map.current.on('mousemove', 'arc-lines', (e) => {
+        map.current.on('mousemove', 'arc-lines', rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
           if (!e.features?.length) return
           const props = e.features[0].properties as Record<string, any>
           setTooltip({ clientX: e.originalEvent.clientX, clientY: e.originalEvent.clientY, props })
-        })
+        }))
         map.current.on('mouseleave', 'arc-lines', () => {
           if (map.current) map.current.getCanvas().style.cursor = ''
           setTooltip(null)
@@ -353,6 +374,17 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
 
         setMapReady(true)
       })
+      } catch {
+        // WebGL unavailable (headless / locked-down browser). The sr-only
+        // table below still renders the data; show a placeholder instead of
+        // throwing into the route error boundary.
+        map.current = null
+        // Error-recovery path only: fires at most once and never on a normal
+        // render, so the "cascading renders" concern this rule guards against
+        // doesn't apply (same try/catch shape as ImpossibleDistanceModal).
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setMapError(true)
+      }
     }
 
     const resizeObserver = new ResizeObserver(() => {
@@ -371,7 +403,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
   // Update sources when rows change or map becomes ready
   useEffect(() => {
     if (!map.current || !mapReady) return
-    
+
     const updateData = () => {
       if (!map.current) return
       const arcSrc = map.current.getSource('arcs') as maplibregl.GeoJSONSource | undefined
@@ -430,7 +462,35 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
     updateData()
   }, [rows, mapReady])
 
-  const arcCount = buildArcFeatures(rows).features.length
+  // a11y mirror of ChoroplethMap's pattern: <canvas> exposes nothing to
+  // assistive tech, so we surface an aria-label summary + sr-only table of
+  // the same rows the visual layer renders. Skipping the keyboard listbox
+  // (the ChoroplethMap variant) because shielding edges are paired routes,
+  // not single-axis values — the sr-only table is the right shape.
+  // NB: these useMemo hooks MUST stay above the conditional early-returns
+  // below (edgeOnly / empty / no-coords). When the card first mounts in the
+  // loading state (all hooks run) and then resolves to one of those empty
+  // states (early return → hooks skipped), React throws "Rendered fewer
+  // hooks than expected" and crashes /network to its error boundary.
+  const sortedRows = React.useMemo(
+    () => [...(rows || [])]
+      .filter(r => r && r.edge_pop && r.shield_pop)
+      .sort((a, b) => (b.requests || 0) - (a.requests || 0)),
+    [rows],
+  )
+  const a11yLabel = React.useMemo(() => {
+    if (sortedRows.length === 0) {
+      return 'Shielding map showing edge-POP to shield-POP paths. No paths available.'
+    }
+    const topThree = sortedRows.slice(0, 3)
+      .map(r => `${r.edge_pop} to ${r.shield_pop} ${r.requests?.toLocaleString() ?? '0'} requests`)
+      .join(', ')
+    return `Shielding map of ${sortedRows.length} edge-to-shield paths. Top routes: ${topThree}.`
+  }, [sortedRows])
+  const a11yRows = React.useMemo(() => sortedRows.slice(0, 50), [sortedRows])
+
+  const arcFeatures = React.useMemo(() => buildArcFeatures(rows), [rows])
+  const arcCount = arcFeatures.features.length
 
   if (edgeOnly) {
     return (
@@ -464,8 +524,50 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
   }
 
   return (
-    <div className={`relative flex flex-col border rounded-xl overflow-hidden bg-muted/10 ${className ?? ''} min-h-[420px]`}>
-      <div ref={mapContainer} className="w-full h-[420px]" />
+    <div
+      className={`relative flex flex-col border rounded-xl overflow-hidden bg-muted/10 ${className ?? ''} min-h-[420px]`}
+      // role="group" (not "img"): the wrapper holds the interactive MapLibre
+      // controls + the sr-only data table below, so it can't be an "img"
+      // (axe: nested-interactive). group legitimately groups interactive
+      // content under the aria-label.
+      role="group"
+      aria-label={a11yLabel}
+    >
+      {mapError ? (
+        <div className="w-full h-[420px] flex items-center justify-center px-4 text-center text-xs text-muted-foreground" aria-hidden="true">
+          Interactive map unavailable in this browser. See the shielding-paths table below.
+        </div>
+      ) : (
+        <div ref={mapContainer} className="w-full h-[420px]" aria-hidden="true" />
+      )}
+
+      <table className="sr-only">
+        <caption>
+          {a11yRows.length > 0
+            ? `Shielding paths — ${a11yRows.length} routes shown${sortedRows.length > a11yRows.length ? ` of ${sortedRows.length} total` : ''}.`
+            : 'Shielding paths — none available.'}
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">Edge POP</th>
+            <th scope="col">Shield POP</th>
+            <th scope="col">Requests</th>
+            <th scope="col">p95 latency (ms)</th>
+            <th scope="col">Efficiency ratio</th>
+          </tr>
+        </thead>
+        <tbody>
+          {a11yRows.map((r, i) => (
+            <tr key={`${r.edge_pop}-${r.shield_pop}-${i}`}>
+              <td><PopLabel code={r.edge_pop} /></td>
+              <td><PopLabel code={r.shield_pop} /></td>
+              <td>{(r.requests ?? 0).toLocaleString()}</td>
+              <td>{r.p95_ms != null ? r.p95_ms.toFixed(0) : 'n/a'}</td>
+              <td>{r.efficiency_ratio != null ? r.efficiency_ratio.toFixed(2) : 'n/a'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
 
       {isLoading && (
         <div className="absolute inset-0 flex items-center justify-center bg-background/50 backdrop-blur-sm">

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from backend.models.common import BaseResponse, FilteredRequest, Limit500, PaginationMixin
+from backend.models.common import BaseResponse, FilteredRequest, Limit500, LogExtentsMixin, PaginationMixin
+from backend.models.security import SecurityTopBotsResponse
 
 # ── Dashboard aggregates ──────────────────────────────────────────────────────
 
@@ -24,9 +25,41 @@ ChartMetric = Literal[
 ]
 
 
+# Selector for /api/dashboard/aggregates + /api/dashboard/bundle. Mirrors
+# the security + network slices: callers pass ``sections=[...]`` to fetch
+# only the panels they render. The 3-name shape collapses the existing
+# 3-flag knob (include_time_series / include_conn_requests / include_map_data)
+# + a new top-N gate into a single uniform API across pages.
+#
+# Coupling: ``core`` ⟶ time_series + conn_requests histogram + map_data
+# (the above-fold cluster shares the live-temp build); ``topten`` ⟶ all
+# ~85 per-field top-N cards (one merged execute_top_n_rollups scan); ``bots``
+# ⟶ the bundle's second-connection top_bots branch only (no effect on the
+# dedicated /aggregates endpoint).
+DashboardSectionName = Literal["core", "topten", "bots"]
+
+
 class AggregatesRequest(FilteredRequest):
     chart_interval: str = "1 minute"
     chart_metric: ChartMetric = "requests"
+    fields: list[str] | None = None
+    # Page-shape flags. Optional so existing callers (which never pass
+    # them) keep working; ``None`` is treated as ``True`` server-side to
+    # preserve the /dashboard contract. /charts (which only renders the
+    # per-field top cards) passes False for all three to skip the
+    # time_series query, conn_requests histogram, and map_data scan it
+    # never reads.
+    include_time_series: bool | None = None
+    include_conn_requests: bool | None = None
+    include_map_data: bool | None = None
+    # Higher-level selector. When set, the router expands it into the
+    # include_* flags above + an internal include_top_n gate. None →
+    # preserves today's full behavior (every panel runs). The selector and
+    # the include_* flags are NOT mutually exclusive — when both are
+    # provided the selector wins (it's the canonical surface; the include_*
+    # knobs stay for backwards compat with the /charts callers that already
+    # pass them).
+    sections: list[DashboardSectionName] | None = None
 
 
 class FieldTopEntry(BaseModel):
@@ -52,7 +85,7 @@ class MapPoint(BaseModel):
     count: int
 
 
-class AggregatesResponse(BaseResponse):
+class AggregatesResponse(BaseResponse, LogExtentsMixin):
     data: dict[str, FieldAggregate]
     time_series: list[TimeSeriesPoint]
     map_data: list[MapPoint]
@@ -61,8 +94,26 @@ class AggregatesResponse(BaseResponse):
     metric: str
     total_rows: int
     total_rows_total: int
-    earliest_log_at: str | None = None
-    latest_log_at: str | None = None
+
+
+class BundleResponse(BaseResponse):
+    """Composite response for /api/dashboard/bundle (finding 013).
+
+    Without an explicit response_model the endpoint emitted an untyped dict
+    that bypassed the BaseResponse._strip_debug_when_disabled serializer,
+    leaking internal SQL queries + execution timings to clients regardless
+    of the DEBUG_RESPONSES flag. Declaring the shape with nested typed
+    sub-responses re-engages Pydantic's serialization lifecycle so the
+    same redaction rules apply here as on the dedicated /aggregates and
+    /top-bots endpoints.
+
+    Sub-responses are Optional so the selector (``sections=[...]``) can
+    omit a branch: a ``sections=['core']`` call returns ``top_bots: None``
+    instead of paying for the second pool connection + bot SQL.
+    """
+
+    aggregates: AggregatesResponse | None = None
+    top_bots: SecurityTopBotsResponse | None = None
 
 
 # ── Dashboard raw ─────────────────────────────────────────────────────────────
@@ -72,17 +123,6 @@ class RawRequest(FilteredRequest, PaginationMixin):
     limit: Limit500 = 50
     sort_col: str | None = None
     columns: list[str] = []
-
-
-class RawResponse(BaseResponse):
-    columns: list[str]
-    data: list[dict[str, Any]]
-    total_rows: int
-    total_rows_total: int
-    page: int
-    limit: int
-    earliest_log_at: str | None = None
-    latest_log_at: str | None = None
 
 
 # ── Dashboard field values ────────────────────────────────────────────────────
@@ -103,8 +143,13 @@ class FieldValuesResponse(BaseResponse):
 
 
 class InsightsRequest(FilteredRequest):
-    window_size_hrs: float = 1.0
-    baseline_hours: float = 168.0
+    # M2: bound both windows. Unbounded, these fed
+    # ``baseline_start = now - (baseline_hours + window_size_hrs)`` into a
+    # temp-table scan — a value like 8_760_000 reached ~1000 years back and
+    # scanned every retained row (DoS + time-scope bypass). 168h / 2160h
+    # (7d / 90d) cover every legitimate insight selection.
+    window_size_hrs: float = Field(default=1.0, gt=0, le=168)
+    baseline_hours: float = Field(default=168.0, gt=0, le=2160)
 
 
 class InsightItem(BaseModel):
@@ -157,6 +202,53 @@ class InsightsAvailabilityResponse(BaseModel):
     unavailable: list[InsightAvailability] | None = None
 
 
+# ── Cache Collapse Detail ─────────────────────────────────────────────────────
+
+
+class CacheCollapseDetailRequest(BaseModel):
+    url: str
+    window_size_hrs: float = Field(default=1.0, gt=0, le=168)
+    baseline_hours: float = Field(default=168.0, gt=0, le=2160)
+
+
+class CacheCollapseTimelinePoint(BaseModel):
+    bucket: str
+    expected_hits: float
+    real_hits: int
+    misses: int
+    total_requests: int
+    hit_rate: float
+
+
+class CacheMissPoint(BaseModel):
+    timestamp: str
+    cache: str
+    pop: str | None = None
+    ip: str | None = None
+    status: int | None = None
+
+
+class CacheBreakdown(BaseModel):
+    # Window-scoped request counts by cache disposition.
+    hits: int
+    misses: int
+    passes: int
+    other: int
+
+
+class CacheCollapseDetailResponse(BaseResponse):
+    url: str
+    timeline: list[CacheCollapseTimelinePoint]
+    recent_misses: list[CacheMissPoint]
+    breakdown: CacheBreakdown
+    # Cacheable hit ratio HIT/(HIT+MISS); PASS excluded.
+    baseline_hit_rate: float
+    window_hit_rate: float
+    # Uncacheable share PASS/total.
+    baseline_pass_rate: float
+    window_pass_rate: float
+
+
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
 
@@ -174,6 +266,11 @@ class Session(BaseModel):
     ja4: str | None = None
     country: str | None = None
     asn: int | None = None
+    # asn_label retained as an optional carry-through so old frontend builds
+    # that still read row.asn_label don't fall back to "AS<n>" mid-deploy.
+    # New backends leave it unset; the labelled string lives in the top-level
+    # ``asn_names`` map keyed by ``asn``.
+    asn_label: str | None = None
     session_start: str
     session_end: str
     req_count: int
@@ -184,17 +281,25 @@ class Session(BaseModel):
     reqs_5xx: int | None = None
     total_bytes: int | None = None
     median_rtt_ms: float | None = None
+    edge_sid: str | None = None
     flagged: bool
 
 
 class SessionsResponse(BaseResponse):
     sessions: list[Session]
+    # Hoisted ASN-label map (``{asn_int: "AS<n> Name"}``) — replaces per-row
+    # asn_label inlining. JSON serialises int keys as strings, so the
+    # frontend looks up ``asn_names[String(row.asn)]``. Sessions sharing an
+    # ASN now reference one map entry instead of repeating the label
+    # ~30 bytes per row.
+    asn_names: dict[int, str] = {}
     total: int
     page: int
     limit: int
     has_rtt: bool
     has_ja4: bool
     has_edge: bool
+    has_edge_sid: bool = False
     min_reqs_flag: int
     min_4xx_pct_flag: float
 
@@ -216,7 +321,13 @@ class SessionDetailResponse(BaseResponse):
 
 class QueryRequest(BaseModel):
     sql: str
-    max_rows: int = 500
+    # M1: bound max_rows so an analyst can't request tens of millions of rows
+    # and OOM the worker (it's interpolated into ``LIMIT max_rows+1`` and the
+    # result is fully materialized via ``to_arrow_table().to_pylist()`` before
+    # truncation). The Pydantic clamp is the first line of defense; the repo's
+    # ``execute_query`` re-clamps against ``MAX_QUERY_ROWS`` so internal callers
+    # that bypass the model can't exceed it either.
+    max_rows: int = Field(default=500, ge=1, le=10_000)
     explain: bool = False
 
 

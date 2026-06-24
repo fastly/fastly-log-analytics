@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
 
 SVC = "test-audit-svc"
 

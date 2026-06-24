@@ -3,18 +3,18 @@ import { useSSE } from '@/hooks/useSSE'
 import { Loader2 } from 'lucide-react'
 import { useDateFormat } from '@/hooks/useDateFormat'
 
-export function CronLiveLog({ 
-  runId, 
-  singleLine = false, 
+export function CronLiveLog({
+  runId,
+  singleLine = false,
   terminalMode = !singleLine,
   startedAt,
-  onDone 
-}: { 
-  runId: number | string | undefined, 
-  singleLine?: boolean, 
+  onDone
+}: {
+  runId: number | string | undefined,
+  singleLine?: boolean,
   terminalMode?: boolean,
   startedAt?: string,
-  onDone?: () => void 
+  onDone?: () => void
 }) {
   const { lines, status, start, stop } = useSSE()
   const started = useRef(false)
@@ -41,12 +41,12 @@ export function CronLiveLog({
     }
   }, [status, onDone])
 
-  // Under singleLine, only show the last line. 
+  // Under singleLine, only show the last line.
   // Otherwise under terminalMode show all lines. Fallback to last 2 lines.
-  const recentLines = singleLine 
-    ? lines.slice(-1) 
-    : terminalMode 
-      ? lines 
+  const recentLines = singleLine
+    ? lines.slice(-1)
+    : terminalMode
+      ? lines
       : lines.slice(-2)
 
   if (recentLines.length === 0) {
@@ -90,9 +90,9 @@ export function CronLiveLog({
         {recentLines.map((line, i) => {
           let text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : JSON.stringify(line))
           if (text.length > 80) text = text.substring(0, 80) + '...'
-          
+
           return (
-            <div key={i} className="truncate w-full" title={typeof line.message === 'string' ? line.message : text}>
+            <div key={line._id ?? `idx-${i}`} className="truncate w-full" title={typeof line.message === 'string' ? line.message : text}>
               {line.type === 'error' ? (
                 <span className="text-red-500">{text}</span>
               ) : line.type === 'done' ? (
@@ -112,7 +112,16 @@ export function CronLiveLog({
   }
 
   return (
-    <div className={terminalMode
+    // a11y: streaming log region. role="log" + aria-live="polite" tells SR
+    // users new lines are arriving as they appear; aria-atomic="false" so
+    // only the new line is read, not the whole accumulated buffer on each
+    // tick. aria-label distinguishes terminal-mode vs the compact dock.
+    <div
+      role="log"
+      aria-live="polite"
+      aria-atomic="false"
+      aria-label={terminalMode ? "Cron job output stream" : "Recent cron output"}
+      className={terminalMode
       ? "flex flex-col gap-1.5 w-full font-mono text-xs leading-relaxed text-zinc-200"
       : "flex flex-col gap-0.5 mt-1.5 bg-background/50 border border-border/50 p-2 rounded text-[10px] font-mono text-muted-foreground w-[280px] max-w-sm overflow-hidden"
     }>
@@ -123,12 +132,12 @@ export function CronLiveLog({
       )}
       {recentLines.map((line, i) => {
         const text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : JSON.stringify(line))
-        
+
         return (
-          <div 
-            key={i} 
-            className={terminalMode 
-              ? "whitespace-pre-wrap break-all w-full text-zinc-300" 
+          <div
+            key={line._id ?? `idx-${i}`}
+            className={terminalMode
+              ? "whitespace-pre-wrap break-all w-full text-zinc-300"
               : "truncate w-full"
             }
             title={typeof line.message === 'string' ? line.message : text}
@@ -150,4 +159,3 @@ export function CronLiveLog({
     </div>
   )
 }
-

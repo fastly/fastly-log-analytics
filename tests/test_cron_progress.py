@@ -18,14 +18,22 @@ from backend import cron_progress
 
 @pytest.fixture(autouse=True)
 def _reset_progress_state():
-    """Clear the module-level dicts between tests — they're process-global."""
+    """Clear the module-level dicts between tests — they're process-global.
+
+    Includes ``_terminal_run_ids`` (the cron_runs terminal-state memo added
+    in perf commit 2e29ac3). Without clearing it, a test that observed
+    run_id=N as terminal would short-circuit subsequent tests that reuse
+    the same run_id with a non-terminal mock.
+    """
     cron_progress._progress.clear()
     cron_progress._last_update.clear()
     cron_progress._run_metadata.clear()
+    cron_progress._terminal_run_ids.clear()
     yield
     cron_progress._progress.clear()
     cron_progress._last_update.clear()
     cron_progress._run_metadata.clear()
+    cron_progress._terminal_run_ids.clear()
 
 
 # ── start_progress + add_progress ────────────────────────────────────────────
@@ -71,13 +79,21 @@ def test_add_progress_silently_drops_unknown_run():
     assert 999 not in cron_progress._progress
 
 
-def test_add_progress_advances_last_update_timestamp():
+def test_add_progress_advances_last_update_timestamp(monkeypatch):
     """The TTL-based ``cleanup_progress`` keys on ``_last_update``, so
     every event must refresh the timestamp — otherwise an active run
-    that's been emitting events for >1h would still get reaped."""
+    that's been emitting events for >1h would still get reaped.
+
+    Drives ``time.time`` with a monotonic step counter instead of
+    ``time.sleep(0.01)`` so the assertion is deterministic under loaded
+    CI runners (where 10 ms of wall clock isn't guaranteed to elapse
+    between calls under preemption).
+    """
+    ticks = iter([1_700_000_000.0, 1_700_000_001.0])
+    monkeypatch.setattr(cron_progress.time, "time", lambda: next(ticks))
+
     cron_progress.start_progress(1)
     initial_ts = cron_progress._last_update[1]
-    time.sleep(0.01)  # ensure measurable diff
     cron_progress.add_progress(1, {"type": "step"})
     assert cron_progress._last_update[1] > initial_ts
 
@@ -400,7 +416,7 @@ def test_list_active_runs_filters_runs_db_marked_success():
     # filter does NOT kick in — this run looks "active" by the in-memory
     # signal but the DB has already marked it success.
 
-    with patch("backend.core.metadata_db.get_cron_run_status", return_value="success"):
+    with patch("backend.core.metadata.get_cron_run_status", return_value="success"):
         out = cron_progress.list_active_runs()
     assert out == [], "DB-success run must be filtered even when in-memory says active"
 
@@ -414,10 +430,10 @@ def test_list_active_runs_does_not_filter_db_missing_or_running():
     cron_progress.start_progress(1, service_id="svc-a", task="sync")
     cron_progress.add_progress(1, {"type": "status"})
 
-    with patch("backend.core.metadata_db.get_cron_run_status", return_value=None):
+    with patch("backend.core.metadata.get_cron_run_status", return_value=None):
         out = cron_progress.list_active_runs()
     assert len(out) == 1
-    with patch("backend.core.metadata_db.get_cron_run_status", return_value="running"):
+    with patch("backend.core.metadata.get_cron_run_status", return_value="running"):
         out = cron_progress.list_active_runs()
     assert len(out) == 1
 

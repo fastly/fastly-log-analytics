@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState } from 'react'
+import dynamic from 'next/dynamic'
 import {
   Card,
   CardContent,
@@ -13,14 +14,28 @@ import { InsightCardData } from '@/types/api'
 import { cn } from '@/lib/utils'
 import { AlertTriangle, Info, CheckCircle, AlertCircle, HelpCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { InsightHelpModal } from './InsightHelpModal'
 import { ImpossibleDistanceModal } from './ImpossibleDistanceModal'
 import { InsightDataModal } from './InsightDataModal'
 import { InsightItemRow } from './InsightItemRow'
 import { ImpossibleDistanceData } from './types'
+import { CacheCollapseModal } from './CacheCollapseModal'
+
+// Lazy-load the help modal: its index statically imports ~28KB of
+// per-insight help copy (InsightHelpModal/sections/*) that otherwise ships
+// in the /insights route chunk even though most users never open a help
+// dialog. next/dynamic(ssr:false) defers that chunk to the first help-button
+// click. The `helpEverOpened` latch below keeps the modal mounted after the
+// first open (so Radix's close animation still plays) while still keeping
+// the chunk off the cold-load critical path.
+const InsightHelpModal = dynamic(
+  () => import('./InsightHelpModal').then((m) => m.InsightHelpModal),
+  { ssr: false },
+)
 
 interface InsightCardProps {
   insight: InsightCardData
+  windowHours: string
+  baselineHours: string
 }
 
 const SEVERITY_ICON = {
@@ -31,10 +46,13 @@ const SEVERITY_ICON = {
   error: AlertCircle,
 }
 
+// Icon colors use the -600 ramp on yellow/blue to clear WCAG 1.4.3
+// 3:1 non-text contrast on the white card background (yellow-500 ~2.6:1,
+// blue-500 ~3.5:1 marginal; -600 lands at ~4.5:1 and ~5:1 respectively).
 const SEVERITY_ICON_COLOR = {
   clean: 'text-green-500',
-  info: 'text-blue-500',
-  warning: 'text-yellow-500',
+  info: 'text-blue-600',
+  warning: 'text-yellow-600',
   critical: 'text-red-500',
   error: 'text-red-600',
 }
@@ -47,11 +65,16 @@ const SEVERITY_BADGE_CLASS = {
   error: 'bg-red-100 text-red-800 border-red-300 dark:bg-red-950/50 dark:text-red-400 dark:border-red-800',
 }
 
-export function InsightCard({ insight }: InsightCardProps) {
+export function InsightCard({ insight, windowHours, baselineHours }: InsightCardProps) {
   const [isHelpOpen, setIsHelpOpen] = useState(false)
+  // Latches true on first help-button click so the lazy InsightHelpModal
+  // mounts once and stays mounted (close animation), loading its chunk only
+  // when a user actually asks for help.
+  const [helpEverOpened, setHelpEverOpened] = useState(false)
   const [isDataModalOpen, setIsDataModalOpen] = useState(false)
   const [selectedMapItem, setSelectedMapItem] = useState<ImpossibleDistanceData | null>(null)
-  
+  const [selectedCollapseUrl, setSelectedCollapseUrl] = useState<string | null>(null)
+
   const Icon = SEVERITY_ICON[insight.severity as keyof typeof SEVERITY_ICON] || AlertCircle
   const iconColor = SEVERITY_ICON_COLOR[insight.severity as keyof typeof SEVERITY_ICON_COLOR] || 'text-muted-foreground'
   const badgeClass = SEVERITY_BADGE_CLASS[insight.severity as keyof typeof SEVERITY_BADGE_CLASS] || ''
@@ -68,15 +91,16 @@ export function InsightCard({ insight }: InsightCardProps) {
             <div className="flex items-center gap-2 shrink-0">
               <Badge
                 variant="outline"
-                className={cn('text-[10px] uppercase tracking-wider border', badgeClass)}
+                className={cn('text-[11px] sm:text-[10px] uppercase tracking-wider border', badgeClass)}
               >
                 {insight.severity}
               </Badge>
               <Button
                 variant="ghost"
                 size="icon"
+                aria-label="How this insight works"
                 className="h-6 w-6 text-muted-foreground hover:text-foreground"
-                onClick={() => setIsHelpOpen(true)}
+                onClick={() => { setHelpEverOpened(true); setIsHelpOpen(true) }}
                 title="How this works"
               >
                 <HelpCircle className="h-4 w-4" />
@@ -99,14 +123,15 @@ export function InsightCard({ insight }: InsightCardProps) {
                   item={item}
                   insightId={insight.id}
                   onMapClick={(data) => setSelectedMapItem(data)}
+                  onCacheCollapseClick={(url) => setSelectedCollapseUrl(url)}
                 />
               ))}
               {insight.items.length > 5 && (
                 <div className="flex justify-center py-1">
-                  <Button 
-                    variant="ghost" 
-                    size="sm" 
-                    className="text-[10px] h-6 px-2 text-muted-foreground hover:text-foreground"
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-[11px] sm:text-[10px] h-6 px-2 text-muted-foreground hover:text-foreground"
                     onClick={() => setIsDataModalOpen(true)}
                   >
                     + Show {insight.items.length - 5} more
@@ -117,24 +142,35 @@ export function InsightCard({ insight }: InsightCardProps) {
           )}
         </CardContent>
       </Card>
-      
-      <InsightHelpModal
-        insightId={insight.id}
-        isOpen={isHelpOpen}
-        onOpenChange={setIsHelpOpen}
-      />
+
+      {helpEverOpened && (
+        <InsightHelpModal
+          insightId={insight.id}
+          isOpen={isHelpOpen}
+          onOpenChange={setIsHelpOpen}
+        />
+      )}
 
       <InsightDataModal
         insight={insight}
         isOpen={isDataModalOpen}
         onOpenChange={setIsDataModalOpen}
         onMapClick={(data) => setSelectedMapItem(data)}
+        onCacheCollapseClick={(url) => setSelectedCollapseUrl(url)}
       />
 
       <ImpossibleDistanceModal
         isOpen={!!selectedMapItem}
         onOpenChange={(open) => !open && setSelectedMapItem(null)}
         data={selectedMapItem}
+      />
+
+      <CacheCollapseModal
+        isOpen={!!selectedCollapseUrl}
+        onOpenChange={(open) => !open && setSelectedCollapseUrl(null)}
+        url={selectedCollapseUrl}
+        windowHours={windowHours}
+        baselineHours={baselineHours}
       />
     </>
   )

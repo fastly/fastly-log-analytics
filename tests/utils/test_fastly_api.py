@@ -217,6 +217,71 @@ def test_generate_capture_vcl_accepts_none_config():
     assert "recv" in snippets
 
 
+# ── 007: X-Edge-Shield-Auth cluster-fetch guard (anti Fastly-FF spoof) ──────
+
+
+def test_capture_vcl_uses_shield_secret_guard_when_secret_present():
+    """007: with a cluster_secret the edge scrub/capture guard keys on the
+    unspoofable X-Edge-Shield-Auth secret, NOT the client-spoofable
+    fastly.ff.visits_this_service. The auth header is also stripped from
+    inbound client requests so a client can't pre-set it to skip the scrub."""
+    snippets = fastly_api.generate_capture_vcl({"groups": ["A"]}, cluster_secret="SEKRIT")
+    assert 'req.http.X-Edge-Shield-Auth != "SEKRIT"' in snippets["recv"]
+    assert "fastly.ff.visits_this_service" not in snippets["recv"]
+    assert "unset req.http.X-Edge-Shield-Auth;" in snippets["recv"]
+
+
+def test_capture_vcl_falls_back_to_fastly_ff_without_secret():
+    """Without a cluster_secret the legacy guard is emitted (services not
+    yet re-provisioned keep working) and no shield-auth header is used."""
+    snippets = fastly_api.generate_capture_vcl({"groups": ["A"]}, cluster_secret=None)
+    assert "fastly.ff.visits_this_service == 0" in snippets["recv"]
+    assert "X-Edge-Shield-Auth" not in snippets["recv"]
+    assert "X-Edge-Shield-Auth" not in snippets["miss"]
+
+
+def test_capture_vcl_stamps_shield_secret_on_every_bereq_not_just_origin():
+    """007 latent-bug regression: the shield-auth secret must be stamped
+    UNCONDITIONALLY on every outgoing bereq (edge→shield AND shield→origin),
+    mirroring the CDN/scoring VCL. Gating it inside ``if (req.backend.is_origin)``
+    would leave the edge→shield leg unauthenticated, so a shielded service
+    re-captures edge data at the shield with the wrong client IP."""
+    snippets = fastly_api.generate_capture_vcl({"groups": ["A"]}, cluster_secret="SEKRIT")
+    set_line = 'set bereq.http.X-Edge-Shield-Auth = "SEKRIT";'
+    for kind in ("miss", "pass"):
+        lines = snippets[kind].splitlines()
+        # Top-level (column 0) => unconditional, not nested in the is_origin block.
+        assert set_line in lines, f"{kind}: shield secret not stamped unconditionally"
+        assert f"  {set_line}" not in lines, f"{kind}: shield secret wrongly nested/indented"
+
+
+# ── 007: resolve_shield_secret (single secret per service) ──────────────────
+
+
+def test_resolve_shield_secret_prefers_scoring_request_secret():
+    """On a scoring service the capture VCL must ride the SAME secret the
+    scoring VCL stamps (scoring.request_secret) so the shared
+    X-Edge-Shield-Auth header carries one value and the shield honours both
+    snippets' skip checks (no cluster_secret/request_secret collision)."""
+    cfg = {"cluster_secret": "CLUSTER", "scoring": {"enabled": True, "request_secret": "REQ"}}
+    assert fastly_api.resolve_shield_secret(cfg) == "REQ"
+
+
+def test_resolve_shield_secret_uses_cluster_secret_without_scoring():
+    cfg = {"cluster_secret": "CLUSTER", "scoring": {"enabled": False}}
+    assert fastly_api.resolve_shield_secret(cfg) == "CLUSTER"
+
+
+def test_resolve_shield_secret_falls_back_to_cluster_when_scoring_lacks_secret():
+    cfg = {"cluster_secret": "CLUSTER", "scoring": {"enabled": True}}
+    assert fastly_api.resolve_shield_secret(cfg) == "CLUSTER"
+
+
+def test_resolve_shield_secret_none_when_neither_present():
+    assert fastly_api.resolve_shield_secret({}) is None
+    assert fastly_api.resolve_shield_secret(None) is None
+
+
 # ── EDGE_DATA_MAPPING: structural invariants ───────────────────────────────
 
 
@@ -344,3 +409,74 @@ def test_generate_capture_vcl_custom_origin_field_emits_fetch_snippet_even_witho
     assert "fetch" in out
     assert "my_origin_field" in out["fetch"]
     assert "x-fos-origin-data" in out["fetch"]
+
+
+# ── miss_pass deliver-gate (falco-free string coverage, py SEAM-01) ─────────
+#
+# An origin field with origin_log_frequency="miss_pass" must promote its value
+# into the log line ONLY when the response did NOT come from cache — i.e. gated
+# behind `if (fastly_info.state !~ "HIT")`. This is the one branch the falco
+# semantic test can't exercise (falco can't bind fastly_info.state for the `!~`
+# operator, see tests/core/test_vcl_semantics.py::test_falco_origin_field_miss_pass_only),
+# so it was completely uncovered. These string-level tests pin the generated VCL
+# directly: invert the operator (`!~`→`~`), drop the guard, or fall the branch
+# through to the unconditional promote and one of these fails.
+
+
+def _miss_pass_cfg(frequency: str) -> dict:
+    return {
+        "groups": ["A"],
+        "field_overrides": {},
+        "custom_fields": [
+            {
+                "name": "origin_cache_state",
+                "enabled": True,
+                "collection_stage": "origin",
+                "duckdb_type": "VARCHAR",
+                "value_type": "string",
+                "vcl_log_expression": "beresp.http.X-Cache",
+                "origin_log_frequency": frequency,
+                "bytes_estimate": 20,
+            }
+        ],
+    }
+
+
+def test_generate_capture_vcl_miss_pass_gates_promotion_behind_cache_miss():
+    """miss_pass fields promote only on a non-HIT response. Pins the exact
+    `fastly_info.state !~ "HIT"` deliver-gate AND that the promotion is nested
+    INSIDE it — inverting the operator or hoisting the promote out fails here."""
+    deliver = fastly_api.generate_capture_vcl(_miss_pass_cfg("miss_pass"))["deliver"]
+    lines = deliver.splitlines()
+
+    # 1. The deliver-gate exists with the exact `!~ "HIT"` operator. Inverting
+    #    to `~` (promote ON hit — the opposite of "miss/pass only") or removing
+    #    the guard changes this literal and trips the assert.
+    guard = '  if (fastly_info.state !~ "HIT") {'
+    assert guard in lines, f"miss_pass deliver-gate missing or changed.\nDELIVER:\n{deliver}"
+
+    # 2. Promote-inside-if: the field's only promotion sits immediately inside
+    #    the guard (deeper indent), and the guard closes right after it.
+    gi = lines.index(guard)
+    promote = "    set req.http.x-fos-origin-data:origin_cache_state = resp.http.x-fos-origin-data:origin_cache_state;"
+    assert lines[gi + 1] == promote, f"promote not nested inside the miss_pass guard.\nDELIVER:\n{deliver}"
+    assert lines[gi + 2].strip() == "}", f"miss_pass guard not closed right after the promote.\nDELIVER:\n{deliver}"
+
+    # 3. The field is NEVER promoted at the unconditional outer indent (the
+    #    shape the `all` branch uses) — proves the branch didn't fall through.
+    unconditional = (
+        "  set req.http.x-fos-origin-data:origin_cache_state = resp.http.x-fos-origin-data:origin_cache_state;"
+    )
+    assert unconditional not in lines, f"miss_pass field promoted unconditionally — gate bypassed.\nDELIVER:\n{deliver}"
+
+
+def test_generate_capture_vcl_all_frequency_promotes_without_cache_state_guard():
+    """Contrast case: the default `all` frequency promotes on every response,
+    with no `fastly_info.state` gate. Pins the branch distinction so a future
+    edit can't collapse miss_pass and all into one shape undetected."""
+    deliver = fastly_api.generate_capture_vcl(_miss_pass_cfg("all"))["deliver"]
+    assert "fastly_info.state" not in deliver, f"`all` frequency must not gate on cache state.\nDELIVER:\n{deliver}"
+    unconditional = (
+        "  set req.http.x-fos-origin-data:origin_cache_state = resp.http.x-fos-origin-data:origin_cache_state;"
+    )
+    assert unconditional in deliver.splitlines(), f"`all` frequency must promote unconditionally.\nDELIVER:\n{deliver}"

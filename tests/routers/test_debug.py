@@ -32,7 +32,7 @@ def test_recent_sqlite_surfaces_real_metadata_db_traffic():
     """Hitting any endpoint that touches metadata_db must populate the
     captured-statements ring buffer. This is the end-to-end contract the
     Debug Panel relies on."""
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     metadata_db.get_con("debug-test-svc")  # forces PRAGMA + schema init
     client = TestClient(app)
@@ -45,7 +45,7 @@ def test_recent_sqlite_surfaces_real_metadata_db_traffic():
 
 
 def test_recent_sqlite_since_seq_filters():
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     metadata_db.get_con("svc-a")
     client = TestClient(app)
@@ -58,7 +58,7 @@ def test_recent_sqlite_since_seq_filters():
 
 
 def test_clear_sqlite_drains_buffer():
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     metadata_db.get_con("svc-clear-test")
     client = TestClient(app)
@@ -72,7 +72,7 @@ def test_clear_sqlite_drains_buffer():
 
 
 def test_recent_sqlite_respects_limit():
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     metadata_db.get_con("svc-limit")
     client = TestClient(app)

@@ -1,0 +1,18 @@
+{
+  "service_id": "YOUR_LOGGING_SERVICE_ID",
+  "name": "My Production Site",
+  "access_level": "read_write",
+
+  "fos_endpoint": "us-east-1.object.fastlystorage.app",
+  "fos_region": "us-east-1",
+  "fos_bucket": "your-fos-bucket-name",
+  "fos_prefix": "",
+  "fos_access_key_id": "YOUR_FOS_ACCESS_KEY_ID",
+  "fos_secret_access_key": "YOUR_FOS_SECRET_ACCESS_KEY",
+
+  "cdn_url": "https://your-cdn-subdomain.example.com",
+  "cdn_secret": "YOUR_CDN_SHARED_SECRET",
+  "cdn_service_id": "YOUR_CDN_SERVICE_ID",
+
+  "fastly_api_key": "YOUR_FASTLY_API_TOKEN"
+}

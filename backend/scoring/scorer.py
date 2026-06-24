@@ -138,7 +138,13 @@ def _running_mean_variance(state: SessionState) -> tuple[float, float]:
 
     Uses the algebraic identity Var(X) = E[X²] − E[X]² so we never need to
     store the history array. seq=0 case (no transitions yet) returns
-    (0, 0) — the timing rules check the warmup gate separately."""
+    (0, 0) — the timing rules check the warmup gate separately.
+
+    Divides by the full ``seq`` (whole-session mean). A ``min(seq, 20)``
+    divisor cap was tried and reverted — it inflates the mean over long
+    sessions instead of windowing it (see scorer.rs #038), so it weakens
+    impossibly-fast detection. The real windowed fix (ring buffer of the
+    last N dwells, Cookie schema v3) is the deferred #038 follow-up."""
     if state.seq <= 0:
         return 0.0, 0.0
     mean = state.sum_dt / state.seq
@@ -187,9 +193,29 @@ def _transition_prob(matrix: dict, prev_route: str, current_route: str, vocab_si
         }
 
     Returns the smoothed conditional probability. Always > 0 (Laplace
-    floor). Unseen prev rows get the all-uniform smoothed prior."""
+    floor). An unseen prev route in a POPULATED matrix is penalized to the
+    probability floor (→ max L2 score) rather than getting the lenient
+    uniform prior — see the fail-closed note below."""
     counts = matrix.get("counts", {})
     row_totals = matrix.get("row_totals", {})
+    # Fail closed on an unseen prev route. In a populated matrix a prev
+    # route that was never a transition SOURCE isn't "neutral" — it's a
+    # transition the model has never observed, which is the exact shape of
+    # evasion (prepend an untracked route to dodge the shield). The old
+    # uniform Laplace prior (1/vocab) mapped to a sub-threshold score, so
+    # unseen-prev sequences slipped past enforcement. Return the floor so it
+    # maps to the max L2 score. Only fires when the matrix HAS data; a truly
+    # empty matrix still falls through to the uniform prior below (L2 self-disables).
+    #
+    # EC-04: "unseen" is decided on the row_total VALUE (<= 0), not mere key
+    # presence — a prev route PRESENT in row_totals with total 0 (a curr-only
+    # route: seen only as a destination, never a source) is still unobserved as a
+    # transition source. This mirrors the Rust scorer (scorer.rs::transition_prob
+    # gates on ``row_total(id) > 0``), so the train-side reference and the edge
+    # agree on a key-present-zero prev. Unreachable from prod matrices (the
+    # trainer always +1's a source's row_total), so this is behaviour-preserving.
+    if row_totals and row_totals.get(prev_route, 0) <= 0:
+        return 1e-12
     prev_row = counts.get(prev_route, {})
     numerator = prev_row.get(current_route, 0) + L2_LAPLACE_ALPHA
     denominator = row_totals.get(prev_route, 0) + L2_LAPLACE_ALPHA * vocab_size
@@ -208,7 +234,7 @@ def score_layer2(
     """Apply the L2 rules. Returns (score_contribution, reasons, trans_prob).
 
     - ``matrix`` is the serialized transition matrix; None → L2 disabled
-      (matrix not yet trained, first 7 days of deployment per §4.3).
+      (matrix not yet trained).
     - ``prev_route`` is the immediate previous route this session visited
       (None on first request — L2 returns 0 with no reasons).
     - ``prev_anchor_route`` is the most-recent ANCHOR route (skipping
@@ -243,16 +269,25 @@ def score_layer2(
 # ── Combined evaluation ───────────────────────────────────────────────────────
 
 
-def _blend_weight(matrix_age_days: float) -> float:
-    """Layer 2 weight ramps from 0 → 1 over the 3 days following Day 7.
+# Length of the L2 opt-in fade-in, in days. Mirrors ``scorer.rs::L2_RAMP_DAYS``.
+L2_RAMP_DAYS = 3.0
 
-    Per §4.3: avoids a step-function score change the moment training
-    becomes available. Day 7 → 0.0, Day 8 → 0.333, Day 10 → 1.0."""
-    if matrix_age_days < 7.0:
+
+def _optin_ramp_weight(days_since_optin: float) -> float:
+    """Weight L2 contributes to the combined score as a function of days since
+    the operator opted L2 into enforcement. Linear ramp over [0, L2_RAMP_DAYS]:
+    0 at (and before) the instant of opt-in, 1.0 once the fade-in completes.
+
+    Mirrors ``scorer.rs::optin_ramp_weight``. Whether L2 contributes at all is
+    gated upstream by the operator's explicit opt-in (``score_combined`` forces
+    the weight to 0 when ``l2_enforce_enabled`` is false) — this only shapes the
+    post-opt-in ramp. Replaces the retired deployment-age blend: L2 no longer
+    auto-joins enforcement on a clock."""
+    if days_since_optin <= 0.0:
         return 0.0
-    if matrix_age_days >= 10.0:
+    if days_since_optin >= L2_RAMP_DAYS:
         return 1.0
-    return (matrix_age_days - 7.0) / 3.0
+    return days_since_optin / L2_RAMP_DAYS
 
 
 def score_combined(
@@ -263,11 +298,17 @@ def score_combined(
     prev_route: Route | None,
     prev_anchor_route: Route | None = None,
     matrix: dict | None = None,
-    matrix_age_days: float = 0.0,
+    l2_enforce_enabled: bool = False,
+    l2_days_since_optin: float = 0.0,
 ) -> ScoreResult:
     """One-stop scorer. The caller assembles the inputs from cookie decode
     + route history + loaded matrix; this function applies all rules,
-    blends per §4.3, quantizes per §3.3, and returns the headers.
+    blends, quantizes per §3.3, and returns the headers.
+
+    L2 joins the *enforced* combined score only on explicit operator opt-in
+    (``l2_enforce_enabled``); on opt-in it fades in over ``L2_RAMP_DAYS`` from
+    the opt-in anchor. Flag off → L2 stays observe-only (its sub-score is still
+    computed/emitted, just weighted 0). Mirrors ``scorer.rs::score_combined``.
 
     ``state=None, cookie_compliance != 'ok'`` is the "no cookie" path —
     cookie compliance rule fires when seq>1 (i.e. this is NOT the first
@@ -306,8 +347,9 @@ def score_combined(
     result.trans_prob = trans_prob
     result.reasons.extend(l2_reasons)
 
-    # Combined per §4.3, quantized per §3.3.
-    w_l2 = _blend_weight(matrix_age_days)
+    # Combined, quantized per §3.3. L2 is weighted into the enforced score only
+    # on explicit operator opt-in; otherwise its weight is 0 (observe-only).
+    w_l2 = _optin_ramp_weight(l2_days_since_optin) if l2_enforce_enabled else 0.0
     raw_combined = result.l1_score + result.l2_score * w_l2
     result.score = quantize_score(raw_combined)
 

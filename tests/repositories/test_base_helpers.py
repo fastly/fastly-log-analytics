@@ -174,6 +174,23 @@ def test_percentile_ms_expr_omits_filter_clause_when_empty():
     assert "FILTER" not in out
 
 
+def test_percentile_ms_expr_approx_uses_approx_quantile():
+    """``approx=True`` opts into DuckDB's T-Digest sketch instead of the
+    exact sort-based PERCENTILE_CONT. Used by the Slowest URLs / ASNs
+    tables on /performance where the column is comparative, not an SLA
+    report — the tail-error tradeoff buys a streaming O(N) pass."""
+    out = percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.95, approx=True)
+    assert "approx_quantile(CAST(elapsed AS DOUBLE), 0.95)" in out
+    assert "PERCENTILE_CONT" not in out
+    assert "/ 1000.0" in out
+
+
+def test_percentile_ms_expr_approx_supports_filter():
+    out = percentile_ms_expr("ttfb", 0.99, filter_expr="WHERE edge = true", approx=True)
+    assert "approx_quantile(ttfb, 0.99)" in out
+    assert "FILTER (WHERE edge = true)" in out
+
+
 # ── error_rate_expr ──────────────────────────────────────────────────────
 
 
@@ -283,20 +300,29 @@ def test_canonical_metric_throughput_uses_template_placeholder():
 
 
 @pytest.mark.parametrize(
-    "msg",
+    "msg,exc_cls",
     [
-        "No files found at s3://my-bucket/logs/foo.parquet",
-        "Catalog Error: Table with name logs_x does not exist",
-        "ParquetReader: file does not exist",
-        "IOError: No such file or directory: /tmp/logs.parquet",
+        ("No files found at s3://my-bucket/logs/foo.parquet", "IOException"),
+        ("Catalog Error: Table with name logs_x does not exist", "CatalogException"),
+        ("ParquetReader: file does not exist", "CatalogException"),
+        ("IOError: No such file or directory: /tmp/logs.parquet", "IOException"),
     ],
 )
-def test_is_stale_view_error_recognises_known_messages(msg):
+def test_is_stale_view_error_recognises_known_messages(msg, exc_cls):
     """Each of these messages indicates an Iceberg view that points
     to a deleted buffer file — recoverable by refreshing the view.
     Pinned because adding a new DuckDB version that changes the
-    message would silently turn recoverable errors into 500s."""
-    assert _is_stale_view_error(Exception(msg)) is True
+    message would silently turn recoverable errors into 500s.
+
+    Per finding 005 (2026-06-15) the detector now also requires a
+    genuine ``duckdb.IOException`` / ``duckdb.CatalogException`` so
+    attacker-controlled substring injection through
+    ``ConversionException`` / ``BinderException`` can no longer
+    spoof the stale-view rebuild path."""
+    import duckdb
+
+    exc = getattr(duckdb, exc_cls)(msg)
+    assert _is_stale_view_error(exc) is True
 
 
 def test_is_stale_view_error_returns_false_for_unrelated_errors():
@@ -409,7 +435,7 @@ def test_attach_ngwaf_cache_passes_through_to_sqlite_attach(monkeypatch, tmp_pat
 
 def test_attach_metadata_db_yields_false_when_file_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        "backend.core.metadata_db.db_path",
+        "backend.core.metadata.db_path",
         lambda sid: str(tmp_path / f"{sid}.metadata.db"),
     )
     con = duckdb.connect(":memory:")
@@ -515,7 +541,14 @@ def test_queryrunner_execute_clears_view_cache_before_force_rebuild(monkeypatch)
             def execute(self, q, p=None):
                 if not raise_once["done"] and "retry_target" in q:
                     raise_once["done"] = True
-                    raise Exception(
+                    # Finding 005 (2026-06-15): the stale-view detector now
+                    # requires a real DuckDB IOException / CatalogException
+                    # so attacker-controlled substring injection can't spoof
+                    # the rebuild path. Use the real class for this self-heal
+                    # regression test.
+                    import duckdb as _duckdb_mod
+
+                    raise _duckdb_mod.IOException(
                         'IO Error: No files found that match the pattern "cache/fos-test/buffer/batch_dead.parquet"'
                     )
                 return self._real.execute(q, p if p is not None else [])

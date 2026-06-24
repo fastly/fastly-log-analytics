@@ -8,15 +8,25 @@ import os
 import re
 import urllib.error
 import urllib.request
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from sse_starlette.sse import EventSourceResponse
 
-from backend.utils.router_utils import SSE_HEADERS as _SSE_HEADERS
-from backend.utils.router_utils import sse_flush_preamble as _sse_flush
+from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.provision import (
+    CheckFosRequest,
+    LakeInfoRequest,
+    ProvisionConfigRequest,
+    ProvisionExecuteRequest,
+    ProvisionTeardownRequest,
+    ProvisionValidateRequest,
+)
+from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, raise_internal
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/provision", tags=["provision"])
+router = APIRouter(prefix="/api/provision", tags=["provision"], responses=DEFAULT_ERROR_RESPONSES)
 
 
 def _check_domain_available(domain: str, timeout: int = 10) -> tuple[bool, str | None]:
@@ -56,15 +66,15 @@ def provision_list_services(token: str = Query(...)):
             if s.get("type", "vcl") == "vcl"
         ]
     except Exception as e:
-        raise HTTPException(status_code=400, detail={"error": str(e)})
+        raise_internal(logger, e, code="list_services_failed", status=400)
 
 
 @router.post("/validate")
-def provision_validate(body: dict):
+def provision_validate(body: ProvisionValidateRequest):
     from backend.core.fastly.client import fastly
 
-    token = body.get("token")
-    service_id = body.get("service_id")
+    token = body.token
+    service_id = body.service_id
     if not token or not service_id:
         raise HTTPException(status_code=400, detail={"error": "Token and Service ID are required"})
 
@@ -109,7 +119,7 @@ def provision_validate(body: dict):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail={"error": str(e)})
+        raise_internal(logger, e, code="provision_validate_failed", status=400)
 
 
 @router.get("/check-domain")
@@ -132,14 +142,13 @@ def provision_check_domain(prefix: str = Query(...)):
     return result
 
 
-@router.get("/check-fos")
-def provision_check_fos(
-    bucket: str = Query(...),
-    region: str = Query(...),
-    access_key: str = Query(...),
-    secret_key: str = Query(...),
-):
+@router.post("/check-fos")
+def provision_check_fos(req: CheckFosRequest):
     """Validate FOS credentials by attempting to list objects."""
+    bucket = req.bucket
+    region = req.region
+    access_key = req.access_key
+    secret_key = req.secret_key
     import botocore.exceptions
 
     from backend.core.duckdb import _get_fos_client
@@ -189,11 +198,14 @@ def _require_json_content_type(req: Request) -> None:
     before FastAPI's body parser — otherwise a malformed text/plain body
     returns 422 from the parser and the explicit 415 never executes."""
     if not (req.headers.get("content-type") or "").startswith("application/json"):
-        raise HTTPException(status_code=415, detail="Unsupported Media Type")
+        raise HTTPException(
+            status_code=415,
+            detail=make_error("unsupported_media_type", "Content-Type must be application/json"),
+        )
 
 
 @router.post("/teardown", dependencies=[Depends(_require_json_content_type)])
-def provision_teardown(req: Request, body: dict | None = None):
+def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = None):
     """Destructive service teardown over SSE.
 
     Switched from ``GET`` to ``POST`` to defend against CSRF: a GET
@@ -204,19 +216,15 @@ def provision_teardown(req: Request, body: dict | None = None):
     ``Content-Type: application/json`` (sent by the dashboard's fetch
     client) puts the request in the CORS-preflighted bucket so the
     browser will block silent invocation entirely.
-
-    Body shape:
-        {token, service_id, remove_logging, remove_cdn,
-         remove_bucket, remove_cache, remove_cron}
     """
-    body = body or {}
-    token: str = str(body.get("token") or "")
-    service_id: str | None = body.get("service_id")
-    remove_logging: bool = bool(body.get("remove_logging", True))
-    remove_cdn: bool = bool(body.get("remove_cdn", True))
-    remove_bucket: bool = bool(body.get("remove_bucket", True))
-    remove_cache: bool = bool(body.get("remove_cache", True))
-    remove_cron: bool = bool(body.get("remove_cron", False))
+    body = body or ProvisionTeardownRequest()
+    token: str = body.token
+    service_id: str | None = body.service_id
+    remove_logging: bool = body.remove_logging
+    remove_cdn: bool = body.remove_cdn
+    remove_bucket: bool = body.remove_bucket
+    remove_cache: bool = body.remove_cache
+    remove_cron: bool = body.remove_cron
     from backend import config as svcconfig
     from backend.core import duckdb as _db
     from backend.provision import _sync_crontab, perform_teardown
@@ -249,15 +257,9 @@ def provision_teardown(req: Request, body: dict | None = None):
     if not state:
         raise HTTPException(status_code=404, detail={"error": "No service config found."})
 
-    # Security: destructive teardown (logging / CDN / bucket) requires a
-    # caller-supplied Fastly token with the ``global`` scope and access to
-    # this service. Cache-only teardown (all three destructive flags false)
-    # is a local-cleanup operation and does not touch Fastly, so it does not
-    # require token validation. The /api/provision/ middleware gate ensures
-    # only local admin requests reach this endpoint regardless.
-    has_destructive = bool(remove_logging or remove_cdn or remove_bucket)
-    if has_destructive:
-        validate_destructive_token(token, service_id=service_id or "")
+    # Security: teardown requires a caller-supplied Fastly token with the
+    # ``global`` scope and access to this service.
+    validate_destructive_token(token, service_id=service_id or "")
 
     opts = {
         "remove_logging": remove_logging,
@@ -266,23 +268,27 @@ def provision_teardown(req: Request, body: dict | None = None):
     }
 
     def stream():
-        from backend.utils.router_utils import sse_event as yj  # local alias preserves the line-level diff
-
-        # Initial padding to force flush
-        yield from _sse_flush()
-
         sid = state.get("logging_service_id") or service_id
 
         try:
             # Stop scheduler jobs for this service immediately so no background sync
             # can write into the cache dir or attempt to fetch from FOS while we're deleting.
             if sid:
-                yield from yj({"type": "status", "message": f"Stopping background sync for service {sid}..."})
+                yield json.dumps({"type": "status", "message": f"Stopping background sync for service {sid}..."})
 
                 cfg_path = svcconfig.config_path(sid)
                 if os.path.exists(cfg_path):
                     os.remove(cfg_path)
-                    yield from yj({"type": "status", "message": f"Removed configs/{sid}.json"})
+                    # The service is gone the instant its config file is. Drop
+                    # the 3s admin bootstrap cache now so /api/bootstrap stops
+                    # listing it immediately (otherwise it lingers for up to
+                    # the TTL — the provision-teardown e2e races exactly here).
+                    # Via the registry, not a bootstrap-router import (routers
+                    # must stay import-independent — import-linter R-9).
+                    from backend.utils.cache_registry import CacheRegistry
+
+                    CacheRegistry.clear("routers.bootstrap._bootstrap_cache")
+                    yield json.dumps({"type": "status", "message": f"Removed configs/{sid}.json"})
 
                 # Sync crontab and reload scheduler to remove jobs immediately
                 try:
@@ -291,24 +297,30 @@ def provision_teardown(req: Request, body: dict | None = None):
 
                     get_scheduler().reload()
                     if remove_cron:
-                        yield from yj({"type": "status", "message": "Cron jobs updated"})
+                        yield json.dumps({"type": "status", "message": "Cron jobs updated"})
                 except Exception as e:
                     if remove_cron:
-                        yield from yj({"type": "status", "message": f"Warning: Failed to update cron jobs: {e}"})
+                        yield json.dumps({"type": "status", "message": f"Warning: Failed to update cron jobs: {e}"})
 
-                # Clear in-memory iceberg caches for this service.
+                # Drop ALL in-memory iceberg caches for this service so a
+                # same-process re-provision of the same bucket can't resurrect a
+                # stale Table object (which makes init_iceberg_table skip
+                # creation and commit_buffer append against deleted metadata).
+                # Key off the runtime source, NOT the service_id — the caches
+                # are keyed by source name + bucket, so the old
+                # clear_source_caches(sid) call missed every entry. svc_cfg is
+                # the in-memory config loaded before the file was removed above.
                 try:
                     from backend.core import iceberg as db_iceberg
 
-                    db_iceberg.clear_source_caches(sid)
+                    _cache_src = svcconfig.config_to_source(svc_cfg) if svc_cfg else {"name": sid}
+                    db_iceberg.invalidate_service_caches(_cache_src)
                 except Exception:
                     pass
 
-            yield from yj({"type": "status", "message": "Starting teardown of Fastly resources..."})
+            yield json.dumps({"type": "status", "message": "Starting teardown of Fastly resources..."})
             for event in perform_teardown(state, token, opts=opts):
-                yield from yj(event)
-                # Small padding after each event
-                yield f": {' ' * 256}\n\n"
+                yield json.dumps(event)
 
             if remove_cache:
                 import shutil
@@ -322,7 +334,7 @@ def provision_teardown(req: Request, body: dict | None = None):
                             os.remove(f)
                             _db.clear_initialization_state(f)
                         except Exception as e:
-                            yield from yj(
+                            yield json.dumps(
                                 {"type": "status", "message": f"Warning: could not remove {os.path.basename(f)}: {e}"}
                             )
 
@@ -335,14 +347,27 @@ def provision_teardown(req: Request, body: dict | None = None):
                         try:
                             shutil.rmtree(svc_cache_dir)
                         except Exception as e:
-                            yield from yj({"type": "status", "message": f"Warning: could not remove cache dir: {e}"})
+                            yield json.dumps({"type": "status", "message": f"Warning: could not remove cache dir: {e}"})
 
-                yield from yj({"type": "status", "message": "Removed local database and cache"})
+                # The per-service metadata SQLite (ingested_files, cron_runs,
+                # rollups) lives in the system data dir, NOT the cache dir, so
+                # the rmtree above never touched it. Without this a re-provision
+                # inherits the dead service's ingested_files rollup and the
+                # usage-log gap panel keeps showing stale "ours" counts.
+                if sid:
+                    try:
+                        from backend.core import metadata as metadata_db
+
+                        metadata_db.teardown(sid)
+                    except Exception as e:
+                        yield json.dumps({"type": "status", "message": f"Warning: could not clear metadata: {e}"})
+
+                yield json.dumps({"type": "status", "message": "Removed local database and cache"})
 
             # Log teardown if the DB wasn't completely wiped
             if sid and not remove_cache:
                 try:
-                    from backend.core import metadata_db
+                    from backend.core import metadata as metadata_db
 
                     metadata_db.record_audit(
                         service_id=sid,
@@ -363,35 +388,39 @@ def provision_teardown(req: Request, body: dict | None = None):
 
                     try:
                         shutil.rmtree(logs_dir)
-                        yield from yj({"type": "status", "message": "Removed logs directory"})
+                        yield json.dumps({"type": "status", "message": "Removed logs directory"})
                     except Exception as e:
-                        yield from yj({"type": "status", "message": f"Warning: could not remove logs directory: {e}"})
+                        yield json.dumps(
+                            {"type": "status", "message": f"Warning: could not remove logs directory: {e}"}
+                        )
 
             _db.reload_default_source()
-            yield from yj({"type": "done", "message": "Teardown complete."})
+            yield json.dumps({"type": "done", "message": "Teardown complete."})
         except Exception as e:
-            yield from yj({"type": "error", "message": str(e)})
+            yield json.dumps({"type": "error", "message": str(e)})
 
-    return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
 
 
-@router.get("/lake-info")
-def provision_lake_info(
-    bucket: str = Query(...),
-    region: str = Query(...),
-    access_key: str = Query(...),
-    secret_key: str = Query(...),
-    prefix: str = Query(default=""),
-    endpoint: str | None = Query(default=None),
-    iceberg_metadata_location: str | None = Query(default=None),
-):
+@router.post("/lake-info")
+def provision_lake_info(req: LakeInfoRequest):
     """Return Iceberg table range and calendar for a given bucket/credentials without registering it."""
+    bucket = req.bucket
+    region = req.region
+    access_key = req.access_key
+    secret_key = req.secret_key
+    prefix = req.prefix
+    endpoint = req.endpoint
+    iceberg_metadata_location = req.iceberg_metadata_location
     import hashlib
 
-    from backend.models.lake import fetch_lake_info
+    from backend.core.iceberg.lake_info import fetch_lake_info
 
     # Use a deterministic name to isolate catalog caches from real services.
-    h = hashlib.md5(f"{bucket}:{prefix}".encode()).hexdigest()[:12]
+    # MD5 is fine here — this is a cache-key fingerprint, not a security
+    # primitive. ``usedforsecurity=False`` flags intent so bandit / fips
+    # / future readers don't second-guess the choice.
+    h = hashlib.md5(f"{bucket}:{prefix}".encode(), usedforsecurity=False).hexdigest()[:12]
     src = {
         "bucket": bucket,
         "region": region,
@@ -404,32 +433,6 @@ def provision_lake_info(
         "iceberg_metadata_location": iceberg_metadata_location,
     }
     return fetch_lake_info(src, use_temp_cache=True)
-
-
-from pydantic import BaseModel
-
-
-class ProvisionExecuteRequest(BaseModel):
-    token: str
-    service_id: str
-    service_name: str | None = None
-    endpoint_name: str = "Fastly Object Storage Logs"
-    fos_region: str = "us-east-1"
-    fos_bucket_name: str
-    fos_prefix: str = ""
-    sample_rate: str = "100"
-    edge_only: bool = True
-    custom_condition: str | None = None
-    log_period: str = "1 minute"
-    cdn_service_name: str | None = None
-    cdn_url: str | None = None
-    cdn_shield: str = "none"
-    enable_cron_sync: bool = True
-    delete_after: bool = True
-    commit_interval_mins: int = 5
-    enable_cron_compact: bool = True
-    log_retention_days: int = 30
-    log_fields: str | None = None
 
 
 @router.post("/execute")
@@ -467,7 +470,7 @@ def provision_execute(req: ProvisionExecuteRequest):
 
         service_name = svcconfig.fetch_service_name(service_id, token) or service_id
 
-    cfg = {
+    cfg: dict[str, Any] = {
         "admin_token": token,
         "logging_service_id": service_id,
         "name": service_name,
@@ -498,27 +501,37 @@ def provision_execute(req: ProvisionExecuteRequest):
     try:
         cfg["log_period"] = parse_period(cfg["log_period"])
     except ValueError as e:
-        raise HTTPException(status_code=400, detail={"error": str(e)})
+        raise HTTPException(status_code=400, detail=make_error("invalid_log_period", str(e)))
 
     bucket = cfg["fos_bucket_name"]
     if not re.match(r"^[A-Za-z0-9](?!.*--)[A-Za-z0-9-]{1,61}[A-Za-z0-9]$", bucket):
         raise HTTPException(
             status_code=400,
-            detail={"error": f"Invalid bucket name: '{bucket}'. Use 3-63 alphanumeric characters or single hyphens."},
+            detail=make_error(
+                "invalid_bucket",
+                f"Invalid bucket name: '{bucket}'. Use 3-63 alphanumeric characters or single hyphens.",
+            ),
+        )
+
+    prefix = cfg.get("fos_prefix", "")
+    if prefix and not re.match(r"^[A-Za-z0-9/_-]*$", prefix):
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("invalid_prefix", "Invalid prefix. Use alphanumerics, /, _, -."),
         )
 
     if cfg.get("cdn_url"):
         domain = cfg["cdn_url"].replace("https://", "")
         available, reason = _check_domain_available(domain, timeout=5)
         if not available and reason and "DNS" not in reason:
-            raise HTTPException(status_code=400, detail={"error": f"Domain {domain} is unavailable: {reason}."})
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("domain_unavailable", reason, domain=domain),
+            )
 
     cfg["cdn_secret"] = secrets.token_urlsafe(24)
 
     def stream():
-        # Initial padding to force flush
-        yield from _sse_flush()
-
         error_already_emitted = False
         try:
             from backend.provision import provision
@@ -526,15 +539,21 @@ def provision_execute(req: ProvisionExecuteRequest):
             for event in provision(cfg):
                 if event.get("type") == "error":
                     error_already_emitted = True
-                yield f"data: {json.dumps(event)}\n\n"
-                # Small padding after each event
-                yield f": {' ' * 256}\n\n"
+                yield json.dumps(event)
 
                 if event.get("type") == "done":
                     _db.reload_default_source()
 
+                    # New service's config is now on disk; drop the 3s admin
+                    # bootstrap cache so /api/bootstrap surfaces it immediately
+                    # rather than after the TTL lapses (symmetry with teardown).
+                    # Via the registry, not a bootstrap-router import (R-9).
+                    from backend.utils.cache_registry import CacheRegistry
+
+                    CacheRegistry.clear("routers.bootstrap._bootstrap_cache")
+
                     try:
-                        from backend.core import metadata_db
+                        from backend.core import metadata as metadata_db
 
                         metadata_db.record_audit(
                             service_id=cfg["logging_service_id"],
@@ -571,38 +590,40 @@ def provision_execute(req: ProvisionExecuteRequest):
                             _run_metadata_sync(cfg["logging_service_id"])
                         except Exception as e:
                             logger.warning("[provision] Initial metadata sync after provision failed: %s", e)
-                        except Exception:
-                            pass
                     except Exception:
                         pass
         except Exception as e:
             if not error_already_emitted:
-                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                yield json.dumps({"type": "error", "message": str(e)})
 
-    return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
 
 
 @router.post("/terraform/preview")
-def provision_terraform_preview(body: dict):
+def provision_terraform_preview(body: ProvisionConfigRequest):
     from backend.utils.terraform_gen import generate_terraform
 
-    access_key = body.get("fos_access_key") or "YOUR_FOS_ACCESS_KEY"
-    secret_key = body.get("fos_secret_key") or "YOUR_FOS_SECRET_KEY"
-    return generate_terraform(body, access_key, secret_key)
+    # ``extra="allow"`` on the model captures any future wizard fields
+    # we haven't enumerated. ``model_dump`` includes them in the dict
+    # passed to generate_terraform so the helper keeps reading the same
+    # shape it always has.
+    cfg = body.model_dump(exclude_none=True)
+    access_key = cfg.get("fos_access_key") or "YOUR_FOS_ACCESS_KEY"
+    secret_key = cfg.get("fos_secret_key") or "YOUR_FOS_SECRET_KEY"
+    return generate_terraform(cfg, access_key, secret_key)
 
 
 @router.post("/terraform/export")
-def provision_terraform_export(body: dict):
+def provision_terraform_export(body: ProvisionConfigRequest):
     import io
     import zipfile
 
-    from fastapi.responses import StreamingResponse
-
     from backend.utils.terraform_gen import generate_terraform
 
-    access_key = body.get("fos_access_key") or "YOUR_FOS_ACCESS_KEY"
-    secret_key = body.get("fos_secret_key") or "YOUR_FOS_SECRET_KEY"
-    tf_files = generate_terraform(body, access_key, secret_key)
+    cfg = body.model_dump(exclude_none=True)
+    access_key = cfg.get("fos_access_key") or "YOUR_FOS_ACCESS_KEY"
+    secret_key = cfg.get("fos_secret_key") or "YOUR_FOS_SECRET_KEY"
+    tf_files = generate_terraform(cfg, access_key, secret_key)
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
@@ -619,12 +640,20 @@ def provision_terraform_export(body: dict):
 
 
 @router.post("/ingest")
-def provision_ingest(body: dict):
+def provision_ingest(payload: ProvisionConfigRequest):
     import secrets
 
     from backend.provision import ensure_fos_access_key, find_fos_key, parse_period, write_service_config
     from backend.utils.fastly_auth import validate_destructive_token
     from backend.utils.pop_utils import fetch_pop_locations
+
+    # The body is mutated in-place below (parse_period substitution,
+    # cdn_secret default, log_fields decode). Pull a plain dict out of
+    # the validated model so the existing logic keeps working — typed
+    # known fields stay typed via ``payload.<field>``; the dict carries
+    # the ``extra="allow"`` passthroughs (e.g. wizard-side fields we
+    # haven't enumerated yet).
+    body: dict[str, Any] = payload.model_dump(exclude_none=False)
 
     token = body.get("token")
     if not token:
@@ -645,7 +674,7 @@ def provision_ingest(body: dict):
         if body.get("log_period"):
             body["log_period"] = parse_period(body["log_period"])
     except ValueError as e:
-        raise HTTPException(status_code=400, detail={"error": str(e)})
+        raise HTTPException(status_code=400, detail=make_error("invalid_log_period", str(e)))
 
     # We skip bucket and service creation, and only ensure we have an access key
     # if one wasn't provided directly (though they really should be providing them or we generate one for the bucket)
@@ -658,18 +687,38 @@ def provision_ingest(body: dict):
         # Try to find or create one
         desc = f"fos-log-analysis-{body.get('fos_bucket_name')}"
         existing = find_fos_key(desc, token)
-        if existing:
+        existing_secret = existing.get("secret_key") if existing else None
+        if existing and existing_secret:
             fos_access_key = existing["access_key"]
-            fos_secret_key = existing["secret_key"]
+            fos_secret_key = existing_secret
             fos_key_id = existing["access_key"]
+        elif existing:
+            # The access-key LIST response carries no secret_key (Fastly only
+            # returns the secret at key-creation time). We can't reconstruct
+            # it, so fail clearly rather than KeyError-ing into a 500 or
+            # writing a broken credential. The caller must pass fos_secret_key.
+            raise HTTPException(
+                status_code=409,
+                detail=make_error(
+                    "fos_key_secret_unavailable",
+                    f"An access key '{desc}' already exists but its secret is not retrievable; "
+                    "provide fos_access_key + fos_secret_key explicitly.",
+                ),
+            )
         else:
             try:
-                new_key = ensure_fos_access_key(desc, body, token, buckets=[body.get("fos_bucket_name")])
+                bucket_name = body.get("fos_bucket_name")
+                if not bucket_name:
+                    raise HTTPException(status_code=400, detail={"error": "fos_bucket_name required"})
+                new_key = ensure_fos_access_key(desc, body, token, buckets=[bucket_name])
                 fos_access_key = new_key["access_key"]
                 fos_secret_key = new_key["secret_key"]
                 fos_key_id = new_key["id"]
             except Exception as e:
-                raise HTTPException(status_code=400, detail={"error": f"Failed to ensure access key: {e}"})
+                # Fastly API error bodies sometimes carry internal token /
+                # account hints — log full server-side and return only a
+                # correlation id, mirroring query.py's leak posture.
+                raise_internal(logger, e, code="ensure_access_key_failed", status=400)
 
     if not body.get("cdn_secret"):
         body["cdn_secret"] = secrets.token_urlsafe(24)
@@ -701,20 +750,16 @@ def provision_ingest(body: dict):
         "provisioning": {"fos_key_id": fos_key_id},
     }
 
-    if body.get("log_fields"):
+    log_fields_raw = body.get("log_fields")
+    if log_fields_raw:
         try:
-            state["log_fields"] = (
-                json.loads(body.get("log_fields"))
-                if isinstance(body.get("log_fields"), str)
-                else body.get("log_fields")
-            )
+            state["log_fields"] = json.loads(log_fields_raw) if isinstance(log_fields_raw, str) else log_fields_raw
         except Exception:
             pass
 
-    from backend.utils.fastly_auth import validate_destructive_token
-
-    validate_destructive_token(token, service_id=state.get("logging_service_id") or "")
-
+    # NB: the token was already validated against this same service_id at the
+    # top of the handler (validate_destructive_token above); the prior second
+    # pass here re-imported and re-validated the identical token+service_id.
     write_service_config(state)
 
     try:
@@ -952,12 +997,17 @@ def provision_ngwaf_workspaces(
         logger.warning("[ngwaf-workspaces] HTTPError %s body=%s", exc.code, body[:300])
         if exc.code == 401:
             raise HTTPException(
-                status_code=400, detail={"error": "Invalid API token or missing Edge Security permissions."}
+                status_code=400,
+                detail=make_error(
+                    "ngwaf_token_invalid",
+                    "Invalid API token or missing Edge Security permissions.",
+                ),
             )
-        raise HTTPException(status_code=400, detail={"error": f"NGWAF API error: {exc.code} — {body[:300]}"})
+        # Upstream body may carry sensitive Fastly internals; collapse to
+        # an error_id and log the full body for operator post-incident.
+        raise_internal(logger, exc, code="ngwaf_api_error", status=400)
     except Exception as e:
-        logger.warning("[ngwaf-workspaces] exception: %s", e)
-        raise HTTPException(status_code=400, detail={"error": str(e)})
+        raise_internal(logger, e, code="ngwaf_workspaces_failed", status=400)
 
 
 @router.patch("/services/{service_id}/ngwaf-workspace")
@@ -985,10 +1035,9 @@ def provision_set_ngwaf_workspace(
 
     from backend import config as svcconfig
     from backend.utils.fastly_auth import validate_destructive_token
+    from backend.utils.router_utils import load_service_config
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    cfg = load_service_config(service_id)
 
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[len("bearer ") :].strip()

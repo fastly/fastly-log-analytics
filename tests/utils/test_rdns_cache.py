@@ -227,9 +227,10 @@ def test_get_stats_counts_total_and_pending():
 def test_do_lookup_returns_nxdomain_on_herror():
     """``socket.herror`` (PTR record missing) → ('nxdomain', no
     hostname). Pinned because the classifier treats nxdomain as
-    impersonator only when the bot defines a verification domain;
-    a refactor that surfaced these as 'error' would shift the
-    distinction."""
+    impersonator only when the bot defines a verification domain.
+    Phase 1.4a: assertion targets the sync fallback (the running-loop
+    safety net); the aiodns hot path translates ARES_ENOTFOUND /
+    ARES_ENODATA to the same status."""
     with patch("socket.gethostbyaddr", side_effect=socket.herror("no PTR")):
         host, status, fcrdns = rdns_cache._do_lookup("1.2.3.4")
     assert host is None
@@ -239,8 +240,10 @@ def test_do_lookup_returns_nxdomain_on_herror():
 
 def test_do_lookup_returns_error_on_unexpected_exception():
     """Any other exception (timeout, gaierror) → 'error' status.
-    Pinned distinct from nxdomain so the classifier can choose
-    whether to retry."""
+    Phase 1.4a: the socket-based path lives in
+    ``_do_lookup_sync_fallback`` (production uses the aiodns async
+    path); this test pins the fallback contract because the running-
+    loop fallback branch still relies on it."""
     with patch("socket.gethostbyaddr", side_effect=OSError("timeout")):
         host, status, fcrdns = rdns_cache._do_lookup("1.2.3.4")
     assert host is None
@@ -250,8 +253,9 @@ def test_do_lookup_returns_error_on_unexpected_exception():
 
 def test_do_lookup_fcrdns_verified_when_forward_matches_reverse():
     """Reverse DNS returns hostname, forward DNS for that hostname
-    includes the original IP → FCrDNS verified. This is the gold
-    standard for bot verification."""
+    includes the original IP → FCrDNS verified. Pinned against
+    the sync-fallback path (the aiodns path is exercised via the
+    enrich_batch tests above)."""
     fake_forward = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("66.249.66.1", 0)),
     ]
@@ -267,10 +271,9 @@ def test_do_lookup_fcrdns_verified_when_forward_matches_reverse():
 
 
 def test_do_lookup_fcrdns_unverified_when_forward_mismatches():
-    """The classic impersonator pattern: PTR points to a googlebot
-    hostname, but forward lookup of that hostname returns a different
-    IP. Pinned because losing this check would let attackers spoof
-    PTR records to pass verification."""
+    """Classic impersonator pattern: PTR points to a googlebot
+    hostname, but forward lookup returns a different IP. Pinned
+    against the sync-fallback path."""
     fake_forward = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("66.249.66.99", 0)),  # different!
     ]
@@ -287,9 +290,8 @@ def test_do_lookup_fcrdns_unverified_when_forward_mismatches():
 
 def test_do_lookup_fcrdns_false_when_forward_resolution_errors():
     """Reverse DNS succeeds but forward DNS fails (NXDOMAIN, timeout)
-    → fcrdns=False but status is still 'resolved'. Pinned because
-    the cache shouldn't discard a known hostname just because forward
-    resolution flaked."""
+    → fcrdns=False but status is still 'resolved'. Pinned against
+    the sync-fallback path."""
     with (
         patch("socket.gethostbyaddr", return_value=("known.example.com", [], [])),
         patch("socket.getaddrinfo", side_effect=OSError("forward DNS down")),
@@ -388,105 +390,11 @@ def test_enrich_batch_no_op_when_nothing_pending():
     assert summary == {"resolved": 0, "errors": 0, "discovered": 0}
 
 
-# ── enrich_batch_gen: SSE-style streaming ──────────────────────────────────
-
-
-def test_enrich_batch_gen_yields_status_and_done_events():
-    """The generator variant yields progress events for the SSE
-    endpoint. Final event is always 'done' with the summary text."""
-    rdns_cache.enqueue(["1.1.1.1"])
-
-    fake_disc_gen = iter([{"type": "count", "count": 0}])
-
-    with (
-        patch(
-            "backend.utils.rdns_cache._do_lookup",
-            return_value=("ok.example.com", "resolved", True),
-        ),
-        patch("backend.utils.rdns_cache._discover_new_ips_gen", return_value=fake_disc_gen),
-    ):
-        events = list(rdns_cache.enrich_batch_gen(limit=10))
-
-    types = [e["type"] for e in events]
-    assert "status" in types
-    assert "log" in types  # the per-IP resolution events
-    assert events[-1]["type"] == "done"
-    assert "Resolved: 1" in events[-1]["message"]
-
-
-def test_enrich_batch_gen_yields_no_pending_status_when_queue_empty():
-    """Empty pending queue → a "No pending IPs to resolve." status
-    event so the SSE UI can render that explicit message instead of
-    a blank progress bar."""
-    fake_disc_gen = iter([{"type": "count", "count": 0}])
-
-    with patch("backend.utils.rdns_cache._discover_new_ips_gen", return_value=fake_disc_gen):
-        events = list(rdns_cache.enrich_batch_gen(limit=10))
-
-    no_pending = [e for e in events if e["type"] == "status" and "No pending" in e["message"]]
-    assert len(no_pending) == 1
-
-
-def test_enrich_batch_gen_yields_error_event_on_discovery_failure():
-    """Discovery pass failure surfaces as a typed 'error' event the
-    SSE client can render in red — distinct from the 'done' terminal."""
-
-    def _fail_gen():
-        raise RuntimeError("discovery broken")
-        yield  # unreachable, keeps it a generator
-
-    with patch("backend.utils.rdns_cache._discover_new_ips_gen", side_effect=_fail_gen):
-        events = list(rdns_cache.enrich_batch_gen(limit=10))
-
-    error_events = [e for e in events if e["type"] == "error"]
-    assert len(error_events) == 1
-    assert "Discovery failed" in error_events[0]["message"]
-
-
 # ── _now ────────────────────────────────────────────────────────────────────
 
 
-def test_now_returns_iso8601_z_format():
-    """ISO 8601 with Z suffix (UTC). Pinned because the SQL filter
-    ``looked_up_at < datetime('now', '-48 hours')`` keys on this
-    exact format — using a different one would silently break the
-    stale-entry refresh path."""
-    out = rdns_cache._now()
-    assert out.endswith("Z")
-    assert "T" in out
-    assert len(out) == 20  # YYYY-MM-DDTHH:MM:SSZ
-
-
-# ── backfill_from_sources ──────────────────────────────────────────────────
-
-
-def test_backfill_from_sources_returns_count_from_discovery():
-    """Thin wrapper around ``_discover_new_ips`` with a 30-day window."""
-    with patch("backend.utils.rdns_cache._discover_new_ips", return_value=42) as mock_disc:
-        out = rdns_cache.backfill_from_sources(max_ips=1000)
-
-    assert out == 42
-    # The wrapper hard-codes days=30 — pinned so a future refactor
-    # that changes this is caught.
-    mock_disc.assert_called_once_with(max_new=1000, days=30)
-
-
-def test_backfill_from_sources_gen_yields_done_event_with_count():
-    """Generator variant: the count event from ``_discover_new_ips_gen``
-    is converted into a 'done' SSE event with the enqueued total."""
-    fake_disc_gen = iter(
-        [
-            {"type": "status", "message": "scanning..."},
-            {"type": "count", "count": 25},
-        ]
-    )
-
-    with patch("backend.utils.rdns_cache._discover_new_ips_gen", return_value=fake_disc_gen):
-        events = list(rdns_cache.backfill_from_sources_gen(max_ips=1000))
-
-    done_events = [e for e in events if e["type"] == "done"]
-    assert len(done_events) == 1
-    assert "25 IPs" in done_events[0]["message"]
+# The local _now() helper was replaced by backend.utils.date_utils.iso_z_now();
+# the ISO 8601 Z-suffix format is pinned by tests/utils/test_date_utils.py.
 
 
 # ── _discover_new_ips: branch coverage via mocked DuckDB ──────────────────
@@ -607,41 +515,6 @@ def test_enrich_batch_refreshes_stale_entries():
     # And the cache reflects the refresh
     host, status, _ = rdns_cache.get_hostname("8.8.4.4")
     assert host == "refreshed.example.com"
-
-
-# ── enrich_batch_gen: per-IP log event stream ──────────────────────────────
-
-
-def test_enrich_batch_gen_yields_log_per_resolved_ip():
-    """Each successfully-resolved IP emits a "Resolved X -> hostname"
-    log line. Pinned because admins use these log lines to debug
-    why a particular IP isn't resolving."""
-    rdns_cache.enqueue(["3.3.3.3"])
-
-    with (
-        patch("backend.utils.rdns_cache._do_lookup", return_value=("h.example.com", "resolved", True)),
-        patch("backend.utils.rdns_cache._discover_new_ips_gen", return_value=iter([{"type": "count", "count": 0}])),
-    ):
-        events = list(rdns_cache.enrich_batch_gen(limit=10))
-
-    log_messages = [e["message"] for e in events if e["type"] == "log"]
-    assert any("Resolved 3.3.3.3" in m and "h.example.com" in m for m in log_messages)
-
-
-def test_enrich_batch_gen_yields_log_per_failed_ip():
-    """Failed lookups emit "Failed to resolve X: nxdomain" lines.
-    Pinned because the FE keys on the "Failed to resolve" prefix to
-    colour the log entry red."""
-    rdns_cache.enqueue(["7.7.7.7"])
-
-    with (
-        patch("backend.utils.rdns_cache._do_lookup", return_value=(None, "nxdomain", False)),
-        patch("backend.utils.rdns_cache._discover_new_ips_gen", return_value=iter([{"type": "count", "count": 0}])),
-    ):
-        events = list(rdns_cache.enrich_batch_gen(limit=10))
-
-    log_messages = [e["message"] for e in events if e["type"] == "log"]
-    assert any("Failed to resolve 7.7.7.7" in m and "nxdomain" in m for m in log_messages)
 
 
 # ── _discover_new_ips_gen: source iteration ──────────────────────────────

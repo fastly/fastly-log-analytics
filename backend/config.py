@@ -77,7 +77,10 @@ def _ensure_dirs():
         _ensured_dirs.add(d)
 
 
-_SERVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# Alphabet shared with backend.deps.ServiceId. Public so the FastAPI
+# Path validator can reuse the same pattern instead of redefining it.
+SERVICE_ID_PATTERN = r"^[A-Za-z0-9_-]+$"
+_SERVICE_ID_RE = re.compile(SERVICE_ID_PATTERN)
 _SERVICE_ID_MAX_LEN = 64
 
 
@@ -120,7 +123,7 @@ def duckdb_path(service_id: str) -> str:
     return str(SERVICES_DATA_DIR / f"{service_id}.duckdb")
 
 
-def load_config(service_id: str) -> dict | None:
+def load_config(service_id: str | None) -> dict | None:
     """Load a single service config by ID. Returns None if not found.
 
     Returns a freshly-parsed dict on every call — callers that mutate the
@@ -128,13 +131,15 @@ def load_config(service_id: str) -> dict | None:
     revalidated via st_mtime_ns, so external edits and save_config writes
     are picked up on the next call without explicit invalidation.
 
-    Returns ``None`` (not a raised exception) for invalid service IDs —
-    several call sites pass unsanitized input (e.g., a stale URL param,
-    an iteration over a stale config list) and rely on the None response
-    to mean "no config". Security's validation in ``config_path`` is
-    still what blocks the actual path-traversal attack; this just makes
-    the helper friendlier at call sites that don't pre-validate.
+    Returns ``None`` (not a raised exception) for invalid service IDs,
+    including ``None`` itself — several call sites in the iceberg/
+    submodules pass ``src.get("name")`` (typed as ``Any | None``) and
+    rely on the None response to mean "no config". Security's validation
+    in ``config_path`` is still what blocks path-traversal; this just
+    makes the helper friendlier at call sites that don't pre-validate.
     """
+    if service_id is None:
+        return None
     try:
         path = config_path(service_id)
     except ValueError:
@@ -156,22 +161,21 @@ def load_config(service_id: str) -> dict | None:
     return parsed
 
 
-def save_config(service_id: str, cfg: dict):
-    """Write a service config atomically.
+def _atomic_write_json(path, data: dict) -> None:
+    """Write ``data`` to ``path`` atomically (unique tmp file + os.replace).
 
-    Uses a UNIQUE tmp file (per-call random suffix) so concurrent save_config
-    calls — e.g. two cron ticks racing update_status — cannot clobber each
-    other's tmp file mid-write. The shared-tmp variant produced corrupted
-    JSON (a stray ``}`` appended to the rendered file) and bricked the backend
-    on next read; we hit it twice in one debugging session before fixing.
+    Shared by :func:`save_config` and :func:`save_usage_logging_config`,
+    which used to paste identical mkstemp / fdopen / json.dump / os.replace
+    blocks. Uses a UNIQUE tmp file (per-call random suffix) so concurrent
+    callers cannot clobber each other's tmp file mid-write. The shared-tmp
+    variant produced corrupted JSON (a stray ``}`` appended to the rendered
+    file) and bricked the backend on next read; we hit it twice in one
+    debugging session before fixing.
     """
-    global _cdn_service_id_map
-    _ensure_dirs()
-    path = config_path(service_id)
     fd, tmp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(cfg, f, indent=2)
+            json.dump(data, f, indent=2)
         os.replace(tmp_path, path)
     except Exception:
         try:
@@ -179,6 +183,13 @@ def save_config(service_id: str, cfg: dict):
         except OSError:
             pass
         raise
+
+
+def save_config(service_id: str, cfg: dict):
+    """Write a service config atomically. See :func:`_atomic_write_json`."""
+    global _cdn_service_id_map
+    _ensure_dirs()
+    _atomic_write_json(config_path(service_id), cfg)
     # Invalidate the load_config cache. The cache uses st_mtime_ns as its
     # revalidation key, which is normally fine — but on Linux ext4/tmpfs two
     # os.replace() calls within the same microsecond can produce identical
@@ -311,31 +322,22 @@ def config_to_source(cfg: dict) -> dict:
 
 def fetch_service_name(service_id: str, api_key: str) -> str | None:
     """Fetch the human-readable service name from the Fastly API.
-    Returns None on failure (caller should use cached name).
+
+    Routes through the shared ``fastly()`` client with ``timeout=10`` +
+    ``max_retries=1`` so the worst-case cold-path tail stays bounded
+    (~21 s vs the client default of ~127 s). The caller is behind a
+    300 s name cache (see :func:`refresh_service_name`) so steady-state
+    cost is one call per service per 5 min.
+
+    Returns None on failure (caller should use the cached name).
     """
+    from backend.core.fastly.client import fastly
+
     try:
-        from backend.utils.telemetry import tracked_call
-    except ImportError:
-        tracked_call = None
-
-    def _do_fetch():
-        try:
-            import urllib.request
-
-            req = urllib.request.Request(
-                f"https://api.fastly.com/service/{service_id}",
-                headers={"Fastly-Key": api_key, "Accept": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return data.get("name")
-        except Exception:
-            return None
-
-    if tracked_call:
-        with tracked_call("GET", f"/service/{service_id}", service="Fastly API"):
-            return _do_fetch()
-    return _do_fetch()
+        data = fastly("GET", f"/service/{service_id}", token=api_key, timeout=10, max_retries=1)
+        return data.get("name")
+    except Exception:
+        return None
 
 
 def refresh_service_name(service_id: str, api_key: str | None = None) -> str:
@@ -419,34 +421,37 @@ def refresh_all_service_names(configs: list[dict]) -> dict[str, str]:
 # ── Fastly credential helpers ─────────────────────────────────────────────────
 
 
-def get_fastly_api_key(service_id: str | None = None) -> str:
-    """Return the Fastly API key for a service (or the active service)."""
+def _get_cfg_field(field: str, service_id: str | None, default):
+    """Return ``cfg[field]`` for ``service_id`` (or the active service), or
+    ``default`` when nothing is configured.
+
+    Shared by the four near-identical fastly + ngwaf accessors below. All
+    four used to paste the same ``sid = service_id or get_active_service_id();
+    if sid: cfg = load_config(sid); if cfg: return cfg.get(field, ...)``
+    block. Pulling the dispatch up means adding another accessor is a
+    one-line tuple addition.
+    """
     sid = service_id or get_active_service_id()
     if sid:
         cfg = load_config(sid)
         if cfg:
-            return cfg.get("fastly_api_key", "")
-    return ""
+            return cfg.get(field, default)
+    return default
+
+
+def get_fastly_api_key(service_id: str | None = None) -> str:
+    """Return the Fastly API key for a service (or the active service)."""
+    return _get_cfg_field("fastly_api_key", service_id, "")
 
 
 def get_fastly_service_id(service_id: str | None = None) -> str:
     """Return the CDN service ID for a service."""
-    sid = service_id or get_active_service_id()
-    if sid:
-        cfg = load_config(sid)
-        if cfg:
-            return cfg.get("cdn_service_id", "")
-    return ""
+    return _get_cfg_field("cdn_service_id", service_id, "")
 
 
 def get_fastly_logging_service_id(service_id: str | None = None) -> str:
     """Return the logging service ID (the FOS logging endpoint's parent service)."""
-    sid = service_id or get_active_service_id()
-    if sid:
-        cfg = load_config(sid)
-        if cfg:
-            return cfg.get("service_id", "")
-    return ""
+    return _get_cfg_field("service_id", service_id, "")
 
 
 def ngwaf_db_path() -> str:
@@ -456,10 +461,7 @@ def ngwaf_db_path() -> str:
 
 def get_ngwaf_workspace_id(service_id: str) -> str | None:
     """Return the ngwaf_workspace_id for a service, or None if not configured."""
-    cfg = load_config(service_id)
-    if cfg:
-        return cfg.get("ngwaf_workspace_id") or None
-    return None
+    return _get_cfg_field("ngwaf_workspace_id", service_id, None) or None
 
 
 # ── Global usage logging config ────────────────────────────────────────────────
@@ -495,21 +497,10 @@ def load_usage_logging_config() -> dict:
 
 
 def save_usage_logging_config(cfg: dict):
-    """Persist the global usage logging config atomically. See save_config()
-    for why we use a unique tmp file."""
+    """Persist the global usage logging config atomically. See
+    :func:`_atomic_write_json`."""
     _ensure_dirs()
-    path = _USAGE_LOGGING_CONFIG_PATH
-    fd, tmp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(cfg, f, indent=2)
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    _atomic_write_json(_USAGE_LOGGING_CONFIG_PATH, cfg)
 
 
 def is_usage_logging_enabled() -> bool:

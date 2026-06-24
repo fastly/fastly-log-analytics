@@ -25,7 +25,8 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-from backend.core import ingest, metadata_db
+from backend.core import ingest
+from backend.core import metadata as metadata_db
 
 
 def test_deterministic_buffer_name_is_stable_across_runs():

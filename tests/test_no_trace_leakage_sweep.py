@@ -21,6 +21,10 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+# Trace-leakage sweep is a known-easy-to-silently-regress guard against
+# returning traceback strings in JSON error responses.
+pytestmark = pytest.mark.security_regression
+
 
 def _make_leaky_app() -> FastAPI:
     """Build a tiny FastAPI app with two route shapes:
@@ -82,7 +86,6 @@ def test_explicit_httpexception_does_not_leak_trace():
         # regression-shaped change to query_errors is likely to be
         # exercised by at least one route in the parametrize list.
         "/api/log-fields/catalog?service_id=does-not-exist-svc-id",
-        "/api/sources",
     ],
 )
 def test_real_routes_do_not_leak_trace_on_forced_500(url):

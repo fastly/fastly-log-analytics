@@ -111,26 +111,39 @@ provider "fastly" {
     # what the CLI expects.
     shutil.copy(TFTEST_DIR / "resource_graph.tftest.hcl", tmp_path / "resource_graph.tftest.hcl")
 
-    init = subprocess.run(
-        ["terraform", "init", "-backend=false", "-input=false", "-no-color"],
-        cwd=str(tmp_path),
-        capture_output=True,
-        text=True,
-    )
-    assert init.returncode == 0, f"terraform init failed:\n{init.stdout}\n{init.stderr}"
+    from pathlib import Path
 
-    # `terraform test` runs each `run` block and reports per-assertion failures.
-    test = subprocess.run(
-        ["terraform", "test", "-no-color"],
-        cwd=str(tmp_path),
-        capture_output=True,
-        text=True,
-    )
-    assert test.returncode == 0, (
-        f"terraform test failed (resource-graph assertion broke):\n"
-        f"--- stdout ---\n{test.stdout}\n"
-        f"--- stderr ---\n{test.stderr}"
-    )
+    from filelock import FileLock
+
+    cache_dir = Path(__file__).parents[2] / "cache" / "tf_provider_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["TF_PLUGIN_CACHE_DIR"] = str(cache_dir)
+
+    lock_path = cache_dir.parent / "tf_provider_cache.lock"
+    with FileLock(str(lock_path)):
+        init = subprocess.run(
+            ["terraform", "init", "-backend=false", "-input=false", "-no-color"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert init.returncode == 0, f"terraform init failed:\n{init.stdout}\n{init.stderr}"
+
+        # `terraform test` runs each `run` block and reports per-assertion failures.
+        test = subprocess.run(
+            ["terraform", "test", "-no-color"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert test.returncode == 0, (
+            f"terraform test failed (resource-graph assertion broke):\n"
+            f"--- stdout ---\n{test.stdout}\n"
+            f"--- stderr ---\n{test.stderr}"
+        )
 
     # Sanity: every run block should report as `pass`. The stdout has
     # lines like "  run \"foo\"... pass". If the binary's output format

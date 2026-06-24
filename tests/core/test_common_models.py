@@ -1,7 +1,7 @@
 import pytest
 
 from backend.models.common import FilterSpec
-from backend.repositories.utils.filters import build_where_clause, resolve_col
+from backend.repositories.utils.filters import build_where_clause
 
 
 def test_build_where_clause_basic():
@@ -57,24 +57,6 @@ def test_build_where_clause_inline():
     # the wildcard branch and makes mixed-type filter values safe.
     assert "(CAST(status AS VARCHAR) IN ('200', '404'))" in sql
     assert "(CAST(country AS VARCHAR) NOT IN ('US'))" in sql
-
-
-# ── resolve_col ───────────────────────────────────────────────────────────────
-
-
-class TestResolveCol:
-    def test_returns_col_when_actual_cols_unknown(self):
-        assert resolve_col("status", None) == "status"
-
-    def test_returns_col_when_present(self):
-        assert resolve_col("status", ["status", "country"]) == "status"
-
-    def test_non_aliased_col_returned_unchanged(self):
-        assert resolve_col("country", ["country", "city"]) == "country"
-
-    def test_unknown_col_returns_self(self):
-        # col not in actual_cols — returns self fallback
-        assert resolve_col("city", ["country"]) == "city"
 
 
 # ── build_where_clause extended cases ─────────────────────────────────────────

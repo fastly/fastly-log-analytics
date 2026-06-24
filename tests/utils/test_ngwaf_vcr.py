@@ -19,6 +19,12 @@ which complements what the MagicMock tests pin at the call level.
 Re-recording a cassette: delete it, then run with
 ``record_mode='new_episodes'`` against a real NGWAF workspace. Scrub the
 ``Fastly-Key`` header before committing.
+
+R-11 freshness gate fires at 90 days (lives in
+``tests/conftest.py::pytest_sessionstart``). When it fails collection
+with a stale cassette path, regenerate via:
+
+    uv run pytest tests/utils/test_ngwaf_vcr.py --vcr-record=all
 """
 
 from __future__ import annotations

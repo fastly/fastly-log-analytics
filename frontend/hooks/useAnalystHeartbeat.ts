@@ -2,6 +2,7 @@
 
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
+import { analystFetch } from '@/lib/analystFetch'
 
 interface Options {
   enabled: boolean
@@ -21,10 +22,11 @@ export function useAnalystHeartbeat({
   failuresBeforeOverlay = DEFAULT_FAILURES,
 }: Options) {
   const router = useRouter()
+  const [isTerminated, setIsTerminated] = React.useState(false)
   const [disconnected, setDisconnected] = React.useState(false)
 
   React.useEffect(() => {
-    if (!enabled) return
+    if (!enabled || isTerminated) return
     if (typeof window === 'undefined') return
 
     let lastActivity = Date.now()
@@ -37,7 +39,7 @@ export function useAnalystHeartbeat({
     }
 
     const tick = async () => {
-      if (cancelled) return
+      if (cancelled || isTerminated) return
       if (document.hidden) return
       if (Date.now() - lastActivity < idleAfterMs) return
       try {
@@ -45,11 +47,12 @@ export function useAnalystHeartbeat({
         // flows through the Next.js proxy that the tunnel exposes. The typed
         // client routes direct to 127.0.0.1:8000, which is unreachable from
         // the analyst's browser.
-        const res = await fetch('/api/share/heartbeat', {
-          credentials: 'include',
-          headers: { 'X-Remote-Analyst': '1' },
-        })
+        // 10s timeout — heartbeats are frequent and must not back up if
+        // the network is wedged. A stuck fetch would still leave the
+        // setInterval queueing more, so a tight bound is load-bearing.
+        const res = await analystFetch('/api/share/heartbeat', {}, 10_000)
         if (res.status === 401 || res.status === 403) {
+          setIsTerminated(true)
           router.replace('/share-login')
           return
         }

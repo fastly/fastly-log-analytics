@@ -4,25 +4,26 @@ import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
-import { 
-  Card, 
-  CardContent, 
-  CardHeader, 
+import {
+  Card,
+  CardContent,
+  CardHeader,
   CardTitle
 } from "@/components/ui/card"
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
-import { 
-  Database, 
-  Layers, 
-  FileCode, 
-  Clock, 
+import {
+  Database,
+  Layers,
+  FileCode,
+  Clock,
   Info,
   Archive
 } from 'lucide-react'
-import { formatBytes } from '@/lib/utils'
+import { formatBytes } from '@/lib/format'
 import { formatRelative } from '@/lib/date'
 import { useDateFormat } from '@/hooks/useDateFormat'
+import { Button } from '@/components/ui/button'
 import {
   Tooltip,
   TooltipContent,
@@ -31,9 +32,13 @@ import {
 } from "@/components/ui/tooltip"
 
 export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
-  const { activeServiceId } = useServiceStore()
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
   const { full, abbr } = useDateFormat()
 
+  // Freshness is driven by useCronRunsStream invalidating
+  // ['admin', 'iceberg'] when an iceberg-mutating cron task finishes.
+  // The 5-min interval is a pure safety net (silently-dropped stream,
+  // missed wakeup) — same shape as useSyncStatus/useLastSync.
   const { data: info, isLoading, error } = useQuery({
     queryKey: ['admin', 'iceberg', activeServiceId],
     queryFn: async () => {
@@ -41,8 +46,8 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
       return data as any
     },
     enabled: !!activeServiceId,
-    refetchInterval: 30000,
-    staleTime: 0
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
   })
 
   if (!activeServiceId) return null
@@ -98,8 +103,19 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
                 {stat.label}
                 <TooltipProvider>
                   <Tooltip>
-                    <TooltipTrigger render={<span className="flex items-center" />}>
-                      <Info className="h-3 w-3 opacity-40 " />
+                    {/* A-8 (a11y, WCAG 2.1.1): Button (not span) so keyboard
+                        users can tab to the info icon. */}
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`More info: ${stat.label}`}
+                          className="flex items-center opacity-40 hover:opacity-100"
+                        />
+                      }
+                    >
+                      <Info className="h-3 w-3 " />
                     </TooltipTrigger>
                     <TooltipContent className="text-[10px] max-w-[150px]">
                       {stat.tooltip}
@@ -115,8 +131,16 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
               ) : (
                 <TooltipProvider>
                   <Tooltip>
+                    {/* A-8 (a11y, WCAG 2.1.1): tabIndex + role="button" so
+                        keyboard users can focus the value and reveal the
+                        explanatory tooltip. */}
                     <TooltipTrigger render={
-                      <div className="text-xl font-mono font-bold tracking-tight ">
+                      <div
+                        className="text-xl font-mono font-bold tracking-tight rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        tabIndex={0}
+                        role="button"
+                        aria-label={`${stat.label}: ${stat.value}`}
+                      >
                         {stat.value}
                       </div>
                     } />

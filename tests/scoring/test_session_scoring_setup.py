@@ -16,6 +16,8 @@ from backend.provision.session_scoring_setup import (
     DEBUG_LOG_DEFAULT,
     DEBUG_LOG_KEY,
     KEYS_RESOURCE_LINK_NAME,
+    MATRIX_RESOURCE_LINK_NAME,
+    SCORING_ENABLED_AT_KEY,
     delete_scoring_service,
     ensure_scoring_service,
 )
@@ -56,6 +58,9 @@ def _fastly_mock_for_create():
         ("POST", "/resources/stores/config/KEYS_STORE_ID/item"): {},
         ("POST", "/resources/stores/config/CFG_STORE_ID/item"): {},
         ("POST", "/service/SCORING_SVC_ID/version/1/resource"): {},
+        # Matrix KV store: not found on first list, then created.
+        ("GET", "/resources/stores/kv"): [],
+        ("POST", "/resources/stores/kv"): {"id": "MATRIX_STORE_ID", "name": "scoring_matrix_SCORING_SVC_ID"},
     }
 
     config_store_responses = iter(
@@ -84,6 +89,7 @@ def test_ensure_creates_full_stack_when_nothing_exists():
     assert result["scoring_domain"] == f"fos-{LOG_SVC.lower()}-session-scorer.edgecompute.app"
     assert result["scoring_keys_store_id"] == "KEYS_STORE_ID"
     assert result["scoring_config_store_id"] == "CFG_STORE_ID"
+    assert result["scoring_matrix_store_id"] == "MATRIX_STORE_ID"
     # Real AES key — 64 hex chars (32 bytes).
     assert len(result["aes_key_hex"]) == 64
     int(result["aes_key_hex"], 16)  # valid hex
@@ -113,11 +119,19 @@ def test_ensure_creates_full_stack_when_nothing_exists():
     # 7. Debug toggle uploaded to config store, default "0".
     debug_upload = next(c for c in calls if c.args[1].endswith("/CFG_STORE_ID/item"))
     assert debug_upload.args[2] == {"item_key": DEBUG_LOG_KEY, "item_value": DEBUG_LOG_DEFAULT}
-    # 8. Resource links created with the short names the Wasm expects.
+    # 7b. Layer-2 warm-up anchor seeded into the config store with an epoch value
+    #     (EC-01). It rides the same POST .../CFG_STORE_ID/item path as the debug
+    #     toggle, so select it by item_key.
+    cfg_item_posts = [c for c in calls if c.args[:2] == ("POST", "/resources/stores/config/CFG_STORE_ID/item")]
+    anchor_upload = next(c for c in cfg_item_posts if c.args[2]["item_key"] == SCORING_ENABLED_AT_KEY)
+    assert anchor_upload.args[2]["item_value"].isdigit(), "anchor must be epoch seconds"
+    assert int(anchor_upload.args[2]["item_value"]) > 0
+    # 8. Resource links created with the short names the Wasm expects
+    #    (keys + config ConfigStores + the matrix KV store).
     link_calls = [c for c in calls if c.args[1].endswith("/version/1/resource")]
-    assert len(link_calls) == 2
+    assert len(link_calls) == 3
     link_names = {c.args[2]["name"] for c in link_calls}
-    assert link_names == {KEYS_RESOURCE_LINK_NAME, CONFIG_RESOURCE_LINK_NAME}
+    assert link_names == {KEYS_RESOURCE_LINK_NAME, CONFIG_RESOURCE_LINK_NAME, MATRIX_RESOURCE_LINK_NAME}
 
 
 # ── ensure_scoring_service: idempotent reuse path ────────────────────────────
@@ -136,6 +150,15 @@ def test_ensure_reuses_existing_service():
                 {"id": "EXISTING_KEYS", "name": "scoring_keys_EXISTING_SVC_ID"},
                 {"id": "EXISTING_CFG", "name": "scoring_config_EXISTING_SVC_ID"},
             ]
+        # Matrix KV store already exists for this service → no self-heal create.
+        if (method, path) == ("GET", "/resources/stores/kv"):
+            return [{"id": "EXISTING_MATRIX", "name": "scoring_matrix_EXISTING_SVC_ID"}]
+        # request_secret is read back from the store (source of truth) on reuse.
+        if (method, path) == ("GET", "/resources/stores/config/EXISTING_KEYS/item/request_secret"):
+            return {"item_key": "request_secret", "item_value": "stored_secret_" + "z" * 50}
+        # Warm-up anchor already present → preserved, no re-seed (write-once).
+        if (method, path) == ("GET", f"/resources/stores/config/EXISTING_CFG/item/{SCORING_ENABLED_AT_KEY}"):
+            return {"item_key": SCORING_ENABLED_AT_KEY, "item_value": "1700000000"}
         # We should NOT see any POSTs.
         raise AssertionError(f"unexpected API call: {method} {path}")
 
@@ -146,8 +169,50 @@ def test_ensure_reuses_existing_service():
     assert result["scoring_service_id"] == "EXISTING_SVC_ID"
     assert result["scoring_keys_store_id"] == "EXISTING_KEYS"
     assert result["scoring_config_store_id"] == "EXISTING_CFG"
+    assert result["scoring_matrix_store_id"] == "EXISTING_MATRIX"
+    # request_secret is read back from the store (source of truth) so the
+    # caller embeds the store's actual secret into the VCL — no cfg/store drift.
+    assert result["request_secret"] == "stored_secret_" + "z" * 50
     # Critical: we did NOT rotate the AES key on a reuse.
     assert result["aes_key_hex"] == ""
+
+
+def test_ensure_reuse_heals_missing_warmup_anchor():
+    """A service provisioned before EC-01 has no scoring_enabled_at anchor.
+    Re-enabling it must SEED the anchor (write-once) so the service's advisory
+    readiness clock starts from now — not turn L2 on with a step change. Pins that
+    the reuse path POSTs the anchor exactly when the GET 404s."""
+    existing = {"id": "EXISTING_SVC_ID", "name": f"Session Scoring Service for {LOG_SVC}"}
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if (method, path) == ("GET", "/service"):
+            return [existing]
+        if (method, path) == ("GET", "/resources/stores/config"):
+            return [
+                {"id": "EXISTING_KEYS", "name": "scoring_keys_EXISTING_SVC_ID"},
+                {"id": "EXISTING_CFG", "name": "scoring_config_EXISTING_SVC_ID"},
+            ]
+        if (method, path) == ("GET", "/resources/stores/kv"):
+            return [{"id": "EXISTING_MATRIX", "name": "scoring_matrix_EXISTING_SVC_ID"}]
+        if (method, path) == ("GET", "/resources/stores/config/EXISTING_KEYS/item/request_secret"):
+            return {"item_key": "request_secret", "item_value": "s" * 64}
+        # Anchor item MISSING on this legacy service → GET 404s, heal POSTs it.
+        if (method, path) == ("GET", f"/resources/stores/config/EXISTING_CFG/item/{SCORING_ENABLED_AT_KEY}"):
+            raise RuntimeError("404 not found")
+        if (method, path) == ("POST", "/resources/stores/config/EXISTING_CFG/item"):
+            return {}
+        raise AssertionError(f"unexpected API call: {method} {path}")
+
+    fastly_mock = MagicMock(side_effect=side_effect)
+    with patch("backend.provision.session_scoring_setup.fastly", fastly_mock):
+        result = ensure_scoring_service(LOG_SVC, TOKEN)
+
+    assert result["scoring_service_id"] == "EXISTING_SVC_ID"
+    anchor_post = next(
+        c for c in fastly_mock.call_args_list if c.args[:2] == ("POST", "/resources/stores/config/EXISTING_CFG/item")
+    )
+    assert anchor_post.args[2]["item_key"] == SCORING_ENABLED_AT_KEY
+    assert anchor_post.args[2]["item_value"].isdigit()
 
 
 # ── ensure_scoring_service: status callback wiring ───────────────────────────
@@ -189,6 +254,7 @@ def test_delete_runs_full_teardown_in_correct_order():
             "SVC_X",
             scoring_keys_store_id="KEYS_X",
             scoring_config_store_id="CFG_X",
+            scoring_matrix_store_id="MATRIX_X",
             token=TOKEN,
         )
 
@@ -202,6 +268,11 @@ def test_delete_runs_full_teardown_in_correct_order():
     assert svc_delete_idx < cfg_delete_idx
     # Inactive version (#2) does NOT get a deactivate call.
     assert ("PUT", "/service/SVC_X/version/2/deactivate") not in calls_in_order
+    # Matrix KV store torn down too: empty the key first, then the store,
+    # both after the service is gone (resource link would otherwise block it).
+    kv_key_idx = calls_in_order.index(("DELETE", "/resources/stores/kv/MATRIX_X/keys/matrix"))
+    kv_store_idx = calls_in_order.index(("DELETE", "/resources/stores/kv/MATRIX_X"))
+    assert svc_delete_idx < kv_key_idx < kv_store_idx
 
 
 def test_delete_skips_already_deleted_service_silently():

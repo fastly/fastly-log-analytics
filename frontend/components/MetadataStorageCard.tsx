@@ -2,12 +2,13 @@
 
 import * as React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { SSEModal } from '@/components/SSEModal/SSEModal'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Trash2, Database, Pencil, Check, X, Lock } from 'lucide-react'
+import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 
 type TableStat = { rows: number; bytes: number | null }
@@ -70,12 +71,18 @@ function fmtDays(n: number): string {
 
 export function MetadataStorageCard() {
   const qc = useQueryClient()
+  // SSR-safe: ['admin','metadata-storage'] is a live client-only query (fed by
+  // useSystemMetricsStream, no bootstrap seed) so the server renders no table
+  // while the client paints it once the SSE/fetch lands — a hydration mismatch
+  // on /admin. Force the loading state until mounted so both renders agree.
+  const mounted = useMounted()
 
   // Service resolution flows through the client middleware (x-service-id
   // header injected from useServiceStore) and the backend's get_source
   // fallback. We don't gate on activeServiceId here — the other admin
   // cards (SystemHealthCard etc.) follow the same pattern, and gating
   // means the card sits in loading forever when the store hasn't hydrated.
+  // Freshness via useSystemMetricsStream. Safety-net poll only.
   const { data, isLoading, isFetching, error } = useQuery<StorageResponse>({
     queryKey: ['admin', 'metadata-storage'],
     queryFn: async () => {
@@ -83,7 +90,7 @@ export function MetadataStorageCard() {
       return data as StorageResponse
     },
     staleTime: 30_000,
-    refetchInterval: 60_000,
+    refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
     retry: 1,
   })
@@ -125,39 +132,14 @@ export function MetadataStorageCard() {
     },
   })
 
-  if (error) {
-    return (
-      <AnalyticsCard
-        title="Metadata Storage"
-        icon={<Database className="h-4 w-4" />}
-        description="Per-table row counts + on-disk size for this service's metadata.db."
-      >
-        <div className="text-sm p-3 rounded-lg border border-destructive/50 bg-destructive/5 text-destructive">
-          Failed to load metadata storage stats: {(error as Error).message}
-        </div>
-      </AnalyticsCard>
-    )
-  }
+  const rows = data
+    ? [
+        ...TRIMMABLE.map((name) => ({ name, trimmable: true, stat: data.tables[name] })),
+        ...REFERENCE.map((name) => ({ name, trimmable: false, stat: data.tables[name] })),
+      ].filter((r) => r.stat)
+    : []
 
-  if (isLoading || !data) {
-    return (
-      <AnalyticsCard
-        title="Metadata Storage"
-        icon={<Database className="h-4 w-4" />}
-        description="Per-table row counts + on-disk size for this service's metadata.db."
-        isLoading
-      >
-        <div className="h-32 animate-pulse rounded-lg bg-muted" />
-      </AnalyticsCard>
-    )
-  }
-
-  const rows = [
-    ...TRIMMABLE.map((name) => ({ name, trimmable: true, stat: data.tables[name] })),
-    ...REFERENCE.map((name) => ({ name, trimmable: false, stat: data.tables[name] })),
-  ].filter((r) => r.stat)
-
-  const headerAction = (
+  const headerAction = data ? (
     <SSEModal
       title="Run metadata cleanup now"
       description={
@@ -188,21 +170,24 @@ export function MetadataStorageCard() {
         </Button>
       }
     />
-  )
+  ) : undefined
 
   return (
     <AnalyticsCard
       title="Metadata Storage"
       icon={<Database className="h-4 w-4" />}
       description="Per-table row counts + on-disk size for this service's metadata.db. Daily auto-cleanup at 03:15 UTC."
-      isFetching={isFetching}
+      isLoading={!mounted || isLoading}
+      isFetching={mounted && isFetching}
+      error={mounted ? (error as AnalyticsCardError | null) : null}
       headerAction={headerAction}
     >
+      {mounted && data ? (
       <div className="space-y-4">
         {/* Retention summary — view or edit */}
         <div className="p-3 border rounded-lg bg-muted/30 space-y-2">
           <div className="flex items-center justify-between">
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Retention policy</div>
+            <div className="text-[11px] sm:text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Retention policy</div>
             {editing ? (
               <div className="flex items-center gap-1">
                 <Button
@@ -264,14 +249,17 @@ export function MetadataStorageCard() {
             </div>
           )}
           {editing && (
-            <div className="text-[10px] text-muted-foreground pt-1">
+            <div className="text-[11px] sm:text-[10px] text-muted-foreground pt-1">
               Set a value to 0 to disable cleanup for that table.
             </div>
           )}
         </div>
 
         {/* Per-table breakdown */}
-        <div className="border rounded-lg overflow-hidden">
+        {/* M-6 (audit, mobile UX): overflow-x-auto on the wrapper so the
+            4-column table scrolls horizontally on phones instead of forcing
+            the whole admin card to overflow its parent. */}
+        <div className="border rounded-lg overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-muted/50">
               <tr className="text-left">
@@ -288,14 +276,14 @@ export function MetadataStorageCard() {
                   <tr key={r.name} className="border-t">
                     <td className="px-3 py-2">
                       <div className="text-sm font-medium">{label}</div>
-                      <div className="text-[10px] text-muted-foreground font-mono">{r.name}</div>
-                      {sub && <div className="text-[10px] text-muted-foreground mt-0.5">{sub}</div>}
+                      <div className="text-[11px] sm:text-[10px] text-muted-foreground font-mono">{r.name}</div>
+                      {sub && <div className="text-[11px] sm:text-[10px] text-muted-foreground mt-0.5">{sub}</div>}
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums align-top">{fmtRows(r.stat.rows)}</td>
                     <td className="px-3 py-2 text-right tabular-nums align-top">{fmtBytes(r.stat.bytes)}</td>
                     <td className="px-3 py-2 text-center align-top">
                       {r.trimmable ? (
-                        <Badge variant="secondary" className="text-[10px]">
+                        <Badge variant="secondary" className="text-[11px] sm:text-[10px]">
                           {fmtDays(
                             r.name === 'usage_log'
                               ? data.retention.usage_log_days
@@ -327,6 +315,7 @@ export function MetadataStorageCard() {
 
 
       </div>
+      ) : null}
     </AnalyticsCard>
   )
 }
@@ -350,11 +339,11 @@ function RetentionField({
 }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground flex items-center gap-1">
+      <div className="text-[11px] sm:text-[10px] uppercase tracking-wider text-muted-foreground flex items-center gap-1">
         {label}
         {locked && (
           <span title={lockedReason} className="inline-flex items-center text-amber-500" aria-label="locked">
-            <Lock className="h-3 w-3" />
+            <Lock className="h-3 w-3" aria-hidden="true" />
           </span>
         )}
       </div>
@@ -368,6 +357,7 @@ function RetentionField({
             disabled={locked}
             className="h-7 w-20 text-sm tabular-nums"
             title={locked ? lockedReason : undefined}
+            aria-label={`${label} retention in days`}
           />
           <span className="text-xs text-muted-foreground">days</span>
         </div>

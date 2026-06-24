@@ -277,6 +277,49 @@ def test_evaluate_per_reason_returns_buckets_for_every_known_atom():
     assert all(b["has_min_samples"] is False for b in result["buckets"])
 
 
+def test_known_reason_atoms_track_scorer_emitters():
+    """_KNOWN_REASON_ATOMS must mirror what the live scorer actually emits.
+
+    The cookie atoms are exercised directly against the Python reference
+    scorer so the most-recently-broken set stays tied to the producer.
+    ``rare-transition`` must be absent — it is emitted by neither the Rust
+    prod scorer nor the Python reference (the L2 rule emits
+    ``low-transition-prob``), and previously produced a perpetually-empty
+    per-rule bucket. ``cookie-replayed`` must be present: the prod (Rust)
+    scorer's ``format!("cookie-{}", compliance)`` emits it on the replay
+    path, so it appears in real ``edge_score_reason`` data even though the
+    Python reference scorer does not currently emit it.
+    """
+    from backend.scoring import scorer as pyscorer
+    from backend.scoring.evaluate import _KNOWN_REASON_ATOMS
+    from backend.scoring.normalize import Route
+
+    known = set(_KNOWN_REASON_ATOMS)
+
+    for compliance in ("missing", "expired", "tampered"):
+        res = pyscorer.score_combined(
+            state=None,
+            cookie_compliance=compliance,
+            current_route=Route("/checkout", "checkout"),
+            prev_route=Route("/home", "home"),
+            matrix=None,
+        )
+        emitted = set(res.reasons)
+        assert emitted, f"{compliance} emitted no reason atoms"
+        assert emitted <= known, f"{compliance}: {emitted - known} missing from _KNOWN_REASON_ATOMS"
+
+    assert "rare-transition" not in known
+    assert known == {
+        "cookie-missing",
+        "cookie-tampered",
+        "cookie-expired",
+        "cookie-replayed",
+        "impossibly-fast",
+        "robotic-consistency",
+        "low-transition-prob",
+    }
+
+
 def test_evaluate_from_persisted_scores_excludes_neutral_from_auc():
     from backend.scoring.evaluate import evaluate_from_persisted_scores
 

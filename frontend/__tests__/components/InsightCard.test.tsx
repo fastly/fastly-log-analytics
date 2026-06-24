@@ -44,6 +44,10 @@ vi.mock('@/components/Insights/ImpossibleDistanceModal', () => ({
   ImpossibleDistanceModal: ({ isOpen }: { isOpen: boolean }) =>
     isOpen ? <div data-testid="distance-modal-open" /> : null,
 }))
+vi.mock('@/components/Insights/CacheCollapseModal', () => ({
+  CacheCollapseModal: ({ isOpen }: { isOpen: boolean }) =>
+    isOpen ? <div data-testid="collapse-modal-open" /> : null,
+}))
 vi.mock('@/components/Insights/InsightItemRow', () => ({
   InsightItemRow: ({ item }: { item: { label?: string } }) => (
     <div data-testid="insight-item-row">{item.label ?? 'no-label'}</div>
@@ -65,7 +69,7 @@ const _BASE_INSIGHT = {
 
 describe('InsightCard', () => {
   it('renders title, summary, and severity badge', () => {
-    render(<InsightCard insight={_BASE_INSIGHT as never} />)
+    render(<InsightCard insight={_BASE_INSIGHT as never} windowHours="24" baselineHours="168" />)
     expect(screen.getByText('Error Spikes')).toBeTruthy()
     expect(screen.getByText('3 URLs with elevated server error rates')).toBeTruthy()
     // Severity badge surfaces as uppercase text
@@ -73,7 +77,7 @@ describe('InsightCard', () => {
   })
 
   it('renders one row per item up to 5', () => {
-    render(<InsightCard insight={_BASE_INSIGHT as never} />)
+    render(<InsightCard insight={_BASE_INSIGHT as never} windowHours="24" baselineHours="168" />)
     expect(screen.getAllByTestId('insight-item-row')).toHaveLength(3)
   })
 
@@ -86,7 +90,7 @@ describe('InsightCard', () => {
         severity: 'warning',
       })),
     }
-    render(<InsightCard insight={many as never} />)
+    render(<InsightCard insight={many as never} windowHours="24" baselineHours="168" />)
     // First 5 visible
     expect(screen.getAllByTestId('insight-item-row')).toHaveLength(5)
     // "Show 3 more" button
@@ -94,13 +98,13 @@ describe('InsightCard', () => {
   })
 
   it('does not show "Show more" when items <= 5', () => {
-    render(<InsightCard insight={_BASE_INSIGHT as never} />)
+    render(<InsightCard insight={_BASE_INSIGHT as never} windowHours="24" baselineHours="168" />)
     expect(screen.queryByText(/Show \d+ more/i)).toBeNull()
   })
 
   it('renders the help modal when the help button is clicked', async () => {
     const user = userEvent.setup()
-    render(<InsightCard insight={_BASE_INSIGHT as never} />)
+    render(<InsightCard insight={_BASE_INSIGHT as never} windowHours="24" baselineHours="168" />)
     expect(screen.queryByTestId('help-modal-open')).toBeNull()
     await user.click(screen.getByTitle('How this works'))
     expect(screen.getByTestId('help-modal-open')).toBeTruthy()
@@ -116,7 +120,7 @@ describe('InsightCard', () => {
         severity: 'warning',
       })),
     }
-    render(<InsightCard insight={many as never} />)
+    render(<InsightCard insight={many as never} windowHours="24" baselineHours="168" />)
     expect(screen.queryByTestId('data-modal-open')).toBeNull()
     // The "Show 3 more" button is a real <button>; role lookup is
     // sturdier than text matching against the localized label.
@@ -128,7 +132,7 @@ describe('InsightCard', () => {
     // Defensive: if backend ever introduces a new severity the FE doesn't
     // know about, the card must still render rather than blank.
     const weird = { ..._BASE_INSIGHT, severity: 'urgent' as never, items: [] }
-    render(<InsightCard insight={weird} />)
+    render(<InsightCard insight={weird} windowHours="24" baselineHours="168" />)
     expect(screen.getByText('Error Spikes')).toBeTruthy()
   })
 
@@ -140,7 +144,7 @@ describe('InsightCard', () => {
       summary: 'No error spikes detected',
       items: [],
     }
-    render(<InsightCard insight={clean} />)
+    render(<InsightCard insight={clean} windowHours="24" baselineHours="168" />)
     expect(screen.getByText('No error spikes detected')).toBeTruthy()
     expect(screen.queryAllByTestId('insight-item-row')).toHaveLength(0)
   })
@@ -150,7 +154,7 @@ describe('InsightCard', () => {
   // rule sets that work under jsdom (color-contrast needs a real layout
   // engine, so disable it; we still cover label/role/aria coverage).
   it('has no axe-detectable a11y violations', async () => {
-    const { container } = render(<InsightCard insight={_BASE_INSIGHT as never} />)
+    const { container } = render(<InsightCard insight={_BASE_INSIGHT as never} windowHours="24" baselineHours="168" />)
     const results = await axe(container, {
       rules: { 'color-contrast': { enabled: false } },
     })
@@ -165,8 +169,8 @@ describe('InsightCard', () => {
     const b = { ..._BASE_INSIGHT, id: 'botnet_grouping', title: 'Botnet Grouping' }
     render(
       <>
-        <InsightCard insight={a as never} />
-        <InsightCard insight={b as never} />
+        <InsightCard insight={a as never} windowHours="24" baselineHours="168" />
+        <InsightCard insight={b as never} windowHours="24" baselineHours="168" />
       </>,
     )
     expect(screen.getByText('Error Spikes')).toBeTruthy()

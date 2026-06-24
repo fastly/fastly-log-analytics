@@ -1,14 +1,13 @@
 'use client'
 
-import { useQuery } from '@tanstack/react-query'
 import { AlertCircle } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
 import { ScoreDistHelp } from '@/components/SessionScoring/help-content'
-import { Button } from '@/components/ui/button'
-import { client } from '@/lib/api'
 
 import { StackedHourlyBarChart } from './StackedHourlyBarChart'
+import { useScoringQuery } from './useScoringQuery'
 
 interface ScoreDistChartProps {
   serviceId: string
@@ -32,22 +31,12 @@ const BUCKET_COLORS: Record<(typeof BUCKETS)[number], string> = {
 }
 
 export function ScoreDistChart({ serviceId, sinceHours = 24 }: ScoreDistChartProps) {
-  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
-    queryKey: ['scoring-score-dist', serviceId, sinceHours],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/score-distribution' as any,
-        {
-          params: {
-            path: { service_id: serviceId },
-            query: { since_hours: sinceHours },
-          },
-        } as any,
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as { rows: DistRow[] }
-    },
-  })
+  const { data, isLoading, isFetching, isError, error, refetch } = useScoringQuery<{ rows: DistRow[] }>(
+    ['scoring-score-dist', serviceId, sinceHours],
+    serviceId,
+    'score-distribution',
+    { since_hours: sinceHours },
+  )
 
   if (isError) {
     return (
@@ -57,18 +46,13 @@ export function ScoreDistChart({ serviceId, sinceHours = 24 }: ScoreDistChartPro
         helpContent={<ScoreDistHelp />}
         helpTitle="About Score Distribution"
       >
-        <div className="flex flex-col items-start gap-3 p-4 border border-destructive/20 bg-destructive/5 rounded-md">
-          <div className="flex items-center gap-2 text-destructive">
-            <AlertCircle className="h-4 w-4" />
-            <span className="text-sm font-medium">Failed to load score distribution</span>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {(error as Error)?.message ?? 'unknown error'}
-          </p>
-          <Button size="sm" variant="outline" onClick={() => refetch()}>
-            Retry
-          </Button>
-        </div>
+        <CardErrorState
+          variant="stacked"
+          icon={<AlertCircle className="h-4 w-4" />}
+          title="Failed to load score distribution"
+          message={(error as Error)?.message ?? 'unknown error'}
+          onRetry={() => refetch()}
+        />
       </AnalyticsCard>
     )
   }
@@ -81,6 +65,7 @@ export function ScoreDistChart({ serviceId, sinceHours = 24 }: ScoreDistChartPro
       helpTitle="About Score Distribution"
       isLoading={isLoading}
       isFetching={isFetching}
+      isEmpty={(data?.rows?.length ?? 0) === 0}
       rows={data?.rows ?? []}
       categoryKey="bucket"
       colors={BUCKET_COLORS}

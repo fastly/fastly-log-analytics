@@ -37,7 +37,7 @@ from backend.main import app
 
 def _parse_sse_events(text: str) -> list[dict]:
     out: list[dict] = []
-    for chunk in text.split("\n\n"):
+    for chunk in text.replace("\r\n", "\n").split("\n\n"):
         chunk = chunk.strip()
         if chunk.startswith("data:"):
             try:

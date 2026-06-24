@@ -25,7 +25,6 @@
 #   (https://api.fastly.com/public-ip-list). When Fastly adds a new edge
 #   range, refresh this list. A stale list means legitimate traffic from a
 #   new POP is treated as direct (untrusted) until Caddy reloads.
-
 {
 	# No auto-HTTPS — Fastly handles TLS termination at the edge.
 	auto_https off
@@ -48,9 +47,26 @@
 		Referrer-Policy "strict-origin-when-cross-origin"
 		# Disable browser features we don't use.
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
-		# Conservative CSP. Next.js needs inline styles for hydration; loosen if
-		# you see CSP violations in DevTools after deploy.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		# Process-isolate from any cross-origin opener so a popup'd or
+		# embedded context can't access window.opener. Pair with the
+		# frame-ancestors 'none' CSP directive below — together they shut
+		# the cross-origin-window-leak side channel.
+		Cross-Origin-Opener-Policy "same-origin"
+		# CSP fallback — the ``?`` prefix sets the header only when the
+		# upstream response didn't set one. Next.js's proxy.ts emits a
+		# per-request nonce CSP on every page render (script-src 'self'
+		# 'nonce-XYZ' 'strict-dynamic' ...). When that header arrives,
+		# this directive is a no-op; if the proxy ever stops running
+		# (build regression, dep upgrade that drops middleware), the
+		# permissive 'unsafe-inline' policy below is the safety net so
+		# the app keeps loading.
+		#
+		# 'unsafe-eval' is intentionally absent — no app code uses eval(),
+		# new Function(), or string-form setTimeout/setInterval (grep-verified
+		# across frontend/{app,components,lib,hooks}). If a future dep pulls
+		# in a runtime template engine that breaks this, restore 'unsafe-eval'
+		# only on a confirmed console violation and note the cause here.
+		?Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 	}
 }
 
@@ -107,11 +123,43 @@
 	# of what Fastly-Client-IP value they send.
 	request_header @from_fastly_v4 X-Forwarded-For {http.request.header.Fastly-Client-IP}
 
+	# RFC 9116 /.well-known/security.txt — exposes the security-reporting
+	# contact + policy URL without requiring auth so researchers can find
+	# them directly. Served by Caddy as a static respond so neither the
+	# Next.js frontend nor the backend need to know about it.
+	#
+	# Expires must be a future ISO-8601 timestamp; bump it on each yearly
+	# refresh. RFC recommends <= 1 year. Re-sign / bump when the
+	# Fastly security-issue URL changes.
+	handle /.well-known/security.txt {
+		header Content-Type "text/plain; charset=utf-8"
+		respond `Contact: https://www.fastly.com/security/report-security-issue
+Expires: 2027-06-17T00:00:00Z
+Preferred-Languages: en
+Canonical: https://fastly-log-analytics.global.ssl.fastly.net/.well-known/security.txt
+Policy: https://github.com/fastly/fastly-log-analytics/blob/main/SECURITY.md
+` 200
+	}
+
 	# API → backend (preserve Host so backend's DNS-rebinding gate matches the
 	# registered public_endpoint).
+	#
+	# Bandaid for the dashboard-30d slow-query 502 (perf audit F0): the
+	# raw time_series scan can take 60-90 s on a 30d window when the
+	# rollup fast-path falls through (e.g. before the
+	# 2026-06-10_rollups_time_series_backfill migration completes on a
+	# given service). Caddy's default response_header_timeout is short
+	# enough that those requests come back to the client as 502 Bad
+	# Gateway. 120 s lets the slow path finish at the cost of one stuck
+	# worker per such request. Once the time_series rollup backfill is
+	# in place, queries return in <1 s and the timeout never matters.
 	@api path /api/*
 	reverse_proxy @api 127.0.0.1:8000 {
 		flush_interval -1
+		transport http {
+			response_header_timeout 120s
+			read_timeout 120s
+		}
 	}
 
 	# Everything else → Next.js frontend.

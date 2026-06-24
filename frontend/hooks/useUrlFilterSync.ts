@@ -1,13 +1,36 @@
 import { useEffect } from 'react'
 import { useFilterStore } from '@/stores/filterStore'
 import { useReportConfig } from './useReportConfig'
-import { usePageContext } from './usePageContext'
+import { useActiveService } from './useActiveService'
 import { client } from '@/lib/api'
 import { useQueryClient } from '@tanstack/react-query'
 
+// All sync URL → filterStore mapping (range, ?filters, ?filter_<col>=)
+// now happens inside ``hydrateFilterStoreFromUrl`` BEFORE first render,
+// so every consumer's first React Query key already reflects the URL.
+// This hook only handles the two cases that can't run synchronously:
+//
+//   - ``?view=<id>`` — needs an async API call into /api/views/{sid}
+//     (or the React Query cache the bootstrap seeds), so it has to wait
+//     for ``activeServiceId`` to be known.
+//   - ``?metric=<val>`` — feeds per-page useState in useReportConfig
+//     (the report-level metric is a page-local choice, not on filterStore).
+//
+// Anything else in the URL has already been consumed and stripped by
+// the time this effect runs.
 export function useUrlFilterSync() {
-  const { addFilter, clearFilters, setRange } = useFilterStore()
-  const { activeServiceId } = usePageContext()
+  const addFilter = useFilterStore(s => s.addFilter)
+  const clearFilters = useFilterStore(s => s.clearFilters)
+  const setRange = useFilterStore(s => s.setRange)
+  const setRelativeRange = useFilterStore(s => s.setRelativeRange)
+  const toggleEdgeOnly = useFilterStore(s => s.toggleEdgeOnly)
+  const toggleCompareMode = useFilterStore(s => s.toggleCompareMode)
+  const setCompareRange = useFilterStore(s => s.setCompareRange)
+  // Subscribe to the toggle-state values so the restore can compare without
+  // poking `useFilterStore.getState()` (which doesn't exist on the test mock).
+  const currentEdgeOnly = useFilterStore(s => s.edgeOnly)
+  const currentCompareMode = useFilterStore(s => s.compareMode)
+  const { activeServiceId } = useActiveService()
   const queryClient = useQueryClient()
   const { setMetric } = useReportConfig({
     defaultMetric: 'requests',
@@ -15,17 +38,12 @@ export function useUrlFilterSync() {
     defaultTrend: 'off'
   })
 
-  // Parse URL parameters on mount or when service changes
   useEffect(() => {
     if (typeof window === 'undefined' || !activeServiceId) return
 
     const params = new URLSearchParams(window.location.search)
-    let updated = false
-
-    const hasFilterParams = Array.from(params.keys()).some(k => k.startsWith('filter_'))
-    const hasRangeParams = params.get('start_time') && params.get('end_time')
-    const hasMetricParam = params.get('metric')
     const viewId = params.get('view')
+    const urlMetric = params.get('metric')
 
     const loadView = async (id: string) => {
       // Prefer the views cache (seeded by /api/bootstrap or warmed by
@@ -41,13 +59,44 @@ export function useUrlFilterSync() {
       }
       const view = (views as any)?.find((v: any) => v.id === id)
       if (view) {
-        if (view.start_time && view.end_time) {
+        // filters_json carries TWO shapes for backward compatibility:
+        //   - Legacy (older saved views): a bare FilterPill[] array.
+        //   - Current: { filters: FilterPill[], _view_extras: {...} }
+        //     where extras carries edgeOnly / compareMode / relativeRange.
+        // Detect by Array.isArray and apply each branch's recovery.
+        const parsed = JSON.parse(view.filters_json)
+        const isLegacy = Array.isArray(parsed)
+        const pills = isLegacy ? parsed : parsed?.filters
+        const extras = isLegacy ? null : parsed?._view_extras
+
+        // Range — prefer relativeRange when extras carry one (rolling window
+        // re-derived from now), else fall back to the saved absolute range.
+        if (extras?.relativeRange) {
+          // setRelativeRange records the label so the URL-sync round-trips
+          // as ?range=<label> and reload re-derives [now-duration, now].
+          setRelativeRange(extras.relativeRange, view.start_time, view.end_time)
+        } else if (view.start_time && view.end_time) {
           setRange(view.start_time, view.end_time)
         }
-        const parsedFilters = JSON.parse(view.filters_json)
+
+        // Edge-only toggle — flip if it differs from current.
+        if (extras?.edgeOnly != null && extras.edgeOnly !== currentEdgeOnly) {
+          toggleEdgeOnly()
+        }
+
+        // Compare-mode toggle + range. Flip if needed; then overwrite range.
+        if (extras?.compareMode != null && extras.compareMode !== currentCompareMode) {
+          toggleCompareMode()
+        }
+        if (extras?.compareStartTime && extras?.compareEndTime) {
+          setCompareRange(extras.compareStartTime, extras.compareEndTime)
+        }
+
         clearFilters()
-        parsedFilters.forEach((f: any) => addFilter(f.column, f.value, f.mode))
-        
+        if (Array.isArray(pills)) {
+          pills.forEach((f: any) => addFilter(f.column, f.value, f.mode))
+        }
+
         const url = new URL(window.location.href)
         url.searchParams.delete('view')
         window.history.replaceState({}, '', url.toString())
@@ -59,43 +108,16 @@ export function useUrlFilterSync() {
       return
     }
 
-    if (hasFilterParams || hasRangeParams || hasMetricParam) {
-      clearFilters()
-    }
-    
-    // Support the standardized ?filter_col=val format
-    params.forEach((value, key) => {
-      if (key.startsWith('filter_')) {
-        const col = key.substring(7)
-        addFilter(col, value, 'include')
-        updated = true
-      }
-    })
-    
-    // Support start_time/end_time
-    const urlStart = params.get('start_time')
-    const urlEnd = params.get('end_time')
-    if (urlStart && urlEnd) {
-      setRange(urlStart, urlEnd)
-      updated = true
-    }
-
-    // Support metric
-    const urlMetric = params.get('metric')
     if (urlMetric) {
       setMetric(urlMetric)
-      updated = true
-    }
-
-    if (updated) {
       const url = new URL(window.location.href)
-      Array.from(url.searchParams.keys()).forEach(key => {
-        if (key.startsWith('filter_')) url.searchParams.delete(key)
-      })
-      url.searchParams.delete('start_time')
-      url.searchParams.delete('end_time')
       url.searchParams.delete('metric')
       window.history.replaceState({}, '', url.toString())
     }
-  }, [activeServiceId, addFilter, setRange, setMetric, clearFilters])
+    // addFilter/setRange/setMetric/clearFilters are Zustand store methods —
+    // their identities are stable across renders (Zustand returns the same
+    // function refs), so listing them in deps documents the dependency
+    // without re-firing the effect. The exhaustive-deps lint is happy and
+    // a future reader sees the full data flow.
+  }, [activeServiceId, addFilter, setRange, setRelativeRange, toggleEdgeOnly, toggleCompareMode, setCompareRange, setMetric, clearFilters, currentEdgeOnly, currentCompareMode, queryClient])
 }

@@ -79,4 +79,3 @@ export const OriginVsEdgeHelp = () => (
     </ul>
   </div>
 )
-

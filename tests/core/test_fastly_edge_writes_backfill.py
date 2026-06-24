@@ -19,7 +19,7 @@ def seeded_metadata_db():
 
     Returns the service_id (which keys the per-service metadata file).
     """
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     service_id = "svc1"
     metadata_db.insert_ingested_files(
@@ -35,7 +35,7 @@ def seeded_metadata_db():
 
 
 @patch("backend.config.is_usage_logging_enabled", return_value=True)
-@patch("backend.core.metadata_db.log_synthetic_usage")
+@patch("backend.core.metadata.log_synthetic_usage")
 def test_backfill_calls_metadata_db(_log_synth, _enabled, seeded_metadata_db):
     """backfill should hand a list of synthesised PUT_OBJECT calls to metadata_db.log_synthetic_usage."""
     from backend.core import duckdb as _db
@@ -62,7 +62,6 @@ def test_backfill_calls_metadata_db(_log_synth, _enabled, seeded_metadata_db):
 def test_backfill_is_idempotent_end_to_end(_enabled, seeded_metadata_db):
     """Running backfill multiple times should not insert duplicate rows."""
     from backend.core import duckdb as _db
-    from backend.core import metadata_db
 
     first = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
     second = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
@@ -72,13 +71,16 @@ def test_backfill_is_idempotent_end_to_end(_enabled, seeded_metadata_db):
     assert second == 0
     assert third == 0
 
-    con = metadata_db.get_con(seeded_metadata_db)
+    # usage_log lives in its own SQLite file post-2026-06-12.
+    from backend.core.metadata import usage_log_db
+
+    con = usage_log_db.get_con(seeded_metadata_db)
     total = con.execute("SELECT count(*) FROM usage_log WHERE function_name = 'fastly.edge'").fetchone()[0]
     assert total == 3
 
 
 @patch("backend.config.is_usage_logging_enabled", return_value=False)
-@patch("backend.core.metadata_db.log_synthetic_usage")
+@patch("backend.core.metadata.log_synthetic_usage")
 def test_backfill_skips_when_usage_logging_disabled(_log_synth, _enabled, seeded_metadata_db):
     from backend.core import duckdb as _db
 
@@ -95,7 +97,7 @@ def test_backfill_incremental_skips_already_backfilled_files(_enabled, seeded_me
     SQL level, so we don't even pay the dedup IN-clause cost.
     """
     from backend.core import duckdb as _db
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     first = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
     assert first == 3
@@ -106,7 +108,7 @@ def test_backfill_incremental_skips_already_backfilled_files(_enabled, seeded_me
         [("s3://bkt/raw/2026-05-13/22/2026-05-13T22:05:00.000-ddd.log.gz", 400, 4567)],
     )
 
-    with patch("backend.core.metadata_db.log_synthetic_usage") as log_synth:
+    with patch("backend.core.metadata.log_synthetic_usage") as log_synth:
         log_synth.return_value = 1
         _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
         calls = log_synth.call_args[0][1]
@@ -115,7 +117,7 @@ def test_backfill_incremental_skips_already_backfilled_files(_enabled, seeded_me
 
     # And after a real second backfill, a third pass sees nothing new.
     _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
-    with patch("backend.core.metadata_db.log_synthetic_usage") as log_synth:
+    with patch("backend.core.metadata.log_synthetic_usage") as log_synth:
         _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
         # log_synthetic_usage should NOT be called when the unbackfilled list is empty
         assert not log_synth.called

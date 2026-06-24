@@ -123,8 +123,13 @@ def _synth_session_id(client_ip: str, user_agent: str, start_ts: str) -> str:
     """Stable 12-hex-char session id from the (ip, ua, start_ts) tuple.
 
     Start-time-anchored so that re-running extraction on the same data
-    produces the same ids — useful for reproducible test fixtures."""
-    h = hashlib.sha1(f"{client_ip}|{user_agent}|{start_ts}".encode()).hexdigest()
+    produces the same ids — useful for reproducible test fixtures.
+
+    SHA-1 is fine here — this is a deterministic id fingerprint for
+    test fixtures, not a security primitive. ``usedforsecurity=False``
+    flags intent so bandit / fips / future readers don't second-guess
+    the choice."""
+    h = hashlib.sha1(f"{client_ip}|{user_agent}|{start_ts}".encode(), usedforsecurity=False).hexdigest()
     return f"ip_{h[:12]}"
 
 

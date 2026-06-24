@@ -158,18 +158,14 @@ def test_normalize_canonicalizes_percent_encoding_and_dot_segments():
 
 
 def test_normalize_encoded_dot_segments_do_not_traverse():
-    """Regression for audit finding 017: an early unconditional unquote()
-    let a caller smuggle ``..`` via ``%2e%2e`` and escape the route. With
-    unquote applied per-segment AFTER normpath, ``%2e%2e`` survives as a
-    literal segment name and the route stays anchored to its real prefix."""
+    """Unquote before normpath to evaluate percent-encoded traversals
+    like ``%2e%2e`` and prevent category bypasses."""
     r = normalize("/admin/%2e%2e/items/foo")
-    # path stays under /admin (no traversal); the original encoded segment
-    # is decoded in place, not collapsed away
-    assert r.path.startswith("/admin/")
-    assert r.category == "admin"
+    assert r.path == "/items/foo"
+    assert r.category == "product"
     r = normalize("/admin/%2e%2e/%2e%2e/etc/passwd")
-    assert r.path.startswith("/admin/")
-    assert r.category == "admin"
+    assert r.path == "/etc/passwd"
+    assert r.category == "other"
 
 
 def test_normalize_double_slash_path_is_not_authority():
@@ -181,3 +177,83 @@ def test_normalize_double_slash_path_is_not_authority():
     assert normalize("//admin/secret").category == "admin"
     # Triple+ slashes get flattened too.
     assert normalize("///admin/secret").path.startswith("/admin")
+
+
+def test_normalize_finding_012_encoded_query_does_not_truncate():
+    """Verify that encoded query delimiters (%3F) are NOT treated as query
+    separators before normalization — finding 012 demonstrated that the
+    prior pre-split %3F → ? replacement let an attacker hide path-traversal
+    payloads (e.g. ``/search%3F/../../etc/passwd``) behind a benign-looking
+    prefix. The path now keeps the encoded character literally so downstream
+    scoring sees the whole payload (unquoted at the per-segment unquote pass
+    inside normalize)."""
+    # Encoded ? becomes a literal ? in the segment after unquote (the
+    # full string ends up as a single first-segment, hence the 'other'
+    # category fallback).
+    assert normalize("/search%3fq=red+shoes&page=2").path == "/search?q=red+shoes&page=2"
+    assert normalize("/search%3Fq=red+shoes&page=2").category == "other"
+
+
+def test_normalize_finding_014_encoded_slash_traversal_bypass():
+    """Verify that encoded slashes (%2F) do not act as structural separators,
+    and thus do not allow path-traversal bypasses (Finding 014)."""
+    r = normalize("/auth/login%2F..%2F..%2Fproduct")
+    assert r.path == "/auth/login/../../product"
+    assert r.category == "auth"
+
+
+def test_normalize_urlsplit_value_error_handling():
+    """Verify that malformed URLs causing ValueError in urlsplit are gracefully
+    handled and fallback to '/' (Finding 008-val)."""
+    assert normalize("http://[example.com").path == "/"
+
+
+def test_normalize_finding_011_double_encoded_traversal_resolves():
+    """Finding 011 (2026-06-15): a single ``unquote_except_slash`` pass only
+    peeled one encoding layer, so a doubly-encoded traversal like
+    ``/admin/%252e%252e/items`` was decoded to ``/admin/%2e%2e/items``
+    before posixpath.normpath ran — normpath saw it as a normal segment
+    and didn't resolve. The delayed per-segment unquote at the end of
+    normalize then decoded ``%2e%2e`` to ``..`` AFTER normpath, leaving
+    the traversal embedded in the canonical path and tagging the route
+    with the wrong category (``admin`` instead of the resolved target's
+    category).
+
+    Iterating until fixed-point unwinds the multi-level encoding *before*
+    normpath, so ``/admin/%252e%252e/items`` correctly resolves to
+    ``/items`` with category ``product``. The 014 ``%2F``-stays-as-data
+    contract is preserved (each iteration runs the same except-slash
+    decoder)."""
+    r = normalize("/admin/%252e%252e/items")
+    assert r.path == "/items", f"double-encoded traversal must resolve; got {r.path!r}"
+    assert r.category == "product", (
+        f"category must reflect the resolved target, not the pre-traversal path; got {r.category!r}"
+    )
+
+    # Triple-encoded variant — paranoid coverage that the loop converges
+    # past two layers as well.
+    r3 = normalize("/admin/%25252e%25252e/items")
+    assert r3.path == "/items"
+    assert r3.category == "product"
+
+    # The 014 ``%2F``-as-data contract still holds — encoded slashes
+    # decode but don't drive traversal resolution.
+    r014 = normalize("/auth/login%2F..%2F..%2Fproduct")
+    assert r014.path == "/auth/login/../../product"
+    assert r014.category == "auth"
+
+
+def test_normalize_finding_010_encoded_fragment_does_not_truncate():
+    """Finding 010: ``_strip_query`` used to convert ``%23`` to ``#`` before
+    ``urlsplit`` so an attacker could write ``/search%23/../../api/admin`` and
+    have the scorer categorize it as a benign ``/search`` browse — the
+    downstream origin still sees the encoded ``%23`` as a literal character
+    and processes the full traversal. After the fix, the encoded fragment
+    delimiter is preserved through ``urlsplit``, normpath collapses the
+    traversal, and the final categorisation is whatever the resolved path
+    is (``api`` in this case)."""
+    r = normalize("/search%23/../../api/admin")
+    assert r.path == "/api/admin", (
+        f"encoded #-fragment must not truncate the path; normpath must collapse the traversal — got {r.path!r}"
+    )
+    assert r.category == "api"

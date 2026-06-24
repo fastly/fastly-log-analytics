@@ -101,3 +101,54 @@ def test_lint_handles_fastly_escaped_braces_in_json():
     with patch("backend.utils.vcl_utils.shutil.which", return_value=None):
         ok, _ = lint_log_format(fmt)
     assert ok is True
+
+
+def test_lint_fails_closed_when_falco_errors_only_on_stderr():
+    """Regression for F011 (audit run 7ba15352): when ``_run_falco_lint``
+    returns non-zero with the error text on stderr and an informational
+    banner on stdout (version line, "linting…", etc.), lint_log_format
+    must report the failure.
+
+    Pre-fix the parser used ``msg = stdout or stderr`` — any truthy
+    stdout silenced stderr entirely, the error-token scan found nothing
+    in the banner, and the function fell through to ``return True,
+    "Valid VCL configuration"``. That fail-open let invalid (or
+    injection-bearing) VCL pass the validator.
+    """
+    fmt = '{"timestamp":"%{time.start}V"}'
+    with (
+        patch("backend.utils.vcl_utils.shutil.which", return_value="/usr/bin/falco"),
+        patch(
+            "backend.utils.vcl_utils._run_falco_lint",
+            return_value=(1, "falco 0.4.2 linting…", "[ERROR] vcl_log syntax invalid at line 9"),
+        ),
+    ):
+        ok, msg = lint_log_format(fmt)
+
+    assert ok is False, f"lint_log_format must fail-closed when stderr carries the error; got ok={ok!r}, msg={msg!r}"
+    assert "[ERROR]" in msg, f"reported message should include the stderr error line: {msg!r}"
+
+
+def test_lint_fails_closed_on_nonzero_exit_without_recognized_error():
+    """Regression for finding 006 (audit run 80e9f210): falco can exit
+    non-zero while phrasing the error in a shape our keyword scan
+    (``[ERROR]`` / ``ERROR:`` / ``💥``) doesn't match. The validator used
+    to fall through to ``return True`` in that gap — a fail-open that
+    accepted VCL falco had actually rejected. A non-zero exit must now
+    fail closed regardless of the output format.
+
+    (The absent-binary / timeout / generic-exception branches deliberately
+    still degrade gracefully — falco is optional, see
+    ``test_lint_log_format_degraded_mode.py``.)
+    """
+    fmt = '{"timestamp":"%{time.start}V"}'
+    with (
+        patch("backend.utils.vcl_utils.shutil.which", return_value="/usr/bin/falco"),
+        patch(
+            "backend.utils.vcl_utils._run_falco_lint",
+            return_value=(2, "falco: unexpected token near 'log'", ""),
+        ),
+    ):
+        ok, msg = lint_log_format(fmt)
+
+    assert ok is False, f"non-zero falco exit must fail closed; got ok={ok!r}, msg={msg!r}"

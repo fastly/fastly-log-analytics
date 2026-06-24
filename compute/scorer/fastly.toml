@@ -16,6 +16,16 @@ language = "rust"
 
 [scripts]
 build = "cargo build --bin session-scorer --release --target wasm32-wasip1 --color always"
+# After the Wasm is produced (bin/main.wasm) but before packaging, run binaryen's
+# wasm-opt to shrink the module by ~14% on top of the cargo `lto`/`strip` pass.
+# A smaller artifact compiles faster at deploy and is cheaper to load per pop.
+# Gated on wasm-opt being installed so contributors / CI without binaryen still
+# build (the un-optimized module ships unchanged in that case). `--all-features`
+# is required because Rust 1.90 emits bulk-memory ops. wasm-opt writes to a temp
+# file and only swaps it in on success, so a failure can't truncate the binary;
+# a present-but-failing wasm-opt fails the build loudly rather than shipping a
+# half-written module. Install with `brew install binaryen`.
+post_build = "if command -v wasm-opt >/dev/null 2>&1; then wasm-opt --all-features -O3 ./bin/main.wasm -o ./bin/main.wasm.opt && mv ./bin/main.wasm.opt ./bin/main.wasm; else echo 'wasm-opt (binaryen) not installed; skipping wasm size optimization'; fi"
 
 # Local-dev fixtures consumed by Viceroy (`fastly compute serve`).
 # Backend rewrites these per-customer before deploy.
@@ -24,3 +34,11 @@ build = "cargo build --bin session-scorer --release --target wasm32-wasip1 --col
     [local_server.dictionaries.scoring_keys]
       file = "fixtures/local-dictionary.json"
       format = "json"
+
+  # Matrix is read from the `scoring_matrix` KV Store at runtime (see
+  # src/matrix.rs). In prod the backend provisions + seeds it via the Fastly
+  # API; locally Viceroy serves it from this fixture under key `matrix`.
+  [local_server.kv_stores]
+    [[local_server.kv_stores.scoring_matrix]]
+      key = "matrix"
+      file = "fixtures/local-matrix.json"

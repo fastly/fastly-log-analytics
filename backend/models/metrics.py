@@ -17,12 +17,3 @@ class MetricType(StrEnum):
     REQ_SIZE = "req_size"
     TTFB = "ttfb"
     SPECIFIC_STATUS = "specific_status"
-
-
-class ChartInterval(StrEnum):
-    """Allowed bucket sizes for timeseries charts."""
-
-    SECOND_1 = "1 second"
-    MINUTE_1 = "1 minute"
-    HOUR_1 = "1 hour"
-    DAY_1 = "1 day"

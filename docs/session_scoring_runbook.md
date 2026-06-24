@@ -6,11 +6,25 @@ Day-2 operations for the session-scoring subsystem (v1.1.0). Aimed at the on-cal
 | :--- | :--- |
 | **Subsystem version** | v1.1.0 |
 | **Surface area** | `/admin/session-scoring` (UI) · `/api/services/{svc}/scoring/*` (API) |
-| **Storage** | `backend/metadata.db` (audit log) · Fastly Object Storage (`scoring_matrix_history/{version}.json`) · Compute ConfigStore (`enforce_threshold` key) |
+| **Storage** | `backend/metadata.db` (audit log) · Fastly Object Storage (`scoring_matrix_history/{version}.json` version history) · Fastly **KV Store** (`scoring_matrix`, key `matrix` — the live L2 matrix the edge scorer reads at runtime) · Compute ConfigStore (`scoring_config`: `enforce_threshold`, `l2_enforce_enabled`, `l2_enabled_at`) |
 | **Edge components** | 6 VCL snippets (recv / pass / fetch / deliver / miss / enforce) + scorer Wasm service |
 | **Audit scope** | Per-host; not mirrored via `state_sync` |
 
 > Reminder: rate-limiting is **out of scope** for v1.1.0. Session scoring observes and (optionally) blocks at the score-threshold level. When `fastly.ddos_detected` fires, Compute is bypassed entirely — the gate is upstream.
+
+---
+
+## Authentication
+
+Admin and scoring endpoints are gated by the deployment's **admin trust model**
+(loopback / reverse-proxy marker), **not** a bearer token. When an operation has
+to call the **Fastly API**, supply the Fastly token as a **`token:` request
+header** for the threshold / enforce / exclude-regex / enforce-status-code /
+rotate-key mutations, or in the **JSON body** `{"token": "…"}` for
+`enable` / `disable`. If omitted, the token falls back to the service's stored
+`fastly_api_key`. An `Authorization: Bearer …` header is **ignored**.
+`matrix-versions/{v}/restore` and the read-only GETs take no token (they resolve
+it from config when needed).
 
 ---
 
@@ -25,7 +39,8 @@ Day-2 operations for the session-scoring subsystem (v1.1.0). Aimed at the on-cal
 ```bash
 curl -sS -X POST \
   "$HOST/api/services/$SVC/scoring/enable" \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Content-Type: application/json" \
+  -d "{\"token\": \"$TOKEN\"}"
 ```
 
 The orchestrator installs the following on your behalf — all rolled back together if any step fails:
@@ -35,8 +50,8 @@ The orchestrator installs the following on your behalf — all rolled back toget
 | VCL snippets | The target VCL service — six snippets: `recv`, `pass`, `fetch`, `deliver`, `miss`, `enforce` |
 | Custom log fields | Appended to the service's existing log format (does not displace your existing fields) |
 | Scorer Wasm service | A separate Compute service in your account; receives the scoring requests from VCL |
-| ConfigStores | `enforce_threshold` (live enforcement value) + `cookie_keys` (AES current/previous slots) |
-| Cookie keys | Generated and seeded into the current slot of `cookie_keys` |
+| ConfigStores | `scoring_config` (enforce threshold + L2 opt-in) + `scoring_keys` (AES current/previous slots) |
+| Cookie keys | Generated and seeded into the current slot of `scoring_keys` |
 
 Confirm with `GET /api/services/$SVC/scoring/status` — `enabled: true`, snippets installed, scorer service ID populated.
 
@@ -49,7 +64,8 @@ Confirm with `GET /api/services/$SVC/scoring/status` — `enabled: true`, snippe
 ```bash
 curl -sS -X POST \
   "$HOST/api/services/$SVC/scoring/disable" \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Content-Type: application/json" \
+  -d "{\"token\": \"$TOKEN\"}"
 ```
 
 What gets torn down: VCL snippets removed, custom fields unregistered, scorer Wasm service deactivated, ConfigStore entries cleared.
@@ -74,7 +90,7 @@ If you need a hard wipe, delete the `scoring_audit` rows manually and remove the
 ```bash
 curl -sS -X POST \
   "$HOST/api/services/$SVC/scoring/rotate-key" \
-  -H "Authorization: Bearer $TOKEN"
+  -H "token: $TOKEN"
 ```
 
 Or in the UI: `/admin/session-scoring` → service detail → **Rotate AES key**.
@@ -93,27 +109,22 @@ API equivalent:
 
 ```bash
 curl -sS -X POST \
-  "$HOST/api/services/$SVC/scoring/matrix-versions/$VERSION/restore" \
-  -H "Authorization: Bearer $TOKEN"
+  "$HOST/api/services/$SVC/scoring/matrix-versions/$VERSION/restore?confirm=true"
 ```
 
 **What happens immediately:**
 
 - A pre-restore snapshot is saved (so the restore itself is reversible — restoring the rolled-back version brings you back).
 - Admin AUC and the dashboard score distribution reflect the restored matrix on the next refresh.
-- The audit log records the restore with the source and target versions.
+- The restored matrix is **automatically pushed to the `scoring_matrix` KV Store**, so the live edge scorer rolls back too — **no Wasm redeploy**.
+- The audit log records the restore with the source and target versions (and whether the KV push succeeded).
 
-**IMPORTANT — edge enforcement lags until the Wasm is redeployed.** The scorer service holds its scoring matrix **embedded in the Wasm binary**. Restoring a version updates the admin/control-plane view but does *not* re-flash the edge. Until you redeploy the scorer, edge enforcement runs against the **old** matrix while admin metrics show the **new** one — and that mismatch is exactly the kind of thing that causes "the dashboard looks fine but customers are still getting 429s."
+**Edge propagation — no redeploy, but not instant.** The matrix lives in a KV Store the scorer reads at runtime, *not* embedded in the Wasm, so a restore re-flashes the edge by itself. The change takes effect **as Compute instances recycle (minutes)** — each instance reads the matrix on cold start. The restore API response tells you which case you're in:
 
-The restore API response includes a `deploy_hint` field with the exact command for your environment. The general shape is:
+- `matrix_kv_written: true` → `deploy_hint: "Live: restored matrix pushed to the scoring_matrix KV Store — the edge scorer rolls back as Compute instances recycle (minutes), no redeploy."` You're done; just wait out the recycle window.
+- `matrix_kv_written: false` → the backend AUC/evaluation reflect the restore, but the live scorer was **not** updated (no KV store id or no Fastly token available). Re-run **Enable** (or supply a token) to seed the KV Store — otherwise the edge keeps serving the old matrix.
 
-```bash
-scripts/scoring/deploy_wasm.sh \
-  --service-id <scorer-service-id> \
-  --token <fastly-token>
-```
-
-Run it. Confirm in `/admin/session-scoring` that the scorer service shows the redeploy timestamp matching the restore moment. Only then is the rollback fully live end-to-end.
+Confirm in `/admin/session-scoring` that the scorer's `MATRIX_LOAD_FAIL_COUNT` stays 0 after the recycle window — that's the signal the KV matrix is serving cleanly end-to-end.
 
 ### Emergency disable of enforcement
 
@@ -124,12 +135,12 @@ Enforcement is the part that returns `429`s. Scoring (the score appearing in log
 ```bash
 # Verify the current enforced threshold
 curl -sS "$HOST/api/services/$SVC/scoring/enforce-threshold" \
-  -H "Authorization: Bearer $TOKEN"
+  -H "token: $TOKEN"
 
 # Clear it
 curl -sS -X PUT \
   "$HOST/api/services/$SVC/scoring/enforce-threshold?confirm=true" \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "token: $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"threshold": null}'
 ```
@@ -156,19 +167,19 @@ The enforce snippet defaults to returning `HTTP 429 Too Many Requests` for flagg
 ```bash
 # Read the current code (returns default 429 when never overridden)
 curl -sS "$HOST/api/services/$SVC/scoring/enforce-status-code" \
-  -H "Authorization: Bearer $TOKEN"
+  -H "token: $TOKEN"
 
 # Set a new code
 curl -sS -X PUT \
   "$HOST/api/services/$SVC/scoring/enforce-status-code?confirm=true" \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "token: $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"status_code": 403}'
 
 # Reset to default (429)
 curl -sS -X PUT \
   "$HOST/api/services/$SVC/scoring/enforce-status-code?confirm=true" \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "token: $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"status_code": null}'
 ```
@@ -185,7 +196,7 @@ curl -sS -X PUT \
 
 ```bash
 curl -sS "$HOST/api/services/$SVC/scoring/audit?limit=200" \
-  -H "Authorization: Bearer $TOKEN"
+  -H "token: $TOKEN"
 ```
 
 **What's recorded.** Every mutation: enable, disable, threshold commit/clear, enforcement set/cleared, retrain, key rotation, matrix restore. Each row has the actor, timestamp, and a structured payload describing the before/after state.
@@ -200,7 +211,7 @@ curl -sS "$HOST/api/services/$SVC/scoring/audit?limit=200" \
 
 1. `/admin/session-scoring` → **Per-reason AUC** card. Look for the rule whose AUC dropped — that's usually a single contributor driving the aggregate.
 2. Confirm against the Matrix history tab: the version timestamp lines up with the retrain in the audit log.
-3. If the regression is real and not a data artifact, roll back to the prior matrix (see *Roll back a bad matrix*). Remember the edge redeploy step.
+3. If the regression is real and not a data artifact, roll back to the prior matrix (see *Roll back a bad matrix*) — the restore auto-pushes to the `scoring_matrix` KV Store, so the edge rolls back as Compute instances recycle (no Wasm redeploy).
 
 ### "Enforcement is 429-ing real users."
 
@@ -220,22 +231,25 @@ The fix for cause 1 is patience — wait one grace cycle and the noise subsides.
 
 ### "What does the scorer think it's doing?"
 
-The Rust scorer keeps four `AtomicU64` counters and flushes them via `dbg_log` every 1000 requests:
+The Rust scorer keeps a set of `AtomicU64` counters and flushes them via `dbg_log` every 1000 requests:
 
-- `TAMPERED_COOKIE_COUNT` — cookies that failed AES verification.
-- `ENFORCE_BLOCK_COUNT` — requests that emitted `X-Edge-Score-Enforce=1`.
-- `MATRIX_LOAD_FAIL_COUNT` — matrix lookup failures (should be zero in steady state).
-- `REQUEST_COUNT` — total requests processed.
+- `tampered` — cookies that failed AES verification.
+- `replayed` — sustained-replay cookies dropped to the no-state baseline.
+- `enforce_block` — requests that emitted `X-Edge-Score-Enforce=1`.
+- `matrix_fail` — matrix lookup failures (should be zero in steady state).
+- `keys_fail` — key-load fail-opens (missing/unreadable `scoring_keys` store → `internal-error-keys`; should be zero in steady state).
+- `cookie_encode_fail` — rotated-cookie re-encode failures (the `Set-Cookie` is dropped; should be zero).
+- `requests` — total requests processed (the fail-open denominator).
 
 In the backend's ingested logs, grep for the emitted line:
 
 ```
-metrics: tampered=... enforce_block=... matrix_fail=... requests=...
+metrics: tampered=... replayed=... enforce_block=... matrix_fail=... keys_fail=... cookie_encode_fail=... requests=...
 ```
 
 Rates are easier to reason about than absolute counts — divide each by the delta in `REQUEST_COUNT` between two flushes to get per-request rates.
 
-If `MATRIX_LOAD_FAIL_COUNT` is non-zero, the embedded matrix is corrupt or unreadable — redeploy the Wasm. If `TAMPERED_COOKIE_COUNT / REQUEST_COUNT` exceeds the baseline you've established for this service, run the cookie-compliance diagnosis above.
+If `MATRIX_LOAD_FAIL_COUNT` is non-zero, the scorer can't read the matrix from the `scoring_matrix` KV Store — the resource-link or `matrix` key is broken or the object is unreadable. Re-push the matrix (a **retrain** or a **matrix restore** both write to KV; or re-run **Enable** to re-seed the store) rather than redeploying the Wasm — the code deploy doesn't touch the matrix. If `TAMPERED_COOKIE_COUNT / REQUEST_COUNT` exceeds the baseline you've established for this service, run the cookie-compliance diagnosis above.
 
 ---
 
@@ -262,10 +276,14 @@ If `MATRIX_LOAD_FAIL_COUNT` is non-zero, the embedded matrix is corrupt or unrea
   | GET | `/api/services/{svc}/scoring/matrix-versions` | List matrix snapshots |
   | POST | `/api/services/{svc}/scoring/matrix-versions/{v}/restore` | Restore a matrix version |
   | GET / PUT | `/api/services/{svc}/scoring/enforce-threshold` | Live enforcement value (ConfigStore-backed) |
+  | GET / PUT | `/api/services/{svc}/scoring/enforce-status-code` | Enforce response code (default 429) |
+  | GET / PUT | `/api/services/{svc}/scoring/l2-enforce` | L2 enforcement opt-in + fade-in status |
+  | GET / PUT / POST | `/api/services/{svc}/scoring/exclude-regex` | URL exclusion regex for the recv snippet (`/validate` dry-runs it) |
 
 - **Custom log fields** added by enable: see `docs/features.md` for the full schema and the field-group toggles.
 - **Architecture notes.** L1 (cookie + timing) + L2 (PageRank transition matrix) → 0–100 score. AES-encrypted cookie state with rotating `sid`; 30-minute idle timeout; 24-hour hard cap. See `backend/scoring/scorer.py` + `compute/scorer/src/scorer.rs` for the implementation.
-- **Security headers.** The `recv` snippet unsets six client-controllable `X-Edge-*` headers before any scoring logic runs — clients cannot spoof scores or compliance state.
+- **L2 enforcement (operator opt-in).** Layer 2's transition-matrix sub-score (`edge_score_l2`) is computed and logged on every request, but it contributes **nothing** to the enforced score until an operator explicitly opts in — there is no automatic, time-based ramp. Turn it on per-service with the **Enforce L2** switch on `/admin/session-scoring` (or `PUT /api/services/{svc}/scoring/l2-enforce?confirm=true` with `{"enabled": true}`). On opt-in the scorer stamps an `l2_enabled_at` anchor and L2's weight fades in linearly from 0 to full over **3 days** (so a still-thin matrix can't over-flag the moment you flip it); disabling returns L2 to observe-only, and a later re-enable restarts the 3-day fade-in. Both `l2_enforce_enabled` and `l2_enabled_at` live in the `scoring_config` ConfigStore and are derived server-side — never from client headers. If you opt a service in while threshold enforcement is on, re-check the threshold before you flip the switch: sessions can score higher once L2 starts counting.
+- **Security headers.** The `recv` snippet unsets eight client-controllable `X-Edge-*` headers before any scoring logic runs — clients cannot spoof scores or compliance state.
 - **DDoS boundary.** `fastly.ddos_detected` bypasses the Compute scorer entirely; under attack, Fastly's upstream gate handles it.
 
 ---

@@ -1,12 +1,12 @@
 """Tests for backend.repositories.cron.
 
-Thin wrapper over ``backend.core.metadata_db`` cron-run helpers. Exercises
+Thin wrapper over ``backend.core.metadata`` cron-run helpers. Exercises
 through real per-service SQLite (autouse ``isolate_metadata_db``).
 """
 
 from __future__ import annotations
 
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
 from backend.repositories.cron import delete_cron_log, get_cron_logs, purge_cron_logs
 
 

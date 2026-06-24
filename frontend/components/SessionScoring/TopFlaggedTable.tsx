@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
@@ -16,10 +16,10 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useScoringLabels } from '@/hooks/useScoringLabels'
-import { client } from '@/lib/api'
 
 import { FlagSessionPopover, type LabelValue } from './FlagSessionPopover'
 import { SessionEventsDialog } from './SessionEventsDialog'
+import { useScoringQuery } from './useScoringQuery'
 
 interface TopFlaggedTableProps {
   serviceId: string
@@ -98,22 +98,12 @@ export function TopFlaggedTable({
   const effectiveHours = onSinceHoursChange ? sinceHours : localHours
   const setHours = onSinceHoursChange ?? setLocalHours
 
-  const flagged = useQuery({
-    queryKey: ['scoring-top-flagged', serviceId, effectiveHours],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/top-flagged' as any,
-        {
-          params: {
-            path: { service_id: serviceId },
-            query: { since_hours: effectiveHours, limit: 200 },
-          },
-        } as any,
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as { rows: FlaggedRow[]; since_hours: number }
-    },
-  })
+  const flagged = useScoringQuery<{ rows: FlaggedRow[]; since_hours: number }>(
+    ['scoring-top-flagged', serviceId, effectiveHours],
+    serviceId,
+    'top-flagged',
+    { since_hours: effectiveHours, limit: 200 },
+  )
 
   const { labelBySid } = useScoringLabels(serviceId)
 
@@ -264,6 +254,7 @@ export function TopFlaggedTable({
       description="Sortable + filterable. Use the Flag column to label sessions for matrix evaluation."
       isLoading={flagged.isLoading}
       isFetching={flagged.isFetching}
+      error={flagged.error as (Error & { status?: number }) | null}
       contentClassName="p-0"
       helpContent={<TopFlaggedHelp />}
       helpTitle="About Top Flagged Sessions"

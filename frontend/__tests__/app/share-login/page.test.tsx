@@ -10,6 +10,10 @@ const locationAssignSpy = vi.fn()
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: pushSpy, replace: pushSpy }),
+  // ShareLoginForm started reading useSearchParams (commit 8c6374d /
+  // d180c4c era). Return a static empty params object — the spec
+  // doesn't deep-link via search params.
+  useSearchParams: () => new URLSearchParams(),
 }))
 
 beforeEach(() => {

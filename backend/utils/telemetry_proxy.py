@@ -16,6 +16,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from typing import Any
 
 import aiohttp
 import yarl
@@ -42,6 +43,15 @@ _RUNNER: web.AppRunner | None = None
 _LOOP: asyncio.AbstractEventLoop | None = None
 _SESSION: aiohttp.ClientSession | None = None
 _READY = threading.Event()
+# Serialises the "is the server already up / do we need to start it"
+# decision in :func:`start_proxy_server`. Concurrent first-callers used
+# to race: thread A would see ``_SERVER_THREAD is None``, spawn the
+# server, and start waiting on _READY; thread B would see the just-
+# spawned thread alive, early-return without waiting, then hit
+# ``proxy_endpoint()`` while ``_PORT`` was still None — surfacing as
+# "proxy server is not running" on every concurrent first-caller after
+# the first.
+_START_LOCK = threading.Lock()
 
 # Upstream call timeouts. The wall-clock `total` is the safety net for
 # requests that get wedged past Fastly's 60s first_byte_timeout (a stuck
@@ -124,7 +134,7 @@ def _flush_batch(items: list[tuple[str, dict, str | None]]) -> None:
         grouped[(service_id, ctx)].append(row)
     for (service_id, ctx), rows in grouped.items():
         try:
-            from backend.core import metadata_db
+            from backend.core import metadata as metadata_db
 
             metadata_db.log_usage_calls(service_id, rows, process_context=ctx)
         except Exception as e:
@@ -201,7 +211,7 @@ def _submit_log_write(service_id: str, row: dict, process_context: str | None) -
     _LOG_QUEUE.put((service_id, row, process_context))
 
 
-def _flush_log_writes_for_tests(timeout: float = 2.0) -> None:
+def _flush_log_writes_for_tests(timeout: float = 15.0) -> None:
     """Block until all in-flight proxy requests finish their handler AND
     all queued log rows are written (or `timeout`).
 
@@ -280,11 +290,77 @@ def _bust_config_cache(service_id: str | None = None) -> None:
             _config._config_cache.pop(service_id, None)
 
 
+def _scheme_host(value: str) -> str:
+    return value.replace("https://", "").replace("http://", "").split("/", 1)[0].lower()
+
+
 def _cdn_host_for(cfg: dict) -> str | None:
     cdn_url = (cfg.get("cdn_url") or "").strip()
     if not cdn_url:
         return None
-    return cdn_url.replace("https://", "").replace("http://", "").split("/", 1)[0].lower()
+    return _scheme_host(cdn_url)
+
+
+# Hosts treated as machine-local — connections to any of these from the
+# backend itself reach loopback and so cannot escalate privilege via the
+# proxy. ``0.0.0.0`` is the wildcard-bind address that ``moto`` and other
+# in-process test servers commonly use; in production it would never be a
+# legitimate X-Fos-Target value.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+
+def _strip_port_for_loopback_check(target_host: str) -> str:
+    """Return the bare host portion of ``target_host`` for comparison
+    against the loopback set. Handles three forms commonly seen as
+    X-Fos-Target values:
+      * ``[::1]:9999`` → ``::1`` (IPv6 literal with port, RFC 3986)
+      * ``host:port`` / ``127.0.0.1:9999`` → host portion before the colon
+      * ``::1`` / bare hostname → returned unchanged
+    """
+    if target_host.startswith("[") and "]" in target_host:
+        return target_host[1 : target_host.index("]")]
+    # A single colon means host:port. Multiple colons (and no brackets) is
+    # a bare IPv6 literal that must not be split.
+    if target_host.count(":") == 1:
+        return target_host.split(":", 1)[0]
+    return target_host
+
+
+def _is_target_host_allowed(target_host: str, cdn_host: str | None, fos_native: str | None) -> bool:
+    """Defense-in-depth gate on the value of X-Fos-Target.
+
+    Without this gate, anyone who can reach the proxy AND supplies a
+    valid X-Telemetry-Service-Id can use the proxy as an AWS-signed
+    forwarder to arbitrary internet hosts (SSRF + service-credential
+    exposure). The proxy binds to loopback so the realistic attacker
+    today already has admin, but defense-in-depth wants the request to
+    be rejected before signing rather than relying on the network
+    binding.
+
+    Allowed per-request:
+      * the service's configured ``cdn_host`` (from ``cfg.cdn_url``),
+        for CDN reads that use ``?key=`` auth and skip SigV4;
+      * the service's configured ``fos_native_endpoint`` (defaults to
+        ``{region}.object.fastlystorage.app``), for FOS reads/writes
+        that the proxy SigV4-signs;
+      * 127.0.0.1 / localhost / ::1 / 0.0.0.0 (loopback / wildcard-bind),
+        because the proxy runs co-located with the backend and routing a
+        loopback request *through* the proxy adds telemetry but not
+        privilege.
+
+    Region isolation is enforced — a service whose ``fos_endpoint`` is
+    ``us-east-1.object.fastlystorage.app`` cannot use the proxy to
+    target ``eu-west-1.object.fastlystorage.app`` (different region's
+    credentials would not work anyway, but the gate cuts off the probe).
+    """
+    t = target_host.lower()
+    if _strip_port_for_loopback_check(t) in _LOOPBACK_HOSTS:
+        return True
+    if cdn_host and t == cdn_host:
+        return True
+    if fos_native and t == fos_native.lower():
+        return True
+    return False
 
 
 def _sign_request(method: str, url: str, headers: dict, body: bytes, service_id: str) -> dict:
@@ -303,7 +379,7 @@ def _sign_request(method: str, url: str, headers: dict, body: bytes, service_id:
         )
         return headers
 
-    target_host = url.replace("https://", "").replace("http://", "").split("/", 1)[0].lower()
+    target_host = _scheme_host(url)
     cdn_host = _cdn_host_for(cfg)
     # CDN routing uses ?key= auth — do NOT inject SigV4 there.
     if cdn_host and target_host == cdn_host:
@@ -340,7 +416,7 @@ def _service_for_target(target_host: str, cdn_host: str | None) -> str:
 
 def _build_details(x_cache: str | None, caller: str) -> str:
     # X-Cache MUST be the first `· `-separated chunk so the shield-egress
-    # doubling logic at metadata_db.py:1113 picks it up correctly.
+    # doubling logic at backend.core.metadata.usage_log.log_usage_calls picks it up correctly.
     # Caller goes second.
     parts: list[str] = []
     if x_cache:
@@ -365,7 +441,7 @@ async def handle_healthz(request: web.Request) -> web.Response:
     return web.Response(text="OK")
 
 
-async def handle_request(request: web.Request) -> web.Response:
+async def handle_request(request: web.Request) -> web.StreamResponse:
     global _IN_FLIGHT_REQUESTS
     with _IN_FLIGHT_LOCK:
         _IN_FLIGHT_REQUESTS += 1
@@ -376,7 +452,7 @@ async def handle_request(request: web.Request) -> web.Response:
             _IN_FLIGHT_REQUESTS -= 1
 
 
-async def _handle_request_inner(request: web.Request) -> web.Response:
+async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
     target_host = request.headers.get("X-Fos-Target")
     if not target_host:
         return web.Response(status=400, text="Missing X-Fos-Target header")
@@ -394,18 +470,55 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
     service_id = request.headers.get("X-Telemetry-Service-Id")
     caller = request.headers.get("X-Telemetry-Caller", "telemetry-proxy")
     process_context = request.headers.get("X-Telemetry-Context")
-    cdn_host = None
+    cdn_host: str | None = None
+    fos_native: str | None = None
+    cfg: dict | None = None
     if service_id:
         cfg = _load_config_cached(service_id)
         if cfg:
             cdn_host = _cdn_host_for(cfg)
+            # ``fos_native_endpoint`` only exists on the derived source dict
+            # produced by ``backend.config.to_source_dict()`` — the raw
+            # service-config JSON loaded here has ``fos_endpoint`` instead.
+            # Without the fallback, every signed FOS request (sync's
+            # ListObjectsV2, commit's PutObject, etc.) reads ``fos=None``
+            # at the allowlist gate and gets rejected with a 400, stalling
+            # ingestion silently. Fall through to ``fos_endpoint`` so the
+            # gate's region-isolation guarantee still holds against the
+            # value the rest of the codebase already treats as canonical.
+            fos_native = (cfg.get("fos_native_endpoint") or cfg.get("fos_endpoint") or "").strip() or None
+
+    # F6 defense-in-depth: when we have a service config the gate is
+    # active. See ``_is_target_host_allowed`` for the rationale and the
+    # allow-set. The check is skipped when no service_id is supplied
+    # (the proxy already forwards unsigned in that branch — FOS will
+    # 403, so there is no credential exposure to gate) or when the
+    # service has no loadable config (existing path logs and forwards
+    # unsigned for the same 403 fate).
+    if service_id and cfg is not None and not _is_target_host_allowed(target_host_for_classify, cdn_host, fos_native):
+        logger.warning(
+            "[telemetry-proxy] rejected disallowed X-Fos-Target=%r for service_id=%r (cdn=%r fos=%r)",
+            target_host_for_classify,
+            service_id,
+            cdn_host,
+            fos_native,
+        )
+        return web.Response(status=400, text="X-Fos-Target not allowed for service")
 
     # SigV4 requires SHA256 of the body, which forces buffering when we
     # sign. botocore.auth.SigV4Auth doesn't support the streaming signed-
-    # payload variant out of the box.
-    # TODO(proxy-mem): large PUTs (multi-GB compacted commits) are an OOM
-    # risk under this approach. Track upgrade to chunked signing if/when
-    # those flows go through the proxy.
+    # payload variant out of the box, so large PUTs (multi-GB compacted
+    # commits) would buffer fully in memory if routed through the proxy.
+    # Today's compaction flow uploads directly to FOS — only metadata.json
+    # and small avro manifests transit the proxy (kilobytes each), so the
+    # buffering is bounded. If a future flow routes bulk payloads through
+    # here, switch to STREAMING-AWS4-HMAC-SHA256-PAYLOAD chunked signing
+    # before increasing the request-body size limit.
+    # ``data`` is either a fully-buffered ``bytes`` (signed paths) or a
+    # streaming ``aiohttp.StreamReader`` (unsigned fallback) — aiohttp's
+    # client accepts both, so ``Any`` keeps the union narrow at the
+    # callsite without forcing a buffer-up that would defeat streaming.
+    data: Any
     if service_id and request.can_read_body:
         body = await request.read()
         data = body
@@ -457,6 +570,7 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
                 # diverged from what R2 verifies — producing
                 # HTTP 403 'The calculated signature does not match'.
                 wire_url = yarl.URL(upstream_url, encoded=True)
+                assert _SESSION is not None, "telemetry-proxy session not initialised"
                 async with _SESSION.request(
                     method=request.method,
                     url=wire_url,
@@ -472,10 +586,16 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
                     )
                     await proxy_resp.prepare(request)
                     client_response_started = True
+                    # RFC 7231 §4.3.2: HEAD responses MUST NOT include a body.
+                    # Drain the upstream body for byte-counting + telemetry,
+                    # but never forward to the client. aiohttp 3.14's stricter
+                    # parser otherwise rejects HEAD-with-body as BadStatusLine.
+                    is_head = request.method == "HEAD"
                     try:
                         async for chunk in upstream_resp.content.iter_chunked(65536):
                             bytes_received += len(chunk)
-                            await proxy_resp.write(chunk)
+                            if not is_head:
+                                await proxy_resp.write(chunk)
                         await proxy_resp.write_eof()
                     except ConnectionResetError as ce:
                         # Client (e.g. aiobotocore) closed its socket
@@ -531,7 +651,7 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
             status_str = "OK" if (upstream_status and 200 <= upstream_status < 300) else f"HTTP {upstream_status}"
             # Row schema MUST match what metadata_db.log_usage_calls reads.
             # The X-Cache value MUST be the first `· `-separated chunk of
-            # `details` — the shield-egress doubling at metadata_db.py:1113
+            # `details` — the shield-egress doubling at backend.core.metadata.usage_log.log_usage_calls
             # parses it from there.
             # Translate the raw HTTP verb to the S3 op name when we can
             # recognise the shape — log_usage_calls keys Class A vs Class B
@@ -542,11 +662,7 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
             # already in the Class A list, HEAD/DELETE/GET-of-object are
             # correctly Class B).
             billing_method = request.method
-            if (
-                service == "FOS"
-                and request.method == "GET"
-                and "list-type=" in request.query_string
-            ):
+            if service == "FOS" and request.method == "GET" and "list-type=" in request.query_string:
                 billing_method = "LIST_OBJECTS_V2"
             row = {
                 "method": billing_method,
@@ -578,19 +694,16 @@ async def _handle_request_inner(request: web.Request) -> web.Response:
             # method (so subsequent reads hit cache), so the underlying
             # FOS op is always GET_OBJECT, not HEAD_OBJECT. The MISS, HIT
             # chain (edge missed, shield hit) does NOT touch FOS.
-            from backend.utils.telemetry import _is_full_miss
+            from backend.utils.telemetry import build_cdn_miss_synth_details, is_full_miss
 
-            if service == "CDN" and _is_full_miss(x_cache):
-                synth_details = "Class B · synthesized from CDN MISS"
-                if bytes_received:
-                    synth_details = f"{bytes_received:,} bytes · " + synth_details
+            if service == "CDN" and is_full_miss(x_cache):
                 synth_row = {
                     "method": "GET_OBJECT",
                     "path": request.path_qs,
                     "bytes": bytes_received,
                     "status": status_str,
                     "service": "FOS",
-                    "details": synth_details,
+                    "details": build_cdn_miss_synth_details(bytes_received or None),
                     "caller": "cdn.miss",
                     "time_ms": elapsed_ms,
                 }
@@ -651,8 +764,13 @@ def _run_server() -> None:
     site = web.TCPSite(_RUNNER, "127.0.0.1", 0)
     _LOOP.run_until_complete(site.start())
 
-    # OS-assigned port becomes available only after .start()
-    _PORT = site._server.sockets[0].getsockname()[1]
+    # OS-assigned port becomes available only after .start().
+    # asyncio's AbstractServer base class doesn't declare ``sockets`` but
+    # every concrete implementation (Server/UnixServer) provides it; the
+    # site is started so `_server` is the concrete subclass at runtime.
+    _server = site._server
+    assert _server is not None
+    _PORT = _server.sockets[0].getsockname()[1]  # type: ignore[attr-defined]
     _READY.set()
 
     _LOOP.run_forever()
@@ -660,12 +778,24 @@ def _run_server() -> None:
 
 def start_proxy_server() -> None:
     global _SERVER_THREAD
-    if _SERVER_THREAD is not None and _SERVER_THREAD.is_alive():
+    # Fast path: server is up and serving. ``_PORT`` is set inside
+    # ``_run_server`` after the server has bound, so testing it (not just
+    # ``_SERVER_THREAD.is_alive()``) is what tells us a concurrent caller
+    # is safe to read ``proxy_endpoint()`` immediately.
+    if _PORT is not None and _SERVER_THREAD is not None and _SERVER_THREAD.is_alive():
         return
-    _READY.clear()
-    _SERVER_THREAD = threading.Thread(target=_run_server, daemon=True, name="telemetry-proxy")
-    _SERVER_THREAD.start()
-    # Anything beyond ~2s is a bind failure; fail loud rather than racing.
+    with _START_LOCK:
+        # Re-check under the lock. The first caller spawns the thread;
+        # every subsequent caller falls through to ``_READY.wait`` below
+        # without re-spawning so we don't have N threads each starting
+        # their own server (which would also leak module globals).
+        if _SERVER_THREAD is None or not _SERVER_THREAD.is_alive():
+            _READY.clear()
+            _SERVER_THREAD = threading.Thread(target=_run_server, daemon=True, name="telemetry-proxy")
+            _SERVER_THREAD.start()
+    # Wait OUTSIDE the lock so concurrent callers all block in parallel
+    # rather than serialising. Anything beyond ~2s is a bind failure;
+    # fail loud rather than racing.
     if not _READY.wait(timeout=2.0):
         raise RuntimeError("telemetry proxy failed to start within 2s")
 
@@ -712,7 +842,7 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
     """
     native_target = source.get("fos_native_endpoint") or source["endpoint"]
     cdn_url = (source.get("cdn_url") or "").strip()
-    cdn_target = cdn_url.replace("https://", "").replace("http://", "").split("/", 1)[0].lower() if cdn_url else None
+    cdn_target = _scheme_host(cdn_url) if cdn_url else None
     cdn_secret = source.get("cdn_secret") or ""
     service_id = source.get("service_id") or source.get("name", "default")
     # Only flip object downloads. LIST is HTTP GET too but the CDN

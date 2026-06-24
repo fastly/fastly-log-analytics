@@ -5,9 +5,14 @@ from pydantic import BaseModel
 from backend.models.common import BaseResponse
 
 
-class PrefillResponse(BaseResponse):
-    requests_per_day: int | None = None
-    edge_requests_per_day: int | None = None
+class _PrefillRatesBase(BaseResponse):
+    """Shared base for /api/usage/prefill and /api/usage/prefill/rates.
+
+    Holds the fields the cost-page stat cards need on first paint
+    (rates, local config, byte estimates). The full PrefillResponse
+    adds the Fastly-stats + DuckDB-derived fields on top.
+    """
+
     avg_log_file_size_kb: float | None = None
     estimated_bytes_per_line: int | None = None
     data_days: int = 0
@@ -15,7 +20,6 @@ class PrefillResponse(BaseResponse):
     commit_interval_mins: int = 5
     sample_rate: int = 100
     edge_only: bool = False
-    edge_ratio: float | None = None
     compaction_enabled: bool = True
     delete_after: bool = True
     log_retention_days: int = 90
@@ -25,6 +29,19 @@ class PrefillResponse(BaseResponse):
     cdn_egress_rate_per_gb: float | None = None
     storage_rate_per_gb_month: float | None = None
     min_billed_days: int | None = None
+
+
+class PrefillResponse(_PrefillRatesBase):
+    requests_per_day: int | None = None
+    edge_requests_per_day: int | None = None
+    edge_ratio: float | None = None
+
+
+class PrefillRatesResponse(_PrefillRatesBase):
+    """Fast-path subset of PrefillResponse for /api/usage/prefill/rates.
+    Omits ``requests_per_day`` / ``edge_requests_per_day`` (Fastly stats)
+    and ``edge_ratio`` (DuckDB) since those gate on the lazy /prefill call.
+    """
 
 
 class CurrentStorageResponse(BaseResponse):

@@ -91,4 +91,79 @@ describe('middleware /admin gate (security)', () => {
     const res: any = middleware(req)
     expect(res.status).toBe(200)
   })
+
+  it('blocks Next.js data requests targeting admin paths with a 403 status when from Caddy', () => {
+    const req1 = makeReq('http://localhost/_next/data/build-id/admin.json', { 'x-proxied-by-caddy': 'true' })
+    const res1: any = middleware(req1)
+    expect(res1.status).toBe(403)
+
+    const req2 = makeReq('http://localhost/_next/data/build-id/admin/settings.json', { 'x-proxied-by-caddy': 'true' })
+    const res2: any = middleware(req2)
+    expect(res2.status).toBe(403)
+  })
+
+  it('allows Next.js data requests targeting admin paths when local', () => {
+    const req = makeReq('http://localhost/_next/data/build-id/admin.json')
+    const res: any = middleware(req)
+    expect(res.status).toBe(200)
+  })
+
+  it('blocks Server Actions with a 403 status when from Caddy', () => {
+    const req = makeReq('http://localhost/', {
+      'x-proxied-by-caddy': 'true',
+      'next-action': 'some-action-id',
+    })
+    const res: any = middleware(req)
+    expect(res.status).toBe(403)
+  })
+
+  it('allows Server Actions when local', () => {
+    const req = makeReq('http://localhost/', {
+      'next-action': 'some-action-id',
+    })
+    const res: any = middleware(req)
+    expect(res.status).toBe(200)
+  })
+
+  // Audit 2026-06-11 H8: /alerts, /usage, /logs are analyst-blocked at the
+  // backend (see backend/utils/remote_access.py:_ANALYST_BLOCKED_PREFIXES).
+  // Previously the FE served them with 200 → page hydrated → client-side
+  // redirected to /dashboard. The URL flash made the wrong page title get
+  // announced to screen readers. The middleware now mirrors the /admin gate
+  // for these prefixes so the redirect is server-side.
+  describe.each(['/alerts', '/usage', '/logs'])('analyst-blocked prefix %s', (prefix) => {
+    it(`redirects ${prefix} to / when request came through Caddy`, () => {
+      const req = makeReq(`http://localhost${prefix}`, { 'x-proxied-by-caddy': 'true' })
+      const res: any = middleware(req)
+      expect(res.status).toBe(307)
+      const loc = res.headers.get('location') || ''
+      const path = new URL(loc).pathname
+      expect(path).toBe('/')
+    })
+
+    it(`allows ${prefix} when request has no Caddy marker (admin path)`, () => {
+      const req = makeReq(`http://localhost${prefix}`)
+      const res: any = middleware(req)
+      expect(res.status).toBe(200)
+      expect(res.headers.get('location')).toBeNull()
+    })
+
+    it(`redirects ${prefix} sub-paths through Caddy`, () => {
+      const req = makeReq(`http://localhost${prefix}/sub`, { 'x-proxied-by-caddy': 'true' })
+      const res: any = middleware(req)
+      expect(res.status).toBe(307)
+    })
+
+    it(`allows ${prefix} sub-paths from local`, () => {
+      const req = makeReq(`http://localhost${prefix}/sub`)
+      const res: any = middleware(req)
+      expect(res.status).toBe(200)
+    })
+
+    it(`blocks Next.js data requests for ${prefix} with 403 when from Caddy`, () => {
+      const req = makeReq(`http://localhost/_next/data/build-id${prefix}.json`, { 'x-proxied-by-caddy': 'true' })
+      const res: any = middleware(req)
+      expect(res.status).toBe(403)
+    })
+  })
 })

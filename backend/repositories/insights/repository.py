@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import heapq
 import threading
 import time
 import urllib.parse
+import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import duckdb
 
-from backend.repositories._base import QueryRunner, _safe_table
+from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table
+from backend.repositories._sql.insights import (
+    COALESCED_CITY_AGGREGATES,
+    COALESCED_URL_AGGREGATES,
+)
 
 from .registry import registry
 
@@ -60,35 +67,12 @@ def _coalesced_city_aggregates(
     - city_latency_regressions: [label, city, region, country, w_p95, b_p95, w_total, b_total]
     - new_city_traffic:         [label, city, region, country, w_cnt, b_cnt]
     """
-    sql = f"""
-    WITH base AS (
-        SELECT
-            "city",
-            {region_sel} AS region,
-            {country_sel} AS country,
-            {label_expr} AS label,
-            status,
-            elapsed,
-            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
-            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
-        FROM {table_name}
-        WHERE "city" IS NOT NULL AND "city" != ''
+    sql = COALESCED_CITY_AGGREGATES.format(
+        table_name=table_name,
+        label_expr=label_expr,
+        region_sel=region_sel,
+        country_sel=country_sel,
     )
-    SELECT
-        label, "city", region, country,
-        COUNT(*) FILTER (WHERE is_w) AS w_cnt,
-        COUNT(*) FILTER (WHERE is_b) AS b_cnt,
-        SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_errors_4xx,
-        SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_errors_4xx,
-        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
-            FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0 AS w_p95,
-        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
-            FILTER (WHERE is_b AND elapsed IS NOT NULL) / 1000.0 AS b_p95,
-        COUNT(*) FILTER (WHERE is_w AND elapsed IS NOT NULL) AS w_lat_total,
-        COUNT(*) FILTER (WHERE is_b AND elapsed IS NOT NULL) AS b_lat_total
-    FROM base
-    GROUP BY ALL
-    """
     rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
 
     surges: list[tuple] = []
@@ -165,76 +149,64 @@ def _coalesced_url_aggregates(
     table_name: str,
     window_start_s: str,
 ) -> dict[str, list[tuple]]:
-    """Coalesce 4 URL-keyed insights (error_spikes, cache_collapse,
-    latency_regression, tail_latency) into ONE pass over ``table_name``.
+    """Coalesce 5 URL-keyed insights (error_spikes, cache_collapse,
+    cacheability_regression, latency_regression, tail_latency) into ONE
+    pass over ``table_name``.
 
-    Each of those four insights previously ran its own GROUP BY url
+    Each of those insights previously ran its own GROUP BY url
     scan with the same WHERE clause and same baseline/window split
     ((timestamp < window_start) → baseline, (>=) → window). Coalescing
     them mirrors the O2 city-aggregates pattern that demonstrably saved
     ~520 ms on prod by replacing 4 city scans with 1.
 
-    Why these 4 and not all 5: ``origin_latency_spike`` is grouped by
+    Why not all url-keyed insights: ``origin_latency_spike`` is grouped by
     URL too but its SQL has a different shape — it uses overall_stats
     CTEs to normalize against the entire population's percentile, so
     its per-url aggregates need a second pass. Leaving it on its own
-    SQL template avoids cross-contaminating the simpler 4-insight CTE.
+    SQL template avoids cross-contaminating the simpler shared CTE.
+
+    cache_collapse and cacheability_regression are siblings that split the
+    cache story: cache_collapse tracks the hit ratio of *cacheable* traffic
+    (HIT/(HIT+MISS), PASS excluded), cacheability_regression tracks a surge
+    in *uncacheable* traffic (PASS/total). They share the HIT/MISS/PASS
+    counters in COALESCED_URL_AGGREGATES.
 
     Returns ``{insight_id: rows}`` where each rows list matches the
     insight's existing processor row-schema. On any exception the
     caller falls back to the legacy per-insight scans transparently.
 
-    - error_spikes:        [url, w_rate, b_rate, w_errors, w_total, b_total]
-    - cache_collapse:      [url, w_rate, b_rate, w_total, b_total]
-    - latency_regression:  [url, w_p95, b_p95, w_total, b_total]
-    - tail_latency:        [url, p99_ms, p50_ms, ratio, total]
+    - error_spikes:             [url, w_rate, b_rate, w_errors, w_total, b_total]
+    - cache_collapse:           [url, w_rate, b_rate, w_cacheable, b_cacheable]
+    - cacheability_regression:  [url, w_pass_rate, b_pass_rate, w_total, b_total]
+    - latency_regression:       [url, w_p95, b_p95, w_total, b_total]
+    - tail_latency:             [url, p99_ms, p50_ms, ratio, total]
     """
-    sql = f"""
-    WITH base AS (
-        SELECT
-            "url",
-            status,
-            cache,
-            elapsed,
-            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
-            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
-        FROM {table_name}
-        WHERE "url" IS NOT NULL
-    )
-    SELECT
-        "url",
-        -- Common counts
-        COUNT(*) FILTER (WHERE is_w) AS w_total,
-        COUNT(*) FILTER (WHERE is_b) AS b_total,
-        -- error_spikes: 5xx counters
-        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_5xx,
-        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_5xx,
-        -- cache_collapse: cache-hit counters
-        SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
-        SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,
-        -- latency_regression: elapsed-only counts + p95s in MILLISECONDS
-        COUNT(*) FILTER (WHERE is_w AND elapsed IS NOT NULL) AS w_lat_total,
-        COUNT(*) FILTER (WHERE is_b AND elapsed IS NOT NULL) AS b_lat_total,
-        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
-            FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0 AS w_p95,
-        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
-            FILTER (WHERE is_b AND elapsed IS NOT NULL) / 1000.0 AS b_p95,
-        -- tail_latency: window-only p99/p50 (rounded to whole ms to match
-        -- the legacy template's output exactly)
-        ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY elapsed)
-              FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p99,
-        ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY elapsed)
-              FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p50
-    FROM base
-    GROUP BY "url"
-    HAVING (COUNT(*) FILTER (WHERE is_w) > 0) OR (COUNT(*) FILTER (WHERE is_b) > 0)
-    """
+    sql = COALESCED_URL_AGGREGATES.format(table_name=table_name)
     cursor = runner.execute(sql, [window_start_s, window_start_s])
 
-    error_spikes_out: list[tuple] = []
-    cache_collapse_out: list[tuple] = []
-    latency_regression_out: list[tuple] = []
-    tail_latency_out: list[tuple] = []
+    # Bounded top-K via min-heap on score: each insight only ever holds
+    # at most _TOP_K entries in memory regardless of how many unique
+    # URLs match the threshold. Pre-refactor these were unbounded lists
+    # that grew linearly with cardinality — an attacker generating
+    # millions of unique URLs (e.g. random query-string) that hit any
+    # of the per-insight gates could OOM the worker before the trailing
+    # sort+slice ran. The counter tie-breaker preserves insertion order
+    # for items with identical scores (matches the prior implicit-stable
+    # sort behaviour).
+    _TOP_K = 15
+    error_spikes_heap: list[tuple] = []
+    cache_collapse_heap: list[tuple] = []
+    cacheability_regression_heap: list[tuple] = []
+    latency_regression_heap: list[tuple] = []
+    tail_latency_heap: list[tuple] = []
+
+    def _push_top_k(heap: list[tuple], score: float, counter: int, item: tuple) -> None:
+        if len(heap) < _TOP_K:
+            heapq.heappush(heap, (score, counter, item))
+        else:
+            heapq.heappushpop(heap, (score, counter, item))
+
+    counter = 0
 
     while True:
         rows = cursor.fetchmany(10000)
@@ -249,6 +221,10 @@ def _coalesced_url_aggregates(
                 b_5xx,
                 w_hits,
                 b_hits,
+                w_miss,
+                b_miss,
+                w_pass,
+                b_pass,
                 w_lat_total,
                 b_lat_total,
                 w_p95,
@@ -259,6 +235,7 @@ def _coalesced_url_aggregates(
 
             w_total_i = w_total or 0
             b_total_i = b_total or 0
+            counter += 1
 
             # ── error_spikes ──────────────────────────────────────────────────
             # Legacy HAVING: w_total >= 3 AND w_rate >= 0.05
@@ -268,17 +245,38 @@ def _coalesced_url_aggregates(
                 w_rate_e = (w_5xx or 0) / w_total_i if w_total_i else 0.0
                 b_rate_e = ((b_5xx or 0) / b_total_i) if b_total_i else None
                 if w_rate_e >= 0.05 and (b_total_i < 10 or (b_rate_e is not None and w_rate_e >= b_rate_e * 2 + 0.05)):
-                    error_spikes_out.append((url, w_rate_e, b_rate_e, w_5xx, w_total, b_total))
+                    item = (url, w_rate_e, b_rate_e, w_5xx, w_total, b_total)
+                    score = (w_rate_e or 0) - (b_rate_e or 0)
+                    _push_top_k(error_spikes_heap, score, counter, item)
 
             # ── cache_collapse ────────────────────────────────────────────────
-            # Legacy HAVING: w_total >= 5 AND b_total >= 20 AND b_rate >= 0.40
-            #                AND w_rate <= b_rate - 0.20 AND w_rate <= b_rate * 0.6
-            # ORDER BY (b_rate - w_rate) DESC LIMIT 15
-            if w_total_i >= 5 and b_total_i >= 20:
-                w_rate_c = (w_hits or 0) / w_total_i if w_total_i else 0.0
-                b_rate_c = (b_hits or 0) / b_total_i if b_total_i else 0.0
+            # Hit ratio = HIT / (HIT + MISS) — the conventional Fastly cache hit
+            # ratio. PASS is uncacheable and excluded from both numerator and
+            # denominator, so a PASS surge no longer trips this insight (it is
+            # surfaced by cacheability_regression below). Gate on the *cacheable*
+            # sample size (HIT+MISS), not total requests. Mirror this exactly in
+            # the standalone CACHE_COLLAPSE template (parity test depends on it).
+            w_cacheable = (w_hits or 0) + (w_miss or 0)
+            b_cacheable = (b_hits or 0) + (b_miss or 0)
+            if w_cacheable >= 5 and b_cacheable >= 20:
+                w_rate_c = (w_hits or 0) / w_cacheable if w_cacheable else 0.0
+                b_rate_c = (b_hits or 0) / b_cacheable if b_cacheable else 0.0
                 if b_rate_c >= 0.40 and w_rate_c <= b_rate_c - 0.20 and w_rate_c <= b_rate_c * 0.6:
-                    cache_collapse_out.append((url, w_rate_c, b_rate_c, w_total, b_total))
+                    item_cc: tuple = (url, w_rate_c, b_rate_c, w_cacheable, b_cacheable)
+                    score = (b_rate_c or 0) - (w_rate_c or 0)
+                    _push_top_k(cache_collapse_heap, score, counter, item_cc)
+
+            # ── cacheability_regression ───────────────────────────────────────
+            # pass_rate = PASS / ALL requests. Fires when a previously-cacheable
+            # URL flips to mostly PASS (origin made it uncacheable). Mirror the
+            # standalone CACHEABILITY_REGRESSION template.
+            if w_total_i >= 10 and b_total_i >= 50:
+                w_pass_rate = (w_pass or 0) / w_total_i if w_total_i else 0.0
+                b_pass_rate = (b_pass or 0) / b_total_i if b_total_i else 0.0
+                if b_pass_rate <= 0.20 and w_pass_rate >= 0.50 and w_pass_rate >= b_pass_rate + 0.30:
+                    item_cr: tuple = (url, w_pass_rate, b_pass_rate, w_total, b_total)
+                    score = (w_pass_rate or 0) - (b_pass_rate or 0)
+                    _push_top_k(cacheability_regression_heap, score, counter, item_cr)
 
             # ── latency_regression ────────────────────────────────────────────
             # Legacy HAVING: w_total >= 5 AND b_total >= 20 AND w_p95 >= b_p95 * 2.0
@@ -296,7 +294,9 @@ def _coalesced_url_aggregates(
                 and w_p95 >= b_p95 * 2.0
                 and w_p95 - b_p95 >= 200
             ):
-                latency_regression_out.append((url, w_p95, b_p95, w_total, b_total))
+                item_lr: tuple = (url, w_p95, b_p95, w_total, b_total)
+                score = (w_p95 / b_p95) if b_p95 else 0.0
+                _push_top_k(latency_regression_heap, score, counter, item_lr)
 
             # ── tail_latency (window-only) ────────────────────────────────────
             # Legacy WHERE timestamp >= window_start; HAVING COUNT(*) >= 20 AND
@@ -305,18 +305,19 @@ def _coalesced_url_aggregates(
             if w_lat_total is not None and w_lat_total >= 20 and w_p99 is not None and w_p50 is not None and w_p50 > 0:
                 ratio = round(w_p99 / w_p50, 1)
                 if ratio > 5:
-                    tail_latency_out.append((url, w_p99, w_p50, ratio, w_lat_total))
+                    item_tl: tuple = (url, w_p99, w_p50, ratio, w_lat_total)
+                    _push_top_k(tail_latency_heap, ratio or 0.0, counter, item_tl)
 
-    error_spikes_out.sort(key=lambda x: -((x[1] or 0) - (x[2] or 0)))
-    cache_collapse_out.sort(key=lambda x: -((x[2] or 0) - (x[1] or 0)))
-    latency_regression_out.sort(key=lambda x: -((x[1] / x[2]) if x[2] else 0))
-    tail_latency_out.sort(key=lambda x: -(x[3] or 0))
+    def _heap_to_sorted_items(heap: list[tuple]) -> list[tuple]:
+        # heap is (score, counter, item); return items sorted by score desc.
+        return [entry[2] for entry in sorted(heap, key=lambda e: e[0], reverse=True)]
 
     return {
-        "error_spikes": error_spikes_out[:15],
-        "cache_collapse": cache_collapse_out[:15],
-        "latency_regression": latency_regression_out[:15],
-        "tail_latency": tail_latency_out[:15],
+        "error_spikes": _heap_to_sorted_items(error_spikes_heap),
+        "cache_collapse": _heap_to_sorted_items(cache_collapse_heap),
+        "cacheability_regression": _heap_to_sorted_items(cacheability_regression_heap),
+        "latency_regression": _heap_to_sorted_items(latency_regression_heap),
+        "tail_latency": _heap_to_sorted_items(tail_latency_heap),
     }
 
 
@@ -325,7 +326,28 @@ def get_insights(
     src: dict,
     window_hours: float,
     baseline_hours: float,
+    *,
+    clamp_start: str | None = None,
+    clamp_end: str | None = None,
+    mask_ips: bool = False,
 ) -> dict:
+    """Compute the insight cards for ``src`` over the window/baseline ranges.
+
+    M2: ``clamp_start`` / ``clamp_end`` (ISO-8601) bound the scanned range to
+    the analyst's allowed window — the router derives them via
+    ``get_analyst_time_bounds`` + ``clamp_or_400``. ``None`` for both is the
+    admin / prewarmer path (full range). They're folded into the cache key so
+    a clamped analyst result can never read (or overwrite) the unclamped
+    admin-prewarmed entry for the same source/window/baseline.
+
+    M3: ``mask_ips`` is passed to the row processors via ``context`` so the
+    IP-keyed insights (request_size_anomaly, connection_abuse) mask the client
+    IP they place in the label / filters / investigate_url. It's also part of
+    the cache key so a masked analyst result and an unmasked one never share an
+    entry.
+    """
+    from backend.utils.date_utils import parse_iso_utc
+
     source_name = src["name"]
     table_name = _safe_table(source_name)
 
@@ -333,18 +355,54 @@ def get_insights(
     window_start = now - timedelta(hours=window_hours)
     baseline_start = now - timedelta(hours=baseline_hours + window_hours)
 
+    # M2: clamp to the analyst's window. ``clamp_end`` ceilings the anchor
+    # (absolute-window invites can end in the past → re-derive the relative
+    # boundaries off the clamped anchor); ``clamp_start`` floors the earliest
+    # scanned row. None on both = admin / prewarmer = no clamp.
+    if clamp_end:
+        ce = parse_iso_utc(clamp_end)
+        if ce and ce < now:
+            now = ce
+            window_start = now - timedelta(hours=window_hours)
+            baseline_start = now - timedelta(hours=baseline_hours + window_hours)
+    if clamp_start:
+        cs = parse_iso_utc(clamp_start)
+        if cs:
+            baseline_start = max(baseline_start, cs)
+            window_start = max(window_start, cs)
+
     now_s = now.isoformat()
     window_start_s = window_start.isoformat()
     baseline_start_s = baseline_start.isoformat()
 
-    cache_bucket = int(time.time() / max(INSIGHTS_CACHE_TTL, 1))
-    cache_key = f"{source_name}:{window_hours}:{baseline_hours}:{cache_bucket}"
+    # Stable cache key — the previous shape included a
+    # ``cache_bucket = int(time.time() / TTL)`` so the key itself rolled
+    # every TTL seconds. That created a deterministic race window: a
+    # request landing 1 ms after the bucket boundary saw the cache key
+    # change and re-computed even though the previous bucket's payload
+    # was still in the BoundedTTLCache. Removing the bucket lets the
+    # cache's own auto-expiry handle freshness, and the prewarmer
+    # cron (every 240 s, INSIGHTS_CACHE_TTL=300 s) re-writes the entry
+    # well before it would expire — so under normal operation a user
+    # request never pays the cold compute.
+    # Fold the analyst clamp into the key so a scoped result can never read
+    # (or overwrite) the unclamped admin / prewarmer entry for the same
+    # source/window/baseline. Admin path (None,None) keeps the original key
+    # shape the prewarmer writes; a relative-window analyst's clamp_start
+    # rolls with ``now`` so they recompute (the BoundedTTLCache caps growth).
+    cache_key = f"{source_name}:{window_hours}:{baseline_hours}:{clamp_start or ''}:{clamp_end or ''}:{int(mask_ips)}"
     if INSIGHTS_CACHE_TTL > 0:
         with _insights_cache_lock:
             entry = _insights_cache.get(cache_key)
         if entry is not None:
             cached = entry[1].copy()
-            cached["_is_cached"] = True
+            # The response model's field is ``is_cached`` with
+            # serialization_alias ``_is_cached`` (see BaseResponse). Stamping
+            # ``_is_cached`` here is dropped on validation — Pydantic matches
+            # the unaliased field name — so every cache hit serialized as
+            # ``"_is_cached": false``. Stamp the field name so the marker
+            # survives. (Mirrors the dashboard.py fix.)
+            cached["is_cached"] = True
             return cached
 
     runner = QueryRunner(con, src)
@@ -382,328 +440,429 @@ def get_insights(
         if not actual_cols:
             return empty_resp
 
-    # ── Materialize relevant window into temp table ───────────────────────────
-    # This is the single most important optimization: avoid globbing/metadata parsing 30+ times.
-    temp_table = f"insights_temp_{int(time.time())}"
+    # ── Materialize relevant window into a per-request scratch table ──────────
+    # This is the single most important optimization: avoid globbing/metadata
+    # parsing 30+ times.
+    #
+    # The materialised window + the unnested WAF stream both live in a
+    # per-request ``ATTACH ':memory:' AS scratch_<uuid>`` database so the
+    # per-insight tasks below can run in parallel: DuckDB Connection objects
+    # are not thread-safe, but ``con.cursor()`` returns shadow connections
+    # that ARE safe across threads and DO see the attached in-memory
+    # database. The first parallelize attempt (3a003de, reverted 7909bcb)
+    # used a regular CREATE TABLE on the default DB to work around the
+    # TEMP-table cross-cursor invisibility, which paid disk I/O on every
+    # cold call. ATTACH ':memory:' fixes both problems — cross-cursor
+    # visibility AND in-memory storage. The scratch is unique per request
+    # so two concurrent requests on the same pool connection don't collide.
+    scratch_alias = f"insights_scratch_{uuid.uuid4().hex[:12]}"
+    runner.con.execute(f"ATTACH ':memory:' AS {scratch_alias}")
+    scratch_attached = True
+    temp_table = f"{scratch_alias}.insights_temp_{uuid.uuid4().hex[:12]}"
 
-    # Derive needed_cols from every registered insight's `required_fields` so
-    # we never project a temp table that's missing a column some insight's SQL
-    # references. (Previously a hard-coded list silently dropped columns like
-    # `metro` / `tls_ciphers_sha` / `oretries` / `conn_requests` — the matching
-    # insights then 500'd with "Referenced column not found in FROM clause".)
+    # Derive needed_cols from each ELIGIBLE insight's `required_fields` —
+    # eligibility is the same all-required-fields-present check the per-insight
+    # loop runs below (around line 595). Pre-filtering here drops columns that
+    # only an ineligible insight references, shrinking the temp projection from
+    # ~35 cols to whatever the current service's schema can actually feed. The
+    # safety guarantee we had before still holds: any eligible insight's
+    # required_fields are included, so no SQL template can land on a missing
+    # column.
     needed_cols_set: set[str] = {"timestamp"}
     for d in registry.get_all():
-        needed_cols_set.update(d.required_fields)
-    # Also include support cols that processors read from context but aren't in
-    # required_fields (e.g. ja3/ja4 fingerprint selection in botnet_grouping).
-    # Geo columns are referenced via build_geo_select_clause when present
-    # in the source schema, even though no insight lists `region` directly
-    # in its required_fields.
+        if all(col in actual_cols for col in d.required_fields):
+            needed_cols_set.update(d.required_fields)
+    # Support cols processors read from context but no insight lists in
+    # required_fields (ja3/ja4 fingerprint selection in botnet_grouping; geo
+    # columns referenced via build_geo_select_clause). Filtered by actual_cols
+    # in the cols_sql line below so missing columns don't break the projection.
     needed_cols_set.update({"ja3", "ja4", "region"})
     needed_cols = sorted(needed_cols_set)
     cols_sql = ", ".join(f'"{c}"' for c in needed_cols if c in actual_cols)
     if not cols_sql:
         cols_sql = "*"
 
-    create_q = f"CREATE TEMP TABLE {temp_table} AS SELECT {cols_sql} FROM {table_name} WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)"
-    if not runner.create_temp_table(create_q, [baseline_start_s, now_s]):
-        temp_table = table_name  # Fallback
+    # CREATE TABLE (not TEMP) inside the scratch :memory: DB — TEMP tables
+    # are connection-scoped and invisible to ``con.cursor()`` shadow
+    # connections; tables in an ATTACH'd :memory: DB are visible to every
+    # cursor on the parent connection.
+    create_q = f"CREATE TABLE {temp_table} AS SELECT {cols_sql} FROM {table_name} WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)"
+    temp_created = runner.create_temp_table(create_q, [baseline_start_s, now_s])
+    if not temp_created:
+        temp_table = table_name  # Fallback to the iceberg view directly
 
-    # Available history
+    # Materialise the unnested WAF signal stream once so waf_signal_spikes
+    # reads from a pre-trimmed table instead of re-running the
+    # unnest+string_split+trim inline on every call. Cheap when "waf_sig"
+    # is present; skipped when the column is missing or when the parent
+    # temp create failed (the WAF insight is gated below so it doesn't
+    # run with a stale ``waf_table`` reference).
+    waf_table: str | None = None
+    if temp_created and "waf_sig" in actual_cols:
+        waf_temp = f"{scratch_alias}.insights_waf_{uuid.uuid4().hex[:12]}"
+        waf_create_q = (
+            f"CREATE TABLE {waf_temp} AS "
+            f"SELECT timestamp, trim(signal) AS signal "
+            f"FROM (SELECT timestamp, unnest(string_split(\"waf_sig\", ',')) AS signal "
+            f"      FROM {temp_table} "
+            f'      WHERE "waf_sig" IS NOT NULL AND "waf_sig" != \'\') '
+            f"WHERE trim(signal) != '' AND trim(signal) != 'BOT-ANALYSIS'"
+        )
+        if runner.create_temp_table(waf_create_q):
+            waf_table = waf_temp
+
     try:
-        earliest_ts = runner.execute(f"SELECT min(timestamp) FROM {temp_table}").fetchone()[0]
-        if earliest_ts:
-            if isinstance(earliest_ts, str):
-                from backend.utils.date_utils import parse_iso_utc
+        # Available history
+        try:
+            earliest_ts = runner.execute(f"SELECT min(timestamp) FROM {temp_table}").fetchone()[0]
+            if earliest_ts:
+                if isinstance(earliest_ts, str):
+                    from backend.utils.date_utils import parse_iso_utc
 
-                earliest_ts = parse_iso_utc(earliest_ts) or earliest_ts
-            elif hasattr(earliest_ts, "tzinfo"):
-                # DuckDB returns TIMESTAMPTZ in the *server's* local zone, not UTC.
-                # `.replace(tzinfo=UTC)` would re-label the local wall clock as
-                # UTC and shift the instant by the local offset — turning a
-                # 23h-old row into a 29h-old one on MDT, or vice versa. Use
-                # astimezone so the instant is preserved across zones (and
-                # handle the rare naive case by assuming UTC).
-                if earliest_ts.tzinfo is None:
-                    earliest_ts = earliest_ts.replace(tzinfo=UTC)
-                else:
-                    earliest_ts = earliest_ts.astimezone(UTC)
-            available_history_hours = (now - earliest_ts).total_seconds() / 3600.0
-        else:
+                    earliest_ts = parse_iso_utc(earliest_ts) or earliest_ts
+                elif hasattr(earliest_ts, "tzinfo"):
+                    # DuckDB returns TIMESTAMPTZ in the *server's* local zone, not UTC.
+                    # `.replace(tzinfo=UTC)` would re-label the local wall clock as
+                    # UTC and shift the instant by the local offset — turning a
+                    # 23h-old row into a 29h-old one on MDT, or vice versa. Use
+                    # astimezone so the instant is preserved across zones (and
+                    # handle the rare naive case by assuming UTC).
+                    if earliest_ts.tzinfo is None:
+                        earliest_ts = earliest_ts.replace(tzinfo=UTC)
+                    else:
+                        earliest_ts = earliest_ts.astimezone(UTC)
+                available_history_hours = (now - earliest_ts).total_seconds() / 3600.0
+            else:
+                available_history_hours = 0.0
+        except Exception:
             available_history_hours = 0.0
-    except Exception:
-        available_history_hours = 0.0
 
-    # Insight definitions
-    try:
-        from backend.core.log_fields import INSIGHT_DEFINITIONS as _defs
-
-        defs_map = {d["id"]: d for d in _defs}
-    except Exception:
-        defs_map = {}
-
-    def _def(insight_id: str) -> dict:
-        return defs_map.get(insight_id, {})
-
-    def check_baseline(insight_id: str) -> dict | None:
-        if available_history_hours < baseline_hours:
-            d = _def(insight_id)
-            avail = max(0.1, round(available_history_hours, 1))
-            return {
-                "id": insight_id,
-                "title": d.get("title", insight_id.replace("_", " ").title()),
-                "description": d.get("description", ""),
-                "severity": "info",
-                "summary": f"Requires {int(baseline_hours)}h of historical data (only {avail}h available)",
-                "items": [],
-            }
-        return None
-
-    try:
-        w_total = runner.execute(
-            f"SELECT count(*) FROM {temp_table} WHERE timestamp >= CAST(? AS TIMESTAMPTZ)", [window_start_s]
-        ).fetchone()[0]
-    except Exception:
-        w_total = 0
-
-    table_name = temp_table
-
-    def make_investigate_url(filters: dict | None = None) -> str:
-        p = [("start", window_start_s), ("end", now_s)]
-        for col, val in (filters or {}).items():
-            if val is not None:
-                p.append((f"filter_{col}", str(val)))
-        return "/dashboard?" + urllib.parse.urlencode(p)
-
-    def _sev(items: list, crit_key: bool = False) -> str:
-        if not items:
-            return "clean"
-        if crit_key and any(i.get("severity") == "critical" for i in items):
-            return "critical"
-        return "warning"
-
-    tasks: list[Callable[[], dict | None]] = []
-
-    # ── Registered Dynamic Insights ───────────────────────────────────────────
-    from backend.repositories.utils.filters import build_geo_select_clause
-
-    loc_cols, label_expr, country_sel, region_sel = build_geo_select_clause(actual_cols)
-    # Bare expression (no leading comma, no trailing alias) so templates can
-    # write ``, {ua_mobile_sel} AS mobile_ratio`` consistently. Returning
-    # ``, ... AS mobile_ratio`` here produced ``avg_kb, , ... AS mobile_ratio
-    # AS mobile_ratio`` — a syntax error around the double comma.
-    ua_mobile_sel = "0"
-    if "ua" in actual_cols:
-        ua_mobile_sel = "SUM(CASE WHEN \"ua\" ILIKE '%Mobi%' OR \"ua\" ILIKE '%Android%' OR \"ua\" ILIKE '%iPhone%' THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)"
-    url_col = '"url"' if "url" in actual_cols else "NULL"
-    q_col = '"url"' if "url" in actual_cols else ('"digest"' if "digest" in actual_cols else "'(unknown)'")
-
-    # ── Coalesced city aggregates (O2 bypass) ─────────────────────────────────
-    # The 4 city-based insights (city_surges, city_error_spikes,
-    # city_latency_regressions, new_city_traffic) each issued their own
-    # GROUP BY (city, region, country) scan of the temp table. On prod
-    # 2026-06-05 those four scans were 177+205+219+181 = 782 ms of pure
-    # duplication — every row read four times to compute counts/rates/p95s
-    # that fit naturally in a single SELECT. Run one pass here and reuse
-    # the per-(city, region, country) aggregate rows below; each insight
-    # task short-circuits via `city_precomputed` instead of issuing its
-    # own SELECT.
-    #
-    # Only fires when ALL 4 are eligible (city + status + elapsed + timestamp
-    # all in schema). When a service is missing one of those columns the
-    # per-insight scans still run for the eligible subset.
-    city_precomputed: dict[str, list[tuple]] = {}
-    if "city" in actual_cols and "status" in actual_cols and "elapsed" in actual_cols and "timestamp" in actual_cols:
+        # Insight definitions — Phase 7 caller migration. The new
+        # field_registry re-exports INSIGHT_DEFINITIONS verbatim (same list
+        # of dicts) so existing patch contracts and the dict-key access shape
+        # below stay valid. Switching the import lets the registry control
+        # the source-of-truth flip in step 13 without re-editing this file.
         try:
-            city_precomputed = _coalesced_city_aggregates(
-                runner,
-                table_name,
-                window_start_s,
-                label_expr,
-                region_sel,
-                country_sel,
-                window_hours,
-                baseline_hours,
-            )
-        except Exception as e:
-            # Fall back transparently to per-insight scans; never break
-            # the page on a coalesced-path bug.
-            import logging
+            from backend.core.field_registry import INSIGHT_DEFINITIONS as _defs
 
-            logging.getLogger(__name__).warning("[insights] coalesced city aggregates failed, falling back: %s", e)
-            city_precomputed = {}
+            defs_map = {d["id"]: d for d in _defs}
+        except Exception:
+            defs_map = {}
 
-    # ── Coalesced URL aggregates (Step 2 / Option C, 2026-06-06) ─────────────
-    # 4 URL-keyed insights (error_spikes, cache_collapse, latency_regression,
-    # tail_latency) all GROUP BY url over the same WHERE clause with the same
-    # is_w/is_b baseline-vs-window split. Pre-coalesce, each ran its own scan
-    # of the temp table; the audit showed they totalled ~400-600 ms. Coalescing
-    # them mirrors O2's city pattern (proven ~520 ms save on prod).
-    #
-    # origin_latency_spike is the 5th url-keyed insight but its SQL has an
-    # overall_stats CTE that normalizes against the entire population's p95
-    # — different shape, kept on its own template.
-    #
-    # Fires only when all the columns the CTE touches are present (url,
-    # status, cache, elapsed, timestamp). When a service is missing any of
-    # them the per-insight scans run normally for whichever subset is
-    # eligible. Failure transparently falls back to per-insight scans —
-    # never blocks the page.
-    url_precomputed: dict[str, list[tuple]] = {}
-    if (
-        "url" in actual_cols
-        and "status" in actual_cols
-        and "cache" in actual_cols
-        and "elapsed" in actual_cols
-        and "timestamp" in actual_cols
-    ):
+        def _def(insight_id: str) -> dict:
+            return defs_map.get(insight_id, {})
+
+        def check_baseline(insight_id: str) -> dict | None:
+            if available_history_hours < baseline_hours:
+                d = _def(insight_id)
+                avail = max(0.1, round(available_history_hours, 1))
+                return {
+                    "id": insight_id,
+                    "title": d.get("title", insight_id.replace("_", " ").title()),
+                    "description": d.get("description", ""),
+                    "severity": "info",
+                    "summary": f"Requires {int(baseline_hours)}h of historical data (only {avail}h available)",
+                    "items": [],
+                }
+            return None
+
         try:
-            url_precomputed = _coalesced_url_aggregates(runner, table_name, window_start_s)
-        except Exception as e:
-            import logging
+            w_total = runner.execute(
+                f"SELECT count(*) FROM {temp_table} WHERE timestamp >= CAST(? AS TIMESTAMPTZ)", [window_start_s]
+            ).fetchone()[0]
+        except Exception:
+            w_total = 0
 
-            logging.getLogger(__name__).warning("[insights] coalesced URL aggregates failed, falling back: %s", e)
-            url_precomputed = {}
+        table_name = temp_table
 
-    for definition in registry.get_all():
-        # Check if all required fields are present
-        if not all(col in actual_cols for col in definition.required_fields):
-            continue
+        def make_investigate_url(filters: dict | None = None) -> str:
+            p = [("start", window_start_s), ("end", now_s)]
+            for col, val in (filters or {}).items():
+                if val is not None:
+                    p.append((f"filter_{col}", str(val)))
+            return "/dashboard?" + urllib.parse.urlencode(p)
 
-        def _make_task(d=definition):
-            def compute_insight() -> dict | None:
-                # Hydrate template
-                fp_col = "ja4" if "ja4" in actual_cols else "ja3"
+        def _sev(items: list, crit_key: bool = False) -> str:
+            if not items:
+                return "clean"
+            if crit_key and any(i.get("severity") == "critical" for i in items):
+                return "critical"
+            return "warning"
 
-                # Special hydration for specific insights
-                extra_args = {}
-                if d.id == "impossible_distance":
-                    from backend.utils.pop_utils import get_pop_lat_lon_map
+        tasks: list[Callable[[], dict | None]] = []
 
-                    pop_map = get_pop_lat_lon_map()
-                    if not pop_map:
-                        return None
-                    extra_args["pop_values"] = ", ".join(
-                        f"('{code}', {float(lat)}::DOUBLE, {float(lon)}::DOUBLE)"
-                        for code, (lat, lon) in pop_map.items()
-                        if lat is not None and lon is not None
-                    )
-                    extra_args["edge_filter"] = 'AND t."edge" = true' if "edge" in actual_cols else ""
+        # Per-task lock that guards parallel appends to ``runner.debug_queries``.
+        # Each per-insight task below runs in its own thread with its own
+        # DuckDB cursor (cursors are separate shadow connections — thread-safe),
+        # but the debug-queries list is the request-scoped one consumed by
+        # ``runner.telemetry()`` at the bottom of this function and ultimately
+        # serialised into the response's debug panel. Without the lock,
+        # concurrent ``list.append`` is technically safe under CPython's GIL
+        # but the SQL/time pairing through ``_compact_sql_for_debug`` is not
+        # — interleaved appends could swap sql with the wrong elapsed_ms.
+        _debug_lock = threading.Lock()
 
-                if d.id != "impossible_distance":
-                    r = check_baseline(d.id)
-                    if r:
-                        return r
+        def _execute_on_cursor(cur: duckdb.DuckDBPyConnection, sql: str, params: list | None = None):
+            """Mirror of ``runner.execute`` for use from worker threads.
 
-                # O2 / Step 2 bypass: insights pull rows from the precomputed
-                # coalesced aggregates instead of issuing their own SELECT.
-                # Row schema is constructed to match each insight's existing
-                # `# row schema: [...]` processor contract.
-                if d.id in city_precomputed:
-                    rows = city_precomputed[d.id]
-                elif d.id in url_precomputed:
-                    rows = url_precomputed[d.id]
-                else:
-                    try:
-                        sql = d.sql_template.format(
-                            table_name=table_name,
-                            window_hours=window_hours,
-                            baseline_hours=baseline_hours,
-                            fp_col=fp_col,
-                            loc_cols=loc_cols,
-                            label_expr=label_expr,
-                            country_sel=country_sel,
-                            region_sel=region_sel,
-                            ua_mobile_sel=ua_mobile_sel,
-                            url_col=url_col,
-                            q_col=q_col,
-                            **extra_args,
+            Calling ``runner.execute`` from a worker would serialise every
+            per-insight scan on the parent connection — exactly what we're
+            trying to avoid. ``cur`` is a per-task ``runner.con.cursor()``
+            shadow connection; the parent-DB-level ATTACH ':memory:' AS
+            scratch_<uuid> is visible to every cursor on the same parent.
+            Telemetry is still appended to the parent runner's debug_queries
+            (lock-guarded) so the response's debug panel sees every per-
+            insight scan, matching the serial-path contract.
+            """
+            t0 = time.time()
+            res = cur.execute(sql, params or [])
+            elapsed_ms = round((time.time() - t0) * 1000, 2)
+            with _debug_lock:
+                runner.debug_queries.append({"sql": _compact_sql_for_debug(sql), "time_ms": elapsed_ms})
+            return res
+
+        # ── Registered Dynamic Insights ───────────────────────────────────────────
+        from backend.repositories.utils.filters import build_geo_select_clause
+
+        loc_cols, label_expr, country_sel, region_sel = build_geo_select_clause(actual_cols)
+        # Bare expression (no leading comma, no trailing alias) so templates can
+        # write ``, {ua_mobile_sel} AS mobile_ratio`` consistently. Returning
+        # ``, ... AS mobile_ratio`` here produced ``avg_kb, , ... AS mobile_ratio
+        # AS mobile_ratio`` — a syntax error around the double comma.
+        ua_mobile_sel = "0"
+        if "ua" in actual_cols:
+            ua_mobile_sel = "SUM(CASE WHEN \"ua\" ILIKE '%Mobi%' OR \"ua\" ILIKE '%Android%' OR \"ua\" ILIKE '%iPhone%' THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)"
+        url_col = '"url"' if "url" in actual_cols else "NULL"
+        q_col = '"url"' if "url" in actual_cols else ('"digest"' if "digest" in actual_cols else "'(unknown)'")
+
+        # ── Coalesced city aggregates (O2 bypass) ─────────────────────────────────
+        # The 4 city-based insights (city_surges, city_error_spikes,
+        # city_latency_regressions, new_city_traffic) each issued their own
+        # GROUP BY (city, region, country) scan of the temp table. On prod
+        # 2026-06-05 those four scans were 177+205+219+181 = 782 ms of pure
+        # duplication — every row read four times to compute counts/rates/p95s
+        # that fit naturally in a single SELECT. Run one pass here and reuse
+        # the per-(city, region, country) aggregate rows below; each insight
+        # task short-circuits via `city_precomputed` instead of issuing its
+        # own SELECT.
+        #
+        # Only fires when ALL 4 are eligible (city + status + elapsed + timestamp
+        # all in schema). When a service is missing one of those columns the
+        # per-insight scans still run for the eligible subset.
+        city_precomputed: dict[str, list[tuple]] = {}
+        if (
+            "city" in actual_cols
+            and "status" in actual_cols
+            and "elapsed" in actual_cols
+            and "timestamp" in actual_cols
+        ):
+            try:
+                city_precomputed = _coalesced_city_aggregates(
+                    runner,
+                    table_name,
+                    window_start_s,
+                    label_expr,
+                    region_sel,
+                    country_sel,
+                    window_hours,
+                    baseline_hours,
+                )
+            except Exception as e:
+                # Fall back transparently to per-insight scans; never break
+                # the page on a coalesced-path bug.
+                import logging
+
+                logging.getLogger(__name__).warning("[insights] coalesced city aggregates failed, falling back: %s", e)
+                city_precomputed = {}
+
+        # ── Coalesced URL aggregates (Step 2 / Option C, 2026-06-06) ─────────────
+        # 4 URL-keyed insights (error_spikes, cache_collapse, latency_regression,
+        # tail_latency) all GROUP BY url over the same WHERE clause with the same
+        # is_w/is_b baseline-vs-window split. Pre-coalesce, each ran its own scan
+        # of the temp table; the audit showed they totalled ~400-600 ms. Coalescing
+        # them mirrors O2's city pattern (proven ~520 ms save on prod).
+        #
+        # origin_latency_spike is the 5th url-keyed insight but its SQL has an
+        # overall_stats CTE that normalizes against the entire population's p95
+        # — different shape, kept on its own template.
+        #
+        # Fires only when all the columns the CTE touches are present (url,
+        # status, cache, elapsed, timestamp). When a service is missing any of
+        # them the per-insight scans run normally for whichever subset is
+        # eligible. Failure transparently falls back to per-insight scans —
+        # never blocks the page.
+        url_precomputed: dict[str, list[tuple]] = {}
+        if (
+            "url" in actual_cols
+            and "status" in actual_cols
+            and "cache" in actual_cols
+            and "elapsed" in actual_cols
+            and "timestamp" in actual_cols
+        ):
+            try:
+                url_precomputed = _coalesced_url_aggregates(runner, table_name, window_start_s)
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning("[insights] coalesced URL aggregates failed, falling back: %s", e)
+                url_precomputed = {}
+
+        for definition in registry.get_all():
+            # Check if all required fields are present
+            if not all(col in actual_cols for col in definition.required_fields):
+                continue
+            # waf_signal_spikes reads from the pre-unnested insights_waf temp.
+            # If we couldn't materialise it (main temp create failed earlier)
+            # skip rather than crash: the SQL template references a "signal"
+            # column that only exists on the materialised temp.
+            if definition.id == "waf_signal_spikes" and waf_table is None:
+                continue
+
+            def _make_task(d=definition):
+                def compute_insight() -> dict | None:
+                    # Hydrate template
+                    fp_col = "ja4" if "ja4" in actual_cols else "ja3"
+
+                    # Special hydration for specific insights
+                    extra_args = {}
+                    if d.id == "impossible_distance":
+                        from backend.utils.pop_utils import get_pop_lat_lon_map
+
+                        pop_map = get_pop_lat_lon_map()
+                        if not pop_map:
+                            return None
+                        extra_args["pop_values"] = ", ".join(
+                            f"('{code}', {float(lat)}::DOUBLE, {float(lon)}::DOUBLE)"
+                            for code, (lat, lon) in pop_map.items()
+                            if lat is not None and lon is not None
                         )
-                    except KeyError:
-                        # If hydration fails due to missing keys (e.g. pop_values), skip this insight
-                        return None
+                        extra_args["edge_filter"] = 'AND t."edge" = true' if "edge" in actual_cols else ""
 
-                    param_count = sql.count("?")
-                    params = [window_start_s] * param_count
+                    if d.id != "impossible_distance":
+                        r = check_baseline(d.id)
+                        if r:
+                            return r
 
-                    rows = runner.execute(sql, params).fetchall()
-                items = []
-                if d.row_processor:
-                    # Build context for processors
-                    context = {
-                        "window_hours": window_hours,
-                        "baseline_hours": baseline_hours,
-                        "fp_col": fp_col,
-                        "actual_cols": actual_cols,
+                    # O2 / Step 2 bypass: insights pull rows from the precomputed
+                    # coalesced aggregates instead of issuing their own SELECT.
+                    # Row schema is constructed to match each insight's existing
+                    # `# row schema: [...]` processor contract.
+                    if d.id in city_precomputed:
+                        rows = city_precomputed[d.id]
+                    elif d.id in url_precomputed:
+                        rows = url_precomputed[d.id]
+                    else:
+                        try:
+                            sql = d.sql_template.format(
+                                table_name=table_name,
+                                waf_table=waf_table or table_name,
+                                window_hours=window_hours,
+                                baseline_hours=baseline_hours,
+                                fp_col=fp_col,
+                                loc_cols=loc_cols,
+                                label_expr=label_expr,
+                                country_sel=country_sel,
+                                region_sel=region_sel,
+                                ua_mobile_sel=ua_mobile_sel,
+                                url_col=url_col,
+                                q_col=q_col,
+                                **extra_args,
+                            )
+                        except KeyError:
+                            # If hydration fails due to missing keys (e.g. pop_values), skip this insight
+                            return None
+
+                        param_count = sql.count("?")
+                        params = [window_start_s] * param_count
+
+                        # Per-task cursor: shadow connection on the same
+                        # parent ``runner.con``, thread-safe and able to see
+                        # the parent's ATTACH ':memory:' scratch tables.
+                        # The closure receives the cursor each call so the
+                        # outer ThreadPoolExecutor can run tasks in parallel
+                        # without the implicit single-cursor serialisation
+                        # that ``runner.execute`` enforces.
+                        task_cur = runner.con.cursor()
+                        rows = _execute_on_cursor(task_cur, sql, params).fetchall()
+                    items = []
+                    if d.row_processor:
+                        # Build context for processors
+                        context = {
+                            "window_hours": window_hours,
+                            "baseline_hours": baseline_hours,
+                            "fp_col": fp_col,
+                            "actual_cols": actual_cols,
+                            "mask_ips": mask_ips,
+                        }
+
+                        # Lazy load maps if needed by processors
+                        if any(p in d.id for p in ["asn", "metro"]):
+                            from backend.core import duckdb as _db_core
+
+                            context["asn_names"] = _db_core.get_asn_names(src["name"], [r[0] for r in rows if r])
+                            if "metro" in actual_cols:
+                                context["dma_map"] = _db_core._get_dma_map()
+
+                        for row in rows:
+                            try:
+                                item = d.row_processor(row, d, context)
+                                if "investigate_url" not in item:
+                                    filters = item.get("meta", {}).get("filters", {})
+                                    item["investigate_url"] = make_investigate_url(filters)
+                                items.append(item)
+                            except Exception:
+                                continue
+
+                    severity = "clean"
+                    if items:
+                        if d.severity_logic:
+                            severity = d.severity_logic(items)
+                        else:
+                            severity = _sev(items, crit_key=True)
+
+                    summary = ""
+                    if items:
+                        if d.id == "error_spikes":
+                            summary = f"{len(items)} URLs with elevated server error rates"
+                        elif d.id == "botnet_grouping":
+                            summary = f"{len(items)} fingerprints with suspicious IP spread"
+                        else:
+                            summary = f"{len(items)} anomalies detected"
+                    else:
+                        summary = f"No {d.title.lower()} detected"
+
+                    return {
+                        "id": d.id,
+                        "title": d.title,
+                        "description": d.description,
+                        "severity": severity,
+                        "summary": summary,
+                        "items": items,
                     }
 
-                    # Lazy load maps if needed by processors
-                    if any(p in d.id for p in ["asn", "metro"]):
-                        from backend.core import duckdb as _db_core
+                # Tag the closure with the insight id+title so the error-path
+                # below can report which insight failed. Without these, every
+                # task closes over the same `compute_insight` name and the
+                # error path emits duplicate `id="insight"` entries — which
+                # React then warns about as duplicate keys.
+                compute_insight._insight_id = d.id  # type: ignore[attr-defined]
+                compute_insight._insight_title = d.title  # type: ignore[attr-defined]
+                return compute_insight
 
-                        context["asn_names"] = _db_core.get_asn_names(src["name"], [r[0] for r in rows if r])
-                        if "metro" in actual_cols:
-                            context["dma_map"] = _db_core._get_dma_map()
+            tasks.append(_make_task())
 
-                    for row in rows:
-                        try:
-                            item = d.row_processor(row, d, context)
-                            if "investigate_url" not in item:
-                                filters = item.get("meta", {}).get("filters", {})
-                                item["investigate_url"] = make_investigate_url(filters)
-                            items.append(item)
-                        except Exception:
-                            continue
+        insights_list: list[dict] = []
 
-                severity = "clean"
-                if items:
-                    if d.severity_logic:
-                        severity = d.severity_logic(items)
-                    else:
-                        severity = _sev(items, crit_key=True)
-
-                summary = ""
-                if items:
-                    if d.id == "error_spikes":
-                        summary = f"{len(items)} URLs with elevated server error rates"
-                    elif d.id == "botnet_grouping":
-                        summary = f"{len(items)} fingerprints with suspicious IP spread"
-                    else:
-                        summary = f"{len(items)} anomalies detected"
-                else:
-                    summary = f"No {d.title.lower()} detected"
-
+        def _safe_run(fn: Callable[[], dict | None]) -> dict | None:
+            """Run one insight task and surface its failure as an error
+            card rather than killing the whole batch — same contract the
+            serial path had."""
+            try:
+                return fn()
+            except Exception as e:
+                insight_id = getattr(fn, "_insight_id", "unknown")
+                insight_title = getattr(fn, "_insight_title", insight_id.replace("_", " ").title())
                 return {
-                    "id": d.id,
-                    "title": d.title,
-                    "description": d.description,
-                    "severity": severity,
-                    "summary": summary,
-                    "items": items,
-                }
-
-            # Tag the closure with the insight id+title so the error-path
-            # below can report which insight failed. Without these, every
-            # task closes over the same `compute_insight` name and the
-            # error path emits duplicate `id="insight"` entries — which
-            # React then warns about as duplicate keys.
-            compute_insight._insight_id = d.id  # type: ignore[attr-defined]
-            compute_insight._insight_title = d.title  # type: ignore[attr-defined]
-            return compute_insight
-
-        tasks.append(_make_task())
-
-    insights_list: list[dict] = []
-    for fn in tasks:
-        try:
-            res = fn()
-            if res:
-                insights_list.append(res)
-        except Exception as e:
-            insight_id = getattr(fn, "_insight_id", "unknown")
-            insight_title = getattr(fn, "_insight_title", insight_id.replace("_", " ").title())
-            insights_list.append(
-                {
                     "id": insight_id,
                     "title": insight_title,
                     "severity": "error",
@@ -711,21 +870,232 @@ def get_insights(
                     "description": "",
                     "items": [],
                 }
-            )
 
-    payload: dict[str, Any] = {
-        "insights": insights_list,
-        "window_start": window_start_s,
-        "window_end": now_s,
-        "baseline_start": baseline_start_s,
-        "baseline_end": window_start_s,
-        "computed_at": now_s,
-        "window_hours": window_hours,
-        "baseline_hours": baseline_hours,
-        "window_total_requests": w_total,
+        # ThreadPoolExecutor dispatch — DuckDB releases the GIL during
+        # query execution, so the per-insight scans (~15-20 SQL-firing
+        # definitions after city_precomputed/url_precomputed bypass the
+        # other 5-10) overlap on the same database. ``max_workers=4``
+        # bounds memory pressure on the shared scratch :memory: tables
+        # and leaves headroom for the main-thread Python work that runs
+        # around the SQL.
+        if tasks:
+            max_workers = min(4, len(tasks))
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="insights") as pool:
+                for res in pool.map(_safe_run, tasks):
+                    if res:
+                        insights_list.append(res)
+
+        payload: dict[str, Any] = {
+            "insights": insights_list,
+            "window_start": window_start_s,
+            "window_end": now_s,
+            "baseline_start": baseline_start_s,
+            "baseline_end": window_start_s,
+            "computed_at": now_s,
+            "window_hours": window_hours,
+            "baseline_hours": baseline_hours,
+            "window_total_requests": w_total,
+            **runner.telemetry(),
+        }
+        if INSIGHTS_CACHE_TTL > 0:
+            with _insights_cache_lock:
+                _insights_cache[cache_key] = (now_s, payload)
+        return payload
+    finally:
+        # Release the entire scratch :memory: DB in one DETACH so neither
+        # the materialised window nor the WAF stream nor the alias itself
+        # leak onto the pooled DuckDB connection (audit finding 009 /
+        # 2026-06-15). Best-effort: a failed DETACH still releases when
+        # the connection is recycled, and the alias includes a fresh UUID
+        # per request so the next call can't collide on the same name.
+        if scratch_attached:
+            try:
+                runner.con.execute(f"DETACH {scratch_alias}")
+            except Exception:
+                pass
+
+
+def get_cache_collapse_detail(
+    con: duckdb.DuckDBPyConnection,
+    src: dict,
+    url: str,
+    window_hours: float,
+    baseline_hours: float,
+    *,
+    clamp_start: str | None = None,
+    clamp_end: str | None = None,
+    mask_ips: bool = False,
+) -> dict:
+    """Compute detailed timeline and eviction points for a specific URL."""
+    from backend.core.share_db.validation import mask_ip
+    from backend.utils.date_utils import parse_iso_utc
+
+    source_name = src["name"]
+    table_name = _safe_table(source_name)
+
+    now = datetime.now(UTC)
+    window_start = now - timedelta(hours=window_hours)
+    baseline_start = now - timedelta(hours=baseline_hours + window_hours)
+
+    if clamp_end:
+        ce = parse_iso_utc(clamp_end)
+        if ce and ce < now:
+            now = ce
+            window_start = now - timedelta(hours=window_hours)
+            baseline_start = now - timedelta(hours=baseline_hours + window_hours)
+    if clamp_start:
+        cs = parse_iso_utc(clamp_start)
+        if cs:
+            baseline_start = max(baseline_start, cs)
+            window_start = max(window_start, cs)
+
+    now_s = now.isoformat()
+    window_start_s = window_start.isoformat()
+    baseline_start_s = baseline_start.isoformat()
+
+    runner = QueryRunner(con, src)
+
+    # 1. Fetch window/baseline cache dispositions for this URL.
+    #    Hit ratio = HIT/(HIT+MISS) (cacheable only, PASS excluded — the
+    #    conventional Fastly definition). Pass rate = PASS/total (uncacheable
+    #    share). Counts double as the window breakdown shown in the modal.
+    rates_sql = f"""
+        WITH base AS (
+            SELECT cache,
+                (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+                (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+            FROM {table_name}
+            WHERE "url" = ? AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)
+        )
+        SELECT
+            SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
+            SUM(CASE WHEN cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_miss,
+            SUM(CASE WHEN cache ILIKE 'PASS%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_pass,
+            COUNT(*) FILTER (WHERE is_w) AS w_total,
+            SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,
+            SUM(CASE WHEN cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_miss,
+            SUM(CASE WHEN cache ILIKE 'PASS%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_pass,
+            COUNT(*) FILTER (WHERE is_b) AS b_total
+        FROM base
+    """
+    params = [window_start_s, window_start_s, url, baseline_start_s, now_s]
+    rates_res = runner.execute(rates_sql, params).fetchone() or (0, 0, 0, 0, 0, 0, 0, 0)
+    w_hits, w_miss, w_pass, w_total, b_hits, b_miss, b_pass, b_total = (int(v or 0) for v in rates_res)
+
+    w_cacheable = w_hits + w_miss
+    b_cacheable = b_hits + b_miss
+    w_rate = (w_hits / w_cacheable) if w_cacheable else 0.0
+    b_rate = (b_hits / b_cacheable) if b_cacheable else 0.0
+    w_pass_rate = (w_pass / w_total) if w_total else 0.0
+    b_pass_rate = (b_pass / b_total) if b_total else 0.0
+    breakdown = {
+        "hits": w_hits,
+        "misses": w_miss,
+        "passes": w_pass,
+        "other": max(0, w_total - w_hits - w_miss - w_pass),
+    }
+
+    # 2. Determine time-bucket interval based on total lookback duration
+    total_hours = window_hours + baseline_hours
+    if total_hours <= 2:
+        bucket_interval = "1 minute"
+    elif total_hours <= 12:
+        bucket_interval = "5 minutes"
+    elif total_hours <= 48:
+        bucket_interval = "15 minutes"
+    elif total_hours <= 168:
+        bucket_interval = "1 hour"
+    elif total_hours <= 720:
+        bucket_interval = "4 hours"
+    else:
+        bucket_interval = "1 day"
+
+    # 3. Query timeline of requests, hits and misses. expected_hits and hit_rate
+    #    are computed against the cacheable count (HIT+MISS) so the chart matches
+    #    the cacheable hit ratio shown in the stats — PASS traffic doesn't drag
+    #    the line down.
+    timeline_sql = f"""
+        SELECT
+            time_bucket(INTERVAL '{bucket_interval}', timestamp) AS bucket,
+            COUNT(*) AS total_requests,
+            SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) AS real_hits,
+            SUM(CASE WHEN cache ILIKE 'MISS%' THEN 1 ELSE 0 END) AS misses
+        FROM {table_name}
+        WHERE "url" = ? AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)
+        GROUP BY bucket
+        ORDER BY bucket ASC
+    """
+    timeline_params = [url, baseline_start_s, now_s]
+    timeline_rows = runner.execute(timeline_sql, timeline_params).fetchall()
+
+    timeline = []
+    for r in timeline_rows:
+        bucket_ts = r[0]
+        total_requests = int(r[1] or 0)
+        real_hits = int(r[2] or 0)
+        misses = int(r[3] or 0)
+        cacheable = real_hits + misses
+        expected_hits = float(cacheable * b_rate)
+        hit_rate = float(real_hits / cacheable) if cacheable > 0 else 0.0
+        timeline.append(
+            {
+                "bucket": bucket_ts.isoformat() if hasattr(bucket_ts, "isoformat") else str(bucket_ts),
+                "expected_hits": expected_hits,
+                "real_hits": real_hits,
+                "misses": misses,
+                "total_requests": total_requests,
+                "hit_rate": hit_rate,
+            }
+        )
+
+    # 4. Fetch the most recent 50 actual cache MISSes (cacheable requests that
+    #    weren't in cache) — the events relevant to a hit-ratio collapse. PASS
+    #    is uncacheable, so it's deliberately excluded here; the PASS share is
+    #    summarised in `breakdown`/`window_pass_rate` instead.
+    misses_sql = f"""
+        SELECT
+            timestamp,
+            cache,
+            pop,
+            ip,
+            status
+        FROM {table_name}
+        WHERE "url" = ? AND cache ILIKE 'MISS%' AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)
+        ORDER BY timestamp DESC
+        LIMIT 50
+    """
+    miss_params = [url, baseline_start_s, now_s]
+    miss_rows = runner.execute(misses_sql, miss_params).fetchall()
+
+    recent_misses = []
+    for mr in miss_rows:
+        raw_ip = mr[3]
+        masked_ip_val = mask_ip(raw_ip) if mask_ips and raw_ip else raw_ip
+        recent_misses.append(
+            {
+                "timestamp": mr[0].isoformat() if hasattr(mr[0], "isoformat") else str(mr[0]),
+                "cache": mr[1] or "UNKNOWN",
+                "pop": mr[2],
+                "ip": masked_ip_val,
+                "status": int(mr[4]) if mr[4] is not None else None,
+            }
+        )
+
+    return {
+        "url": url,
+        "timeline": timeline,
+        "recent_misses": recent_misses,
+        "breakdown": breakdown,
+        "baseline_hit_rate": float(b_rate) * 100,
+        "window_hit_rate": float(w_rate) * 100,
+        "baseline_pass_rate": float(b_pass_rate) * 100,
+        "window_pass_rate": float(w_pass_rate) * 100,
         **runner.telemetry(),
     }
-    if INSIGHTS_CACHE_TTL > 0:
-        with _insights_cache_lock:
-            _insights_cache[cache_key] = (now_s, payload)
-    return payload
+
+
+# R-1: register the insights TTL cache so the autouse fixture in
+# tests/conftest.py drains it via CacheRegistry.clear_all().
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+
+_CacheRegistry.register("insights._insights_cache", _insights_cache)

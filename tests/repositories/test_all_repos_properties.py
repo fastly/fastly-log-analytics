@@ -313,25 +313,8 @@ def test_performance_aggregates_required_keys_present(seeded_con, filters):
     from backend.repositories.performance import get_performance_aggregates
 
     result = get_performance_aggregates(seeded_con, _src, None, None, filters)
-    for key in ("latency_ts", "top_urls", "top_asns", "ttl_dist", "scatter"):
+    for key in ("top_urls", "top_asns", "ttl_dist", "scatter"):
         assert key in result, f"performance_aggregates missing key {key}"
-
-
-# ── performance.get_origin_ts ───────────────────────────────────────────
-
-
-@given(filters=_filters_strategy, start=_iso_time_strategy, end=_iso_time_strategy)
-@settings(
-    max_examples=15,
-    deadline=None,
-    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
-)
-def test_performance_get_origin_ts_never_raises(seeded_con, filters, start, end):
-    from backend.repositories.performance import get_origin_ts
-
-    result = get_origin_ts(seeded_con, _src, start, end, filters)
-    assert isinstance(result, dict)
-    _assert_all_finite(result)
 
 
 # ── network.get_health ──────────────────────────────────────────────────

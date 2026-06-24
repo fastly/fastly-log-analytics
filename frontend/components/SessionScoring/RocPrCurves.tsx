@@ -5,9 +5,9 @@ import { useQuery } from '@tanstack/react-query'
 import { Info, LineChart } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
 import { RocPrCurvesHelp } from '@/components/SessionScoring/help-content'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 
@@ -59,8 +59,8 @@ export function RocPrCurves({ serviceId }: RocPrCurvesProps) {
     queryKey: ['scoring-curves', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/curves' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/curves',
+        { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
       return data as CurvesResponse
@@ -77,23 +77,12 @@ export function RocPrCurves({ serviceId }: RocPrCurvesProps) {
       helpTitle="About ROC & PR Curves"
     >
       {isError ? (
-        <div className="border border-destructive/20 bg-destructive/5 rounded-md p-4">
-          <div className="flex items-center gap-2 text-destructive">
-            <Info className="h-4 w-4" />
-            <span className="text-sm font-medium">Failed to load ROC + PR curves</span>
-          </div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {(error as any)?.message || 'Unknown error'}
-          </p>
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-3"
-            onClick={() => refetch()}
-          >
-            Retry
-          </Button>
-        </div>
+        <CardErrorState
+          icon={<Info className="h-4 w-4" />}
+          title="Failed to load ROC + PR curves"
+          message={(error as any)?.message || 'Unknown error'}
+          onRetry={() => refetch()}
+        />
       ) : isLoading || !data ? (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           <Skeleton className="h-64 w-full" />

@@ -26,8 +26,14 @@ export function ChartIntervalButtons({
           size="sm"
           onClick={() => React.startTransition(() => onIntervalChange(i.value))}
           disabled={!validIntervals.has(i.value)}
+          aria-pressed={effectiveInterval === i.value}
+          // Distinct accessible name: the visible label ("1h", "1d", …) is
+          // identical to the main time-range buttons, so screen readers and
+          // automation see duplicate "1h"/"1d" controls. Scope the name to
+          // the chart-bucket role.
+          aria-label={`Chart bucket size: ${i.label}`}
           className={cn(
-            'h-6 text-[10px] px-2 shadow-none transition-colors disabled:opacity-30',
+            'h-9 text-xs px-2 shadow-none transition-colors disabled:opacity-30 sm:h-7 sm:text-[11px]',
             effectiveInterval === i.value
               ? 'bg-primary text-primary-foreground hover:bg-primary/90'
               : 'hover:text-primary hover:bg-muted'

@@ -27,9 +27,9 @@
  * as ``__tests__/hooks/useBootstrap.test.ts``.
  */
 import { renderHook, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { http, HttpResponse } from 'msw'
-import React from 'react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { server } from '../../tests/msw/server'
@@ -46,11 +46,8 @@ vi.mock('@/stores/serviceStore', () => {
 const API_BASE = 'http://127.0.0.1:8000'
 
 function wrapper() {
-  const qc = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
-  })
-  return ({ children }: { children: React.ReactNode }) =>
-    React.createElement(QueryClientProvider, { client: qc }, children)
+  const qc = createTestQueryClient({ queries: { gcTime: 0 } })
+  return makeQueryWrapper(qc)
 }
 
 describe('extractApiError — unit coverage of error shapes', () => {

@@ -4,12 +4,22 @@ This file catalogs every third-party class/function we monkeypatch at import
 time so we can audit, justify, and eventually replace them with cleaner
 abstractions (subclasses, fsspec hooks, custom catalogs, etc.).
 
-All patches today live in [backend/core/iceberg.py](backend/core/iceberg.py).
+All patches today live in [backend/core/iceberg/fs.py](backend/core/iceberg/fs.py).
 Five patches form a single **s3fs cache + telemetry-proxy** category, all
 behind a single `try: ... except ImportError` block
-([iceberg.py:187-443](backend/core/iceberg.py#L187-L443)). One additional
+([fs.py:168-529](backend/core/iceberg/fs.py#L168-L529)). One additional
 **stdlib** patch (`ThreadPoolExecutor.submit`) propagates ContextVars to
 worker threads so cross-tenant proxy routing stays correct.
+
+A boot-time contract guard ([fs.py:175-182](backend/core/iceberg/fs.py#L175-L182))
+verifies the s3fs slots we monkey with still exist — if a future s3fs
+release renames any of `__init__`, `set_session`, `_connect`,
+`_cat_file`, `_info`, or `_open`, boot fails loudly naming the missing
+slot instead of silently leaving the proxy hook unregistered.
+
+A preemptive `from backend.core.iceberg import fs as _iceberg_fs_patches`
+at the top of [backend/main.py](backend/main.py) installs the patches
+before any other backend import can trigger lazy s3fs/pyiceberg loading.
 
 (A sixth `SqlCatalog.load_table` patch lived here until 2026-05-21; it has
 been replaced by a clean `FosSqlCatalog` subclass — see the "Replaced patches"
@@ -23,7 +33,7 @@ and the cleanup path.
 
 ## 1. `S3FileSystem.__init__`
 
-- **Site:** [iceberg.py:191, 194-224, 439](backend/core/iceberg.py#L191)
+- **Site:** [fs.py:187, 188-221, 501](backend/core/iceberg/fs.py#L187)
 - **What:** Forces `request_checksum_calculation=when_required`, routes the
   endpoint through the in-process telemetry proxy, switches signing to
   `UNSIGNED` (the proxy re-signs), and stashes proxy-context attributes
@@ -39,7 +49,7 @@ and the cleanup path.
 
 ## 2. `S3FileSystem.set_session` (and `S3FileSystem._connect`)
 
-- **Site:** [iceberg.py:192, 226-236, 440-441](backend/core/iceberg.py#L226)
+- **Site:** [fs.py:223, 224-289, 502-503](backend/core/iceberg/fs.py#L223)
 - **What:** Wraps the async session bootstrap and re-registers our
   `before-send.s3.*` event handler on the (possibly recreated) underlying
   botocore client.
@@ -50,7 +60,7 @@ and the cleanup path.
 
 ## 3. `S3FileSystem._cat_file`
 
-- **Site:** [iceberg.py:294, 370-376, 435](backend/core/iceberg.py#L370)
+- **Site:** [fs.py:291, 367-373, 497](backend/core/iceberg/fs.py#L367)
 - **What:** Adds an immutable-bytes LRU cache + in-flight async dedup for
   `*.avro` / `*.metadata.json` reads, and forces `max_concurrency=1` on the
   underlying call.
@@ -70,7 +80,7 @@ and the cleanup path.
 
 ## 4. `S3FileSystem._info`
 
-- **Site:** [iceberg.py:295, 378-396, 436](backend/core/iceberg.py#L378)
+- **Site:** [fs.py:292, 375-393, 498](backend/core/iceberg/fs.py#L375)
 - **What:** For immutable paths, synthesize the info dict from cached bytes
   if present (skip the HEAD round-trip).
 - **Why:** Without this, `FsspecInputFile.__len__()` issues a HEAD even when
@@ -82,7 +92,7 @@ and the cleanup path.
 
 ## 5. `S3FileSystem._open`
 
-- **Site:** [iceberg.py:296, 398-498, 502](backend/core/iceberg.py#L398)
+- **Site:** [fs.py:293, 457-495, 499](backend/core/iceberg/fs.py#L457)
 - **What:** For immutable reads, hits the LRU first; on miss, synchronizes
   into fsspec's iothread and calls our cached `_get_or_fetch_immutable_async`
   helper directly (bypassing `self.cat_file`, which is the auto-generated
@@ -97,7 +107,7 @@ and the cleanup path.
   `_cat_file` calls on a real `plan_files` run on 2026-05-20). If we only
   patch `_cat_file`, manifest reads never populate the LRU. The
   `self.cat_file` trap is documented inline at
-  [iceberg.py:410-417](backend/core/iceberg.py#L410).
+  [fs.py:469-478](backend/core/iceberg/fs.py#L469).
 - **Why (write — Stream I):** Every `table.append()` writes one snap-*.avro
   (~64 KB) and one m*.avro (~10 KB) which `_update_snapshot_cache_from_delta`
   GETs back seconds later — pyiceberg has no API to hand back the
@@ -143,7 +153,7 @@ obsolete.
 
 ## 6. `concurrent.futures.ThreadPoolExecutor.submit`
 
-- **Site:** [iceberg.py:60-71](backend/core/iceberg.py#L60) (top-level, runs
+- **Site:** [fs.py:61-73](backend/core/iceberg/fs.py#L61) (top-level, runs
   at module import — does NOT live behind the s3fs `try: ... except
   ImportError` block).
 - **What:** Wraps `submit(fn, *args, **kwargs)` so the worker thread runs
@@ -172,8 +182,11 @@ obsolete.
   empty ContextVars now see the submitter's context.
 - **Cleanup:** Remove if/when CPython adds first-class context propagation
   to `concurrent.futures` (proposals exist) or if PyIceberg switches to
-  asyncio for parquet writes. Until then, the global patch is the
-  smallest correct fix.
+  asyncio for parquet writes. A narrower alternative — injecting a
+  `ContextVarPropagatingThreadPoolExecutor` into PyIceberg's writer pool
+  only — is preferable to the process-wide patch but is contingent on
+  PyIceberg exposing an executor-injection hook (none today). Until one
+  of those lands, the global patch is the smallest correct fix.
 
 ---
 
@@ -184,7 +197,7 @@ obsolete.
 Originally installed as a monkeypatch by `_install_cached_sql_load_table()`,
 this was replaced the same day by a clean `FosSqlCatalog(SqlCatalog)`
 subclass returned by `_get_fos_catalog_class()`
-([iceberg.py:737-771](backend/core/iceberg.py#L737-L771)). `_get_catalog()`
+([_core.py:428-470](backend/core/iceberg/_core.py#L428-L470)). `_get_catalog()`
 instantiates the subclass instead of `SqlCatalog` directly, so pyiceberg's
 internal `commit_table.load_table` call dispatches to the subclass override
 that consults `_table_object_cache`. The subclass is built lazily on first

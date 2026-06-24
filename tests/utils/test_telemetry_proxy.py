@@ -166,6 +166,10 @@ async def test_proxy_injects_sigv4_authorization_header_for_fos_request(proxy_se
         "fos_access_key_id": "AKIATESTKEY",
         "fos_secret_access_key": "test-secret",
         "fos_region": "us-east-1",
+        # F6 allowlist: target must match cfg.fos_native_endpoint or
+        # cfg.cdn_host. This test exercises the FOS path; the test
+        # bucket stands in for the FOS native endpoint here.
+        "fos_native_endpoint": "bucket.s3.amazonaws.com",
     }
     captured = {}
 
@@ -384,7 +388,7 @@ async def test_proxy_writes_one_usage_log_row_per_request(proxy_server):
         captured_ctx["value"] = process_context
 
     with patch.object(telemetry_proxy._SESSION, "request", return_value=ctx):
-        with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture_calls):
+        with patch("backend.core.metadata.log_usage_calls", side_effect=_capture_calls):
             async with aiohttp.ClientSession() as s:
                 url = f"{proxy_server.proxy_endpoint()}/key.parquet"
                 async with s.get(
@@ -410,7 +414,7 @@ async def test_proxy_writes_one_usage_log_row_per_request(proxy_server):
     assert row["caller"] == "duckdb.httpfs"
     assert row["service"] == "FOS"
     # X-Cache MUST live inside `details` as the FIRST `· `-separated chunk —
-    # see backend/core/metadata_db.py:1113 where shield-egress doubling
+    # see backend.core.metadata package:1113 where shield-egress doubling
     # parses it. A separate `x_cache` key would be silently ignored AND the
     # shield-doubling math would under-report by 50%.
     assert row["details"].startswith("HIT"), row["details"]
@@ -435,11 +439,10 @@ async def test_proxy_translates_fos_list_get_to_list_objects_v2(proxy_server):
         captured_rows.extend(rows)
 
     with patch.object(telemetry_proxy._SESSION, "request", return_value=ctx):
-        with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
+        with patch("backend.core.metadata.log_usage_calls", side_effect=_capture):
             async with aiohttp.ClientSession() as s:
                 url = (
-                    f"{proxy_server.proxy_endpoint()}/bucket"
-                    "?list-type=2&prefix=raw%2F&start-after=raw%2F2026-06-08%2F"
+                    f"{proxy_server.proxy_endpoint()}/bucket?list-type=2&prefix=raw%2F&start-after=raw%2F2026-06-08%2F"
                 )
                 async with s.get(
                     url,
@@ -470,7 +473,7 @@ async def test_proxy_keeps_get_for_non_list_fos_reads(proxy_server):
         captured_rows.extend(rows)
 
     with patch.object(telemetry_proxy._SESSION, "request", return_value=ctx):
-        with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
+        with patch("backend.core.metadata.log_usage_calls", side_effect=_capture):
             async with aiohttp.ClientSession() as s:
                 async with s.get(
                     f"{proxy_server.proxy_endpoint()}/bucket/key.parquet?versionId=abc",
@@ -488,7 +491,7 @@ async def test_proxy_keeps_get_for_non_list_fos_reads(proxy_server):
 
 
 async def test_proxy_encodes_xcache_chain_in_details_for_shield_doubling(proxy_server):
-    """The downstream shield-egress doubling at metadata_db.py:1113 reads
+    """The downstream shield-egress doubling at backend.core.metadata.usage_log.log_usage_calls reads
     the first `· `-separated chunk of details and looks for `MISS, MISS`
     / `MISS, PASS`. Without correctly formatting details, CDN egress
     bytes under-report by 50% on every shield miss."""
@@ -510,7 +513,7 @@ async def test_proxy_encodes_xcache_chain_in_details_for_shield_doubling(proxy_s
     telemetry_proxy._bust_config_cache()
     with patch("backend.config.load_config", return_value=mock_cfg):
         with patch.object(telemetry_proxy._SESSION, "request", return_value=ctx):
-            with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
+            with patch("backend.core.metadata.log_usage_calls", side_effect=_capture):
                 async with aiohttp.ClientSession() as s:
                     url = f"{proxy_server.proxy_endpoint()}/k.parquet"
                     async with s.get(
@@ -613,7 +616,7 @@ async def test_proxy_per_request_context_headers_land_in_usage_log(proxy_server)
         captured["process_context"] = process_context
 
     with patch.object(telemetry_proxy._SESSION, "request", return_value=ctx):
-        with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
+        with patch("backend.core.metadata.log_usage_calls", side_effect=_capture):
             async with aiohttp.ClientSession() as s:
                 url = f"{proxy_server.proxy_endpoint()}/k"
                 async with s.get(
@@ -655,7 +658,7 @@ async def test_proxy_synthesizes_fos_get_object_for_cdn_full_miss(proxy_server):
     telemetry_proxy._bust_config_cache()
     with patch("backend.config.load_config", return_value=mock_cfg):
         with patch.object(telemetry_proxy._SESSION, "request", return_value=ctx):
-            with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
+            with patch("backend.core.metadata.log_usage_calls", side_effect=_capture):
                 async with aiohttp.ClientSession() as s:
                     url = f"{proxy_server.proxy_endpoint()}/k.log.gz"
                     # Client sent HEAD — but synth row should still be GET_OBJECT.
@@ -700,7 +703,7 @@ async def test_proxy_does_not_synthesize_when_cdn_chain_has_a_hit(proxy_server, 
     telemetry_proxy._bust_config_cache()
     with patch("backend.config.load_config", return_value=mock_cfg):
         with patch.object(telemetry_proxy._SESSION, "request", return_value=ctx):
-            with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
+            with patch("backend.core.metadata.log_usage_calls", side_effect=_capture):
                 async with aiohttp.ClientSession() as s:
                     url = f"{proxy_server.proxy_endpoint()}/k.parquet"
                     async with s.get(
@@ -726,7 +729,7 @@ async def test_proxy_writes_actually_persist_to_metadata_db(proxy_server, tmp_pa
     — the mocked-write tests above would still pass."""
     # Route writes to an isolated SQLite directory and force config that
     # makes this look like a CDN call (so shield-doubling fires).
-    monkeypatch.setattr("backend.core.metadata_db._DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("backend.core.metadata._DATA_DIR", str(tmp_path))
 
     mock_cfg = {
         "fos_access_key_id": "k",
@@ -760,9 +763,10 @@ async def test_proxy_writes_actually_persist_to_metadata_db(proxy_server, tmp_pa
 
     # A MISS, MISS chain produces TWO rows (CDN + synth FOS GET_OBJECT
     # from Task 7). We assert on the CDN row specifically.
-    from backend.core import metadata_db
+    # usage_log lives in its own SQLite file post-2026-06-12.
+    from backend.core.metadata import usage_log_db
 
-    con = metadata_db.get_con("real-svc-task6")
+    con = usage_log_db.get_con("real-svc-task6")
     rows = con.execute(
         "SELECT operation_class, operation_type, url, bytes "
         "FROM usage_log WHERE operation_class = 'CDN' "
@@ -867,7 +871,7 @@ async def test_proxy_records_each_range_get_as_separate_row(proxy_server, moto_s
 
     telemetry_proxy._bust_config_cache()
     with patch("backend.config.load_config", return_value=mock_cfg):
-        with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
+        with patch("backend.core.metadata.log_usage_calls", side_effect=_capture):
             for start, end in [(0, 99), (100, 199), (200, 299)]:
                 resp = proxied.get_object(Bucket=bucket, Key=key, Range=f"bytes={start}-{end}")
                 resp["Body"].read()
@@ -905,7 +909,7 @@ async def test_proxy_records_multipart_put_per_part(proxy_server, moto_s3_server
 
     telemetry_proxy._bust_config_cache()
     with patch("backend.config.load_config", return_value=mock_cfg):
-        with patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture):
+        with patch("backend.core.metadata.log_usage_calls", side_effect=_capture):
             init = proxied.create_multipart_upload(Bucket=bucket, Key=key)
             upload_id = init["UploadId"]
             parts = []
@@ -1117,7 +1121,7 @@ async def test_client_disconnect_mid_stream_is_not_logged_as_upstream_502(proxy_
     with (
         patch.object(telemetry_proxy._SESSION, "request", return_value=ok_ctx),
         patch.object(web.StreamResponse, "write", _flaky_write),
-        patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
     ):
         async with aiohttp.ClientSession() as s:
             url = f"{proxy_server.proxy_endpoint()}/some/key.avro"
@@ -1177,3 +1181,173 @@ def test_proxy_connector_caps_keepalive_below_fastly_default():
     finally:
         telemetry_proxy.stop_proxy_server()
         telemetry_proxy._reset_for_tests()
+
+
+# ── F6: X-Fos-Target hostname allowlist ──────────────────────────────────
+
+
+def test_is_target_host_allowed_loopback_passes_without_config():
+    # The proxy runs co-located with the backend; routing a loopback
+    # request through it adds telemetry but not privilege. Tests using
+    # moto on http://127.0.0.1:<port> rely on this.
+    assert telemetry_proxy._is_target_host_allowed("127.0.0.1", None, None)
+    assert telemetry_proxy._is_target_host_allowed("127.0.0.1:9999", None, None)
+    assert telemetry_proxy._is_target_host_allowed("localhost", None, None)
+    assert telemetry_proxy._is_target_host_allowed("localhost:8080", None, None)
+    assert telemetry_proxy._is_target_host_allowed("::1", None, None)
+
+
+def test_is_target_host_allowed_cdn_match():
+    assert telemetry_proxy._is_target_host_allowed(
+        "cdn.example.net", "cdn.example.net", "us-east-1.object.fastlystorage.app"
+    )
+    # A target that is neither the configured cdn nor the configured fos
+    # endpoint must be rejected, even if it looks plausible.
+    assert not telemetry_proxy._is_target_host_allowed(
+        "cdn.example.org", "cdn.example.net", "us-east-1.object.fastlystorage.app"
+    )
+
+
+def test_is_target_host_allowed_fos_native_match_is_region_scoped():
+    # Region isolation: a service configured for us-east-1 cannot use the
+    # proxy to target eu-west-1's FOS endpoint. The credentials wouldn't
+    # work either, but the gate cuts off the probe.
+    assert telemetry_proxy._is_target_host_allowed(
+        "us-east-1.object.fastlystorage.app", None, "us-east-1.object.fastlystorage.app"
+    )
+    assert not telemetry_proxy._is_target_host_allowed(
+        "eu-west-1.object.fastlystorage.app", None, "us-east-1.object.fastlystorage.app"
+    )
+
+
+def test_is_target_host_allowed_rejects_arbitrary_host():
+    # The exact attack surface: an internet host outside the service's
+    # configured endpoints must be refused before any SigV4 signing.
+    assert not telemetry_proxy._is_target_host_allowed(
+        "evil.example.com", "cdn.example.net", "us-east-1.object.fastlystorage.app"
+    )
+    assert not telemetry_proxy._is_target_host_allowed(
+        "169.254.169.254", "cdn.example.net", "us-east-1.object.fastlystorage.app"
+    )
+
+
+def test_is_target_host_allowed_case_insensitive():
+    # X-Fos-Target may arrive case-mixed from clients; comparison must be
+    # case-insensitive so the gate is not an accidental shibboleth.
+    assert telemetry_proxy._is_target_host_allowed(
+        "CDN.EXAMPLE.NET", "cdn.example.net", "us-east-1.object.fastlystorage.app"
+    )
+    assert telemetry_proxy._is_target_host_allowed(
+        "US-EAST-1.OBJECT.FASTLYSTORAGE.APP", None, "us-east-1.object.fastlystorage.app"
+    )
+
+
+async def test_proxy_rejects_disallowed_x_fos_target_with_400(proxy_server, caplog):
+    """End-to-end: with a valid service_id but an X-Fos-Target outside
+    the service's configured cdn/fos endpoints, the proxy must 400 the
+    request BEFORE any signing or upstream call. Without the gate, any
+    actor reaching the proxy with a valid X-Telemetry-Service-Id could
+    steer the proxy as an AWS-signed forwarder to arbitrary hosts."""
+    mock_cfg = {
+        "fos_access_key_id": "AKIATESTKEY",
+        "fos_secret_access_key": "test-secret",
+        "fos_region": "us-east-1",
+        "cdn_url": "https://cdn.example.net",
+        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
+    }
+    upstream_called = False
+
+    def _capture(*args, **kwargs):
+        nonlocal upstream_called
+        upstream_called = True
+        return _mock_upstream()[0]
+
+    telemetry_proxy._bust_config_cache()
+    with caplog.at_level("WARNING", logger=telemetry_proxy.logger.name):
+        with patch("backend.config.load_config", return_value=mock_cfg):
+            with patch.object(telemetry_proxy._SESSION, "request", side_effect=_capture):
+                async with aiohttp.ClientSession() as s:
+                    url = f"{proxy_server.proxy_endpoint()}/some/path"
+                    async with s.get(
+                        url,
+                        headers={
+                            "X-Fos-Target": "evil.example.com",
+                            "X-Telemetry-Service-Id": "test-svc",
+                        },
+                    ) as resp:
+                        body = await resp.text()
+                        assert resp.status == 400
+                        assert "not allowed" in body.lower()
+
+    assert not upstream_called, "upstream request fired despite disallowed X-Fos-Target"
+    assert any(
+        "rejected disallowed X-Fos-Target" in rec.message and "evil.example.com" in rec.message
+        for rec in caplog.records
+    )
+
+
+async def test_proxy_allows_fos_target_matching_configured_fos_endpoint(proxy_server):
+    """Counterpart to the rejection test: when the X-Fos-Target matches
+    the service's configured FOS endpoint, the gate must permit the signed
+    call.
+
+    Why the field name in mock_cfg is ``fos_endpoint`` (not
+    ``fos_native_endpoint``) — the raw service-config JSON that
+    ``backend.config.load_config()`` returns to the proxy's gate uses
+    ``fos_endpoint``; the ``fos_native_endpoint`` alias is only added by
+    ``to_source_dict()`` for callers that consume the derived source dict.
+    The original F006 test passed because it set the wrong field name that
+    matched the buggy gate code — masking a real prod regression where every
+    signed sync/commit call was 400'd. Keep this assertion against
+    ``fos_endpoint`` so the gate stays load_config-correct."""
+    mock_cfg = {
+        "fos_access_key_id": "AKIATESTKEY",
+        "fos_secret_access_key": "test-secret",
+        "fos_region": "us-east-1",
+        "fos_endpoint": "us-east-1.object.fastlystorage.app",
+    }
+    ctx, _ = _mock_upstream()
+    captured = {}
+
+    def _capture(*args, **kwargs):
+        captured.update(kwargs)
+        return ctx
+
+    telemetry_proxy._bust_config_cache()
+    with patch("backend.config.load_config", return_value=mock_cfg):
+        with patch.object(telemetry_proxy._SESSION, "request", side_effect=_capture):
+            async with aiohttp.ClientSession() as s:
+                url = f"{proxy_server.proxy_endpoint()}/k"
+                async with s.get(
+                    url,
+                    headers={
+                        "X-Fos-Target": "us-east-1.object.fastlystorage.app",
+                        "X-Telemetry-Service-Id": "test-svc",
+                    },
+                ) as resp:
+                    await resp.read()
+                    assert resp.status == 200
+
+    assert "Authorization" in captured["headers"], "FOS-targeted request must be SigV4-signed"
+
+
+async def test_proxy_skips_gate_when_no_service_id(proxy_server):
+    """When no X-Telemetry-Service-Id is supplied the proxy already
+    forwards unsigned (and FOS will 403). There are no service
+    credentials to misuse, so the gate is correctly inactive — preserves
+    the existing test fixtures that use fake hosts without a service_id."""
+    ctx, _ = _mock_upstream(chunks=(b"ok",))
+    upstream_called = False
+
+    def _capture(*args, **kwargs):
+        nonlocal upstream_called
+        upstream_called = True
+        return ctx
+
+    with patch.object(telemetry_proxy._SESSION, "request", side_effect=_capture):
+        async with aiohttp.ClientSession() as s:
+            url = f"{proxy_server.proxy_endpoint()}/x"
+            async with s.get(url, headers={"X-Fos-Target": "fake.cdn.net"}) as resp:
+                assert resp.status == 200
+
+    assert upstream_called, "upstream not called — gate fired despite no X-Telemetry-Service-Id"

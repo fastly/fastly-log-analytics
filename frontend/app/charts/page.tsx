@@ -4,13 +4,14 @@ import React from 'react'
 import { useCardVisibility } from '@/hooks/useCardVisibility'
 import { client } from '@/lib/api'
 import { useFilterStore } from '@/stores/filterStore'
+import { useShallow } from 'zustand/react/shallow'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useFilterPayload } from '@/hooks/useFilterPayload'
+import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
-import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates } from '@/lib/staleViewRetry'
+import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates, isStaleDashboardViewError } from '@/lib/staleViewRetry'
 import { formatValue } from '@/lib/format'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { BarChart3, EyeOff } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useTheme } from 'next-themes'
@@ -20,6 +21,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ReportShell } from '@/components/ReportShell'
+import { UpdatingBadge } from '@/components/UpdatingBadge'
 import { useUrlFilterSync } from '@/hooks/useUrlFilterSync'
 import { useDashboardCards } from '@/hooks/useDashboardCards'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
@@ -35,13 +37,19 @@ const VISIBILITY_KEY = 'fastly_charts_card_visibility'
 export default function ChartsPage() {
   const allCards = useDashboardCards()
   const { data: catalog } = useLogFieldsCatalog()
-  
+
   const chartCards = React.useMemo(() => {
     return allCards.filter((c: any) => CHART_CARD_IDS.has(c.id))
   }, [allCards])
 
-  const { startTime, endTime } = useFilterStore()
-  const { activeServiceId } = useServiceStore()
+  // Subscribe ONLY to startTime + endTime so unrelated filterStore
+  // mutations (pills, edgeOnly, compareMode) don't trigger a re-render
+  // of the charts grid. Without useShallow, every filterStore tick
+  // forces re-render of N PlotlyChart memos.
+  const { startTime, endTime } = useFilterStore(
+    useShallow(s => ({ startTime: s.startTime, endTime: s.endTime }))
+  )
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
   const { theme } = useTheme()
   const isDark = theme === 'dark'
 
@@ -51,12 +59,15 @@ export default function ChartsPage() {
     chartCards.filter((c: any) => c.inActiveFormat).map((c: any) => c.id),
   )
 
-  const filterPayload = useFilterPayload()
+  // Pass `true` so the FilterBar's "Edge only" toggle reaches the chart
+  // aggregates request — same wiring as ReportLayout.
+  const filterPayload = useDebouncedFilterPayload(true)
 
   useUrlFilterSync()
 
-  const { data: aggregates, isLoading, isFetching } = useServiceQuery(
-    ['charts', 'aggregates', activeServiceId, startTime, endTime, filterPayload],
+  const chartFields = React.useMemo(() => Array.from(CHART_CARD_IDS), [])
+  const { data: aggregates, isLoading, isFetching, error } = useServiceQuery(
+    ['charts', 'aggregates', activeServiceId, startTime, endTime, filterPayload, chartFields],
     async ({ signal }) => {
       const { data } = await client.POST("/api/dashboard/aggregates", { signal,
         body: {
@@ -64,32 +75,52 @@ export default function ChartsPage() {
           end_time: endTime,
           filters: filterPayload,
           chart_interval: '1 hour',
-          chart_metric: 'requests'
+          chart_metric: 'requests',
+          // Charts only renders the fields in CHART_CARD_IDS; pass the
+          // explicit list so the backend's top_n_rollups only computes
+          // those (vs the full ~25-field default — half of which the
+          // chart page throws away). Backend already honours `fields`.
+          fields: chartFields,
+          // Charts also doesn't render the time-series chart, the
+          // conn_requests histogram, or the world map — opting out of
+          // each shaves the per-section SQL the page would never read.
+          // /dashboard keeps these defaults (true).
+          include_time_series: false,
+          include_conn_requests: false,
+          include_map_data: false,
         }
       })
-      return throwIfStaleAggregates(data)
+      return throwIfStaleAggregates(data, { startTime, endTime })
     },
     STALE_VIEW_RETRY_OPTIONS,
   )
 
-  const chartLayout = {
+  // Stable reference so PlotlyChart's React.memo doesn't re-render every
+  // card on every parent re-render (the previous inline object was a new
+  // identity each render).
+  const chartLayout = React.useMemo(() => ({
     showlegend: true,
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
-  }
+  }), [])
 
-  const isLoadingInitial = isLoading || (isFetching && !aggregates)
+  // A surviving stale-view symptom is benign and self-resolving
+  // (STALE_VIEW_RETRY_OPTIONS keeps polling until the view is consistent),
+  // so present it as "still loading" rather than surfacing a per-card
+  // error. Common on a fresh install whose first view/rollup build
+  // outlasts the fast retry budget.
+  const isStalePreparing = isStaleDashboardViewError(error)
+  const isLoadingInitial = isLoading || isStalePreparing || (isFetching && !aggregates)
+  const cardError = isStalePreparing ? null : (error as AnalyticsCardError | null)
 
   const headerActions = (
     <div className="flex items-center gap-3">
-      {isFetching && !isLoadingInitial && (
-        <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[10px] font-bold uppercase tracking-wider animate-pulse">
-          <span className="w-1.5 h-1.5 rounded-full bg-primary" />
-          Updating
-        </div>
-      )}
+      {isFetching && !isLoadingInitial && <UpdatingBadge />}
       <Popover>
-        <PopoverTrigger render={<Button variant="outline" size="sm" className="h-9 gap-1.5" />}>
+        <PopoverTrigger
+          aria-label="Toggle visible charts"
+          render={<Button variant="outline" size="sm" className="h-9 gap-1.5" />}
+        >
           <span className="flex items-center gap-1.5">
             <BarChart3 className="h-4 w-4" />
             <span className="hidden sm:inline text-xs">Charts</span>
@@ -170,6 +201,7 @@ export default function ChartsPage() {
               }
               isLoading={isLoadingInitial}
               isFetching={isFetching}
+              error={cardError}
               className="h-[400px]"
               contentClassName="flex flex-col justify-center min-h-0 relative"
             >
@@ -180,7 +212,7 @@ export default function ChartsPage() {
                     const fieldId = card.id
                     const fieldMeta = catalog?.fields?.find(f => f.id === fieldId)
                     const groupId = fieldMeta?.group
-                    
+
                     if (groupId) {
                       const groupMeta = catalog?.groups?.find(g => g.id === groupId)
                       if (groupMeta) {

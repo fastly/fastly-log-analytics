@@ -3,10 +3,11 @@
 import React, { useState } from 'react'
 import { DashboardTableData } from '@/types/api'
 import { FieldSearchDialog } from './FieldSearchDialog'
-import { Copy, Check, EyeOff } from 'lucide-react'
+import { Copy, Check, EyeOff, TrendingUp, TrendingDown } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { formatValue, calculateDelta } from '@/lib/format'
+import { PopLabel } from '@/components/PopLabel'
 import {
   Tooltip,
   TooltipContent,
@@ -27,7 +28,20 @@ interface TopTenTableProps {
 function NotLoggedIndicator() {
   return (
     <Tooltip>
-      <TooltipTrigger render={<span className="inline-flex items-center" />}>
+      {/* A-8 (a11y, WCAG 2.1.1): tabIndex + role="button" so keyboard
+          users can focus the EyeOff icon and reveal the tooltip. We
+          can't use a real <button> inside the <h3> tree without
+          breaking the heading's inline flow / cursor behavior. */}
+      <TooltipTrigger
+        render={
+          <span
+            className="inline-flex items-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            tabIndex={0}
+            role="button"
+            aria-label="Not currently being logged"
+          />
+        }
+      >
         <EyeOff className="h-3 w-3 text-muted-foreground/70" />
       </TooltipTrigger>
       <TooltipContent>
@@ -69,7 +83,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
     }
 
     return (
-      <div className="flex flex-col border rounded-lg p-4 h-full bg-card">
+      <div className="flex flex-col border rounded-lg p-4 h-full bg-card [content-visibility:auto] [contain-intrinsic-size:300px]">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-medium tracking-tight flex items-center gap-1.5">
             {icon} {title}
@@ -77,7 +91,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
           </h3>
           {field && <FieldSearchDialog field={field} title={title} />}
         </div>
-        <div className="flex flex-col flex-1 items-center justify-center text-muted-foreground text-sm border-t border-dashed mt-1 pt-4 text-center">
+        <div data-empty-placeholder="true" className="flex flex-col flex-1 items-center justify-center text-muted-foreground text-sm border-t border-dashed mt-1 pt-4 text-center">
           <span className="mb-1">No data available</span>
           {requiredGroupMessage && (
             <span className="text-[10px] opacity-70 px-4">
@@ -95,14 +109,25 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
   const handleCopyCSV = (e: React.MouseEvent) => {
     e.stopPropagation()
     const header = `${field},count\n`
-    const rows = data.top.map(item => `"${item.label || item.value}",${item.count}`).join('\n')
+    const rows = data.top.map(item => {
+      // CSV/formula-injection hardening: log fields are attacker-controlled
+      // (User-Agent, URL, Referer…). Prefix formula-leading values with a
+      // single quote so spreadsheets treat them as text, and double any
+      // embedded quotes so the value can't break out of its quoted column.
+      let val = String(item.label || item.value)
+      if (/^[=+\-@\t\r]/.test(val)) {
+        val = "'" + val
+      }
+      val = val.replace(/"/g, '""')
+      return `"${val}",${item.count}`
+    }).join('\n')
     navigator.clipboard.writeText(header + rows)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
 
   return (
-    <div className="flex flex-col border rounded-lg p-4 h-full bg-card">
+    <div className="flex flex-col border rounded-lg p-4 h-full bg-card [content-visibility:auto] [contain-intrinsic-size:300px]">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium tracking-tight flex items-center gap-1.5">
           {icon} {title} <span className="text-muted-foreground font-normal text-xs ml-1">(Top 10)</span>
@@ -110,15 +135,21 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
         </h3>
         <div className="flex items-center gap-1">
           <Tooltip>
-            <TooltipTrigger render={<span className="inline-block" />}>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 text-muted-foreground hover:text-primary"
-                onClick={handleCopyCSV}
-              >
-                {copied ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}
-              </Button>
+            {/* A-8 (a11y, WCAG 2.1.1): render the Button directly as the
+                trigger — a wrapping <span> would shadow keyboard focus
+                from the underlying button. */}
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={copied ? 'Copied!' : 'Copy table as CSV'}
+                  className="h-7 w-7 text-muted-foreground hover:text-primary"
+                  onClick={handleCopyCSV}
+                />
+              }
+            >
+              {copied ? <Check className="h-3.5 w-3.5 text-green-500" aria-hidden="true" /> : <Copy className="h-3.5 w-3.5" aria-hidden="true" />}
             </TooltipTrigger>
             <TooltipContent>
               <p className="text-[10px]">{copied ? 'Copied!' : 'Copy as CSV'}</p>
@@ -132,34 +163,62 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
           const compCount = compareMap.get(item.value)
           const delta = calculateDelta(item.count, compCount)
 
+          // A-5: pair the color signal with a Trending* icon + aria-label so
+          // direction is conveyed without relying on red/green alone (WCAG 1.4.1).
+          const deltaPct = delta !== null ? delta.toFixed(0) : null
+          const deltaAriaLabel = delta === null
+            ? undefined
+            : delta > 0
+              ? `Increased by ${deltaPct}% versus comparison period`
+              : delta < 0
+                ? `Decreased by ${Math.abs(delta).toFixed(0)}% versus comparison period`
+                : 'No change versus comparison period'
+          const DeltaIcon = delta !== null && delta > 0
+            ? TrendingUp
+            : delta !== null && delta < 0
+              ? TrendingDown
+              : null
+
           return (
-            <div 
-              key={i} 
-              className="group flex items-center justify-between py-1.5 px-2 -mx-2 rounded-sm cursor-pointer hover:bg-muted/50 text-sm relative overflow-hidden"
+            // A-4: native <button> for keyboard reachability + Enter/Space
+            // activation + focus ring for free (WCAG 2.1.1 / 4.1.2). The
+            // visual row layout is preserved via the reset classes.
+            <button
+              key={i}
+              type="button"
+              className="group flex items-center justify-between py-1.5 px-2 -mx-2 rounded-sm cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-sm text-left relative overflow-hidden w-full bg-transparent border-0"
               onClick={() => onRowClick?.(field ?? '', item.value as string | number)}
               title={String(displayVal)}
+              aria-label={`Filter to ${displayVal}`}
             >
-              <div 
-                className="absolute inset-y-0 left-0 bg-primary/10 transition-all duration-300" 
+              <div
+                className="absolute inset-y-0 left-0 bg-primary/10 transition-all duration-300"
                 style={{ width: `${(item.count / maxCount) * 100}%` }}
+                aria-hidden="true"
               />
               <span className="relative z-10 truncate pr-4 max-w-[65%]">
-                {displayVal}
+                {field === 'pop' ? <PopLabel code={String(item.value)} /> : displayVal}
               </span>
               <div className="relative z-10 flex items-center gap-2">
                 {delta !== null && (
-                  <span className={cn(
-                    "text-[10px] font-bold tabular-nums",
-                    delta > 0 ? "text-red-500" : delta < 0 ? "text-green-500" : "text-muted-foreground"
-                  )}>
-                    {delta > 0 ? '+' : ''}{delta.toFixed(0)}%
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-0.5 text-[10px] font-bold tabular-nums",
+                      delta > 0 ? "text-red-500" : delta < 0 ? "text-green-500" : "text-muted-foreground"
+                    )}
+                    aria-label={deltaAriaLabel}
+                  >
+                    {DeltaIcon && <DeltaIcon className="h-3 w-3" aria-hidden="true" />}
+                    <span aria-hidden="true">
+                      {delta > 0 ? '+' : ''}{deltaPct}%
+                    </span>
                   </span>
                 )}
                 <span className="text-xs font-mono tabular-nums text-muted-foreground">
                   {item.count.toLocaleString()}
                 </span>
               </div>
-            </div>
+            </button>
           )
         })}
       </div>

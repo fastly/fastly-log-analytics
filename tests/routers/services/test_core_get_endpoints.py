@@ -18,7 +18,23 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tests.conftest import MOCK_SERVICE_ID
+
+
+@pytest.fixture(autouse=True)
+def _clear_cron_schedule_ttl_cache():
+    """``api_cron_schedule`` memoises by service_id with a 5 s TTL via a
+    module-level dict. Tests in this file all hit MOCK_SERVICE_ID within
+    that window so the second test would receive the first test's
+    payload — masking real route behaviour. Clear on enter and exit."""
+    from backend.routers.services import core as _core
+
+    _core._cron_schedule_cache.clear()
+    yield
+    _core._cron_schedule_cache.clear()
+
 
 # ── GET /services ───────────────────────────────────────────────────────────
 
@@ -62,7 +78,7 @@ def test_lake_info_returns_fetched_payload(client):
         "latest": "2026-05-18T00:00:00Z",
         "calendar": {},
     }
-    with patch("backend.models.lake.fetch_lake_info", return_value=fake_info) as mock_fetch:
+    with patch("backend.core.iceberg.lake_info.fetch_lake_info", return_value=fake_info) as mock_fetch:
         resp = client.get(
             f"/api/services/{MOCK_SERVICE_ID}/lake-info",
             headers={"x-fastly-service-id": MOCK_SERVICE_ID},
@@ -338,7 +354,7 @@ def test_cron_schedule_returns_schedules_list(client):
     }
 
     with (
-        patch("backend.core.metadata_db.latest_cron_per_task", return_value=fake_per_task),
+        patch("backend.core.metadata.latest_cron_per_task", return_value=fake_per_task),
         patch("backend.scheduler.get_scheduler") as mock_get_sched,
     ):
         # Empty scheduler — no jobs registered. The route should still
@@ -364,8 +380,8 @@ def test_cron_schedule_swallows_metadata_db_exception(client):
     patched to raise so the no-alerts-placeholder synthesis path
     doesn't mask a real metadata_db outage."""
     with (
-        patch("backend.core.metadata_db.latest_cron_per_task", side_effect=RuntimeError("locked")),
-        patch("backend.core.metadata_db.count_alerts", side_effect=RuntimeError("locked")),
+        patch("backend.core.metadata.latest_cron_per_task", side_effect=RuntimeError("locked")),
+        patch("backend.core.metadata.count_alerts", side_effect=RuntimeError("locked")),
         patch("backend.scheduler.get_scheduler") as mock_get_sched,
     ):
         fake_sched = type("S", (), {"_sched": type("X", (), {"get_jobs": lambda self: []})()})()
@@ -383,8 +399,8 @@ def test_cron_schedule_synthesizes_alerts_placeholder_when_zero_alerts(client):
     disabled_reason='no_alerts_configured' so the UI shows "No alerts
     configured" instead of silently omitting the tile."""
     with (
-        patch("backend.core.metadata_db.latest_cron_per_task", return_value={}),
-        patch("backend.core.metadata_db.count_alerts", return_value=0),
+        patch("backend.core.metadata.latest_cron_per_task", return_value={}),
+        patch("backend.core.metadata.count_alerts", return_value=0),
         patch("backend.scheduler.get_scheduler") as mock_get_sched,
     ):
         fake_sched = type("S", (), {"_sched": type("X", (), {"get_jobs": lambda self: []})()})()
@@ -408,7 +424,7 @@ def test_cron_schedule_tags_historical_alerts_entry_with_disabled_reason(client)
     Verify the disabled_reason is applied to the existing entry."""
     with (
         patch(
-            "backend.core.metadata_db.latest_cron_per_task",
+            "backend.core.metadata.latest_cron_per_task",
             return_value={
                 "alerts": {
                     "started_at": "2026-05-22T10:00:00Z",
@@ -419,7 +435,7 @@ def test_cron_schedule_tags_historical_alerts_entry_with_disabled_reason(client)
                 }
             },
         ),
-        patch("backend.core.metadata_db.count_alerts", return_value=0),
+        patch("backend.core.metadata.count_alerts", return_value=0),
         patch("backend.scheduler.get_scheduler") as mock_get_sched,
     ):
         fake_sched = type("S", (), {"_sched": type("X", (), {"get_jobs": lambda self: []})()})()
@@ -804,10 +820,11 @@ def test_import_custom_fields_404s_when_service_missing(client, tmp_path, monkey
     assert resp.status_code == 404
 
 
-def test_import_custom_fields_400s_when_payload_not_a_list(client, tmp_path, monkeypatch):
-    """``custom_fields`` must be a list. Pinned because the FE's
-    drag-and-drop import sends a JSON file directly; a dict-shaped
-    file should produce a clear 400 with helpful message."""
+def test_import_custom_fields_422s_when_payload_not_a_list(client, tmp_path, monkeypatch):
+    """``custom_fields`` must be a list. The FE's drag-and-drop import
+    sends a JSON file directly; a dict-shaped file now produces a 422
+    from the Pydantic body validator (matches the body/query
+    classification from commit 3c036cf — see also Phase O's flips)."""
     from backend import config
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
@@ -818,8 +835,9 @@ def test_import_custom_fields_400s_when_payload_not_a_list(client, tmp_path, mon
         headers={"x-fastly-service-id": MOCK_SERVICE_ID},
         json={"custom_fields": {"not": "a list"}},
     )
-    assert resp.status_code == 400
-    assert "list" in resp.json()["detail"]["error"].lower()
+    assert resp.status_code == 422
+    errors = resp.json()["detail"]
+    assert any(e.get("loc", [])[-1] == "custom_fields" for e in errors)
 
 
 def test_import_custom_fields_merges_new_into_existing(client, tmp_path, monkeypatch):
@@ -1009,7 +1027,7 @@ def test_validate_custom_vcl_returns_valid_true_for_clean_expression(client, tmp
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
 
     with (
-        patch("backend.core.log_fields.validate_custom_field", return_value=[]),
+        patch("backend.core.field_registry.validate_custom_field", return_value=[]),
         patch("backend.provision.validate_log_format", return_value=[]),
         patch("backend.provision.load_log_format", return_value="format string"),
     ):
@@ -1038,7 +1056,7 @@ def test_validate_custom_vcl_routes_warn_prefix_to_warnings_not_errors(client, t
 
     with (
         patch(
-            "backend.core.log_fields.validate_custom_field",
+            "backend.core.field_registry.validate_custom_field",
             return_value=["WARN: deprecated VCL function used", "Real syntax error"],
         ),
         patch("backend.provision.validate_log_format", return_value=[]),
@@ -1068,7 +1086,7 @@ def test_validate_custom_vcl_omits_format_length_when_invalid(client, tmp_path, 
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
 
     with (
-        patch("backend.core.log_fields.validate_custom_field", return_value=["Hard error"]),
+        patch("backend.core.field_registry.validate_custom_field", return_value=["Hard error"]),
         patch("backend.provision.validate_log_format", return_value=[]),
         patch("backend.provision.load_log_format") as mock_load,
     ):
@@ -1081,9 +1099,6 @@ def test_validate_custom_vcl_omits_format_length_when_invalid(client, tmp_path, 
     assert resp.json()["format_length"] is None
     # We didn't call load_log_format because errors short-circuited
     mock_load.assert_not_called()
-
-
-# ── PATCH /services/{id}/custom-fields/{field_name} — type-lock guard ────
 
 
 # ── POST /services/{id}/cron-settings (SSE) ────────────────────────────
@@ -1118,7 +1133,7 @@ def test_cron_settings_sse_persists_allowed_keys_only(client, tmp_path, monkeypa
 
     with (
         patch("backend.provision._sync_crontab"),
-        patch("backend.core.metadata_db.record_audit"),
+        patch("backend.core.metadata.record_audit"),
     ):
         resp = client.post(
             f"/api/services/{MOCK_SERVICE_ID}/cron-settings",
@@ -1154,7 +1169,7 @@ def test_cron_settings_sse_warns_but_proceeds_when_crontab_sync_fails(client, tm
 
     with (
         patch("backend.provision._sync_crontab", side_effect=RuntimeError("scheduler busy")),
-        patch("backend.core.metadata_db.record_audit"),
+        patch("backend.core.metadata.record_audit"),
     ):
         resp = client.post(
             f"/api/services/{MOCK_SERVICE_ID}/cron-settings",
@@ -1179,7 +1194,7 @@ def test_cron_settings_sse_supports_all_three_cron_namespaces(client, tmp_path, 
 
     with (
         patch("backend.provision._sync_crontab"),
-        patch("backend.core.metadata_db.record_audit"),
+        patch("backend.core.metadata.record_audit"),
     ):
         client.post(
             f"/api/services/{MOCK_SERVICE_ID}/cron-settings",
@@ -1242,7 +1257,7 @@ def test_clear_time_range_removes_from_provisioning_config(client, tmp_path, mon
         },
     )
 
-    with patch("backend.core.metadata_db.record_audit"):
+    with patch("backend.core.metadata.record_audit"):
         resp = client.delete(f"/api/services/{MOCK_SERVICE_ID}/time-range")
 
     assert resp.status_code == 200

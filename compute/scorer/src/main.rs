@@ -21,6 +21,8 @@ mod normalize;
 mod scorer;
 
 use fastly::{ConfigStore, Error, Request, Response};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // Lightweight in-process counters. Emitted via dbg_log every
@@ -35,12 +37,37 @@ static TAMPERED_COOKIE_COUNT: AtomicU64 = AtomicU64::new(0);
 static ENFORCE_BLOCK_COUNT: AtomicU64 = AtomicU64::new(0);
 static MATRIX_LOAD_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
+static REPLAY_FLAGGED_COUNT: AtomicU64 = AtomicU64::new(0);
+// EC-05: fail-open observability. keys_fail counts key-load fail-opens (which
+// early-return before the bottom-of-function metrics flush) so they land in the
+// in-process denominator; cookie_encode_fail counts the silent drop of a rotated
+// Set-Cookie when re-encode fails. Both were previously invisible to `metrics:`.
+static KEYS_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+static COOKIE_ENCODE_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 const METRICS_EMIT_EVERY: u64 = 1000;
+
+// ── Sustained-replay detector (per-instance, lock-free) ──────────────────────
+// The session cookie is rotated on every response, so a legit client sends a
+// DISTINCT sealed value each request. The only benign reason to see the SAME
+// value twice is concurrency — a burst of in-flight requests carrying the
+// cookie the client most recently held, before they process the new
+// Set-Cookie. Those settle within a second or two. An attacker REPLAYS one
+// low-score cookie indefinitely (ignoring Set-Cookie) to keep seq=1 and dodge
+// the L1 warmup/velocity rules inside the idle window. We remember when each
+// value was FIRST seen and flag a repeat only once it's still being presented
+// past REPLAY_WINDOW_S — long after any legit burst. Keyed on first-seen (not
+// the cookie's last_ts) so an idle-then-burst client is never falsely flagged.
+const REPLAY_CACHE_SIZE: usize = 8192; // power of two → mask indexing
+const REPLAY_PROBES: usize = 8;
+const REPLAY_WINDOW_S: u32 = 30;
+#[allow(clippy::declare_interior_mutable_const)]
+const ZERO_SLOT: AtomicU64 = AtomicU64::new(0);
+static REPLAY_HASH: [AtomicU64; REPLAY_CACHE_SIZE] = [ZERO_SLOT; REPLAY_CACHE_SIZE];
+static REPLAY_FIRST_SEEN: [AtomicU64; REPLAY_CACHE_SIZE] = [ZERO_SLOT; REPLAY_CACHE_SIZE];
 
 const SERVICE_ID_HEADER: &str = "X-Edge-Service-Id";
 const PREV_ROUTE_HEADER: &str = "X-Edge-Prev-Route";
 const PREV_ANCHOR_HEADER: &str = "X-Edge-Prev-Anchor";
-const MATRIX_AGE_HEADER: &str = "X-Edge-Matrix-Age-Days";
 const SCORER_AUTH_HEADER: &str = "X-Edge-Scorer-Auth";
 const COOKIE_NAME: &str = "X-Session-State";
 const KEYS_STORE: &str = "scoring_keys";
@@ -52,6 +79,16 @@ const REQUEST_SECRET_KEY: &str = "request_secret";
 const CONFIG_STORE: &str = "scoring_config";
 const DEBUG_LOG_KEY: &str = "debug_logging_enabled";
 const ENFORCE_THRESHOLD_KEY: &str = "enforce_threshold";
+// Layer-2 enforcement opt-in (scoring_config). `l2_enforce_enabled` is the
+// explicit operator switch: L2 joins the *enforced* combined score only when it
+// trims to "1" — never on a deployment-age clock. `l2_enabled_at` is the
+// UNIX-epoch (seconds) anchor the backend stamps on off→on; the scorer derives
+// the opt-in fade-in age from it live (see load_l2_days_since_optin), so it
+// can't be spoofed by a client and doesn't reset on retrain. The 7-day
+// deployment-age "readiness" signal is now an advisory gauge computed
+// backend-side — the scorer no longer reads scoring_enabled_at.
+const L2_ENFORCE_ENABLED_KEY: &str = "l2_enforce_enabled";
+const L2_ENABLED_AT_KEY: &str = "l2_enabled_at";
 
 #[fastly::main]
 fn main(req: Request) -> Result<Response, Error> {
@@ -68,7 +105,13 @@ fn score_request(req: &Request) -> Response {
     //         domain (which is reachable from anywhere on the public
     //         internet) from being scored on by random people who
     //         find the hostname.
-    if !request_auth_ok(req) {
+    // Open the scoring_keys ConfigStore ONCE for the whole request: auth reads
+    // the shared secret from it; load_keys reads the AES-GCM key(s) from the
+    // same handle below. Opening per-helper crossed the host boundary twice for
+    // the same store on every request — one reused handle halves that.
+    let keys_store = ConfigStore::try_open(KEYS_STORE).ok();
+    if !request_auth_ok(req, keys_store.as_ref()) {
+        dbg_log("[ERROR] Unauthorized request: X-Edge-Scorer-Auth header missing or invalid");
         return Response::from_status(401)
             .with_header("X-Edge-Score-Reason", "unauthorized")
             .with_body("unauthorized");
@@ -78,9 +121,26 @@ fn score_request(req: &Request) -> Response {
     let service_id = req.get_header_str(SERVICE_ID_HEADER).unwrap_or("default");
     let prev_route_raw = req.get_header_str(PREV_ROUTE_HEADER);
     let prev_anchor_raw = req.get_header_str(PREV_ANCHOR_HEADER);
-    let matrix_age_days: f64 = req
-        .get_header_str(MATRIX_AGE_HEADER)
-        .and_then(|s| s.parse().ok())
+    // Layer-2 enforcement gate. L2 joins the *enforced* combined score only when
+    // an operator has explicitly opted in (l2_enforce_enabled="1"); on opt-in it
+    // fades in over L2_RAMP_DAYS from the l2_enabled_at anchor. Both are
+    // self-derived server-side from scoring_config, so a client can't spoof them
+    // (the F009 evasion class closed for prev_route/anchor). Flag absent/off →
+    // L2 observe-only forever: its sub-score is still computed + logged, just
+    // weighted 0 in the combined score — no auto monitoring→blocking transition.
+    // Open the scoring_config ConfigStore ONCE and read every toggle from the
+    // single handle: the L2 opt-in flag + anchor here, the debug switch below,
+    // and the enforce threshold near the end. `None` = store unavailable → each
+    // reader falls back to its safe default, exactly as the per-helper try_open
+    // calls did before (3 fewer host-boundary opens of the same store).
+    let config_store = ConfigStore::try_open(CONFIG_STORE).ok();
+    let l2_enforce_enabled: bool = config_store
+        .as_ref()
+        .map(load_l2_enforce_enabled)
+        .unwrap_or(false);
+    let l2_days_since_optin: f64 = config_store
+        .as_ref()
+        .map(load_l2_days_since_optin)
         .unwrap_or(0.0);
 
     // Cheap toggle: flip the `debug_logging_enabled` key in the
@@ -88,27 +148,30 @@ fn score_request(req: &Request) -> Response {
     // service with `fastly log-tail`, then flip back to off. The store
     // lookup is a constant-time hash hit so leaving the check in costs
     // ~nothing on the hot path.
-    let debug = debug_logging_enabled();
-    // Wall-clock since the Wasm instance booted, in nanoseconds. We
-    // diff start vs end to get the time spent scoring this request,
-    // which goes into the debug log so the operator can see real
-    // edge-side latency without leaving Fastly's tools.
-    let t0 = if debug {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    let debug = config_store
+        .as_ref()
+        .map(debug_logging_enabled)
+        .unwrap_or(false);
+    // Wall-clock at scorer entry, in nanoseconds. Diffed against a read
+    // taken just before we return to get this request's Wasm execution
+    // time. Captured UNCONDITIONALLY now (was debug-gated) because it is
+    // emitted on every 200 as the X-Edge-Score-Exec-Us header → VCL →
+    // edge_score_exec_us, giving operators compute-only latency distinct
+    // from the edge-observed round-trip. SystemTime::now() is already on
+    // the hot path (now_secs below), so this adds nothing measurable.
+    let t0 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     if debug {
         dbg_log(&format!(
-            "incoming: url={} service={} prev_route={:?} prev_anchor={:?} matrix_age_days={}",
+            "incoming: url={} service={} prev_route={:?} prev_anchor={:?} l2_enforce_enabled={} l2_days_since_optin={}",
             req.get_url_str(),
             service_id,
             prev_route_raw,
             prev_anchor_raw,
-            matrix_age_days,
+            l2_enforce_enabled,
+            l2_days_since_optin,
         ));
     }
 
@@ -116,12 +179,19 @@ fn score_request(req: &Request) -> Response {
     let current_route = normalize::normalize(req.get_url_str());
 
     // ── Load AES-GCM keys from the Edge Dictionary. ──────────────────────────
-    let (key, prev_key) = match load_keys() {
+    let (key, prev_key) = match load_keys(keys_store.as_ref()) {
         Ok(pair) => pair,
-        Err(_) => {
+        Err(e) => {
             // Misconfigured dictionary is operationally critical but should
             // fail open in the request path. Emit a diagnostic header so the
             // outage is visible in VCL logs.
+            dbg_log(&format!("[ERROR] Failed to load keys from ConfigStore: {:?}", e));
+            // EC-05: bump the keys fail-open counter AND flush metrics BEFORE the
+            // early return — otherwise this path skips maybe_emit_metrics() at the
+            // bottom, leaving key-load outages out of the in-process `metrics:`
+            // line and its request denominator entirely.
+            KEYS_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+            maybe_emit_metrics();
             return fail_open_response("internal-error-keys");
         }
     };
@@ -130,6 +200,25 @@ fn score_request(req: &Request) -> Response {
     let inbound_cookie = req
         .get_header_str("cookie")
         .and_then(|h| extract_cookie_value(h, COOKIE_NAME));
+
+    // Compute "now" UP FRONT so we can reject expired cookies BEFORE we hand
+    // their state into the scorer. Pre-fix (audit finding 009), expiration
+    // was only evaluated at the bottom of this function when minting the
+    // replacement cookie — meaning an attacker who replayed an expired
+    // low-score cookie got scored against the trusted historical state and
+    // bypassed enforcement thresholds.
+    // Fail CLOSED on a clock read failure. The pre-fix `.unwrap_or(0)` made
+    // now_secs = 0, which silently disabled BOTH the cookie expiration check
+    // (`idle`/`age` saturating-sub to 0 → never expired) and replay detection
+    // (`now_secs - first_seen` → 0, never over the window), letting a replayed
+    // expired low-score cookie be scored against trusted historical state.
+    // We panic instead (panic=abort → request fails closed), mirroring the
+    // getrandom decision in `random_nonce` below: on wasm32-wasip1 SystemTime
+    // is a reliable host function and this branch is unreachable in practice.
+    let now_secs: u32 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .expect("WASI clock must not fail — now_secs=0 disables cookie expiry + replay detection");
 
     let (state, compliance) = match inbound_cookie {
         None => (None, "missing"),
@@ -140,7 +229,21 @@ fn score_request(req: &Request) -> Response {
             service_id,
             cookie::SCHEMA_VERSION,
         ) {
-            Ok(s) => (Some(s), "ok"),
+            Ok(s) => {
+                if session_expired(&s, now_secs) {
+                    (None, "expired")
+                } else if is_sustained_replay(value, now_secs) {
+                    // Same sealed cookie still presented long after first
+                    // sight → the client is ignoring Set-Cookie rotation
+                    // (replay). Drop the cultivated low-seq state so the
+                    // replayer can't sit at seq=1 dodging L1 warmup; scored
+                    // as a fresh no-state session (penalized like missing).
+                    REPLAY_FLAGGED_COUNT.fetch_add(1, Ordering::Relaxed);
+                    (None, "replayed")
+                } else {
+                    (Some(s), "ok")
+                }
+            }
             Err(_) => {
                 TAMPERED_COOKIE_COUNT.fetch_add(1, Ordering::Relaxed);
                 (None, "tampered")
@@ -171,12 +274,20 @@ fn score_request(req: &Request) -> Response {
     }
 
     // ── Resolve previous route(s) for L2. ────────────────────────────────────
-    // Prefer the prev_route stored in the cookie state (carried forward
-    // from the last scored request in this session) — req.http doesn't
-    // persist across separate client requests, so the X-Edge-Prev-Route
-    // header path was always empty. The header is still consulted as a
-    // fallback for one-off testing scenarios where the cookie is missing.
-    let prev_route_from_state = state
+    // Use ONLY the prev_route stored in the cookie state (carried forward
+    // from the last scored request in this session). The session cookie is
+    // AEAD-sealed; an attacker can't forge it without the AES-GCM key.
+    //
+    // The prior implementation fell back to the unauthenticated
+    // X-Edge-Prev-Route header when the cookie was missing — an attacker
+    // could omit the session cookie and supply a benign route in the
+    // header, deterministically depressing the L2 sequence anomaly score
+    // and bypassing enforcement thresholds (audit F009, run 7ba15352).
+    // The header is dropped here; missing-cookie sessions get a None
+    // prev_route, matching the safe-by-default L2 fallback. The
+    // ``prev_route_raw`` variable is still bound up-top for the debug log
+    // so operators can see what the client tried to send.
+    let prev_route = state
         .as_ref()
         .filter(|s| !s.prev_route_path.is_empty())
         .map(|s| normalize::Route {
@@ -185,17 +296,35 @@ fn score_request(req: &Request) -> Response {
             // Leaving empty avoids re-running the full normalize() pass.
             category: String::new(),
         });
-    let prev_route = prev_route_from_state
-        .or_else(|| prev_route_raw.map(|s| normalize::normalize(s)));
-    let prev_anchor = prev_anchor_raw.map(|s| normalize::normalize(s));
+    // The skip-gram anchor is treated exactly like prev_route above: it is
+    // NOT taken from the unauthenticated X-Edge-Prev-Anchor header. A client
+    // could otherwise supply a SEEN high-probability anchor route; because the
+    // L2 transition prob is `direct_p.max(anchor_p * BETA)` (scorer.rs), a
+    // client-chosen anchor can only RAISE trans_prob and thus DEPRESS the L2
+    // sequence-anomaly score — the same evasion class closed for prev_route in
+    // audit F009. There is no trusted server-side source for the anchor today
+    // (it is not carried in the sealed cookie state), so it stays None and the
+    // skip-gram self-disables, matching the safe-by-default L2 fallback. The
+    // `prev_anchor_raw` binding survives only for the debug log so operators
+    // can see what the client tried to send.
+    let prev_anchor: Option<normalize::Route> = None;
 
     // ── Score. ───────────────────────────────────────────────────────────────
-    let matrix = matrix::load_embedded();
-    if matrix.is_none() {
-        // The matrix is compiled into the Wasm binary, so a None here
-        // means the embedded JSON failed to parse at first access —
-        // operationally this would only happen after a bad deploy.
-        // Bump the counter so the periodic metrics line surfaces it.
+    // Lazy matrix load: L2 only fires when there's a trusted previous-route
+    // signal (the sealed-cookie prev_route; prev_anchor is forced None above).
+    // Cookie-missing requests — the large majority — never use the matrix, so
+    // skip the ~1.8MB KV fetch entirely for them. The fetch (and its cold-start
+    // cost) was pushing the scorer round-trip past the timeout budget and
+    // causing fail-opens; keeping it off the common path fixes that while
+    // still serving the matrix (cached per-instance) to L2-eligible requests.
+    // Behaviour is unchanged: with prev_route None, L2 has no transition to
+    // score regardless of whether the matrix is loaded.
+    let needs_matrix = prev_route.is_some() || prev_anchor.is_some();
+    let matrix = if needs_matrix { matrix::load_matrix() } else { None };
+    if needs_matrix && matrix.is_none() {
+        // We needed the matrix but it's unlinked/empty/unparseable. L2
+        // self-disables; bump the counter so the periodic metrics line
+        // surfaces a service not yet seeded with a trained matrix.
         MATRIX_LOAD_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
     }
     let result = scorer::score_combined(scorer::ScoreInputs {
@@ -205,17 +334,16 @@ fn score_request(req: &Request) -> Response {
         prev_route: prev_route.as_ref(),
         prev_anchor_route: prev_anchor.as_ref(),
         matrix,
-        matrix_age_days,
+        l2_enforce_enabled,
+        l2_days_since_optin,
     });
 
     // ── Re-encode the updated cookie. ────────────────────────────────────────
     // We rotate the cookie on every request so the seq/sum_dt fields stay
     // fresh and the encryption nonce never repeats. The just-scored
-    // current_route becomes the next request's prev_route.
-    let now_secs: u32 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(0);
+    // current_route becomes the next request's prev_route. `now_secs` was
+    // computed near the top of the function so the expiration check could
+    // run before scoring (see audit finding 009).
     let updated = update_state(state.clone(), &result, &current_route.path, now_secs);
     let set_cookie = match cookie::encode(
         &updated,
@@ -225,7 +353,14 @@ fn score_request(req: &Request) -> Response {
         cookie::SCHEMA_VERSION,
     ) {
         Ok(c) => Some(c),
-        Err(_) => None,
+        Err(e) => {
+            dbg_log(&format!("[ERROR] Failed to encode rotated cookie: {:?}", e));
+            // EC-05: count the silent Set-Cookie drop so a re-encode regression is
+            // visible in `metrics:` (this request still completes — no rotated
+            // cookie means the next request is cookie-missing).
+            COOKIE_ENCODE_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+            None
+        }
     };
 
     // ── Build response. ──────────────────────────────────────────────────────
@@ -247,7 +382,7 @@ fn score_request(req: &Request) -> Response {
     // request's score meets or exceeds it. VCL reads this in a recv-
     // restart-2 snippet and `error 429`s the request. Missing key or
     // unparseable value → no enforcement (fail-open).
-    if let Some(t) = load_enforce_threshold() {
+    if let Some(t) = config_store.as_ref().and_then(load_enforce_threshold) {
         if u32::from(result.score) >= t {
             ENFORCE_BLOCK_COUNT.fetch_add(1, Ordering::Relaxed);
             resp.set_header("X-Edge-Score-Enforce", "1");
@@ -264,14 +399,21 @@ fn score_request(req: &Request) -> Response {
         );
     }
 
+    // Wasm execution time for this request (µs). Emitted on every 200 so
+    // VCL can stash it into edge_score_exec_us — compute-only latency,
+    // separate from the edge-observed round-trip (edge_score_rtt_us, which
+    // also includes network + cold-start and is measured in VCL). Computed
+    // unconditionally here and reused by the debug log below.
+    let t1 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let elapsed_us = exec_us(t0, t1);
+    resp.set_header("X-Edge-Score-Exec-Us", elapsed_us.to_string());
+
     if debug {
-        let t1 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let elapsed_us = (t1.saturating_sub(t0)) / 1_000;
-        
-        let current_dt_secs = state.as_ref()
+        let current_dt_secs = state
+            .as_ref()
             .map(|s| now_secs.saturating_sub(s.last_ts).min(3600))
             .unwrap_or(0);
 
@@ -308,20 +450,13 @@ fn score_request(req: &Request) -> Response {
 
 /// Read the debug toggle from the `scoring_config` ConfigStore. Any truthy
 /// string ("1", "true", "yes", any non-empty value other than "0"/"false")
-/// enables verbose log emission. Missing config store / missing key → off.
+/// enables verbose log emission. Missing key → off. The store handle is opened
+/// once at the top of `score_request` and shared with the other config readers;
+/// a missing store is handled there (the reader is skipped → debug off).
 ///
 /// Always returns a bool — never panics — because this is on the request
 /// hot path and a misconfigured store must not 5xx real traffic.
-fn debug_logging_enabled() -> bool {
-    // ConfigStore::open panics if the store doesn't exist. catch_unwind is
-    // a no-op under wasm32 + panic=abort, so we use try_open to actually
-    // achieve the "missing store → silent fallback" semantic. A missing
-    // store on this fast-path code = debug off, which is the right default
-    // for a fresh service that hasn't been fully configured yet.
-    let dict = match ConfigStore::try_open(CONFIG_STORE) {
-        Ok(d) => d,
-        Err(_) => return false,
-    };
+fn debug_logging_enabled(dict: &ConfigStore) -> bool {
     match dict.get(DEBUG_LOG_KEY) {
         Some(v) => {
             let trimmed = v.trim().to_ascii_lowercase();
@@ -338,8 +473,7 @@ fn debug_logging_enabled() -> bool {
 /// missing key, or unparseable value → None → no enforcement happens.
 /// Operator clears enforcement by deleting the key or writing a non-
 /// numeric value (e.g. "off"). Values outside 0..100 are clamped.
-fn load_enforce_threshold() -> Option<u32> {
-    let dict = ConfigStore::try_open(CONFIG_STORE).ok()?;
+fn load_enforce_threshold(dict: &ConfigStore) -> Option<u32> {
     let raw = dict.get(ENFORCE_THRESHOLD_KEY)?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -347,6 +481,66 @@ fn load_enforce_threshold() -> Option<u32> {
     }
     let n: u32 = trimmed.parse().ok()?;
     Some(n.min(100))
+}
+
+/// Read the operator's explicit Layer-2 enforcement opt-in flag from
+/// scoring_config. Returns ``true`` only when ``l2_enforce_enabled`` is present
+/// AND trims to exactly "1".
+///
+/// Fail-CLOSED-to-observe-only on EVERY other path (missing store, missing/empty/
+/// any-other value) → ``false`` → L2 contributes nothing to the enforced
+/// combined score. This is the safe default: L2's sub-score is still always
+/// computed + logged, but it never joins blocking until an operator explicitly
+/// opts in via the admin UI. There is deliberately no deployment-age clock that
+/// flips this on automatically.
+fn load_l2_enforce_enabled(dict: &ConfigStore) -> bool {
+    match dict.get(L2_ENFORCE_ENABLED_KEY) {
+        Some(v) => v.trim() == "1",
+        None => false,
+    }
+}
+
+/// Resolve the L2 opt-in fade-in age: days (with fractional part) since the
+/// operator opted L2 into enforcement, read from the ``l2_enabled_at`` anchor
+/// (UNIX epoch seconds) in the scoring_config ConfigStore. The backend stamps
+/// this key on the off→on transition; the scorer derives the age live so the
+/// fade-in (optin_ramp_weight: day 0 → 0 … day L2_RAMP_DAYS → 1, scorer.rs)
+/// advances continuously. Deriving it here — rather than from a request header
+/// or the matrix's build date — means it cannot be spoofed by a client AND does
+/// not reset every time the matrix is retrained (a build-date clock would).
+///
+/// Fail-open to 0.0 on EVERY error path (missing store, missing/empty/unparseable
+/// key, clock read failure, future anchor). age 0.0 → optin_ramp_weight 0 → L2
+/// contributes nothing until the fade-in advances — so a service whose anchor is
+/// missing (flag never set) or just-stamped scores L2 as observe-only.
+fn load_l2_days_since_optin(dict: &ConfigStore) -> f64 {
+    let raw = match dict.get(L2_ENABLED_AT_KEY) {
+        Some(v) => v,
+        None => return 0.0,
+    };
+    let enabled_at: u64 = match raw.trim().parse() {
+        Ok(n) => n,
+        Err(_) => return 0.0,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if now <= enabled_at {
+        // Anchor in the future (clock skew / mis-seed) → treat as just-opted-in
+        // → fade-in keeps L2 weight at 0 rather than over-trusting it.
+        return 0.0;
+    }
+    (now - enabled_at) as f64 / 86_400.0
+}
+
+/// Wasm execution time in microseconds from two `SystemTime`-derived
+/// nanosecond stamps. `saturating_sub` so a non-monotonic clock (t1 < t0)
+/// yields 0 rather than a wrapped enormous value — this feeds the
+/// X-Edge-Score-Exec-Us header → edge_score_exec_us, and a bogus spike
+/// there would skew the latency percentiles operators tune timeouts on.
+fn exec_us(t0_nanos: u128, t1_nanos: u128) -> u128 {
+    t1_nanos.saturating_sub(t0_nanos) / 1_000
 }
 
 /// Write a structured log line to stderr via `eprintln!`. On Wasm,
@@ -368,13 +562,18 @@ fn dbg_log(msg: &str) {
 /// Relaxed ordering — exact values aren't required, only rough
 /// magnitudes for operator visibility.
 fn maybe_emit_metrics() {
-    let count = REQUEST_COUNT.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-    if count % METRICS_EMIT_EVERY == 0 {
+    let count = REQUEST_COUNT
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
+    if count.is_multiple_of(METRICS_EMIT_EVERY) {
         dbg_log(&format!(
-            "metrics: tampered={} enforce_block={} matrix_fail={} requests={}",
+            "metrics: tampered={} replayed={} enforce_block={} matrix_fail={} keys_fail={} cookie_encode_fail={} requests={}",
             TAMPERED_COOKIE_COUNT.load(Ordering::Relaxed),
+            REPLAY_FLAGGED_COUNT.load(Ordering::Relaxed),
             ENFORCE_BLOCK_COUNT.load(Ordering::Relaxed),
             MATRIX_LOAD_FAIL_COUNT.load(Ordering::Relaxed),
+            KEYS_FAIL_COUNT.load(Ordering::Relaxed),
+            COOKIE_ENCODE_FAIL_COUNT.load(Ordering::Relaxed),
             count,
         ));
     }
@@ -390,16 +589,15 @@ fn fail_open_response(reason: &str) -> Response {
     resp
 }
 
-fn request_auth_ok(req: &Request) -> bool {
+fn request_auth_ok(req: &Request, keys: Option<&ConfigStore>) -> bool {
     let provided = req.get_header_str(SCORER_AUTH_HEADER).unwrap_or("");
     if provided.is_empty() {
         return false;
     }
-    // Use try_open so a missing scoring_keys store fails-closed gracefully
-    // instead of panicking; load_request_secret also returns None when
-    // the key is missing or empty. Either way: reject the request — better
-    // than letting unauthenticated traffic through on misconfiguration.
-    let expected = match load_request_secret() {
+    // A missing scoring_keys store (keys=None) or a missing/empty secret rejects
+    // the request — better than letting unauthenticated traffic through on
+    // misconfiguration. The store handle is opened once by the caller.
+    let expected = match keys.and_then(load_request_secret) {
         Some(v) => v,
         None => return false,
     };
@@ -409,8 +607,7 @@ fn request_auth_ok(req: &Request) -> bool {
     constant_time_eq(provided.as_bytes(), expected.as_bytes())
 }
 
-fn load_request_secret() -> Option<String> {
-    let dict = ConfigStore::try_open(KEYS_STORE).ok()?;
+fn load_request_secret(dict: &ConfigStore) -> Option<String> {
     let v = dict.get(REQUEST_SECRET_KEY)?;
     if v.is_empty() {
         None
@@ -430,8 +627,12 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn load_keys() -> Result<(Vec<u8>, Option<Vec<u8>>), Error> {
-    let dict = ConfigStore::open(KEYS_STORE);
+fn load_keys(keys: Option<&ConfigStore>) -> Result<(Vec<u8>, Option<Vec<u8>>), Error> {
+    // EC-05: a missing / unlinked scoring_keys store (keys=None) must fail OPEN
+    // gracefully via the Err → fail_open_response("internal-error-keys") path,
+    // not panic=abort the request. The handle is opened once at the top of
+    // score_request and shared with the auth check (request_auth_ok).
+    let dict = keys.ok_or_else(|| Error::msg("scoring_keys store unavailable"))?;
     let key_hex = dict
         .get("current_key_hex")
         .ok_or_else(|| Error::msg("scoring_keys.current_key_hex missing"))?;
@@ -446,7 +647,7 @@ fn load_keys() -> Result<(Vec<u8>, Option<Vec<u8>>), Error> {
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, Error> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(Error::msg("hex key has odd length"));
     }
     (0..s.len())
@@ -470,6 +671,43 @@ fn extract_cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a st
         }
     }
     None
+}
+
+/// Returns true when this sealed cookie value looks like a SUSTAINED replay:
+/// the same value is still being presented more than `REPLAY_WINDOW_S` after
+/// this instance first saw it. See the cache doc above for why first-seen
+/// (not the cookie's `last_ts`) is the right key — it tolerates legit
+/// concurrent bursts (including idle-then-burst) while catching a client
+/// that ignores Set-Cookie and replays one cookie indefinitely.
+///
+/// Lock-free open-addressing over a fixed ring. On a fresh sighting the
+/// timestamp is published BEFORE the hash so any reader that observes the
+/// hash is guaranteed to read a valid first-seen (no torn "seen but ts=0"
+/// false positive). Probe-chain exhaustion overwrites the home slot and
+/// treats the value as not-replay (eviction is a documented residual risk —
+/// it can only MISS a replay, never manufacture a false positive).
+fn is_sustained_replay(cookie_value: &str, now_secs: u32) -> bool {
+    let mut hasher = DefaultHasher::new();
+    cookie_value.hash(&mut hasher);
+    let h = hasher.finish();
+    let h = if h == 0 { 1 } else { h }; // 0 marks an empty slot
+    let start = (h as usize) & (REPLAY_CACHE_SIZE - 1);
+    for probe in 0..REPLAY_PROBES {
+        let idx = (start + probe) & (REPLAY_CACHE_SIZE - 1);
+        let slot = REPLAY_HASH[idx].load(Ordering::Acquire);
+        if slot == h {
+            let first = REPLAY_FIRST_SEEN[idx].load(Ordering::Acquire) as u32;
+            return now_secs.saturating_sub(first) > REPLAY_WINDOW_S;
+        }
+        if slot == 0 {
+            REPLAY_FIRST_SEEN[idx].store(u64::from(now_secs), Ordering::Release);
+            REPLAY_HASH[idx].store(h, Ordering::Release);
+            return false;
+        }
+    }
+    REPLAY_FIRST_SEEN[start].store(u64::from(now_secs), Ordering::Release);
+    REPLAY_HASH[start].store(h, Ordering::Release);
+    false
 }
 
 fn random_nonce() -> [u8; cookie::NONCE_BYTES] {
@@ -512,6 +750,17 @@ fn random_nonce() -> [u8; cookie::NONCE_BYTES] {
 const SESSION_IDLE_EXPIRE_S: u32 = 30 * 60; // 30 minutes
 const SESSION_HARD_CAP_S: u32 = 24 * 60 * 60; // 24 hours
 
+/// True when a session has exceeded either lifetime bound — the idle gap
+/// since the last request or the total age since issue. Shared by the
+/// decode-time "expired" verdict (score_request) and the update_state
+/// sid-rotation so the two predicates stay in lockstep. saturating_sub
+/// protects against clock skew where last_ts/issued_at > now_secs.
+fn session_expired(s: &cookie::SessionState, now_secs: u32) -> bool {
+    let idle = now_secs.saturating_sub(s.last_ts);
+    let age = now_secs.saturating_sub(s.issued_at);
+    idle > SESSION_IDLE_EXPIRE_S || age > SESSION_HARD_CAP_S
+}
+
 fn update_state(
     prev: Option<cookie::SessionState>,
     result: &scorer::ScoreResult,
@@ -522,13 +771,12 @@ fn update_state(
     match prev {
         Some(s) => {
             let idle = now_secs.saturating_sub(s.last_ts);
-            let age = now_secs.saturating_sub(s.issued_at);
             // SESSION ROTATION: idle-expire OR hard-cap → mint a fresh
             // sid and reset timing. Bounded session lifetime is a
             // security feature (stolen cookies can't be replayed after
             // their window) and a data-hygiene feature (long-running
             // sessions stop biasing the variance estimator).
-            if idle > SESSION_IDLE_EXPIRE_S || age > SESSION_HARD_CAP_S {
+            if session_expired(&s, now_secs) {
                 return cookie::SessionState {
                     v: cookie::SCHEMA_VERSION,
                     sid: new_random_sid(),
@@ -549,8 +797,14 @@ fn update_state(
             // protects against clock skew where last_ts > now_secs.
             let dt_secs: u32 = idle.min(3600);
             let dt64 = u64::from(dt_secs);
-            let new_sum_dt = s.sum_dt.saturating_add(dt_secs);
-            let new_sum_dt_sq = s.sum_dt_sq.saturating_add(dt64.saturating_mul(dt64));
+            let mut new_sum_dt = s.sum_dt;
+            let mut new_sum_dt_sq = s.sum_dt_sq;
+            if s.seq >= 20 {
+                new_sum_dt -= new_sum_dt / 20;
+                new_sum_dt_sq -= new_sum_dt_sq / 20;
+            }
+            let new_sum_dt = new_sum_dt.saturating_add(dt_secs);
+            let new_sum_dt_sq = new_sum_dt_sq.saturating_add(dt64.saturating_mul(dt64));
             cookie::SessionState {
                 v: cookie::SCHEMA_VERSION,
                 sid: s.sid,
@@ -583,7 +837,8 @@ fn new_random_sid() -> [u8; cookie::SID_BYTES] {
     // sessions into the same row in the labels table. Better to abort
     // the request and fail-open than to return a deterministic sid.
     let mut buf = [0u8; cookie::SID_BYTES];
-    getrandom::getrandom(&mut buf).expect("WASI getrandom must not fail when generating session sid");
+    getrandom::getrandom(&mut buf)
+        .expect("WASI getrandom must not fail when generating session sid");
     buf
 }
 
@@ -616,6 +871,17 @@ mod tests {
     }
 
     #[test]
+    fn exec_us_converts_ns_to_us_and_saturates() {
+        // 5000ns = 5µs.
+        assert_eq!(exec_us(1_000, 6_000), 5);
+        // Zero elapsed.
+        assert_eq!(exec_us(10_000, 10_000), 0);
+        // Non-monotonic clock (t1 < t0) → 0, never a wrapped huge value
+        // that would corrupt the latency percentiles.
+        assert_eq!(exec_us(9_000, 1_000), 0);
+    }
+
+    #[test]
     fn hex_decode_rejects_odd_length() {
         assert!(hex_decode("abc").is_err());
     }
@@ -623,6 +889,49 @@ mod tests {
     #[test]
     fn hex_decode_rejects_non_hex() {
         assert!(hex_decode("zzzz").is_err());
+    }
+
+    // ── is_sustained_replay ──────────────────────────────────────────────────
+    //
+    // The replay cache is a process-wide static shared across the whole test
+    // binary, so each test uses a UNIQUE cookie string. Slot collisions only
+    // ever cause probing (the `slot == h` check compares the full 64-bit
+    // hash, never just the index), so distinct strings can't false-match.
+
+    #[test]
+    fn replay_first_sighting_not_flagged() {
+        assert!(!is_sustained_replay("replaytest-first-sighting", 1_000));
+    }
+
+    #[test]
+    fn replay_concurrent_burst_within_window_not_flagged() {
+        // A concurrent in-flight burst re-presents the SAME freshly-rotated
+        // cookie a few seconds apart — must be tolerated, up to the window.
+        assert!(!is_sustained_replay("replaytest-burst", 1_000));
+        assert!(!is_sustained_replay("replaytest-burst", 1_003));
+        assert!(!is_sustained_replay(
+            "replaytest-burst",
+            1_000 + REPLAY_WINDOW_S
+        ));
+    }
+
+    #[test]
+    fn replay_sustained_beyond_window_flagged() {
+        assert!(!is_sustained_replay("replaytest-sustained", 5_000));
+        // Still presenting the same sealed cookie well past first sight.
+        assert!(is_sustained_replay(
+            "replaytest-sustained",
+            5_000 + REPLAY_WINDOW_S + 1
+        ));
+    }
+
+    #[test]
+    fn replay_rotating_client_never_flagged() {
+        // A protocol-following client sends a distinct value each request.
+        for i in 0..64u32 {
+            let v = format!("replaytest-rotating-{i}");
+            assert!(!is_sustained_replay(&v, 6_000 + i));
+        }
     }
 
     // ── update_state lifecycle tests ────────────────────────────────────────
@@ -668,7 +977,10 @@ mod tests {
         let s2 = update_state(Some(s1), &result, "/home", now);
 
         assert_ne!(s2.sid, original_sid, "idle-expire must mint a new sid");
-        assert_eq!(s2.seq, 1, "accumulators should reset to fresh-session state");
+        assert_eq!(
+            s2.seq, 1,
+            "accumulators should reset to fresh-session state"
+        );
         assert_eq!(s2.sum_dt, 0);
         assert_eq!(s2.sum_dt_sq, 0);
         assert_eq!(s2.issued_at, now);
@@ -782,5 +1094,37 @@ mod tests {
         // constant test above — a bounded session lifetime is a
         // security guarantee against indefinite cookie replay.
         assert_eq!(SESSION_HARD_CAP_S, 24 * 60 * 60);
+    }
+
+    #[test]
+    fn test_session_expired_boundaries() {
+        // Pin the shared predicate at both bounds: exactly == cap is NOT
+        // expired (the comparison is strictly `>`); one second past IS.
+        let base = update_state(None, &mk_score_result(0), "/home", 1_000);
+
+        // Idle bound: age stays tiny, idle drives the verdict.
+        assert!(
+            !session_expired(&base, 1_000 + SESSION_IDLE_EXPIRE_S),
+            "idle == cap must not expire"
+        );
+        assert!(
+            session_expired(&base, 1_000 + SESSION_IDLE_EXPIRE_S + 1),
+            "idle one second past cap must expire"
+        );
+
+        // Hard-cap bound: keep last_ts recent so only total age drives it.
+        let aged = cookie::SessionState {
+            issued_at: 1_000,
+            last_ts: 1_000 + SESSION_HARD_CAP_S,
+            ..base
+        };
+        assert!(
+            !session_expired(&aged, 1_000 + SESSION_HARD_CAP_S),
+            "age == cap must not expire"
+        );
+        assert!(
+            session_expired(&aged, 1_000 + SESSION_HARD_CAP_S + 1),
+            "age one second past cap must expire"
+        );
     }
 }

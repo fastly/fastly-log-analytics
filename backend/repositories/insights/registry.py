@@ -30,10 +30,10 @@ class InsightDefinition(BaseModel):
 class InsightsRegistry:
     """Registry for all insight definitions."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._definitions: dict[str, InsightDefinition] = {}
 
-    def register(self, definition: InsightDefinition):
+    def register(self, definition: InsightDefinition) -> None:
         """Register a new insight definition."""
         self._definitions[definition.id] = definition
 

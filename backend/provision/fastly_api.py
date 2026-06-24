@@ -2,8 +2,9 @@ import datetime
 import re
 import shutil
 import urllib.parse
+from typing import Any
 
-from backend.core import log_fields as lf
+from backend.core import field_registry as lf
 from backend.core.fastly.client import fastly
 from backend.core.fastly.service import (
     ensure_condition,
@@ -65,15 +66,48 @@ EDGE_DATA_MAPPING = {
 }
 
 
-def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
+def resolve_shield_secret(cfg: dict | None) -> str | None:
+    """Return the single per-service secret baked into ``X-Edge-Shield-Auth``
+    to mark a request as an internal cluster fetch — the unspoofable
+    replacement for the old ``fastly.ff.visits_this_service == 0`` edge
+    check (finding 007).
+
+    There must be exactly ONE such value per service: the capture VCL and
+    the session-scoring VCL are installed on the *same* logging service and
+    both write + validate the single ``X-Edge-Shield-Auth`` header. Session
+    scoring already mints ``scoring.request_secret`` and stamps it on every
+    bereq (``session_scoring_vcl``), so the capture VCL rides that same
+    value when scoring is enabled; otherwise it uses the service-level
+    ``cluster_secret``. Two different secrets on one header would make the
+    shield honour only one snippet's skip check and re-run the other's
+    edge-only logic at the shield POP.
+
+    Returns ``None`` when neither secret exists, in which case the capture
+    VCL falls back to the legacy ``fastly.ff`` guard.
+    """
+    cfg = cfg or {}
+    scoring = cfg.get("scoring") or {}
+    if scoring.get("enabled") and scoring.get("request_secret"):
+        return scoring["request_secret"]
+    return cfg.get("cluster_secret") or None
+
+
+def generate_capture_vcl(
+    log_fields_config: dict | None, cluster_secret: str = None, scoring_enabled: bool = False
+) -> dict[str, str]:
     """Return dict of VCL snippets keyed by subroutine name.
 
     Always returns "recv", "miss", and "pass". When group L (Origin Metrics)
     is enabled, also returns "fetch", "error", and "deliver".
+
+    ``log_fields_config`` accepts ``None`` because most callers pass the
+    raw ``cfg.get("log_fields")`` value; coerced to ``{}`` at the top so
+    downstream calls don't have to repeat the None-check.
     """
+    log_fields_config = log_fields_config or {}
     required = lf.get_required_edge_headers(log_fields_config)
-    group_l = "L" in ((log_fields_config or {}).get("groups") or [])
-    limits = (log_fields_config or {}).get("field_limits") or {}
+    group_l = "L" in (log_fields_config.get("groups") or [])
+    limits = log_fields_config.get("field_limits") or {}
 
     enabled_custom = sorted(
         [cf for cf in (log_fields_config or {}).get("custom_fields", []) if cf.get("enabled", True)],
@@ -109,33 +143,60 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
     # public docs) can pre-set ``x-fos-edge-data:<field>`` and have
     # the log line read the spoofed value instead of the edge-captured
     # one. Per-name scrubs close the gap.
+    # Edge-hop detection (restart-invariant): the shield-auth secret if we have
+    # one (unspoofable from outside), else the first-POP visits check.
+    if cluster_secret:
+        edge_detect = f'req.http.X-Edge-Shield-Auth != "{cluster_secret}"'
+    else:
+        edge_detect = "fastly.ff.visits_this_service == 0"
+    # SCRUB runs only on the FIRST edge pass: it strips client-forged headers
+    # before anything trusts them. It must stay req.restarts == 0 so it does not
+    # re-run on the post-scoring-restart pass (where it would risk wiping the
+    # score headers the scoring deliver snippet stashed).
+    scrub_guard = f"req.restarts == 0 && {edge_detect}"
+    # CAPTURE must run on the FINAL edge pass. Session scoring restarts the
+    # request (req.restarts 0→1); gating capture on req.restarts == 0 leaves
+    # scored requests with no url/ua/geo and edge != true, and EVERY scoring view
+    # filters WHERE edge = true → Fire Rate 0%. When scoring is enabled, drop the
+    # restarts clause so the post-restart edge pass captures; edge_detect alone
+    # still scopes it to the edge hop, and the first-pass scrub already removed
+    # any client-forged values so capturing on the later pass is safe.
+    capture_guard = edge_detect if scoring_enabled else f"req.restarts == 0 && {edge_detect}"
+
     scrub_lines = [
         "# [security] strip client-supplied internal-routing headers",
-        "if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {",
-        "  unset req.http.x-is-cluster-fetch;",
-        "  unset req.http.x-fos-edge-data;",
-        "  unset req.http.x-fos-origin-data;",
-        "  unset req.http.x-of-start;",
-        "  unset req.http.x-of-ttfb;",
-        "  unset req.http.x-of-ttlb;",
-        "  unset req.http.x-of-ost;",
-        "  unset req.http.x-of-oip;",
-        "  unset req.http.x-of-oretries;",
-        "  unset req.http.x-of-status;",
-        "  unset req.http.x-edge-req-id;",
-        "  # Session-scoring internal markers. X-Edge-Scoring-Pass=1 from a",
-        "  # client would bypass scoring entirely; x-edge-score* / X-Edge-Sid",
-        "  # from a client could forge a clean score / sid that the deliver",
-        "  # subfields propagate into the log line. Scrub them all at the",
-        "  # client edge regardless of whether scoring is currently enabled.",
-        "  unset req.http.X-Edge-Scoring-Pass;",
-        "  unset req.http.x-edge-score;",
-        "  unset req.http.X-Edge-Score;",
-        "  unset req.http.X-Edge-Score-Reason;",
-        "  unset req.http.X-Edge-Score-Enforce;",
-        "  unset req.http.X-Edge-Sid;",
-        "  unset req.http.X-Edge-Score-Set-Cookie;",
+        f"if ({scrub_guard}) {{",
     ]
+    if cluster_secret:
+        scrub_lines.append("  unset req.http.X-Edge-Shield-Auth;")
+
+    scrub_lines.extend(
+        [
+            "  unset req.http.x-is-cluster-fetch;",
+            "  unset req.http.x-fos-edge-data;",
+            "  unset req.http.x-fos-origin-data;",
+            "  unset req.http.x-of-start;",
+            "  unset req.http.x-of-ttfb;",
+            "  unset req.http.x-of-ttlb;",
+            "  unset req.http.x-of-ost;",
+            "  unset req.http.x-of-oip;",
+            "  unset req.http.x-of-oretries;",
+            "  unset req.http.x-of-status;",
+            "  unset req.http.x-edge-req-id;",
+            "  # Session-scoring internal markers. X-Edge-Scoring-Pass=1 from a",
+            "  # client would bypass scoring entirely; x-edge-score* / X-Edge-Sid",
+            "  # from a client could forge a clean score / sid that the deliver",
+            "  # subfields propagate into the log line. Scrub them all at the",
+            "  # client edge regardless of whether scoring is currently enabled.",
+            "  unset req.http.X-Edge-Scoring-Pass;",
+            "  unset req.http.x-edge-score;",
+            "  unset req.http.X-Edge-Score;",
+            "  unset req.http.X-Edge-Score-Reason;",
+            "  unset req.http.X-Edge-Score-Enforce;",
+            "  unset req.http.X-Edge-Sid;",
+            "  unset req.http.X-Edge-Score-Set-Cookie;",
+        ]
+    )
     if enabled_custom:
         scrub_lines.append("  # --- Per-custom-field subfield scrubs (020) ---")
         for cf in enabled_custom:
@@ -148,7 +209,7 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
     # recv: edge capture + optional group-L request ID + custom edge fields
     if required or custom_edge:
         recv_lines = [
-            "if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {",
+            f"if ({capture_guard}) {{",
             "  # Capture edge data for logging before shielding or backend fetch",
         ]
         for key in sorted(required):
@@ -183,7 +244,22 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
         )
 
     # miss and pass: unset edge headers + optional group-L timing
-    base_unset = "if (req.backend.is_origin) {\n  unset bereq.http.x-fos-edge-data;\n}"
+    base_unset_lines = ["if (req.backend.is_origin) {", "  unset bereq.http.x-fos-edge-data;", "}"]
+    if cluster_secret:
+        # Shield-auth marker — stamp on EVERY outgoing bereq (edge→shield
+        # AND shield→origin), mirroring the CDN VCL (core/fastly/utils.py)
+        # and the session-scoring VCL. The next POP's vcl_recv reads it
+        # back via req.http.X-Edge-Shield-Auth and skips the edge-only
+        # capture/scrub — replicating the old "first POP only" semantics
+        # of fastly.ff.visits_this_service==0. Gating this on
+        # req.backend.is_origin would leave the edge→shield leg
+        # unauthenticated, so a shielded service would re-capture edge data
+        # at the shield with the wrong client IP. Unspoofable from outside
+        # because the secret is only ever set here (compiled into our VCL,
+        # never returned to clients) and stripped from inbound client reqs
+        # by the recv scrub above.
+        base_unset_lines.append(f'set bereq.http.X-Edge-Shield-Auth = "{cluster_secret}";')
+    base_unset = "\n".join(base_unset_lines) + "\n"
 
     # Session-scoring services route the first-pass request to the scorer
     # Compute backend via `return(pass)` in vcl_recv. That triggers the
@@ -359,8 +435,20 @@ def generate_capture_vcl(log_fields_config: dict) -> dict[str, str]:
 
 
 def load_log_format(log_fields_config: dict = None) -> str:
-    """Return the log format as a single-line string."""
-    cfg = log_fields_config or {"groups": lf.PRESETS["standard"]["groups"], "field_overrides": {}}
+    """Return the log format as a single-line string.
+
+    A config that carries custom_fields but no groups/preset MUST still get the
+    standard groups. This happens when scoring is enabled on a service that was
+    provisioned with an empty log_fields (which relied on the standard-preset
+    fallback): adding the scoring custom_fields makes log_fields truthy, so a
+    plain ``log_fields_config or {standard}`` fallback never fires and
+    url/ua/geo/edge silently drop out of the log format (every non-base field
+    vanishes, leaving only base + scoring fields).
+    """
+    cfg = dict(log_fields_config or {})
+    if not cfg.get("groups") and not cfg.get("preset"):
+        cfg["groups"] = lf.PRESETS["standard"]["groups"]
+        cfg.setdefault("field_overrides", {})
     return lf.generate_log_format(cfg)
 
 
@@ -404,6 +492,8 @@ def install_capture_snippets(
     version: int,
     log_fields_config: dict | None,
     token: str,
+    cluster_secret: str = None,
+    scoring_enabled: bool = False,
 ) -> None:
     """Install the auto-generated "Fastly Log Analysis *" capture VCL
     snippets on the given draft version. Idempotent via ``ensure_vcl_
@@ -421,7 +511,7 @@ def install_capture_snippets(
     silently lacked failed-origin TTFB capture. This helper closes that
     drift by installing all phases via one loop.
     """
-    snippets = generate_capture_vcl(log_fields_config)
+    snippets = generate_capture_vcl(log_fields_config, cluster_secret=cluster_secret, scoring_enabled=scoring_enabled)
     # (snippet_name, subroutine_type, priority, required)
     # 'required' phases ("recv", "miss", "pass") are always generated.
     # Group-L phases ("fetch", "deliver", "error") only exist when
@@ -484,7 +574,47 @@ def _validate_log_format_regex(raw: str) -> list[str]:
     return errors
 
 
-def ensure_cdn_service(cfg: dict, fos_access_key: str, fos_secret_key: str, token: str, status_cb=None) -> dict:
+def _validate_with_ratelimit_fallback(svc_id, ver, token, *, status_cb=None, ok_msg=None, ok_fallback_msg=None):
+    """Validate ``svc_id``/``ver`` and, if it fails on a missing rate-limiting
+    feature (ratecounter / penaltybox / ratelimit), redeploy the main VCL
+    without rate limiting and re-validate. Returns the final validate result.
+
+    Shared by ``ensure_cdn_service`` and ``redeploy_cdn_vcl`` — both ran the
+    identical GET-validate → keyword-sniff → no-ratelimit redeploy → re-validate
+    sequence. Raises ``RuntimeError`` only for the no-ratelimit fallback that
+    STILL fails to validate (its caller-specific message). A non-rate-limit
+    validation failure is NOT raised here — the helper returns the not-ok
+    result so each caller keeps its own distinct final raise / status branch.
+    ``ok_msg`` / ``ok_fallback_msg`` let a caller emit its success log (the
+    initial-ok and rate-limiting-disabled messages differ per caller); omit
+    them to stay silent on the ok path.
+    """
+    result = fastly("GET", f"/service/{svc_id}/version/{ver}/validate", token=token)
+
+    if result.get("status") != "ok":
+        errors = result.get("errors") or result.get("msg") or result
+        errors_str = str(errors).lower()
+        if any(kw in errors_str for kw in ("ratecounter", "penaltybox", "ratelimit")):
+            warn("Rate limiting not available on this account — redeploying without it")
+            if status_cb:
+                status_cb("⚠️ Rate limiting unavailable; redeploying without it...")
+            vcl_no_rl = load_vcl(rate_limiting=False)
+            fastly("PUT", f"/service/{svc_id}/version/{ver}/vcl/main", {"content": vcl_no_rl}, token=token)
+            result = fastly("GET", f"/service/{svc_id}/version/{ver}/validate", token=token)
+            if result.get("status") != "ok":
+                raise RuntimeError(f"VCL validation failed (no-ratelimit fallback): {result.get('errors')}")
+            if ok_fallback_msg:
+                ok(ok_fallback_msg)
+        return result
+
+    if ok_msg:
+        ok(ok_msg)
+    return result
+
+
+def ensure_cdn_service(
+    cfg: dict, fos_access_key: str, fos_secret_key: str, token: str, status_cb=None, on_created=None
+) -> dict:
     """Create and activate the CDN VCL service fronting FOS."""
     name = cfg["cdn_service_name"]
     domain = cfg["cdn_url"].replace("https://", "")
@@ -506,6 +636,13 @@ def ensure_cdn_service(cfg: dict, fos_access_key: str, fos_secret_key: str, toke
         status_cb(f"⏳ Creating CDN service '{name}'...")
     svc = fastly("POST", "/service", {"name": name, "type": "vcl"}, token=token)
     svc_id = svc["id"]
+    # Hand the new service id to the caller IMMEDIATELY. Everything below (domain,
+    # backend, dictionaries, VCL, validation, activation) can still fail, and the
+    # orchestrator otherwise only records cdn_service_id AFTER this function
+    # returns — so a failure here would orphan a CDN service the rollback can't
+    # see, blocking re-provision with "CDN service already exists".
+    if on_created:
+        on_created(svc_id)
     v = 1
     ok(f"Service created  (id: {svc_id})")
 
@@ -618,25 +755,17 @@ def ensure_cdn_service(cfg: dict, fos_access_key: str, fos_secret_key: str, toke
     info("Validating service version…")
     if status_cb:
         status_cb("⏳ Validating service configuration...")
-    result = fastly("GET", f"/service/{svc_id}/version/{v}/validate", token=token)
-
+    result = _validate_with_ratelimit_fallback(
+        svc_id,
+        v,
+        token,
+        status_cb=status_cb,
+        ok_msg="Version validated",
+        ok_fallback_msg="Version validated (rate limiting disabled)",
+    )
     if result.get("status") != "ok":
         errors = result.get("errors") or result.get("msg") or result
-        errors_str = str(errors).lower()
-        if any(kw in errors_str for kw in ("ratecounter", "penaltybox", "ratelimit")):
-            warn("Rate limiting not available on this account — redeploying without it")
-            if status_cb:
-                status_cb("⚠️ Rate limiting unavailable; redeploying without it...")
-            vcl_no_rl = load_vcl(rate_limiting=False)
-            fastly("PUT", f"/service/{svc_id}/version/{v}/vcl/main", {"content": vcl_no_rl}, token=token)
-            result = fastly("GET", f"/service/{svc_id}/version/{v}/validate", token=token)
-            if result.get("status") != "ok":
-                raise RuntimeError(f"VCL validation failed (no-ratelimit fallback): {result.get('errors')}")
-            ok("Version validated (rate limiting disabled)")
-        else:
-            raise RuntimeError(f"VCL validation failed: {errors}")
-    else:
-        ok("Version validated")
+        raise RuntimeError(f"VCL validation failed: {errors}")
 
     info("Activating CDN service…")
     if status_cb:
@@ -700,20 +829,7 @@ def redeploy_cdn_vcl(cdn_service_id: str, token: str, rate_limiting: bool = True
 
     if status_cb:
         status_cb("⏳ Validating...")
-    result = fastly("GET", f"/service/{cdn_service_id}/version/{new_ver}/validate", token=token)
-
-    if result.get("status") != "ok":
-        errors = result.get("errors") or result.get("msg") or result
-        errors_str = str(errors).lower()
-        if any(kw in errors_str for kw in ("ratecounter", "penaltybox", "ratelimit")):
-            warn("Rate limiting not available on this account — redeploying without it")
-            if status_cb:
-                status_cb("⚠️ Rate limiting unavailable; redeploying without it...")
-            vcl_no_rl = load_vcl(rate_limiting=False)
-            fastly("PUT", f"/service/{cdn_service_id}/version/{new_ver}/vcl/main", {"content": vcl_no_rl}, token=token)
-            result = fastly("GET", f"/service/{cdn_service_id}/version/{new_ver}/validate", token=token)
-            if result.get("status") != "ok":
-                raise RuntimeError(f"VCL validation failed (no-ratelimit fallback): {result.get('errors')}")
+    result = _validate_with_ratelimit_fallback(cdn_service_id, new_ver, token, status_cb=status_cb)
 
     if result.get("status") == "ok":
         if status_cb:
@@ -754,13 +870,29 @@ def delete_cdn_service(service_id: str, name: str, token: str, status_cb=None):
             raise exc
 
 
+def _log_sampling_edge_clause(scoring_enabled: bool) -> str:
+    """Edge-hop predicate for the 'Log Sampling' response_condition.
+
+    Session scoring restarts the request (req.restarts 0→1) to run the scorer
+    sub-fetch, so the FINAL logged pass (the one carrying the real response +
+    the captured edge_score subfields) runs at req.restarts == 1. ``vcl_log``
+    fires once, at that final pass — so gating the log on ``req.restarts == 0``
+    drops EVERY scored request from the logs (edge_score never reaches the log
+    line → Fire Rate 0%). ``fastly.ff.visits_this_service == 0`` identifies the
+    edge hop restart-invariantly, so the post-restart edge pass still logs.
+    """
+    if scoring_enabled:
+        return "fastly.ff.visits_this_service == 0"
+    return "(req.restarts == 0 && fastly.ff.visits_this_service == 0)"
+
+
 def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str, token: str, status_cb=None) -> int:
     """Safely add a logging endpoint to the target service's active version."""
     service_id = cfg["logging_service_id"]
     endpoint_name = cfg["endpoint_name"]
     region = cfg["fos_region"]
     bucket = cfg["fos_bucket_name"]
-    prefix = cfg.get("fos_prefix", "").strip("/")
+    prefix = (cfg.get("fos_prefix") or "").strip("/")
     period = cfg["log_period"]
     path = f"/{prefix}/raw/%Y-%m-%d/%H/" if prefix else "/raw/%Y-%m-%d/%H/"
 
@@ -801,11 +933,14 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
 
         sample_rate = int(cfg.get("sample_rate", 100))
         edge_only = bool(cfg.get("edge_only", False))
-        custom_condition = cfg.get("custom_condition", "").strip()
+        # ``.get(k, "")`` only defaults when the key is ABSENT; the /execute API
+        # passes custom_condition=None explicitly, so guard with ``or ""``.
+        custom_condition = (cfg.get("custom_condition") or "").strip()
 
+        scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
         cond_parts = ["!segmented_caching.is_inner_req"]
         if edge_only:
-            cond_parts.append("(req.restarts == 0 && fastly.ff.visits_this_service == 0)")
+            cond_parts.append(_log_sampling_edge_clause(scoring_enabled))
         if sample_rate < 100:
             cond_parts.append(f"randombool({sample_rate}, 100)")
         if custom_condition:
@@ -843,7 +978,14 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
         if status_cb:
             status_cb("⏳ Deploying VCL snippets to capture edge values...")
 
-        install_capture_snippets(service_id, new_ver, cfg.get("log_fields"), token)
+        install_capture_snippets(
+            service_id,
+            new_ver,
+            cfg.get("log_fields"),
+            token,
+            cluster_secret=resolve_shield_secret(cfg),
+            scoring_enabled=bool((cfg.get("scoring") or {}).get("enabled")),
+        )
 
         ok("Logging endpoint and VCL snippets added to draft")
 
@@ -998,26 +1140,27 @@ def update_logging_endpoint(cfg: dict, token: str):
     path_changed = path is not None and current_ep.get("path") != path
 
     current_cond_name = current_ep.get("response_condition")
-    current_stmt = ""
+    current_stmt: str = ""
     if current_cond_name:
         cond = find_condition(current_cond_name, service_id, active_ver, token)
-        current_stmt = cond.get("statement") if cond else ""
+        current_stmt = (cond.get("statement") if cond else "") or ""
 
-    target_sample_rate = (
-        int(sample_rate)
-        if sample_rate is not None
-        else (
-            int(re.search(r"randombool\((\d+),", current_stmt).group(1))
-            if re.search(r"randombool\((\d+),", current_stmt)
-            else 100
-        )
-    )
-    target_edge_only = bool(edge_only) if edge_only is not None else ("req.restarts == 0" in current_stmt)
-    target_custom_condition = cfg.get("custom_condition", "").strip()
+    def _rate_from_stmt(stmt: str) -> int:
+        m = re.search(r"randombool\((\d+),", stmt)
+        return int(m.group(1)) if m else 100
 
+    target_sample_rate = int(sample_rate) if sample_rate is not None else _rate_from_stmt(current_stmt)
+    # Detect edge-only via visits_this_service, NOT req.restarts==0 — the latter
+    # is dropped from the clause once scoring is enabled (see
+    # _log_sampling_edge_clause), so keying off it would misread a scoring-fixed
+    # condition as "not edge-only" and silently strip the edge gate.
+    target_edge_only = bool(edge_only) if edge_only is not None else ("visits_this_service" in current_stmt)
+    target_custom_condition = (cfg.get("custom_condition") or "").strip()
+
+    scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
     cond_parts = ["!segmented_caching.is_inner_req"]
     if target_edge_only:
-        cond_parts.append("(req.restarts == 0 && fastly.ff.visits_this_service == 0)")
+        cond_parts.append(_log_sampling_edge_clause(scoring_enabled))
     if target_sample_rate < 100:
         cond_parts.append(f"randombool({target_sample_rate}, 100)")
     if target_custom_condition:
@@ -1044,7 +1187,11 @@ def update_logging_endpoint(cfg: dict, token: str):
         current_snippets = {
             s["name"]: s for s in fastly("GET", f"/service/{service_id}/version/{active_ver}/snippet", token=token)
         }
-        vcl_snippets = generate_capture_vcl(lf_config)
+        vcl_snippets = generate_capture_vcl(
+            lf_config,
+            cluster_secret=resolve_shield_secret(service_cfg),
+            scoring_enabled=bool(((service_cfg or {}).get("scoring") or {}).get("enabled")),
+        )
         target_snippets = {
             "Fastly Log Analysis Capture": vcl_snippets["recv"],
             "Fastly Log Analysis Miss": vcl_snippets["miss"],
@@ -1085,8 +1232,8 @@ def update_logging_endpoint(cfg: dict, token: str):
     yield {"type": "progress", "current": 2, "total": total_steps}
 
     try:
-        update_payload = {}
-        if period_changed:
+        update_payload: dict[str, Any] = {}
+        if period_changed and period is not None:
             update_payload["period"] = int(period)
         if path_changed:
             update_payload["path"] = path
@@ -1117,7 +1264,14 @@ def update_logging_endpoint(cfg: dict, token: str):
 
         yield {"type": "progress", "current": 3, "total": total_steps}
 
-        install_capture_snippets(service_id, new_ver, lf_config, token)
+        install_capture_snippets(
+            service_id,
+            new_ver,
+            lf_config,
+            token,
+            cluster_secret=resolve_shield_secret(service_cfg),
+            scoring_enabled=bool(((service_cfg or {}).get("scoring") or {}).get("enabled")),
+        )
         if "fetch" not in generate_capture_vcl(lf_config):
             for snip in [
                 "Fastly Log Analysis Origin Fetch",
@@ -1136,7 +1290,13 @@ def update_logging_endpoint(cfg: dict, token: str):
                         raise
 
         yield {"type": "progress", "current": 4, "total": total_steps}
-        fastly("GET", f"/service/{service_id}/version/{new_ver}/validate", token=token)
+        result = fastly("GET", f"/service/{service_id}/version/{new_ver}/validate", token=token)
+        if result.get("status") != "ok":
+            # Don't activate a draft Fastly reports as invalid — mirror every
+            # other activation path in this module (e.g. line ~880). The prior
+            # code discarded the validate result and activated unconditionally,
+            # so a malformed VCL / log-format edit could go live.
+            raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
         fastly("PUT", f"/service/{service_id}/version/{new_ver}/activate", token=token)
         yield {"type": "progress", "current": 5, "total": total_steps}
         yield {

@@ -124,70 +124,13 @@ def test_credentials_fos_validation_failure_returns_400():
         )
 
     assert response.status_code == 400
-    assert "Validation failed" in response.json()["detail"]["error"]
+    detail = response.json()["detail"]
+    assert detail["error"] == "fos_credentials_invalid"
+    assert "Validation failed" in detail["message"]
 
 
 # ---------------------------------------------------------------------------
-# POST /api/services/{service_id}/rename
-# ---------------------------------------------------------------------------
-
-
-def test_rename_saves_name_to_config():
-    saved = {}
-
-    def fake_save(sid, cfg):
-        saved.update(cfg)
-
-    with (
-        patch("backend.config.load_config", return_value=_cfg()),
-        patch("backend.config.save_config", side_effect=fake_save),
-    ):
-        response = _client().post(
-            "/api/services/svc1/rename",
-            json={"name": "New Name"},
-        )
-
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert response.json()["name"] == "New Name"
-    assert saved["name"] == "New Name"
-
-
-def test_rename_missing_service_returns_404():
-    with patch("backend.config.load_config", return_value=None):
-        response = _client().post("/api/services/missing/rename", json={"name": "x"})
-    assert response.status_code == 404
-
-
-def test_rename_empty_name_returns_400():
-    with patch("backend.config.load_config", return_value=_cfg()):
-        response = _client().post("/api/services/svc1/rename", json={"name": "   "})
-    assert response.status_code == 400
-
-
-def test_rename_reads_name_from_body_not_query_param():
-    """Regression: name must come from body, not query string."""
-    saved = {}
-
-    def fake_save(sid, cfg):
-        saved.update(cfg)
-
-    with (
-        patch("backend.config.load_config", return_value=_cfg()),
-        patch("backend.config.save_config", side_effect=fake_save),
-    ):
-        # Send name only as query param (wrong location) with no body field
-        response = _client().post(
-            "/api/services/svc1/rename?name=ShouldBeIgnored",
-            json={},  # empty body
-        )
-
-    assert response.status_code == 400  # empty name from body
-    assert saved.get("name") != "ShouldBeIgnored"
-
-
-# ---------------------------------------------------------------------------
-# POST|PATCH /api/services/{service_id}/cron-settings (SSE)
+# POST /api/services/{service_id}/cron-settings (SSE)
 # ---------------------------------------------------------------------------
 
 
@@ -214,7 +157,7 @@ def test_cron_settings_saves_enabled_flag():
         patch("backend.config.load_config", return_value=_cfg()),
         patch("backend.config.save_config", side_effect=fake_save),
         patch("backend.provision._sync_crontab"),
-        patch("backend.core.metadata_db.record_audit"),
+        patch("backend.core.metadata.record_audit"),
     ):
         response = _client().post(
             "/api/services/svc1/cron-settings",
@@ -238,9 +181,9 @@ def test_cron_settings_saves_interval_mins():
         patch("backend.config.load_config", return_value=_cfg()),
         patch("backend.config.save_config", side_effect=fake_save),
         patch("backend.provision._sync_crontab"),
-        patch("backend.core.metadata_db.record_audit"),
+        patch("backend.core.metadata.record_audit"),
     ):
-        response = _client().patch(
+        response = _client().post(
             "/api/services/svc1/cron-settings",
             json={"cron_sync": {"interval_mins": 15}},
         )
@@ -274,7 +217,7 @@ def test_cron_settings_only_saves_allowed_keys():
         patch("backend.config.load_config", return_value=_cfg()),
         patch("backend.config.save_config", side_effect=fake_save),
         patch("backend.provision._sync_crontab"),
-        patch("backend.core.metadata_db.record_audit"),
+        patch("backend.core.metadata.record_audit"),
     ):
         _client().post(
             "/api/services/svc1/cron-settings",
@@ -300,7 +243,7 @@ def test_log_fields_saves_to_config():
     with (
         patch("backend.config.load_config", return_value=_cfg(log_fields=_BASE_LF)),
         patch("backend.config.save_config", side_effect=fake_save),
-        patch("backend.core.metadata_db.record_audit"),
+        patch("backend.core.metadata.record_audit"),
         patch("backend.state_sync.export_admin_state"),
     ):
         new_lf = {"preset": "standard", "groups": ["A", "B", "C"], "schema_version": 2}
@@ -378,7 +321,7 @@ def test_time_range_delete_clears_provisioning_entry():
     with (
         patch("backend.config.load_config", return_value=cfg),
         patch("backend.config.save_config", side_effect=fake_save),
-        patch("backend.core.metadata_db.record_audit"),
+        patch("backend.core.metadata.record_audit"),
     ):
         response = _client().delete("/api/services/svc1/time-range")
 
@@ -552,6 +495,110 @@ def test_custom_field_patch_missing_field_returns_404():
     assert response.status_code == 404
 
 
+# ── PATCH duckdb_type change (audit follow-up) ──────────────────────────────
+
+
+def _fake_iceberg_with_field(field_name: str):
+    """Build a mock catalog/table/schema chain whose schema reports the
+    given ``field_name`` — used to drive the PATCH route's inline
+    "is field already in iceberg" check.
+    """
+    from unittest.mock import MagicMock
+
+    fake_field = MagicMock()
+    fake_field.name = field_name
+    schema = MagicMock()
+    schema.fields = [fake_field]
+    table = MagicMock()
+    table.schema.return_value = schema
+    catalog = MagicMock()
+    catalog.load_table.return_value = table
+    return catalog
+
+
+def test_custom_field_patch_rejects_type_change_when_field_in_iceberg():
+    """PATCH that changes ``duckdb_type`` MUST 422 when the field already
+    exists in the Iceberg table — type evolution after ingest would
+    silently break readers. The route at services/core.py:1048-1069
+    inspects the iceberg schema inline; this test drives that branch.
+    """
+    saved: dict = {}
+
+    def fake_save(sid, cfg):
+        import copy
+
+        saved.update(copy.deepcopy(cfg))
+
+    catalog = _fake_iceberg_with_field("cf_env")
+
+    with (
+        patch("backend.config.load_config", return_value=_cfg_with_field()),
+        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.provision.validate_log_format", return_value=[]),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
+        patch("backend.core.iceberg._get_catalog", return_value=catalog),
+        patch("backend.core.iceberg._table_identifier", return_value=("default", "logs")),
+    ):
+        response = _client().patch(
+            "/api/services/svc1/custom-fields/cf_env",
+            json={"duckdb_type": "BIGINT", "value_type": "numeric"},
+        )
+
+    assert response.status_code == 422, (
+        f"PATCH that changes type on iceberg-locked field must 422; got {response.status_code} body={response.text}"
+    )
+    body = response.json()
+    errors = body.get("detail", {}).get("errors", [])
+    assert any("duckdb_type" in e.lower() or "data type" in e.lower() for e in errors), (
+        f"422 body should explain the type-lock rejection; got errors={errors!r}"
+    )
+    # Save MUST NOT have been called — the rejection happens before any
+    # config mutation lands.
+    assert saved == {}, f"save_config was called despite the 422; saved={saved!r}"
+
+
+def test_custom_field_patch_allows_type_change_before_iceberg_write():
+    """When the field has NOT yet been written to Iceberg (the schema
+    doesn't contain it), changing duckdb_type is legal — PATCH 200s.
+    """
+    from unittest.mock import MagicMock
+
+    saved: dict = {}
+
+    def fake_save(sid, cfg):
+        import copy
+
+        saved.update(copy.deepcopy(cfg))
+
+    # Schema with NO matching field → the check falls through to a normal save.
+    schema = MagicMock()
+    schema.fields = []  # empty
+    table = MagicMock()
+    table.schema.return_value = schema
+    catalog = MagicMock()
+    catalog.load_table.return_value = table
+
+    with (
+        patch("backend.config.load_config", return_value=_cfg_with_field()),
+        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.provision.validate_log_format", return_value=[]),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
+        patch("backend.core.iceberg._get_catalog", return_value=catalog),
+        patch("backend.core.iceberg._table_identifier", return_value=("default", "logs")),
+    ):
+        response = _client().patch(
+            "/api/services/svc1/custom-fields/cf_env",
+            json={"duckdb_type": "BIGINT", "value_type": "numeric"},
+        )
+
+    assert response.status_code == 200, f"PATCH on un-ingested field should 200; got {response.text}"
+    updated = response.json()["field"]
+    assert updated["duckdb_type"] == "BIGINT"
+    assert updated["value_type"] == "numeric"
+    # save_config WAS called this time.
+    assert saved, "save_config should be called on a successful type change"
+
+
 # ---------------------------------------------------------------------------
 # PATCH /api/services/{service_id}/credentials — api_token rotation path
 # ---------------------------------------------------------------------------
@@ -627,8 +674,9 @@ def test_credentials_api_token_create_failure_returns_400():
         )
 
     assert resp.status_code == 400
-    assert "Failed to create FOS key" in resp.json()["detail"]["error"]
-    assert "Fastly 401" in resp.json()["detail"]["error"]
+    detail = resp.json()["detail"]
+    assert detail["error"] == "fos_key_create_failed"
+    assert "error_id" in detail
 
 
 def test_credentials_api_token_skips_delete_when_old_key_same_as_new():

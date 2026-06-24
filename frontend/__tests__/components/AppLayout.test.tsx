@@ -1,3 +1,16 @@
+/**
+ * R-16 audit (testing_suite_audit_2026-06-14.md): every assertion in
+ * this file is pure-logic conditional rendering driven by the
+ * useServiceStore + useBootstrap mocks (access-level gating, remote-
+ * analyst watermark). The Phase 3 Playwright journeys (plotly-chart,
+ * maplibre-country-filter, dashboard-card-drag-drop) exercise the
+ * mounted DOM of the layout but NOT the prop-driven branching pinned
+ * here, so there is no overlap to prune — these tests stay.
+ *
+ * If a future Playwright spec starts asserting on the same conditional
+ * branches (e.g. that an analyst session hides "Usage & Cost"), revisit
+ * this file and trim the now-redundant JSDOM coverage.
+ */
 import { render, screen, act } from '@testing-library/react'
 import { expect, test, vi, beforeEach } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -22,7 +35,11 @@ vi.mock('next/navigation', () => ({
   useRouter: vi.fn(() => ({
     replace: vi.fn(),
     push: vi.fn(),
+    prefetch: vi.fn(),
   })),
+  // AppLayout's <RawQueryModeProbe> consumes useSearchParams; stub it so
+  // the Suspense boundary renders cleanly under jsdom.
+  useSearchParams: vi.fn(() => new URLSearchParams()),
 }))
 
 // Mock custom hooks
@@ -32,6 +49,15 @@ vi.mock('@/hooks/useBootstrap', () => ({
 
 vi.mock('@/hooks/useUrlServiceSync', () => ({
   useUrlServiceSync: vi.fn(),
+}))
+
+// useIsAnalyst reads directly from the QueryClient cache (NOT the
+// mocked useBootstrap), so mocking useBootstrap above doesn't reach it.
+// The default implementation honours serviceStore.accessLevel so the
+// "hides restricted items for analysts" test continues to work; the
+// watermark test overrides via vi.mocked(useIsAnalyst).mockReturnValue.
+vi.mock('@/hooks/useIsAnalyst', () => ({
+  useIsAnalyst: vi.fn(),
 }))
 
 // Mock components
@@ -51,7 +77,7 @@ vi.mock('@/components/ui/scroll-area', () => ({
 }))
 
 // Real store for the test
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks()
 
   vi.mocked(useBootstrap).mockReturnValue({
@@ -59,6 +85,17 @@ beforeEach(() => {
     isSuccess: true,
     isLoading: false,
   } as any)
+
+  // Default useIsAnalyst implementation: mirror the prod hook's
+  // serviceStore-accessLevel branch (the bootstrap-settings branch
+  // requires QueryClient cache seeding that the test isn't doing).
+  // Watermark test overrides via mockReturnValue(true).
+  const { useIsAnalyst } = await import('@/hooks/useIsAnalyst')
+  vi.mocked(useIsAnalyst).mockImplementation(() => {
+    const { activeServiceId, services } = useServiceStore.getState()
+    const active = services.find((s) => s.id === activeServiceId)
+    return active?.accessLevel === 'read_only'
+  })
 
   // Wrap in act() — the previous test's component may still have a live
   // store subscription mid-cleanup, and React 19 warns when a subscriber
@@ -96,7 +133,7 @@ test('hides restricted items for analysts', () => {
   expect(screen.queryByText('Usage & Cost')).not.toBeInTheDocument()
 })
 
-test('renders analyst watermark when bootstrap reports remote analyst', () => {
+test('renders analyst watermark when bootstrap reports remote analyst', async () => {
   vi.mocked(useBootstrap).mockReturnValue({
     data: {
       services: [{ id: 'test-svc', name: 'Test Service' }],
@@ -109,6 +146,11 @@ test('renders analyst watermark when bootstrap reports remote analyst', () => {
     isSuccess: true,
     isLoading: false,
   } as any)
+  // useIsAnalyst reads its own QueryClient cache; flip it true for
+  // this assertion so the watermark render gate (isAnalyst &&
+  // (analystEmail || analystName)) opens.
+  const { useIsAnalyst } = await import('@/hooks/useIsAnalyst')
+  vi.mocked(useIsAnalyst).mockReturnValue(true)
 
   renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
 

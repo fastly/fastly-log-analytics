@@ -369,6 +369,24 @@ def test_cache_collapse_critical_when_dropped_from_above_60_to_below_10():
     assert warn["severity"] == "warning"
 
 
+# ── cacheability_regression ────────────────────────────────────────────────
+
+
+def test_cacheability_regression_processor_shape_and_severity():
+    p = defs.cacheability_regression_processor
+    # row schema: [url, w_pass_rate, b_pass_rate, w_total, b_total]
+    out = p(("/api", 0.95, 0.02, 200, 800), None, {})
+    assert out["label"] == "/api"
+    assert out["unit"] == "% PASS"
+    assert out["current_val"] == 95.0
+    assert out["baseline_val"] == 2.0
+    assert out["meta"]["filters"] == {"url": "/api"}
+    # Critical: w>=0.80 AND b<=0.10
+    assert out["severity"] == "critical"
+    # Warning: surge present but not extreme enough for critical.
+    assert p(("/api", 0.60, 0.15, 200, 800), None, {})["severity"] == "warning"
+
+
 # ── latency_regression ─────────────────────────────────────────────────────
 
 
@@ -617,3 +635,36 @@ def test_shield_path_degradation_handles_zero_baseline():
 def test_shield_path_degradation_label_uses_arrow_format():
     out = defs.shield_path_degradation_processor(("LAX", "SFO", 100.0, 50.0, 10), None, {})
     assert out["label"] == "LAX → SFO"
+
+
+# ── M3: IP-keyed processors mask the client IP when the analyst sets mask_ips ──
+
+
+def test_request_size_anomaly_masks_ip_when_mask_ips():
+    # row schema: [ip, max_bytes, avg_bytes, w_total, b_p95]
+    row = ("203.0.113.42", 70000, 100, 50, 1000)
+    masked = defs.request_size_anomaly_processor(row, None, {"mask_ips": True})
+    assert masked["label"] == "203.0.113.xxx"
+    assert masked["meta"]["filters"]["ip"] == "203.0.113.xxx"  # also feeds investigate_url
+
+
+def test_request_size_anomaly_keeps_ip_for_admin():
+    row = ("203.0.113.42", 70000, 100, 50, 1000)
+    raw = defs.request_size_anomaly_processor(row, None, {})  # no mask_ips
+    assert raw["label"] == "203.0.113.42"
+    assert raw["meta"]["filters"]["ip"] == "203.0.113.42"
+
+
+def test_connection_abuse_masks_ip_when_mask_ips():
+    # row schema: [ip, max_reqs, avg_reqs, w_total, b_p95]
+    row = ("203.0.113.42", 800, 10, 50, 100)
+    masked = defs.connection_abuse_processor(row, None, {"mask_ips": True})
+    assert masked["label"] == "203.0.113.xxx"
+    assert masked["meta"]["filters"]["ip"] == "203.0.113.xxx"
+
+
+def test_connection_abuse_keeps_ip_for_admin():
+    row = ("203.0.113.42", 800, 10, 50, 100)
+    raw = defs.connection_abuse_processor(row, None, {})
+    assert raw["label"] == "203.0.113.42"
+    assert raw["meta"]["filters"]["ip"] == "203.0.113.42"

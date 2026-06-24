@@ -1,27 +1,54 @@
 repos:
+  # Pinned ruff version must stay reasonably close to the version in
+  # pyproject.toml (currently ruff>=0.11) — drift triggers pre-existing
+  # rule changes (UP038, E731 strictness) that the project's actual ruff
+  # has already retired. Bump together when bumping either side.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.0
+    rev: v0.15.15
     hooks:
       - id: ruff
         args: [--fix]
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.15.0
+  # mypy runs via the project's own uv env (matches what CI runs) and is
+  # piped through mypy-baseline so pre-existing errors stay accepted and
+  # only NET-NEW errors fail the commit. The baseline lives in
+  # mypy-baseline.txt at the repo root; refresh it after a burndown PR with
+  #   uv run mypy backend/ 2>&1 | uv run mypy-baseline sync
+  # and commit the updated file.
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - types-boto3
-          - types-pytz
-          - fastapi
-          - pydantic
+        name: mypy (full backend/, filtered through mypy-baseline)
+        language: system
+        # Always check the whole backend/ tree, not just changed files —
+        # per-file mypy only visits a partial import graph, which makes
+        # mypy-baseline report unrelated baseline entries as "fixed" and
+        # exit non-zero. Cost: ~10s per commit; benefit: matches CI exactly.
+        entry: bash -c 'uv run mypy backend/ 2>&1 | uv run mypy-baseline filter'
+        files: '^backend/.*\.py$'
+        pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        # syrupy snapshots embed the rendered SQL strings verbatim; many
+        # of the repository templates align CASE WHEN / SELECT columns
+        # with intentional trailing spaces. Trimming them desyncs the
+        # snapshot from what the source actually emits on next render.
+        exclude: '^tests/.*/__snapshots__/.*\.ambr$'
       - id: end-of-file-fixer
+        # openapi-typescript emits openapi.json without a trailing newline;
+        # end-of-file-fixer adds one, then the next regen-openapi run
+        # strips it. Excluding the generated artifact breaks the cycle.
+        exclude: '^frontend/openapi\.json$'
       - id: check-yaml
+        # Docker Compose Override files use !reset / !override custom YAML
+        # tags that PyYAML's default loader doesn't recognize. The compose
+        # spec validates them at compose-time; the check-yaml hook would
+        # falsely flag them here.
+        exclude: '^docker-compose\.prod\.yml$'
       - id: check-json
       - id: check-merge-conflict
       - id: debug-statements
@@ -41,16 +68,21 @@ repos:
       - id: gitleaks
 
   # Regenerate the committed OpenAPI snapshot + typed frontend client
-  # whenever the FastAPI surface or the generator script changes. If the
-  # regenerated files differ from the staged version, pre-commit fails
-  # the commit and leaves the updated files in the working tree — re-stage
-  # them (`git add frontend/openapi.json frontend/types/api.generated.ts`)
-  # and re-commit. Requires `uv` and `npm` on PATH.
+  # whenever the FastAPI surface or the generator script changes. Runs at
+  # PRE-PUSH, not per-commit: when this fired on commit, a backend-only
+  # change rewrote frontend/openapi.json + types mid-commit, so every
+  # backend commit dirtied generated frontend files that then needed manual
+  # re-staging — and on a shared branch with parallel frontend work it was
+  # easy to sweep unrelated edits into the commit. At push, if the
+  # regenerated files differ, the push fails and leaves them in the working
+  # tree — commit them (`git add frontend/openapi.json frontend/types/api.generated.ts`)
+  # and re-push. Requires `uv` and `npm` on PATH.
   - repo: local
     hooks:
       - id: regen-openapi
         name: Regenerate frontend/openapi.json + types
         files: ^(backend/.*\.py|scripts/generate_openapi\.py)$
+        stages: [pre-push]
         language: system
         pass_filenames: false
         entry: bash -c 'cd frontend && npm run --silent gen:types'
@@ -60,3 +92,31 @@ repos:
         language: system
         pass_filenames: false
         entry: bash -c 'cd frontend && npx tsc --noEmit'
+
+      # v2.0 cleanup (Phase 0.12): pre-push gate that the
+      # @pytest.mark.security_regression count hasn't dropped below
+      # the Phase 0 floor (24). Catches a refactor that silently
+      # removes coverage of a verified security fix before push,
+      # not in CI. `stages: [pre-push]` keeps it off the per-commit
+      # hot path (the gate takes ~2s to collect 3k+ tests).
+      - id: security-regression-count
+        name: Assert security_regression test count >= floor
+        stages: [pre-push]
+        language: system
+        pass_filenames: false
+        entry: bash scripts/check_security_regression_count.sh
+
+      # Run the Rust scorer's native unit tests before pushing a change to
+      # compute/scorer/. The Python suite only pins the cross-language *tables*
+      # (tests/scoring/test_normalize_parity.py); the cargo `#[test]`s pin the
+      # normalize/cookie/matrix LOGIC + session-expiry boundaries that no Python
+      # test exercises. Pre-push (not per-commit) keeps the compile off the hot
+      # path; `files:` scopes it to scorer changes; skips with a notice if cargo
+      # isn't installed (the Scorer CI job hard-requires it).
+      - id: scorer-test
+        name: Rust scorer unit tests (cargo test)
+        files: ^compute/scorer/.*\.(rs|toml|lock)$
+        stages: [pre-push]
+        language: system
+        pass_filenames: false
+        entry: bash -c 'if command -v cargo >/dev/null || [ -x "$HOME/.cargo/bin/cargo" ]; then PATH="$HOME/.cargo/bin:$PATH" cargo test --manifest-path compute/scorer/Cargo.toml --locked; else echo "skipping scorer-test - cargo not on PATH (CI enforces it)"; fi'

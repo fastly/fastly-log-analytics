@@ -1,0 +1,331 @@
+"""Local + rollup compaction crons.
+
+* ``_run_local_compact`` — frequent merge of small parquet files in the
+  LOCAL CACHE only (does NOT touch FOS). Free in terms of cloud cost, so
+  we run it on a 2 min interval.
+* ``_run_rollup_compact_daily`` — consolidates per-hour rollup parquet
+  into per-day files for closed days, slashing file-open overhead on
+  7-day dashboard queries.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+
+from backend.cron.decorators import cron_task
+from backend.cron.scheduler import (
+    _display_label,
+    _extract_log_text,
+    _log_and_add_progress,
+)
+
+logger = logging.getLogger("backend.scheduler")
+
+
+@cron_task("local_compact")
+def _run_local_compact(service_id: str) -> None:
+    """Frequent job: merge small parquet files in the LOCAL CACHE only.
+
+    Does NOT touch FOS — only rewrites files inside cache/<bucket>/data/
+    so DuckDB's view-glob picks up fewer files at query time. Free in
+    terms of FOS cost (no 30-day-minimum penalty), so we can run it
+    aggressively (every 2 min) without billing impact.
+
+    Distinct from ``_run_optimize`` which writes through PyIceberg and
+    DOES update FOS.
+    """
+    from backend.core import local_compaction as _lc
+    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.utils.active_requests import should_defer_cron
+
+    # Active-request gate (perf #84): cache compaction holds the DuckDB
+    # write lock for hundreds of ms — defer when API requests are in flight.
+    if should_defer_cron("local_compact", service_id):
+        return
+
+    src = get_source_for_service(service_id)
+    if src is None:
+        return
+
+    try:
+        run_id = start_cron_run(src, "local_compact")
+    except RuntimeError as e:
+        logger.info("⏭️  \x1b[96m[local-compact]\x1b[0m %s: skipping — %s", service_id, str(e))
+        return
+
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+
+    cleanup_progress_and_reap()
+    start_progress(run_id, service_id=service_id, task="local_compact")
+    _display = _display_label(src, service_id)
+    logger.info("▶️  \x1b[96m[local-compact]\x1b[0m %s: Local compaction started.", _display)
+    _log_and_add_progress(
+        run_id,
+        service_id,
+        job_name="local_compact",
+        event={"type": "status", "message": "Scanning local cache partitions..."},
+    )
+
+    start_time = time.time()
+    try:
+        result = _lc.compact_local_partitions(src)
+        duration = time.time() - start_time
+        errors = result.get("errors") or []
+        merged = result.get("files_merged", 0)
+        removed = result.get("files_removed", 0)
+        partitions = result.get("partitions_compacted", 0)
+        summary = (
+            f"Compacted {partitions} partition(s): merged {merged} small file(s) into "
+            f"{partitions} (removed {removed} originals)"
+        )
+        if errors:
+            err_preview = "\n".join(errors[:3])
+            if len(errors) > 3:
+                err_preview += f"\n... ({len(errors) - 3} more)"
+            status = "warning"
+            summary += f" — {len(errors)} partition error(s)"
+        else:
+            err_preview = None
+            status = "success"
+        log_cron_run(
+            src,
+            "local_compact",
+            duration,
+            status,
+            summary=summary,
+            error_message=err_preview,
+            run_id=run_id,
+            log_output=_extract_log_text(run_id),
+        )
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="local_compact",
+            event={"type": "status", "message": summary},
+        )
+        logger.info("⏹️  \x1b[96m[local-compact]\x1b[0m %s: %s in %.2fs", _display, summary, duration)
+    except Exception as e:
+        duration = time.time() - start_time
+        log_cron_run(
+            src,
+            "local_compact",
+            duration,
+            "error",
+            error_message=str(e),
+            summary="local compaction failed",
+            run_id=run_id,
+            log_output=_extract_log_text(run_id),
+        )
+        _log_and_add_progress(run_id, service_id, job_name="local_compact", event={"type": "error", "message": str(e)})
+        logger.exception("[scheduler] %s: local_compact failed: %s", service_id, e)
+    finally:
+        end_progress(run_id)
+
+
+@cron_task("rollup_compact_daily")
+def _run_rollup_compact_daily(service_id: str) -> None:
+    """Daily job: consolidate closed-day per-hour rollup parquet into per-day files.
+
+    Reduces file-open overhead on 7-day dashboard queries from ~1500 files
+    to ~30. Reader automatically falls back to per-hour when per-day is
+    missing, so this is purely additive.
+    """
+    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.rollups import (
+        backfill_day_bundles,
+        backfill_missing_hour_bundles,
+        backfill_missing_hour_ip_spread,
+        compact_closed_days_to_daily,
+        compact_network_rtt_closed_days_to_daily,
+        compact_network_speed_closed_days_to_daily,
+        compact_origin_summary_closed_days_to_daily,
+        compact_perf_latency_closed_days_to_daily,
+        compact_verified_bots_ts_closed_days_to_daily,
+    )
+
+    src = get_source_for_service(service_id)
+    if src is None:
+        return
+
+    try:
+        run_id = start_cron_run(src, "rollup_compact_daily")
+    except RuntimeError as e:
+        logger.info("⏭️  [rollup-compact] %s: skipping — %s", service_id, str(e))
+        return
+
+    _display = _display_label(src, service_id)
+    logger.info("▶️  [rollup-compact] %s: Daily rollup compaction started.", _display)
+
+    start_time = time.time()
+    try:
+        # Self-heal pass FIRST: any closed hour where the iceberg view
+        # has rows but no hour_bundled file exists (ingest's
+        # "touched_hours" report under-reported, the recompute fired
+        # before the iceberg commit landed, etc.) gets rebuilt here.
+        # Surfaced 2026-06-15 as a multi-percent POST undercount on
+        # the dashboard method panel — 18 hours over 30 days were
+        # silently missing. Best-effort: a failure leaves the
+        # compaction pass to run anyway against whatever bundles do
+        # exist.
+        try:
+            heal = backfill_missing_hour_bundles(service_id, src, lookback_days=30)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: missing-hour self-heal failed (compaction continues): %s",
+                _display,
+                e,
+            )
+            heal = {"missing": 0, "bundled": 0}
+
+        # IP-spread self-heal: closed hours that have the count bundle
+        # but no all_fields_ip.parquet (the common case after #3 ships
+        # to a service whose count rollup was already backfilled).
+        # Bounded by the same 30-day lookback as the count heal so a
+        # one-time backfill can't run away on a long-lived service.
+        try:
+            ip_heal = backfill_missing_hour_ip_spread(service_id, src, lookback_days=30)
+            if ip_heal.get("missing", 0) > 0:
+                logger.info(
+                    "🔁 [rollup-compact] %s: ip_spread self-heal rebuilt %d/%d hours",
+                    _display,
+                    ip_heal.get("rebuilt", 0),
+                    ip_heal.get("missing", 0),
+                )
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: ip_spread self-heal failed (compaction continues): %s",
+                _display,
+                e,
+            )
+
+        rebuilt = compact_closed_days_to_daily(service_id, src)
+        # After per-field per-day files are fresh, bundle them across
+        # fields so the dashboard reader opens 1 file per day instead
+        # of ~40. backfill_day_bundles is idempotent (skips up-to-date
+        # bundles via mtime) so running it on every compact tick is
+        # cheap when no new per-field days landed. Best-effort —
+        # bundle failure degrades to per-field reading, which still
+        # works correctly.
+        try:
+            bundled = backfill_day_bundles(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: day-bundle backfill failed (per-field still serves): %s",
+                _display,
+                e,
+            )
+            bundled = 0
+        # Origin-summary per-day compaction: takes the 24 per-hour
+        # origin_summary.parquet files in hour_bundled and writes a
+        # single per-day file in day_bundled/day=YYYY-MM-DD/. The
+        # /api/origin/aggregates summary panel reader prefers day-files
+        # when present and falls back to per-hour otherwise, so this is
+        # purely additive — the file-open overhead drop is the win
+        # (3.2 s → ~200 ms on a 30 d window's cold reads on prod cloud
+        # disk, per the 2026-06-16 measurement). Idempotent (mtime-
+        # gated); best-effort failure leaves the panel on the per-hour
+        # path.
+        try:
+            origin_summary_compacted = compact_origin_summary_closed_days_to_daily(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: origin_summary day-compact failed (per-hour still serves): %s",
+                _display,
+                e,
+            )
+            origin_summary_compacted = 0
+
+        # network_rtt per-day compaction: collapses 24 per-hour
+        # rtt_percentiles parquets into 1 per-day file so the
+        # /api/network-health rtt_percentiles_query rollup reader opens
+        # ~30 files on a 30 d window instead of 720. Same mtime-gated
+        # idempotent pattern; failure leaves the panel on per-hour.
+        try:
+            network_rtt_compacted = compact_network_rtt_closed_days_to_daily(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: network_rtt day-compact failed (per-hour still serves): %s",
+                _display,
+                e,
+            )
+            network_rtt_compacted = 0
+
+        # network_speed per-day compaction: same shape as network_rtt
+        # but the per-day row is a pure GROUP BY (asn, c_speed) SUM.
+        try:
+            network_speed_compacted = compact_network_speed_closed_days_to_daily(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: network_speed day-compact failed (per-hour still serves): %s",
+                _display,
+                e,
+            )
+            network_speed_compacted = 0
+
+        # verified_bots_ts per-day compaction: same shape as network_speed
+        # but PRESERVES the minute (bucket_ts) dimension because the panel
+        # is a time series (GROUP BY bucket_ts, bot_type).
+        try:
+            vbts_compacted = compact_verified_bots_ts_closed_days_to_daily(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: verified_bots_ts day-compact failed (per-hour still serves): %s",
+                _display,
+                e,
+            )
+            vbts_compacted = 0
+
+        # perf_latency per-day compaction: top_urls + top_asns latency
+        # leaderboards (request-weighted percentile merge + re-cap top-K).
+        try:
+            perf_compacted = compact_perf_latency_closed_days_to_daily(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: perf_latency day-compact failed (per-hour still serves): %s",
+                _display,
+                e,
+            )
+            perf_compacted = 0
+        duration = time.time() - start_time
+        # Pass run_id so log_cron_run UPDATEs the 'running' row that
+        # start_cron_run inserted (instead of orphaning it and inserting
+        # a fresh terminal row). The same fix applies to the error
+        # branch below — without run_id pass-through both branches
+        # leave the original 'running' row stuck forever.
+        heal_summary = (
+            f"; healed {heal['bundled']}/{heal['missing']} missing hour bundle(s)" if heal.get("missing") else ""
+        )
+        os_summary = f"; compacted {origin_summary_compacted} origin_summary day(s)" if origin_summary_compacted else ""
+        nr_summary = f"; compacted {network_rtt_compacted} network_rtt day(s)" if network_rtt_compacted else ""
+        ns_summary = f"; compacted {network_speed_compacted} network_speed day(s)" if network_speed_compacted else ""
+        vbts_summary = f"; compacted {vbts_compacted} verified_bots_ts day(s)" if vbts_compacted else ""
+        perf_summary = f"; compacted {perf_compacted} perf_latency day(s)" if perf_compacted else ""
+        log_cron_run(
+            src,
+            "rollup_compact_daily",
+            duration,
+            "success",
+            summary=f"Rebuilt {rebuilt} (field, day) file(s); bundled {bundled} day(s){os_summary}{nr_summary}{ns_summary}{vbts_summary}{perf_summary}{heal_summary}.",
+            run_id=run_id,
+        )
+        logger.info(
+            "⏹️  [rollup-compact] %s: Compacted %d (field, day), bundled %d day(s), healed %d/%d hour bundle(s) in %.1fs.",
+            _display,
+            rebuilt,
+            bundled,
+            heal.get("bundled", 0),
+            heal.get("missing", 0),
+            duration,
+        )
+    except Exception as e:
+        duration = time.time() - start_time
+        log_cron_run(
+            src,
+            "rollup_compact_daily",
+            duration,
+            "error",
+            error_message=str(e),
+            run_id=run_id,
+        )
+        logger.exception("[rollup-compact] %s: Daily rollup compaction failed: %s", _display, e)

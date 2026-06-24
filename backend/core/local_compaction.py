@@ -50,6 +50,8 @@ from typing import Any
 
 import duckdb
 
+from backend.utils.sql_validator import escape_sql_literal
+
 logger = logging.getLogger(__name__)
 
 # Don't merge a partition whose total parquet size already exceeds this — we'd
@@ -76,6 +78,45 @@ _WEEKLY_DIR = "weekly"
 _HOUR_PART_RE = re.compile(r"^timestamp_hour=(\d{4}-\d{2}-\d{2})-(\d{2})$")
 # Daily file naming from _compact_daily_tier: daily_YYYY-MM-DD_<hex>.parquet
 _DAILY_FILE_RE = re.compile(r"^daily_(\d{4}-\d{2}-\d{2})_[0-9a-f]+\.parquet$")
+
+
+def _build_merge_select_sql(paths_sql: str, cols_to_strip: list[str], has_rid: bool) -> str:
+    """SELECT clause for the COPY that produces a merged parquet.
+
+    When the schema has a ``rid`` column, dedupe by ``rid`` keeping the
+    earliest-timestamp occurrence. Without this, the buffer-commit ↔
+    tombstone window (``buffer.py:463-477`` — table.append succeeded but
+    tombstone_buffer_files crashed before running) causes the same buffer
+    file's rows to be committed twice on the retry tick → every row in
+    that batch counted twice in every dashboard query. The 2026-06-12
+    audit found ~12 days of ~2× duplication from exactly this race.
+
+    ``rid`` is Fastly's per-request id and is unique per logical request,
+    so it's the right key. NULL-rid rows pass through unchanged — the row
+    is preserved without a uniqueness guarantee. In practice prod data
+    has zero NULL rids (verified 2026-06-12), so this branch is defensive.
+
+    When the schema has no ``rid`` column (older sources, test fixtures),
+    fall through to a plain SELECT — no dedup, original behaviour.
+    """
+    exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
+    if not has_rid:
+        return f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
+    # Add _dup_rn to the EXCLUDE list so the helper column doesn't bleed
+    # into the output parquet schema.
+    inner_exclude_clause = f" EXCLUDE ({', '.join([*cols_to_strip, '_dup_rn'])})"
+    return (
+        # Non-NULL rid: dedupe, keep earliest occurrence.
+        f"SELECT *{inner_exclude_clause} FROM ("
+        f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY rid ORDER BY timestamp) AS _dup_rn"
+        f"  FROM read_parquet([{paths_sql}], union_by_name=true)"
+        f"  WHERE rid IS NOT NULL"
+        f") WHERE _dup_rn = 1"
+        f" UNION ALL BY NAME "
+        # NULL rid: pass through.
+        f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
+        f" WHERE rid IS NULL"
+    )
 
 
 def _bin_pack_files(file_paths: list[str], max_bin_size_bytes: int) -> list[list[str]]:
@@ -114,7 +155,7 @@ def _bin_pack_files(file_paths: list[str], max_bin_size_bytes: int) -> list[list
     return bins
 
 
-def compact_local_partitions(source: dict, min_files_per_partition: int = 3, dry_run: bool = False) -> dict[str, Any]:
+def compact_local_partitions(source: dict, min_files_per_partition: int = 1, dry_run: bool = False) -> dict[str, Any]:
     """Merge small parquet files within each hour-partition directory into
     a single larger file. Additionally rolls partitions older than
     ``_DAILY_TIER_AGE_DAYS`` into per-day merged files.
@@ -122,8 +163,14 @@ def compact_local_partitions(source: dict, min_files_per_partition: int = 3, dry
     Args:
         source: service source dict (used to resolve cache path)
         min_files_per_partition: only partitions with strictly more than
-            this many files are touched. Default 3 = aggressive: any hour
-            with 4+ files gets merged.
+            this many files are touched. Default 1 — every multi-file
+            partition is eligible. This is required for the dedup-on-merge
+            pass (see ``_build_merge_select_sql``) to clean up the
+            orphan-file dup pattern: a partition with exactly 3 files (one
+            ``compacted_*`` + a 2-split ``00000-N-*`` orphan pair from a
+            buffer-commit replay) needs ``> 1`` to be considered, not the
+            previous ``> 3``. Without this, the historic 12 days of ~2×
+            duplication would never self-heal.
         dry_run: if True, report what would be done without writing.
 
     Returns:
@@ -179,7 +226,7 @@ def compact_local_partitions(source: dict, min_files_per_partition: int = 3, dry
     # phase so concurrent dashboard queries via the view-build path
     # don't race with our delete-then-rename and hit FileNotFoundError /
     # IO Error mid-glob. Architecture-review Finding #3.
-    from backend.core.iceberg import _get_service_lock
+    from backend.core.iceberg.view import _get_service_lock
 
     service_key = source.get("name", "default")
     publish_lock = _get_service_lock(service_key)
@@ -202,7 +249,15 @@ def compact_local_partitions(source: dict, min_files_per_partition: int = 3, dry
         full_paths = [os.path.join(part_dir, f) for f in parquets_sorted]
         bins = _bin_pack_files(full_paths, _MAX_PARTITION_BYTES)
 
-        eligible_bins = [b for b in bins if len(b) > 1]
+        # In normal compaction (``min_files_per_partition >= 1``) a single-
+        # file bin is a no-op — there's nothing to merge. In force-rewrite
+        # mode (``== 0``, one-shot dedup pass) we DO want to rewrite even
+        # singletons so intra-file dups in long-stable partitions get the
+        # dedup-by-rid pass.
+        if min_files_per_partition == 0:
+            eligible_bins = bins
+        else:
+            eligible_bins = [b for b in bins if len(b) > 1]
         if not eligible_bins:
             continue
 
@@ -274,7 +329,7 @@ def compact_local_partitions(source: dict, min_files_per_partition: int = 3, dry
     service_id = source.get("service_id") or source.get("name")
     if removed_basenames and service_id and not dry_run:
         try:
-            from backend.core import metadata_db as _meta
+            from backend.core import metadata as _meta
 
             _meta.register_locally_compacted(service_id, removed_basenames)
         except Exception as e:
@@ -313,6 +368,103 @@ def _cleanup_stale_tmp(data_dir: str) -> int:
                 except OSError:
                     pass
     return n
+
+
+def _rollup_bins(
+    bins: list[list[str]],
+    out_root: str,
+    name_prefix: str,
+    token: str,
+    rollup_key: str,
+    result: dict[str, Any],
+    *,
+    dry_run: bool,
+    log_migrate,
+    log_migrate_fail,
+    log_merge,
+    log_merge_fail,
+) -> None:
+    """Roll up each pre-packed bin into one output parquet under ``out_root``.
+
+    Shared inner loop of the daily and weekly tiers. A single-file bin is
+    migrated via ``os.rename``; a multi-file bin is merged via a DuckDB COPY
+    into a tmp file then atomically renamed, with originals deleted into
+    ``result['removed_basenames']`` and the tmp cleaned on failure. ``token``
+    is the per-group date key embedded in the output filename (day_str /
+    week_key); ``rollup_key`` is the result counter to bump (daily_rollups /
+    weekly_rollups). The four log callables let each tier keep its exact log
+    strings (emoji + wording) unchanged.
+    """
+    for bin_paths in bins:
+        bytes_before = sum(os.path.getsize(p) for p in bin_paths)
+        if dry_run:
+            result[rollup_key] += 1
+            result["files_merged"] += len(bin_paths)
+            result["bytes_before"] += bytes_before
+            continue
+
+        if len(bin_paths) == 1:
+            # Migrate single-file bin to the tier folder to retire the source.
+            old_path = bin_paths[0]
+            old_name = os.path.basename(old_path)
+            out_name = f"{name_prefix}{token}_{uuid.uuid4().hex[:8]}.parquet"
+            out_path = os.path.join(out_root, out_name)
+            try:
+                os.rename(old_path, out_path)
+                result["files_removed"] += 1
+                result.setdefault("removed_basenames", []).append(old_name)
+                result[rollup_key] += 1
+                result["files_merged"] += 1
+                result["bytes_before"] += bytes_before
+                result["bytes_after"] += bytes_before
+                log_migrate(old_name, out_name)
+            except Exception as e:
+                log_migrate_fail(old_path, e)
+        else:
+            out_name = f"{name_prefix}{token}_{uuid.uuid4().hex[:8]}.parquet"
+            tmp_path = os.path.join(out_root, f"{out_name}.tmp")
+            out_path = os.path.join(out_root, out_name)
+            try:
+                con = duckdb.connect(":memory:")
+                try:
+                    paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in bin_paths)
+                    probe = (
+                        con.execute(
+                            f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
+                        ).description
+                        or []
+                    )
+                    col_names = {d[0] for d in probe}
+                    cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in col_names)
+                    select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, "rid" in col_names)
+                    con.execute(
+                        f"COPY ({select_sql} ORDER BY timestamp, ip) "
+                        f"TO '{escape_sql_literal(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                    )
+                finally:
+                    con.close()
+                for p in bin_paths:
+                    try:
+                        os.remove(p)
+                        result["files_removed"] += 1
+                        result.setdefault("removed_basenames", []).append(os.path.basename(p))
+                    except OSError as e:
+                        logger.warning("[local-compact] failed to remove %s: %s", p, e)
+                os.rename(tmp_path, out_path)
+                bytes_after = os.path.getsize(out_path)
+                result[rollup_key] += 1
+                result["files_merged"] += len(bin_paths)
+                result["bytes_before"] += bytes_before
+                result["bytes_after"] += bytes_after
+                log_merge(token, len(bin_paths))
+            except Exception as e:
+                # Clean the tmp on failure so we don't leak.
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
+                log_merge_fail(token, e)
 
 
 def _compact_daily_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]:
@@ -371,81 +523,21 @@ def _compact_daily_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]:
         all_paths = sorted(all_paths)
         bins = _bin_pack_files(all_paths, _MAX_PARTITION_BYTES)
 
-        for bin_paths in bins:
-            bytes_before = sum(os.path.getsize(p) for p in bin_paths)
-            if dry_run:
-                result["daily_rollups"] += 1
-                result["files_merged"] += len(bin_paths)
-                result["bytes_before"] += bytes_before
-                continue
-
-            if len(bin_paths) == 1:
-                # Migrate single-file bin to daily folder to retire the hourly folder
-                old_path = bin_paths[0]
-                old_name = os.path.basename(old_path)
-                out_name = f"daily_{day_str}_{uuid.uuid4().hex[:8]}.parquet"
-                out_path = os.path.join(daily_root, out_name)
-                try:
-                    os.rename(old_path, out_path)
-                    result["files_removed"] += 1
-                    result.setdefault("removed_basenames", []).append(old_name)
-                    result["daily_rollups"] += 1
-                    result["files_merged"] += 1
-                    result["bytes_before"] += bytes_before
-                    result["bytes_after"] += bytes_before
-                    logger.info("🚚 [local-compact] migrated single-file bin %s to %s", old_name, out_name)
-                except Exception as e:
-                    logger.warning("[local-compact] failed to migrate single-file %s: %s", old_path, e)
-            else:
-                # Merge multi-file bin
-                out_name = f"daily_{day_str}_{uuid.uuid4().hex[:8]}.parquet"
-                tmp_path = os.path.join(daily_root, f"{out_name}.tmp")
-                out_path = os.path.join(daily_root, out_name)
-                try:
-                    con = duckdb.connect(":memory:")
-                    try:
-                        paths_sql = ", ".join(f"'{_sql_escape(p)}'" for p in bin_paths)
-                        probe = (
-                            con.execute(
-                                f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
-                            ).description
-                            or []
-                        )
-                        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if any(d[0] == c for d in probe))
-                        exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
-                        con.execute(
-                            f"COPY (SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
-                            f" ORDER BY timestamp, ip) "
-                            f"TO '{_sql_escape(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
-                        )
-                    finally:
-                        con.close()
-                    for p in bin_paths:
-                        try:
-                            os.remove(p)
-                            result["files_removed"] += 1
-                            result.setdefault("removed_basenames", []).append(os.path.basename(p))
-                        except OSError as e:
-                            logger.warning("[local-compact] failed to remove %s: %s", p, e)
-                    os.rename(tmp_path, out_path)
-                    bytes_after = os.path.getsize(out_path)
-                    result["daily_rollups"] += 1
-                    result["files_merged"] += len(bin_paths)
-                    result["bytes_before"] += bytes_before
-                    result["bytes_after"] += bytes_after
-                    logger.info(
-                        "📦 [local-compact] daily bin rollup %s: %d files → 1",
-                        day_str,
-                        len(bin_paths),
-                    )
-                except Exception as e:
-                    # Clean the tmp on failure so we don't leak.
-                    try:
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                    except OSError:
-                        pass
-                    logger.warning("[local-compact] daily bin rollup %s failed: %s", day_str, e)
+        _rollup_bins(
+            bins,
+            daily_root,
+            "daily_",
+            day_str,
+            "daily_rollups",
+            result,
+            dry_run=dry_run,
+            log_migrate=lambda old, out: logger.info("🚚 [local-compact] migrated single-file bin %s to %s", old, out),
+            log_migrate_fail=lambda old, e: logger.warning(
+                "[local-compact] failed to migrate single-file %s: %s", old, e
+            ),
+            log_merge=lambda tok, n: logger.info("📦 [local-compact] daily bin rollup %s: %d files → 1", tok, n),
+            log_merge_fail=lambda tok, e: logger.warning("[local-compact] daily bin rollup %s failed: %s", tok, e),
+        )
 
         # Try to rmdir the now-empty hour partition dirs.
         if not dry_run:
@@ -520,79 +612,25 @@ def _compact_weekly_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]
         all_paths = [p for p, _ in items_sorted]
         bins = _bin_pack_files(all_paths, _MAX_PARTITION_BYTES)
 
-        for bin_paths in bins:
-            bytes_before = sum(os.path.getsize(p) for p in bin_paths)
-            if dry_run:
-                result["weekly_rollups"] += 1
-                result["files_merged"] += len(bin_paths)
-                result["bytes_before"] += bytes_before
-                continue
-
-            if len(bin_paths) == 1:
-                # Migrate single-file weekly bin to weekly folder
-                old_path = bin_paths[0]
-                old_name = os.path.basename(old_path)
-                out_name = f"weekly_{week_key}_{uuid.uuid4().hex[:8]}.parquet"
-                out_path = os.path.join(weekly_root, out_name)
-                try:
-                    os.rename(old_path, out_path)
-                    result["files_removed"] += 1
-                    result.setdefault("removed_basenames", []).append(old_name)
-                    result["weekly_rollups"] += 1
-                    result["files_merged"] += 1
-                    result["bytes_before"] += bytes_before
-                    result["bytes_after"] += bytes_before
-                    logger.info("🚚 [local-compact] migrated single-file weekly bin %s to %s", old_name, out_name)
-                except Exception as e:
-                    logger.warning("[local-compact] failed to migrate single-file weekly bin %s: %s", old_path, e)
-            else:
-                out_name = f"weekly_{week_key}_{uuid.uuid4().hex[:8]}.parquet"
-                tmp_path = os.path.join(weekly_root, f"{out_name}.tmp")
-                out_path = os.path.join(weekly_root, out_name)
-                try:
-                    con = duckdb.connect(":memory:")
-                    try:
-                        paths_sql = ", ".join(f"'{_sql_escape(p)}'" for p in bin_paths)
-                        probe = (
-                            con.execute(
-                                f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
-                            ).description
-                            or []
-                        )
-                        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if any(d[0] == c for d in probe))
-                        exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
-                        con.execute(
-                            f"COPY (SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
-                            f" ORDER BY timestamp, ip) "
-                            f"TO '{_sql_escape(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
-                        )
-                    finally:
-                        con.close()
-                    for p in bin_paths:
-                        try:
-                            os.remove(p)
-                            result["files_removed"] += 1
-                            result.setdefault("removed_basenames", []).append(os.path.basename(p))
-                        except OSError as e:
-                            logger.warning("[local-compact] failed to remove %s: %s", p, e)
-                    os.rename(tmp_path, out_path)
-                    bytes_after = os.path.getsize(out_path)
-                    result["weekly_rollups"] += 1
-                    result["files_merged"] += len(bin_paths)
-                    result["bytes_before"] += bytes_before
-                    result["bytes_after"] += bytes_after
-                    logger.info(
-                        "🗓️  [local-compact] weekly bin rollup %s: %d daily file(s) → 1",
-                        week_key,
-                        len(bin_paths),
-                    )
-                except Exception as e:
-                    try:
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                    except OSError:
-                        pass
-                    logger.warning("[local-compact] weekly bin rollup %s failed: %s", week_key, e)
+        _rollup_bins(
+            bins,
+            weekly_root,
+            "weekly_",
+            week_key,
+            "weekly_rollups",
+            result,
+            dry_run=dry_run,
+            log_migrate=lambda old, out: logger.info(
+                "🚚 [local-compact] migrated single-file weekly bin %s to %s", old, out
+            ),
+            log_migrate_fail=lambda old, e: logger.warning(
+                "[local-compact] failed to migrate single-file weekly bin %s: %s", old, e
+            ),
+            log_merge=lambda tok, n: logger.info(
+                "🗓️  [local-compact] weekly bin rollup %s: %d daily file(s) → 1", tok, n
+            ),
+            log_merge_fail=lambda tok, e: logger.warning("[local-compact] weekly bin rollup %s failed: %s", tok, e),
+        )
 
     return result
 
@@ -627,21 +665,21 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
     # view's semantics so the resulting file is query-compatible.
     con = duckdb.connect(":memory:")
     try:
-        paths_sql = ", ".join(f"'{_sql_escape(p)}'" for p in paths)
+        paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
         # Strip the computed `timestamp_hour` / `dt` columns from output
         # if they exist in input files. Iceberg's view-build re-adds them
         # via `SELECT *, strftime(...) AS timestamp_hour` and would error
         # with a duplicate-column UNION ALL BY NAME on a merged file
         # that already contained them.
         probe = con.execute(f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0").description or []
-        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if any(d[0] == c for d in probe))
-        exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
+        col_names = {d[0] for d in probe}
+        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in col_names)
+        select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, "rid" in col_names)
         # zstd compression matches Fastly's parquet output and the
         # buffer-commit writer; keeps decompression cost stable.
         con.execute(
-            f"COPY (SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
-            f" ORDER BY timestamp, ip) "
-            f"TO '{_sql_escape(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f"COPY ({select_sql} ORDER BY timestamp, ip) "
+            f"TO '{escape_sql_literal(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
         )
     finally:
         con.close()
@@ -670,16 +708,34 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
     }
 
 
+# Short-TTL memo for compaction_stats so the 5 s health-snapshot poll
+# in the admin UI doesn't redo a fan-out os.listdir per service per
+# tick. The cron's actual local-compact runs every 2 min, so even a
+# 5 s lag is well inside the staleness budget the dashboard already
+# tolerates.
+_COMPACTION_STATS_TTL = 5.0
+_COMPACTION_STATS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
 def compaction_stats(source: dict) -> dict[str, Any]:
     """Snapshot of file-count distribution across local cache partitions.
 
     Returns counts that downstream metrics / health endpoints can graph
     to spot small-file regressions (e.g., if the cron stops running and
     files start accumulating, ``partitions_above_threshold`` climbs).
+
+    Results are memoised per cache_root for ``_COMPACTION_STATS_TTL`` s
+    so the admin health-snapshot poll doesn't re-walk the data dir on
+    every tick.
     """
     from backend.core.duckdb import _cache_dir
 
     cache_root = _cache_dir(source)
+    now = time.monotonic()
+    cached = _COMPACTION_STATS_CACHE.get(cache_root)
+    if cached is not None and (now - cached[0]) < _COMPACTION_STATS_TTL:
+        return cached[1]
+
     data_dir = os.path.join(cache_root, "data")
     total_files = 0
     partitions = 0
@@ -688,7 +744,7 @@ def compaction_stats(source: dict) -> dict[str, Any]:
     daily_files = 0
     weekly_files = 0
     if not os.path.isdir(data_dir):
-        return {
+        result: dict[str, Any] = {
             "total_files": 0,
             "partitions": 0,
             "partitions_above_3": 0,
@@ -697,6 +753,8 @@ def compaction_stats(source: dict) -> dict[str, Any]:
             "weekly_files": 0,
             "avg_files_per_partition": 0.0,
         }
+        _COMPACTION_STATS_CACHE[cache_root] = (now, result)
+        return result
     for entry in os.listdir(data_dir):
         full = os.path.join(data_dir, entry)
         if not os.path.isdir(full):
@@ -713,7 +771,7 @@ def compaction_stats(source: dict) -> dict[str, Any]:
                 above_3 += 1
             if n > 10:
                 above_10 += 1
-    return {
+    result = {
         "total_files": total_files + daily_files + weekly_files,
         "partitions": partitions,
         "partitions_above_3": above_3,
@@ -722,8 +780,11 @@ def compaction_stats(source: dict) -> dict[str, Any]:
         "weekly_files": weekly_files,
         "avg_files_per_partition": (total_files / partitions) if partitions else 0.0,
     }
+    _COMPACTION_STATS_CACHE[cache_root] = (now, result)
+    return result
 
 
-def _sql_escape(path: str) -> str:
-    """Escape single quotes in a path for safe inlining into DuckDB SQL."""
-    return path.replace("'", "''")
+# R-1: drain the per-service compaction stats TTL cache between tests.
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+
+_CacheRegistry.register("core.local_compaction._COMPACTION_STATS_CACHE", _COMPACTION_STATS_CACHE)

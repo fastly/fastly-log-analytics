@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { usePathname } from 'next/navigation'
 
 interface ErrorBoundaryProps {
   children: React.ReactNode
@@ -50,4 +51,32 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
     }
     return this.props.children
   }
+}
+
+/**
+ * E-4 (audit): the class-based ErrorBoundary above tracks `error` in
+ * component state, which means once an error is captured the boundary
+ * stays tripped across client-side navigations — Next.js keeps the
+ * layout (and therefore the boundary instance) mounted while only
+ * swapping the page segment, so React's reconciler reuses the same
+ * boundary instance and its error state persists. Without this
+ * wrapper, a user who hits a render error on one page would see the
+ * "Something went wrong" fallback continue to render after navigating
+ * to a completely unrelated route, with no recovery short of a full
+ * page reload.
+ *
+ * Keying the boundary on `pathname` forces React to unmount and
+ * remount it on every route change, which clears the error state for
+ * free without any imperative reset wiring.
+ */
+export function ErrorBoundaryWithRouteReset({
+  children,
+  fallback,
+}: ErrorBoundaryProps) {
+  const pathname = usePathname()
+  return (
+    <ErrorBoundary key={pathname ?? '/'} fallback={fallback}>
+      {children}
+    </ErrorBoundary>
+  )
 }

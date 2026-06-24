@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import time as _time
+
 import duckdb
 
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
+    SectionTimer,
     _safe_table,
+    empty_schema_response,
     percentile_ms_expr,
     safe_interval,
     safe_iso,
     time_bucket_select,
 )
+from backend.repositories._sql import dashboard as SQL_DASHBOARD
 from backend.repositories.utils.filters import build_where_clause
 
 
@@ -23,28 +28,40 @@ def get_performance_aggregates(
     end_time: str | None,
     filters: FiltersDict,
     sort_by: str = "p99",
+    sections: set[str] | None = None,
 ) -> dict:
+    # Per-phase wall-clock timings surface in the response under
+    # _section_timings so the perf harness can attribute /api/performance/
+    # aggregates without ad-hoc instrumentation. Mirrors network.py.
+    timer = SectionTimer()
+    section_timings = timer.entries
+
+    def _want(name: str) -> bool:
+        return sections is None or name in sections
+
     source_name = src["name"]
     table_name = _safe_table(source_name)
     runner = QueryRunner(con, src)
 
+    _t = _time.perf_counter()
     actual_cols = runner.get_schema_cols()
+    timer.mark("get_schema_cols", _t)
     if not actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(
-            latency_ts=[], top_urls=[], top_asns=[], ttl_dist=[], scatter=[], **runner.telemetry()
+            top_urls=[], top_asns=[], ttl_dist=[], scatter=[], section_timings=section_timings, **runner.telemetry()
         )
 
+    _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
+    timer.mark("build_where_clause", _t)
 
-    cols = ["timestamp", "url", "asn", "ttfb", "elapsed", "cache", "ttl"]
+    cols = ["timestamp", "url", "asn", "ttfb", "elapsed", "cache", "ttl", "ottfb", "ottlb"]
+    _t = _time.perf_counter()
     with runner.temp_table(cols, actual_cols, table_name, where_clause, params) as temp_table:
+        timer.mark("temp_table_create", _t)
         if temp_table is None:
-            from backend.repositories._base import empty_schema_response
-
             return empty_schema_response(
-                latency_ts=[], top_urls=[], top_asns=[], ttl_dist=[], scatter=[], **runner.telemetry()
+                top_urls=[], top_asns=[], ttl_dist=[], scatter=[], section_timings=section_timings, **runner.telemetry()
             )
 
         results = {**runner.telemetry()}
@@ -52,57 +69,134 @@ def get_performance_aggregates(
         sort_idx_map = {"avg": 3, "p50": 4, "p95": 5, "p99": 6}
         sort_idx = sort_idx_map.get(sort_by, 6)
 
-        # 1. Latency Time Series (Stacked: Origin TTFB vs Edge Processing)
-        if "ttfb" in actual_cols and "elapsed" in actual_cols:
-            ts_q = f"""
-                SELECT {time_bucket_select("1 minute")},
-                       AVG(CAST(ttfb AS DOUBLE)) * 1000.0 AS origin_ms,
-                       AVG(CAST(elapsed AS DOUBLE) / 1000.0 - CAST(ttfb AS DOUBLE) * 1000.0) AS edge_ms
-                FROM {temp_table}
-                WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL AND (CAST(elapsed AS DOUBLE) / 1000.0) >= (CAST(ttfb AS DOUBLE) * 1000.0)
-                GROUP BY 1 ORDER BY 1
-            """
-            ts_res = runner.execute(ts_q).fetchall()
-            results["latency_ts"] = [{"time": safe_iso(r[0]), "origin": r[1], "edge": r[2]} for r in ts_res]
-        else:
-            results["latency_ts"] = []
+        _want_top_urls = _want("top_urls")
+        _want_top_asns = _want("top_asns")
+        _want_ttl = _want("ttl_dist")
+        _want_waterfall = _want("waterfall")
+        _want_scatter = _want("scatter")
 
-        # 2. Top URLs by Latency
-        if "url" in actual_cols and "elapsed" in actual_cols:
-            url_q = f"""
-                SELECT url,
-                       count(*) as reqs,
-                       AVG(CAST(elapsed AS DOUBLE)) / 1000.0 as avg,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.5)} as p50,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.95)} as p95,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.99)} as p99
-                FROM {temp_table}
-                WHERE url IS NOT NULL AND elapsed IS NOT NULL
-                GROUP BY 1 HAVING count(*) > 5 ORDER BY {sort_idx} DESC LIMIT 20
-            """
-            url_res = runner.execute(url_q).fetchall()
-            results["top_urls"] = [
-                {"url": r[0], "requests": r[1], "avg": r[2], "p50": r[3], "p95": r[4], "p99": r[5]} for r in url_res
-            ]
-        else:
+        # 1. Top URLs by Latency
+        # (Was: a "Latency Time Series" query that returned a per-minute
+        # origin_ms / edge_ms pair as `latency_ts`. Frontend never read
+        # that field — only `waterfall.avg`, top_urls, top_asns, ttl_dist
+        # and scatter are rendered. The ts_q scan was ~800 ms on admin-30d
+        # for output the page threw away; deleted along with the
+        # latency_ts response field and its Pydantic model slot.)
+        # Two-pass CTE: filter URLs by count FIRST (cheap), then compute the
+        # 4 APPROX_QUANTILE aggregates only for surviving URLs. The original
+        # single-pass query forced DuckDB to allocate + populate a t-digest
+        # per unique URL even though HAVING > 5 dropped most of them at the
+        # end. On a 30-day window (~1.4M rows, ~50-100k unique URLs) the
+        # original was 11 s; this CTE shape drops it to ~3 s by skipping
+        # the digest work for the long-tail one-off URLs. Semantically
+        # identical — same HAVING floor, same ORDER BY, same LIMIT.
+        _t = _time.perf_counter()
+        if _want_top_urls and "url" in actual_cols and "elapsed" in actual_cols:
+            # Try the perf_latency rollup first (unfiltered, >= 48 h). Same
+            # per-URL elapsed percentiles, request-weight-averaged across
+            # hours + re-ranked by sort_by; falls through to live on a miss.
+            rolled = runner.try_perf_latency_from_rollup(
+                start_time,
+                end_time,
+                dimension="url",
+                sort_by=sort_by,
+                has_filters=bool(filters),
+                min_requests=5,
+                limit=20,
+            )
+            if rolled is not None:
+                results["top_urls"] = [
+                    {
+                        "url": r["value"],
+                        "requests": r["requests"],
+                        "avg": r["avg_ms"],
+                        "p50": r["p50_ms"],
+                        "p95": r["p95_ms"],
+                        "p99": r["p99_ms"],
+                    }
+                    for r in rolled["rows"]
+                ]
+                results["approx"] = True
+                timer.mark("top_urls_query_rollup", _t)
+            else:
+                url_q = f"""
+                    WITH url_counts AS (
+                        SELECT url, count(*) AS reqs
+                        FROM {temp_table}
+                        WHERE url IS NOT NULL AND elapsed IS NOT NULL
+                        GROUP BY 1 HAVING count(*) > 5
+                    )
+                    SELECT t.url,
+                           uc.reqs,
+                           AVG(CAST(t.elapsed AS DOUBLE)) / 1000.0 as avg,
+                           {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.5, approx=True)} as p50,
+                           {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.95, approx=True)} as p95,
+                           {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.99, approx=True)} as p99
+                    FROM {temp_table} t
+                    INNER JOIN url_counts uc USING (url)
+                    WHERE t.elapsed IS NOT NULL
+                    GROUP BY t.url, uc.reqs
+                    ORDER BY {sort_idx} DESC LIMIT 20
+                """
+                url_res = runner.execute(url_q).fetchall()
+                results["top_urls"] = [
+                    {"url": r[0], "requests": r[1], "avg": r[2], "p50": r[3], "p95": r[4], "p99": r[5]} for r in url_res
+                ]
+                timer.mark("top_urls_query", _t)
+        elif _want_top_urls:
             results["top_urls"] = []
+            timer.mark("top_urls_query", _t)
 
-        # 3. Top ASNs by Latency
-        if "asn" in actual_cols and "elapsed" in actual_cols:
-            asn_q = f"""
-                SELECT asn,
-                       count(*) as reqs,
-                       AVG(CAST(elapsed AS DOUBLE)) / 1000.0 as avg,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.5)} as p50,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.95)} as p95,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.99)} as p99
-                FROM {temp_table}
-                WHERE asn IS NOT NULL AND elapsed IS NOT NULL
-                GROUP BY 1 HAVING count(*) > 10 ORDER BY {sort_idx} DESC LIMIT 20
-            """
-            asn_res = runner.execute(asn_q).fetchall()
+        # 3. Top ASNs by Latency — same two-pass CTE pattern. ASN cardinality
+        # is much lower than URL (hundreds vs tens of thousands), so the
+        # absolute win is smaller, but the shape is identical so a single
+        # query template would just complicate this for no benefit.
+        _t = _time.perf_counter()
+        if _want_top_asns and "asn" in actual_cols and "elapsed" in actual_cols:
+            # Rollup first (same per-ASN elapsed percentiles); fall through to
+            # live on a miss. Both paths feed the shared ASN-name resolution
+            # below — rollup rows are normalised to the live tuple shape
+            # (asn, reqs, avg, p50, p95, p99).
+            rolled = runner.try_perf_latency_from_rollup(
+                start_time,
+                end_time,
+                dimension="asn",
+                sort_by=sort_by,
+                has_filters=bool(filters),
+                min_requests=10,
+                limit=20,
+            )
+            if rolled is not None:
+                asn_res = [
+                    (r["value"], r["requests"], r["avg_ms"], r["p50_ms"], r["p95_ms"], r["p99_ms"])
+                    for r in rolled["rows"]
+                ]
+                results["approx"] = True
+                _asn_timer_name = "top_asns_query_rollup"
+            else:
+                asn_q = f"""
+                    WITH asn_counts AS (
+                        SELECT asn, count(*) AS reqs
+                        FROM {temp_table}
+                        WHERE asn IS NOT NULL AND elapsed IS NOT NULL
+                        GROUP BY 1 HAVING count(*) > 10
+                    )
+                    SELECT t.asn,
+                           ac.reqs,
+                           AVG(CAST(t.elapsed AS DOUBLE)) / 1000.0 as avg,
+                           {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.5, approx=True)} as p50,
+                           {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.95, approx=True)} as p95,
+                           {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.99, approx=True)} as p99
+                    FROM {temp_table} t
+                    INNER JOIN asn_counts ac USING (asn)
+                    WHERE t.elapsed IS NOT NULL
+                    GROUP BY t.asn, ac.reqs
+                    ORDER BY {sort_idx} DESC LIMIT 20
+                """
+                asn_res = runner.execute(asn_q).fetchall()
+                _asn_timer_name = "top_asns_query"
 
-            # Resolve ASN names
+            # Resolve ASN names (shared by both paths)
             asn_list = [int(r[0]) for r in asn_res if str(r[0]).isdigit()]
             from backend.core import duckdb as _db
 
@@ -127,11 +221,14 @@ def get_performance_aggregates(
                         "p99": r[5],
                     }
                 )
-        else:
+            timer.mark(_asn_timer_name, _t)
+        elif _want_top_asns:
             results["top_asns"] = []
+            timer.mark("top_asns_query", _t)
 
         # 5. Cache TTL Distribution (Histogram)
-        if "ttl" in actual_cols:
+        _t = _time.perf_counter()
+        if _want_ttl and "ttl" in actual_cols:
             ttl_q = f"""
                 SELECT
                     CASE
@@ -163,25 +260,95 @@ def get_performance_aggregates(
             """
             ttl_res = runner.execute(ttl_q).fetchall()
             results["ttl_dist"] = [{"bucket": r[0], "count": r[1]} for r in ttl_res]
-        else:
+            timer.mark("ttl_dist_query", _t)
+        elif _want_ttl:
             results["ttl_dist"] = []
+            timer.mark("ttl_dist_query", _t)
 
-        # 6. Backend vs Fastly Processing Scatter (Sampled)
-        if "ttfb" in actual_cols and "elapsed" in actual_cols:
-            scatter_q = f"""
+        # 6 + 7. Scatter sample + waterfall averages from a single
+        # MATERIALIZED CTE pass over the temp table. Prior shape ran two
+        # full scans of the per-request TEMP — once to build the scatter
+        # sample, once to compute the four AVG aggregates — repeating the
+        # CAST + COALESCE + GREATEST tree per row both times. The CTE is
+        # AS MATERIALIZED so DuckDB writes the derived rowset to a
+        # spool once and both consumers (sample + aggregate) read from
+        # it. Result is unioned with a row_type discriminator so a single
+        # execute() returns both the scatter rows and the waterfall row.
+        _t = _time.perf_counter()
+        _want_scatter_waterfall = _want_scatter or _want_waterfall
+        if _want_scatter_waterfall and "ttfb" in actual_cols and "elapsed" in actual_cols:
+            ottfb_expr = "COALESCE(CAST(ottfb AS DOUBLE) / 1000.0, 0)" if "ottfb" in actual_cols else "0"
+            ottlb_expr = "COALESCE(CAST(ottlb AS DOUBLE) / 1000.0, 0)" if "ottlb" in actual_cols else "0"
+
+            combined_q = f"""
+                WITH components AS MATERIALIZED (
+                    SELECT
+                        cache::VARCHAR AS cache,
+                        CAST(ttfb AS DOUBLE) * 1000.0 AS origin_ms,
+                        (CAST(elapsed AS DOUBLE) / 1000.0 - CAST(ttfb AS DOUBLE) * 1000.0) AS edge_ms,
+                        {ottfb_expr} AS origin_wait,
+                        GREATEST(0.0, {ottlb_expr} - {ottfb_expr}) AS origin_download,
+                        GREATEST(0.0, (CAST(ttfb AS DOUBLE) * 1000.0) - {ottfb_expr}) AS edge_processing,
+                        GREATEST(0.0, (CAST(elapsed AS DOUBLE) / 1000.0) - GREATEST({ottlb_expr}, CAST(ttfb AS DOUBLE) * 1000.0)) AS client_download
+                    FROM {temp_table}
+                    WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL
+                )
                 SELECT
-                    CAST(ttfb AS DOUBLE) * 1000.0 as origin_ms,
-                    (CAST(elapsed AS DOUBLE) / 1000.0 - CAST(ttfb AS DOUBLE) * 1000.0) as edge_ms,
-                    cache
-                FROM {temp_table}
-                WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL AND (CAST(elapsed AS DOUBLE) / 1000.0) >= (CAST(ttfb AS DOUBLE) * 1000.0)
-                USING SAMPLE 1000
+                    's'::VARCHAR AS row_type,
+                    origin_ms,
+                    edge_ms,
+                    cache,
+                    NULL::DOUBLE AS w_edge_processing,
+                    NULL::DOUBLE AS w_origin_wait,
+                    NULL::DOUBLE AS w_origin_download,
+                    NULL::DOUBLE AS w_client_download
+                FROM components
+                WHERE edge_ms >= 0
+                USING SAMPLE 300
+                UNION ALL
+                SELECT
+                    'w'::VARCHAR,
+                    NULL::DOUBLE,
+                    NULL::DOUBLE,
+                    NULL::VARCHAR,
+                    AVG(edge_processing),
+                    AVG(origin_wait),
+                    AVG(origin_download),
+                    AVG(client_download)
+                FROM components
             """
-            scatter_res = runner.execute(scatter_q).fetchall()
-            results["scatter"] = [{"origin": r[0], "edge": r[1], "cache": r[2]} for r in scatter_res]
-        else:
-            results["scatter"] = []
+            combined_rows = runner.execute(combined_q).fetchall()
 
+            scatter: list[dict] = []
+            waterfall_avg = {
+                "edge_processing": 0.0,
+                "origin_wait": 0.0,
+                "origin_download": 0.0,
+                "client_download": 0.0,
+            }
+            for r in combined_rows:
+                if r[0] == "s":
+                    scatter.append({"origin": r[1], "edge": r[2], "cache": r[3]})
+                else:  # 'w'
+                    waterfall_avg = {
+                        "edge_processing": float(r[4] or 0.0),
+                        "origin_wait": float(r[5] or 0.0),
+                        "origin_download": float(r[6] or 0.0),
+                        "client_download": float(r[7] or 0.0),
+                    }
+            if _want_scatter:
+                results["scatter"] = scatter
+            if _want_waterfall:
+                results["waterfall"] = {"avg": waterfall_avg}
+            timer.mark("scatter_waterfall_query", _t)
+        elif _want_scatter_waterfall:
+            if _want_scatter:
+                results["scatter"] = []
+            if _want_waterfall:
+                results["waterfall"] = {}
+            timer.mark("scatter_waterfall_query", _t)
+
+        results["section_timings"] = section_timings
         return results
 
 
@@ -200,8 +367,6 @@ def get_origin_ts(
 
     actual_cols = runner.get_schema_cols()
     if not actual_cols:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(timeseries=[], **runner.telemetry())
 
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
@@ -210,13 +375,16 @@ def get_origin_ts(
     is_microseconds = True
 
     if metric_col not in actual_cols:
-        # Fallback to Group C ttfb if ottfb requested but missing
+        # Fallback to Group C ttfb if ottfb requested but missing. The
+        # ``return`` MUST be in the else — a prior misindentation made it
+        # unconditional, so the fallback set metric_col/is_microseconds and
+        # then got discarded by an always-empty return, silently giving
+        # ttfb-only (no-ottfb) services an empty origin-latency chart.
         if origin_metric == "ttfb" and "ttfb" in actual_cols:
             metric_col = "ttfb"
             is_microseconds = False
         else:
-            from backend.repositories._base import empty_schema_response
-        return empty_schema_response(timeseries=[], **runner.telemetry())
+            return empty_schema_response(timeseries=[], **runner.telemetry())
 
     pct_val = {"p50": 0.5, "p95": 0.95, "p99": 0.99}.get(origin_percentile, 0.95)
     interval_str = safe_interval(chart_interval)
@@ -227,17 +395,15 @@ def get_origin_ts(
         # Seconds to Milliseconds
         val_expr = f'ROUND(COALESCE(PERCENTILE_CONT({pct_val}) WITHIN GROUP (ORDER BY "{metric_col}") * 1000.0, 0), 2)'
 
-    q = f"""
-        SELECT {time_bucket_select(interval_str)},
-               {val_expr} AS value
-        FROM {table_name}
-        WHERE {where_clause} AND "{metric_col}" IS NOT NULL
-        GROUP BY 1 ORDER BY 1
-    """
+    q = SQL_DASHBOARD.TIME_SERIES.format(
+        time_bucket_select=time_bucket_select(interval_str),
+        value_expr=val_expr,
+        table_name=table_name,
+        extra_where=f' AND "{metric_col}" IS NOT NULL',
+        where_clause=where_clause,
+    )
     res_cursor = runner.execute_with_retry(q, params)
     if res_cursor is None:
-        from backend.repositories._base import empty_schema_response
-
         return empty_schema_response(timeseries=[], **runner.telemetry())
 
     res = res_cursor.fetchall()

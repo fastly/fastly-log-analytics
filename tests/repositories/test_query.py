@@ -1,6 +1,7 @@
 """Tests for backend/repositories/query.py — execute_query and get_presets."""
 
 import duckdb
+import pytest
 
 from backend.repositories.query import execute_query, get_presets
 
@@ -47,15 +48,26 @@ class TestLogsTableAlias:
         assert result["row_count"] == 1
 
     def test_logs_word_boundary_not_matched_in_longer_names(self):
-        """'my_logs' or 'logs_extra' must not be rewritten."""
+        """'my_logs' or 'logs_extra' must not be rewritten by the \\blogs\\b
+        regex (the rewriter must respect word boundaries).
+
+        Fix 5 (audit F-8/9/10) layers a per-service allowlist on top —
+        the SQL validator now rejects references to tables outside
+        ``{"logs", "logs_<active_service_id>"}`` to close cross-tenant
+        catalog leakage on /api/query. So a query against ``my_logs``
+        with src={"name": "svc3"} is now rejected as a foreign table
+        even though the regex correctly leaves the identifier alone.
+        The PermissionError shape from execute_query is what the route
+        handler translates into HTTP 403.
+        """
         con = duckdb.connect(":memory:")
         con.execute("CREATE TABLE logs_svc3 (id INTEGER)")
         con.execute("CREATE TABLE my_logs (id INTEGER)")
         con.execute("INSERT INTO logs_svc3 VALUES (1)")
         con.execute("INSERT INTO my_logs VALUES (99)")
         src = {"name": "svc3"}
-        result = execute_query(con, src, "SELECT * FROM my_logs", max_rows=100, want_explain=False)
-        assert result["data"][0]["id"] == 99
+        with pytest.raises(PermissionError, match="not in the allowed set"):
+            execute_query(con, src, "SELECT * FROM my_logs", max_rows=100, want_explain=False)
 
 
 class TestGetPresets:
@@ -120,13 +132,16 @@ class TestAutoLimitPushdown:
         assert result["truncated"] is False
         assert result["total_rows"] == 5
 
-    def test_summarize_is_not_wrapped(self):
-        """SUMMARIZE returns a fixed-shape stats result; wrapping with LIMIT
-        would either error or change semantics. Must execute as-is."""
+    def test_summarize_is_rejected_at_validator(self):
+        """SUMMARIZE parses as SELECT_NODE with from_table.type == SHOW_REF,
+        so it slips past the statement-type whitelist. Fix 5 (audit
+        F-8/9/10) closes that bypass — SUMMARIZE / SHOW / DESCRIBE are now
+        rejected on the user-query path because they leak foreign service
+        table names + schemas via the pooled DuckDB catalog. Admins who
+        need catalog introspection should use an admin-only endpoint."""
         con = self._con(rows=10)
-        result = execute_query(con, None, "SUMMARIZE logs", max_rows=100, want_explain=False)
-        # SUMMARIZE returns one row per column (2 columns → 2 rows).
-        assert result["row_count"] == 2
+        with pytest.raises(PermissionError, match="SHOW / DESCRIBE / SUMMARIZE"):
+            execute_query(con, None, "SUMMARIZE logs", max_rows=100, want_explain=False)
 
     def test_count_star_is_not_wrapped(self):
         """Pure aggregates already return 1 row — wrapping is no-op but
@@ -144,4 +159,164 @@ class TestAutoLimitPushdown:
         sql = "/* This is a comment */ SELECT * FROM logs"
         result = execute_query(con, None, sql, max_rows=10, want_explain=False)
         assert result["row_count"] == 10
+        assert result["truncated"] is True
+
+
+class TestAnalystTimeWindow:
+    """H1: ``/api/query`` enforces the analyst's clamped time window.
+
+    The enforcement rebinds the per-service log table to a temp view filtered
+    to ``[start, end)`` (the finding's primary recommended fix) rather than
+    wrapping the OUTPUT in ``WHERE timestamp BETWEEN`` — the latter cannot
+    bound aggregates / ``count(*)`` (no timestamp column in the result) and is
+    defeated by aliasing the column away. ``time_filter=None`` is the admin
+    path = full retained range.
+    """
+
+    # _safe_table("svc") -> "logs_svc"; rows straddle the window below.
+    SRC = {"name": "svc"}
+    WINDOW = ("2026-06-17T09:45:00+00:00", "2026-06-17T11:00:00+00:00")
+
+    def _con(self) -> duckdb.DuckDBPyConnection:
+        con = duckdb.connect(":memory:")
+        con.execute("CREATE TABLE logs_svc (timestamp TIMESTAMPTZ, ip VARCHAR, url VARCHAR)")
+        con.executemany(
+            "INSERT INTO logs_svc VALUES (?, ?, ?)",
+            [
+                ("2026-06-17T10:00:00+00:00", "1.2.3.4", "/a"),  # in window
+                ("2026-06-17T10:30:00+00:00", "5.6.7.8", "/b"),  # in window
+                ("2026-06-01T00:00:00+00:00", "9.9.9.9", "/old"),  # outside window
+            ],
+        )
+        return con
+
+    def test_admin_no_filter_sees_full_range(self):
+        con = self._con()
+        result = execute_query(con, self.SRC, "SELECT * FROM logs ORDER BY timestamp", max_rows=100, want_explain=False)
+        assert result["row_count"] == 3
+
+    def test_analyst_window_filters_out_of_range_rows(self):
+        con = self._con()
+        result = execute_query(
+            con,
+            self.SRC,
+            "SELECT * FROM logs ORDER BY timestamp",
+            max_rows=100,
+            want_explain=False,
+            time_filter=self.WINDOW,
+        )
+        assert result["row_count"] == 2
+        assert all("9.9.9.9" not in str(row) for row in result["data"])
+
+    def test_analyst_window_bounds_aggregates(self):
+        """The temp-view rebind bounds ``count(*)`` too — an output-level
+        ``WHERE timestamp`` wrapper could not (the result has no timestamp
+        column) and would raise a Binder error here instead."""
+        con = self._con()
+        result = execute_query(
+            con, self.SRC, "SELECT count(*) AS n FROM logs", max_rows=100, want_explain=False, time_filter=self.WINDOW
+        )
+        assert result["data"][0]["n"] == 2
+
+    def test_analyst_cannot_widen_window_via_own_where(self):
+        """An analyst WHERE reaching for older rows is ANDed with the window
+        (their filter is on the outer query, ours is in the source view) — it
+        can narrow but never widen."""
+        con = self._con()
+        sql = "SELECT * FROM logs WHERE timestamp >= TIMESTAMPTZ '1970-01-01T00:00:00+00:00'"
+        result = execute_query(con, self.SRC, sql, max_rows=100, want_explain=False, time_filter=self.WINDOW)
+        assert result["row_count"] == 2
+
+    def test_analyst_window_with_cte_named_logs(self):
+        """``WITH logs AS (...)`` still parses AND stays windowed. The rebind
+        substitutes a plain view name (not a subquery), so a CTE that shadows
+        the table resolves correctly instead of producing a syntax error."""
+        con = self._con()
+        sql = "WITH logs AS (SELECT * FROM logs WHERE url LIKE '/%') SELECT count(*) AS n FROM logs"
+        result = execute_query(con, self.SRC, sql, max_rows=100, want_explain=False, time_filter=self.WINDOW)
+        assert result["data"][0]["n"] == 2
+
+    def test_default_service_table_named_logs_is_windowed(self):
+        """When the service table IS literally ``logs`` (the 'default' service)
+        the first ``logs``→table rewrite is skipped — the rebind must still
+        window it."""
+        con = duckdb.connect(":memory:")
+        con.execute("CREATE TABLE logs (timestamp TIMESTAMPTZ, ip VARCHAR)")
+        con.executemany(
+            "INSERT INTO logs VALUES (?, ?)",
+            [("2026-06-17T10:00:00+00:00", "1.1.1.1"), ("2026-06-01T00:00:00+00:00", "2.2.2.2")],
+        )
+        result = execute_query(
+            con,
+            {"name": "default"},
+            "SELECT count(*) AS n FROM logs",
+            max_rows=100,
+            want_explain=False,
+            time_filter=self.WINDOW,
+        )
+        assert result["data"][0]["n"] == 1
+
+    def test_window_view_is_dropped_after_call(self):
+        """The reserved temp view must not linger on the pooled connection —
+        the next request (different session / service / window) reuses it."""
+        from backend.repositories.query import _ANALYST_WINDOW_VIEW
+
+        con = self._con()
+        execute_query(con, self.SRC, "SELECT * FROM logs", max_rows=100, want_explain=False, time_filter=self.WINDOW)
+        with pytest.raises(duckdb.Error):
+            con.execute(f"SELECT * FROM {_ANALYST_WINDOW_VIEW}").fetchall()
+
+    def test_window_view_dropped_even_when_query_fails(self):
+        """A failing user query must not leave the window view behind."""
+        from backend.repositories.query import _ANALYST_WINDOW_VIEW
+
+        con = self._con()
+        with pytest.raises(Exception):  # noqa: B017 — Binder error on a bad column
+            execute_query(
+                con, self.SRC, "SELECT no_such_col FROM logs", max_rows=100, want_explain=False, time_filter=self.WINDOW
+            )
+        with pytest.raises(duckdb.Error):
+            con.execute(f"SELECT * FROM {_ANALYST_WINDOW_VIEW}").fetchall()
+
+
+class TestValueShapeMasking:
+    """H2: ``mask_ips`` masks result IPs by VALUE, not by output column name."""
+
+    def _con(self) -> duckdb.DuckDBPyConnection:
+        con = duckdb.connect(":memory:")
+        con.execute("CREATE TABLE logs (timestamp TIMESTAMPTZ, ip VARCHAR, url VARCHAR)")
+        con.execute("INSERT INTO logs VALUES (TIMESTAMPTZ '2026-06-17T10:00:00+00:00', '1.2.3.4', '/path')")
+        return con
+
+    def test_mask_ips_survives_column_aliasing(self):
+        """``SELECT ip AS addr`` defeats key-name masking but NOT value-shape
+        masking — this is the H2 bypass scenario."""
+        con = self._con()
+        result = execute_query(
+            con, None, "SELECT ip AS addr, url FROM logs", max_rows=100, want_explain=False, mask_ips=True
+        )
+        row = result["data"][0]
+        assert row["addr"] == "1.2.3.xxx"
+        assert row["url"] == "/path"  # non-IP cell untouched
+
+    def test_mask_ips_false_returns_raw_ip(self):
+        con = self._con()
+        result = execute_query(
+            con, None, "SELECT ip AS addr FROM logs", max_rows=100, want_explain=False, mask_ips=False
+        )
+        assert result["data"][0]["addr"] == "1.2.3.4"
+
+
+class TestMaxRowsClamp:
+    """M1: execute_query re-clamps max_rows to MAX_QUERY_ROWS regardless of the
+    requested value (defense-in-depth for callers that bypass the model)."""
+
+    def test_max_rows_clamped_to_ceiling(self):
+        from backend.repositories.query import MAX_QUERY_ROWS
+
+        con = duckdb.connect(":memory:")
+        con.execute("CREATE TABLE logs (id INTEGER)")
+        con.executemany("INSERT INTO logs VALUES (?)", [(i,) for i in range(MAX_QUERY_ROWS + 50)])
+        result = execute_query(con, None, "SELECT * FROM logs ORDER BY id", max_rows=10**9, want_explain=False)
+        assert result["row_count"] == MAX_QUERY_ROWS
         assert result["truncated"] is True

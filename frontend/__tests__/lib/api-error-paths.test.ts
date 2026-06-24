@@ -37,9 +37,9 @@
  * it can rely on a stable ``.message``.
  */
 import { renderHook, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider, useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { http, HttpResponse } from 'msw'
-import React from 'react'
 import { describe, it, expect, vi } from 'vitest'
 
 import { server } from '../../tests/msw/server'
@@ -59,14 +59,8 @@ vi.mock('@/stores/serviceStore', () => {
 })
 
 function wrapper() {
-  const qc = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false, gcTime: 0 },
-      mutations: { retry: false },
-    },
-  })
-  return ({ children }: { children: React.ReactNode }) =>
-    React.createElement(QueryClientProvider, { client: qc }, children)
+  const qc = createTestQueryClient({ queries: { gcTime: 0 }, mutations: { retry: false } })
+  return makeQueryWrapper(qc)
 }
 
 describe('extractApiError shape coverage', () => {

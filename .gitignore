@@ -3,10 +3,10 @@ setup-state.json
 *.duckdb
 *.duckdb.wal
 /configs/*
-# Security: the SSH known_hosts pin IS source-controlled — it's the
-# trust anchor for the reverse-tunnel host-key check. Override the
-# blanket configs/* ignore.
-!/configs/ssh_known_hosts
+# Keep the configs/ directory present on a fresh clone so "drop a JSON
+# config here" works without a manual mkdir; the dir's real contents stay
+# ignored by the blanket rule above.
+!/configs/.gitkeep
 /data/*
 /data/system/*
 __pycache__/
@@ -57,26 +57,62 @@ frontend/*_output.txt
 # Reproducible via scripts/scoring/extract_traces.py against local data.
 tests/fixtures/scoring/
 
+# Per-run perf output written by scripts/emit_perf_latest.py and read by
+# scripts/perf_gate.sh. The tracked baseline.json is the committed gate input.
+tests/perf/latest.json
+
 # Trained matrix.json carries real customer route names. Regenerable via
 # scripts/scoring/train.py against a fresh trace extract.
 compute/scorer/matrix.json
 
+# Per-tenant matrices pulled from FOS on every backend startup
+# (see backend/main.py:_ensure_scoring_matrix). matrix.default.json
+# stays tracked — that's the in-repo fallback the scoring endpoint
+# uses when neither the shared matrix.json nor a tenant matrix exists.
+compute/scorer/matrix_*.json
+
 # Rust build artifacts.
 compute/scorer/target/
 compute/scorer/bin/
-compute/scorer/pkg/
+# Ignore the pkg build dir EXCEPT the committed, matrix-less Wasm package the
+# backend ships in its image and deploys via the Fastly API (no toolchain on
+# the VM). Rebuild with `make scorer-package` and recommit on scorer changes.
+compute/scorer/pkg/*
+!compute/scorer/pkg/session-scorer.tar.gz
 
 # Per-deployment secrets: AES cookie keys, deploy-time IDs the service files
 # might reference. NEVER commit.
 .scoring/
 .aider*
 
+# Snapshot of the GCE VM's restart script — drift-prone copy that also
+# leaks VM name/zone/mount paths. The canonical version lives on the VM
+# at ~/restart.sh; this local copy is for reference only.
+/scripts/restart.sh.deployed
+
 # Ad-hoc working directory for local profiling — HAR captures, per-page JSON
 # summaries, query trace dumps. The reusable harness scripts (profile.js,
 # split_per_page.py) live here for now; treat the whole tree as throwaway.
 /scratch/
 
+# Performance-audit campaign artifacts: HAR captures, per-sample telemetry,
+# aggregated p50/p95/p99 summaries, per-page reports + improvement plans.
+# Throwaway — regenerable by re-running scratch/perf_audit.mjs.
+/performance-report/
+
+# Architectural baseline-metrics snapshots from scripts/baseline_metrics.sh
+# (make baseline). Generated, throwaway — regenerable any time.
+/.metrics/
+
 # Local-only VS Code config (file-watcher / Pylance excludes for the
 # regenerating .next + cache trees). Personal to each contributor's editor
 # setup — not promoted to the repo by default.
 .vscode/
+
+# Playwright artifacts — generated per-run, throwaway. The specs
+# themselves live under frontend/e2e/ and ARE tracked.
+/frontend/playwright-report/
+/frontend/test-results/
+# Separate Next.js dev cache for the Playwright dev server (port 13004)
+# so its lockfile doesn't collide with the dev shell on 13002.
+/frontend/.next-e2e/

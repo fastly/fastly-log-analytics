@@ -227,16 +227,28 @@ def evaluate_from_persisted_scores(
 
 
 # Known L1/L2 reason atoms emitted by the live scorer. Sourced from
-# compute/scorer/src/scorer.rs — any new atom added there needs to be
-# mirrored here (or, longer-term, derived from /scoring/health's
-# top_reasons list dynamically). The two compute-side failure atoms
-# (compute-unavailable / unauthorized) are excluded — they indicate
-# scorer outages, not detection signals, and would skew per-rule AUC.
+# compute/scorer/src/scorer.rs (mirrored exactly by the Python reference in
+# backend/scoring/scorer.py) — any new atom added there needs to be mirrored
+# here (or, longer-term, derived from /scoring/health's top_reasons list
+# dynamically). The compute-side failure atoms are excluded — they indicate
+# scorer outages, not detection signals, and would skew per-rule AUC. Those are
+# the compute-unavailable-* family (the scorer's 401-unauthorized lands here as
+# compute-unavailable-401 once VCL rewrites the non-200 — there is no bare
+# "unauthorized" log atom; EC-05) and the 200 "internal-error-keys" reason.
+#
+# The cookie atoms come from scorer.rs's `format!("cookie-{}", compliance)`
+# over {missing, expired, replayed} plus the literal "cookie-tampered". The
+# three non-missing cookie atoms were absent here, so their per-rule AUC
+# never surfaced; "rare-transition" was listed but is emitted by neither
+# scorer (the L2 rule emits "low-transition-prob"), so it produced a
+# perpetually-empty bucket.
 _KNOWN_REASON_ATOMS = (
     "cookie-missing",
+    "cookie-tampered",
+    "cookie-expired",
+    "cookie-replayed",
     "impossibly-fast",
     "robotic-consistency",
-    "rare-transition",
     "low-transition-prob",
 )
 

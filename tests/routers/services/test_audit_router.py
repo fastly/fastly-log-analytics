@@ -7,7 +7,7 @@ to ``test_service_source``) and seed rows via ``metadata_db.record_audit``.
 
 from __future__ import annotations
 
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
 from tests.conftest import MOCK_SERVICE_ID
 
 

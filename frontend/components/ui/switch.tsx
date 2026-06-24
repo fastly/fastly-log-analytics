@@ -11,6 +11,15 @@ function Switch({
 }: SwitchPrimitive.Root.Props & {
   size?: "sm" | "default"
 }) {
+  // M-14 (a11y): BaseUI's <Switch.Root> renders a role=switch button with
+  // no inner text; axe reports critical/serious "aria-toggle-field-name"
+  // violations whenever the call site doesn't pass aria-label or
+  // aria-labelledby. Default to a generic "Toggle" so the residual count
+  // is bounded; call sites with a visible adjacent <Label> should still
+  // override with aria-labelledby pointing at the real label.
+  const ariaLabel = (props as any)["aria-label"]
+  const ariaLabelledby = (props as any)["aria-labelledby"]
+  const labelProps = !ariaLabel && !ariaLabelledby ? { "aria-label": "Toggle" } : {}
   return (
     <SwitchPrimitive.Root
       data-slot="switch"
@@ -19,6 +28,7 @@ function Switch({
         "peer group/switch relative inline-flex shrink-0 items-center rounded-full border border-transparent transition-all outline-none cursor-pointer after:absolute after:-inset-x-3 after:-inset-y-2 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 data-[size=default]:h-[18.4px] data-[size=default]:w-[32px] data-[size=sm]:h-[14px] data-[size=sm]:w-[24px] dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 data-checked:bg-primary data-unchecked:bg-input dark:data-unchecked:bg-input/80 data-disabled:cursor-not-allowed data-disabled:opacity-50",
         className
       )}
+      {...labelProps}
       {...props}
     >
       <SwitchPrimitive.Thumb

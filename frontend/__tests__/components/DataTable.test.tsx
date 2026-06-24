@@ -17,11 +17,20 @@
  * invariants, column visibility, and the resize-race guard.
  */
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import { describe, it, expect, beforeAll, afterEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest'
 import { axe } from 'vitest-axe'
 import React from 'react'
 import { DataTable } from '@/components/DataTable/DataTable'
 import type { ColumnDef } from '@tanstack/react-table'
+
+vi.mock('@tanstack/react-virtual', () => {
+  return {
+    useVirtualizer: (options: any) => ({
+      getVirtualItems: () => Array.from({ length: options.count }).map((_, i) => ({ index: i, start: i * 40, end: (i + 1) * 40 })),
+      getTotalSize: () => options.count * 40,
+    })
+  }
+})
 
 beforeAll(() => {
   global.ResizeObserver = class {
@@ -139,10 +148,14 @@ describe('DataTable', () => {
   // <table>/<thead>/<tbody>. This guard catches regressions where a future
   // refactor swaps in <div role="grid"> without proper ARIA wiring.
   it('has no axe-detectable a11y violations', async () => {
+    // color-contrast was previously disabled — masked 435 occurrences of
+    // text-muted-foreground at 10-11px that failed WCAG AA. The token has
+    // since been darkened to oklch(0.40), which clears AA on the muted/10
+    // and muted/20 backgrounds the empty-state and footer surfaces use.
+    // Re-enabled so future regressions of the token (or new sites that
+    // pair text-muted-foreground with even-lighter backgrounds) trip CI.
     const { container } = render(<DataTable columns={COLUMNS} data={DATA} hideToolbar />)
-    const results = await axe(container, {
-      rules: { 'color-contrast': { enabled: false } },
-    })
+    const results = await axe(container)
     expect(results).toHaveNoViolations()
   })
 

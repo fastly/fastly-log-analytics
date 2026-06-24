@@ -66,34 +66,16 @@ export function useCardVisibility(
     return defaultVisible
   }, [storageKey, defaultVisible, migrationKey, migrationVersion, migrationRemoveStr, migrationAddStr])
 
-  // Read localStorage SYNCHRONOUSLY in the useState initializer so
-  // ``visibleCards`` is correct on the very first paint — not "empty
-  // until useEffect fires next tick". The previous deferred-load
-  // shape (``useState(defaultVisible)`` + ``useEffect(setVisibleCards(load()))``)
-  // meant first-render ``visibleCards.size`` was always 0 when callers
-  // passed defaults derived from a still-loading list (e.g. dashboard
-  // page passes ``allCards.filter(...).map(c.id)`` and allCards is []
-  // until the catalog query resolves). Components gating their loading-
-  // skeleton on ``visibleCards.size > 0`` then never rendered the
-  // skeleton on the first paint — visible as the cards section being
-  // absent during the catalog-loading gap, with the raw-logs table
-  // jumping when the section appeared.
-  const [visibleCards, setVisibleCards] = useState<Set<string>>(() => {
-    if (typeof window === 'undefined') return defaultVisible
-    try {
-      const stored = localStorage.getItem(storageKey)
-      if (!stored) return defaultVisible
-      const set = new Set<string>(JSON.parse(stored))
-      // NB: migration is intentionally NOT applied here — the
-      // useEffect below will re-run load() after mount and apply it
-      // then. This keeps the initial render fast (no JSON.parse of
-      // migration arrays in the hot path) and the migration's
-      // localStorage writes off the critical path.
-      return set
-    } catch {
-      return defaultVisible
-    }
-  })
+  // SSR-safe initial state: ALWAYS start from the deterministic default set.
+  // Reading localStorage in this initializer was correct for first-paint on a
+  // pure CSR app, but under the force-dynamic SSR layout it made the first
+  // client render diverge from the server's default-set render — the
+  // visibility-count badge and the rendered card set differed → React #418 on
+  // /charts and the dashboard for any user who had toggled card visibility.
+  // The useEffect below promotes to the persisted value (and applies the
+  // migration) right after mount, so the saved choice still lands — just one
+  // tick later, off the hydration path.
+  const [visibleCards, setVisibleCards] = useState<Set<string>>(defaultVisible)
 
   // Keep the load() reactive so callers whose ``allIds`` / ``defaultIds``
   // change after mount (e.g. dashboard's allCards arriving from the

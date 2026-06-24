@@ -8,7 +8,7 @@ Three endpoints:
 
 from __future__ import annotations
 
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
 from tests.conftest import MOCK_SERVICE_ID
 
 
@@ -170,8 +170,8 @@ def test_delete_cron_log_removes_row(client, test_service_source):
 
     r = client.delete(f"/api/cron-runs/{kill}", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
-    assert r.status_code == 200
-    assert r.json()["ok"] is True
+    assert r.status_code == 204
+    assert r.content == b""
 
     con = metadata_db.get_con(test_service_source["name"])
     remaining = [row[0] for row in con.execute("SELECT id FROM cron_runs").fetchall()]
@@ -180,9 +180,9 @@ def test_delete_cron_log_removes_row(client, test_service_source):
 
 
 def test_delete_cron_log_unknown_id_is_noop(client, test_service_source):
-    """Per the impl: delete is best-effort; deleting a non-existent id returns 200."""
+    """Per the impl: delete is best-effort; deleting a non-existent id succeeds."""
     r = client.delete("/api/cron-runs/9999999", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
-    assert r.status_code == 200
+    assert r.status_code == 204
 
 
 # ── DELETE /api/cron-runs (bulk purge) ───────────────────────────────────────
@@ -193,8 +193,8 @@ def test_purge_all_cron_logs(client, test_service_source):
 
     r = client.delete("/api/cron-runs", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
-    assert r.status_code == 200
-    assert r.json()["ok"] is True
+    assert r.status_code == 204
+    assert r.content == b""
     con = metadata_db.get_con(test_service_source["name"])
     assert con.execute("SELECT count(*) FROM cron_runs").fetchone()[0] == 0
 
@@ -215,8 +215,67 @@ def test_purge_by_task_only_removes_matching(client, test_service_source):
         headers={"x-fastly-service-id": MOCK_SERVICE_ID},
     )
 
-    assert r.status_code == 200
+    assert r.status_code == 204
     con = metadata_db.get_con(test_service_source["name"])
     remaining_tasks = [row[0] for row in con.execute("SELECT task FROM cron_runs").fetchall()]
     assert "sync" not in remaining_tasks
     assert "commit" in remaining_tasks
+
+
+# ── Error paths (pin the 500 fallbacks) ──────────────────────────────────────
+
+
+def test_get_cron_logs_returns_500_on_repo_failure(client, monkeypatch):
+    """The router catches any exception from the repository and surfaces
+    it as a 500 with the ``raise_internal`` shape: generic ``error``
+    code + ``error_id`` for correlation, never the raw exception
+    string (that would leak repo internals / SQL fragments). Without
+    this test the except branch is silently uncovered — a future
+    refactor that drops the try/except would still pass CI.
+    """
+    from backend.routers.services import cron as _cron_router
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("simulated repo failure with internal SQL leak")
+
+    monkeypatch.setattr(_cron_router, "get_cron_logs", _boom)
+    r = client.get("/api/cron-runs", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert r.status_code == 500
+    body = r.json()["detail"]
+    assert body["error"] == "cron_logs_read_failed"
+    assert "error_id" in body
+    assert "simulated repo failure" not in body["error"]
+
+
+def test_delete_cron_log_returns_500_on_repo_failure(client, monkeypatch):
+    from backend.routers.services import cron as _cron_router
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("simulated delete failure")
+
+    monkeypatch.setattr(_cron_router, "delete_cron_log", _boom)
+    r = client.delete("/api/cron-runs/1", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert r.status_code == 500
+    body = r.json()["detail"]
+    assert body["error"] == "cron_log_delete_failed"
+    assert "error_id" in body
+    assert "simulated delete failure" not in body["error"]
+
+
+def test_purge_cron_logs_returns_500_on_repo_failure(client, monkeypatch):
+    """Purge has a slightly different error shape (``ok: False``) so the
+    body asserts both fields, not just the error."""
+    from backend.routers.services import cron as _cron_router
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("simulated purge failure")
+
+    monkeypatch.setattr(_cron_router, "purge_cron_logs", _boom)
+    r = client.delete("/api/cron-runs", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert r.status_code == 500
+    detail = r.json()["detail"]
+    # raise_internal hides the upstream exception message (security) and
+    # returns a machine-readable code + correlation id instead. Adjusted
+    # from the pre-refactor assertion that pinned the leaked exception text.
+    assert detail["error"] == "cron_logs_purge_failed"
+    assert "error_id" in detail and len(detail["error_id"]) == 8

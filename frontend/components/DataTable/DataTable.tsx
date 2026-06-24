@@ -7,37 +7,17 @@ import {
   SortingState,
   VisibilityState,
   ColumnOrderState,
-  ColumnResizeMode,
-  flexRender,
   getCoreRowModel,
   getFilteredRowModel,
   getPaginationRowModel,
   getSortedRowModel,
   useReactTable,
 } from '@tanstack/react-table'
-import { ChevronDown, GripHorizontal, ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
-import { cn } from '@/lib/utils'
 
-import { Button, buttonVariants } from '@/components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { Input } from '@/components/ui/input'
+import { useVirtualizer } from '@tanstack/react-virtual'
+
 import {
   Table,
-  TableBody,
-  TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
@@ -57,110 +37,14 @@ import {
   arrayMove,
   SortableContext,
   horizontalListSortingStrategy,
-  useSortable,
 } from '@dnd-kit/sortable'
-import { CSS } from '@dnd-kit/utilities'
 
-// Draggable Header Component
-const DraggableTableHeader = ({ header }: { header: any }) => {
-  const {
-    attributes,
-    isDragging,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-  } = useSortable({
-    id: header.column.id,
-  })
-
-  const style: React.CSSProperties = {
-    opacity: isDragging ? 1 : 1,
-    transform: CSS.Translate.toString(transform),
-    transition,
-    whiteSpace: 'nowrap',
-    width: header.column.getSize(),
-    zIndex: isDragging ? 10 : 0,
-    position: 'relative',
-  }
-
-  return (
-    <TableHead 
-      ref={setNodeRef} 
-      style={style} 
-      className={`relative z-0 group select-none border-r last:border-r-0 px-0 ${isDragging ? 'bg-accent shadow-md rounded-md ring-1 ring-border' : 'bg-transparent'}`}
-    >
-      <div className="flex items-center justify-between gap-1 w-full h-full pl-3 pr-2 overflow-hidden">
-        <div 
-          className={cn("flex-1 flex items-center hover:text-foreground transition-colors overflow-hidden", header.column.getCanSort() ? "cursor-pointer" : "")}
-          onClick={header.column.getToggleSortingHandler()}
-        >
-          <span className="truncate">
-            {header.isPlaceholder
-              ? null
-              : flexRender(
-                  header.column.columnDef.header,
-                  header.getContext()
-                )}
-          </span>
-          {header.column.getCanSort() && !header.isPlaceholder && (
-            <span className="ml-2 flex items-center shrink-0">
-              {{
-                asc: <ArrowUp className="w-3.5 h-3.5" />,
-                desc: <ArrowDown className="w-3.5 h-3.5" />,
-              }[header.column.getIsSorted() as string] ?? (
-                <ArrowUpDown className="w-3.5 h-3.5 opacity-0 group-hover:opacity-50 transition-opacity" />
-              )}
-            </span>
-          )}
-        </div>
-        <div 
-          {...attributes} 
-          {...listeners} 
-          className="cursor-grab text-muted-foreground/30 hover:text-foreground active:cursor-grabbing p-1 rounded hover:bg-muted opacity-40 group-hover:opacity-100 transition-opacity shrink-0"
-          title="Drag to reorder"
-        >
-          <GripHorizontal className="w-3.5 h-3.5" />
-        </div>
-        <div
-          // Guard `getResizeHandler` against the column being removed
-          // mid-render: when a column toggles off, the DOM header lingers
-          // for one frame and tanstack-table's resize handler throws
-          // "Column with id '<id>' does not exist" if the user happens to
-          // touch the resize handle in that window. Lazy-call the handler
-          // and swallow the lookup error.
-          onMouseDown={(e) => {
-            try { header.getResizeHandler()(e) } catch { /* stale header */ }
-          }}
-          onTouchStart={(e) => {
-            try { header.getResizeHandler()(e) } catch { /* stale header */ }
-          }}
-          className={cn(
-            "absolute right-0 top-0 h-full w-2 cursor-col-resize hover:bg-primary/30 transition-colors z-10 touch-none",
-            header.column.getIsResizing() ? "bg-primary opacity-100" : "opacity-0 group-hover:opacity-100"
-          )}
-        />
-      </div>
-    </TableHead>  )
-}
-
-// Standard Cell Component (Cells don't need to be draggable, only headers do to set column order)
-const StandardTableCell = ({ cell }: { cell: any }) => {
-  const isActions = cell.column.id === 'actions' || cell.column.id === 'selection'
-
-  return (
-    <TableCell 
-      className="pl-3 pr-2"
-      style={{
-        width: cell.column.getSize(),
-      }}
-    >
-      <div className={cn(!isActions && "truncate")}>
-        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-      </div>
-    </TableCell>
-  )
-}
+import { DraggableTableHeader } from './Header'
+import { DataTableToolbar } from './Toolbar'
+import { DataTableBody } from './DataTableBody'
+import { DataTablePagination } from './DataTablePagination'
+import { useDataTableState } from './useDataTableState'
+import { reportUxEvent } from '@/lib/ux-telemetry'
 
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[]
@@ -181,37 +65,25 @@ interface DataTableProps<TData, TValue> {
   columnVisibility?: VisibilityState
   onColumnVisibilityChange?: (visibility: VisibilityState) => void
   emptyMessage?: string
+  /** Optional secondary line shown beneath emptyMessage — usually a hint
+   *  like "Try widening your time range" or "Adjust the FilterBar".
+   *  Skipped when undefined so callers that don't opt in render the
+   *  prior single-line empty state. */
+  emptyHint?: React.ReactNode
+  /** Optional clear-filter affordance shown in the empty state. When set,
+   *  renders a small "Clear filter" button under the message; clicking
+   *  fires this callback. Surfacing it on the empty row means users with
+   *  an over-narrow filter aren't stuck staring at "No results." with no
+   *  visible escape. */
+  onClearFilter?: () => void
   onRowClick?: (row: TData) => void
+  /** Optional per-row class hook. Receives the row's ``original`` data and
+   *  returns a Tailwind class string (or empty). Lets callers tint live vs
+   *  faded rows without forking the table component. Opt-in; tables that
+   *  don't pass this prop render unchanged. */
+  getRowClassName?: (row: TData) => string
+  tableCaption?: string
 }
-
-// Memoized Row Component to prevent redundant re-renders.
-// columnVisibility is passed only so React.memo re-renders when visibility
-// changes — TanStack Table's row references are stable across visibility
-// updates, so without this prop the memo would return stale visible cells.
-const MemoizedTableRow = React.memo(({
-  row,
-  onRowClick,
-  columns: _columns,
-  columnVisibility: _columnVisibility,
-}: {
-  row: any,
-  onRowClick?: (data: any) => void
-  columns: any[]
-  columnVisibility?: VisibilityState
-}) => {
-  return (
-    <TableRow
-      data-state={row.getIsSelected() && "selected"}
-      className={cn(onRowClick && "cursor-pointer hover:bg-muted/50")}
-      onClick={() => onRowClick && onRowClick(row.original)}
-    >
-      {row.getVisibleCells().map((cell: any) => (
-        <StandardTableCell key={cell.id} cell={cell} />
-      ))}
-    </TableRow>
-  )
-})
-MemoizedTableRow.displayName = 'MemoizedTableRow'
 
 function DataTableImpl<TData, TValue>({
   columns,
@@ -232,65 +104,121 @@ function DataTableImpl<TData, TValue>({
   columnVisibility: controlledVisibility,
   onColumnVisibilityChange,
   emptyMessage = "No results.",
-  onRowClick
+  emptyHint,
+  onClearFilter,
+  onRowClick,
+  getRowClassName,
+  tableCaption
 }: DataTableProps<TData, TValue>) {
-  const isControlled = controlledVisibility !== undefined
-  const isSortingControlled = controlledSorting !== undefined
-  const [internalSorting, setInternalSorting] = React.useState<SortingState>(initialSorting)
-  const sorting = isSortingControlled ? controlledSorting : internalSorting
+  const { sorting, isSortingControlled, columnVisibility, setColumnVisibility, handleSortingChange } =
+    useDataTableState({
+      controlledSorting,
+      onSortingChange,
+      initialSorting,
+      controlledVisibility,
+      onColumnVisibilityChange,
+      initialVisibility,
+    })
 
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([])
-  const [internalVisibility, setInternalVisibility] = React.useState<VisibilityState>(initialVisibility)
-  const columnVisibility = isControlled ? controlledVisibility! : internalVisibility
-  const setColumnVisibility = (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
-    const next = typeof updater === 'function' ? updater(columnVisibility) : updater
-    if (isControlled) {
-      onColumnVisibilityChange?.(next)
-    } else {
-      setInternalVisibility(next)
-    }
-  }
 
-  const handleSortingChange = (updater: SortingState | ((prev: SortingState) => SortingState)) => {
-    const next = typeof updater === 'function' ? updater(sorting) : updater
-    if (isSortingControlled) {
-      onSortingChange?.(next)
-    } else {
-      setInternalSorting(next)
+  // Column order: derived from the ``columns`` prop by default so it stays
+  // in lockstep with dynamic column-set changes (e.g. sessions/page.tsx
+  // adds ja4/edge/rtt cols only after data lands with has_* flags).
+  //
+  // The previous useState+useEffect pattern lagged one render — between
+  // the columns change and the effect that synced ``columnOrder``,
+  // ``columnOrder`` still held the OLD ID list. The MemoizedTableRow
+  // captured the cells in that old order while header rendering used
+  // the new columns prop, so headers and cells visibly misaligned on
+  // /sessions and any other table that ships dynamic columns (user
+  // report 2026-06-10).
+  //
+  // ``userColumnOrder`` is the drag-reorder override; it survives across
+  // re-renders only while the column SET (the set of IDs, not the order)
+  // is unchanged. Adding or removing a column invalidates the override
+  // and we fall back to the columns-array order so headers and cells
+  // can't desync.
+  const defaultColumnOrder = React.useMemo<ColumnOrderState>(() => {
+    const allIds = columns.map(
+      (column) => column.id as string || (column as any).accessorKey as string,
+    )
+    if (initialColumnOrder && initialColumnOrder.length > 0) {
+      const validInitial = initialColumnOrder.filter((id) => allIds.includes(id))
+      const remaining = allIds.filter((id) => !validInitial.includes(id))
+      return [...validInitial, ...remaining]
     }
-  }
+    return allIds
+  }, [columns, initialColumnOrder])
 
-  const [columnOrder, setColumnOrder] = React.useState<ColumnOrderState>([])
+  const [userColumnOrder, setUserColumnOrder] = React.useState<ColumnOrderState | null>(null)
+
+  const columnOrder = React.useMemo<ColumnOrderState>(() => {
+    if (!userColumnOrder) return defaultColumnOrder
+    // The length + set-membership guard below is load-bearing: when a
+    // dynamic column changes (add/remove), userColumnOrder still
+    // references the OLD ids for one render. Without this check the
+    // table renders stale ids and headers/cells desync until the next
+    // userColumnOrder update.
+    if (userColumnOrder.length !== defaultColumnOrder.length) return defaultColumnOrder
+    const userSet = new Set(userColumnOrder)
+    for (const id of defaultColumnOrder) {
+      if (!userSet.has(id)) return defaultColumnOrder
+    }
+    return userColumnOrder
+  }, [userColumnOrder, defaultColumnOrder])
+
+  // Adapter for TanStack's ``OnChangeFn<ColumnOrderState>`` contract — the
+  // table calls it with either a ColumnOrderState or an updater function.
+  // We collapse both forms into a concrete ColumnOrderState and store it
+  // on ``userColumnOrder`` (which is nullable; the updater needs the
+  // derived ``columnOrder`` as its "previous" basis when no user override
+  // exists yet).
+  const setColumnOrder = React.useCallback(
+    (next: ColumnOrderState | ((prev: ColumnOrderState) => ColumnOrderState)) => {
+      const resolved = typeof next === 'function' ? next(columnOrder) : next
+      setUserColumnOrder(resolved)
+    },
+    [columnOrder],
+  )
+
   const [rowSelection, setRowSelection] = React.useState({})
   const [pagination, setPagination] = React.useState({
     pageIndex: 0,
     pageSize: 50,
   })
 
-  // Memoize column defs
   const tableColumns = React.useMemo(() => columns, [columns])
-  const tableData = React.useMemo(() => data, [data])
+  // Stabilise the data reference. Callers commonly pass ``query?.rows || []``,
+  // which is a BRAND-NEW array on every render while the query is
+  // loading/empty. TanStack's autoResetPageIndex treats each new data identity
+  // as a data change and fires setPagination → re-render → new array →
+  // infinite loop ("Maximum update depth exceeded"), freezing the page (e.g.
+  // the always-mounted Data Management tabs). Reuse the previous array whenever
+  // the contents are referentially identical so autoReset still fires on a REAL
+  // data change but not on an unstable-but-equal reference. Row arrays here are
+  // bounded, so the per-change shallow scan is cheap.
+  const prevDataRef = React.useRef(data)
+  const tableData = React.useMemo(() => {
+    const prev = prevDataRef.current
+    if (
+      Array.isArray(prev) &&
+      Array.isArray(data) &&
+      prev !== data &&
+      prev.length === data.length &&
+      prev.every((row, i) => row === data[i])
+    ) {
+      return prev
+    }
+    prevDataRef.current = data
+    return data
+  }, [data])
 
   React.useEffect(() => {
     if (Object.keys(initialVisibility).length > 0) {
       setColumnVisibility(initialVisibility)
     }
   }, [initialVisibility])
-
-  // Ensure column order updates if columns array changes (e.g., dynamic queries), but respect initial order if provided initially
-  React.useEffect(() => {
-    if (initialColumnOrder && initialColumnOrder.length > 0) {
-      // Find all column IDs
-      const allIds = columns.map((column) => column.id as string || (column as any).accessorKey as string)
-      // Filter initial order to only include valid IDs
-      const validInitial = initialColumnOrder.filter(id => allIds.includes(id))
-      // Append any remaining columns not in initialColumnOrder
-      const remaining = allIds.filter(id => !validInitial.includes(id))
-      setColumnOrder([...validInitial, ...remaining])
-    } else {
-      setColumnOrder(columns.map((column) => column.id as string || (column as any).accessorKey as string))
-    }
-  }, [columns, initialColumnOrder])
 
   const table = useReactTable({
     data: tableData,
@@ -317,6 +245,17 @@ function DataTableImpl<TData, TValue>({
     },
   })
 
+  const tableContainerRef = React.useRef<HTMLDivElement>(null)
+
+  const { rows } = table.getRowModel()
+
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => tableContainerRef.current,
+    estimateSize: () => 40,
+    overscan: 10,
+  })
+
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } }),
@@ -326,10 +265,30 @@ function DataTableImpl<TData, TValue>({
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
     if (active && over && active.id !== over.id) {
-      setColumnOrder((columnOrder) => {
-        const oldIndex = columnOrder.indexOf(active.id as string)
-        const newIndex = columnOrder.indexOf(over.id as string)
-        return arrayMove(columnOrder, oldIndex, newIndex)
+      // Resolve indices against the CURRENT derived ``columnOrder`` (never
+      // null) rather than the previous override state (which can be null
+      // before the user drags anything). Otherwise the first drag from a
+      // fresh table would hit ``null.indexOf``.
+      const oldIndex = columnOrder.indexOf(active.id as string)
+      const newIndex = columnOrder.indexOf(over.id as string)
+      if (oldIndex < 0 || newIndex < 0) return
+      setColumnOrder(arrayMove(columnOrder, oldIndex, newIndex))
+      // Fire a UX-telemetry event so we can later slice "which DataTable
+      // callers actually get reordered" before deciding which of the
+      // remaining ~25 callers should migrate to DataTableReadonly (which
+      // drops @dnd-kit from the bundle). component_id falls back through
+      // tableCaption → string-title → 'unnamed' so log slicing has a key
+      // even when callers don't pass either.
+      reportUxEvent({
+        event: 'column_reordered',
+        component_id:
+          tableCaption ?? (typeof title === 'string' ? title : 'unnamed'),
+        details: {
+          column_id: String(active.id),
+          from_index: oldIndex,
+          to_index: newIndex,
+          column_count: columnOrder.length,
+        },
       })
     }
   }
@@ -359,56 +318,13 @@ function DataTableImpl<TData, TValue>({
       {!hideToolbar && (renderToolbar ? (
         renderToolbar(table)
       ) : (
-      <div className={cn("flex items-center gap-4", compactToolbar ? "mb-2" : "py-4 px-4")}>
-        {title && (
-          <div className="flex-1">{title}</div>
-        )}
-        {searchKey && (
-          <Input
-            placeholder={`Filter ${searchKey}...`}
-            value={(table.getColumn(searchKey)?.getFilterValue() as string) ?? ""}
-            onChange={(event) =>
-              table.getColumn(searchKey)?.setFilterValue(event.target.value)
-            }
-            className="max-w-sm h-8"
-          />
-        )}
-        {extraToolbarContent && (
-          <div className="flex items-center gap-2">
-            {extraToolbarContent}
-          </div>
-        )}
-        <div className="ml-auto flex items-center gap-2">
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              className={buttonVariants({ variant: "outline", size: compactToolbar ? "sm" : "default", className: "h-8" })}
-            >
-              <span className={cn("flex items-center", compactToolbar && "text-xs")}>
-                Columns <ChevronDown className="ml-2 h-4 w-4" />
-              </span>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-auto min-w-[200px]">
-              {table
-                .getAllColumns()
-                .filter((column) => column.getCanHide())
-                .map((column) => {
-                  return (
-                    <DropdownMenuCheckboxItem
-                      key={column.id}
-                      className="whitespace-nowrap"
-                      checked={column.getIsVisible()}
-                      onCheckedChange={(value) =>
-                        column.toggleVisibility(!!value)
-                      }
-                    >
-                      {(column.columnDef.meta as any)?.label ?? (typeof column.columnDef.header === 'string' ? column.columnDef.header : column.id)}
-                    </DropdownMenuCheckboxItem>
-                  )
-                })}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </div>
+        <DataTableToolbar
+          table={table}
+          title={title}
+          searchKey={searchKey}
+          compactToolbar={compactToolbar}
+          extraToolbarContent={extraToolbarContent}
+        />
       ))}
 
       <DndContext
@@ -418,93 +334,31 @@ function DataTableImpl<TData, TValue>({
         onDragEnd={handleDragEnd}
         sensors={sensors}
       >
-        <div className="rounded-md border overflow-x-auto w-full">
+        <div ref={tableContainerRef} className="rounded-md border overflow-auto w-full max-h-[min(600px,calc(100dvh-200px))]">
           <Table style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}>
+            <caption className="sr-only">
+              {tableCaption || (typeof title === 'string' ? title : 'Data Table')}
+            </caption>
             {tableHeader}
-            <TableBody>
-              {isLoading ? (
-                <TableRow>
-                  <TableCell
-                    colSpan={columns.length}
-                    className="h-24 text-center text-muted-foreground"
-                  >
-                    Loading...
-                  </TableCell>
-                </TableRow>
-              ) : table.getRowModel().rows?.length ? (
-                table.getRowModel().rows.map((row) => (
-                  <MemoizedTableRow
-                    key={row.id}
-                    row={row}
-                    onRowClick={onRowClick}
-                    columnVisibility={columnVisibility}
-                    columns={columns}
-                  />
-                ))
-              ) : (
-                <TableRow>
-                  <TableCell
-                    colSpan={columns.length}
-                    className="h-24 text-center text-muted-foreground"
-                  >
-                    {emptyMessage}
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
+            <DataTableBody
+              table={table}
+              rows={rows}
+              rowVirtualizer={rowVirtualizer}
+              columns={columns}
+              columnVisibility={columnVisibility}
+              isLoading={isLoading}
+              onRowClick={onRowClick}
+              getRowClassName={getRowClassName}
+              emptyMessage={emptyMessage}
+              emptyHint={emptyHint}
+              onClearFilter={onClearFilter}
+            />
           </Table>
         </div>
       </DndContext>
 
-      
-      {showPagination && table.getFilteredRowModel().rows.length >= 19 && (
-        <div className="flex items-center justify-end px-4 py-4 border-t">
-          <div className="flex items-center space-x-6 lg:space-x-8">
-            <div className="flex items-center space-x-2">
-              <p className="text-sm font-medium">Rows per page</p>
-              <Select
-                value={`${table.getState().pagination.pageSize}`}
-                onValueChange={(value) => {
-                  table.setPageSize(Number(value))
-                }}
-              >
-                <SelectTrigger className="h-8 w-[70px]">
-                  <SelectValue placeholder={table.getState().pagination.pageSize} />
-                </SelectTrigger>
-                <SelectContent side="top">
-                  {[10, 20, 50, 100, 500].map((pageSize) => (
-                    <SelectItem key={pageSize} value={`${pageSize}`}>
-                      {pageSize}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex w-[100px] items-center justify-center text-sm font-medium">
-              Page {table.getState().pagination.pageIndex + 1} of{" "}
-              {table.getPageCount() || 1}
-            </div>
-            <div className="flex items-center space-x-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => table.previousPage()}
-                disabled={!table.getCanPreviousPage()}
-              >
-                Previous
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => table.nextPage()}
-                disabled={!table.getCanNextPage()}
-              >
-                Next
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+
+      {showPagination && <DataTablePagination table={table} />}
     </div>
   )
 }

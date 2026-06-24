@@ -374,7 +374,7 @@ def test_cleanup_local_data_removes_duckdb_when_remove_data_true(tmp_path):
     with (
         patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
         patch("backend.config.duckdb_path", return_value=str(db)),
-        patch("backend.core.metadata_db.teardown"),
+        patch("backend.core.metadata.teardown"),
         patch("backend.provision.orchestrator._sync_crontab"),
     ):
         orchestrator.cleanup_local_data("svc", remove_data=True)
@@ -392,7 +392,7 @@ def test_cleanup_local_data_swallows_metadata_db_teardown_exception(tmp_path):
     with (
         patch("backend.config.config_path", return_value=str(cfg_file)),
         patch("backend.config.duckdb_path", return_value=str(tmp_path / "noexist.duckdb")),
-        patch("backend.core.metadata_db.teardown", side_effect=RuntimeError("locked")),
+        patch("backend.core.metadata.teardown", side_effect=RuntimeError("locked")),
         patch("backend.provision.orchestrator._sync_crontab"),
     ):
         # Should not raise
@@ -410,7 +410,7 @@ def test_cleanup_local_data_removes_cache_directory_for_bucket(tmp_path, monkeyp
     with (
         patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
         patch("backend.config.duckdb_path", return_value=str(tmp_path / "no.duckdb")),
-        patch("backend.core.metadata_db.teardown"),
+        patch("backend.core.metadata.teardown"),
         patch("backend.provision.orchestrator._sync_crontab"),
     ):
         orchestrator.cleanup_local_data("svc", bucket="test-bucket", remove_data=True)
@@ -698,11 +698,15 @@ def test_provision_loads_state_when_resume_from_state_true(tmp_path, monkeypatch
     assert captured_state["state"]["temp_admin_key_id"] == "PREV_ID"
 
 
-def test_provision_skips_iceberg_init_when_no_source_resolved(tmp_path, monkeypatch):
-    """When ``get_source_for_service`` returns None after the config
-    is written (race, missing fields), the iceberg-init block is
-    skipped silently. Pinned because the iceberg init is best-effort
-    — losing it must NOT block the wizard from reporting success."""
+def test_provision_surfaces_warning_when_no_source_resolved(tmp_path, monkeypatch):
+    """When ``get_source_for_service`` returns None after the config is
+    written (race, missing fields), the iceberg-init block can't run — but
+    it must SURFACE that (warning event), not skip silently. The wizard still
+    reports success because commit_buffer self-heals the table on first commit.
+
+    Regression: this block used to be silent on both the None-source and the
+    init-raises paths, which is how a fresh service shipped with no Iceberg
+    table and a commit cron crashing every cycle."""
     monkeypatch.chdir(tmp_path)
 
     temp_key = {"access_key": "T", "secret_key": "TS", "id": "TID"}
@@ -722,9 +726,54 @@ def test_provision_skips_iceberg_init_when_no_source_resolved(tmp_path, monkeypa
         events, exc = _consume(orchestrator.provision(_provision_cfg()))
 
     assert exc is None
+    # Wizard still completes (best-effort — first commit creates the table).
     assert events[-1]["type"] == "done"
-    # Iceberg init was NOT called (no source)
+    # Iceberg init was NOT called (no source to init against).
     mock_iceberg.assert_not_called()
+    # ...but the failure is now visible, not silent.
+    assert any(e["type"] == "status" and "not initialized" in e["message"].lower() for e in events), (
+        "expected a surfaced warning that the Iceberg table was not initialized"
+    )
+
+
+def test_provision_surfaces_warning_when_iceberg_init_raises(tmp_path, monkeypatch):
+    """If ``init_iceberg_table`` raises during provisioning, the wizard must
+    NOT swallow it silently: it logs/surfaces a warning and still completes
+    (commit_buffer creates the table on first commit). Pinned because the
+    bare ``except Exception: pass`` here is what hid a broken fresh install."""
+    monkeypatch.chdir(tmp_path)
+
+    temp_key = {"access_key": "T", "secret_key": "TS", "id": "TID"}
+    perm_key = {"access_key": "P", "secret_key": "PS", "id": "PID"}
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value={"id": "cdn"}),
+        patch("backend.provision.orchestrator.ensure_logging_endpoint", return_value=1),
+        patch("backend.provision.orchestrator.write_service_config"),
+        patch(
+            "backend.core.duckdb.get_source_for_service",
+            return_value={"name": "svc", "service_id": "sid", "logging_service_id": "lsid"},
+        ),
+        patch("backend.core.duckdb.get_connection"),
+        patch(
+            "backend.core.iceberg.init_iceberg_table",
+            side_effect=RuntimeError("FOS not ready"),
+        ) as mock_iceberg,
+    ):
+        events, exc = _consume(orchestrator.provision(_provision_cfg()))
+
+    assert exc is None
+    mock_iceberg.assert_called_once()
+    # Wizard still completes despite the init failure.
+    assert events[-1]["type"] == "done"
+    # The failure is surfaced, not swallowed.
+    assert any(e["type"] == "status" and "deferred to first commit" in e["message"].lower() for e in events), (
+        "expected a surfaced warning that Iceberg init was deferred"
+    )
 
 
 # ── perform_teardown (4-step generator) ──────────────────────────────────
@@ -940,7 +989,7 @@ def test_write_service_config_preserves_scoring_block_when_state_omits_it(tmp_pa
     # User's custom_field survived
     custom_names = {cf["name"] for cf in cfg["log_fields"]["custom_fields"]}
     assert "my_field" in custom_names
-    # All 6 scoring fields re-injected from code (canonical source of truth)
+    # All scoring fields re-injected from code (canonical source of truth)
     from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
 
     for name in _SCORING_FIELD_NAMES:
@@ -1008,3 +1057,144 @@ def test_perform_teardown_filters_fastly_keys_by_managed_description_prefix():
     assert "TEMPADMIN" in deleted_keys
     assert "TEMPTEAR" in deleted_keys
     assert "UNMANAGED" not in deleted_keys
+
+
+# ── NGWAF workspace preservation across provision() (audit follow-up) ───────
+
+
+def test_write_service_config_preserves_existing_ngwaf_workspace_id(tmp_path, monkeypatch):
+    """When the on-disk config already has ``ngwaf_workspace_id`` and the
+    provisioning state does NOT set it, write_service_config must
+    preserve it. Regression of this surfaced as silent NGWAF workspace
+    detach on every re-provision (2026-06-02 state_sync incident).
+    """
+    from backend import config
+    from backend.provision import orchestrator
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+
+    svc_id = "svc-ngwaf-preserve"
+    # Seed an existing cfg with an NGWAF workspace_id.
+    config.save_config(
+        svc_id,
+        {
+            "service_id": svc_id,
+            "ngwaf_workspace_id": "ws_preserved_xyz",
+            "status": {},
+            "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
+        },
+    )
+
+    # Provisioning state OMITS ngwaf_workspace_id — write_service_config
+    # should pick it up from the existing cfg on disk.
+    state = {
+        "service_id": svc_id,
+        "service_name": svc_id,
+        "fos_region": "us-east-1",
+        "fos_bucket_name": "b",
+        "fos_prefix": "logs",
+        "fos_access_key_id": "AK",
+        "fos_secret_access_key": "SK",
+        "fos_endpoint": "us-east-1.object.fastlystorage.app",
+        "cdn_service_id": "CDN",
+        "cdn_url": "https://b.global.ssl.fastly.net",
+        "logging_service_id": "SU",
+        "endpoint_name": "fastly_log_analysis",
+        "log_period": 60,
+        "sample_rate": 100,
+        "edge_only": False,
+        "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
+    }
+    orchestrator.write_service_config(state)
+
+    saved = config.load_config(svc_id)
+    assert saved.get("ngwaf_workspace_id") == "ws_preserved_xyz", (
+        f"existing NGWAF workspace_id was clobbered on re-provision; saved={saved!r}"
+    )
+
+
+def test_write_service_config_ngwaf_routing_separated_from_provision_state(tmp_path, monkeypatch):
+    """OBSERVED behaviour: write_service_config DOES NOT consume
+    ``ngwaf_workspace_id`` from the provisioning state. The NGWAF
+    workspace binding is routed exclusively through the dedicated
+    PATCH /ngwaf-workspace endpoint, not through the provision flow.
+
+    The preserve loop runs only when ``ngwaf_workspace_id`` is NOT in
+    state (covered by the sibling test). State-set ngwaf_workspace_id
+    therefore short-circuits preservation AND is not written either —
+    the existing on-disk value is dropped.
+
+    Pinned because the wording is subtle: a contributor reading the
+    state dict could reasonably assume "state overrides cfg". It
+    doesn't, by design — surface the contract in a regression test.
+    """
+    from backend import config
+    from backend.provision import orchestrator
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+
+    svc_id = "svc-ngwaf-routing"
+    config.save_config(
+        svc_id,
+        {
+            "service_id": svc_id,
+            "ngwaf_workspace_id": "ws_existing",
+            "status": {},
+            "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
+        },
+    )
+
+    state = {
+        "service_id": svc_id,
+        "service_name": svc_id,
+        "ngwaf_workspace_id": "ws_in_state_should_be_ignored",
+        "fos_region": "us-east-1",
+        "fos_bucket_name": "b",
+        "fos_prefix": "logs",
+        "fos_access_key_id": "AK",
+        "fos_secret_access_key": "SK",
+        "fos_endpoint": "us-east-1.object.fastlystorage.app",
+        "cdn_service_id": "CDN",
+        "cdn_url": "https://b.global.ssl.fastly.net",
+        "logging_service_id": "SU",
+        "endpoint_name": "fastly_log_analysis",
+        "log_period": 60,
+        "sample_rate": 100,
+        "edge_only": False,
+        "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
+    }
+    orchestrator.write_service_config(state)
+
+    saved = config.load_config(svc_id)
+    # Neither "ws_existing" (preservation skipped because state has the
+    # key) nor "ws_in_state_should_be_ignored" (state is ignored by
+    # write_service_config). Behaviour pins that the orchestrator does
+    # NOT propagate the field — admin must use PATCH /ngwaf-workspace.
+    assert "ngwaf_workspace_id" not in saved or saved.get("ngwaf_workspace_id") == "ws_existing", (
+        f"state-set ngwaf_workspace_id leaked into saved cfg; saved={saved!r}"
+    )
+
+
+# ── _reject_unsafe_fos_component (L8) ────────────────────────────────────────
+
+
+def test_reject_unsafe_fos_component_bucket_rejects_path_tokens():
+    """L8: fos_bucket composes into the local cache path — no separators."""
+    from backend.provision.orchestrator import _reject_unsafe_fos_component
+
+    for bad in ("../etc", "a/b", "a\\b", "..", "a\x00b"):
+        with pytest.raises(ValueError, match="illegal path token"):
+            _reject_unsafe_fos_component("fos_bucket", bad, allow_slash=False)
+    # Legitimate bucket name + empty value pass.
+    _reject_unsafe_fos_component("fos_bucket", "my-fos-bucket", allow_slash=False)
+    _reject_unsafe_fos_component("fos_bucket", "", allow_slash=False)
+
+
+def test_reject_unsafe_fos_component_prefix_allows_slash_rejects_traversal():
+    from backend.provision.orchestrator import _reject_unsafe_fos_component
+
+    # S3 key prefixes legitimately contain '/'.
+    _reject_unsafe_fos_component("fos_prefix", "raw/logs/2026/", allow_slash=True)
+    for bad in ("../up", "a\\b", "..", "a\x00"):
+        with pytest.raises(ValueError, match="illegal path token"):
+            _reject_unsafe_fos_component("fos_prefix", bad, allow_slash=True)

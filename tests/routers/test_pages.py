@@ -36,26 +36,6 @@ def test_origin_summary_endpoint(client, in_memory_duckdb, test_service_source):
     assert "_debug_queries" in response.json()
 
 
-def test_origin_ts_endpoint_returns_timeseries(client, in_memory_duckdb, test_service_source):
-    """Regression: /api/performance/origin-ts response must contain 'timeseries', not 'origin_ts'."""
-    logs = generate_mock_logs(test_service_source, num_logs=20)
-    for log in logs:
-        log["ottfb"] = 50000  # 50ms in microseconds
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    response = client.post(
-        "/api/performance/origin-ts",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "origin_metric": "ttfb", "origin_percentile": "p95"},
-    )
-
-    assert response.status_code == 200, response.text
-    data = response.json()
-    assert "timeseries" in data, f"Expected 'timeseries' key in response, got: {list(data.keys())}"
-    assert isinstance(data["timeseries"], list)
-    assert len(data["timeseries"]) > 0
-
-
 def test_security_aggregates_endpoint(client, in_memory_duckdb, test_service_source):
     logs = generate_mock_logs(test_service_source, num_logs=30)
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
@@ -140,7 +120,7 @@ def test_views_endpoint(client):
 
 def test_log_activity_endpoint_returns_data_key(client, test_service_source):
     """Regression: /api/usage/log-activity must return 'data' list with row_count/bytes, not generated/processed."""
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     src_name = test_service_source["name"]
     con = metadata_db.get_con(src_name)

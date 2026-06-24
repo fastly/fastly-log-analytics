@@ -1,10 +1,19 @@
 [project]
 name = "fastly-log-analytics"
-version = "1.2.0"
+version = "2.0.0b1"
 description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB"
 requires-python = ">=3.10"
 dependencies = [
-    "duckdb>=1.2",
+    # Pin to the 1.5 line specifically. Pre-1.3 ships without the
+    # canonical ``.to_arrow_table()`` method on DuckDBPyConnection
+    # (only the now-deprecated ``.fetch_arrow_table()`` alias), so
+    # ingest.py / iceberg/buffer.py / rollups/recompute.py — which all
+    # use ``.to_arrow_table()`` — silently break on a dev box that
+    # resolved an older version. Prod docker has consistently shipped
+    # 1.5.x; matching that here closes the dev/prod drift window.
+    # Upper-bound at <2 because the 2.x major hasn't released yet and
+    # may include further API renames we'd want to audit before adopting.
+    "duckdb>=1.5,<2",
     "python-dotenv>=1.0",
     "boto3>=1.34",
     "cymruwhois>=1.6",
@@ -13,7 +22,10 @@ dependencies = [
     "pydantic>=2.9",
     "apscheduler>=3.10,<4",
     "pyiceberg[s3fs,pyarrow,sql-sqlite]>=0.8",
-    "pyarrow>=17.0",
+    # Floor at 23.0.1 — the fix for CVE-2026-25087. uv.lock already pins a
+    # clean version; this raises the declared floor so Dependabot stops
+    # flagging the <23.0.1 range.
+    "pyarrow>=23.0.1",
     "pandas>=2.3.3",
     "httpx>=0.28.1",
     # pytz is loaded at RUNTIME by DuckDB's icu_collations / TIMESTAMP WITH
@@ -23,10 +35,65 @@ dependencies = [
     # to import" the moment they ran `WHERE timestamp >= now() - INTERVAL`.
     # Don't drop again without confirming DuckDB no longer needs it.
     "pytz>=2026.1.post1",
-    "aiohttp>=3.9",
-    "cryptography>=42",
-    "python-multipart>=0.0.9",
+    # Upper-bound lifted 2026-06-17 after vcrpy 8.2.0 (PR #996) shipped
+    # the AsyncStreamReaderMixin removal compat. Floor raised to 3.14.1
+    # to clear 7 Dependabot alerts: websocket frame payload bypass
+    # (med), pipelined request queue (med), compressed body cleanup
+    # (med), max_line_size fragment bypass (med), DigestAuth cross-
+    # origin credential leak (med), TLS hostname override on conn-reuse
+    # (low), host-only cookie persistence drift (low).
+    "aiohttp>=3.14.1,<4",
+    # Floor raised 2026-06-17 to clear Dependabot #18 (high): cryptography
+    # wheels bundled vulnerable OpenSSL across all platforms. 48.0.1
+    # ships patched OpenSSL.
+    "cryptography>=48.0.1",
+    # Pinned ≥1.3.1 to clear Dependabot #19 (low, unvalidated authority
+    # poisoning) + #20 (high, request.form() limits silently ignored).
+    # FastAPI normally pulls this transitively; the explicit floor is
+    # belt-and-braces in case a future FastAPI loosens its constraint.
+    "starlette>=1.3.1",
+    # Floor raised 2026-06-16 to clear GHSA-v9pg-7xvm-68hf
+    # (negative Content-Length in parse_form buffers the entire body
+    # in memory — low severity but trivial to fix). 0.0.31 ships the
+    # bounds check; keep the floor at the audit-fixed version so
+    # Dependabot stays quiet.
+    "python-multipart>=0.0.31",
     "starlette-compress>=1.7",
+    "sse-starlette>=2.1",
+    "cachetools>=6.2",
+    # v2.0 Phase 1: OpenTelemetry + structlog replace the four fragmented
+    # custom telemetry surfaces. Phase
+    # ships with the console exporter only; adding Jaeger/Tempo/etc. is a
+    # post-v2.0 deploy-config decision (no SaaS subscription).
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-botocore>=0.48b0",
+    "opentelemetry-instrumentation-aiohttp-client>=0.48b0",
+    "structlog>=24.4",
+    # v2.0 Phase 1.4a: aiodns + aiosqlite implement concurrent reverse DNS
+    # with FCrDNS verification and a single-transaction bulk SQLite write.
+    # aiosqlite is scoped to
+    # rdns_cache.py only — every other SQLite call site stays sync.
+    "aiodns>=3.2",
+    "aiosqlite>=0.20",
+    # v2.0 Phase 3: tenacity provides standardized declarative retry
+    # decorators replacing fragile custom try/except loops in
+    # provision/fastly_api.py + utils/ngwaf.py + SQLite write paths.
+    "tenacity>=9.0",
+    # argon2-cffi provides argon2id passcode hashing per OWASP 2026
+    # guidance. Used by backend.core.share_db.passcode for new invite
+    # passcode hashes; the legacy scrypt verify branch stays in place so
+    # pre-cutover hashes keep working until each user next logs in
+    # (transparent rehash-on-login upgrades them to argon2id).
+    "argon2-cffi>=23.1",
+    # Phase 10.5: rich + typer power the provision CLI. rich.console
+    # owns the ANSI emit + colour markup for backend/provision/utils.py
+    # (the public info/ok/warn/fail helpers); typer wraps the handler
+    # functions in backend/provision/cli.py as subcommands so
+    # `python -m backend.provision.cli` exposes a real --help.
+    "rich>=13.7",
+    "typer>=0.12",
 ]
 
 [dependency-groups]
@@ -35,6 +102,10 @@ dev = [
     "pytest-cov>=5.0",
     "httpx>=0.28",
     "mypy>=1.15",
+    # mypy-baseline pins pre-existing errors so pre-commit + CI fail only
+    # on net-new errors.
+    "mypy-baseline>=0.7",
+    "types-python-dateutil",
     "ruff>=0.11",
     "pre-commit>=4.0",
     "moto[s3,server]>=5.0",
@@ -44,8 +115,66 @@ dev = [
     "pytest-xdist>=3.6",
     # vcrpy hooks the socket layer so it captures the production
     # urllib.request transport without us rewriting clients to httpx.
-    # TESTING_PLAN_3 item 8.
-    "vcrpy>=6.0",
+    # TESTING_PLAN_3 item 8. Floor raised to 8.2.0 — earlier releases
+    # inherited `streams.AsyncStreamReaderMixin` which aiohttp 3.14
+    # removed, so the import broke at collection time. PR #996 in
+    # vcrpy shipped 8.2.0 with the compat shim.
+    "vcrpy>=8.2.0",
+    # syrupy provides string-snapshot assertions. Used by R-4 to pin
+    # SQL strings emitted by the repository builders so a future
+    # query rewrite that keeps the response shape valid but alters
+    # semantics fails with a readable diff.
+    "syrupy>=4.0",
+    # import-linter enforces architectural contracts (no cross-router
+    # imports, core stays router-free). Configured under
+    # [tool.importlinter] below; CI runs `uv run lint-imports`.
+    "import-linter>=2.0",
+    # testcontainers-python (A-4) — opt-in dependency for the rare
+    # integration test that needs a real-container dep (Postgres,
+    # LocalStack S3, etc.). Most of the suite is happy with moto's
+    # in-process mocks; this dep stays unused until a future test
+    # opts in. Skipped when Docker isn't on PATH.
+    "testcontainers>=4.0",
+    # pytest-timeout enforces a per-test wall-clock ceiling. The default
+    # below (configured under [tool.pytest.ini_options]) catches a
+    # hanging async test or deadlocked SSE consumer fast, instead of
+    # waiting out the suite-wide 10-minute CI timeout. Per-test override
+    # via @pytest.mark.timeout(N) for tests that are legitimately slow
+    # (perf smoke, the multi-commit E2E, etc.).
+    "pytest-timeout>=2.3",
+    # pytest-benchmark: statistical micro-benchmarks for hot paths.
+    # Complements the 100K/500K/1M perf gates (scripts/emit_perf_latest.py)
+    # which measure end-to-end query latency at scale — pytest-benchmark
+    # measures per-call cost on the pure-Python helpers those queries
+    # build on (HLL.add / count / merge / serialize, table-name + SQL-
+    # literal sanitizers). Run with `uv run pytest tests/perf/test_benchmarks_micro.py
+    # --benchmark-only` to see throughput; the suite skips the timing
+    # collection in regular runs (autouse opt-out via marker).
+    "pytest-benchmark>=4.0",
+    # bandit: pattern-based Python security scan. Used by
+    # ``make security-scan-bandit`` at HIGH severity only — the MEDIUM
+    # tier's B608 (string-built SQL) is dominated by false positives
+    # the codebase defends against via backend/utils/sql_validator.py +
+    # escape_sql_literal, which bandit can't see. The HIGH tier catches
+    # real issues (weak-hash misuse, eval/exec, shell=True).
+    "bandit>=1.9",
+    # deptry: dep-hygiene scan. Used by ``make deps-check`` to catch
+    # imports of transitive deps (DEP003), unused declared deps
+    # (DEP002), and missing declared deps (DEP001). Configured under
+    # [tool.deptry] below — runtime-only deps (uvicorn CLI, pytz for
+    # DuckDB ICU, python-dotenv, python-multipart for FastAPI form
+    # parsing) get DEP002 ignores; s3fs+fsspec are first-class imports
+    # served by the ``pyiceberg[s3fs]`` extra so DEP003 ignores them.
+    "deptry>=0.20",
+    # time-machine: deterministic time travel for tests. Enables
+    # tests that assert on time boundaries (cron orphan threshold,
+    # rollup bucket cut-overs, snapshot retention windows) without
+    # the flaky-at-23:59 problem of relying on real wall-clock.
+    # Preferred over freezegun: time-machine ticks the clock forward
+    # during the call (so time.monotonic() / perf_counter() still
+    # measure real elapsed time inside the frozen window).
+    "time-machine>=2.13",
+    "schemathesis>=4.21.7",
 ]
 
 [build-system]
@@ -55,6 +184,32 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["backend"]
 
+[tool.deptry]
+# Treat ``backend`` as first-party so ``from backend.X import Y`` doesn't
+# show as DEP003 (transitive — which it isn't; it's our own package).
+known_first_party = ["backend"]
+extend_exclude = ["tests/.*", "scripts/.*", "scratch/.*"]
+
+[tool.deptry.per_rule_ignores]
+# DEP002 — declared but not directly imported. All four are runtime/CLI
+# needs deptry can't statically detect:
+#   uvicorn:         CLI runner (`uvicorn backend.main:app …`)
+#   python-dotenv:   loaded by uv via --env-file at process start
+#   pytz:            DuckDB ICU loads it at runtime for TIMESTAMP TZ
+#                    (regression of the 2026-05 dedup; do NOT drop)
+#   python-multipart: FastAPI form-data parser, never imported directly
+DEP002 = ["python-dotenv", "uvicorn", "pytz", "python-multipart"]
+# DEP003 — direct import of a transitive dep. The codebase imports
+# these on purpose; they're guaranteed by the listed first-class deps:
+#   botocore:  via boto3
+#   yarl:      via aiohttp (used by telemetry_proxy URL parsing)
+#   dateutil:  via pandas (used for ISO-8601 parsing in iceberg sync)
+#   s3fs:      via pyiceberg[s3fs] extra
+#   fsspec:    via s3fs
+# (starlette removed 2026-06-17 — promoted to a direct dep above to
+# pin >=1.3.1 for Dependabot #19/#20.)
+DEP003 = ["botocore", "yarl", "dateutil", "s3fs", "fsspec"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Worker cap: -n auto spawns cpu_count() workers, and each worker re-imports
@@ -62,8 +217,35 @@ testpaths = ["tests"]
 # On an 8-10 core Mac that's 4-5 GB just for pytest workers, which combined
 # with `make ci -j2` running vitest in parallel was pushing 16 GB Macs into
 # swap. -n 4 caps the worker pool at 4 regardless of CPU count.
-addopts = "-q -n 4"
+#
+# --strict-markers (GATE-02): unregistered markers used in a `-m EXPR`
+# selection are an error. (The companion guard for a typo'd *applied*
+# @pytest.mark.<typo> — which pytest 9 only warns about — is the
+# `error::pytest.PytestUnknownMarkWarning` filter below; together they ensure a
+# misspelled @pytest.mark.security_regression can't silently drop from the
+# count gate.) Every custom marker must be registered in `markers` below;
+# builtin/plugin markers (parametrize, asyncio, timeout, benchmark, skip/skipif)
+# are registered by their plugins.
+addopts = "-q -n 4 --strict-markers"
 asyncio_mode = "auto"
+# Per-test wall-clock ceiling (pytest-timeout). Hanging async tests and
+# deadlocked SSE consumers used to wait out the suite-wide 10-minute CI
+# timeout before failing; 60s catches them fast while clearing the slowest
+# E2E + perf_smoke tests with headroom. Override per-test via
+# @pytest.mark.timeout(N) for legitimately long tests.
+timeout = 60
+# "thread" method works under xdist and on async tests; the "signal"
+# method requires the main thread and breaks pytest-xdist.
+timeout_method = "thread"
+markers = [
+    # Tests deriving from a (since-removed) audit-findings/ fix or covering a security
+    # invariant the v2.0 cleanup must not silently regress. CI asserts the
+    # count is monotonically >= the Phase 0 baseline so a refactor can't
+    # delete coverage of a verified fix without surfacing the change.
+    # Phase 0 floor: 24 marked tests (derives from the 24 verified findings).
+    "security_regression: tests covering a verified security fix; CI gates on count",
+    "slow: tests intentionally excluded from the fast default suite — run with `pytest -m slow`",
+]
 # Test-only suppression: FastAPI's TestClient runs requests in worker
 # threads that open metadata_db SQLite connections. Most of them are
 # closed by close_all_connections() in tests/conftest.py, but a handful
@@ -73,6 +255,12 @@ asyncio_mode = "auto"
 # production code holds its connections for the process lifetime, so
 # this is a test-fixture artefact, not a production resource leak.
 filterwarnings = [
+    # GATE-02: a misspelled marker applied via @pytest.mark.<typo> only WARNS
+    # under pytest 9's --strict-markers (which still gates -m EXPR typos), so a
+    # typo'd @pytest.mark.security_regression would silently fall out of the
+    # count gate. Elevate the unknown-mark warning to a collection ERROR so the
+    # typo fails immediately. Every real marker is registered in `markers` below.
+    "error::pytest.PytestUnknownMarkWarning",
     "ignore::ResourceWarning:.*sqlite3.*",
     "ignore:unclosed database:ResourceWarning",
     # Third-party deprecations we can't fix in our own code:
@@ -88,7 +276,39 @@ filterwarnings = [
     # warning references is already in our Python, so the message is
     # noise — there's nothing to act on.
     "ignore:enable_cleanup_closed ignored:DeprecationWarning",
+    # pytest-benchmark warns once per xdist worker at startup that
+    # benchmarks are auto-disabled under ``-n`` (parallel timing is
+    # unreliable). That's expected — the default suite never runs the
+    # micro-benchmarks (run them serially via ``--benchmark-only``), so the
+    # warning is pure noise on every ``-n 4`` run. Suppress by message so a
+    # dedicated ``--benchmark-only`` run still surfaces real benchmark output.
+    "ignore:Benchmarks are automatically disabled because xdist plugin is active",
+    # DuckDB deprecated ``fetch_record_batch()`` in favour of
+    # ``to_arrow_reader()``. We still instrument it by name in
+    # query_instrumentation._READER_METHODS because callers may use either,
+    # and tests/core/test_query_instrumentation.py deliberately exercises the
+    # deprecated path to pin that the wrapper defers deregistration until the
+    # reader drains. The deprecation is DuckDB's, not ours to fix.
+    "ignore:fetch_record_batch.. is deprecated:DeprecationWarning",
 ]
+
+# Coverage tip — focused per-module coverage:
+#
+# Use ``--cov=backend`` for the full tree (what CI runs) and read the
+# per-file row from the report. For a SINGLE module use the file-path
+# form ``--cov=backend/path/to/file.py``. Do NOT use the dotted-module
+# form (``--cov=backend.path.to.file``) — pytest-cov resolves it by
+# eagerly importing the named module BEFORE conftest runs, and for
+# any module whose import chain transitively reaches duckdb, that
+# races duckdb's lazy ``_duckdb._sqltypes`` setup and crashes with
+# ``ModuleNotFoundError: No module named '_duckdb._sqltypes';
+# '_duckdb' is not a package`` (duckdb stages its submodules into
+# sys.modules from the .so's PyInit; coverage's import-instrumentation
+# starts before that stage completes). No ``[tool.coverage.run]``
+# block exists because every config we tried either no-ops against
+# this path or conflicts with the ``--cov=PATH`` filter. Workaround
+# is the path form; for an upstream-flavor fix this would need
+# coverage.py to defer the dotted-name resolution past plugin import.
 
 [tool.mypy]
 python_version = "3.13"
@@ -101,25 +321,75 @@ ignore_missing_imports = true
 implicit_optional = true
 exclude = ["frontend/", "docs/", "scripts/"]
 
-# Ignore pre-existing errors in large files not yet annotated
+# ignore_errors burndown — Phase 10.13.
+#
+# This list is the **explicit** set of backend modules that still have
+# pre-existing type errors mypy is suppressing. Each subsequent burndown
+# session picks one module, fixes its errors, removes it from the list.
+# Plan target: ≤ 3 entries by v2.0.0 tag.
+#
+# History:
+#   - r1: broad wildcards (backend.routers.*, backend.utils.*, etc.) —
+#     silently covered 120 files in those packages even though 98 were
+#     already clean by default mypy. Effectively zero coverage on those
+#     packages because the patterns ate everything.
+#   - r2 (this commit): wildcards replaced with the per-file list of the
+#     22 files that actually have errors today. Net effect: 93 files
+#     that had no real mypy coverage are now type-checked. The remaining
+#     28 entries below are the actual burndown list.
+#
+# Refresh procedure when burning down an entry:
+#   1. Remove the line from this list.
+#   2. Run `uv run mypy backend/` — fix or annotate the errors.
+#   3. Run `make test` to make sure no behavior changed.
+#   4. Commit the fix + the override removal in the same commit.
+# NOTE: per the v2.0 zero-tech-debt goal (cleanup_plan §10.13), this
+# block is intentionally empty — every backend module now type-checks
+# under the default settings. Re-add a module here ONLY as a last resort
+# when a fix is genuinely impractical, and document why in a comment
+# alongside the entry.
+[[tool.mypy.overrides]]
+module = []
+ignore_errors = true
+
+# Per-module mypy-strict ratchet (cleanup_plan §10.14). Modules listed
+# below are checked with `disallow_untyped_defs` + friends — every
+# function declares its parameter and return types, no `Any` return
+# leakage from declared concrete types, no unused `# type: ignore` slips.
+# Add a module here once it's clean under default checks AND has the
+# annotations to support the stricter set; new files in these packages
+# inherit the stricter checks automatically.
 [[tool.mypy.overrides]]
 module = [
-    "backend.core.duckdb",
-    "backend.core.iceberg",
-    "backend.core.ingest",
-    "backend.scheduler",
-    "backend.routers.*",
-    "backend.repositories.*",
-    "backend.cron_progress",
-    "backend.utils.*",
-    "backend.models.*",
-    "backend.deps",
-    "backend.provision",
-    "backend.provision.*",
-    "backend.core.log_fields",
-    "backend.config",
+    "backend.core.query_registry",
+    "backend.core.query_instrumentation",
+    "backend.core.query_attribution",
+    "backend.core.metadata.reconciliation",
+    "backend.cron.jobs.compaction",
+    "backend.repositories.session_scoring",
+    "backend.routers.admin_queries",
+    "backend.utils.tunnel.state",
+    # v2.0 final wave (2026-06-12): post-split modules with fresh test
+    # coverage. Each verified clean under the strict flags below before
+    # opt-in; new files in these packages inherit the stricter checks
+    # automatically.
+    "backend.core.rollups._common",
+    "backend.core.rollups.sessions",
+    "backend.core.rollups.time_series",
+    "backend.core.rollups.day_bundles",
+    "backend.core.rollups.hour_bundles",
+    "backend.core.rollups.recompute",
+    "backend.core.rollups.wellknown_bots",
+    "backend.routers.admin.ingest",
+    "backend.routers.admin.log_accounting",
+    "backend.routers.admin.sync_status",
+    "backend.routers.admin.health",
 ]
-ignore_errors = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = true
 
 [tool.ruff]
 line-length = 120
@@ -134,7 +404,7 @@ exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP"]
+select = ["E", "F", "W", "I", "UP", "T201"]
 ignore = [
     "E501",   # line too long — not enforced
     "E701",   # multiple statements on one line — existing codebase style
@@ -142,3 +412,80 @@ ignore = [
     "E402",   # module import not at top — scripts need sys.path setup first
     "F841",   # local variable assigned but never used — often intentional guards
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# CLI tools and one-off scripts legitimately print to stdout.
+"scripts/*" = ["T201"]
+"backend/provision/cli.py" = ["T201"]
+"backend/provision/utils.py" = ["T201"]
+# Tests can print benchmark timings, debug dumps, etc. — not production code.
+"tests/*" = ["T201"]
+
+# R-9: import-linter contracts.
+#
+# The forbidden contracts prevent two specific drift patterns the audit
+# flagged: routers reaching across to other routers (the dependency
+# direction should always be router → repository → core), and core
+# modules importing router code (which would invert the layering and
+# pull web-framework concerns into the analytics engine).
+#
+# Run locally: `uv run lint-imports`
+# CI step: `.github/workflows/ci.yml`'s backend job runs this before
+# pytest so an architectural regression fails fast.
+#
+# To add an exemption (rare — almost always means a refactor is owed
+# instead), add the specific edge to `ignore_imports` with a comment
+# explaining WHY the cycle is OK for this case.
+[tool.importlinter]
+root_package = "backend"
+
+[[tool.importlinter.contracts]]
+name = "Routers are independent of each other"
+type = "independence"
+modules = ["backend.routers.*"]
+# Baselined pre-existing cross-router edges. Each entry is a real
+# direct or transitive import; the goal of this contract is to
+# PREVENT NEW cross-router coupling, not to demand a refactor of
+# existing wiring. If a future commit adds a new edge, lint-imports
+# fails with a readable diff — fix or whitelist with a why-comment.
+ignore_imports = [
+    # Direct admin re-exports — admin_usage extends the admin router
+    # and bootstrap surfaces an admin helper via the bootstrap route.
+    "backend.routers.admin_usage -> backend.routers.admin",
+    "backend.routers.bootstrap -> backend.routers.admin",
+    # Saved-views ↔ alerts both rely on _state_sync (cross-tenant
+    # propagation helper; deliberately not a router).
+    "backend.routers.alerts -> backend.routers._state_sync",
+    "backend.routers.views -> backend.routers._state_sync",
+    # Session scoring's admin variant + user variant share helpers.
+    "backend.routers.session_scoring -> backend.routers.session_scoring_admin",
+    "backend.routers.session_scoring_admin -> backend.routers.session_scoring",
+    # Transitive via backend.scheduler → backend.cron.jobs.sync, which
+    # legitimately imports from the admin router (the iceberg-commit +
+    # sync flushes share that admin path). Treating the cron job module
+    # as router-free is the next refactor; for now, allow the indirect
+    # coupling. import-linter matches edges by EXACT module name, so the
+    # bare-package edge (sync.py:853 `from backend.routers.admin import …`)
+    # and the submodule edge (sync.py:412 `from
+    # backend.routers.admin.sync_status import compute_sync_status_cached`)
+    # must each be listed — the package entry alone does not suppress the
+    # submodule import.
+    "backend.cron.jobs.sync -> backend.routers.admin",
+    "backend.cron.jobs.sync -> backend.routers.admin.sync_status",
+    # bootstrap's optional share-status panel reuses the share_admin
+    # router's build_share_status() helper (bootstrap.py:441, lazy import
+    # inside the bootstrap route). Read-only status assembly for the
+    # admin landing page, not new business coupling.
+    "backend.routers.bootstrap -> backend.routers.share_admin",
+    # The system-metrics sampler reuses admin_queries' _ensure_enabled()
+    # feature gate (system_metrics_sampler.py:71,81, lazy imports). The
+    # sampler is a backend-only collector reached via the admin router;
+    # the resulting edge is admin → sampler → admin_queries.
+    "backend.system_metrics_sampler -> backend.routers.admin_queries",
+]
+
+[[tool.importlinter.contracts]]
+name = "Core does not depend on routers"
+type = "forbidden"
+source_modules = ["backend.core"]
+forbidden_modules = ["backend.routers"]

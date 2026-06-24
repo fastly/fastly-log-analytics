@@ -132,6 +132,30 @@ class HasDataMixin(BaseModel):
     total: int = 0
 
 
+class LogExtentsMixin(BaseModel):
+    """Mixin for responses that expose the per-service log time-extents.
+
+    ``earliest_log_at`` / ``latest_log_at`` appear together on four
+    response models (admin status + dashboard variants) — the audit
+    flagged them as a one-shape pair worth co-locating so a new field
+    on this pair (e.g. ``coverage_pct``) lands in one place.
+    """
+
+    earliest_log_at: str | None = None
+    latest_log_at: str | None = None
+
+
+class OkResponse(BaseModel):
+    """Mixin for "ack" endpoints that only return ``{"ok": True}``.
+
+    Six share-auth response models all carry ``ok: bool = True`` as
+    their first field — promoted here so the field's default + name
+    can't drift across the set.
+    """
+
+    ok: bool = True
+
+
 # 038: telemetry payloads (raw SQL + outbound API URL/timing) are useful
 # during development and incident response but they're an information-leak
 # surface in normal operation — every analyst dashboard fetch echoes the
@@ -185,23 +209,6 @@ class BaseResponse(BaseModel):
         return cls(**data, debug_queries=dq, debug_calls=dc)
 
 
-class RowsResponse(BaseResponse):
-    """Base for endpoints that return a has_data flag and a list of row dicts.
-
-    Subclass and add endpoint-specific fields; inherit the telemetry fields
-    from BaseResponse for free.
-    """
-
-    has_data: bool = False
-    rows: list[dict] = Field(default_factory=list)
-
-
-class ErrorResponse(BaseModel):
-    error: str
-    busy: bool = False
-    no_service: bool = False
-
-
 class BootstrapService(BaseModel):
     service_id: str
     name: str | None = None
@@ -212,8 +219,19 @@ class BootstrapResponse(BaseResponse):
     active_service_id: str | None
     services: list[BootstrapService]
     schema_: list[dict] | None = Field(default=None, alias="schema")
+    # _safe_table_name(active_source.name) — the same value /api/schema
+    # returns alongside its schema list. Folded in so the frontend can
+    # seed its ['admin', 'schema', service_id] React Query cache with the
+    # full {schema, table_name} payload and skip the dedicated round-trip
+    # on /query nav. None when no active service / status not populated.
+    table_name: str | None = None
     countries: dict[str, str] | None = None
     pops: dict[str, tuple[float | None, float | None]] | None = None
+    # Per-PoP {city, region, country} for the shared PoP label
+    # ("DEN (Denver, CO - USA)"). Parsed from the cached /datacenters list;
+    # the frontend formats + renders it (see frontend/lib/pop.ts). Separate
+    # from `pops` (lat/lon) so the world-map consumer is untouched.
+    pop_geo: dict[str, dict[str, str]] | None = None
     settings: dict[str, str | bool | None] | None = None
     custom_dashboard_cards: list[dict] = Field(default_factory=list)
     custom_fields_catalog: list[dict] = Field(default_factory=list)
@@ -222,4 +240,78 @@ class BootstrapResponse(BaseResponse):
     # render ViewSelector and rehydrate from URL view params without a
     # second /api/views/{service_id} round-trip on every page nav.
     views: list[dict] = Field(default_factory=list)
+    # Full log-fields catalog (same payload as /api/log-fields/catalog)
+    # for the active service. Folded in so the frontend can seed its
+    # ['log-fields-catalog', service_id] React Query cache and skip the
+    # 35-KB round-trip on every cold page load (perf audit Phase D).
+    # None when no active service.
+    log_fields_catalog: dict | None = None
+    # Cached sync-status (same fast-path payload /api/sync-status?skip_fos=true
+    # returns). Folded in so SyncStatusBadge / logs page hit cache on
+    # first mount. ADMIN ONLY — None for analyst sessions (matches the
+    # dedicated endpoint's 403 for analysts).
+    sync_status: dict | None = None
+    # Lean share-status banner ({sharing_active, public_url}). Folded
+    # in so the global share banner has its initial state on first
+    # render and skips the first /api/admin/share/banner poll.
+    # ADMIN ONLY — analysts don't manage sharing.
+    share_banner: dict | None = None
+    # Analyst-safe sibling of sync_status, projected down to the two
+    # fields the global SyncStatusBadge renders (latest_log_at,
+    # local_rows). Available to BOTH admin AND analyst sessions so the
+    # badge shows on prod for analyst-shared instances too.
+    header_badge: dict | None = None
+    # Analyst-safe log extents (same shape as /api/log-extents): the
+    # earliest + latest log timestamps the FilterBar uses for its
+    # auto-range snap-to-extents. Folded in so the FilterBar's first
+    # render skips the dedicated round-trip; the existing 3-s
+    # not-yet-populated poll continues from useFilterBar for new
+    # services where extents land later.
+    log_extents: dict | None = None
+    # Whether the backend will populate ``_debug_queries`` /
+    # ``_debug_calls`` envelopes on responses (gated by the
+    # ``DEBUG_RESPONSES`` env var). Folded in so the admin
+    # DiagnosticsPanel can dim the "Query debugging" / "API call"
+    # toggles on first paint instead of paying a separate
+    # /api/debug/state round-trip. ADMIN ONLY — analysts never see
+    # the diagnostics panel and the toggles aren't user-facing.
+    debug_state: dict | None = None
+    # Seed for the OperationsOverview admin cards:
+    # ``{queries_summary, log_accounting, slow_queries_count}``.
+    # The card-level useQueries (10-s poll, same queryKeys) hit cache
+    # on first paint so the cards render with real values instead of
+    # "—" placeholders. ADMIN ONLY.
+    ops_overview: dict | None = None
+    # Seed for the /logs cron tab. ``cron_schedule`` mirrors the
+    # /api/cron-schedule response (the endpoint's 5-s TTL cache means
+    # the bootstrap call is usually a cache hit). ``cron_runs_first_page``
+    # mirrors the lean delta-poll shape of /api/cron-runs?per_page=10
+    # with ``with_total=False`` so the count(*) precount stays off the
+    # cold-path WAL writer. The heavy 500-row cron-history pull is
+    # intentionally NOT seeded — it's tab-gated and a session-3 lesson
+    # (commit bbbd381) showed seeding expensive payloads dominates the
+    # bootstrap hot path. ADMIN ONLY — analysts don't reach /logs.
+    cron_schedule: dict | None = None
+    cron_runs_first_page: dict | None = None
+    # Seed for useLastSync (the "Last Sync: Xs ago" header badge).
+    # Shape: ``{started_at, status, duration_s}`` of the latest non-running
+    # sync cron run, derived from ``latest_cron_per_task("sync")``. Without
+    # this seed every admin page-load fired one mandatory
+    # /api/cron-runs?task=sync request + 1-2 SSE-invalidation-driven
+    # refetches before the 5-min poll TTL kicked in. ADMIN ONLY.
+    last_sync: dict | None = None
+    # Seed for useScoringLabels — TopFlaggedTable + admin Labels tab +
+    # dashboard Flag column all read from ``['scoring-labels', sid]``.
+    # Without this seed every cold load fires
+    # GET /api/services/{sid}/scoring/labels (p95 311 ms admin / 702 ms
+    # analyst). Shape mirrors the endpoint: ``{labels: [...], counts: {...}}``.
+    # ADMIN ONLY.
+    scoring_labels: dict | None = None
+    # Seed for the /admin/share page's mount-time useQuery on
+    # ``['admin', 'share', 'status']``. Mirrors GET /admin/share/status
+    # — services, invites, sessions, audit_logs, rate_limits, telemetry.
+    # ~2.6 KB compressed. Without this seed every /admin/share cold
+    # load pays a 187 ms p95 round-trip before InvitationsPanel can
+    # render. ADMIN ONLY.
+    share_status: dict | None = None
     # section_timings is inherited from BaseResponse.

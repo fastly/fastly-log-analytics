@@ -18,15 +18,14 @@ interface SSEProgressViewProps {
   doneMessage?: string
 }
 
-export function SSEProgressView({ 
-  lines, 
-  status, 
-  error, 
-  description, 
-  onStart, 
-  renderLine, 
+export function SSEProgressView({
+  lines,
+  status,
+  error,
+  description,
+  onStart,
+  renderLine,
   className,
-  progressLabel = "Progress",
   doneMessage = "Process completed successfully."
 }: SSEProgressViewProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -40,11 +39,11 @@ export function SSEProgressView({
     l.type === 'status' && typeof l.message === 'string' && l.message.trim() !== ''
   )
   const currentStepMessage = lastStepStatusLine?.message || ""
-  
+
   let progressCurrent = 0
   let progressTotal = 1
   let progressPercent = 0
-  
+
   if (lastProgressLine) {
     progressCurrent = typeof lastProgressLine.current === 'number' ? lastProgressLine.current : 0
     progressTotal = typeof lastProgressLine.total === 'number' ? lastProgressLine.total : 1
@@ -54,12 +53,15 @@ export function SSEProgressView({
   return (
     <div className={cn("flex flex-col bg-muted/30 border border-border/50 text-foreground rounded-lg font-mono text-xs relative overflow-hidden shadow-inner", className)}>
       {status === 'idle' && description && (
-        <div className="absolute inset-0 bg-background/80 backdrop-blur-[2px] z-10 flex flex-col items-center justify-center p-8 text-center">
-          <div className="max-w-md space-y-6">
+        <div className="absolute inset-0 bg-background/80 backdrop-blur-[2px] z-10 flex flex-col items-center overflow-y-auto p-8 text-center">
+          {/* my-auto centers the block when it fits and collapses to allow
+              scrolling when the description is taller than the overlay —
+              justify-center alone clips tall content with no way to reach it. */}
+          <div className="max-w-md space-y-6 my-auto">
             <div className="text-muted-foreground leading-relaxed font-sans text-sm">{description}</div>
             {onStart && (
-              <button 
-                onClick={onStart} 
+              <button
+                onClick={onStart}
                 className="w-full font-sans font-semibold bg-primary text-primary-foreground h-11 px-8 rounded-md transition-colors hover:bg-primary/90"
               >
                 Start Process
@@ -68,7 +70,7 @@ export function SSEProgressView({
           </div>
         </div>
       )}
-      
+
       <ScrollArea className="flex-1 p-4 h-full">
         <div className="space-y-1.5 pb-4">
           {lines
@@ -78,9 +80,28 @@ export function SSEProgressView({
             if (line.type === 'file_done' || (line.message && line.message.includes('[') && line.message.includes('] Read'))) {
               isDoneFile = true;
             }
-            
+
+            // Section-header convention: a status line whose message starts
+            // with "▸" (e.g. the orchestrator's two-phase "▸ Phase 1/2 …"
+            // markers) renders as a bold, spaced header so the operator can
+            // see at a glance where one phase ends and the next begins. Other
+            // SSE producers don't emit "▸"-prefixed lines, so this is a no-op
+            // for them.
+            const isHeader =
+              typeof line.message === 'string' && line.message.trimStart().startsWith('▸')
+
             return (
-              <div key={i} className={cn("transition-colors leading-relaxed", isDoneFile ? "text-muted-foreground" : "text-foreground")}>
+              <div
+                key={line._id ?? i}
+                className={cn(
+                  "transition-colors leading-relaxed",
+                  isHeader
+                    ? "font-sans font-semibold text-foreground mt-3 first:mt-0"
+                    : isDoneFile
+                      ? "text-muted-foreground"
+                      : "text-foreground",
+                )}
+              >
                 {((renderLine ? renderLine(line, i) : null) || (
                   line.message ?? line.summary ?? (
                     line.type === 'file_done' ? `Processed ${line.file_name}` :
@@ -104,7 +125,7 @@ export function SSEProgressView({
           <div ref={bottomRef} />
         </div>
       </ScrollArea>
-      
+
       {lastProgressLine && (
         <div className="p-4 bg-muted/50 border-t shrink-0">
           <div className="flex justify-between items-end text-xs text-muted-foreground mb-2 font-sans font-medium">

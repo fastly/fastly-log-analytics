@@ -1,5 +1,5 @@
 from backend.repositories._base import _safe_table
-from backend.repositories.performance import get_origin_ts, get_performance_aggregates
+from backend.repositories.performance import get_performance_aggregates
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 
@@ -26,7 +26,6 @@ def test_performance_aggregates(in_memory_duckdb, test_service_source):
     # 3. Assertions
     assert "top_urls" in result
     assert "top_asns" in result
-    assert "latency_ts" in result
 
     # The URLs we artificially slowed down should be present (if enough requests)
     # The mock data generator adds randomness, so we mainly check the structure
@@ -40,31 +39,6 @@ def test_performance_aggregates(in_memory_duckdb, test_service_source):
     assert isinstance(result["top_asns"], list)
 
 
-def test_get_origin_ts_returns_timeseries_key(in_memory_duckdb, test_service_source):
-    """Regression: get_origin_ts must use 'timeseries' key to match PerformanceOriginTsResponse."""
-    logs = generate_mock_logs(test_service_source, num_logs=20, hours_ago=1)
-    for log in logs:
-        log["ottfb"] = 50000  # 50ms in microseconds
-
-    table_name = _safe_table(test_service_source["name"])
-    insert_mock_logs(in_memory_duckdb, table_name, logs)
-
-    result = get_origin_ts(
-        con=in_memory_duckdb,
-        src=test_service_source,
-        start_time=None,
-        end_time=None,
-        filters={},
-    )
-
-    assert "timeseries" in result, f"Expected 'timeseries' key, got: {list(result.keys())}"
-    assert "origin_ts" not in result, "Stale key 'origin_ts' must not be returned"
-    assert isinstance(result["timeseries"], list)
-    assert len(result["timeseries"]) > 0
-    assert "time" in result["timeseries"][0]
-    assert "value" in result["timeseries"][0]
-
-
 # ── get_performance_aggregates: early returns ──────────────────────────────
 
 
@@ -76,7 +50,7 @@ def test_get_performance_aggregates_returns_empty_arrays_for_unknown_schema(in_m
         con=in_memory_duckdb, src=test_service_source, start_time=None, end_time=None, filters={}
     )
 
-    for key in ("latency_ts", "top_urls", "top_asns", "ttl_dist", "scatter"):
+    for key in ("top_urls", "top_asns", "ttl_dist", "scatter"):
         assert result[key] == []
 
 
@@ -169,29 +143,140 @@ def test_get_performance_aggregates_scatter_filters_negative_edge_time(in_memory
         assert pt["edge"] >= 0
 
 
-# ── get_origin_ts: fallback paths ──────────────────────────────────────────
+# ── Section selector (P-4 slice 5) ───────────────────────────────────────────
 
 
-def test_get_origin_ts_returns_empty_when_no_schema(in_memory_duckdb, test_service_source):
-    """Missing table → empty timeseries. Pinned because the frontend
-    map() over an absent list would crash."""
-    result = get_origin_ts(con=in_memory_duckdb, src=test_service_source, start_time=None, end_time=None, filters={})
-    assert result["timeseries"] == []
+_ALL_PERF_SECTIONS = {"waterfall", "top_urls", "top_asns", "ttl_dist", "scatter"}
 
 
-def test_get_origin_ts_returns_empty_when_metric_unavailable(in_memory_duckdb, test_service_source):
-    """``origin_metric='ttlb'`` but no ``ottlb`` column → empty
-    timeseries. Pinned because querying a non-existent column would
-    raise a CatalogException."""
-    in_memory_duckdb.execute(
-        f"CREATE TABLE {_safe_table(test_service_source['name'])} (timestamp TIMESTAMP, status INTEGER)"
-    )
-    result = get_origin_ts(
+def test_performance_aggregates_sections_none_preserves_full_response(in_memory_duckdb, test_service_source):
+    """sections=None must return every section the full-response path
+    produces today — the zero-risk default for callers that haven't
+    opted into the selector."""
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    result = get_performance_aggregates(
         con=in_memory_duckdb,
         src=test_service_source,
         start_time=None,
         end_time=None,
         filters={},
-        origin_metric="ttlb",
+        sections=None,
     )
-    assert result["timeseries"] == []
+
+    assert _ALL_PERF_SECTIONS.issubset(result.keys()), (
+        f"sections=None should keep the full response shape; missing: {_ALL_PERF_SECTIONS - result.keys()}"
+    )
+
+
+def test_performance_aggregates_single_ttl_dist_emits_only_requested(in_memory_duckdb, test_service_source):
+    """sections={'ttl_dist'} returns ONLY ttl_dist among the 5 selectable
+    sections — proves the gates suppress the unrequested SQL (a
+    distributions-only request should not pay for the top_urls/top_asns
+    CTE work)."""
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=10)
+    for log in logs:
+        log["ttl"] = 60
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    result = get_performance_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        sections={"ttl_dist"},
+    )
+    present = _ALL_PERF_SECTIONS & result.keys()
+    assert present == {"ttl_dist"}, f"single-section request leaked extra section keys; got {present}"
+    # Timer entries are the load-bearing FE signal — suppressed sections
+    # must not append to it.
+    timer_names = {t["section"] for t in result.get("section_timings", [])}
+    assert "ttl_dist_query" in timer_names
+    for blocked in ("top_urls_query", "top_asns_query", "scatter_waterfall_query"):
+        assert blocked not in timer_names, f"selector did not suppress {blocked}; got {timer_names}"
+
+
+def test_performance_aggregates_top_urls_keeps_top_asns_cte_shared(in_memory_duckdb, test_service_source):
+    """top_urls + top_asns travel together as the expanded set the
+    router produces — emulate that expansion here to prove the repo
+    gate keeps both 2-pass CTE branches firing off the SAME per-request
+    temp (commit 8fc53e1's optimization survives the selector)."""
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=30)
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    result = get_performance_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        sections={"top_urls", "top_asns"},
+    )
+    present = _ALL_PERF_SECTIONS & result.keys()
+    assert present == {"top_urls", "top_asns"}, f"top_urls+top_asns pair leaked or dropped keys; got {present}"
+    timer_names = {t["section"] for t in result.get("section_timings", [])}
+    # Both CTE branches fire, AND temp_table_create fires exactly once —
+    # proves they share the temp.
+    assert "top_urls_query" in timer_names
+    assert "top_asns_query" in timer_names
+    temp_marks = [t for t in result.get("section_timings", []) if t["section"] == "temp_table_create"]
+    assert len(temp_marks) == 1, f"temp_table materialized {len(temp_marks)} times; expected 1"
+
+
+def test_performance_aggregates_multi_section_runs_only_requested(in_memory_duckdb, test_service_source):
+    """sections={'top_urls','top_asns','ttl_dist'} runs three branches
+    and skips scatter+waterfall — covers the typical multi-card
+    selector request shape."""
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=25)
+    for log in logs:
+        log["ttl"] = 300
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    result = get_performance_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        sections={"top_urls", "top_asns", "ttl_dist"},
+    )
+    present = _ALL_PERF_SECTIONS & result.keys()
+    assert present == {"top_urls", "top_asns", "ttl_dist"}, f"multi-section request got {present}"
+    timer_names = {t["section"] for t in result.get("section_timings", [])}
+    assert "scatter_waterfall_query" not in timer_names, (
+        f"scatter/waterfall fired without being requested; got {timer_names}"
+    )
+
+
+def test_performance_aggregates_waterfall_emits_when_requested_alone(in_memory_duckdb, test_service_source):
+    """sections={'waterfall','scatter'} — the pair shares the
+    MATERIALIZED components CTE so requesting one auto-includes the
+    other at the router boundary. The repo emits both keys without
+    firing the top_urls/top_asns CTE."""
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    for log in logs:
+        log["elapsed"] = 200_000
+        log["ttfb"] = f"{0.1:.6f}"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    result = get_performance_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        sections={"waterfall", "scatter"},
+    )
+    present = _ALL_PERF_SECTIONS & result.keys()
+    assert present == {"waterfall", "scatter"}, f"waterfall+scatter pair got {present}"
+    timer_names = {t["section"] for t in result.get("section_timings", [])}
+    assert "scatter_waterfall_query" in timer_names
+    for blocked in ("top_urls_query", "top_asns_query", "ttl_dist_query"):
+        assert blocked not in timer_names, f"selector did not suppress {blocked}; got {timer_names}"

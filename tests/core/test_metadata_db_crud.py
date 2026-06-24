@@ -1,4 +1,4 @@
-"""CRUD-layer tests for ``backend.core.metadata_db``.
+"""CRUD-layer tests for ``backend.core.metadata``.
 
 The schema migration tests live in ``test_metadata_db_schema.py``; the
 concurrency tests in ``test_metadata_db_concurrency.py``; the orphan
@@ -15,7 +15,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
+from backend.core.metadata import usage_log_db
 
 
 @pytest.fixture
@@ -155,6 +156,42 @@ def test_insert_and_get_ingested_filenames_round_trip(sid):
     metadata_db.insert_ingested_files(sid, [("a.gz", 100, 5000), ("b.gz", 200, 8000)])
     names = metadata_db.get_ingested_filenames(sid)
     assert names == {"a.gz", "b.gz"}
+
+
+def test_get_reclaimable_strand_filenames_requires_durable_and_post_epoch(sid):
+    """The reconcile may only delete a strand it can POSITIVELY prove safe: durable
+    data (row_count>0) AND ingested at/after the durability epoch. Markers
+    (row_count==0) and pre-epoch rows (untrustworthy row_count) are excluded."""
+    metadata_db.insert_ingested_files(
+        sid,
+        [("durable.gz", 100, 5000), ("marker.gz", 0, 1200), ("legacy.gz", 100, 8000)],
+    )
+    # Backdate legacy.gz so it falls BEFORE the epoch; the others keep datetime('now').
+    con = metadata_db.get_con(sid)
+    con.execute(
+        "UPDATE ingested_files SET ingested_at = ? WHERE file_name = ? AND source_name = ?",
+        ("2020-01-01 00:00:00", "legacy.gz", sid),
+    )
+    con.commit()
+
+    cands = {"durable.gz", "marker.gz", "legacy.gz"}
+    # A far-past epoch admits durable + legacy (both row_count>0), never the marker.
+    assert metadata_db.get_reclaimable_strand_filenames(sid, cands, "2000-01-01 00:00:00") == {
+        "durable.gz",
+        "legacy.gz",
+    }
+    # An epoch between legacy (2020) and "now" excludes the pre-epoch legacy row AND
+    # the zero-row marker, leaving only the durable, post-epoch row.
+    assert metadata_db.get_reclaimable_strand_filenames(sid, cands, "2025-01-01 00:00:00") == {"durable.gz"}
+
+
+def test_get_reclaimable_strand_filenames_restricts_to_candidates(sid):
+    """The ``candidates`` filter keeps the query cheap — only the asked-for
+    file_names are classified, and an empty candidate set short-circuits."""
+    metadata_db.insert_ingested_files(sid, [("a.gz", 9, 100), ("b.gz", 9, 100), ("marker.gz", 0, 100)])
+    past = "2000-01-01 00:00:00"
+    assert metadata_db.get_reclaimable_strand_filenames(sid, {"a.gz", "marker.gz"}, past) == {"a.gz"}
+    assert metadata_db.get_reclaimable_strand_filenames(sid, set(), past) == set()
 
 
 def test_insert_ingested_files_upserts_on_conflict(sid):
@@ -492,6 +529,30 @@ def test_start_cron_run_raises_when_task_already_running(sid):
         metadata_db.start_cron_run(sid, "sync")
 
 
+def test_start_cron_run_gate_is_per_service_not_global(sid):
+    """crash SEAM-01: a 'running' sync on service A must NOT block a sync on
+    service B. The busy check (``cron_log.py``) has no ``service_id`` predicate
+    — independence rests ENTIRELY on ``get_con(service_id)`` routing each
+    service to its own SQLite file (``db_path``). This pins that contract: with
+    A running, B starts cleanly, while a second A correctly raises. Mutation
+    that breaks it: point ``get_con`` at one shared file → B sees A's running
+    row and raises (the scheduler would then serialise all services' syncs)."""
+    svc_a, svc_b = "cronseam-a", "cronseam-b"
+    # A starts and stays running.
+    run_a = metadata_db.start_cron_run(svc_a, "sync")
+    assert isinstance(run_a, int) and run_a > 0
+
+    # B must start independently — different per-service DB file, so A's
+    # running row is invisible to B's busy check.
+    run_b = metadata_db.start_cron_run(svc_b, "sync")
+    assert isinstance(run_b, int) and run_b > 0
+
+    # And the within-service gate still holds for A (proves B's success wasn't
+    # because the gate is simply off).
+    with pytest.raises(RuntimeError, match="already running"):
+        metadata_db.start_cron_run(svc_a, "sync")
+
+
 def test_start_cron_run_reaps_orphans_before_busy_check(sid):
     """If an OLD 'running' row (past the orphan threshold) exists,
     it's flipped to 'error' BEFORE the busy check, so the new
@@ -590,7 +651,7 @@ def test_get_usage_logs_aggregates_and_breaks_down_in_one_pass(sid):
     two-query form is what the cost panel + Usage Log page contract was built
     against, and any drift in the totals or breakdown shape would silently
     break both."""
-    con = metadata_db.get_con(sid)
+    con = usage_log_db.get_con(sid)
     rows = [
         ("2026-05-25T10:00:00Z", sid, "A", "PUT_OBJECT", "u1", "OK", 1.0, "fn1", None, 100, 2),
         ("2026-05-25T10:00:01Z", sid, "A", "PUT_OBJECT", "u2", "OK", 1.0, "fn1", None, 200, 3),
@@ -609,7 +670,11 @@ def test_get_usage_logs_aggregates_and_breaks_down_in_one_pass(sid):
     con.commit()
 
     _entries, total, agg = metadata_db.get_usage_logs(sid, "2026-05-25T00:00:00Z", "2026-05-25T23:59:59Z")
-    assert total == 6
+    # ``total`` is the sum of the ``count`` column across matched rows
+    # (2+3+1+5+7+4 = 22) — derived from the same grouped aggregate the
+    # agg.* fields are built from, so the page query doesn't need a
+    # separate COUNT(*). See usage_log.py:586-592 for the perf rationale.
+    assert total == 22
     assert agg["total_class_a"] == 6  # 2+3+1
     assert agg["total_class_b"] == 5
     assert agg["total_cdn_downloads"] == 11  # 7+4
@@ -617,6 +682,26 @@ def test_get_usage_logs_aggregates_and_breaks_down_in_one_pass(sid):
     assert agg["total_fos_bytes"] == 850  # 100+200+50+500
     assert agg["class_a_breakdown"] == {"PUT_OBJECT": 5, "POST": 1}
     assert agg["class_b_breakdown"] == {"GET_OBJECT": 5}
+
+
+def test_usage_class_predicate_matches_across_callers():
+    """``_usage_class_predicate`` is the single source of truth shared by
+    ``get_usage_logs`` and ``iter_usage_logs_chunks`` (and the rollup
+    aggregate). Pinned so the operation_class WHERE fragment stays identical
+    for every usage_type — a drift here would silently re-class CDN/FOS rows
+    differently between the page query and the CSV export."""
+    from backend.core.metadata.usage_log import _usage_class_predicate
+
+    expected = {
+        "": ("", []),
+        "CDN": ("operation_class = 'CDN'", []),
+        "FOS-A": ("operation_class = 'A'", []),
+        "FOS-B": ("operation_class = 'B'", []),
+        "FOS": ("operation_class IN ('A', 'B')", []),
+        "custom-x": ("operation_class = ?", ["custom-x"]),
+    }
+    for usage_type, want in expected.items():
+        assert _usage_class_predicate(usage_type) == want
 
 
 def test_cron_summary_for_tasks_returns_latest_per_task(sid):
@@ -732,7 +817,10 @@ def test_log_usage_calls_classifies_fos_class_a_correctly(sid):
         ],
     )
 
-    con = metadata_db.get_con(sid)
+    # usage_log lives in its own SQLite file post-2026-06-12 — see
+    # backend/core/metadata/usage_log_db.py for rationale. Read against
+    # that db, not metadata.db.
+    con = usage_log_db.get_con(sid)
     classes = [
         r["operation_class"] for r in con.execute("SELECT operation_class FROM usage_log ORDER BY id").fetchall()
     ]
@@ -741,14 +829,14 @@ def test_log_usage_calls_classifies_fos_class_a_correctly(sid):
 
 def test_log_usage_calls_classifies_cdn_separately(sid):
     metadata_db.log_usage_calls(sid, [{"method": "GET", "service": "CDN"}])
-    con = metadata_db.get_con(sid)
+    con = usage_log_db.get_con(sid)
     row = con.execute("SELECT operation_class FROM usage_log").fetchone()
     assert row["operation_class"] == "CDN"
 
 
 def test_log_usage_calls_noops_on_empty_list(sid):
     metadata_db.log_usage_calls(sid, [])  # must not raise
-    con = metadata_db.get_con(sid)
+    con = usage_log_db.get_con(sid)
     assert con.execute("SELECT count(*) FROM usage_log").fetchone()[0] == 0
 
 
@@ -764,7 +852,10 @@ def _seed_usage_log_row(
     bytes_count: int = 1024,
 ):
     """Insert a usage_log row directly via SQL for testing query helpers."""
-    con = metadata_db.get_con(sid)
+    # usage_log now lives in its own per-service SQLite file (separated
+    # from metadata.db on 2026-06-12) — insert against that db so the
+    # public-API readers (metadata_db.get_usage_logs etc.) find the rows.
+    con = usage_log_db.get_con(sid)
     con.execute(
         """INSERT INTO usage_log
             (service_id, timestamp, operation_class, operation_type, url, bytes,
@@ -783,6 +874,11 @@ def _seed_usage_log_row(
             "OK",
         ],
     )
+    # ``get_usage_logs`` now opens a separate ``mode=ro`` connection per
+    # call (decoupled from the cron writer), so the writer's uncommitted
+    # transaction is invisible to the reader. Commit here so the assertions
+    # see the seeded rows.
+    con.commit()
 
 
 def test_get_usage_logs_filters_by_service_id_and_time_range(sid):
@@ -1048,7 +1144,6 @@ def test_log_usage_calls_doubles_cdn_egress_on_shield_miss(sid):
 
     logs, _, _ = metadata_db.get_usage_logs(sid, "2000-01-01", "2099-01-01")
 
-    # Assert
     assert len(logs) == 6
 
     # Sort by path so we can check bytes
@@ -1071,3 +1166,233 @@ def test_log_usage_calls_doubles_cdn_egress_on_shield_miss(sid):
 
     assert logs[5]["url"] == "/file6.parquet"
     assert logs[5]["bytes"] == 2000
+
+
+# ── usage_log coverage expansion (sub-86% gap fill) ─────────────────────────
+
+
+def test_log_usage_calls_swallows_executemany_exception(sid, caplog):
+    """log_usage_calls catches and logs a SQLite insert exception without
+    re-raising. Pinned because the cron writer can't crash the request
+    that triggered the call — usage telemetry is best-effort, not a
+    correctness gate."""
+    import logging as _logging
+
+    from backend.core.metadata import usage_log_db
+
+    con = usage_log_db.get_con(sid)
+    real_executemany = con.executemany
+
+    def _explode(*_a, **_kw):
+        raise RuntimeError("simulated commit failure")
+
+    con.executemany = _explode  # type: ignore[method-assign]
+    try:
+        with caplog.at_level(_logging.ERROR, logger="backend.core.metadata.usage_log"):
+            metadata_db.log_usage_calls(
+                sid,
+                [{"function_name": "ingest", "operation_type": "PUT_OBJECT", "url": "/x", "status": "OK"}],
+            )
+    finally:
+        con.executemany = real_executemany  # type: ignore[method-assign]
+
+    assert any("Failed to log usage calls" in r.message for r in caplog.records)
+
+
+def test_log_synthetic_usage_empty_calls_returns_zero(sid):
+    """Empty input → immediate 0 return without touching the connection."""
+    assert metadata_db.log_synthetic_usage(sid, []) == 0
+
+
+def test_log_synthetic_usage_returns_zero_when_no_paths(sid):
+    """Calls without a ``path`` key are filtered out; if NONE have a path,
+    log_synthetic_usage returns 0 before any SELECT or INSERT runs."""
+    assert metadata_db.log_synthetic_usage(sid, [{"method": "PUT"}, {"caller": "x"}]) == 0
+
+
+def test_log_synthetic_usage_dedupes_against_existing_urls(sid):
+    """A second call with overlapping URLs only inserts the new ones."""
+    from backend.core.metadata import usage_log_db
+
+    n1 = metadata_db.log_synthetic_usage(sid, [{"path": "/a"}, {"path": "/b"}])
+    assert n1 == 2
+    n2 = metadata_db.log_synthetic_usage(sid, [{"path": "/a"}, {"path": "/c"}])
+    assert n2 == 1, "should have inserted only /c (dedup against /a)"
+
+    con = usage_log_db.get_con(sid)
+    urls = sorted(
+        r["url"]
+        for r in con.execute("SELECT url FROM usage_log WHERE function_name = 'fastly.edge' ORDER BY url").fetchall()
+    )
+    assert urls == ["/a", "/b", "/c"]
+
+
+def test_log_synthetic_usage_skips_when_all_paths_already_present(sid):
+    """If every path in the input is already in the table, new_rows is
+    empty and the function short-circuits to 0 BEFORE attempting any
+    INSERT."""
+    n1 = metadata_db.log_synthetic_usage(sid, [{"path": "/dup1"}, {"path": "/dup2"}])
+    assert n1 == 2
+    n2 = metadata_db.log_synthetic_usage(sid, [{"path": "/dup1"}, {"path": "/dup2"}])
+    assert n2 == 0
+
+
+def test_log_synthetic_usage_swallows_insert_exception(sid, caplog):
+    """When executemany fails on the synthetic-row INSERT, the function
+    logs and returns 0 rather than propagating."""
+    import logging as _logging
+
+    from backend.core.metadata import usage_log_db
+
+    con = usage_log_db.get_con(sid)
+    real_executemany = con.executemany
+
+    def _explode(*_a, **_kw):
+        raise RuntimeError("simulated insert failure")
+
+    con.executemany = _explode  # type: ignore[method-assign]
+    try:
+        with caplog.at_level(_logging.ERROR, logger="backend.core.metadata.usage_log"):
+            out = metadata_db.log_synthetic_usage(sid, [{"path": "/x"}, {"path": "/y"}])
+    finally:
+        con.executemany = real_executemany  # type: ignore[method-assign]
+
+    assert out == 0
+    assert any("Synthetic usage log failed" in r.message for r in caplog.records)
+
+
+# ── reconcile_fastly_stats ──────────────────────────────────────────────────
+
+
+def test_reconcile_fastly_stats_returns_zero_on_empty_records(sid):
+    assert metadata_db.reconcile_fastly_stats(sid, []) == 0
+
+
+def test_reconcile_fastly_stats_skips_records_without_hour_iso(sid):
+    """Records missing hour_iso or with invalid hour_iso must be skipped
+    without raising. If ALL records are malformed, return 0."""
+    out = metadata_db.reconcile_fastly_stats(
+        sid,
+        [{"class_a": 10, "class_b": 5}, {"hour_iso": "not-a-date", "class_a": 1}],
+    )
+    assert out == 0
+
+
+def test_reconcile_fastly_stats_writes_gap_rows_for_underreporting(sid):
+    """When Fastly reports more Class-A/B ops than usage_log holds,
+    reconciliation rows fill the gap."""
+    from backend.core.metadata import usage_log_db
+
+    for i in range(5):
+        _seed_usage_log_row(sid, f"2026-05-22T13:0{i}:00Z", operation_class="A")
+
+    written = metadata_db.reconcile_fastly_stats(
+        sid,
+        [{"hour_iso": "2026-05-22T13:00:00Z", "class_a": 10, "class_b": 3}],
+    )
+    assert written == 2
+
+    con = usage_log_db.get_con(sid)
+    rows = con.execute(
+        "SELECT operation_class, count FROM usage_log "
+        "WHERE function_name = 'fastly.reconciliation' ORDER BY operation_class"
+    ).fetchall()
+    classes = {r["operation_class"]: r["count"] for r in rows}
+    assert classes == {"A": 5, "B": 3}
+
+
+def test_reconcile_fastly_stats_does_not_double_count_prior_reconciliation_rows(sid):
+    """Reconciliation rows are excluded from the local_sum math AND prior
+    rows in the same window are deleted before new ones are written. A
+    second call with the same Fastly counts must produce the SAME gap,
+    not double it."""
+    from backend.core.metadata import usage_log_db
+
+    for i in range(2):
+        _seed_usage_log_row(sid, f"2026-05-22T14:0{i}:00Z", operation_class="A")
+
+    n1 = metadata_db.reconcile_fastly_stats(
+        sid,
+        [{"hour_iso": "2026-05-22T14:00:00Z", "class_a": 10, "class_b": 0}],
+    )
+    n2 = metadata_db.reconcile_fastly_stats(
+        sid,
+        [{"hour_iso": "2026-05-22T14:00:00Z", "class_a": 10, "class_b": 0}],
+    )
+    assert n1 == 1 and n2 == 1
+
+    con = usage_log_db.get_con(sid)
+    rows = con.execute(
+        "SELECT count FROM usage_log WHERE function_name = 'fastly.reconciliation' AND operation_class = 'A'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["count"] == 8
+
+
+def test_reconcile_fastly_stats_writes_nothing_when_local_matches_fastly(sid):
+    """If local_sum equals fastly_count, gap is 0 and no row is written."""
+    for i in range(7):
+        _seed_usage_log_row(sid, f"2026-05-22T15:0{i}:00Z", operation_class="A")
+
+    written = metadata_db.reconcile_fastly_stats(
+        sid,
+        [{"hour_iso": "2026-05-22T15:00:00Z", "class_a": 7, "class_b": 0}],
+    )
+    assert written == 0
+
+
+# ── _query_usage_log_aggregate_rollup branches via get_usage_logs ───────────
+
+
+def test_get_usage_logs_sub_hour_range_uses_direct_scan(sid):
+    """When start_hour == end_hour, the rollup helper takes the single-
+    raw-scan path. The aggregate result still matches the seeded rows."""
+    _seed_usage_log_row(sid, "2026-05-25T10:05:00Z", operation_class="A")
+    _seed_usage_log_row(sid, "2026-05-25T10:15:00Z", operation_class="A")
+    _seed_usage_log_row(sid, "2026-05-25T11:05:00Z", operation_class="A")  # different hour, excluded
+
+    _entries, total, agg = metadata_db.get_usage_logs(sid, "2026-05-25T10:00:00Z", "2026-05-25T10:30:00Z")
+    assert total == 2
+    assert agg["total_class_a"] == 2
+
+
+def test_get_usage_logs_custom_usage_type_filters_by_class(sid):
+    """A usage_type outside the known enum (CDN/FOS/FOS-A/FOS-B) is
+    applied as a direct ``operation_class = ?`` filter — defensive
+    forward-compat branch."""
+    _seed_usage_log_row(sid, "2026-05-26T10:00:00Z", operation_class="A")
+    _seed_usage_log_row(sid, "2026-05-26T10:01:00Z", operation_class="CUSTOM")
+
+    _entries, _total, agg = metadata_db.get_usage_logs(
+        sid, "2026-05-26T00:00:00Z", "2026-05-26T23:59:59Z", usage_type="CUSTOM"
+    )
+    assert agg["total_class_a"] == 0
+    assert agg["total_class_b"] == 0
+
+
+def test_get_usage_logs_operation_type_filter_uses_like(sid):
+    """operation_type filter applies as ``LIKE %X%`` so substring matches
+    work (e.g., 'PUT' matches 'PUT_OBJECT')."""
+    _seed_usage_log_row(sid, "2026-05-27T10:00:00Z", operation_type="PUT_OBJECT")
+    _seed_usage_log_row(sid, "2026-05-27T10:01:00Z", operation_type="GET_OBJECT")
+    _seed_usage_log_row(sid, "2026-05-27T10:02:00Z", operation_type="POST")
+
+    entries, total, _agg = metadata_db.get_usage_logs(
+        sid, "2026-05-27T00:00:00Z", "2026-05-27T23:59:59Z", operation_type="PUT"
+    )
+    assert total == 1
+    assert entries[0]["operation_type"] == "PUT_OBJECT"
+
+
+def test_get_usage_logs_process_context_filter_uses_like(sid):
+    """process_context filter is also LIKE-based — matches admin
+    Usage Log page's 'filter by process' text input."""
+    _seed_usage_log_row(sid, "2026-05-28T10:00:00Z", process_context="cron:sync")
+    _seed_usage_log_row(sid, "2026-05-28T10:01:00Z", process_context="cron:commit")
+    _seed_usage_log_row(sid, "2026-05-28T10:02:00Z", process_context="request:handler")
+
+    entries, total, _agg = metadata_db.get_usage_logs(
+        sid, "2026-05-28T00:00:00Z", "2026-05-28T23:59:59Z", process_context="cron"
+    )
+    assert total == 2
+    assert all("cron" in e["process_context"] for e in entries)

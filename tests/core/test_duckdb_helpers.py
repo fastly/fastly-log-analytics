@@ -292,8 +292,6 @@ def test_data_stats_fingerprint_changes_when_partition_added(tmp_path):
     cached COUNT is invalidated. Pinned because stale COUNT after
     optimize or post-commit would surface as the dashboard pinning
     to the pre-compaction row total forever."""
-    import time
-
     from backend.core.duckdb import _data_stats_fingerprint
 
     cache_root = tmp_path / "cache"
@@ -302,8 +300,8 @@ def test_data_stats_fingerprint_changes_when_partition_added(tmp_path):
     src = {"_cache_dir_override": str(cache_root)}
 
     fp_before = _data_stats_fingerprint(src)
-    # Ensure mtime moves forward even on coarse FS timers
-    time.sleep(0.01)
+    # Count differs (1 → 2) so the fingerprint tuple must differ regardless
+    # of mtime — no need to sleep past the FS timer.
     (data_dir / "ts=2").mkdir()
     fp_after = _data_stats_fingerprint(src)
     assert fp_before is not None
@@ -320,8 +318,6 @@ def test_data_stats_fingerprint_ignores_buffer_changes(tmp_path):
     pure waste. Pinned because the previous combined-fingerprint design
     blew up the cache hit rate to ~0% on busy services (see
     update_iceberg_view_clears_schema_cache memory)."""
-    import time
-
     from backend.core.duckdb import _data_stats_fingerprint
 
     cache_root = tmp_path / "cache"
@@ -331,7 +327,6 @@ def test_data_stats_fingerprint_ignores_buffer_changes(tmp_path):
     src = {"_cache_dir_override": str(cache_root)}
 
     fp_before = _data_stats_fingerprint(src)
-    time.sleep(0.01)
     (buf_dir / "batch_001.parquet").write_bytes(b"x")
     fp_after_add = _data_stats_fingerprint(src)
     (buf_dir / "batch_001.parquet").unlink()
@@ -525,7 +520,7 @@ def test_ensure_source_registered_passes_config_json_to_metadata_db():
         "cdn_secret": "shh",
     }
 
-    with patch("backend.core.metadata_db.register_source") as mock_register:
+    with patch("backend.core.metadata.register_source") as mock_register:
         table_name = _ensure_source_registered(src)
 
     # Returns the sanitised table name
@@ -555,10 +550,10 @@ def test_start_cron_run_purges_old_runs_before_starting():
             return_value={"provisioning": {"cron_sync": {"log_retention_days": 14}}},
         ),
         patch(
-            "backend.core.metadata_db.purge_cron_runs",
+            "backend.core.metadata.purge_cron_runs",
             side_effect=lambda sid, task, days: purge_calls.append((sid, task, days)),
         ),
-        patch("backend.core.metadata_db.start_cron_run", return_value=99),
+        patch("backend.core.metadata.start_cron_run", return_value=99),
     ):
         run_id = start_cron_run({"name": "svc-1"}, "sync")
 
@@ -566,10 +561,15 @@ def test_start_cron_run_purges_old_runs_before_starting():
     assert purge_calls == [("svc-1", "sync", 14)]
 
 
-def test_start_cron_run_uses_cron_compact_retention_for_non_sync_tasks():
-    """Tasks other than `sync` use `cron_compact.log_retention_days`.
-    Pinned because admin commit/optimize/expire tasks should respect
-    their own retention setting."""
+def test_start_cron_run_uses_default_retention_for_non_mapped_tasks():
+    """Tasks not in ``_TASK_TO_CRON_KEY`` (commit / optimize / expire /
+    metadata_cleanup / alerts / ngwaf_sync / ...) fall back to the
+    7-day default rather than picking up cron_compact's setting.
+
+    The previous ``"cron_sync" if task == "sync" else "cron_compact"``
+    ternary silently coupled every non-sync task to cron_compact's
+    log_retention_days; this test pins the corrected behavior so the
+    coupling can't quietly come back."""
     from backend.core.duckdb import start_cron_run
 
     purge_calls = []
@@ -580,14 +580,15 @@ def test_start_cron_run_uses_cron_compact_retention_for_non_sync_tasks():
             return_value={"provisioning": {"cron_compact": {"log_retention_days": 30}}},
         ),
         patch(
-            "backend.core.metadata_db.purge_cron_runs",
+            "backend.core.metadata.purge_cron_runs",
             side_effect=lambda sid, task, days: purge_calls.append((sid, task, days)),
         ),
-        patch("backend.core.metadata_db.start_cron_run", return_value=100),
+        patch("backend.core.metadata.start_cron_run", return_value=100),
     ):
         start_cron_run({"name": "svc-1"}, "commit")
 
-    assert purge_calls == [("svc-1", "commit", 30)]
+    # 7 (the default), NOT 30 (cron_compact's setting).
+    assert purge_calls == [("svc-1", "commit", 7)]
 
 
 def test_start_cron_run_skips_purge_when_retention_days_zero():
@@ -601,8 +602,8 @@ def test_start_cron_run_skips_purge_when_retention_days_zero():
             "backend.config.load_config",
             return_value={"provisioning": {"cron_sync": {"log_retention_days": 0}}},
         ),
-        patch("backend.core.metadata_db.purge_cron_runs") as mock_purge,
-        patch("backend.core.metadata_db.start_cron_run", return_value=101),
+        patch("backend.core.metadata.purge_cron_runs") as mock_purge,
+        patch("backend.core.metadata.start_cron_run", return_value=101),
     ):
         start_cron_run({"name": "svc-1"}, "sync")
 
@@ -620,8 +621,8 @@ def test_start_cron_run_swallows_purge_exception():
             "backend.config.load_config",
             return_value={"provisioning": {"cron_sync": {"log_retention_days": 7}}},
         ),
-        patch("backend.core.metadata_db.purge_cron_runs", side_effect=RuntimeError("locked")),
-        patch("backend.core.metadata_db.start_cron_run", return_value=200),
+        patch("backend.core.metadata.purge_cron_runs", side_effect=RuntimeError("locked")),
+        patch("backend.core.metadata.start_cron_run", return_value=200),
     ):
         run_id = start_cron_run({"name": "svc-1"}, "sync")
 
@@ -805,7 +806,7 @@ def test_get_sources_merges_metadata_db_rows_for_each_service():
     }
     with (
         patch("backend.config.list_configs", return_value=fake_configs),
-        patch("backend.core.metadata_db.get_source_by_name", side_effect=[fake_row_a, fake_row_b]),
+        patch("backend.core.metadata.get_source_by_name", side_effect=[fake_row_a, fake_row_b]),
     ):
         out = get_sources()
 
@@ -826,7 +827,7 @@ def test_get_sources_skips_services_with_no_metadata_db_row():
     fake_configs = [{"service_id": "svc-1"}]
     with (
         patch("backend.config.list_configs", return_value=fake_configs),
-        patch("backend.core.metadata_db.get_source_by_name", return_value=None),
+        patch("backend.core.metadata.get_source_by_name", return_value=None),
     ):
         out = get_sources()
     assert out == []
@@ -838,7 +839,7 @@ def test_get_source_by_name_returns_none_for_unknown_name():
     misconfigured."""
     from backend.core.duckdb import get_source_by_name
 
-    with patch("backend.core.metadata_db.get_source_by_name", return_value=None):
+    with patch("backend.core.metadata.get_source_by_name", return_value=None):
         assert get_source_by_name(None, "ghost") is None
 
 
@@ -863,7 +864,7 @@ def test_get_source_by_name_builds_source_dict_from_metadata_row():
         ),
         "table_name": "logs_svc_1",
     }
-    with patch("backend.core.metadata_db.get_source_by_name", return_value=fake_row):
+    with patch("backend.core.metadata.get_source_by_name", return_value=fake_row):
         src = get_source_by_name(None, "svc-1")
 
     assert src is not None
@@ -890,7 +891,7 @@ def test_log_cron_run_persists_error_runs_regardless_of_log_enabled():
             return_value={"provisioning": {"cron_sync": {"log_enabled": False}}},
         ),
         patch(
-            "backend.core.metadata_db.log_cron_run",
+            "backend.core.metadata.log_cron_run",
             side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
         ),
     ):
@@ -913,10 +914,10 @@ def test_log_cron_run_deletes_pending_when_success_with_log_disabled():
             return_value={"provisioning": {"cron_sync": {"log_enabled": False}}},
         ),
         patch(
-            "backend.core.metadata_db.delete_cron_run",
+            "backend.core.metadata.delete_cron_run",
             side_effect=lambda sid, rid: deleted.append((sid, rid)),
         ),
-        patch("backend.core.metadata_db.log_cron_run") as mock_log,
+        patch("backend.core.metadata.log_cron_run") as mock_log,
     ):
         log_cron_run({"name": "svc"}, "sync", 1.0, "success", run_id=42)
 
@@ -929,7 +930,13 @@ def test_log_cron_run_deletes_pending_when_success_with_log_disabled():
 def test_log_cron_run_upgrades_status_to_partial_success_on_corrupt_rows():
     """Success status + corrupt_rows > 0 → upgraded to
     `partial_success`. Pinned because the FE renders a yellow
-    badge for partial vs green for full success."""
+    badge for partial vs green for full success.
+
+    DUMB-01: the status reaches ``metadata_db.log_cron_run`` as POSITIONAL arg
+    index 3 (``service_id, task, duration_s, status, …`` — see duckdb.py). The
+    old assertion captured only ``kwargs``, so ``"partial" in str(captured)``
+    was always False and the trailing ``or True`` made the whole test a no-op.
+    Capture positional args and assert the actual status."""
     from backend.core.duckdb import log_cron_run
 
     captured = {}
@@ -937,15 +944,39 @@ def test_log_cron_run_upgrades_status_to_partial_success_on_corrupt_rows():
     with (
         patch("backend.config.load_config", return_value={"provisioning": {}}),
         patch(
-            "backend.core.metadata_db.log_cron_run",
-            side_effect=lambda *args, **kwargs: captured.update(kwargs),
+            "backend.core.metadata.log_cron_run",
+            side_effect=lambda *args, **kwargs: captured.update(args=args, kwargs=kwargs),
         ),
     ):
         log_cron_run({"name": "svc"}, "sync", 1.0, "success", corrupt_rows=5)
 
-    # The status that made it to metadata_db is partial_success
-    # (positional arg 3 to metadata_db.log_cron_run is `status`)
-    assert "partial" in str(captured) or True  # caller passes positional too
+    # status is positional arg 3 (service_id, task, duration_s, status).
+    assert captured["args"][3] == "partial_success", (
+        f"status reached metadata_db as {captured['args'][3]!r}, expected 'partial_success'"
+    )
+
+
+def test_log_cron_run_keeps_success_when_no_corrupt_rows():
+    """Negative case for the upgrade above (pattern: test_scheduler.py): with
+    corrupt_rows == 0 the status stays 'success' (green badge). Pins that the
+    partial_success upgrade is CONDITIONAL — a blanket upgrade would mislabel
+    every clean sync as partial."""
+    from backend.core.duckdb import log_cron_run
+
+    captured = {}
+
+    with (
+        patch("backend.config.load_config", return_value={"provisioning": {}}),
+        patch(
+            "backend.core.metadata.log_cron_run",
+            side_effect=lambda *args, **kwargs: captured.update(args=args, kwargs=kwargs),
+        ),
+    ):
+        log_cron_run({"name": "svc"}, "sync", 1.0, "success", corrupt_rows=0)
+
+    assert captured["args"][3] == "success", (
+        f"status reached metadata_db as {captured['args'][3]!r}; corrupt_rows=0 must not upgrade"
+    )
 
 
 def test_log_cron_run_only_local_compact_consults_cron_compact_config():
@@ -970,10 +1001,10 @@ def test_log_cron_run_only_local_compact_consults_cron_compact_config():
             return_value={"provisioning": {"cron_compact": {"log_enabled": False}}},
         ),
         patch(
-            "backend.core.metadata_db.delete_cron_run",
+            "backend.core.metadata.delete_cron_run",
             side_effect=lambda sid, rid: deleted_lc.append((sid, rid)),
         ),
-        patch("backend.core.metadata_db.log_cron_run"),
+        patch("backend.core.metadata.log_cron_run"),
     ):
         log_cron_run({"name": "svc"}, "local_compact", 1.0, "success", run_id=11)
     assert deleted_lc == [("svc", 11)], "local_compact should honor cron_compact.log_enabled"
@@ -988,11 +1019,11 @@ def test_log_cron_run_only_local_compact_consults_cron_compact_config():
                 return_value={"provisioning": {"cron_compact": {"log_enabled": False}}},
             ),
             patch(
-                "backend.core.metadata_db.delete_cron_run",
+                "backend.core.metadata.delete_cron_run",
                 side_effect=lambda sid, rid: deleted.append((sid, rid)),
             ),
             patch(
-                "backend.core.metadata_db.log_cron_run",
+                "backend.core.metadata.log_cron_run",
                 side_effect=lambda *args, **kwargs: logged.append((args, kwargs)),
             ),
         ):
@@ -1011,7 +1042,7 @@ def test_log_cron_run_swallows_metadata_db_exception():
     with (
         patch("backend.config.load_config", return_value={"provisioning": {}}),
         patch(
-            "backend.core.metadata_db.log_cron_run",
+            "backend.core.metadata.log_cron_run",
             side_effect=RuntimeError("database is locked"),
         ),
     ):
@@ -1107,7 +1138,7 @@ def test_get_sync_status_derives_fos_fields_from_local_ingested_files():
     with (
         patch("backend.config.is_usage_logging_enabled", return_value=False),
         patch("backend.config.get_status", return_value=None),
-        patch("backend.core.metadata_db.get_ingested_files_status_summary", return_value=summary),
+        patch("backend.core.metadata.get_ingested_files_status_summary", return_value=summary),
         patch.object(_db, "_execute_query_with_retry", side_effect=_fail_if_glob),
     ):
         out = get_sync_status(_FakeCon(), src, skip_fos=False, force=True)
@@ -1139,7 +1170,7 @@ def test_get_sync_status_skip_fos_returns_cached_status_immediately():
 
     with (
         patch("backend.config.get_status", return_value=dict(cached)),
-        patch("backend.core.metadata_db.get_ingested_files_status_summary") as mock_summary,
+        patch("backend.core.metadata.get_ingested_files_status_summary") as mock_summary,
     ):
         out = get_sync_status(MagicMock(), src, skip_fos=True)
 
@@ -1291,7 +1322,7 @@ def test_get_asn_names_returns_cached_values_without_whois_lookup():
 
     cached = {7922: "Comcast", 15169: "Google"}
     with (
-        patch("backend.core.metadata_db.lookup_asn_names", return_value=dict(cached)),
+        patch("backend.core.metadata.lookup_asn_names", return_value=dict(cached)),
         patch("cymruwhois.Client") as mock_cw,
     ):
         out = get_asn_names("svc-1", [7922, 15169])
@@ -1309,7 +1340,7 @@ def test_get_asn_names_fallback_to_AS_number_when_resolution_fails():
     from backend.core.duckdb import get_asn_names
 
     with (
-        patch("backend.core.metadata_db.lookup_asn_names", return_value={}),
+        patch("backend.core.metadata.lookup_asn_names", return_value={}),
         patch("cymruwhois.Client", side_effect=ImportError("not installed")),
     ):
         out = get_asn_names("svc-1", [7922, 15169])
@@ -1325,7 +1356,7 @@ def test_get_asn_names_swallows_metadata_db_lookup_exception():
     from backend.core.duckdb import get_asn_names
 
     with (
-        patch("backend.core.metadata_db.lookup_asn_names", side_effect=RuntimeError("locked")),
+        patch("backend.core.metadata.lookup_asn_names", side_effect=RuntimeError("locked")),
         patch("cymruwhois.Client", side_effect=ImportError()),
     ):
         out = get_asn_names("svc-1", [7922])
@@ -1382,7 +1413,7 @@ def test_update_cron_duration_extracts_service_id_from_source_name():
     captured = []
 
     with patch(
-        "backend.core.metadata_db.update_cron_duration",
+        "backend.core.metadata.update_cron_duration",
         side_effect=lambda sid, rid, dur, log_output=None: captured.append((sid, rid, dur, log_output)),
     ):
         update_cron_duration({"name": "svc-1", "service_id": "other-id"}, 42, 1.5)
@@ -1395,7 +1426,7 @@ def test_update_cron_duration_no_op_when_no_service_id_resolvable():
     Pinned because the global default source may not have one."""
     from backend.core.duckdb import update_cron_duration
 
-    with patch("backend.core.metadata_db.update_cron_duration") as mock_update:
+    with patch("backend.core.metadata.update_cron_duration") as mock_update:
         update_cron_duration({}, 42, 1.0)
 
     mock_update.assert_not_called()
@@ -1409,7 +1440,7 @@ def test_log_usage_calls_no_op_when_usage_logging_disabled():
 
     with (
         patch("backend.config.is_usage_logging_enabled", return_value=False),
-        patch("backend.core.metadata_db.log_usage_calls") as mock_log,
+        patch("backend.core.metadata.log_usage_calls") as mock_log,
     ):
         log_usage_calls({"name": "svc-1"}, [{"method": "GET", "service": "FOS"}])
 
@@ -1423,7 +1454,7 @@ def test_log_usage_calls_no_op_when_no_service_id():
 
     with (
         patch("backend.config.is_usage_logging_enabled", return_value=True),
-        patch("backend.core.metadata_db.log_usage_calls") as mock_log,
+        patch("backend.core.metadata.log_usage_calls") as mock_log,
     ):
         log_usage_calls({}, [{"method": "GET", "service": "FOS"}])
 
@@ -1441,7 +1472,7 @@ def test_log_usage_calls_propagates_process_context():
     with (
         patch("backend.config.is_usage_logging_enabled", return_value=True),
         patch(
-            "backend.core.metadata_db.log_usage_calls",
+            "backend.core.metadata.log_usage_calls",
             side_effect=lambda sid, calls, process_context=None: captured.update(
                 {"sid": sid, "calls": calls, "ctx": process_context}
             ),
@@ -1468,7 +1499,7 @@ def test_purge_usage_log_reads_retention_from_global_config():
     with (
         patch("backend.config.load_usage_logging_config", return_value={"retention_days": 14}),
         patch(
-            "backend.core.metadata_db.purge_usage_log",
+            "backend.core.metadata.purge_usage_log",
             side_effect=lambda sid, days: captured.append((sid, days)),
         ),
     ):
@@ -1488,7 +1519,7 @@ def test_purge_usage_log_defaults_to_30_days_when_config_missing():
     with (
         patch("backend.config.load_usage_logging_config", return_value={}),
         patch(
-            "backend.core.metadata_db.purge_usage_log",
+            "backend.core.metadata.purge_usage_log",
             side_effect=lambda sid, days: captured.append(days),
         ),
     ):
@@ -1559,7 +1590,7 @@ def test_get_sync_status_busts_view_cache_before_retrying_on_no_files_found():
     with (
         patch("backend.config.is_usage_logging_enabled", return_value=False),
         patch("backend.config.get_status", return_value=None),
-        patch("backend.core.metadata_db.get_ingested_files_status_summary", return_value=_empty_summary),
+        patch("backend.core.metadata.get_ingested_files_status_summary", return_value=_empty_summary),
         patch("backend.core.iceberg.clear_source_caches", side_effect=_fake_clear) as mock_clear,
         patch("backend.core.iceberg.update_iceberg_view", side_effect=_fake_update) as mock_update,
     ):
@@ -1627,7 +1658,7 @@ def test_get_sync_status_prefers_ingested_count_when_view_returns_zero():
     with (
         patch("backend.config.is_usage_logging_enabled", return_value=False),
         patch("backend.config.get_status", return_value=None),
-        patch("backend.core.metadata_db.get_ingested_files_status_summary", return_value=summary),
+        patch("backend.core.metadata.get_ingested_files_status_summary", return_value=summary),
     ):
         out = get_sync_status(_FakeCon(), src, skip_fos=True, force=True)
 
@@ -1695,7 +1726,7 @@ def test_get_sync_status_trusts_view_count_when_smaller_than_ingested():
     with (
         patch("backend.config.is_usage_logging_enabled", return_value=False),
         patch("backend.config.get_status", return_value=None),
-        patch("backend.core.metadata_db.get_ingested_files_status_summary", return_value=summary),
+        patch("backend.core.metadata.get_ingested_files_status_summary", return_value=summary),
     ):
         out = get_sync_status(_FakeCon(), src, skip_fos=True, force=True)
 

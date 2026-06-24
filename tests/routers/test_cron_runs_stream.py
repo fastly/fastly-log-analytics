@@ -19,7 +19,7 @@ from backend.main import app
 
 def _parse_sse_events(text: str) -> list[dict]:
     out: list[dict] = []
-    for chunk in text.split("\n\n"):
+    for chunk in text.replace("\r\n", "\n").split("\n\n"):
         chunk = chunk.strip()
         if chunk.startswith("data:"):
             try:
@@ -93,7 +93,7 @@ def test_live_run_streams_events_to_done():
 def test_completed_run_streams_from_database(isolate_metadata_db):
     """If a run has finished and is no longer in progress, it should stream logs from SQLite."""
     from backend import config as svcconfig
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     service_id = "test-svc"
 

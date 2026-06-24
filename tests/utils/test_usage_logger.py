@@ -6,13 +6,12 @@ from unittest.mock import patch
 
 # ---------------------------------------------------------------------------
 # telemetry — process context helpers
-# ---------------------------------------------------------------------------
 
 
 def test_process_context_set_and_get():
-    from backend.utils.telemetry import get_process_context, set_process_context
+    from backend.utils.telemetry import _set_process_context_for_tests, get_process_context
 
-    set_process_context("cron:sync:svc1")
+    _set_process_context_for_tests("cron:sync:svc1")
     assert get_process_context() == "cron:sync:svc1"
 
 
@@ -58,12 +57,10 @@ def test_record_call_stores_bytes():
 
 # ---------------------------------------------------------------------------
 # log_usage_calls — classification and insertion (now per-service SQLite)
-# ---------------------------------------------------------------------------
 
 
 @patch("backend.config.is_usage_logging_enabled", return_value=True)
 def test_log_usage_calls_inserts_fos_a(mock_enabled):
-    from backend.core import metadata_db
     from backend.core.duckdb import log_usage_calls
 
     calls = [
@@ -80,7 +77,9 @@ def test_log_usage_calls_inserts_fos_a(mock_enabled):
     ]
     log_usage_calls({"name": "svc1"}, calls, process_context="cron:sync:svc1")
 
-    con = metadata_db.get_con("svc1")
+    from backend.core.metadata import usage_log_db
+
+    con = usage_log_db.get_con("svc1")
     row = con.execute("SELECT operation_class, operation_type, service_id FROM usage_log").fetchone()
     assert row is not None
     assert row["operation_class"] == "A"
@@ -95,7 +94,6 @@ def test_log_usage_calls_classifies_raw_http_put_post_as_class_a(mock_enabled):
     The classifier must recognise those as Class A so PutObject, UploadPart,
     DeleteObjects batch, etc. routed through the proxy aren't misbilled as B.
     """
-    from backend.core import metadata_db
     from backend.core.duckdb import log_usage_calls
 
     calls = [
@@ -107,7 +105,9 @@ def test_log_usage_calls_classifies_raw_http_put_post_as_class_a(mock_enabled):
     ]
     log_usage_calls({"name": "svc1"}, calls)
 
-    con = metadata_db.get_con("svc1")
+    from backend.core.metadata import usage_log_db
+
+    con = usage_log_db.get_con("svc1")
     rows = con.execute("SELECT operation_type, operation_class FROM usage_log ORDER BY rowid").fetchall()
     assert [(r["operation_type"], r["operation_class"]) for r in rows] == [
         ("PUT", "A"),
@@ -120,7 +120,6 @@ def test_log_usage_calls_classifies_raw_http_put_post_as_class_a(mock_enabled):
 
 @patch("backend.config.is_usage_logging_enabled", return_value=True)
 def test_log_usage_calls_classifies_cdn(mock_enabled):
-    from backend.core import metadata_db
     from backend.core.duckdb import log_usage_calls
 
     calls = [
@@ -137,7 +136,9 @@ def test_log_usage_calls_classifies_cdn(mock_enabled):
     ]
     log_usage_calls({"name": "svc1"}, calls)
 
-    con = metadata_db.get_con("svc1")
+    from backend.core.metadata import usage_log_db
+
+    con = usage_log_db.get_con("svc1")
     row = con.execute("SELECT operation_class, bytes FROM usage_log").fetchone()
     assert row is not None
     assert row["operation_class"] == "CDN"
@@ -157,7 +158,6 @@ def test_log_usage_calls_skips_when_disabled(mock_enabled):
 @patch("backend.config.is_usage_logging_enabled", return_value=True)
 def test_log_usage_calls_classifies_non_fos_as_class_b(mock_enabled):
     """Non-FOS, non-CDN calls (e.g. Fastly API) default to operation_class 'B'."""
-    from backend.core import metadata_db
     from backend.core.duckdb import log_usage_calls
 
     calls = [
@@ -174,7 +174,9 @@ def test_log_usage_calls_classifies_non_fos_as_class_b(mock_enabled):
     ]
     log_usage_calls({"name": "svc1"}, calls)
 
-    con = metadata_db.get_con("svc1")
+    from backend.core.metadata import usage_log_db
+
+    con = usage_log_db.get_con("svc1")
     rows = con.execute("SELECT operation_class FROM usage_log").fetchall()
     # Default classification for unknown services is Class B (per metadata_db)
     assert len(rows) == 1
@@ -183,15 +185,14 @@ def test_log_usage_calls_classifies_non_fos_as_class_b(mock_enabled):
 
 # ---------------------------------------------------------------------------
 # purge_usage_log — retention enforcement
-# ---------------------------------------------------------------------------
 
 
 @patch("backend.config.load_usage_logging_config", return_value={"retention_days": 7})
 def test_purge_usage_log_deletes_old_rows(mock_cfg):
-    from backend.core import metadata_db
     from backend.core.duckdb import purge_usage_log
+    from backend.core.metadata import usage_log_db
 
-    con = metadata_db.get_con("svc1")
+    con = usage_log_db.get_con("svc1")
     con.executemany(
         "INSERT INTO usage_log (timestamp, service_id, operation_class, status) VALUES (?, ?, ?, ?)",
         [
@@ -210,10 +211,10 @@ def test_purge_usage_log_deletes_old_rows(mock_cfg):
 
 @patch("backend.config.load_usage_logging_config", return_value={"retention_days": 0})
 def test_purge_usage_log_skips_when_retention_zero(mock_cfg):
-    from backend.core import metadata_db
     from backend.core.duckdb import purge_usage_log
+    from backend.core.metadata import usage_log_db
 
-    con = metadata_db.get_con("svc1")
+    con = usage_log_db.get_con("svc1")
     con.execute(
         "INSERT INTO usage_log (timestamp, service_id, operation_class, status) VALUES (?, ?, ?, ?)",
         ("2020-01-01T00:00:00", "svc1", "A", "OK"),
@@ -231,7 +232,6 @@ def test_purge_usage_log_skips_when_retention_zero(mock_cfg):
 # backend.utils.usage_logger that the scheduler calls each cron tick.
 # Both are deliberately broad-try/except — verify the happy + error paths
 # while protecting against any of them escaping as an exception.
-# ---------------------------------------------------------------------------
 
 
 def test_flush_usage_log_skips_when_logging_disabled():
@@ -288,7 +288,7 @@ def test_flush_usage_log_happy_path_forwards_calls_and_context():
     from backend.utils.usage_logger import flush_usage_log
 
     telemetry.start_call_tracking()
-    telemetry.set_process_context("cron:sync:svc-flush-3")
+    telemetry._set_process_context_for_tests("cron:sync:svc-flush-3")
     telemetry.record_call("PutObject", "/x.gz", 12.0, service="FOS", bytes_count=42)
 
     fake_cfg = {"service_id": "svc-flush-3", "fos_bucket": "b", "fos_region": "us-east-1", "name": "X"}

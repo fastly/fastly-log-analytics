@@ -47,6 +47,12 @@ function DialogContent({
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean
 }) {
+  // NOTE: Do NOT wrap the Popup in a foreign focus trap (e.g. Radix
+  // FocusScope). Base UI's Dialog already provides modal focus-trapping and
+  // coordinates nested floating elements (Select/Popover) via floating-ui's
+  // tree. A second trap can't see those portaled popups, so it yanks focus
+  // back the instant a Select opens — closing the dropdown before it can be
+  // used (Expiration/Query window in CreateInviteDialog).
   return (
     <DialogPortal>
       <DialogOverlay />

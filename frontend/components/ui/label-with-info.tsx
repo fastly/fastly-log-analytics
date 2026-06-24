@@ -4,6 +4,7 @@ import * as React from "react"
 import { Info } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Label } from "@/components/ui/label"
+import { Button } from "@/components/ui/button"
 import {
   Tooltip,
   TooltipContent,
@@ -25,10 +26,24 @@ export function LabelWithInfo({ label, info, className, labelClassName, htmlFor 
       <Label htmlFor={htmlFor} className={cn("text-xs font-semibold", labelClassName)}>
         {label}
       </Label>
-      <TooltipProvider delay={0}>
+      {/* A-9 (a11y, WCAG 1.4.13): inherit the accessible 400/300
+          defaults from tooltip.tsx — info-icon tooltips carry the
+          explanatory text users may need time to read and reach. */}
+      <TooltipProvider>
         <Tooltip>
-          <TooltipTrigger render={<span className="flex items-center" />}>
-            <Info className="h-3.5 w-3.5 text-muted-foreground " />
+          {/* A-8 (a11y, WCAG 2.1.1): Button (not span) so keyboard users can
+              tab to the info icon and trigger the tooltip on focus. */}
+          <TooltipTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`More info: ${label}`}
+                className="flex items-center text-muted-foreground hover:text-foreground"
+              />
+            }
+          >
+            <Info className="h-3.5 w-3.5 " />
           </TooltipTrigger>
           <TooltipContent side="right" className="max-w-xs text-xs">
             <p>{info}</p>

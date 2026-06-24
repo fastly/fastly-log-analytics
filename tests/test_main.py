@@ -27,7 +27,7 @@ def test_initialize_service_skips_when_no_service_id():
 
     # No service_id → early return without side-effects
     with (
-        patch("backend.core.metadata_db.reap_running_cron_runs") as mock_reap,
+        patch("backend.core.metadata.reap_running_cron_runs") as mock_reap,
         patch("backend.core.duckdb.get_source_for_service") as mock_get_src,
     ):
         _initialize_service({})
@@ -41,9 +41,16 @@ def test_initialize_service_reaps_orphans_and_refreshes_status():
 
     fake_src = {"name": "svc-1", "service_id": "svc-1"}
     with (
-        patch("backend.core.metadata_db.reap_running_cron_runs", return_value=3) as mock_reap,
+        patch("backend.core.metadata.reap_running_cron_runs", return_value=3) as mock_reap,
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
         patch("backend.core.duckdb.refresh_config_status") as mock_refresh,
+        # The post-reap path now pre-warms the persistent view, sync-status
+        # cache, and usage_log DB. They all touch real on-disk state which
+        # is irrelevant to what this test pins (the reap + refresh
+        # ordering), so swallow them here.
+        patch("backend.main._ensure_persistent_view"),
+        patch("backend.routers.admin.compute_sync_status_cached"),
+        patch("backend.core.metadata.usage_log_db.get_con"),
     ):
         _initialize_service({"service_id": "svc-1"})
 
@@ -58,7 +65,7 @@ def test_initialize_service_logs_reaped_count_only_when_nonzero():
     from backend.main import _initialize_service
 
     with (
-        patch("backend.core.metadata_db.reap_running_cron_runs", return_value=0),
+        patch("backend.core.metadata.reap_running_cron_runs", return_value=0),
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
         patch("backend.main.logging.info") as mock_log_info,
     ):
@@ -77,9 +84,12 @@ def test_initialize_service_tolerates_reap_failure():
 
     fake_src = {"name": "svc-1"}
     with (
-        patch("backend.core.metadata_db.reap_running_cron_runs", side_effect=RuntimeError("locked")),
+        patch("backend.core.metadata.reap_running_cron_runs", side_effect=RuntimeError("locked")),
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
         patch("backend.core.duckdb.refresh_config_status") as mock_refresh,
+        patch("backend.main._ensure_persistent_view"),
+        patch("backend.routers.admin.compute_sync_status_cached"),
+        patch("backend.core.metadata.usage_log_db.get_con"),
     ):
         # Must not raise; refresh_config_status should still run
         _initialize_service({"service_id": "svc-1"})
@@ -93,7 +103,7 @@ def test_initialize_service_skips_status_refresh_when_no_source():
     from backend.main import _initialize_service
 
     with (
-        patch("backend.core.metadata_db.reap_running_cron_runs", return_value=0),
+        patch("backend.core.metadata.reap_running_cron_runs", return_value=0),
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
         patch("backend.core.duckdb.refresh_config_status") as mock_refresh,
     ):
@@ -126,7 +136,7 @@ def test_initialize_service_calls_ensure_persistent_view():
 
     fake_src = {"name": "svc-1", "service_id": "svc-1"}
     with (
-        patch("backend.core.metadata_db.reap_running_cron_runs", return_value=0),
+        patch("backend.core.metadata.reap_running_cron_runs", return_value=0),
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
         patch("backend.core.duckdb.refresh_config_status"),
         patch("backend.main._ensure_persistent_view") as mock_ensure,
@@ -283,6 +293,96 @@ def test_ensure_pop_cache_swallows_unexpected_exceptions():
         _ensure_pop_cache()  # must not raise
 
 
+# ── _ensure_scoring_matrix ──────────────────────────────────────────────────
+
+
+def test_ensure_scoring_matrix_writes_tenant_scoped_paths_for_each_service(tmp_path):
+    """Pre-audit-finding-005 the boot helper wrote every service's FOS-pulled
+    matrix to the shared ``matrix.json`` and broke after the first success,
+    so service A's matrix would silently serve service B until B's first
+    retrain. Pin the tenant-scoped path + no-early-break behaviour so the
+    cross-tenant leak can't come back."""
+    from backend.main import _ensure_scoring_matrix
+
+    fake_matrix_path = tmp_path / "matrix.json"
+    configs = [
+        {"service_id": "svc-a", "scoring": {"enabled": True}},
+        {"service_id": "svc-b", "scoring": {"enabled": True}},
+        {"service_id": "svc-c", "scoring": {"enabled": False}},  # skipped
+    ]
+    matrices = {
+        "svc-a": {"version": "a-v1", "vocab_size": 10},
+        "svc-b": {"version": "b-v1", "vocab_size": 20},
+    }
+
+    with (
+        patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_matrix_path),
+        patch("backend.config.list_configs", return_value=configs),
+        patch("backend.state_sync.fetch_matrix_from_fos", side_effect=lambda sid: matrices.get(sid)),
+    ):
+        _ensure_scoring_matrix()
+
+    # Both enabled services land in their own tenant-scoped file —
+    # NOT the shared matrix.json.
+    assert (tmp_path / "matrix_svc-a.json").exists()
+    assert (tmp_path / "matrix_svc-b.json").exists()
+    assert not fake_matrix_path.exists(), "shared matrix.json must not be written"
+
+    import json as _json
+
+    assert _json.loads((tmp_path / "matrix_svc-a.json").read_text())["version"] == "a-v1"
+    assert _json.loads((tmp_path / "matrix_svc-b.json").read_text())["version"] == "b-v1"
+
+
+def test_ensure_scoring_matrix_tolerates_per_service_failure(tmp_path):
+    """One service's FOS fetch failing must not break the others —
+    startup is best-effort, partial coverage > no coverage."""
+    from backend.main import _ensure_scoring_matrix
+
+    fake_matrix_path = tmp_path / "matrix.json"
+
+    def fetch(sid):
+        if sid == "svc-bad":
+            raise RuntimeError("FOS unreachable")
+        return {"version": "v1", "vocab_size": 5}
+
+    configs = [
+        {"service_id": "svc-bad", "scoring": {"enabled": True}},
+        {"service_id": "svc-good", "scoring": {"enabled": True}},
+    ]
+
+    with (
+        patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_matrix_path),
+        patch("backend.config.list_configs", return_value=configs),
+        patch("backend.state_sync.fetch_matrix_from_fos", side_effect=fetch),
+    ):
+        _ensure_scoring_matrix()  # must not raise
+
+    assert (tmp_path / "matrix_svc-good.json").exists()
+    assert not (tmp_path / "matrix_svc-bad.json").exists()
+
+
+def test_ensure_scoring_matrix_skips_services_without_scoring_enabled(tmp_path):
+    """Services with no ``scoring`` block or ``enabled: false`` must not
+    trigger a FOS fetch — bounds per-restart FOS calls to actual scorers."""
+    from backend.main import _ensure_scoring_matrix
+
+    fake_matrix_path = tmp_path / "matrix.json"
+    configs = [
+        {"service_id": "svc-off", "scoring": {"enabled": False}},
+        {"service_id": "svc-none"},
+    ]
+
+    with (
+        patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_matrix_path),
+        patch("backend.config.list_configs", return_value=configs),
+        patch("backend.state_sync.fetch_matrix_from_fos") as mock_fetch,
+    ):
+        _ensure_scoring_matrix()
+
+    mock_fetch.assert_not_called()
+
+
 # ── _background_startup ────────────────────────────────────────────────────
 
 
@@ -357,6 +457,103 @@ def test_health_endpoint_does_not_require_service_id(client):
     assert resp.status_code == 200
 
 
+def test_health_endpoint_deep_returns_shallow_for_remote_analyst():
+    """Finding 003: ``GET /api/health?deep=1`` returned a per-service
+    list including service_ids + last-sync error messages, which is
+    operational metadata an analyst should not see. With the fix,
+    remote (live-share) callers get the shallow ok/version response
+    regardless of the ``deep`` flag — load-balancer liveness still
+    works, infrastructure enumeration is blocked.
+
+    Calls the handler directly with a mock Request so the patch can
+    flip ``is_request_remote`` for the handler alone (going through
+    TestClient would also flip it for the middleware, which would
+    then 400 on the host_not_allowed gate before the handler runs)."""
+    from unittest.mock import MagicMock, patch
+
+    from backend.main import health_check
+
+    fake_request = MagicMock()
+    with (
+        patch("backend.config.list_service_ids", return_value=["secret-svc-1", "secret-svc-2"]),
+        patch("backend.utils.remote_access.is_request_remote", return_value=True),
+    ):
+        result = health_check(fake_request, deep=True)
+
+    # Shallow result is a bare dict (no JSONResponse wrapping), so we
+    # inspect it directly.
+    assert isinstance(result, dict)
+    assert result["status"] == "ok"
+    assert "version" in result
+    assert "services" not in result, f"deep=1 from remote leaked services: {result.get('services')!r}"
+    payload_str = str(result)
+    assert "secret-svc-1" not in payload_str
+    assert "secret-svc-2" not in payload_str
+
+
+def test_health_endpoint_deep_returns_full_payload_for_admin():
+    """Companion: admin/loopback callers still get the full per-service
+    deep report (not blocked, just the analyst path is hardened)."""
+    import sqlite3
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock, patch
+
+    from backend.main import health_check
+
+    fake_request = MagicMock()
+    with patch("backend.config.list_service_ids", return_value=["admin-svc-1"]):
+        with patch("backend.core.metadata.get_con") as mock_get_con:
+            con = sqlite3.connect(":memory:", check_same_thread=False)
+            con.row_factory = sqlite3.Row
+            con.execute("CREATE TABLE ingested_files (source_name TEXT, ingested_at TEXT)")
+            con.execute("CREATE TABLE cron_runs (task TEXT, status TEXT, started_at TEXT, error_message TEXT)")
+            now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+            con.execute("INSERT INTO ingested_files VALUES (?, ?)", ("admin-svc-1", now_str))
+            mock_get_con.return_value = con
+            with patch("backend.utils.remote_access.is_request_remote", return_value=False):
+                result = health_check(fake_request, deep=True)
+
+    assert isinstance(result, dict)
+    assert result["status"] == "ok"
+    assert "services" in result, "admin caller must get the per-service report"
+    assert any(s["service_id"] == "admin-svc-1" for s in result["services"])
+
+
+def test_health_endpoint_deep(client):
+    """Deep health check verifies ingest freshness and cron status."""
+    import sqlite3
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    with patch("backend.config.list_service_ids", return_value=["test-svc-1"]):
+        with patch("backend.core.metadata.get_con") as mock_get_con:
+            con = sqlite3.connect(":memory:", check_same_thread=False)
+            con.row_factory = sqlite3.Row
+            con.execute("CREATE TABLE ingested_files (source_name TEXT, ingested_at TEXT)")
+            con.execute("CREATE TABLE cron_runs (task TEXT, status TEXT, started_at TEXT, error_message TEXT)")
+            mock_get_con.return_value = con
+
+            # 1. No ingested files -> OK
+            resp = client.get("/api/health?deep=1")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "ok"
+
+            # 2. Fresh ingest (using space separator as SQLite datetime('now') does) -> OK
+            now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+            con.execute("INSERT INTO ingested_files VALUES (?, ?)", ("test-svc-1", now_str))
+            resp = client.get("/api/health?deep=1")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "ok"
+
+            # 3. Stale ingest -> Degraded
+            stale_str = (datetime.now(UTC) - timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S")
+            con.execute("DELETE FROM ingested_files")
+            con.execute("INSERT INTO ingested_files VALUES (?, ?)", ("test-svc-1", stale_str))
+            resp = client.get("/api/health?deep=1")
+            assert resp.status_code == 503
+            assert resp.json()["status"] == "degraded"
+
+
 # ── telemetry middleware: cdn_service_id resolution ────────────────────────
 
 
@@ -394,3 +591,71 @@ def test_middleware_flush_swallows_exceptions(client):
         resp = client.get("/api/health")
 
     assert resp.status_code == 200  # request succeeds despite flush error
+
+
+# ── _bounded_scheduler_shutdown ──────────────────────────────────────────────
+
+
+def test_bounded_shutdown_returns_quickly_when_scheduler_finishes_fast():
+    """The 60s timeout is a CEILING. When the scheduler has no running jobs
+    (or they finish promptly), bounded shutdown should return in milliseconds
+    — not sit and wait for the deadline. Pins that the success path doesn't
+    accidentally introduce a fixed 60s pause on every clean restart."""
+    import time
+
+    from backend.main import _bounded_scheduler_shutdown
+
+    fake_scheduler = MagicMock()
+    fake_scheduler.shutdown = MagicMock(return_value=None)  # returns immediately
+
+    t0 = time.monotonic()
+    _bounded_scheduler_shutdown(fake_scheduler, timeout_secs=10.0)
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 0.5, f"fast-path shutdown took {elapsed:.2f}s, expected <0.5s"
+    fake_scheduler.shutdown.assert_called_once_with(wait=True)
+
+
+def test_bounded_shutdown_caps_at_timeout_when_scheduler_hangs():
+    """A scheduler.shutdown(wait=True) that takes longer than timeout_secs
+    must NOT hang the lifespan past the deadline. Pins that the bounded
+    wait actually releases — without this, a stuck cron would block the
+    restart past Docker's stop_grace_period and trigger SIGKILL, which
+    would defeat the whole graceful-shutdown contract."""
+    import threading
+    import time
+
+    from backend.main import _bounded_scheduler_shutdown
+
+    # Block forever in the fake scheduler so the bounded wait MUST trip
+    # the timeout to return.
+    never_returns = threading.Event()
+
+    def _hangs_forever(wait):  # noqa: ARG001
+        never_returns.wait()
+
+    fake_scheduler = MagicMock()
+    fake_scheduler.shutdown = _hangs_forever
+
+    t0 = time.monotonic()
+    _bounded_scheduler_shutdown(fake_scheduler, timeout_secs=0.3)
+    elapsed = time.monotonic() - t0
+
+    # Released within the timeout (allow a small overshoot for thread sched).
+    assert 0.25 <= elapsed < 0.6, f"bounded wait released at {elapsed:.2f}s, expected ~0.3s"
+
+    # Unblock the worker so the daemon thread can exit cleanly.
+    never_returns.set()
+
+
+def test_bounded_shutdown_does_not_raise_when_shutdown_throws():
+    """A scheduler.shutdown that raises mid-execution must not propagate
+    out of bounded shutdown — the rest of the lifespan teardown (close
+    DuckDB connections, etc.) needs to run regardless."""
+    from backend.main import _bounded_scheduler_shutdown
+
+    fake_scheduler = MagicMock()
+    fake_scheduler.shutdown = MagicMock(side_effect=RuntimeError("apscheduler internal"))
+
+    # Should not raise — the warning log is the only side-effect.
+    _bounded_scheduler_shutdown(fake_scheduler, timeout_secs=5.0)

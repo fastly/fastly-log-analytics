@@ -49,7 +49,12 @@ pub fn l2_score_from_trans_prob(p: f64) -> u8 {
     }
     let raw = -p.log10() * (100.0 / 6.0);
     let clamped = raw.clamp(0.0, 100.0);
-    clamped.round() as u8
+    // Python's `round()` is banker's rounding (round-half-to-even); Rust's
+    // `f64::round` is round-half-away-from-zero. At an exact .5 the two
+    // diverge by one point, breaking the Python/Rust parity this function
+    // is pinned to mirror. Match Python with `round_ties_even` (same fix
+    // as cookie.rs's bucket rounding).
+    clamped.round_ties_even() as u8
 }
 
 // ── Combined output ─────────────────────────────────────────────────────────
@@ -86,9 +91,12 @@ fn running_mean_variance(state: &SessionState) -> (f64, f64) {
     if state.seq == 0 {
         return (0.0, 0.0);
     }
-    let n = state.seq as f64;
-    let mean = state.sum_dt as f64 / n;
-    let second_moment = state.sum_dt_sq as f64 / n;
+    // Mean/variance over the WHOLE session via the algebraic identity
+    // Var(X) = E[X²] − E[X]². Divide by the full `seq` — see the #038
+    // note below for why a naive `min(seq, 20)` divisor cap was tried
+    // and reverted (it inflates the mean instead of windowing it).
+    let mean = state.sum_dt as f64 / state.seq as f64;
+    let second_moment = state.sum_dt_sq as f64 / state.seq as f64;
     let var = (second_moment - mean * mean).max(0.0);
     (mean, var)
 }
@@ -102,8 +110,14 @@ fn running_mean_variance(state: &SessionState) -> (f64, f64) {
 // effectively rolling the L1 score off. The audit confirmed this is
 // exploitable in principle.
 //
-// A real fix would replace the cumulative sum with a sliding window of
-// the last N (~20) dwells. That requires:
+// A naive shortcut — dividing the still-cumulative `sum_dt` by a capped
+// `min(seq, 20)` — does NOT work and was reverted: once seq > 20 the
+// denominator freezes at 20 while the numerator keeps growing, so the
+// mean INFLATES over a long session, pushing it further above
+// L1_FAST_DWELL_THRESHOLD_S and making "impossibly-fast" detection
+// fire LESS, not more. A real fix must window the SUM, not just the
+// divisor — replace the cumulative sum with a sliding window of the
+// last N (~20) dwells. That requires:
 //   1. Cookie schema v3: add a fixed-size ring buffer of u16 dwells
 //      (40 bytes for 20 entries) to SessionState.
 //   2. Backward-compat: v2 cookies treated as "missing" (rotate).
@@ -147,19 +161,32 @@ pub fn score_layer1(state: &SessionState) -> (u8, Vec<String>, f64, f64) {
 
 // ── Layer 2 ─────────────────────────────────────────────────────────────────
 
-fn transition_prob(
-    matrix: &TransitionMatrix,
-    prev: &str,
-    current: &str,
-    vocab_size: u32,
-) -> f64 {
+fn transition_prob(matrix: &TransitionMatrix, prev: &str, current: &str, vocab_size: u32) -> f64 {
     let v = vocab_size as f64;
-    let prev_row = matrix.counts.get(prev);
-    let numerator = prev_row
-        .and_then(|row| row.get(current).copied())
-        .unwrap_or(0) as f64
-        + L2_LAPLACE_ALPHA;
-    let row_total = matrix.row_totals.get(prev).copied().unwrap_or(0) as f64;
+    let has_rows = matrix.has_rows();
+    let prev_id = matrix.route_id(prev);
+    // Fail closed on an unseen prev route in a POPULATED matrix — mirrors
+    // backend/scoring/scorer.py::_transition_prob. An unseen prev row isn't
+    // neutral; it's a transition the model never observed (the shape of
+    // evasion: prepend an untracked route to dodge the shield). Return the
+    // floor so l2_score_from_trans_prob maps it to the max anomaly score.
+    // "Known prev" = in the vocab AND seen as a transition SOURCE (row_total > 0).
+    // A curr-only route (present in the matrix but row_total 0 — seen only as a
+    // destination) is treated as UNSEEN: we fail closed on the VALUE, not mere
+    // key presence. (Python's _transition_prob mirrors this exactly:
+    // `row_totals.get(prev) <= 0` → floor; EC-04 aligned the two for a
+    // key-present-zero prev.) A truly empty matrix still falls through to the
+    // uniform prior below so L2 self-disables until trained.
+    let prev_is_known = matches!(prev_id, Some(id) if matrix.row_total(id) > 0);
+    if has_rows && !prev_is_known {
+        return 1e-12;
+    }
+    let count = match (prev_id, matrix.route_id(current)) {
+        (Some(p), Some(c)) => matrix.transition_count(p, c),
+        _ => 0,
+    };
+    let numerator = count as f64 + L2_LAPLACE_ALPHA;
+    let row_total = prev_id.map(|id| matrix.row_total(id)).unwrap_or(0) as f64;
     let denominator = row_total + L2_LAPLACE_ALPHA * v;
     if denominator <= 0.0 {
         return 1.0 / v.max(1.0);
@@ -181,7 +208,7 @@ pub fn score_layer2(
         Some(r) => r,
         None => return (0, vec![], 1.0),
     };
-    let vocab_size = matrix.vocab_size;
+    let vocab_size = matrix.vocab_size();
     if vocab_size == 0 {
         return (0, vec![], 1.0);
     }
@@ -207,14 +234,27 @@ pub fn score_layer2(
 
 // ── Combined ────────────────────────────────────────────────────────────────
 
-pub fn blend_weight(matrix_age_days: f64) -> f64 {
-    if matrix_age_days < 7.0 {
+/// Length of the L2 opt-in fade-in, in days. On operator opt-in, L2's weight in
+/// the enforced combined score ramps linearly 0 → 1 over this window from the
+/// `l2_enabled_at` anchor — a smooth, operator-initiated rollout, never an auto
+/// step-change keyed off deployment age.
+pub const L2_RAMP_DAYS: f64 = 3.0;
+
+/// Weight L2 contributes to the combined score, as a function of days since the
+/// operator opted L2 into enforcement. Linear ramp over `[0, L2_RAMP_DAYS]`:
+/// `<= 0 → 0.0` (the instant of opt-in), `>= L2_RAMP_DAYS → 1.0` (fade-in
+/// complete), else `days / L2_RAMP_DAYS`. Whether L2 contributes at all is gated
+/// upstream by the operator's explicit opt-in — `score_combined` forces the
+/// weight to 0 when `l2_enforce_enabled` is false — so this function only shapes
+/// the post-opt-in ramp, never the on/off decision.
+pub fn optin_ramp_weight(days_since_optin: f64) -> f64 {
+    if days_since_optin <= 0.0 {
         return 0.0;
     }
-    if matrix_age_days >= 10.0 {
+    if days_since_optin >= L2_RAMP_DAYS {
         return 1.0;
     }
-    (matrix_age_days - 7.0) / 3.0
+    days_since_optin / L2_RAMP_DAYS
 }
 
 pub struct ScoreInputs<'a> {
@@ -224,16 +264,18 @@ pub struct ScoreInputs<'a> {
     pub prev_route: Option<&'a Route>,
     pub prev_anchor_route: Option<&'a Route>,
     pub matrix: Option<&'a TransitionMatrix>,
-    pub matrix_age_days: f64,
+    /// Operator's explicit opt-in. When false, L2 contributes 0 to the enforced
+    /// combined score — its sub-score is still computed + emitted for
+    /// observability, only its weight in the combined score is gated.
+    pub l2_enforce_enabled: bool,
+    /// Days since the opt-in anchor (`l2_enabled_at`); shapes `optin_ramp_weight`.
+    pub l2_days_since_optin: f64,
 }
 
 pub fn score_combined(inp: ScoreInputs<'_>) -> ScoreResult {
     let mut result = ScoreResult {
         cookie_compliance: inp.cookie_compliance.to_string(),
-        matrix_version: inp
-            .matrix
-            .map(|m| m.version.clone())
-            .unwrap_or_default(),
+        matrix_version: inp.matrix.map(|m| m.version().to_string()).unwrap_or_default(),
         ..Default::default()
     };
 
@@ -249,9 +291,17 @@ pub fn score_combined(inp: ScoreInputs<'_>) -> ScoreResult {
             l1_from_cookie = L1_SCORE_COOKIE_TAMPERED;
             result.reasons.push("cookie-tampered".into());
         }
-        "missing" | "expired" => {
+        "missing" | "expired" | "replayed" => {
+            // "replayed" (main.rs is_sustained_replay) is treated like
+            // missing/expired: the cultivated low-seq state is dropped, so a
+            // replayer gets the no-state baseline instead of dodging warmup.
+            // Penalized at the missing tier (not the tampered 100) — a
+            // replay isn't payload forgery, and keeping it below the tamper
+            // ceiling avoids over-penalizing the rare benign repeat.
             l1_from_cookie = L1_SCORE_COOKIE_MISSING;
-            result.reasons.push(format!("cookie-{}", inp.cookie_compliance));
+            result
+                .reasons
+                .push(format!("cookie-{}", inp.cookie_compliance));
         }
         _ => {}
     }
@@ -276,7 +326,15 @@ pub fn score_combined(inp: ScoreInputs<'_>) -> ScoreResult {
     result.trans_prob = trans_prob;
     result.reasons.extend(l2_reasons);
 
-    let w_l2 = blend_weight(inp.matrix_age_days);
+    // L2 joins the *enforced* combined score only on explicit operator opt-in
+    // (l2_enforce_enabled); on opt-in it fades in over L2_RAMP_DAYS from the
+    // opt-in anchor. Flag off → weight 0 → L2 stays observe-only forever (its
+    // sub-score above is still always computed/emitted).
+    let w_l2 = if inp.l2_enforce_enabled {
+        optin_ramp_weight(inp.l2_days_since_optin)
+    } else {
+        0.0
+    };
     let raw = result.l1_score as f64 + result.l2_score as f64 * w_l2;
     result.score = quantize_score(raw);
 
@@ -287,7 +345,6 @@ pub fn score_combined(inp: ScoreInputs<'_>) -> ScoreResult {
 mod tests {
     use super::*;
     use crate::matrix::TransitionMatrix;
-    use std::collections::HashMap;
 
     fn state(seq: u16, sum_dt: u32, sum_dt_sq: u64) -> SessionState {
         SessionState {
@@ -311,22 +368,10 @@ mod tests {
     }
 
     fn matrix(counts: &[(&str, &[(&str, u64)])], vocab_size: u32) -> TransitionMatrix {
-        let mut m = TransitionMatrix {
-            version: "test-v1".into(),
-            vocab_size,
-            ..Default::default()
-        };
-        for (src, dests) in counts {
-            let mut row = HashMap::new();
-            let mut total: u64 = 0;
-            for (dst, n) in *dests {
-                row.insert(dst.to_string(), *n);
-                total += n;
-            }
-            m.counts.insert(src.to_string(), row);
-            m.row_totals.insert(src.to_string(), total);
-        }
-        m
+        // Builds via the real FSM1 encode→decode path (see matrix.rs). row_total
+        // defaults to each row's count-sum; tests that need a different total
+        // call `set_row_total` after.
+        TransitionMatrix::from_counts("test-v1", vocab_size, counts)
     }
 
     // ── running_mean_variance ────────────────────────────────────────────────
@@ -352,6 +397,17 @@ mod tests {
         let (m, v) = running_mean_variance(&state(4, 10, 30));
         assert!((m - 2.5).abs() < 1e-9);
         assert!((v - 1.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn running_long_session_divides_by_full_seq_not_capped() {
+        // #038: the mean must divide by the full session length, NOT a
+        // capped min(seq, 20). 40 dwells summing to 80 → mean 2.0. A
+        // min(20) divisor would (wrongly) give 80/20 = 4.0. Pinning 2.0
+        // guards against re-introducing the inflating divisor cap.
+        let (m, v) = running_mean_variance(&state(40, 80, 200));
+        assert!((m - 2.0).abs() < 1e-9);
+        assert!((v - 1.0).abs() < 1e-9); // 200/40 - 2² = 5 - 4 = 1
     }
 
     // ── Layer 1 warmup gate ──────────────────────────────────────────────────
@@ -403,7 +459,8 @@ mod tests {
 
     #[test]
     fn l2_no_matrix_returns_zero() {
-        let (score, reasons, p) = score_layer2(None, Some(&r("/a", "home")), None, &r("/b", "home"));
+        let (score, reasons, p) =
+            score_layer2(None, Some(&r("/a", "home")), None, &r("/b", "home"));
         assert_eq!(score, 0);
         assert!(reasons.is_empty());
         assert_eq!(p, 1.0);
@@ -412,7 +469,12 @@ mod tests {
     #[test]
     fn l2_high_prob_no_score() {
         let m = matrix(&[("/home", &[("/products", 99), ("/other", 1)])], 10);
-        let (score, _, p) = score_layer2(Some(&m), Some(&r("/home", "home")), None, &r("/products", "product"));
+        let (score, _, p) = score_layer2(
+            Some(&m),
+            Some(&r("/home", "home")),
+            None,
+            &r("/products", "product"),
+        );
         assert_eq!(score, 0);
         assert!(p > 0.9);
     }
@@ -420,7 +482,7 @@ mod tests {
     #[test]
     fn l2_rare_pair_fires() {
         let mut m = matrix(&[("/home", &[("/checkout", 1)])], 100);
-        m.row_totals.insert("/home".into(), 10_000);
+        m.set_row_total("/home", 10_000);
         let (score, reasons, p) = score_layer2(
             Some(&m),
             Some(&r("/home", "home")),
@@ -441,8 +503,8 @@ mod tests {
             ],
             10,
         );
-        m.row_totals.insert("/about-us".into(), 1000);
-        m.row_totals.insert("/product".into(), 100);
+        m.set_row_total("/about-us", 1000);
+        m.set_row_total("/product", 100);
         let (score, _, p) = score_layer2(
             Some(&m),
             Some(&r("/about-us", "content")),
@@ -453,16 +515,76 @@ mod tests {
         assert!(score < 10);
     }
 
-    // ── Blend weight ─────────────────────────────────────────────────────────
+    #[test]
+    fn l2_unseen_prev_row_fails_closed() {
+        // Parity with Python test_transition_prob_with_unseen_prev_row.
+        // An unseen prev route in a populated matrix is maximally anomalous,
+        // not the lenient uniform prior — closes the shield-evasion gap
+        // where an attacker prepends an untracked route to dodge L2.
+        let m = matrix(&[("/home", &[("/products", 100)])], 10);
+        let (score, reasons, p) = score_layer2(
+            Some(&m),
+            Some(&r("/never-seen-prev", "other")),
+            None,
+            &r("/products", "product"),
+        );
+        assert!(p <= 1e-12);
+        assert_eq!(score, 100);
+        assert!(reasons.contains(&"low-transition-prob".to_string()));
+    }
 
     #[test]
-    fn blend_weight_pinned() {
-        assert_eq!(blend_weight(0.0), 0.0);
-        assert_eq!(blend_weight(6.99), 0.0);
-        assert_eq!(blend_weight(7.0), 0.0);
-        assert!((blend_weight(8.5) - 0.5).abs() < 1e-9);
-        assert_eq!(blend_weight(10.0), 1.0);
-        assert_eq!(blend_weight(30.0), 1.0);
+    fn l2_present_prev_zero_row_total_fails_closed() {
+        // EC-04 parity with Python's test_transition_prob_present_zero_row_total_
+        // fails_closed: a prev route PRESENT in the matrix but never a transition
+        // SOURCE (row_total 0 — a curr-only/destination-only route) is treated as
+        // UNSEEN and fails closed to the floor, same as a fully-absent prev. Here
+        // /products is only ever a destination, so its row_total is 0; using it as
+        // prev must map to the max L2 score, not the lenient uniform prior.
+        let m = matrix(&[("/home", &[("/products", 100)])], 10);
+        assert_eq!(m.row_total(m.route_id("/products").unwrap()), 0, "fixture: /products is curr-only");
+        let (score, reasons, p) = score_layer2(
+            Some(&m),
+            Some(&r("/products", "product")), // present in matrix, row_total 0
+            None,
+            &r("/home", "home"),
+        );
+        assert!(p <= 1e-12);
+        assert_eq!(score, 100);
+        assert!(reasons.contains(&"low-transition-prob".to_string()));
+    }
+
+    #[test]
+    fn l2_unseen_anchor_does_not_rescue_anomalous_transition() {
+        // Parity with the Python finding-021 guard: an unseen skip-gram
+        // anchor must not mask an anomalous direct transition. Python
+        // filters unseen anchors via `in counts`; on the Rust side the
+        // unseen-prev fail-closed makes the anchor contribute ~0 so max()
+        // can't rescue the score.
+        let mut m = matrix(&[("/about-us", &[("/home", 1000)])], 10);
+        m.set_row_total("/about-us", 1000);
+        let (score, reasons, p) = score_layer2(
+            Some(&m),
+            Some(&r("/about-us", "content")),
+            Some(&r("/never-visited-anchor", "product")), // unseen anchor
+            &r("/checkout", "checkout"),
+        );
+        assert!(p < 0.001);
+        assert!(score >= 50);
+        assert!(reasons.contains(&"low-transition-prob".to_string()));
+    }
+
+    // ── Opt-in ramp weight ───────────────────────────────────────────────────
+
+    #[test]
+    fn optin_ramp_weight_pinned() {
+        // Linear fade-in over [0, L2_RAMP_DAYS=3]: 0 at (and before) the instant
+        // of opt-in, 0.5 at the midpoint, 1.0 once fully ramped and beyond.
+        assert_eq!(optin_ramp_weight(0.0), 0.0);
+        assert_eq!(optin_ramp_weight(-1.0), 0.0);
+        assert!((optin_ramp_weight(1.5) - 0.5).abs() < 1e-9);
+        assert_eq!(optin_ramp_weight(3.0), 1.0);
+        assert_eq!(optin_ramp_weight(30.0), 1.0);
     }
 
     // ── Combined output ──────────────────────────────────────────────────────
@@ -480,7 +602,8 @@ mod tests {
             prev_route: Some(&r1),
             prev_anchor_route: None,
             matrix: Some(&m),
-            matrix_age_days: 30.0,
+            l2_enforce_enabled: true,
+            l2_days_since_optin: 30.0,
         });
         assert_eq!(result.score, 0);
         assert_eq!(result.l1_score, 0);
@@ -499,7 +622,8 @@ mod tests {
             prev_route: Some(&r1),
             prev_anchor_route: None,
             matrix: None,
-            matrix_age_days: 0.0,
+            l2_enforce_enabled: false,
+            l2_days_since_optin: 0.0,
         });
         assert!(result.l1_score >= L1_SCORE_COOKIE_MISSING);
         assert!(result.reasons.iter().any(|r| r == "cookie-missing"));
@@ -510,7 +634,7 @@ mod tests {
     fn combined_caps_at_100() {
         let s = state(10, 0, 0); // fast
         let mut m = matrix(&[("/a", &[("/b", 1)])], 1000);
-        m.row_totals.insert("/a".into(), 1_000_000);
+        m.set_row_total("/a", 1_000_000);
         let r1 = r("/a", "other");
         let r2 = r("/b", "other");
         let result = score_combined(ScoreInputs {
@@ -520,9 +644,110 @@ mod tests {
             prev_route: Some(&r1),
             prev_anchor_route: None,
             matrix: Some(&m),
-            matrix_age_days: 30.0,
+            l2_enforce_enabled: true,
+            l2_days_since_optin: 30.0, // fully ramped
         });
         assert_eq!(result.score, 100);
+    }
+
+    #[test]
+    fn l2_off_contributes_nothing() {
+        // Flag false → L2 stays observe-only forever: its sub-score is still
+        // computed/emitted, but it never reaches the *enforced* combined score,
+        // no matter how stale the opt-in anchor is. A maximally-anomalous
+        // transition (unseen prev in a populated matrix → L2 100) must leave the
+        // combined score at quantize(L1) for every age.
+        let s = state(10, 50, 300); // clean L1: mean 5s, var 5 → no timing flags
+        let m = matrix(&[("/home", &[("/products", 100)])], 10);
+        let prev = r("/never-seen-prev", "other"); // unseen prev → fail-closed → L2 100
+        let cur = r("/products", "product");
+        for days in [0.0_f64, 1.5, 3.0, 30.0] {
+            let result = score_combined(ScoreInputs {
+                state: Some(&s),
+                cookie_compliance: "ok",
+                current_route: &cur,
+                prev_route: Some(&prev),
+                prev_anchor_route: None,
+                matrix: Some(&m),
+                l2_enforce_enabled: false,
+                l2_days_since_optin: days,
+            });
+            assert_eq!(result.l2_score, 100, "days {days}: L2 sub-score still computed");
+            assert_eq!(result.l1_score, 0, "L1 must be clean so L2 is the only mover");
+            assert_eq!(
+                result.score,
+                quantize_score(result.l1_score as f64),
+                "days {days}: flag off → combined must equal quantize(L1)"
+            );
+        }
+    }
+
+    #[test]
+    fn l2_on_fades_in_from_optin() {
+        // Flag true: at the instant of opt-in (days 0) the ramp weight is 0 so
+        // the combined score still equals quantize(L1); once the fade-in
+        // completes (days ≥ L2_RAMP_DAYS) L2 lifts the enforced combined score.
+        // The L2 sub-score itself is age-independent (always computed).
+        let s = state(10, 50, 300); // clean L1: mean 5s, var 5 → no timing flags
+        let m = matrix(&[("/home", &[("/products", 100)])], 10);
+        let prev = r("/never-seen-prev", "other"); // unseen prev → fail-closed → L2 100
+        let cur = r("/products", "product");
+        let mk = |days: f64| {
+            score_combined(ScoreInputs {
+                state: Some(&s),
+                cookie_compliance: "ok",
+                current_route: &cur,
+                prev_route: Some(&prev),
+                prev_anchor_route: None,
+                matrix: Some(&m),
+                l2_enforce_enabled: true,
+                l2_days_since_optin: days,
+            })
+        };
+        let day0 = mk(0.0);
+        let day3 = mk(3.0);
+        assert_eq!(day0.l2_score, 100);
+        assert_eq!(day3.l2_score, 100);
+        assert_eq!(day0.l1_score, 0, "L1 must be clean so L2 is the only mover");
+        // Day 0: ramp weight 0 → combined == quantize(L1).
+        assert_eq!(day0.score, quantize_score(day0.l1_score as f64));
+        // Fully ramped: L2 now moves the enforced combined score.
+        assert!(
+            day3.score > day0.score,
+            "L2 must lift the combined score once the opt-in fade-in completes"
+        );
+    }
+
+    #[test]
+    fn l2_on_young_optin_cannot_hard_block() {
+        // Enabling L2 must NOT instantly push a clean-L1 session to the
+        // score==100 hard-block bar — the admin enforcement UI keys hard blocks
+        // on 100, and the ramp opens at 0 the moment you opt in. Guards against
+        // a step-change block the instant the operator flips the switch.
+        let s = state(10, 50, 300); // clean L1
+        let m = matrix(&[("/home", &[("/products", 100)])], 10);
+        let prev = r("/never-seen-prev", "other");
+        let cur = r("/products", "product");
+        let result = score_combined(ScoreInputs {
+            state: Some(&s),
+            cookie_compliance: "ok",
+            current_route: &cur,
+            prev_route: Some(&prev),
+            prev_anchor_route: None,
+            matrix: Some(&m),
+            l2_enforce_enabled: true,
+            l2_days_since_optin: 0.0, // just opted in
+        });
+        assert_eq!(result.l2_score, 100, "L2 sub-score still computed");
+        assert!(
+            result.score < 100,
+            "opt-in day 0 must keep L2 below the hard-block bar"
+        );
+        assert_eq!(
+            result.score,
+            quantize_score(result.l1_score as f64),
+            "opt-in day 0: combined must equal quantize(L1)"
+        );
     }
 
     #[test]
@@ -537,7 +762,8 @@ mod tests {
             prev_route: Some(&r1),
             prev_anchor_route: None,
             matrix: None,
-            matrix_age_days: 0.0,
+            l2_enforce_enabled: false,
+            l2_days_since_optin: 0.0,
         });
         assert_eq!(result.score % 5, 0);
     }

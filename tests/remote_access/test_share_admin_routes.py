@@ -40,8 +40,6 @@ def test_status_returns_expected_keys(client):
     body = r.json()
     for key in (
         "sharing_active",
-        "use_tunnel",
-        "tunnel_url",
         "public_endpoint",
         "public_url",
         "active_session_count",
@@ -75,8 +73,12 @@ def test_audit_logs_endpoint_returns_filtered_rows(client):
 
 
 def test_audit_logs_endpoint_rejects_bad_limit(client):
+    """``limit`` out of [1, 2000] now rejected by FastAPI's Query(ge/le)
+    validator → 422 with the structured ``loc`` path that every other
+    422 in the codebase uses (consistency with body/query validation
+    conventions, instead of the prior hand-rolled 400)."""
     r = client.get("/api/admin/share/audit-logs", params={"limit": 0})
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 # ── /start /stop /panic ────────────────────────────────────────────────────
@@ -85,7 +87,7 @@ def test_audit_logs_endpoint_rejects_bad_limit(client):
 def test_start_direct_mode_validates_https(client):
     r = client.post(
         "/api/admin/share/start",
-        json={"use_tunnel": False, "public_endpoint": "http://example.com"},
+        json={"public_endpoint": "http://example.com"},
     )
     assert r.status_code == 400
     assert r.json()["detail"]["error"] == "invalid_request"
@@ -94,7 +96,7 @@ def test_start_direct_mode_validates_https(client):
 def test_start_direct_mode_happy_path(client):
     r = client.post(
         "/api/admin/share/start",
-        json={"use_tunnel": False, "public_endpoint": "https://share.example.com"},
+        json={"public_endpoint": "https://share.example.com"},
     )
     assert r.status_code == 200, r.text
     assert r.json()["public_url"] == "https://share.example.com"
@@ -429,3 +431,41 @@ def test_wordphrase_returns_dashed_string(client):
     assert isinstance(passcode, str)
     assert len(passcode) >= 16
     assert "-" in passcode
+
+
+# ── /stream (SSE) ──────────────────────────────────────────────────────────
+#
+# We don't TestClient-stream the SSE endpoint itself: TestClient.stream
+# waits on the FULL response body before returning, but the /stream
+# generator is a `while True` loop, so the call would deadlock at the
+# `__enter__`. (The cron-runs SSE test works only because its test
+# mocks `publisher.subscribe` to a finite async-generator.) Instead we
+# pin the route is registered AND test the payload shape via the
+# extracted ``_live_payload`` helper — same source of truth as the
+# polling /live endpoint, so payload-shape coverage carries.
+
+
+def test_stream_route_is_registered():
+    """If the route declaration is dropped, the /admin/share page
+    silently falls back to its 5-min safety-net poll. This pins it."""
+    from fastapi import FastAPI
+
+    from backend.routers import share_admin
+
+    app = FastAPI()
+    app.include_router(share_admin.router)
+    # FastAPI 0.138 includes sub-routers lazily; assert against the public
+    # OpenAPI path table rather than walking app.routes (which now holds a
+    # single _IncludedRouter wrapper instead of the copied child routes).
+    assert "/api/admin/share/stream" in app.openapi()["paths"]
+
+
+def test_stream_payload_shape_matches_live(client):
+    """The SSE channel reuses the same ``_live_payload`` helper as
+    the /live polling endpoint, so the wire-shape contract the
+    frontend SHARE_LIVE_QUERY_KEY cache expects holds for both."""
+    from backend.routers.share_admin import _live_payload
+
+    payload = _live_payload()
+    for key in ("sharing_active", "public_url", "active_session_count", "rate_limits", "telemetry"):
+        assert key in payload, f"missing {key}"

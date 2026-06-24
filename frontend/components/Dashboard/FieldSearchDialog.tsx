@@ -28,7 +28,7 @@ export function FieldSearchDialog({ field, title }: FieldSearchDialogProps) {
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebounce(search)
 
-  const { addFilter } = useFilterStore()
+  const addFilter = useFilterStore(s => s.addFilter)
 
   const { data, isLoading, isFetching } = useFieldValues({ field, search: debouncedSearch, limit: 100, enabled: open })
 
@@ -41,10 +41,10 @@ export function FieldSearchDialog({ field, title }: FieldSearchDialogProps) {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
         render={
-          <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-foreground" />
+          <Button variant="ghost" size="icon" aria-label={`Search ${title}`} className="h-6 w-6 text-muted-foreground hover:text-foreground" />
         }
       >
-        <Search className="h-3.5 w-3.5" />
+        <Search className="h-3.5 w-3.5" aria-hidden="true" />
       </DialogTrigger>
       <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>

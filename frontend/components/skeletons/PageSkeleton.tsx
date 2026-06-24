@@ -21,15 +21,35 @@
  */
 
 import { Skeleton } from '@/components/ui/skeleton'
+import { PageHeader } from '@/components/ui/page-header'
+
+/**
+ * When a route's loading.tsx passes its (static, build-time-known) title,
+ * the skeleton paints the real PageHeader at navigation-start — BEFORE the
+ * page bundle loads — instead of an anonymous grey bar. The header then
+ * matches what ReportShell/ReportLayout render a beat later, so the
+ * skeleton→real swap doesn't reflow or pop the title in. Omitting title
+ * keeps the original grey-bar placeholder (used by ReportShell, which
+ * already renders its own PageHeader above the skeleton). PageHeader is a
+ * server component, so this ships zero extra client JS in loading.tsx.
+ */
+interface PageSkeletonHeaderProps {
+  title?: string
+  description?: string
+}
 
 /**
  * 4 stat cards over a wide chart + a table. Matches /dashboard,
  * /performance, /security, /origin layout shape.
  */
-export function DashboardSkeleton() {
+export function DashboardSkeleton({ title, description }: PageSkeletonHeaderProps = {}) {
   return (
     <div className="space-y-4">
-      <Skeleton className="h-7 w-48" />
+      {title ? (
+        <PageHeader title={title} description={description} />
+      ) : (
+        <Skeleton className="h-7 w-48" />
+      )}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Skeleton className="h-20 w-full" />
         <Skeleton className="h-20 w-full" />
@@ -46,10 +66,14 @@ export function DashboardSkeleton() {
 }
 
 /** Grid of equally-sized chart panels — matches /charts. */
-export function ChartsGridSkeleton() {
+export function ChartsGridSkeleton({ title, description }: PageSkeletonHeaderProps = {}) {
   return (
     <div className="space-y-4">
-      <Skeleton className="h-7 w-32" />
+      {title ? (
+        <PageHeader title={title} description={description} />
+      ) : (
+        <Skeleton className="h-7 w-32" />
+      )}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         {Array.from({ length: 9 }).map((_, i) => (
           <Skeleton key={i} className="h-64 w-full" />
@@ -60,13 +84,17 @@ export function ChartsGridSkeleton() {
 }
 
 /** Tall table with header row + N body rows — matches /logs, /sessions, /alerts. */
-export function TableSkeleton({ rows = 12 }: { rows?: number }) {
+export function TableSkeleton({ rows = 12, title, description }: PageSkeletonHeaderProps & { rows?: number } = {}) {
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <Skeleton className="h-7 w-48" />
-        <Skeleton className="h-9 w-32" />
-      </div>
+      {title ? (
+        <PageHeader title={title} description={description} />
+      ) : (
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-7 w-48" />
+          <Skeleton className="h-9 w-32" />
+        </div>
+      )}
       <div className="border rounded-md overflow-hidden">
         <Skeleton className="h-10 w-full rounded-none" />
         <div className="divide-y">

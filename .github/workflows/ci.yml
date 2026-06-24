@@ -2,9 +2,17 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, release/**]
   pull_request:
-    branches: [main]
+    branches: [main, release/**]
+
+# Cancel superseded runs on the same ref (e.g. a force-push or rapid PR
+# updates). `main` keeps each push separate (group includes SHA) so we
+# never lose a post-merge run; PR refs and release/** branch pushes
+# collapse to one in-flight run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -12,7 +20,7 @@ env:
 jobs:
   backend:
     name: Backend (Python)
-    runs-on: forge-amd64-medium
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v6
@@ -32,13 +40,49 @@ jobs:
       - name: Format check (ruff)
         run: uv run ruff format --check .
 
-      - name: Type check (mypy)
-        run: uv run mypy backend/
+      - name: Type check (mypy, filtered through mypy-baseline)
+        # Pre-existing errors accepted via mypy-baseline.txt; the filter
+        # exits non-zero only on NET-NEW errors. Refresh the baseline after
+        # a burndown PR with
+        #   uv run mypy backend/ 2>&1 | uv run mypy-baseline sync
+        # and commit mypy-baseline.txt.
+        run: uv run mypy backend/ 2>&1 | uv run mypy-baseline filter
+
+      - name: Architectural contracts (import-linter, R-9)
+        # Enforces:
+        #   - Routers are independent (no router imports another router,
+        #     transitively). Pre-existing cross-router edges are
+        #     baselined in pyproject.toml [tool.importlinter]; new
+        #     edges fail the gate.
+        #   - Core does not depend on routers (no inversion of
+        #     web ↔ analytics layering).
+        run: uv run lint-imports
 
       - name: Install falco
+        # Pinned to match backend/Dockerfile's FALCO_VERSION so CI lints VCL
+        # with the SAME falco the prod backend uses. An unpinned `latest` is a
+        # moving supply-chain target AND can accept/reject a recv snippet
+        # differently than production (silent CI-vs-prod VCL-lint drift on a
+        # security-relevant validation path). Bump deliberately alongside the
+        # Dockerfile ARG.
         run: |
-          sudo curl -sL https://github.com/ysugimoto/falco/releases/latest/download/falco-linux-amd64 -o /usr/local/bin/falco
+          FALCO_VERSION=2.3.0
+          # Resolve the release arch from the runner so this works on both
+          # x86_64 and arm64 runners (e.g. ubuntu-22.04 vs ubuntu-22.04-arm).
+          case "$(uname -m)" in
+            x86_64)  ARCH=amd64 ;;
+            aarch64) ARCH=arm64 ;;
+            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          # Extract the whole archive (no member arg) — it contains only the
+          # binary, stored as "./falco". GNU tar (the runner's tar) won't match
+          # a bare "falco" against the "./"-prefixed name, so naming the member
+          # fails with "falco: Not found in archive". This mirrors how
+          # backend/Dockerfile installs falco, keeping CI and prod identical.
+          sudo curl -sSfL "https://github.com/ysugimoto/falco/releases/download/v${FALCO_VERSION}/falco-linux-${ARCH}.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin
           sudo chmod +x /usr/local/bin/falco
+          falco --version
 
       - name: Install gitleaks
         # Same curl-binary-to-PATH pattern as falco above. Version pinned so
@@ -46,7 +90,13 @@ jobs:
         # deliberately when wanted. Mirrors `.pre-commit-config.yaml`.
         run: |
           GITLEAKS_VERSION=8.30.1
-          sudo curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+          # gitleaks names x86_64 assets "x64" (not "amd64"); arm64 matches.
+          case "$(uname -m)" in
+            x86_64)  ARCH=x64 ;;
+            aarch64) ARCH=arm64 ;;
+            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          sudo curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${ARCH}.tar.gz" \
             | sudo tar -xz -C /usr/local/bin gitleaks
           sudo chmod +x /usr/local/bin/gitleaks
           gitleaks version
@@ -58,6 +108,29 @@ jobs:
         # diagnostic — see CONTRIBUTING.md / AGENTS.md for the
         # suppression playbook.
         run: gitleaks detect --no-banner --redact --config .gitleaks.toml --exit-code 1
+
+      - name: Install osv-scanner
+        # Same curl-binary-to-PATH pattern as falco and gitleaks above.
+        # Version pinned so a CVE-database refresh doesn't suddenly fail
+        # an unrelated PR; bump deliberately when wanted.
+        run: |
+          OSV_VERSION=2.2.4
+          case "$(uname -m)" in
+            x86_64)  ARCH=amd64 ;;
+            aarch64) ARCH=arm64 ;;
+            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          sudo curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_${ARCH}" \
+            -o /usr/local/bin/osv-scanner
+          sudo chmod +x /usr/local/bin/osv-scanner
+          osv-scanner --version
+
+      - name: Dependency vulnerability scan (osv-scanner, CRITICAL gate)
+        # scripts/check_osv.py runs osv-scanner once and exits non-zero
+        # only on CRITICAL vulnerabilities. Lower severities print as a
+        # warning table but don't block — they get triaged via Dependabot.
+        # Lives in scripts/ so it's also runnable locally via `make osv`.
+        run: uv run python scripts/check_osv.py
 
       - name: Install terraform
         # Required by tests/utils/test_terraform_gen.py — runs `terraform fmt`
@@ -85,23 +158,50 @@ jobs:
         env:
           FALCO_REQUIRED: "1"
           TERRAFORM_VALIDATE: "1"
-        # Gate ratcheted as milestones land:
-        #   end Milestone A: 44% (baseline 46%, -2pp buffer)
-        #   end Milestone E: 47% (current 49% — keeps the 2pp buffer)
-        #   post-Milestone E coverage backfill: 55% (current 59% — 4pp buffer)
-        #   confidence-batch (insights+admin+services+dashboard+origin+
-        #   hypothesis+regression+E2E smoke): 78% (current 83% — 5pp buffer)
+        # Coverage gate convention: ratchet --cov-fail-under to current actual − 2pp.
+        # The 2pp buffer absorbs CI-vs-local jitter so it can't force-fail a build;
+        # raise it as backend coverage clears the next floor. `make ratchet` prints actual.
         #
         # `-n auto` parallelizes via pytest-xdist (TESTING_PLAN_3 item 21).
         # Verified safe: per-service SQLite (`{id}.metadata.db`) + per-test
         # tmp_path give file isolation; autouse `_reset_module_caches` resets
         # the 8 module-level caches between tests; moto fixtures are per-test.
         # Local run: 2268 passed in 58s under `-n auto` vs ~3min serial.
-        run: uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=78
+        run: uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=86
+
+      - name: Observability guard (no OTEL_EXPORTER=console in deploy files)
+        # SRE-10 / ADR-08 §5: the console exporter floods prod stdout with
+        # ~1 MB/min of JSON (the 2026-06-10 incident). The default is `none`
+        # in code; this catches a hardcoded `console` slipping into a tracked
+        # compose/Dockerfile/env. Also runnable locally via `make ci`.
+        run: bash scripts/check_no_console_otel.sh
+
+      - name: Security-regression count gate
+        # v2.0 cleanup Phase 0.8: asserts the
+        # @pytest.mark.security_regression count never drops below the
+        # baseline floor (24 — from the since-removed audit-findings/
+        # verified fixes). A refactor cannot silently delete coverage of a
+        # verified fix without surfacing the change.
+        run: bash scripts/check_security_regression_count.sh
+
+      - name: Emit perf samples (CI-scale synthetic load)
+        # Produces tests/perf/latest.json from a 100K-row in-memory
+        # DuckDB dataset (~2 s wall). The gate below compares to
+        # tests/perf/baseline.json and fails on >regression_pct_threshold%
+        # over baseline (50 % default; tuned for GH Actions runner
+        # variance at CI scale).
+        run: uv run python scripts/emit_perf_latest.py
+
+      - name: Perf gate (load-harness baseline)
+        # Compares the just-emitted latest.json against baseline.json.
+        # Production targets (≤2800 / ≤1900 ms) are documented in
+        # baseline.json's production_targets_comment for traceability
+        # but enforced by the manual loadtest probe, not this CI gate.
+        run: bash scripts/perf_gate.sh
 
   frontend:
     name: Frontend (Node)
-    runs-on: forge-amd64-medium
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: frontend
@@ -130,17 +230,94 @@ jobs:
         run: npm ci
 
       - name: Generate API types
-        # `frontend/types/api.generated.ts` is gitignored — regenerated fresh
-        # on every CI run. The tsc step below is the drift guard: if a backend
-        # model changed in a way that breaks a frontend `components['schemas']`
-        # import, tsc fails here against the just-regenerated types.
+        # `frontend/types/api.generated.ts` is regenerated fresh on every
+        # CI run. The drift guard below catches the case where a contributor
+        # bypassed the pre-commit `regen-openapi` hook (or where the backend
+        # OpenAPI surface changed without a corresponding type regen). The
+        # backend-side guard is `tests/test_openapi_snapshot.py`; this is
+        # the consumer-side mirror.
         run: npm run gen:types
+
+      - name: Detect drift in generated OpenAPI types
+        # Pre-commit runs the same generator, so the only way this fires
+        # is (a) someone bypassed --no-verify or (b) the openapi-typescript
+        # tool version drifted between local and CI. Either way, the right
+        # response is to regenerate locally and commit.
+        run: |
+          if ! git diff --exit-code types/api.generated.ts openapi.json; then
+            echo "::error::Generated OpenAPI types are out of sync. Run 'npm run gen:types' locally and commit the result." >&2
+            exit 1
+          fi
 
       - name: Type check (tsc)
         run: npx tsc --noEmit
 
+      - name: ESLint count-ceiling gate
+        # ESLint was previously gated nowhere (this job runs gen:types + tsc +
+        # vitest; the backend job runs the Python import-linter). The gate
+        # fails if the source eslint error count rises above the committed
+        # ceiling, catching new `as any` / rules-of-hooks before runtime.
+        # Ratchet the ceiling down as violations are removed.
+        # The script resolves the repo root itself, so call it with ../.
+        run: bash ../scripts/check_eslint_count.sh
+
       - name: Tests (vitest with coverage)
-        # Gate ratcheted as milestones land:
-        #   end Milestone A: 40% (baseline 42.7%, -2pp buffer)
-        #   end Milestone E: 44% (current 46.55% — keeps the 2pp buffer)
-        run: npx vitest run --coverage --coverage.thresholds.lines=44
+        # Coverage gate convention: ratchet each threshold to current actual − 2pp
+        # (the 2pp buffer absorbs CI-vs-local jitter). GATE-03 (2026-06-19): enforce
+        # statements/functions/branches floors too, not just lines — else an uncovered
+        # error-path branch (no new lines) can't drop the gate, and the branch floor is
+        # what catches a happy-path-only test. `make ratchet` prints all four.
+        run: >-
+          npx vitest run --coverage
+          --coverage.thresholds.lines=66
+          --coverage.thresholds.statements=65
+          --coverage.thresholds.functions=54
+          --coverage.thresholds.branches=52
+
+  scorer:
+    name: Scorer (Rust)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: compute/scorer
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        # compute/scorer/rust-toolchain.toml pins the channel (1.90). We install
+        # that toolchain explicitly so `rustc`/`cargo` exist for the cache step
+        # below; rustup then honours the toml override when cargo runs here.
+        # Install rustup itself only if the runner image doesn't ship it.
+        run: |
+          if ! command -v cargo >/dev/null && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain 1.90 --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compute/scorer
+
+      - name: Run scorer unit tests
+        # Native (host-target) tests: Python↔Rust normalize/cookie/matrix
+        # parity, session-expiry boundaries, and the scoring math. These are the
+        # 80+ `#[test]`s that no other CI job runs — a Rust-side normalizer,
+        # wire-format, or expiry regression ships green without this. `--locked`
+        # also fails if Cargo.lock drifted. No Fastly CLI needed: the dev
+        # profile builds for the host; Wasm is only built for deploy
+        # (`make scorer-package`).
+        run: cargo test --locked
+
+      - name: Audit dependencies for RustSec advisories
+        # The scorer verifies AES-GCM cookie integrity at the edge, so a future
+        # advisory in a crypto/RNG crate (aes-gcm/ghash/polyval/getrandom/time)
+        # must fail CI rather than ship green — `cargo test --locked` above does
+        # not check advisories. `cargo audit` exits non-zero on any known
+        # vulnerability in the locked tree. cargo-audit is cached by rust-cache
+        # (cache-bin) after the first install.
+        run: |
+          command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+          cargo audit

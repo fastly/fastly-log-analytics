@@ -25,12 +25,16 @@ You'll need:
 ## Quick Start
 
 ```bash
-docker-compose up --build
+docker compose up --build
 ```
 
-Open **http://localhost:3000** and follow the provisioning wizard. The wizard creates your Object Storage bucket, access keys, a CDN-fronting service, and the logging endpoint on the VCL service you select.
+> Requires Docker Compose v2 (the `docker compose` subcommand). The standalone `docker-compose` v1 binary reached end-of-life in 2023 and isn't shipped with current Docker installs.
 
-For manual install (no Docker), see [Manual Installation](#manual-installation).
+Open **http://localhost** and follow the provisioning wizard. The wizard creates your Object Storage bucket, access keys, a CDN-fronting service, and the logging endpoint on the VCL service you select.
+
+> The stack is fronted by Caddy on port **80** (a single ingress, mirroring production). A friendlier alias **http://fastly.localhost** works with no setup — browsers resolve `*.localhost` to `127.0.0.1`. For a custom name like **http://fastly.analytics**, add `127.0.0.1 fastly.analytics` to your hosts file.
+
+For manual install (no Docker), see [Manual Installation](#manual-installation). The non-Docker [`run.sh`](run.sh) path still serves the app directly on **http://localhost:3000**.
 
 ---
 
@@ -62,19 +66,17 @@ The analyst runs their own independent copy of the app on their laptop or server
 
 #### How it works:
 1. **Admin:** Click **Invite Analyst** in your dashboard. The app packages your FOS bucket name, region, and a set of read-only access keys into a secure JSON string. Send this JSON securely to your teammate.
-2. **Analyst:** Start your own copy of the app (e.g., using `docker-compose`), select **Join Service** on the setup screen, and paste the JSON config.
+2. **Analyst:** Start your own copy of the app (e.g., using `docker compose`), select **Join Service** on the setup screen, and paste the JSON config.
 3. Your teammate's app automatically configures itself in `read_only` mode and syncs directly from the bucket. *Note: Because only the Admin's machine runs the active raw log ingestion pipeline, if the admin is offline, no new logs will be written to the database (though the analyst can still query all historical data). Once the admin is back online, the analyst's dashboard will automatically sync the newly committed logs.*
 
 ---
 
 ### Path B: Live Shared Server (Web-Accessible Host)
 
-You run the application as a central web-accessible server (either on a dedicated VM or from your laptop using a secure tunnel). Your associates connect to your server using a standard web browser and enter a passcode.
+You run the application as a central web-accessible server on a dedicated VM (or a laptop reachable at its own hostname / IP). Your associates connect using a standard web browser and enter a passcode.
 
 #### How it works:
-1. **Admin:** Click **Share Dashboard** in your dashboard. Choose how to make your server reachable over the web:
-   - **SSH Tunnel (via localhost.run):** Easiest for local laptops. Spawns an automatic reverse SSH tunnel to assign you a public `https://*.lhrun.dev` link.
-   - **Your Own Hostname/IP:** Best for public servers. Direct connections via a custom domain name or IP (requires HTTPS setup).
+1. **Admin:** Click **Share Dashboard** in your dashboard. The sharing manager prompts for your server's public URL — a custom domain or IP that the analyst can reach over HTTPS. (The previous SSH-reverse-tunnel mode via `localhost.run` was removed in v2.0; production deployments use direct-mode against a real public endpoint.)
 2. **Admin:** Mint an analyst invitation in the sharing manager by specifying their name, an optional IP allowlist, and a passcode. Give them the public URL and passcode.
 3. **Analyst:** Open the shared link in a standard browser, accept the Terms of Service, enter the passcode, and view the live read-only dashboard. All database queries are executed securely on your host server. You can revoke access or **Sever All Access** instantly.
 
@@ -90,11 +92,11 @@ You run the application as a central web-accessible server (either on a dedicate
 - **Log sampling** — optionally log a random percentage of requests to manage cost on high-traffic services
 - **Multi-source support** — analyze logs from multiple services side by side
 - **Interactive dashboards** — traffic over time, global request map, top-N aggregations, raw log viewer with click-to-filter
-- **Insights** — automated anomaly detection (error spikes, regional surges, new IPs, WAF signal changes, cache regressions, latency)
+- **Insights** — automated anomaly detection (error spikes, regional surges, new-region traffic, botnet IP-spread, WAF signal changes, cache regressions, latency)
 - **Usage & Cost** — live storage breakdown, FOS operation counts, period totals, interactive cost estimator
 - **Log field configuration** — built-in field groups (HTTP, network, geo, TLS, NGWAF) plus custom VCL expressions
 - **Alerts** — threshold-based, webhook-delivered
-- **Live dashboard sharing** — three modes (SSH tunnel, your own hostname, your own IP) with per-analyst passcode invites, IP allowlisting, and instant revoke
+- **Live dashboard sharing** — direct-mode via your own hostname or IP, with per-analyst passcode invites, IP allowlisting, and instant revoke
 - **Session scoring** — edge-computed 0-100 risk score per request combining cookie/timing signals with a PageRank transition matrix, with live threshold enforcement, audit logging, key rotation, and matrix version history. See the [runbook](docs/session_scoring_runbook.md) and [feature reference](docs/features.md)
 
 See [docs/features.md](docs/features.md) for the full feature reference.
@@ -130,20 +132,20 @@ If you have a [Fastly API token](https://www.fastly.com/documentation/guides/acc
 
 ```bash
 # Guided
-uv run python backend/provision.py
+uv run python -m backend.provision.cli provision
 
 # Non-interactive
-uv run python backend/provision.py --token <YOUR_TOKEN> --service-id <ID> --yes
+uv run python -m backend.provision.cli provision --token <YOUR_TOKEN> --service-id <ID> --yes
 
 # Teardown
-uv run python backend/provision.py --teardown --service-id <ID> --yes
+uv run python -m backend.provision.cli teardown --service-id <ID> --yes
 ```
 
 Common flags: `--region us-east-1`, `--bucket <name>`, `--prefix <path>`, `--sample-rate 100`, `--period "1 minute"`, `--cdn-prefix <subdomain>`, `--remove-data` (on teardown), `-y` / `--yes` (accept defaults). Provisioning auto-rolls back on failure to leave your Fastly account clean.
 
 ### Bring your own bucket
 
-If you already have a bucket, drop a JSON config file in `configs/` instead. See `config.example.json` for the schema (`fos_endpoint`, `fos_bucket`, `fos_access_key_id`, `fos_secret_access_key`, `fos_region`, optional `cdn_url` + `cdn_secret`, optional `fastly_api_key`).
+If you already have a bucket, drop a JSON config file in `configs/` instead (create the directory if your checkout doesn't have one yet). See [`config.example.json`](config.example.json) at the repo root for the schema (`fos_endpoint`, `fos_bucket`, `fos_access_key_id`, `fos_secret_access_key`, `fos_region`, optional `cdn_url` + `cdn_secret`, optional `fastly_api_key`).
 
 ---
 
@@ -169,8 +171,8 @@ To route FOS reads through a Fastly CDN service (for free egress and edge cachin
 
 ```bash
 make install         # uv sync + frontend npm ci
-make ci              # full check: lint + format + typecheck + tests + osv scan
-make dev             # backend + frontend with hot reload
+make ci              # full gate: lint + format + typecheck + tests (back + front) + security scans
+make dev             # backend + frontend with hot reload (./run.sh --dev)
 make test            # backend pytest only
 make test-frontend   # frontend vitest only
 make typecheck       # mypy backend/
@@ -192,14 +194,14 @@ The Next.js frontend uses a typed API client generated from the FastAPI OpenAPI 
 cd frontend && npm run gen:types
 ```
 
-See [AGENTS.md](AGENTS.md) for the architecture deep-dive, canonical patterns, and the (extensive) list of known traps.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the system design, and [AGENTS.md](AGENTS.md) for the deeper contributor/agent notes — canonical patterns and the (extensive) list of known traps.
 
 ---
 
 ## Troubleshooting
 
-### Port 8080 conflict on macOS
-Another process is using port 8080. Find it with `lsof -i :8080`, or run the backend on a different port and update `BACKEND_PORT` / `API_PROXY_URL` accordingly.
+### Port already in use (3000 / 8000)
+The frontend listens on **3000** and the backend on **8000** by default. If another process holds one, find it with `lsof -i :3000` or `lsof -i :8000`, then either stop it or run on different ports: set `FRONTEND_PORT` / `BACKEND_PORT` (and `API_PROXY_URL` to match the backend) in `.env`, or pass `--frontend-port` / `--backend-port` to `run.sh`.
 
 ### Browser: `ERR_ALPN_NEGOTIATION_FAILED`
 Usually a protocol mismatch from a security setting forcing HTTPS on a port that only speaks HTTP. Hit `http://localhost:3000` (not `127.0.0.1`), and make sure the frontend is going through the Next.js proxy rather than calling the backend port directly.

@@ -21,10 +21,12 @@ import {
   Eye,
   EyeOff,
   KeyRound,
+  History,
 } from 'lucide-react'
 import { Label } from '@/components/ui/label'
 import { client } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import {
   panelDialogContent,
   panelDialogFooter,
@@ -43,15 +45,28 @@ interface InviteAnalystDialogProps {
 
 type Step = 'confirm' | 'creating' | 'result'
 
-function CopyField({ label, value, secret, multiline = false }: { label: string; value: string; secret?: boolean; multiline?: boolean }) {
-  const [copied, setCopied] = useState(false)
-  const [revealed, setRevealed] = useState(false)
+// In-memory cache of most-recently-issued invite, scoped per service_id.
+// Lives only in the JS heap — never persisted to storage. Auto-evicted after
+// REVEAL_TTL_MS so a forgotten tab doesn't leak the secret indefinitely.
+// Addresses audit finding U-3: admin who mis-copies the key on first display
+// can reopen the dialog within the TTL and re-reveal instead of being forced
+// to revoke + re-issue.
+const REVEAL_TTL_MS = 5 * 60 * 1000
+const recentInvites = new Map<string, { invite: AnalystInvite; issuedAt: number }>()
 
-  const copy = () => {
-    navigator.clipboard.writeText(value)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+function getRecentInvite(serviceId: string): AnalystInvite | null {
+  const entry = recentInvites.get(serviceId)
+  if (!entry) return null
+  if (Date.now() - entry.issuedAt > REVEAL_TTL_MS) {
+    recentInvites.delete(serviceId)
+    return null
   }
+  return entry.invite
+}
+
+function CopyField({ label, value, secret, multiline = false }: { label: string; value: string; secret?: boolean; multiline?: boolean }) {
+  const { copied, copy } = useCopyToClipboard(2000)
+  const [revealed, setRevealed] = useState(false)
 
   const display = secret && !revealed ? '•'.repeat(Math.min(value.length, 24)) : value
 
@@ -67,6 +82,7 @@ function CopyField({ label, value, secret, multiline = false }: { label: string;
             <Button
               variant="ghost"
               size="icon"
+              aria-label={revealed ? 'Hide value' : 'Reveal value'}
               className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
               onClick={() => setRevealed(r => !r)}
               title={revealed ? 'Hide' : 'Reveal'}
@@ -77,8 +93,9 @@ function CopyField({ label, value, secret, multiline = false }: { label: string;
           <Button
             variant="ghost"
             size="icon"
+            aria-label="Copy to clipboard"
             className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
-            onClick={copy}
+            onClick={() => copy(value)}
             title="Copy"
           >
             {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
@@ -94,6 +111,9 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
   const [error, setError] = useState('')
   const [result, setResult] = useState<AnalystInvite | null>(null)
   const [jsonCopied, setJsonCopied] = useState(false)
+  // Re-renders the "Reveal previously issued key" banner as TTL ticks down
+  // and forces it to disappear the moment the cache entry expires.
+  const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
     if (!open) {
@@ -106,7 +126,22 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
     }
   }, [open])
 
+  // Tick once per second while the confirm step is visible so the
+  // "remaining minutes" hint stays accurate and the banner self-hides at TTL.
+  useEffect(() => {
+    if (!open || step !== 'confirm') return
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [open, step])
+
   if (!service) return null
+
+  const cachedInvite = getRecentInvite(service.service_id)
+  const cachedEntry = recentInvites.get(service.service_id)
+  const cachedAgeMs = cachedEntry ? now - cachedEntry.issuedAt : 0
+  const cachedRemainingMs = Math.max(0, REVEAL_TTL_MS - cachedAgeMs)
+  const cachedRemainingMin = Math.max(1, Math.ceil(cachedRemainingMs / 60000))
 
   const handleCreate = async () => {
     setError('')
@@ -115,12 +150,20 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
       const { data } = await client.POST("/api/services/{service_id}/generate-viewer-key", {
         params: { path: { service_id: service.service_id } },
       })
-      setResult(data as any)
+      const invite = data as AnalystInvite
+      recentInvites.set(service.service_id, { invite, issuedAt: Date.now() })
+      setResult(invite)
       setStep('result')
     } catch (e: any) {
       setError(e.message || 'Failed to create analyst key')
       setStep('confirm')
     }
+  }
+
+  const handleRevealCached = () => {
+    if (!cachedInvite) return
+    setResult(cachedInvite)
+    setStep('result')
   }
 
   const handleCopyJson = () => {
@@ -171,6 +214,26 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
         <div className="flex-1 overflow-y-auto min-h-0">
           {step === 'confirm' && (
             <div className="p-8 space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
+              {cachedInvite && (
+                <Alert className="bg-primary/5 border-primary/20">
+                  <History className="h-4 w-4" />
+                  <AlertDescription className="text-sm ml-1 flex items-center justify-between gap-3">
+                    <span>
+                      A key was issued for this service in the last {cachedRemainingMin} min — still available in this tab.
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleRevealCached}
+                      className="h-8 shrink-0"
+                    >
+                      <Eye className="h-3.5 w-3.5 mr-1.5" />
+                      Reveal
+                    </Button>
+                  </AlertDescription>
+                </Alert>
+              )}
+
               <div className="rounded-lg border bg-muted/30 p-4 space-y-3">
                 <div className="flex items-center gap-2 text-sm font-semibold">
                   <KeyRound className="h-4 w-4 text-primary" />
@@ -207,7 +270,7 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
               <Alert className="bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-400">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription className="text-sm ml-1 font-medium">
-                  Save the secret key now — it cannot be retrieved again.
+                  Save the secret key now — available in this browser tab for {REVEAL_TTL_MS / 60000} min, then unrecoverable.
                 </AlertDescription>
               </Alert>
 

@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
-import { useFilterPayload } from '@/hooks/useFilterPayload'
+import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
 import { useShallow } from 'zustand/react/shallow'
 
 interface UseFieldValuesOptions {
@@ -15,11 +15,11 @@ interface UseFieldValuesOptions {
 }
 
 export function useFieldValues({ field, search, limit = 50, enabled = true }: UseFieldValuesOptions) {
-  const { activeServiceId } = useServiceStore()
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
   const { startTime, endTime } = useFilterStore(
     useShallow(s => ({ startTime: s.startTime, endTime: s.endTime }))
   )
-  const filterPayload = useFilterPayload()
+  const filterPayload = useDebouncedFilterPayload()
 
   return useQuery({
     queryKey: ['dashboard', 'field_values', activeServiceId, startTime, endTime, filterPayload, field, search],

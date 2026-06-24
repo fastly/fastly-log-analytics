@@ -21,7 +21,16 @@ const Slider = React.forwardRef<
       <SliderPrimitive.Range className="absolute h-full bg-primary" />
     </SliderPrimitive.Track>
     {Array.from({ length: Array.isArray(props.value) ? props.value.length : Array.isArray(props.defaultValue) ? props.defaultValue.length : 1 }).map((_, i) => (
-      <SliderPrimitive.Thumb key={i} className="block h-4 w-4 rounded-full border-2 border-primary bg-background ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50" />
+      // Radix puts role="slider" on the Thumb, so the accessible name must live
+      // here — Root's aria-label does not propagate to it. Additive: thumbs are
+      // named only when the caller passes aria-label/aria-labelledby, so existing
+      // unnamed sliders are unchanged.
+      <SliderPrimitive.Thumb
+        key={i}
+        aria-label={props['aria-label']}
+        aria-labelledby={props['aria-labelledby']}
+        className="block h-4 w-4 rounded-full border-2 border-primary bg-background ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50"
+      />
     ))}
   </SliderPrimitive.Root>
 ))

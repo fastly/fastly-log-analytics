@@ -1,13 +1,13 @@
 """Regression tests for backend.repositories.insights — validates return shape."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
 
-from backend.core.duckdb import _clear_schema_cache
 from backend.repositories._base import _safe_table
 from backend.repositories.insights import _insights_cache, get_insights
+from backend.utils.date_utils import parse_iso_utc
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 # JFK coords: (40.6413, -73.7781). Client at (0, 0) is ~8,880 km away.
@@ -44,15 +44,6 @@ def _create_impossible_distance_table(con, table_name: str, n: int = 3):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [now, "1.2.3.4", "JFK", 0.0, 0.0, 1000, "aabbcc112233", 200, "US", "SomeCity"],
         )
-
-
-@pytest.fixture(autouse=True)
-def clear_caches():
-    _insights_cache.clear()
-    _clear_schema_cache()
-    yield
-    _insights_cache.clear()
-    _clear_schema_cache()
 
 
 _EXPECTED_TOP_LEVEL_KEYS = {
@@ -143,11 +134,21 @@ def test_impossible_distance_excluded_when_no_pop_data(in_memory_duckdb, test_se
 
 
 def test_get_insights_cached_result_is_returned_on_second_call(in_memory_duckdb, test_service_source):
-    """A second call with identical params returns the cached dict
-    with `_is_cached=True`. Pinned because the dashboard re-renders
-    on every tab switch — losing the cache would re-run the whole
-    insight pipeline (heavy SQL) on every render."""
+    """A second call with identical params returns the cached dict, and the
+    cache-hit marker survives the response-model round-trip as
+    ``_is_cached=True``. Pinned because the dashboard re-renders on every
+    tab switch — losing the cache would re-run the whole insight pipeline
+    (heavy SQL) on every render.
+
+    Regression guard: the repo stamps the model FIELD name
+    (``is_cached``), not its serialization alias. Stamping the alias was
+    dropped on validation, so every cache hit serialized as
+    ``"_is_cached": false`` — invisible to clients. The raw-dict-only
+    assertion this test used to make never exercised serialization, which
+    is why the bug slipped through; we now round-trip through the model.
+    """
     from backend.core.log_fields import LOG_FIELD_CATALOG
+    from backend.models.dashboard import InsightsResponse
 
     table_name = _safe_table(test_service_source["name"])
     raw_fields = [f for f in LOG_FIELD_CATALOG if f.get("vcl") is not None]
@@ -157,8 +158,16 @@ def test_get_insights_cached_result_is_returned_on_second_call(in_memory_duckdb,
     out1 = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
     out2 = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
 
-    assert "_is_cached" not in out1
-    assert out2.get("_is_cached") is True
+    # Freshly-computed result carries no cache marker; the cache-hit path
+    # stamps the unaliased field name.
+    assert out1.get("is_cached") is not True
+    assert out2.get("is_cached") is True
+
+    # And it must survive serialization as the wire-facing alias.
+    dumped = InsightsResponse(**out1).model_dump(by_alias=True)
+    assert dumped["_is_cached"] is False
+    dumped_cached = InsightsResponse(**out2).model_dump(by_alias=True)
+    assert dumped_cached["_is_cached"] is True
 
 
 # ── Empty-schema short-circuit ────────────────────────────────────────────
@@ -792,16 +801,19 @@ def test_coalesced_city_path_matches_per_insight_scan_output(in_memory_duckdb, t
         )
 
 
-def _seed_url_data_for_all_four_insights(con, table_name: str) -> None:
-    """Insert rows engineered to trigger each of the 4 URL-keyed insights
+def _seed_url_data_for_all_url_insights(con, table_name: str) -> None:
+    """Insert rows engineered to trigger each of the URL-keyed insights
     folded into the coalesced URL aggregate (Step 2 / Option C, 2026-06-06).
 
     Layout:
       - error_spikes: "ErrUrl" has 20 window reqs, 14 5xx (70% rate, well
         above 5% floor + 2× baseline ratchet).
-      - cache_collapse: "CollUrl" has 30 window reqs (5 HITs → 17% hit rate)
-        vs 200 baseline reqs (160 HITs → 80%). Drop is 63 points (>= 20),
-        and 17% <= 80% * 0.6 = 48%.
+      - cache_collapse: "CollUrl" has 30 window reqs (5 HITs / 25 MISS →
+        17% cacheable hit ratio) vs 200 baseline reqs (160 HITs / 40 MISS →
+        80%). Drop is 63 points (>= 20), and 17% <= 80% * 0.6 = 48%.
+      - cacheability_regression: "PassUrl" has 20 window reqs all PASS
+        (100% PASS) vs 60 baseline reqs all cacheable (0% PASS). The window
+        has 0 cacheable reqs, so it does NOT trip cache_collapse.
       - latency_regression: "RegUrl" has 12 window reqs at elapsed=4_000_000
         (p95=4000ms) vs 60 baseline at elapsed=200_000 (p95=200ms).
         w_p95/b_p95 = 20 >= 2.0; delta 3800 >= 200.
@@ -813,7 +825,10 @@ def _seed_url_data_for_all_four_insights(con, table_name: str) -> None:
 
     now = datetime.now(UTC)
     window_ts = now - timedelta(minutes=30)
-    baseline_ts = now - timedelta(hours=12)
+    # Baseline rows must be old enough that available_history >= baseline_hours
+    # (24h) or get_insights' check_baseline short-circuits every insight with an
+    # empty "needs more history" card. 24.5h sits inside [now-25h, now-1h).
+    baseline_ts = now - timedelta(hours=24, minutes=30)
 
     def _ins(ts: datetime, url: str, status: int, cache: str, elapsed: int) -> None:
         con.execute(
@@ -833,6 +848,12 @@ def _seed_url_data_for_all_four_insights(con, table_name: str) -> None:
         _ins(window_ts, "/CollUrl", 200, "HIT" if i < 5 else "MISS", 50_000)
     for i in range(200):
         _ins(baseline_ts, "/CollUrl", 200, "HIT" if i < 160 else "MISS", 50_000)
+
+    # cacheability_regression: "PassUrl" — 20 window all PASS, 60 baseline all cacheable
+    for _ in range(20):
+        _ins(window_ts, "/PassUrl", 200, "PASS", 50_000)
+    for i in range(60):
+        _ins(baseline_ts, "/PassUrl", 200, "HIT" if i < 50 else "MISS", 50_000)
 
     # latency_regression: "RegUrl" — 12 window at 4000ms, 60 baseline at 200ms
     for _ in range(12):
@@ -873,28 +894,22 @@ def test_coalesced_url_path_matches_per_insight_scan_output(in_memory_duckdb, te
         '"elapsed" INTEGER'
         ")"
     )
-    _seed_url_data_for_all_four_insights(in_memory_duckdb, table_name)
+    _seed_url_data_for_all_url_insights(in_memory_duckdb, table_name)
+
+    url_ids = ("error_spikes", "cache_collapse", "cacheability_regression", "latency_regression", "tail_latency")
 
     # Pass 1 — coalesced path (default).
     _insights_cache.clear()
     fast = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
-    fast_url = {
-        i["id"]: i
-        for i in fast["insights"]
-        if i["id"] in ("error_spikes", "cache_collapse", "latency_regression", "tail_latency")
-    }
+    fast_url = {i["id"]: i for i in fast["insights"] if i["id"] in url_ids}
 
     # Pass 2 — disable URL coalescing, force per-insight scans.
     _insights_cache.clear()
     monkeypatch.setattr(insights_repo, "_coalesced_url_aggregates", lambda *a, **k: {})
     slow = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
-    slow_url = {
-        i["id"]: i
-        for i in slow["insights"]
-        if i["id"] in ("error_spikes", "cache_collapse", "latency_regression", "tail_latency")
-    }
+    slow_url = {i["id"]: i for i in slow["insights"] if i["id"] in url_ids}
 
-    expected_ids = {"error_spikes", "cache_collapse", "latency_regression", "tail_latency"}
+    expected_ids = set(url_ids)
     assert set(fast_url.keys()) == expected_ids, f"fast missing: {expected_ids - set(fast_url.keys())}"
     assert set(slow_url.keys()) == expected_ids, f"slow missing: {expected_ids - set(slow_url.keys())}"
 
@@ -926,6 +941,96 @@ def test_coalesced_url_path_matches_per_insight_scan_output(in_memory_duckdb, te
         )
 
 
+def _create_url_insights_table(con, table_name: str) -> None:
+    con.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        '"timestamp" TIMESTAMPTZ, "url" VARCHAR, "status" INTEGER, "cache" VARCHAR, "elapsed" INTEGER)'
+    )
+
+
+def test_pass_surge_is_cacheability_regression_not_cache_collapse(in_memory_duckdb, test_service_source):
+    """Regression for the reported bug: a surge of uncacheable PASS traffic
+    must NOT trip cache_collapse — PASS is excluded from the HIT/(HIT+MISS)
+    cacheable hit ratio — and must instead surface under cacheability_regression.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    table_name = _safe_table(test_service_source["name"])
+    _create_url_insights_table(in_memory_duckdb, table_name)
+
+    now = datetime.now(UTC)
+    window_ts = now - timedelta(minutes=30)
+    # 24.5h old so available_history >= baseline_hours (24h); see check_baseline.
+    baseline_ts = now - timedelta(hours=24, minutes=30)
+
+    def _ins(ts, cache):
+        in_memory_duckdb.execute(
+            f'INSERT INTO {table_name} ("timestamp", "url", "status", "cache", "elapsed") VALUES (?, ?, ?, ?, ?)',
+            [ts.isoformat(), "/PassSurge", 200, cache, 50_000],
+        )
+
+    # Baseline: 100 cacheable reqs, mostly HIT (80 HIT / 20 MISS, 0 PASS).
+    for i in range(100):
+        _ins(baseline_ts, "HIT" if i < 80 else "MISS")
+    # Recent window: 40 reqs, ALL PASS (content became uncacheable).
+    for _ in range(40):
+        _ins(window_ts, "PASS")
+
+    _insights_cache.clear()
+    res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    by_id = {i["id"]: i for i in res["insights"]}
+
+    cc_labels = {item["label"] for item in by_id["cache_collapse"]["items"]}
+    cr_items = {item["label"]: item for item in by_id["cacheability_regression"]["items"]}
+
+    assert "/PassSurge" not in cc_labels, "a PASS surge must not be flagged as a cache-efficiency collapse"
+    assert "/PassSurge" in cr_items, "a PASS surge should surface as a cacheability regression"
+    assert cr_items["/PassSurge"]["current_val"] == 100.0  # 100% PASS in window
+    assert cr_items["/PassSurge"]["baseline_val"] == 0.0  # 0% PASS in baseline
+
+
+def test_cache_collapse_hit_ratio_ignores_pass(in_memory_duckdb, test_service_source):
+    """cache_collapse hit ratio is HIT/(HIT+MISS): adding PASS traffic to both
+    windows leaves the reported ratios unchanged, and a genuine HIT→MISS drop
+    on the cacheable traffic still fires."""
+    from datetime import UTC, datetime, timedelta
+
+    table_name = _safe_table(test_service_source["name"])
+    _create_url_insights_table(in_memory_duckdb, table_name)
+
+    now = datetime.now(UTC)
+    window_ts = now - timedelta(minutes=30)
+    # 24.5h old so available_history >= baseline_hours (24h); see check_baseline.
+    baseline_ts = now - timedelta(hours=24, minutes=30)
+
+    def _ins(ts, cache):
+        in_memory_duckdb.execute(
+            f'INSERT INTO {table_name} ("timestamp", "url", "status", "cache", "elapsed") VALUES (?, ?, ?, ?, ?)',
+            [ts.isoformat(), "/Coll", 200, cache, 50_000],
+        )
+
+    # Baseline: 90 HIT + 10 MISS (90% cacheable hit ratio) + 100 PASS noise.
+    for i in range(100):
+        _ins(baseline_ts, "HIT" if i < 90 else "MISS")
+    for _ in range(100):
+        _ins(baseline_ts, "PASS")
+    # Window: 3 HIT + 27 MISS (10% cacheable hit ratio) + 100 PASS noise.
+    for i in range(30):
+        _ins(window_ts, "HIT" if i < 3 else "MISS")
+    for _ in range(100):
+        _ins(window_ts, "PASS")
+
+    _insights_cache.clear()
+    res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    by_id = {i["id"]: i for i in res["insights"]}
+    coll = {item["label"]: item for item in by_id["cache_collapse"]["items"]}
+
+    assert "/Coll" in coll, "a real cacheable hit-ratio drop should fire cache_collapse"
+    # Ratios reflect HIT/(HIT+MISS), not HIT/total — PASS is excluded.
+    assert coll["/Coll"]["baseline_val"] == 90.0
+    assert coll["/Coll"]["current_val"] == 10.0
+
+
 def test_impossible_distance_items_include_pop_coords(in_memory_duckdb, test_service_source):
     """When POP data is cached, impossible-distance items include finite pop_lat and pop_lon."""
     table_name = _safe_table(test_service_source["name"])
@@ -945,3 +1050,242 @@ def test_impossible_distance_items_include_pop_coords(in_memory_duckdb, test_ser
         assert isinstance(meta["pop_lon"], float), f"pop_lon should be float, got {type(meta['pop_lon'])}"
         assert meta["client_lat"] is not None, "client_lat must not be None"
         assert meta["client_lon"] is not None, "client_lon must not be None"
+
+
+def test_get_insights_drops_temp_tables_after_each_call(in_memory_duckdb, test_service_source):
+    """Finding 009: ``get_insights`` previously created two TEMP tables
+    (``insights_temp_*`` and possibly ``insights_waf_*``) but never dropped
+    them, so on a pooled DuckDB connection they accumulated across requests —
+    an attacker who could force cache misses (e.g. via a varying cache-bypass
+    parameter) would gradually exhaust temp storage / memory. The fix wraps
+    the post-create work in try/finally that DROPs both tables before
+    returning. This test seeds a logs table, calls ``get_insights`` a few
+    times, and verifies no ``insights_temp_*`` or ``insights_waf_*`` tables
+    remain on the connection."""
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20, hours_ago=1)
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    def _leftover_temps() -> list[str]:
+        rows = in_memory_duckdb.execute("SELECT table_name FROM duckdb_tables() WHERE temporary = true").fetchall()
+        return [r[0] for r in rows if r[0].startswith(("insights_temp_", "insights_waf_"))]
+
+    # Bypass the in-process result cache between calls so each invocation
+    # actually re-creates the temp pair (otherwise the second call would
+    # short-circuit through ``_insights_cache.get(cache_key)`` and never
+    # touch the cleanup branch we are validating).
+    for n in range(3):
+        _insights_cache.clear()
+        get_insights(
+            in_memory_duckdb,
+            test_service_source,
+            window_hours=1.0 + n * 0.01,
+            baseline_hours=24,
+        )
+
+    leftover = _leftover_temps()
+    assert leftover == [], f"insights temp tables must be dropped after every call; leftover: {leftover}"
+
+
+class TestInsightsAnalystClamp:
+    """M2: get_insights clamps the scanned [baseline_start, now] range to the
+    analyst's window and keys the cache on the clamp so a scoped result can't
+    read the unclamped admin/prewarmer entry."""
+
+    def _empty_schema(self, con, src) -> None:
+        from backend.core.log_fields import LOG_FIELD_CATALOG
+
+        table = _safe_table(src["name"])
+        raw = [f for f in LOG_FIELD_CATALOG if f.get("vcl") is not None]
+        schema = ", ".join(f'"{f["id"]}" {f["duckdb_type"]}' for f in raw)
+        con.execute(f"CREATE TABLE IF NOT EXISTS {table} ({schema})")
+
+    def test_clamp_start_floors_baseline_start(self, in_memory_duckdb, test_service_source):
+        self._empty_schema(in_memory_duckdb, test_service_source)
+        now = datetime.now(UTC)
+        clamp_start = (now - timedelta(hours=2)).isoformat()
+        out = get_insights(
+            in_memory_duckdb,
+            test_service_source,
+            window_hours=1,
+            baseline_hours=168,
+            clamp_start=clamp_start,
+        )
+        bstart = parse_iso_utc(out["baseline_start"])
+        # Unclamped this would be ~now-169h; the clamp floors it to ~now-2h.
+        assert bstart >= parse_iso_utc(clamp_start) - timedelta(seconds=2)
+        assert bstart > now - timedelta(hours=3)
+
+    def test_clamp_end_ceilings_window_end(self, in_memory_duckdb, test_service_source):
+        self._empty_schema(in_memory_duckdb, test_service_source)
+        now = datetime.now(UTC)
+        clamp_end = (now - timedelta(hours=5)).isoformat()
+        out = get_insights(
+            in_memory_duckdb,
+            test_service_source,
+            window_hours=1,
+            baseline_hours=24,
+            clamp_end=clamp_end,
+        )
+        assert parse_iso_utc(out["window_end"]) <= parse_iso_utc(clamp_end) + timedelta(seconds=2)
+
+    def test_admin_no_clamp_keeps_full_lookback(self, in_memory_duckdb, test_service_source):
+        self._empty_schema(in_memory_duckdb, test_service_source)
+        now = datetime.now(UTC)
+        out = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=168)
+        # Full baseline+window lookback (~169h) — the clamp didn't fire.
+        assert parse_iso_utc(out["baseline_start"]) < now - timedelta(hours=160)
+
+    def test_clamped_call_does_not_read_unclamped_cache(self, in_memory_duckdb, test_service_source):
+        """The prewarmer caches an UNCLAMPED result under source:window:baseline.
+        A scoped analyst requesting the same window/baseline must not read it."""
+        self._empty_schema(in_memory_duckdb, test_service_source)
+        now = datetime.now(UTC)
+        # Prime the admin/prewarmer entry (no clamp).
+        admin = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=168)
+        assert "_is_cached" not in admin
+        assert parse_iso_utc(admin["baseline_start"]) < now - timedelta(hours=160)
+        # Analyst call, same window/baseline, but clamped: must compute fresh
+        # (different cache key) and reflect the clamp — not the cached admin range.
+        clamp_start = (now - timedelta(hours=2)).isoformat()
+        analyst = get_insights(
+            in_memory_duckdb,
+            test_service_source,
+            window_hours=1,
+            baseline_hours=168,
+            clamp_start=clamp_start,
+        )
+        assert analyst.get("_is_cached") is not True
+        assert parse_iso_utc(analyst["baseline_start"]) > now - timedelta(hours=3)
+
+    def test_mask_ips_isolates_cache_entry(self, in_memory_duckdb, test_service_source):
+        """M3: mask_ips is part of the cache key — a masked analyst result and an
+        unmasked one (same source/window/baseline/clamp) must not share an entry,
+        else one analyst could read the other's IP-keyed insight labels."""
+        self._empty_schema(in_memory_duckdb, test_service_source)
+        now = datetime.now(UTC)
+        cs, ce = (now - timedelta(hours=2)).isoformat(), now.isoformat()
+        unmasked = get_insights(
+            in_memory_duckdb,
+            test_service_source,
+            window_hours=1,
+            baseline_hours=24,
+            clamp_start=cs,
+            clamp_end=ce,
+            mask_ips=False,
+        )
+        assert "_is_cached" not in unmasked
+        masked = get_insights(
+            in_memory_duckdb,
+            test_service_source,
+            window_hours=1,
+            baseline_hours=24,
+            clamp_start=cs,
+            clamp_end=ce,
+            mask_ips=True,
+        )
+        # Different mask_ips → different cache key → fresh compute, not a cache hit.
+        assert masked.get("_is_cached") is not True
+
+
+def test_insights_request_bounds_window_fields():
+    """M2: InsightsRequest caps both windows (were unbounded floats → a
+    baseline_hours like 8_760_000 scanned ~1000 years of data)."""
+    from pydantic import ValidationError
+
+    from backend.models.dashboard import InsightsRequest
+
+    with pytest.raises(ValidationError):
+        InsightsRequest(window_size_hrs=169)
+    with pytest.raises(ValidationError):
+        InsightsRequest(baseline_hours=2161)
+    with pytest.raises(ValidationError):
+        InsightsRequest(window_size_hrs=0)
+    with pytest.raises(ValidationError):
+        InsightsRequest(baseline_hours=0)
+    ok = InsightsRequest(window_size_hrs=168, baseline_hours=2160)
+    assert ok.window_size_hrs == 168
+    assert ok.baseline_hours == 2160
+
+
+def test_coalesced_url_aggregates_caps_per_insight_at_top_15():
+    """``_coalesced_url_aggregates`` must hold at most 15 entries per
+    insight in memory, regardless of how many input rows meet the gates.
+
+    Regression for F007 (audit run 7ba15352): previously the function
+    appended every qualifying row to four unbounded lists and only
+    sliced [:15] after the full result set was materialised. An attacker
+    generating millions of unique URLs that hit any of the per-insight
+    gates (e.g. random query strings producing 5xx) could OOM the worker
+    before the trailing sort+slice ran. The bounded-heap rewrite caps
+    each insight at K=15 in flight, so total memory stays O(1) in the
+    number of unique URLs.
+
+    We can't easily simulate a million-row DuckDB cursor; instead we
+    drive the helper with a fake cursor returning 100 synthetic rows
+    and assert (a) the result is sorted-descending by the documented
+    score and (b) the four output lists are each ≤ 15 entries.
+    """
+    from unittest.mock import MagicMock
+
+    from backend.repositories.insights.repository import _coalesced_url_aggregates
+
+    # Each row has 17 columns matching the SQL projection:
+    # (url, w_total, b_total, w_5xx, b_5xx, w_hits, b_hits, w_miss, b_miss,
+    #  w_pass, b_pass, w_lat_total, b_lat_total, w_p95, b_p95, w_p99, w_p50)
+    # Construct 100 rows that satisfy every insight's gate but with
+    # increasing scores so the top 15 are the highest-i rows.
+    rows = []
+    for i in range(100):
+        w_5xx = 50 + i  # ascending w_rate (w_5xx / w_total = (50+i)/100)
+        rows.append(
+            (
+                f"/url-{i}",
+                100,  # w_total >= 5 and >= 3
+                100,  # b_total >= 20
+                w_5xx,  # w_5xx
+                1,  # b_5xx (baseline rate ~0.01)
+                10,  # w_hits (cacheable w_rate = 10/(10+90) ~0.1)
+                90 - i % 20,  # b_hits varying so cache_collapse selects
+                90,  # w_miss (w_cacheable = 100)
+                10,  # b_miss (b_cacheable ~ 100, b_rate ~0.9)
+                60,  # w_pass (cacheability w_pass_rate = 0.6)
+                1,  # b_pass (baseline pass rate ~0.01)
+                100,  # w_lat_total >= 20
+                100,  # b_lat_total
+                500.0 + i,  # w_p95 ascending
+                100.0,  # b_p95 (w_p95 / b_p95 ascending)
+                3000.0 + i * 10,  # w_p99
+                100.0,  # w_p50 (ratio = p99 / p50)
+            )
+        )
+
+    # Single fetchmany returns all 100 rows then signals exhaustion.
+    fake_cursor = MagicMock()
+    fake_cursor.fetchmany.side_effect = [rows, []]
+    fake_runner = MagicMock()
+    fake_runner.execute.return_value = fake_cursor
+
+    result = _coalesced_url_aggregates(fake_runner, "t", window_start_s="2024-01-01T00:00:00Z")
+
+    assert set(result.keys()) == {
+        "error_spikes",
+        "cache_collapse",
+        "cacheability_regression",
+        "latency_regression",
+        "tail_latency",
+    }
+    for key, items in result.items():
+        assert len(items) <= 15, f"{key} returned {len(items)} entries — must be capped at 15"
+
+    # error_spikes is the cleanest to verify: score = w_rate - b_rate ≈
+    # (50+i)/100 - 0.01. Top 15 must be the highest-i URLs in DESC order.
+    es = result["error_spikes"]
+    if es:
+        urls = [row[0] for row in es]
+        # Top entry is the highest score → highest i.
+        assert urls[0] == "/url-99", f"expected top error_spike to be /url-99, got {urls[0]}"
+        # Sorted descending by score (which is monotone in i): urls should
+        # follow /url-99, /url-98, ...
+        expected = [f"/url-{99 - n}" for n in range(len(urls))]
+        assert urls == expected, f"error_spikes not sorted DESC by score: {urls} vs {expected}"

@@ -321,7 +321,7 @@ def test_handle_update_logs_dry_run_prints_format_and_returns(capsys):
     with (
         patch("backend.config.list_service_ids", return_value=["svc"]),
         patch("backend.config.load_config", return_value={"log_fields": {"groups": ["A"]}}),
-        patch("backend.core.log_fields.generate_log_format", return_value="EXPECTED_LOG_FORMAT"),
+        patch("backend.core.field_registry.generate_log_format", return_value="EXPECTED_LOG_FORMAT"),
         patch("backend.provision.cli.update_logging_endpoint") as mock_update,
     ):
         cli.handle_update_logs(_args(service_id="svc", dry_run=True))
@@ -354,7 +354,7 @@ def test_handle_update_logs_pushes_to_fastly_and_persists_config():
         ),
         patch("backend.provision.cli.write_service_config", side_effect=lambda c: write_calls.append(c)),
         patch("backend.provision.cli.update_logging_endpoint", side_effect=_record_update),
-        patch("backend.core.log_fields.format_hash", return_value="hash123"),
+        patch("backend.core.field_registry.format_hash", return_value="hash123"),
     ):
         cli.handle_update_logs(_args(service_id="svc"))
 
@@ -375,7 +375,7 @@ def test_handle_update_logs_preserves_scoring_custom_fields_on_preset_swap():
     """REGRESSION (sibling of 2026-06-02 state_sync incident): running
     ``handle_update_logs`` with a --preset (or --enable-group/--disable-group)
     argument used to clobber the entire cfg.log_fields, silently dropping
-    the 6 scoring custom_fields that ``enable_scoring`` had injected.
+    the scoring custom_fields that ``enable_scoring`` had injected.
     The new merge guard preserves existing custom_fields and re-injects
     ``_SCORING_CUSTOM_FIELDS`` when scoring is enabled."""
     write_calls = []
@@ -401,7 +401,7 @@ def test_handle_update_logs_preserves_scoring_custom_fields_on_preset_swap():
         ),
         patch("backend.provision.cli.write_service_config", side_effect=lambda c: write_calls.append(c)),
         patch("backend.provision.cli.update_logging_endpoint", side_effect=_record_update),
-        patch("backend.core.log_fields.format_hash", return_value="h"),
+        patch("backend.core.field_registry.format_hash", return_value="h"),
     ):
         # --preset triggers the rebuild path (the bug-bait branch). Without
         # the merge guard, the persisted cfg's custom_fields would be empty.
@@ -764,3 +764,70 @@ def test_wizard_default_token_from_env(monkeypatch):
     # fastly was called with the env-derived token
     _, kwargs = mock_fastly.call_args
     assert kwargs.get("token") == "env-tok"
+
+
+# ── handle_enable_scoring / handle_disable_scoring ──────────────────────────
+
+
+def test_handle_enable_scoring_dispatches_to_orchestrator():
+    """enable-scoring resolves service + token from config and calls
+    session_scoring_orchestrator.enable_scoring. Pinned so the CLI redeploy
+    path stays wired to the same flow the admin UI button runs."""
+    fake_cfg = {"fastly_api_key": "tok", "scoring": {"enabled": True}}
+    calls = []
+
+    def _record(sid, token, **kw):
+        calls.append((sid, token))
+        return {"logging_service_active_version": 471}
+
+    with (
+        patch("backend.config.list_service_ids", return_value=["svc-1"]),
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.provision.session_scoring_orchestrator.enable_scoring", side_effect=_record),
+    ):
+        cli.handle_enable_scoring(_args(service_id="svc-1"))
+
+    assert calls == [("svc-1", "tok")]
+
+
+def test_handle_enable_scoring_no_services_exits():
+    """No configured service → clean sys.exit, not a traceback."""
+    with (
+        patch("backend.config.list_service_ids", return_value=[]),
+        pytest.raises(SystemExit),
+    ):
+        cli.handle_enable_scoring(_args(service_id=None))
+
+
+def test_handle_disable_scoring_dispatches_to_orchestrator():
+    """disable-scoring (with --yes, non-interactive) resolves service + token
+    and calls session_scoring_orchestrator.disable_scoring."""
+    fake_cfg = {"fastly_api_key": "tok", "scoring": {"enabled": True}}
+    calls = []
+
+    with (
+        patch("backend.config.list_service_ids", return_value=["svc-1"]),
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch(
+            "backend.provision.session_scoring_orchestrator.disable_scoring",
+            side_effect=lambda sid, token, **kw: calls.append((sid, token)),
+        ),
+    ):
+        cli.handle_disable_scoring(_args(service_id="svc-1", yes=True))
+
+    assert calls == [("svc-1", "tok")]
+
+
+def test_handle_disable_scoring_aborts_without_confirmation():
+    """Without --yes the handler prompts; a 'no' answer aborts via sys.exit
+    BEFORE touching the orchestrator."""
+    fake_cfg = {"fastly_api_key": "tok", "scoring": {"enabled": True}}
+    with (
+        patch("backend.config.list_service_ids", return_value=["svc-1"]),
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.provision.cli.ask_yes", return_value=False),
+        patch("backend.provision.session_scoring_orchestrator.disable_scoring") as mock_disable,
+        pytest.raises(SystemExit),
+    ):
+        cli.handle_disable_scoring(_args(service_id="svc-1", yes=False))
+    mock_disable.assert_not_called()

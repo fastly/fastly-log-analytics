@@ -183,7 +183,7 @@ def test_s3fs_through_proxy_records_telemetry_with_caller_pyiceberg_s3fs(proxy_s
     token = _ic._PENDING_FS_SOURCE.set(source)
     try:
         with (
-            patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture),
+            patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
             patch(
                 "backend.config.load_config",
                 return_value={
@@ -221,7 +221,7 @@ def test_s3fs_through_proxy_carries_per_call_process_context(proxy_server, moto_
     from s3fs import S3FileSystem
 
     from backend.core import iceberg as _ic
-    from backend.utils.telemetry import set_process_context
+    from backend.utils.telemetry import _set_process_context_for_tests
 
     moto_endpoint, moto_host_port, _ = moto_s3_server
     source = {
@@ -244,7 +244,7 @@ def test_s3fs_through_proxy_carries_per_call_process_context(proxy_server, moto_
     token = _ic._PENDING_FS_SOURCE.set(source)
     try:
         with (
-            patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture),
+            patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
             patch(
                 "backend.config.load_config",
                 return_value={
@@ -262,9 +262,9 @@ def test_s3fs_through_proxy_carries_per_call_process_context(proxy_server, moto_
             # refresh=True is load-bearing — fsspec.DirCache short-circuits
             # the second ls without an S3 call, so the second context never
             # gets a chance to ride a request through the proxy.
-            set_process_context("ctx-A")
+            _set_process_context_for_tests("ctx-A")
             fs.ls("test-bucket/", refresh=True)
-            set_process_context("ctx-B")
+            _set_process_context_for_tests("ctx-B")
             fs.ls("test-bucket/", refresh=True)
             proxy_server._flush_log_writes_for_tests()
     finally:
@@ -566,7 +566,7 @@ def test_pyiceberg_through_proxy_logs_telemetry_end_to_end(tmp_path, proxy_serve
     _ic._catalog_cache.pop(source["name"], None)
     try:
         with (
-            patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture_proxy),
+            patch("backend.core.metadata.log_usage_calls", side_effect=_capture_proxy),
             patch("backend.utils.telemetry.record_call", side_effect=_capture_tracked),
             patch(
                 "backend.config.load_config",

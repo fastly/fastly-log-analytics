@@ -6,6 +6,13 @@ import { DashboardSkeleton } from '@/components/skeletons/PageSkeleton'
 // to-paint experience consistent across the sidebar. Previously this
 // imported GenericPageSkeleton (3 small grey boxes) which looked like
 // a different app loading vs the proper card grid + chart placeholder.
+// title/description mirror the ReportLayout props in page.tsx so the
+// instant route skeleton shows the real header before the bundle loads.
 export default function Loading() {
-  return <DashboardSkeleton />
+  return (
+    <DashboardSkeleton
+      title="Anomaly Detection"
+      description="Automated insights comparing recent traffic to historical baselines."
+    />
+  )
 }

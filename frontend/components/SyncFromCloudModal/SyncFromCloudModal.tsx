@@ -11,7 +11,9 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Loader2, CloudDownload, Calendar } from 'lucide-react'
-import { formatBytes, formatDateTime, cn } from '@/lib/utils'
+import { formatDateTime, cn } from '@/lib/utils';
+import { formatBytes } from '@/lib/format'
+import { adminFetch } from '@/lib/api'
 import { formatForInput, parseFromInput } from '@/lib/date'
 import {
   panelDialogContent,
@@ -28,12 +30,12 @@ interface SyncFromCloudModalProps {
 
 export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFromCloudModalProps) {
   const { timezone } = useTimezoneStore()
-  const { activeServiceId } = useServiceStore()
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
 
   const [lakeInfo, setLakeInfo] = useState<any>(null)
   const [lakeError, setLakeError] = useState<string | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
-  
+
   const [importMode, setImportMode] = useState<"all" | "range">("all")
   const [importRange, setImportRange] = useState({ start: "", end: "" })
 
@@ -55,12 +57,12 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
 
     for (const [dateStr, stats] of Object.entries(lakeInfo.calendar)) {
       if (dateStr === "unknown") continue;
-      
+
       if (importMode === "range") {
         if (start && dateStr < start.split('T')[0]) continue;
         if (end && dateStr > end.split('T')[0]) continue;
       }
-      
+
       total += (stats as any).size_bytes || 0;
     }
     return total;
@@ -77,7 +79,7 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
       // coupled to the backend route. Add a response_model on the
       // handler (and lift service_id into an explicit path arg) to make
       // this typed.
-      const resp = await fetch(`/api/services/${activeServiceId}/lake-info`);
+      const resp = await adminFetch(`/api/services/${activeServiceId}/lake-info`);
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
       }
@@ -215,7 +217,7 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
                   </div>
                 </div>
               )}
-              
+
               <Button onClick={handleStartSync} className="w-full h-8 text-xs mt-2" variant="default">
                 Start Sync
               </Button>

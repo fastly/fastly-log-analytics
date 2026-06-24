@@ -960,6 +960,10 @@ def test_update_logging_endpoint_clones_and_activates_on_changes_detected():
             return {"period": 30, "path": "/raw/", "format": "old", "response_condition": None}
         if path.endswith("/snippet"):
             return [{"name": "x", "content": "y"}]
+        # The orchestrator fails closed on an unverifiable validate (cb256a2),
+        # so the draft must report status=ok before it activates.
+        if "/validate" in path:
+            return {"status": "ok"}
         return {}
 
     with (
@@ -1018,6 +1022,9 @@ def test_update_logging_endpoint_removes_origin_snippets_when_group_l_disabled()
         if method == "DELETE" and "/snippet/" in path:
             deleted_snippets.append(path)
             return {}
+        # Fail-closed validate gate (cb256a2): draft must report status=ok.
+        if "/validate" in path:
+            return {"status": "ok"}
         return {}
 
     with (
@@ -1155,3 +1162,211 @@ def test_ensure_logging_endpoint_emits_origin_snippets_when_group_l_enabled():
     assert "Fastly Log Analysis Origin Fetch" in snippet_names
     assert "Fastly Log Analysis Origin Error" in snippet_names
     assert "Fastly Log Analysis Origin Deliver" in snippet_names
+
+
+@pytest.mark.parametrize("custom_condition", [None, "", 'req.http.X-Foo == "bar"'])
+def test_ensure_logging_endpoint_tolerates_none_custom_condition(custom_condition):
+    """``ensure_logging_endpoint`` must treat custom_condition None / "" / a real
+    value all as valid. Regression: the /execute API passes
+    ``custom_condition=None`` explicitly, so ``cfg.get("custom_condition", "")``
+    returned None (the "" default only applies to an ABSENT key) and ``.strip()``
+    raised ``'NoneType' object has no attribute 'strip'`` at provisioning Step 7."""
+    captured = {}
+
+    def fake_fastly(method, path, body=None, **kwargs):
+        if path.endswith("/clone"):
+            return {"number": 6}
+        if path.endswith("/validate"):
+            return {"status": "ok"}
+        return {}
+
+    def fake_ensure_condition(name, stmt, ctype, sid, ver, token):
+        captured["stmt"] = stmt
+
+    cfg = {
+        "logging_service_id": "svc",
+        "endpoint_name": "EP",
+        "fos_region": "us-east-1",
+        "fos_bucket_name": "b",
+        "log_period": "1 minute",
+        "sample_rate": "100",
+        "edge_only": True,
+        "custom_condition": custom_condition,  # None must NOT crash
+    }
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=5),
+        patch("backend.provision.fastly_api.list_s3_endpoints", return_value=[]),
+        patch("backend.provision.fastly_api.ensure_condition", side_effect=fake_ensure_condition),
+        patch("backend.provision.fastly_api.load_log_format", return_value="fmt"),
+        patch("backend.provision.fastly_api.install_capture_snippets"),
+        patch("backend.provision.fastly_api.resolve_shield_secret", return_value="secret"),
+        patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
+    ):
+        new_ver = fastly_api.ensure_logging_endpoint(cfg, "ak", "sk", "tok")
+
+    assert new_ver == 6
+    # The literal string "None" must never leak into the generated VCL condition.
+    assert "None" not in captured["stmt"]
+    # A real custom_condition is still appended; None / "" contribute nothing.
+    if custom_condition:
+        assert custom_condition in captured["stmt"]
+
+
+def test_ensure_cdn_service_reports_created_id_before_later_failure():
+    """``ensure_cdn_service`` must hand the new service id to ``on_created`` the
+    instant ``POST /service`` succeeds — BEFORE the fallible domain / VCL /
+    validation steps. Regression: the orchestrator recorded cdn_service_id only
+    AFTER the function returned, so a validation failure mid-way orphaned a CDN
+    service the rollback couldn't see, and re-provision then hit 'CDN service
+    already exists'."""
+    created_ids = []
+
+    def fake_fastly(method, path, body=None, **kwargs):
+        if method == "POST" and path == "/service":
+            return {"id": "cdn-new-123"}
+        if path.endswith("/dictionary"):
+            return {"id": "dict-1"}
+        return {}
+
+    cfg = {
+        "cdn_service_name": "Log Analysis CDN Service for svc",
+        "cdn_url": "https://b.global.ssl.fastly.net",
+        "fos_region": "us-east-1",
+        "cdn_shield": "none",
+        "fos_bucket_name": "b",
+        "cdn_secret": "s",
+        "logging_service_id": "svc",
+    }
+    with (
+        patch("backend.provision.fastly_api.find_service_by_name", return_value=None),
+        patch("backend.provision.fastly_api.load_vcl", return_value="vcl"),
+        patch("backend.provision.fastly_api.ensure_vcl_snippet"),
+        patch(
+            "backend.provision.fastly_api._validate_with_ratelimit_fallback",
+            return_value={"status": "error", "msg": "boom"},
+        ),
+        patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
+    ):
+        with pytest.raises(RuntimeError, match="VCL validation failed"):
+            fastly_api.ensure_cdn_service(cfg, "ak", "sk", "tok", on_created=created_ids.append)
+
+    # on_created fired with the new id BEFORE the validation step raised, so the
+    # orchestrator's state carries cdn_service_id and the rollback can delete it.
+    assert created_ids == ["cdn-new-123"]
+
+
+def test_log_sampling_edge_clause_is_restart_tolerant_when_scoring_enabled():
+    """The Log Sampling edge gate must drop ``req.restarts == 0`` once scoring is
+    enabled. Scoring restarts the request (0→1) to run the scorer sub-fetch, so
+    the final logged pass is req.restarts == 1; gating on 0 drops every scored
+    request from the logs (edge_score never logged → Fire Rate 0%)."""
+    from backend.provision.fastly_api import _log_sampling_edge_clause
+
+    assert _log_sampling_edge_clause(False) == "(req.restarts == 0 && fastly.ff.visits_this_service == 0)"
+    scored = _log_sampling_edge_clause(True)
+    assert "req.restarts" not in scored
+    assert scored == "fastly.ff.visits_this_service == 0"
+
+
+def test_ensure_logging_endpoint_drops_restart_gate_when_scoring_enabled():
+    """End-to-end: with scoring enabled in cfg, ensure_logging_endpoint must
+    generate a Log Sampling condition WITHOUT the req.restarts==0 gate so scored
+    requests (which log at req.restarts == 1) still match."""
+    captured = {}
+
+    def fake_fastly(method, path, body=None, **kwargs):
+        if path.endswith("/clone"):
+            return {"number": 6}
+        if path.endswith("/validate"):
+            return {"status": "ok"}
+        return {}
+
+    def fake_ensure_condition(name, stmt, ctype, sid, ver, token):
+        captured["stmt"] = stmt
+
+    cfg = {
+        "logging_service_id": "svc",
+        "endpoint_name": "EP",
+        "fos_region": "us-east-1",
+        "fos_bucket_name": "b",
+        "log_period": "1 minute",
+        "sample_rate": "100",
+        "edge_only": True,
+        "custom_condition": "",
+        "scoring": {"enabled": True},
+    }
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=5),
+        patch("backend.provision.fastly_api.list_s3_endpoints", return_value=[]),
+        patch("backend.provision.fastly_api.ensure_condition", side_effect=fake_ensure_condition),
+        patch("backend.provision.fastly_api.load_log_format", return_value="fmt"),
+        patch("backend.provision.fastly_api.install_capture_snippets"),
+        patch("backend.provision.fastly_api.resolve_shield_secret", return_value="s"),
+        patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
+    ):
+        fastly_api.ensure_logging_endpoint(cfg, "ak", "sk", "tok")
+
+    assert "req.restarts == 0" not in captured["stmt"], captured["stmt"]
+    assert "fastly.ff.visits_this_service == 0" in captured["stmt"]
+
+
+def test_generate_capture_vcl_splits_scrub_and_capture_guards_when_scoring_enabled():
+    """With scoring enabled the CAPTURE block must drop req.restarts==0 (scoring
+    restarts the request → the logged pass is restarts==1; gating on 0 leaves
+    scored rows with no url/ua/geo and edge != true → Fire Rate 0%). The SCRUB
+    must STAY first-pass-only so it can't re-run post-restart and wipe the
+    captured score headers."""
+    from backend.provision.fastly_api import generate_capture_vcl
+
+    cfg = {
+        "groups": [],
+        "custom_fields": [
+            {"name": "cf1", "enabled": True, "collection_stage": "edge", "vcl_log_expression": "req.http.host"}
+        ],
+    }
+
+    recv = generate_capture_vcl(cfg, cluster_secret="SEKRET", scoring_enabled=True)["recv"]
+    lines = recv.splitlines()
+    cap_idx = next(i for i, ln in enumerate(lines) if "Capture edge data for logging" in ln)
+    capture_guard_line = lines[cap_idx - 1].strip()
+    # capture is restart-tolerant (shield-auth alone)
+    assert capture_guard_line == 'if (req.http.X-Edge-Shield-Auth != "SEKRET") {', capture_guard_line
+    # scrub stays first-pass-only
+    assert any('if (req.restarts == 0 && req.http.X-Edge-Shield-Auth != "SEKRET") {' in ln for ln in lines)
+
+    # Without scoring: capture keeps the req.restarts==0 gate (unchanged).
+    recv2 = generate_capture_vcl(cfg, cluster_secret="SEKRET", scoring_enabled=False)["recv"]
+    lines2 = recv2.splitlines()
+    cap_idx2 = next(i for i, ln in enumerate(lines2) if "Capture edge data for logging" in ln)
+    assert lines2[cap_idx2 - 1].strip() == 'if (req.restarts == 0 && req.http.X-Edge-Shield-Auth != "SEKRET") {'
+
+
+def test_load_log_format_keeps_standard_fields_when_only_custom_fields_present():
+    """A log_fields carrying custom_fields but no groups/preset must still emit
+    the standard fields. Regression: enabling scoring on an empty-log_fields
+    service added custom_fields, made the dict truthy, defeated the
+    standard-preset fallback in load_log_format, and silently dropped
+    url/method/edge (and all other group fields) from the log format."""
+    from backend.provision.fastly_api import load_log_format
+
+    fmt = load_log_format(
+        {
+            "custom_fields": [
+                {
+                    "name": "edge_score",
+                    "enabled": True,
+                    "collection_stage": "deliver",
+                    "vcl_log_expression": "req.http.x-edge-score:score",
+                }
+            ]
+        }
+    )
+    # Standard group fields survive alongside the custom field.
+    assert "req.url" in fmt
+    assert "req.method" in fmt
+    assert "visits_this_service" in fmt  # the `edge` field
+    assert "edge_score" in fmt
+
+    # Empty / None configs still fall back to the standard fields (unchanged).
+    assert "req.url" in load_log_format({})
+    assert "req.url" in load_log_format(None)

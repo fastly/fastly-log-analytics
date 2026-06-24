@@ -10,19 +10,22 @@ from backend.models.common import FiltersDict
 _SAFE_COL_RE = re.compile(r"[^\w]")
 
 
-def resolve_col(col: str, actual_cols: list[str] | None) -> str:
-    """Resolve a logical column name to the actual name present in the table.
-
-    Falls back gracefully when actual_cols is unknown.
-    """
-    if actual_cols is None:
-        return col
-    if col in actual_cols:
-        return col
-    return col
-
-
 from backend.utils.date_utils import parse_iso_utc
+
+
+def filter_spec_attr(spec: Any, attr: str) -> Any:
+    """Read ``attr`` from a filter spec that may be a FilterSpec object or a
+    plain dict.
+
+    Filters arrive as FilterSpec objects (attribute access) from request
+    models, OR as plain dicts from tests and internal callers.
+    ``getattr(some_dict, "values", None)`` returns the bound dict ``.values``
+    METHOD, not the "values" key — which raised
+    ``TypeError: 'builtin_function_or_method' object is not iterable`` the
+    moment a non-Pydantic filter reached a cache-key serializer. Use this
+    accessor to read either shape uniformly.
+    """
+    return spec.get(attr) if isinstance(spec, dict) else getattr(spec, attr, None)
 
 
 def _get_utc_date_str(iso_str: str) -> str:
@@ -93,8 +96,13 @@ def build_where_clause(
                 conditions.append(f"timestamp_hour <= {_add_param(end_hour)}")
 
     for filter_key, spec in filters.items():
-        # Strip filter_ / xfilter_ prefixes and numeric suffixes that the
-        # frontend appends to guarantee unique dict keys.
+        # Strip filter_ / xfilter_ prefixes and the `_<n>` dedup suffix that
+        # frontend buildFiltersPayload appends when the same column needs
+        # both include + exclude buckets. The frontend filterStore.addFilter
+        # guard rejects column names matching /_\d+$/ at entry, so a real
+        # field whose name ends in `_<digit>` cannot reach this strip and
+        # be corrupted — any future field naming convention must preserve
+        # that constraint or this regex needs to change.
         col = filter_key
         for prefix in ("xfilter_", "filter_"):
             if col.startswith(prefix):
@@ -107,8 +115,8 @@ def build_where_clause(
         is_bot_name = col == "_bot_name"
         is_ngwaf_bot_name = col == "_ngwaf_bot_name"
         real_col = "waf_sig" if is_signals_individual else clean_col
-        sql_col = resolve_col(real_col, actual_cols)
-        sql_clean_col = resolve_col(clean_col, actual_cols)
+        sql_col = real_col
+        sql_clean_col = clean_col
 
         mode = spec.mode
         values = spec.values

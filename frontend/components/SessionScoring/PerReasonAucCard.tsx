@@ -5,9 +5,9 @@ import { useQuery } from '@tanstack/react-query'
 import { ListChecks } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
 import { PerReasonAucHelp } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 import { Info } from 'lucide-react'
@@ -51,11 +51,11 @@ export function PerReasonAucCard({ serviceId }: PerReasonAucCardProps) {
     queryKey: ['scoring-evaluation-per-reason', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/evaluation/per-reason' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/evaluation/per-reason',
+        { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as PerReasonResponse
+      return data as unknown as PerReasonResponse
     },
     staleTime: 30_000,
   })
@@ -69,27 +69,16 @@ export function PerReasonAucCard({ serviceId }: PerReasonAucCardProps) {
       helpTitle="About AUC by Rule"
     >
       {isError ? (
-        <div className="rounded-md border border-destructive/20 bg-destructive/5 p-4">
-          <div className="flex items-center gap-2 text-destructive">
-            <Info className="h-4 w-4" />
-            <span className="text-sm font-medium">Failed to load per-rule AUC</span>
-          </div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {(error as any)?.message || 'Unknown error'}
-          </p>
-          <Button
-            size="sm"
-            variant="outline"
-            className="mt-3"
-            onClick={() => refetch()}
-          >
-            Retry
-          </Button>
-        </div>
+        <CardErrorState
+          icon={<Info className="h-4 w-4" />}
+          title="Failed to load per-rule AUC"
+          message={(error as Error | null)?.message || 'Unknown error'}
+          onRetry={() => refetch()}
+        />
       ) : isLoading || !data ? (
         <div className="space-y-2">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <Skeleton key={i} className="h-10 w-full" />
+          {['r1', 'r2', 'r3', 'r4', 'r5'].map((k) => (
+            <Skeleton key={k} className="h-10 w-full" />
           ))}
         </div>
       ) : !data.has_min_samples_overall ? (

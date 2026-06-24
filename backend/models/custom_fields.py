@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
-from backend.core.log_fields import VALID_NAME_RE
+from backend.core.field_registry import VALID_NAME_RE
 from backend.models.common import BaseResponse
 
 

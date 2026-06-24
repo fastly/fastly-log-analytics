@@ -34,7 +34,7 @@ import os
 import resource
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 import pyarrow as pa
@@ -68,11 +68,56 @@ PROTOCOLS = ["HTTP/2", "HTTP/1.1", "HTTP/3"]
 PROTO_WEIGHTS = [0.70, 0.20, 0.10]
 
 POPS = [
-    "JFK", "LHR", "SYD", "NRT", "FRA", "AMS", "SIN", "GRU", "LAX", "ORD",
-    "DFW", "MIA", "SEA", "DEN", "ATL", "BOS", "IAD", "PHX", "MSP", "DTW",
-    "YYZ", "YVR", "MAD", "MIL", "MUC", "BER", "STO", "OSL", "CPH", "DUB",
-    "ZRH", "VIE", "PRG", "WAW", "ATH", "IST", "DXB", "BOM", "HKG", "ICN",
-    "BKK", "MEL", "PER", "AKL", "JNB", "CAI", "SFO", "PDX", "HOU", "PHL",
+    "JFK",
+    "LHR",
+    "SYD",
+    "NRT",
+    "FRA",
+    "AMS",
+    "SIN",
+    "GRU",
+    "LAX",
+    "ORD",
+    "DFW",
+    "MIA",
+    "SEA",
+    "DEN",
+    "ATL",
+    "BOS",
+    "IAD",
+    "PHX",
+    "MSP",
+    "DTW",
+    "YYZ",
+    "YVR",
+    "MAD",
+    "MIL",
+    "MUC",
+    "BER",
+    "STO",
+    "OSL",
+    "CPH",
+    "DUB",
+    "ZRH",
+    "VIE",
+    "PRG",
+    "WAW",
+    "ATH",
+    "IST",
+    "DXB",
+    "BOM",
+    "HKG",
+    "ICN",
+    "BKK",
+    "MEL",
+    "PER",
+    "AKL",
+    "JNB",
+    "CAI",
+    "SFO",
+    "PDX",
+    "HOU",
+    "PHL",
 ]
 
 HOSTS = ["www.example.com", "api.example.com", "static.example.com"]
@@ -121,7 +166,7 @@ def _gen_batch(n: int, hour_start_ms: int, hour_end_ms: int, card: dict, rng: np
     )
     ja3 = np.array([f"ja3-{i:04x}" for i in ja3_idx], dtype=object)
     ja4 = np.array([f"ja4-{i:04x}" for i in ja3_idx], dtype=object)
-    asn = (asn_idx.astype(np.int32) + 1000)
+    asn = asn_idx.astype(np.int32) + 1000
 
     elapsed_ms = rng.lognormal(mean=np.log(25), sigma=1.2, size=n).astype(np.int32)
     elapsed = np.clip(elapsed_ms, 1, 30_000)
@@ -219,7 +264,7 @@ def main() -> int:
 
     hour_start_dt = datetime.fromisoformat(args.hour_start.replace("Z", "+00:00"))
     if hour_start_dt.tzinfo is None:
-        hour_start_dt = hour_start_dt.replace(tzinfo=timezone.utc)
+        hour_start_dt = hour_start_dt.replace(tzinfo=UTC)
     hour_start_ms = int(hour_start_dt.timestamp() * 1000)
     hour_end_ms = hour_start_ms + 3600 * 1000
 
@@ -257,7 +302,7 @@ def main() -> int:
         size_mb = os.path.getsize(fpath) / (1024 * 1024)
         print(
             f"  wrote {fname}: {rows_this_file:,} rows, {size_mb:.1f} MB | "
-            f"total {total_rows:,}/{args.rows:,} ({100*total_rows/args.rows:.1f}%) | "
+            f"total {total_rows:,}/{args.rows:,} ({100 * total_rows / args.rows:.1f}%) | "
             f"{rate:,.0f} rows/sec | RSS {_rss_mb():.0f} MB | elapsed {elapsed:.1f}s",
             flush=True,
         )
@@ -265,7 +310,7 @@ def main() -> int:
     total_elapsed = time.monotonic() - t0
     print(
         f"\nGENERATED: {total_rows:,} rows in {total_elapsed:.1f}s "
-        f"({total_rows/total_elapsed:,.0f} rows/sec). Peak RSS {_rss_mb():.0f} MB."
+        f"({total_rows / total_elapsed:,.0f} rows/sec). Peak RSS {_rss_mb():.0f} MB."
     )
     print(f"Buffer dir: {buf_dir}")
 

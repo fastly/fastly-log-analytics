@@ -4,15 +4,15 @@ import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
-import { 
-  Card, 
-  CardContent, 
-  CardHeader, 
+import {
+  Card,
+  CardContent,
+  CardHeader,
   CardTitle,
   CardDescription
 } from "@/components/ui/card"
 import { Loader2 } from 'lucide-react'
-import { formatBytes } from '@/lib/utils'
+import { formatBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import {
   Tooltip,
@@ -22,8 +22,10 @@ import {
 } from "@/components/ui/tooltip"
 
 export function IcebergCalendar() {
-  const { activeServiceId } = useServiceStore()
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
 
+  // Freshness via useCronRunsStream invalidation (prefix-matches
+  // ['admin', 'iceberg']). 5-min interval is a pure safety net.
   const { data: calendar, isLoading } = useQuery({
     queryKey: ['admin', 'iceberg', 'calendar', activeServiceId],
     queryFn: async () => {
@@ -31,7 +33,8 @@ export function IcebergCalendar() {
       return data as any
     },
     enabled: !!activeServiceId,
-    refetchInterval: 60000,
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
   })
 
   // Generate last 90 days
@@ -67,11 +70,25 @@ export function IcebergCalendar() {
               {days.map((date) => {
                 const dayData = (calendar as any)?.[date]
                 const hasData = !!dayData
-                
+
                 return (
                   <TooltipProvider key={date}>
                     <Tooltip>
-                      <TooltipTrigger render={<span className="inline-block" />}>
+                      {/* A-8 (a11y, WCAG 2.1.1): tabIndex + role="button" so
+                          keyboard users can step through each day cell and
+                          read its file/size tooltip. */}
+                      <TooltipTrigger
+                        render={
+                          <span
+                            className="inline-block rounded-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            tabIndex={0}
+                            role="button"
+                            aria-label={hasData
+                              ? `${date}: ${dayData.data_files} files, ${formatBytes(dayData.size_bytes)}`
+                              : `${date}: no data`}
+                          />
+                        }
+                      >
                         <div
                           className={cn(
                             "h-4 w-4 rounded-[2px] transition-colors border ",
@@ -105,7 +122,7 @@ export function IcebergCalendar() {
             </div>
           </>
         )}
-        
+
         <div className="mt-4 flex items-center gap-4 text-[10px] text-muted-foreground uppercase font-bold tracking-wider">
             <div className="flex items-center gap-1.5">
                 <div className="h-2 w-2 rounded-[1px] bg-blue-500" />

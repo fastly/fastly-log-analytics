@@ -3,20 +3,11 @@ Integration tests verifying that filters actually narrow results through the ful
 repository layer — not just that the WHERE clause SQL is generated correctly.
 """
 
-import pytest
-
 from backend.models.common import FilterSpec
 from backend.repositories._base import _safe_table
-from backend.repositories.dashboard import _dashboard_cache, get_aggregates
+from backend.repositories.dashboard import get_aggregates
 from tests.conftest import MOCK_SERVICE_ID
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
-
-
-@pytest.fixture(autouse=True)
-def clear_cache():
-    _dashboard_cache.clear()
-    yield
-    _dashboard_cache.clear()
 
 
 def _logs_with_pops(src, n_jfk: int, n_lhr: int) -> list[dict]:

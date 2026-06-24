@@ -82,7 +82,7 @@ def test_fast_path_returns_payload_from_s3(fos_src):
             return_value=("ns", "tbl"),
         ),
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         out = fetch_lake_info(fos_src)
 
@@ -111,7 +111,7 @@ def test_fast_path_handles_non_empty_source_prefix(fos_src):
         patch("backend.core.duckdb._get_fos_client", return_value=fake_s3),
         patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         fetch_lake_info(src)
 
@@ -139,7 +139,7 @@ def test_fast_path_uses_cdn_when_cdn_url_is_set(fos_src):
         patch("backend.utils.telemetry.record_cdn_call"),
         patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         out = fetch_lake_info(src)
 
@@ -166,7 +166,7 @@ def test_fast_path_records_cdn_call_telemetry(fos_src):
         patch("backend.utils.telemetry.record_cdn_call") as mock_record,
         patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         fetch_lake_info(src)
 
@@ -200,7 +200,7 @@ def test_fast_path_missing_info_falls_through_to_iceberg(fos_src):
         ),
         patch("backend.core.iceberg.get_snapshot_calendar", return_value=[]),
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         out = fetch_lake_info(fos_src)
 
@@ -234,7 +234,7 @@ def test_iceberg_fallback_returns_table_info(fos_src):
             return_value=[{"day": "2026-02-01"}],
         ),
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         out = fetch_lake_info(fos_src)
 
@@ -253,7 +253,7 @@ def test_iceberg_fallback_returns_table_does_not_exist_when_none(fos_src):
         patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
         patch("backend.core.iceberg.init_iceberg_table", return_value=None),
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         out = fetch_lake_info(fos_src)
 
@@ -271,7 +271,7 @@ def test_iceberg_fallback_treats_not_found_error_as_empty_lake(fos_src):
         patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
         patch("backend.core.iceberg.init_iceberg_table", side_effect=Exception("NoSuchTable: missing")),
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         out = fetch_lake_info(fos_src)
 
@@ -288,7 +288,7 @@ def test_iceberg_fallback_surfaces_unexpected_errors(fos_src):
         patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
         patch("backend.core.iceberg.init_iceberg_table", side_effect=Exception("403 AccessDenied")),
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         out = fetch_lake_info(fos_src)
 
@@ -317,7 +317,7 @@ def test_temp_cache_path_clears_source_caches_on_exit(fos_src):
         patch("backend.core.iceberg.get_snapshot_calendar", return_value=[]),
         patch("backend.core.iceberg.clear_source_caches") as mock_clear,
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         fetch_lake_info(fos_src, use_temp_cache=True)
 
@@ -334,7 +334,7 @@ def test_temp_cache_path_returns_empty_lake_when_table_missing(fos_src):
         patch("backend.core.iceberg.init_iceberg_table", return_value=None),
         patch("backend.core.iceberg.clear_source_caches"),
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         out = fetch_lake_info(fos_src, use_temp_cache=True)
 
@@ -350,7 +350,7 @@ def test_temp_cache_path_surfaces_unexpected_errors(fos_src):
         patch("backend.core.iceberg.init_iceberg_table", side_effect=Exception("403 boom")),
         patch("backend.core.iceberg.clear_source_caches"),
     ):
-        from backend.models.lake import fetch_lake_info
+        from backend.core.iceberg.lake_info import fetch_lake_info
 
         out = fetch_lake_info(fos_src, use_temp_cache=True)
 

@@ -20,6 +20,10 @@ export const useDebugStore = create<DebugState>()(
     }),
     {
       name: 'fastly-debug-settings',
+      // SSR safety — see serviceStore. Rehydrated post-mount by
+      // <StoreHydrator> so the first client render matches the server's
+      // `enabled: false` default instead of a persisted `true`.
+      skipHydration: true,
     }
   )
 )

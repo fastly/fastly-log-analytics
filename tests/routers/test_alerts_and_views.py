@@ -1,6 +1,6 @@
 """HTTP-layer contract tests for alerts and saved-views mutation endpoints.
 
-Operational state lives in per-service SQLite via ``backend.core.metadata_db``;
+Operational state lives in per-service SQLite via ``backend.core.metadata``;
 the ``isolate_metadata_db`` autouse fixture in conftest.py points the module
 at a tmp_path so each test gets a fresh per-service file.
 
@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,7 +73,9 @@ def _view_row(view_id: str) -> dict | None:
 def test_create_alert_persists_to_db(client):
     response = client.post("/api/alerts/", json=_ALERT_BODY, headers={"x-fastly-service-id": _SERVICE_ID})
 
-    assert response.status_code == 200
+    # 201 Created — resource POST convention (was 200 before the
+    # 28/audit reclass; body shape unchanged).
+    assert response.status_code == 201
     data = response.json()["data"]
     assert data["status"] == "success"
     alert_id = data["id"]
@@ -92,7 +94,7 @@ def test_create_alert_returns_correct_fields(client):
         json={**_ALERT_BODY, "name": "Latency Alert", "metric": "p95_latency"},
         headers={"x-fastly-service-id": _SERVICE_ID},
     )
-    assert response.status_code == 200
+    assert response.status_code == 201
     data = response.json()["data"]
     assert data["status"] == "success"
     assert data["id"]
@@ -123,7 +125,7 @@ def test_create_alert_invalid_operator_returns_422(client):
 
 def _seed_alert(client) -> str:
     resp = client.post("/api/alerts/", json=_ALERT_BODY, headers={"x-fastly-service-id": _SERVICE_ID})
-    assert resp.status_code == 200
+    assert resp.status_code == 201
     return resp.json()["data"]["id"]
 
 
@@ -181,16 +183,16 @@ def test_delete_alert_removes_from_db(client):
 
     response = client.delete(f"/api/alerts/{alert_id}", headers={"x-fastly-service-id": _SERVICE_ID})
 
-    assert response.status_code == 200
-    assert response.json()["data"]["status"] == "success"
+    assert response.status_code == 204
+    assert response.content == b""
 
     assert _alert_row(alert_id) is None
 
 
 def test_delete_alert_idempotent(client):
-    """Deleting a non-existent alert should still return 200 (no-op)."""
+    """Deleting a non-existent alert should still succeed (no-op)."""
     response = client.delete("/api/alerts/non-existent-id", headers={"x-fastly-service-id": _SERVICE_ID})
-    assert response.status_code == 200
+    assert response.status_code == 204
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +264,7 @@ def test_preview_alert_unknown_service_returns_404(client):
     with patch("backend.core.duckdb.get_source_for_service", return_value=None):
         resp = client.post("/api/alerts/preview", json=_preview_body())
     assert resp.status_code == 404
-    assert resp.json()["detail"] == "Service not found"
+    assert resp.json()["detail"] == {"error": "Service not found"}
 
 
 def test_preview_alert_relative_evaluation_returns_hist_values(client, in_memory_duckdb):
@@ -406,7 +408,7 @@ def test_preview_alert_bucket_granularity_scales_with_lookback(
 def test_create_view_persists_to_db(client):
     response = client.post("/api/views/", json=_VIEW_BODY, headers={"x-fastly-service-id": _SERVICE_ID})
 
-    assert response.status_code == 200
+    assert response.status_code == 201
     data = response.json()
     assert data["status"] == "success"
     view_id = data["id"]
@@ -420,7 +422,7 @@ def test_create_view_persists_to_db(client):
 
 def test_create_view_returns_id(client):
     response = client.post("/api/views/", json=_VIEW_BODY, headers={"x-fastly-service-id": _SERVICE_ID})
-    assert response.status_code == 200
+    assert response.status_code == 201
     assert response.json()["id"]
 
 
@@ -440,7 +442,7 @@ def test_create_view_missing_required_field_returns_422(client):
 
 def _seed_view(client) -> str:
     resp = client.post("/api/views/", json=_VIEW_BODY, headers={"x-fastly-service-id": _SERVICE_ID})
-    assert resp.status_code == 200
+    assert resp.status_code == 201
     return resp.json()["id"]
 
 
@@ -449,16 +451,16 @@ def test_delete_view_removes_from_db(client):
 
     response = client.delete(f"/api/views/{view_id}", headers={"x-fastly-service-id": _SERVICE_ID})
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "success"
+    assert response.status_code == 204
+    assert response.content == b""
 
     assert _view_row(view_id) is None
 
 
 def test_delete_view_idempotent(client):
-    """Deleting a non-existent view should still return 200."""
+    """Deleting a non-existent view should still succeed (no-op)."""
     response = client.delete("/api/views/nonexistent-view-id", headers={"x-fastly-service-id": _SERVICE_ID})
-    assert response.status_code == 200
+    assert response.status_code == 204
 
 
 # ---------------------------------------------------------------------------
@@ -497,3 +499,55 @@ def test_list_views_after_create(client):
     names = [v["name"] for v in response.json()]
     assert "My View" in names
     assert "Second View" in names
+
+
+# ── limit query param (d180c4c bounded list payloads) ─────────────────────
+
+
+def test_list_service_alerts_respects_limit_param(client):
+    """d180c4c added limit: int = Query(500, ge=1, le=2000) to /api/alerts/
+    to cap the unbounded JSON payload. Pinned because losing the slice
+    (alerts = alerts[:limit]) would silently regress to the unbounded
+    response — slow-growth resource exhaustion on the page-load path."""
+    # Seed 3 alerts under the same service.
+    for i in range(3):
+        client.post(
+            "/api/alerts/",
+            json={**_ALERT_BODY, "name": f"Alert {i}"},
+            headers={"x-fastly-service-id": _SERVICE_ID},
+        )
+
+    response = client.get(f"/api/alerts/{_SERVICE_ID}?limit=2")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 2
+
+
+def test_list_service_alerts_rejects_limit_above_ceiling(client):
+    """The le=2000 upper bound prevents callers from un-doing the cap by
+    asking for limit=10_000. FastAPI's Query validator returns 422."""
+    response = client.get(f"/api/alerts/{_SERVICE_ID}?limit=99999")
+    assert response.status_code == 422
+
+
+def test_list_service_alerts_rejects_limit_below_floor(client):
+    """ge=1 floor blocks limit=0 (would return an empty payload but still
+    do the full unbounded read + filter pass on the server)."""
+    response = client.get(f"/api/alerts/{_SERVICE_ID}?limit=0")
+    assert response.status_code == 422
+
+
+def test_list_views_respects_limit_param(client):
+    """Same bound applied to /api/views/{service_id}."""
+    for i in range(3):
+        client.post(
+            "/api/views/",
+            json={**_VIEW_BODY, "name": f"View {i}"},
+            headers={"x-fastly-service-id": _SERVICE_ID},
+        )
+
+    response = client.get(f"/api/views/{_SERVICE_ID}?limit=2")
+
+    assert response.status_code == 200
+    assert len(response.json()) == 2

@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 
-import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 
 interface HourlyRow {
@@ -15,6 +15,8 @@ interface Props<R extends HourlyRow> {
   description: string
   isLoading?: boolean
   isFetching?: boolean
+  isEmpty?: boolean
+  error?: AnalyticsCardError | null
   rows: R[]
   /** Field on each row that names the stacked-bar category. */
   categoryKey: keyof R & string
@@ -40,6 +42,8 @@ export function StackedHourlyBarChart<R extends HourlyRow>({
   description,
   isLoading,
   isFetching,
+  isEmpty,
+  error,
   rows,
   categoryKey,
   colors,
@@ -73,6 +77,8 @@ export function StackedHourlyBarChart<R extends HourlyRow>({
       description={description}
       isLoading={isLoading}
       isFetching={isFetching}
+      isEmpty={isEmpty}
+      error={error}
       className="min-h-[320px]"
       helpContent={helpContent}
       helpTitle={helpTitle}

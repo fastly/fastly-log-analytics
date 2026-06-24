@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
+from typing import Annotated, Any
 
 # Ensure the root project directory (parent of backend/) is on sys.path so
 # that the backend package is importable.
@@ -16,11 +18,21 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import duckdb
-from fastapi import Depends, Header, HTTPException, Query
+from fastapi import Depends, Header, HTTPException, Path, Query
 
 from backend import config as svcconfig
+
+# Path-param service_id with a defence-in-depth regex. The authoritative
+# validation lives at ``load_config(service_id)`` (which rejects any id
+# missing from CONFIGS_DIR), but tightening at the FastAPI boundary means
+# malformed ids never reach SQL / filesystem code paths in the first
+# place. Mirrors the alphabet S3 bucket names use (the same character set
+# Fastly assigns to its service ids).
+from backend.config import SERVICE_ID_PATTERN
 from backend.core import duckdb as db
 from backend.core.duckdb import DBBusyError, get_connection
+
+ServiceId = Annotated[str, Path(pattern=SERVICE_ID_PATTERN)]
 
 # ── Service resolution ────────────────────────────────────────────────────────
 
@@ -48,11 +60,9 @@ def get_service_id(
     return svcconfig.get_active_service_id()
 
 
-def get_source(service_id: str | None = Depends(get_service_id)) -> dict:
-    """Return the source config dict for the active service.
-
-    Raises 400 if no service is configured.
-    """
+def _resolve_source_or_400(service_id: str | None) -> dict:
+    """Look up ``service_id``'s source dict, or raise 400 with the canonical
+    ``no_service`` detail the frontend checks for."""
     if service_id:
         src = db.get_source_for_service(service_id)
         if src:
@@ -61,6 +71,14 @@ def get_source(service_id: str | None = Depends(get_service_id)) -> dict:
         status_code=400,
         detail={"error": "No active service configured. Please configure a service first.", "no_service": True},
     )
+
+
+def get_source(service_id: str | None = Depends(get_service_id)) -> dict:
+    """Return the source config dict for the active service.
+
+    Raises 400 if no service is configured.
+    """
+    return _resolve_source_or_400(service_id)
 
 
 # ── DuckDB connection ─────────────────────────────────────────────────────────
@@ -88,8 +106,11 @@ class _ConnectionHolder:
         self.con: duckdb.DuckDBPyConnection | None = None
         # Set when we exit cleanly so __exit__ knows to return-vs-discard.
         self._errored = False
-        # Used only on the pooled path so __exit__ can release.
-        self._pool_cm = None
+        # Used only on the pooled path so __exit__ can release. Typed
+        # ``Any | None`` because ``duckdb_pool.checkout_connection`` is a
+        # contextmanager-decorated generator and mypy struggles to thread
+        # its return type through.
+        self._pool_cm: Any | None = None
 
     def __enter__(self) -> duckdb.DuckDBPyConnection:
         # Write mode + skip_view_update fall back to the fresh-connection
@@ -153,7 +174,7 @@ class _ConnectionHolder:
         return False
 
 
-def get_con(source: dict = Depends(get_source)) -> duckdb.DuckDBPyConnection:
+def get_con(source: dict = Depends(get_source)) -> Iterator[duckdb.DuckDBPyConnection]:
     """Dependency that yields a DuckDB connection and closes it after the request.
 
     Always opens in read-only mode for HTTP request handlers — write-mode
@@ -169,29 +190,6 @@ def get_con(source: dict = Depends(get_source)) -> duckdb.DuckDBPyConnection:
     holder = _ConnectionHolder(source, read_only=True)
     with holder as con:
         yield con
-
-
-# ── Bundled analytics dependency ─────────────────────────────────────────────
-
-
-class AnalyticsDeps:
-    """Bundles the two common analytics dependencies into a single injectable.
-
-    Usage in a route::
-
-        @router.post("/api/my-endpoint")
-        @query_errors()
-        def my_endpoint(req: MyRequest, deps: AnalyticsDeps = Depends()):
-            return repo.do_stuff(con=deps.con, src=deps.source, ...)
-    """
-
-    def __init__(
-        self,
-        source: dict = Depends(get_source),
-        con: duckdb.DuckDBPyConnection = Depends(get_con),
-    ):
-        self.source = source
-        self.con = con
 
 
 # ── Tenant-scope enforcement (security) ─────────────
@@ -228,17 +226,3 @@ def require_service_access(
             detail={"error": "service_not_authorized", "service": service_id},
         )
     return service_id
-
-
-def get_meta_con(source: dict = Depends(get_source)) -> duckdb.DuckDBPyConnection:
-    """Dependency that yields a DuckDB connection, skipping the Iceberg view update.
-
-    Use this for metadata routes (e.g. cron logs, admin settings) that don't
-    need to query the main logs table, to avoid blocking on S3 manifest reads.
-
-    Security: ``read_only`` is hardcoded True for the same reason as
-    ``get_con`` above.
-    """
-    holder = _ConnectionHolder(source, skip_view_update=True, read_only=True)
-    with holder as con:
-        yield con

@@ -9,6 +9,19 @@ parameters).
 The Rust port under ``compute/scorer/`` must produce identical output for
 the same URL — these are the lookup keys for the matrix.
 
+**ASCII-only cross-language parity contract (EC-02).** The train/score parity
+guarantee holds for the ASCII subset only. This module lowercases with
+``str.lower()`` and collapses ids with ``\\d`` (both full-Unicode), while the
+Rust scorer uses ``to_ascii_lowercase`` / ``is_ascii_digit``; on NON-ASCII input
+the two therefore diverge (``/CAF%C3%89`` → ``/café`` here vs ``/cafÉ`` at the
+edge; Arabic-Indic digits collapse here but not there). This is a deliberate,
+documented limit — the worst case is the edge treating an i18n route as novel
+(an L2 accuracy loss, never a category-evasion bypass), and porting Unicode
+folding into the Wasm would pull in unicode crates. The divergence classes are
+pinned by ``tests/scoring/test_normalize_runtime_parity.py``; raw C0 control
+chars (``\\t \\n \\r``) are NOT divergent — ``urlsplit`` strips them here and the
+Rust ``normalize`` strips them too.
+
 Categories: every normalized route also gets a top-level category tag
 derived from its first path segment, used by Layer 2's category-level
 backoff (§4.2). Categories are intentionally coarse: ``product``, ``cart``,
@@ -106,8 +119,17 @@ def _strip_query(url: str) -> str:
     (``/foo/bar?x=1``) and absolute (``https://h/foo/bar?x=1``) inputs."""
     while url.startswith("//"):
         url = url[1:]
-    parts = urlsplit(url)
-    return parts.path or "/"
+    # Do NOT replace %3F with ? before splitting — %3F in a URL path is a
+    # literal path character per RFC 3986, not a query delimiter. Decoding
+    # it before urlsplit lets an attacker hide path-traversal payloads
+    # behind ``%3F`` (audit finding 012): the scorer would categorize
+    # `/search%3F/../../etc/passwd` as a benign `/search` browse, while
+    # the downstream backend processes the whole traversal.
+    try:
+        parts = urlsplit(url)
+        return parts.path or "/"
+    except ValueError:
+        return "/"
 
 
 def _looks_like_id(segment: str) -> bool:
@@ -123,6 +145,54 @@ def _category_for(first_segment: str) -> str:
     return _CATEGORY_MAP.get(first_segment.lower(), "other")
 
 
+def unquote_except_slash(s: str) -> str:
+    """Decode all percent-encoded sequences in the string EXCEPT for encoded slashes
+    (%2f / %2F). This ensures that encoded directory traversals (like %2e%2e)
+    can be resolved by normpath, while encoded slashes are preserved as data."""
+    # Split by %2f and %2F case-insensitively
+    parts = re.split(r"(%2f|%2F)", s)
+    # parts will be like [chunk, "%2f", chunk, "%2F", ...]
+    # We only unquote chunks, leaving the delimiters intact
+    decoded_parts = []
+    for i, p in enumerate(parts):
+        if i % 2 == 0:
+            decoded_parts.append(unquote(p))
+        else:
+            decoded_parts.append(p)
+    return "".join(decoded_parts)
+
+
+def _unquote_until_stable(s: str, max_iter: int = 4) -> str:
+    """Iteratively :func:`unquote_except_slash` until the string stops changing.
+
+    Finding 011 (2026-06-15): a single unquote pass only peels one
+    encoding layer, so a doubly-encoded traversal like
+    ``/admin/%252e%252e/items`` survived the pre-normpath decode as
+    ``/admin/%2e%2e/items`` — :func:`posixpath.normpath` saw it as a
+    normal segment (no ``..``) and didn't resolve the traversal. The
+    delayed per-segment unquote at the end of :func:`normalize` then
+    decoded ``%2e%2e`` to ``..`` AFTER normpath, leaving the traversal
+    embedded in the canonical path / leaking the wrong category tag.
+
+    Iterating until fixed-point unwinds multi-level encoding *before*
+    normpath sees the path, so attacker payloads converge to the
+    actual literal characters and any ``..`` segments collapse
+    normally. The ``%2F`` preservation contract from finding 014 is
+    untouched — each iteration runs the same except-slash decoder.
+
+    ``max_iter`` is a paranoid cap on pathological inputs (the encoder
+    has a finite alphabet, so any well-formed input reaches a
+    fixed-point in at most a handful of passes; the cap just keeps
+    the loop bounded if someone feeds in a non-converging sequence).
+    """
+    for _ in range(max_iter):
+        decoded = unquote_except_slash(s)
+        if decoded == s:
+            return decoded
+        s = decoded
+    return s
+
+
 def normalize(url: str) -> Route:
     """Convert a raw URL into a canonical (route, category) pair.
 
@@ -133,7 +203,14 @@ def normalize(url: str) -> Route:
         /api/v2/orders/00000abc-...        → Route('/api/v2/orders/*',  'api')
         /search?q=red+shoes&page=2         → Route('/search',           'browse')
     """
-    path = posixpath.normpath(_strip_query(url))
+    # 013/014/011: iteratively unquote everything EXCEPT encoded slashes
+    # before normalization so that
+    #   - encoded traversals (``%2e%2e``) AND multi-level-encoded variants
+    #     (``%252e%252e``) are resolved to ``..`` before posixpath.normpath
+    #     runs — finding 011 closed the prior single-unquote bypass.
+    #   - encoded slashes (``%2F``) still cannot act as structural path
+    #     separators — the per-iteration helper preserves them as data.
+    path = posixpath.normpath(_unquote_until_stable(_strip_query(url)))
     # Treat the root specially — there's no segment to inspect, and the
     # category is unambiguously 'home'.
     if path in ("", "/"):
@@ -142,6 +219,9 @@ def normalize(url: str) -> Route:
     # Split, normalize each segment, rejoin. Empty strings between
     # consecutive '/' or at the leading position drop out cleanly via the
     # filter; we re-prepend the leading '/' below.
+    # 014: unquote individual segments after splitting by '/' to prevent
+    # encoded slashes (%2F) from being treated as directory separators during
+    # posixpath.normpath.
     raw_segments = [unquote(s) for s in path.split("/") if s != ""]
     if not raw_segments:
         return Route(path="/", category="home")

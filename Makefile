@@ -1,4 +1,4 @@
-.PHONY: test lint format typecheck ci install install-hooks clean gen-types verify-deps secret-scan osv outdated
+.PHONY: test test-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
@@ -11,6 +11,40 @@ install:
 
 install-hooks:
 	uv run pre-commit install
+
+# Backend + frontend with hot reload. Thin alias for the documented
+# `./run.sh --dev` entry point so `make dev` (README Development section)
+# works alongside the other make targets.
+dev:
+	./run.sh --dev
+
+# ── Scorer (Fastly Compute) ─────────────────────────────────────────────────
+
+# Rebuild the matrix-less scorer Wasm package and refresh the committed
+# artifact the backend ships + deploys via the Fastly API. Run this off-VM
+# (needs rustup-pinned Rust 1.90 + the Fastly CLI) whenever compute/scorer/src
+# changes, then commit compute/scorer/pkg/session-scorer.tar.gz. The matrix is
+# NOT embedded — it's served from the scoring_matrix KV Store at runtime.
+# --auto-yes auto-approves the fastly.toml post_build (wasm-opt) script prompt;
+# without it the CLI blocks on a confirmation that aborts non-interactively.
+scorer-package:
+	cd compute/scorer && PATH="$$HOME/.cargo/bin:$$PATH" fastly compute build --auto-yes
+	@echo "Built compute/scorer/pkg/session-scorer.tar.gz — commit it."
+
+# Run the Rust scorer's native unit tests (normalize/cookie/matrix
+# cross-language parity, session-expiry boundaries, wire-format round-trips).
+# These run at native speed (the dev profile builds for the host, not Wasm), so
+# `cargo test` needs no Fastly CLI — just the rust-toolchain.toml-pinned Rust.
+# Skips with a warning if cargo isn't on PATH (mirrors vcl-test / secret-scan);
+# the Scorer CI job hard-requires it. The pre-push hook runs it when
+# compute/scorer/ changes.
+scorer-test:
+	@if command -v cargo > /dev/null || [ -x "$$HOME/.cargo/bin/cargo" ]; then \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path compute/scorer/Cargo.toml --locked; \
+	else \
+		echo "⚠️  Skipping scorer-test: cargo not on PATH."; \
+		echo "    Install: https://rustup.rs   (rust-toolchain.toml pins the version)"; \
+	fi
 
 # ── Backend ───────────────────────────────────────────────────────────────────
 
@@ -35,6 +69,12 @@ format-check:
 typecheck:
 	uv run mypy backend/
 
+# R-9: enforce no cross-router imports + core ↛ routers. Same gate CI
+# runs in .github/workflows/ci.yml. Pre-existing edges are baselined
+# in pyproject.toml [tool.importlinter]; new ones fail.
+import-contracts:
+	uv run lint-imports
+
 # ── Frontend ──────────────────────────────────────────────────────────────────
 
 gen-types:
@@ -45,6 +85,14 @@ test-frontend:
 
 typecheck-frontend: gen-types
 	cd frontend && npx tsc --noEmit
+
+# Frontend ESLint count-ceiling gate. ESLint is otherwise gated nowhere
+# (CI runs the Python import-linter; `make lint` is ruff), so `as any` and
+# rules-of-hooks violations had been accumulating unchecked. The gate fails
+# if the error count rises above the committed ceiling; ratchet it DOWN as
+# violations are removed. See scripts/check_eslint_count.sh.
+lint-frontend:
+	bash scripts/check_eslint_count.sh
 
 # ── Combined ──────────────────────────────────────────────────────────────────
 
@@ -79,6 +127,37 @@ secret-scan:
 		echo "    Pre-commit + CI install it automatically — local dev is recommended."; \
 	fi
 
+# Bandit pattern-based Python security scan. Gated at HIGH severity
+# only — the MEDIUM tier is dominated by B608 (string-built SQL) false
+# positives the codebase defends against via backend/utils/sql_validator.py
+# + escape_sql_literal, which bandit can't see. HIGH catches the real
+# issues (weak-hash misuse, eval/exec, shell=True). Run ad-hoc with
+# ``uv run bandit -r backend/ -ll`` to also see the noisy mediums.
+security-scan-bandit:
+	uv run bandit -r backend/ -lll --quiet
+
+# Deptry dep-hygiene scan: catches direct imports of transitive deps
+# (DEP003), unused declared deps (DEP002), missing declared deps
+# (DEP001). Per-rule ignores live in pyproject.toml [tool.deptry] for
+# the runtime-only and extras-served cases that can't be detected
+# statically. A NEW transitive import or NEW unused dep fails this.
+deps-check:
+	uv run deptry backend/
+
+# Knip frontend dead-code scan: dead exports + unused deps. Config in
+# frontend/knip.config.ts. Advisory target — useful after a refactor
+# to surface ``export``s no one consumes any more. NOT wired into
+# ``make ci`` because the baseline still has ~27 intentional cases
+# (public API types in types/api.ts, internal helpers that should
+# drop their ``export`` keyword) that need per-export curation.
+knip:
+	# ``--no-exit-code`` keeps the target advisory — the report prints
+	# but the build doesn't fail. Tightening to gating requires
+	# per-export curation of the ~27 baseline cases (public API types
+	# in types/api.ts, internal helpers that should drop their
+	# ``export`` keyword).
+	cd frontend && npx knip --no-progress --no-exit-code
+
 # Verify package.json + package-lock.json resolve cleanly under `npm ci`.
 # Local `make ci` previously used the already-installed node_modules and
 # silently tolerated peer-dep conflicts that would break GitHub Actions
@@ -103,8 +182,111 @@ vcl-test:
 # first, so the slow ones (`test`, `test-frontend`) are listed first to
 # claim the two parallel slots immediately. Lighter checks fill in as
 # slots free up.
+# ── CI parity targets ─────────────────────────────────────────────────────────
+# These mirror the exact steps .github/workflows/ci.yml runs so `make ci`
+# catches what GitHub catches. The bare `test` / `test-frontend` above stay
+# light for quick local loops; `ci` uses the gated variants below.
+
+# Backend tests AS CI RUNS THEM: pytest-xdist + the coverage floor + the env
+# flags that make falco/terraform-dependent tests HARD-FAIL instead of skip
+# (ci.yml "Tests (pytest with coverage)"). MUST use `-n auto` (NOT `-n 4`) to
+# match ci.yml's worker count: parallelism-dependent races (e.g. a per-test
+# connection close colliding with a live worker thread → segfault) only surface
+# at CI's worker density. A lower `-n` here was why `make ci` went green while
+# the ci.yml pull_request run segfaulted (2026-06-23).
+test-ci:
+	FALCO_REQUIRED=1 TERRAFORM_VALIDATE=1 uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=86
+
+# Frontend tests AS CI RUNS THEM: vitest with the four coverage floors
+# (GATE-03). Bare `npm test` applies none of these.
+test-frontend-ci:
+	cd frontend && npx vitest run --coverage --coverage.thresholds.lines=66 --coverage.thresholds.statements=65 --coverage.thresholds.functions=54 --coverage.thresholds.branches=52
+
+# RustSec advisory scan (ci.yml scorer "Audit dependencies"). cargo test
+# does NOT check advisories. Skips with a warning if cargo-audit is absent.
+scorer-audit:
+	@if command -v cargo-audit > /dev/null || [ -x "$$HOME/.cargo/bin/cargo-audit" ]; then \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo audit --file compute/scorer/Cargo.lock; \
+	else \
+		echo "⚠️  Skipping scorer-audit: cargo-audit not on PATH (cargo install cargo-audit --locked)."; \
+	fi
+
+# OpenAPI type-drift guard (ci.yml frontend "Detect drift in generated
+# OpenAPI types"). Regenerates then fails if the tracked output changed.
+openapi-drift: gen-types
+	@cd frontend && git diff --exit-code types/api.generated.ts openapi.json \
+		|| { echo "OpenAPI types out of sync — run 'make gen-types' and commit." >&2; exit 1; }
+
+# Perf gate AS CI RUNS IT: emit latest.json from synthetic load, then compare
+# to baseline.json (ci.yml "Emit perf samples" + "Perf gate").
+perf-ci:
+	uv run python scripts/emit_perf_latest.py && bash scripts/perf_gate.sh
+
+# Playwright E2E — mirrors .github/workflows/e2e.yml. Kept SEPARATE from `ci`
+# (it boots the backend + frontend + a browser, ~minutes) exactly like the
+# split CI workflows. `npm run test:e2e` is chromium-only; this runs the full
+# chromium+firefox+webkit matrix CI runs. THE gap that hid the a11y/hydration
+# failures locally — run `make e2e` before pushing UI changes.
+e2e:
+	cd frontend && npm ci && npx playwright install --with-deps && npx playwright test
+
+# Mirrors EVERY gating GitHub workflow (ci.yml AND e2e.yml) step-for-step, so a
+# green `make ci` == green CI — no separate command to forget. Runs the full
+# backend suite (-n auto, matching ci.yml's worker count), the frontend unit
+# suite, every static/security gate, AND the full Playwright e2e matrix
+# (chromium+firefox+webkit). Intentionally heavy (several minutes + a browser
+# install): use `make test-ci` / `make test-frontend-ci` / `make e2e` for fast
+# focused loops, but run the whole `make ci` before pushing to be confident.
+# The e2e step runs LAST so the cheaper backend/frontend/static gates fail fast
+# before the multi-minute browser matrix.
 ci:
-	@$(MAKE) -j2 test test-frontend typecheck-frontend lint format-check typecheck vcl-test verify-deps secret-scan osv
+	$(MAKE) test-ci
+	$(MAKE) test-frontend-ci
+	@$(MAKE) -j2 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard security-regression openapi-drift perf-ci
+	$(MAKE) e2e
+
+# ── v2.0 cleanup targets ──────────────────────────────────────────────────────
+
+# Load-harness perf gate. Reads tests/perf/baseline.json + latest.json.
+# Phase 0 ships scaffolding (no-op if latest.json missing). Phase 1.6
+# hooks the emitter and turns the skip into a hard fail.
+perf:
+	bash scripts/perf_gate.sh
+
+# Security-regression count gate. Asserts the
+# @pytest.mark.security_regression count is monotonically >= floor
+# (Phase 0.8 baseline: 24, from the since-removed audit-findings/ verified fixes).
+security-regression:
+	bash scripts/check_security_regression_count.sh
+
+# SRE-10 / ADR-08 §5: fail if a tracked deploy file activates the
+# OTEL_EXPORTER=console spam mode (the 2026-06-10 prod-stdout-flood incident).
+otel-guard:
+	bash scripts/check_no_console_otel.sh
+
+# Architectural baseline snapshot. Captures LOC, large files,
+# TODO/FIXME markers, # Security: comment count, and mypy ignore
+# overrides into .metrics/baseline/<ts>/. Run at Phase 0 + end of
+# Phase 10 for the success-criteria scorecard.
+baseline:
+	bash scripts/baseline_metrics.sh
+
+# Pre-deploy gate. `ci` now runs every gating GitHub workflow itself (ci.yml +
+# e2e.yml), so verify is just an alias kept for muscle memory / older docs.
+verify: ci
+
+# CI gate ratchet helper. After a phase lifts coverage in a touched
+# module, bump the gate in .github/workflows/ci.yml's --cov-fail-under.
+# This target prints the current values + suggests the next floor
+# ("current actual − 2pp" per existing convention).
+ratchet:
+	@echo "Current backend gate:"
+	@grep -E "cov-fail-under" .github/workflows/ci.yml
+	@echo
+	@echo "Current frontend gates (lines/statements/functions/branches):"
+	@grep -E "coverage.thresholds" .github/workflows/ci.yml
+	@echo
+	@echo "Edit .github/workflows/ci.yml to bump. Floor: current actual − 2pp."
 
 
 clean:

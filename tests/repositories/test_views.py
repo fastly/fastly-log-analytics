@@ -1,16 +1,16 @@
 """Tests for backend.repositories.views.
 
-Covers ``get_views`` / ``save_view`` / ``delete_view`` and the
-``_find_view_service`` cross-service lookup that lets the API resolve a
-view id back to its owning per-service SQLite file.
+Covers ``get_views`` / ``save_view`` / ``delete_view`` / ``get_view_by_id``.
+
+Post-audit-finding-018: cross-tenant ``_find_view_service`` scan helper
+is gone — every public function now requires ``service_id`` directly so
+an unknown id lookup can't sprawl O(N) across every tenant DB.
 """
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 from backend.models.views import SavedView
-from backend.repositories.views import _find_view_service, delete_view, get_views, save_view
+from backend.repositories.views import delete_view, get_views, save_view
 
 
 def _make_view(service_id: str, name: str = "My View") -> SavedView:
@@ -34,56 +34,79 @@ def test_get_views_empty_when_unseeded():
     assert get_views("svc-views-empty") == []
 
 
-def test_delete_view_with_explicit_service_hint():
+def test_delete_view_scoped_to_service():
     sid = "svc-views-2"
     view = save_view(_make_view(sid, "to-delete"))
-    res = delete_view(view["id"], service_id_hint=sid)
+    res = delete_view(view["id"], service_id=sid)
     assert res["status"] in ("success", "deleted")
     assert res["service_id"] == sid
     assert all(v["id"] != view["id"] for v in get_views(sid))
 
 
 def test_delete_view_unknown_id_returns_not_found():
-    res = delete_view("does-not-exist", service_id_hint="svc-views-3")
+    res = delete_view("does-not-exist", service_id="svc-views-3")
     # Without the row existing, metadata_db returns a not_found-shaped response
     # OR the wrapper returns the not_found shape itself. Either is acceptable
     # — the contract is "no exception, an actionable status payload back".
     assert "status" in res
 
 
-def test_find_view_service_scans_known_configs():
-    sid = "svc-views-find"
-    view = save_view(_make_view(sid))
+def test_get_view_by_id_returns_view_with_service_id_stamped():
+    """``get_view_by_id`` is the security mirror of ``alerts.get_alert_by_id``.
+    The router-level cross-tenant gate calls it before delete_view to verify
+    the requesting analyst owns the targeted view. The returned row MUST
+    have ``service_id`` stamped so the caller can compare without re-scanning."""
+    from backend.repositories.views import get_view_by_id
 
-    # _find_view_service iterates svcconfig.list_configs(); patch it to
-    # surface only this service so the scan is deterministic.
-    with patch(
-        "backend.repositories.views.svcconfig.list_configs",
-        return_value=[{"service_id": sid}],
-    ):
-        found = _find_view_service(view["id"])
-
-    assert found == sid
-
-
-def test_find_view_service_returns_none_when_no_match():
-    with patch(
-        "backend.repositories.views.svcconfig.list_configs",
-        return_value=[{"service_id": "svc-no-such-view"}],
-    ):
-        assert _find_view_service("nonexistent-view-id") is None
+    sid = "svc-views-get-by-id"
+    view = save_view(_make_view(sid, "by-id"))
+    row = get_view_by_id(view["id"], sid)
+    assert row is not None
+    assert row["id"] == view["id"]
+    # Critical: service_id is stamped onto the row so the cross-tenant
+    # check downstream doesn't have to re-scan.
+    assert row["service_id"] == sid
 
 
-def test_delete_view_falls_back_to_cross_service_scan():
-    """When no service_id_hint is given, delete_view scans configs to find
-    the owning service."""
-    sid = "svc-views-fallback"
-    view = save_view(_make_view(sid))
+def test_get_view_by_id_returns_none_when_view_does_not_exist():
+    from backend.repositories.views import get_view_by_id
 
-    with patch(
-        "backend.repositories.views.svcconfig.list_configs",
-        return_value=[{"service_id": sid}],
-    ):
-        res = delete_view(view["id"])
+    assert get_view_by_id("nonexistent-id", "svc-no-views") is None
 
-    assert res["service_id"] == sid
+
+def test_metadata_save_view_uses_service_id_parameter_not_payload_value():
+    """Finding 016: ``backend.core.metadata.views.save_view`` previously
+    persisted ``view.service_id`` (the client-supplied payload field) instead
+    of the trusted ``service_id`` function argument. If any caller passes a
+    trusted ``service_id`` that differs from ``view.service_id`` (e.g. derived
+    from a path parameter / dependency-injected tenant), the row must land in
+    the *parameter*'s tenant, not the payload's.
+
+    The higher-level ``backend.repositories.views.save_view(view)`` wrapper
+    currently passes ``view.service_id`` through both slots, so the public-facing
+    behaviour is unchanged — but this defense-in-depth fix ensures a future
+    refactor that wires the trusted tenant differently won't reintroduce the
+    cross-tenant write."""
+    from backend.core.metadata.views import list_views as md_list_views
+    from backend.core.metadata.views import save_view as md_save_view
+
+    trusted_sid = "svc-views-016-trusted"
+    untrusted_sid = "svc-views-016-attacker"
+
+    view = SavedView(
+        service_id=untrusted_sid,
+        name="cross-tenant attempt",
+        filters_json='{"status":[500]}',
+        page="dashboard",
+    )
+    res = md_save_view(trusted_sid, view)
+    assert res["status"] == "success"
+
+    trusted_rows = md_list_views(trusted_sid)
+    assert any(r["id"] == res["id"] for r in trusted_rows), "view must be persisted in the trusted tenant"
+    for r in trusted_rows:
+        if r["id"] == res["id"]:
+            assert r["service_id"] == trusted_sid, "stored service_id must be the trusted parameter, not the payload"
+
+    attacker_rows = md_list_views(untrusted_sid)
+    assert not any(r["id"] == res["id"] for r in attacker_rows), "view must NOT leak into the payload-claimed tenant"

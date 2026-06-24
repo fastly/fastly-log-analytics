@@ -266,3 +266,1008 @@ def test_security_aggregates_wellknown_bots_falls_back_when_no_pattern_available
 
     # Result is still well-formed (no crash, no missing keys)
     assert "wellknown_bots" in result
+
+
+# ── Fingerprint rollup routing (Step 6 of #3) ────────────────────────────────
+
+
+def test_security_aggregates_fingerprints_use_rollup_when_filters_empty(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """When filters={} AND ip_spread + count rollups exist for a
+    fingerprint field, the rollup path serves the FP card without
+    running the live FINGERPRINT_TOP_N SQL over the catalog temp.
+
+    This is the load-bearing routing change from the audit's #58-full
+    leg: instead of three count(DISTINCT ip) full-temp scans on a 30d
+    window (the dominant cost), we read pre-computed top-N + HLL
+    sketches. Pinned because a regression here silently restores the
+    old slow path on the security tab."""
+    import uuid
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from backend.repositories._base import QueryRunner
+    from backend.utils.hll import HyperLogLog
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    for i, log in enumerate(logs):
+        log["tls_ciphers_sha"] = "rollup-served-fp" if i < 10 else "live-fp-fallback"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    # Seed count + ip_spread rollups for tls_ciphers_sha so the rollup
+    # path has data for the (field, value) we'll assert on. We pin a
+    # closed hour the test query window covers.
+    from datetime import UTC, datetime, timedelta
+
+    closed_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+    closed_hour = closed_hour_dt.strftime("%Y-%m-%d-%H")
+
+    # Count rollup parquet — schema (value, count) under hive (field, hour).
+    count_dir = cache_root / "rollups" / "hour" / "field=tls_ciphers_sha" / f"hour={closed_hour}"
+    count_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"value": pa.array(["rollup-served-fp"]), "count": pa.array([42], type=pa.int64())}),
+        str(count_dir / f"compacted_{uuid.uuid4().hex[:12]}.parquet"),
+    )
+
+    # IP-spread rollup parquet — HLL sketch over 7 distinct IPs.
+    hll = HyperLogLog()
+    hll.update([f"10.0.0.{i}" for i in range(7)])
+    ip_dir = cache_root / "rollups" / "hour_ip_spread" / "field=tls_ciphers_sha" / f"hour={closed_hour}"
+    ip_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "value": pa.array(["rollup-served-fp"]),
+                "ip_sketch": pa.array([hll.to_bytes()], type=pa.binary()),
+                "ip_count_observed": pa.array([7], type=pa.int64()),
+                "sample_capped": pa.array([False], type=pa.bool_()),
+            }
+        ),
+        str(ip_dir / f"compacted_{uuid.uuid4().hex[:12]}.parquet"),
+    )
+
+    # Spy on the live FINGERPRINT_TOP_N execution. If the rollup path
+    # served the card, the live path MUST NOT fire for tls_ciphers_sha.
+    live_fp_calls = {"n": 0}
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "count(DISTINCT ip)" in sql and '"tls_ciphers_sha"' in sql:
+            live_fp_calls["n"] += 1
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    start = (closed_hour_dt - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (closed_hour_dt + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start,
+        end_time=end,
+        filters={},
+    )
+
+    # The rollup path produced the fingerprint card. Check the value
+    # came from the rollup, not the in-memory table directly.
+    fps = result["tls_fingerprints"]
+    by_value = {fp["fingerprint"]: fp for fp in fps}
+    assert "rollup-served-fp" in by_value, f"rollup-served fingerprint missing from result; got {list(by_value)}"
+    assert by_value["rollup-served-fp"]["request_count"] == 42  # from count rollup
+    assert by_value["rollup-served-fp"]["ip_count"] > 0  # from HLL merge
+
+    # The live FINGERPRINT_TOP_N must NOT have run for tls_ciphers_sha
+    # — that's the whole point of the routing. (Other live queries
+    # may still run for h2/oh fingerprints if they're not rollup-served.)
+    assert live_fp_calls["n"] == 0, (
+        f"live FINGERPRINT_TOP_N fired {live_fp_calls['n']} times for tls_ciphers_sha "
+        f"even though rollup data was available — routing regression"
+    )
+
+
+def test_security_aggregates_fingerprints_fall_back_to_live_when_ip_spread_empty(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """When the COUNT rollup has data but the IP-spread rollup is cold
+    (writer hasn't populated it yet — the post-deploy reality on every
+    pre-existing service), the rollup path MUST fall through to the
+    live FINGERPRINT_TOP_N SQL so the FE sees real ip_counts rather
+    than a sea of zeros.
+
+    Pinned because the first deploy of session 8 hit exactly this
+    case in prod: count rollups were already 30d backfilled, ip_spread
+    backfill hadn't run yet → every tls_fingerprint row landed with
+    ip_count=0. The fix tests for "at least one non-zero ip_count"
+    rather than "non-empty ip_spread dict" before marking the col
+    rollup-served."""
+    import uuid
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=10)
+    for log in logs:
+        log["tls_ciphers_sha"] = "live-served-fp"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    # Seed ONLY the count rollup — leave ip_spread tree empty so the
+    # merge returns nothing for any (col, value) pair.
+    from datetime import UTC, datetime, timedelta
+
+    closed_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+    closed_hour = closed_hour_dt.strftime("%Y-%m-%d-%H")
+
+    count_dir = cache_root / "rollups" / "hour" / "field=tls_ciphers_sha" / f"hour={closed_hour}"
+    count_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"value": pa.array(["live-served-fp"]), "count": pa.array([42], type=pa.int64())}),
+        str(count_dir / f"compacted_{uuid.uuid4().hex[:12]}.parquet"),
+    )
+
+    # Spy on live FINGERPRINT_TOP_N: it MUST fire because ip_spread is empty.
+    live_fp_calls = {"n": 0}
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "count(DISTINCT ip)" in sql and '"tls_ciphers_sha"' in sql:
+            live_fp_calls["n"] += 1
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    start = (closed_hour_dt - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (closed_hour_dt + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start,
+        end_time=end,
+        filters={},
+    )
+
+    # The live path MUST have run because ip_spread is cold.
+    assert live_fp_calls["n"] >= 1, (
+        "live FINGERPRINT_TOP_N did not fire for tls_ciphers_sha even though "
+        "ip_spread is cold — would have returned ip_count=0 to the FE"
+    )
+
+    # And the returned rows must have non-zero ip_count from the live path.
+    fps = result["tls_fingerprints"]
+    for fp in fps:
+        if fp.get("fingerprint") == "live-served-fp":
+            assert fp["ip_count"] > 0, f"live-served fingerprint landed with ip_count=0 — fallback didn't run; got {fp}"
+
+
+def test_security_aggregates_fingerprints_skip_rollup_when_filters_present(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """When the request has filters, the rollup path is BYPASSED —
+    rollups don't carry per-request filter state, so we must use the
+    live SQL path even when rollup data exists. Pinned because a
+    rollup-on-filtered request would silently ignore the filter and
+    surface mis-attributed top-N fingerprints."""
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=10)
+    for log in logs:
+        log["tls_ciphers_sha"] = "fp-A"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    # Spy on the rollup reader call.
+    rollup_calls = {"top_n": 0, "ip_spread": 0}
+    orig_top_n = QueryRunner.execute_top_n_rollups
+    orig_ip = QueryRunner.execute_ip_spread_rollups
+
+    def _spy_top_n(self, *args, **kwargs):
+        rollup_calls["top_n"] += 1
+        return orig_top_n(self, *args, **kwargs)
+
+    def _spy_ip(self, *args, **kwargs):
+        rollup_calls["ip_spread"] += 1
+        return orig_ip(self, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", _spy_top_n)
+    monkeypatch.setattr(QueryRunner, "execute_ip_spread_rollups", _spy_ip)
+
+    # Non-empty filters MUST bypass the rollup fast-path. Filter shape
+    # mirrors what build_where_clause accepts — a single-field include
+    # filter. The actual filter value doesn't matter for this test;
+    # the rollup-bypass decision is gated solely on truthiness.
+    from backend.models.common import FilterSpec
+
+    filters = {"status": FilterSpec(mode="include", values=["200"])}
+
+    get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters=filters,
+    )
+
+    assert rollup_calls["top_n"] == 0, (
+        f"execute_top_n_rollups fired {rollup_calls['top_n']} times with non-empty filters — "
+        f"rollups don't carry filter state and would mis-attribute top-N"
+    )
+    assert rollup_calls["ip_spread"] == 0
+
+
+# ── ipv6_adoption + proxy_dist rollup routing (#94 closure) ──────────────────
+
+
+def _seed_count_rollup(cache_root, field: str, hours_back: int, value_counts: dict[str, int]) -> str:
+    """Write a per-(field, hour) count rollup parquet with the requested
+    value→count rows; return the closed_hour string for window setup."""
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    closed_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=hours_back)
+    closed_hour = closed_hour_dt.strftime("%Y-%m-%d-%H")
+    count_dir = cache_root / "rollups" / "hour" / f"field={field}" / f"hour={closed_hour}"
+    count_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "value": pa.array(list(value_counts.keys())),
+                "count": pa.array(list(value_counts.values()), type=pa.int64()),
+            }
+        ),
+        str(count_dir / f"compacted_{uuid.uuid4().hex[:12]}.parquet"),
+    )
+    return closed_hour
+
+
+def _seed_bundled_hour_rollup(cache_root, hours_back: int, field_value_counts: dict[str, dict[str, int]]) -> str:
+    """Write a per-hour ``all_fields.parquet`` bundle at the prod shape —
+    ``(field, value, count)`` columns, no ``hour`` column in the body
+    (hour lives in the hive path segment). Returns the closed_hour str.
+
+    Mirrors what ``backend/core/rollups/hour_bundles.py:bundle_hours``
+    produces in production. The steady-state post-bundling layout has
+    ONLY this file (per-field per-hour copies are swept by
+    ``_cleanup_per_field_after_bundle``), so reads against the bundled
+    tree must work even when the per-field tree is empty.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    closed_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=hours_back)
+    closed_hour = closed_hour_dt.strftime("%Y-%m-%d-%H")
+    bundle_dir = cache_root / "rollups" / "hour_bundled" / f"hour={closed_hour}"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    rows_field: list[str] = []
+    rows_value: list[str] = []
+    rows_count: list[int] = []
+    for field, vc in field_value_counts.items():
+        for value, count in vc.items():
+            rows_field.append(field)
+            rows_value.append(value)
+            rows_count.append(count)
+    pq.write_table(
+        pa.table(
+            {
+                "field": pa.array(rows_field),
+                "value": pa.array(rows_value),
+                "count": pa.array(rows_count, type=pa.int64()),
+            }
+        ),
+        str(bundle_dir / "all_fields.parquet"),
+    )
+    return closed_hour
+
+
+def test_security_aggregates_ipv6_uses_rollup_when_filters_empty(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """When filters={} AND the count rollup has is_ipv6 coverage for the
+    window's closed hours, ipv6_adoption is served from the rollup —
+    bypassing the live SQL scan over the catalog temp. Pinned because
+    a regression here silently restores the temp scan that #94 closure
+    is meant to avoid.
+    """
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=10)
+    # Seed the live table so the active-hour merge in
+    # _ipv6_per_hour_from_rollups has something to find (or harmlessly
+    # finds nothing for the in-window active slice). Mock_data fields
+    # don't include is_ipv6, so add it explicitly so the col exists in
+    # actual_cols and the routing branch is reachable.
+    for log in logs:
+        log["is_ipv6"] = False
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    from datetime import UTC, datetime, timedelta
+
+    closed_hour_str = _seed_count_rollup(cache_root, "is_ipv6", hours_back=2, value_counts={"true": 23, "false": 77})
+    closed_hour_dt = datetime.strptime(closed_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+
+    # Spy: the live IPV6_ADOPTION_TS SQL must NOT run when the rollup
+    # path serves (it has the canonical SUM(CASE WHEN is_ipv6 ...) /
+    # count(*) shape; check for the CASE clause to avoid matching the
+    # active-hour merge's similar-but-distinct base-table query).
+    live_calls = {"n": 0}
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "CASE WHEN is_ipv6" in sql and "FROM t_" in sql:
+            live_calls["n"] += 1
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    # Window >= 3 days to satisfy the rollup-routing gate
+    # (_ROLLUP_MIN_WINDOW_SECONDS). Shorter windows skip rollup serve
+    # and stay on the live SQL path — by design, since the rollup-read
+    # cost only amortises on wider windows. Pinned separately by
+    # test_security_aggregates_ipv6_proxy_skip_rollup_on_small_window.
+    start = (closed_hour_dt - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (closed_hour_dt + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start,
+        end_time=end,
+        filters={},
+    )
+
+    # Rollup-served value lands as a time-series row for closed_hour
+    # with pct = 23/(23+77) * 100 = 23.0.
+    ipv6 = result["ipv6_adoption"]
+    by_time = {row["time"]: row for row in ipv6}
+    expected_time = f"{closed_hour_str[:10]}T{closed_hour_str[11:13]}:00:00+00:00"
+    assert expected_time in by_time, f"closed_hour rollup point missing from result; got {list(by_time)}"
+    assert abs(by_time[expected_time]["pct"] - 23.0) < 0.001
+
+    # Live SQL path must NOT have run for ipv6_adoption.
+    assert live_calls["n"] == 0, (
+        f"live IPV6_ADOPTION_TS fired {live_calls['n']} times even though rollup data was available — "
+        f"routing regression"
+    )
+
+
+def test_security_aggregates_proxy_uses_rollup_when_filters_empty(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """When filters={} AND the count rollup has p_type coverage for the
+    window's closed hours, proxy_dist is served from the rollup
+    instead of the live PROXY_TYPE_DIST scan over the catalog temp.
+    """
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=5)
+    for log in logs:
+        log["p_type"] = "hosting"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    from datetime import UTC, datetime, timedelta
+
+    closed_hour_str = _seed_count_rollup(
+        cache_root, "p_type", hours_back=2, value_counts={"hosting": 1496, "edu": 7, "": 1382}
+    )
+    closed_hour_dt = datetime.strptime(closed_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+
+    # Spy: the live PROXY_TYPE_DIST SQL (`SELECT p_type, count(*)... FROM t_*`)
+    # must NOT fire when the rollup path serves.
+    live_calls = {"n": 0}
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "SELECT p_type, count(*)" in sql and "FROM t_" in sql:
+            live_calls["n"] += 1
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    # Window >= 3 days to satisfy the rollup-routing gate.
+    start = (closed_hour_dt - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (closed_hour_dt + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start,
+        end_time=end,
+        filters={},
+    )
+
+    proxy = result["proxy_dist"]
+    by_type = {row["type"]: row["count"] for row in proxy}
+    # Empty-string p_type filtered out (matches live query's `!= ''`).
+    assert "" not in by_type
+    assert by_type.get("hosting", 0) >= 1496  # rollup contribution; live merge may add more
+    assert by_type.get("edu", 0) >= 7
+    assert list(by_type) == sorted(by_type, key=by_type.get, reverse=True)  # sorted desc
+
+    assert live_calls["n"] == 0, f"live PROXY_TYPE_DIST fired {live_calls['n']} times — rollup-served path regression"
+
+
+def test_security_aggregates_ipv6_proxy_skip_rollup_when_filters_present(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """Filter-present requests MUST bypass both ipv6 and proxy rollup
+    paths — rollups don't carry per-request filter state. Pinned
+    because a rollup-on-filtered request would silently ignore the
+    filter and mis-attribute the per-hour pct or per-type totals.
+    """
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=5)
+    for log in logs:
+        log["is_ipv6"] = True
+        log["p_type"] = "hosting"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    # Seed rollups so the pre-check would PASS if filters were empty —
+    # the test is whether the filter-present gate fires first.
+    _seed_count_rollup(cache_root, "is_ipv6", hours_back=2, value_counts={"true": 10, "false": 0})
+    _seed_count_rollup(cache_root, "p_type", hours_back=2, value_counts={"hosting": 10})
+
+    from backend.models.common import FilterSpec
+
+    filters = {"status": FilterSpec(mode="include", values=["200"])}
+
+    # The temp MUST carry is_ipv6 + p_type since the rollups are
+    # bypassed. The live SQL paths read those cols from the temp, so a
+    # successful response is itself the assertion (BinderException would
+    # fire if Tier-2 had dropped the cols incorrectly).
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters=filters,
+    )
+    assert "ipv6_adoption" in result
+    assert "proxy_dist" in result
+
+
+def test_security_aggregates_ipv6_proxy_fall_back_to_live_when_rollup_cold(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """Cold rollup (no in-window closed-hour parquets) → the pre-check
+    fails → is_ipv6 + p_type STAY in the temp → live SQL serves the
+    aggregates. Pinned because a regression here would route through
+    the rollup helpers despite no data, returning empty cards on every
+    cold-pool service.
+
+    Uses start_time=None so the test doesn't get caught by the mock-
+    data fixture's naive-TIMESTAMP vs TIMESTAMPTZ comparison quirk
+    (the live SQL would match 0 rows with explicit Z-suffixed bounds).
+    The pre-check requires explicit bounds; None → pre-check returns
+    False → live path runs.
+    """
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=10)
+    for log in logs:
+        log["is_ipv6"] = True
+        log["p_type"] = "hosting"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    # No rollup parquets seeded — cache_root has no rollups/ tree at all.
+    # Spy on whether the LIVE SQL paths fired (independent of whether
+    # they return rows) — that's the routing assertion this test owns.
+    live_ipv6_fired = {"n": 0}
+    live_proxy_fired = {"n": 0}
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str):
+            if "CASE WHEN is_ipv6" in sql and "FROM t_" in sql:
+                live_ipv6_fired["n"] += 1
+            if "SELECT p_type, count(*)" in sql and "FROM t_" in sql:
+                live_proxy_fired["n"] += 1
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+    )
+
+    # Live paths fired — temp still carries is_ipv6 + p_type (pre-check
+    # returned False for both).
+    assert live_ipv6_fired["n"] >= 1, "live IPV6_ADOPTION_TS did not fire on cold rollup"
+    assert live_proxy_fired["n"] >= 1, "live PROXY_TYPE_DIST did not fire on cold rollup"
+    # And the response is well-formed — cards present + non-empty per
+    # the seeded data (with None bounds the where clause permits all
+    # rows so the live aggregates have rows to count).
+    assert result["ipv6_adoption"], "ipv6_adoption empty even with non-empty temp"
+    assert result["proxy_dist"], "proxy_dist empty even with non-empty temp"
+    assert any(row["type"] == "hosting" for row in result["proxy_dist"])
+
+
+def test_security_aggregates_drops_ipv6_ptype_from_temp_when_rollups_will_serve(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """When the pre-check passes for is_ipv6 AND p_type, those columns
+    must NOT appear in the catalog temp's projection. Pinned because
+    silently keeping them in the temp would defeat Tier 2's
+    materialization-cost savings even though the live SQL paths no
+    longer scan them.
+    """
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=5)
+    for log in logs:
+        log["is_ipv6"] = False
+        log["p_type"] = "hosting"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    from datetime import UTC, datetime, timedelta
+
+    closed_hour_str = _seed_count_rollup(cache_root, "is_ipv6", hours_back=2, value_counts={"false": 50})
+    _seed_count_rollup(cache_root, "p_type", hours_back=2, value_counts={"hosting": 50})
+    closed_hour_dt = datetime.strptime(closed_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+
+    # Capture every CREATE TEMP TABLE statement so we can inspect the
+    # projected col list.
+    create_sqls: list[str] = []
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "CREATE TEMP TABLE" in sql:
+            create_sqls.append(sql)
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    # Window >= 3 days to satisfy the rollup-routing gate.
+    start = (closed_hour_dt - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (closed_hour_dt + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start,
+        end_time=end,
+        filters={},
+    )
+
+    # The catalog temp materialization should have dropped both cols.
+    # Other CREATE TEMP TABLEs may run for sub-queries (NGWAF join etc.)
+    # — find the security-catalog one by looking for `tls_ciphers_sha`
+    # in the projection.
+    catalog_creates = [s for s in create_sqls if "tls_ciphers_sha" in s]
+    assert catalog_creates, "didn't capture any catalog temp create — test fixture issue"
+    catalog_sql = catalog_creates[0]
+    assert "is_ipv6" not in catalog_sql, (
+        f"is_ipv6 still in temp projection despite rollup pre-check passing — Tier-2 regression. "
+        f"SQL: {catalog_sql[:300]}"
+    )
+    assert "p_type" not in catalog_sql, (
+        f"p_type still in temp projection despite rollup pre-check passing — Tier-2 regression. "
+        f"SQL: {catalog_sql[:300]}"
+    )
+
+
+def test_security_aggregates_ipv6_serves_from_bundled_hour_when_per_field_swept(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """Steady-state prod layout: hour_bundles.bundle_hours() writes the
+    per-hour ``all_fields.parquet`` bundle then ``_cleanup_per_field_
+    after_bundle`` deletes the per-field per-hour parquets. The IPv6
+    helper must serve from the bundled file alone — no per-field tree
+    available as a fallback.
+
+    Pinned by session-9 adversarial review: the bundled-paths branch
+    used hive_partitioning=0 which fails to surface ``hour`` from the
+    path segment (the bundle body has only ``(field, value, count)``),
+    raising BinderException → empty IPv6 chart on every closed-hour-
+    bundled service. Caught after merge would have shipped a silent
+    regression to prod.
+    """
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=10)
+    for log in logs:
+        log["is_ipv6"] = False
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    from datetime import UTC, datetime, timedelta
+
+    # ONLY the bundled tree — per-field tree is intentionally absent to
+    # mirror the post-cleanup steady state.
+    closed_hour_str = _seed_bundled_hour_rollup(
+        cache_root,
+        hours_back=3,
+        field_value_counts={"is_ipv6": {"true": 17, "false": 83}},
+    )
+    closed_hour_dt = datetime.strptime(closed_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+
+    # Spy on the live IPV6_ADOPTION_TS path — it MUST NOT fire (the
+    # temp dropped is_ipv6 because the pre-check sees the bundled file).
+    live_calls = {"n": 0}
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "CASE WHEN is_ipv6" in sql and "FROM t_" in sql:
+            live_calls["n"] += 1
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    # Window >= 3 days to satisfy the rollup-routing gate.
+    start = (closed_hour_dt - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (closed_hour_dt + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start,
+        end_time=end,
+        filters={},
+    )
+
+    # The bundled hour must produce a time-series point at the seeded
+    # pct = 17/100 * 100 = 17.0. Empty result indicates the BinderException
+    # → swallowed → None → empty-card failure mode the regression was about.
+    ipv6 = result["ipv6_adoption"]
+    by_time = {row["time"]: row for row in ipv6}
+    expected_time = f"{closed_hour_str[:10]}T{closed_hour_str[11:13]}:00:00+00:00"
+    assert expected_time in by_time, (
+        f"bundled-hour rollup point missing from result — the bundled-branch "
+        f"BinderException regression is back. Got times: {list(by_time)}"
+    )
+    assert abs(by_time[expected_time]["pct"] - 17.0) < 0.001
+    # And live SQL must NOT have run (temp dropped is_ipv6).
+    assert live_calls["n"] == 0
+
+
+def test_security_aggregates_ipv6_mixes_bundled_and_per_field_hours(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """Mid-bundling state: some closed hours are bundled, others are
+    still in the per-field tree. Reader must produce a row per hour
+    from BOTH sources without double-counting (bundled wins for the
+    hours it covers; per-field fills the gaps).
+    """
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=5)
+    for log in logs:
+        log["is_ipv6"] = False
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    from datetime import UTC, datetime, timedelta
+
+    bundled_hour = _seed_bundled_hour_rollup(
+        cache_root,
+        hours_back=4,
+        field_value_counts={"is_ipv6": {"true": 30, "false": 70}},
+    )
+    per_field_hour = _seed_count_rollup(cache_root, "is_ipv6", hours_back=2, value_counts={"true": 50, "false": 50})
+    bundled_hour_dt = datetime.strptime(bundled_hour, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+    per_field_hour_dt = datetime.strptime(per_field_hour, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+
+    # Window >= 3 days to satisfy the rollup-routing gate.
+    start = (bundled_hour_dt - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (per_field_hour_dt + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start,
+        end_time=end,
+        filters={},
+    )
+
+    by_time = {row["time"]: row for row in result["ipv6_adoption"]}
+    bundled_iso = f"{bundled_hour[:10]}T{bundled_hour[11:13]}:00:00+00:00"
+    per_field_iso = f"{per_field_hour[:10]}T{per_field_hour[11:13]}:00:00+00:00"
+    assert bundled_iso in by_time, f"bundled hour missing; got {list(by_time)}"
+    assert per_field_iso in by_time, f"per-field hour missing; got {list(by_time)}"
+    assert abs(by_time[bundled_iso]["pct"] - 30.0) < 0.001
+    assert abs(by_time[per_field_iso]["pct"] - 50.0) < 0.001
+
+
+def test_security_aggregates_ipv6_proxy_skip_rollup_on_small_window(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """Windows narrower than _ROLLUP_MIN_WINDOW_SECONDS (3 days) skip
+    the rollup-served paths even when rollup data exists and filters
+    are empty. The live SQL serves ipv6 + proxy from the catalog temp
+    instead. Pinned because the small-window regression on prod
+    measurements drove the gate-introduction: 24h was +110 ms net
+    regression vs the prior live path because the closed-hour parquet
+    reads cost more than scanning is_ipv6 / p_type from the already-
+    materialised temp.
+    """
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=5)
+    for log in logs:
+        log["is_ipv6"] = True
+        log["p_type"] = "hosting"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    # Seed rollup data so the pre-check would PASS if window were wide
+    # enough — the test is whether the window-size gate fires first.
+    _seed_count_rollup(cache_root, "is_ipv6", hours_back=2, value_counts={"true": 100})
+    _seed_count_rollup(cache_root, "p_type", hours_back=2, value_counts={"hosting": 100})
+
+    from datetime import UTC, datetime, timedelta
+
+    # 24h window — below the 3-day gate threshold.
+    end = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start = (datetime.now(UTC) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    live_ipv6_fired = {"n": 0}
+    live_proxy_fired = {"n": 0}
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str):
+            if "CASE WHEN is_ipv6" in sql and "FROM t_" in sql:
+                live_ipv6_fired["n"] += 1
+            if "SELECT p_type, count(*)" in sql and "FROM t_" in sql:
+                live_proxy_fired["n"] += 1
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start,
+        end_time=end,
+        filters={},
+    )
+
+    # Gate kept ipv6 + p_type in the temp; live SQL paths fired even
+    # though rollup data existed.
+    assert live_ipv6_fired["n"] >= 1, (
+        "live IPV6_ADOPTION_TS did NOT fire on a 24h window — small-window gate regression"
+    )
+    assert live_proxy_fired["n"] >= 1, (
+        "live PROXY_TYPE_DIST did NOT fire on a 24h window — small-window gate regression"
+    )
+    # Response well-formed (cards present + non-empty per the seeded data).
+    assert "ipv6_adoption" in result
+    assert "proxy_dist" in result
+
+
+def test_security_aggregates_window_gate_keeps_ipv6_ptype_in_temp_on_small_window(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """Companion to the rollup-skip test above: when the window is
+    below the gate threshold, the catalog temp KEEPS is_ipv6 + p_type
+    in its projection so the live SQL fallback can scan them. Pinned
+    because dropping the cols on small windows would break the live
+    path (BinderException on `is_ipv6` / `p_type` not in temp).
+    """
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=5)
+    for log in logs:
+        log["is_ipv6"] = False
+        log["p_type"] = "hosting"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    # Rollup data exists — would normally pass the coverage pre-check.
+    _seed_count_rollup(cache_root, "is_ipv6", hours_back=2, value_counts={"false": 50})
+    _seed_count_rollup(cache_root, "p_type", hours_back=2, value_counts={"hosting": 50})
+
+    from datetime import UTC, datetime, timedelta
+
+    end = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start = (datetime.now(UTC) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    create_sqls: list[str] = []
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "CREATE TEMP TABLE" in sql:
+            create_sqls.append(sql)
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start,
+        end_time=end,
+        filters={},
+    )
+
+    catalog_creates = [s for s in create_sqls if "tls_ciphers_sha" in s]
+    assert catalog_creates, "didn't capture any catalog temp create — fixture issue"
+    catalog_sql = catalog_creates[0]
+    assert "is_ipv6" in catalog_sql, (
+        "is_ipv6 missing from temp on small-window — gate didn't keep it "
+        "in the projection; live SQL would BinderException"
+    )
+    assert "p_type" in catalog_sql, (
+        "p_type missing from temp on small-window — gate didn't keep it "
+        "in the projection; live SQL would BinderException"
+    )
+
+
+# ── Section selector (P-4 slice 1) ───────────────────────────────────────────
+
+
+def test_security_aggregates_sections_none_preserves_full_response(in_memory_duckdb, test_service_source):
+    """sections=None must return every section the full-response path
+    produces today — the zero-risk default for callers that haven't
+    opted into the selector."""
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        sections=None,
+    )
+
+    full_section_keys = {
+        "verified_bots_ts",
+        "ngwaf_verified_bots",
+        "ngwaf_verified_bots_ts",
+        "wellknown_bots",
+        "tls_fingerprints",
+        "fingerprint_coverage",
+        "req_size_dist",
+        "top_ips_header",
+        "ipv6_adoption",
+        "proxy_dist",
+        "conn_reuse_dist",
+    }
+    assert full_section_keys.issubset(result.keys()), (
+        f"sections=None should keep the full response shape; missing: {full_section_keys - result.keys()}"
+    )
+
+
+def test_security_aggregates_single_section_emits_only_requested(in_memory_duckdb, test_service_source):
+    """sections=['ipv6_adoption'] returns ONLY ipv6_adoption among the
+    13 selectable sections — proves the gates suppress the unrequested
+    SQL + skip the result-dict writes."""
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=10)
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        sections={"ipv6_adoption"},
+    )
+
+    all_section_keys = {
+        "verified_bots_ts",
+        "ngwaf_verified_bots",
+        "ngwaf_verified_bots_ts",
+        "wellknown_bots",
+        "tls_fingerprints",
+        "fingerprint_coverage",
+        "req_size_dist",
+        "top_ips_header",
+        "ipv6_adoption",
+        "proxy_dist",
+        "conn_reuse_dist",
+    }
+    present = all_section_keys & result.keys()
+    assert present == {"ipv6_adoption"}, f"single-section request leaked extra section keys; got {present}"
+    # Timer + telemetry envelopes always survive the selector — the
+    # frontend needs them on every response.
+    assert "section_timings" in result
+    assert "debug_queries" in result
+
+
+def test_security_aggregates_multi_section_respects_fingerprint_coupling(in_memory_duckdb, test_service_source):
+    """Multi-section request honors the fingerprint-card → coverage
+    coupling: requesting tls_fingerprints causes fingerprint_coverage to
+    be auto-computed (the router boundary enforces this — the repo layer
+    just trusts the expanded set).
+    """
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    for i, log in enumerate(logs):
+        log["tls_ciphers_sha"] = "abc123" if i < 10 else "def456"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    # The router auto-expands FP card requests to include
+    # fingerprint_coverage; emulate that expansion here so this test
+    # exercises the repo gate in the same shape the router produces.
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        sections={"tls_fingerprints", "fingerprint_coverage"},
+    )
+
+    all_section_keys = {
+        "verified_bots_ts",
+        "ngwaf_verified_bots",
+        "ngwaf_verified_bots_ts",
+        "wellknown_bots",
+        "tls_fingerprints",
+        "fingerprint_coverage",
+        "req_size_dist",
+        "top_ips_header",
+        "ipv6_adoption",
+        "proxy_dist",
+        "conn_reuse_dist",
+    }
+    present = all_section_keys & result.keys()
+    assert present == {"tls_fingerprints", "fingerprint_coverage"}, (
+        f"multi-section request leaked or dropped keys; got {present}"
+    )
+    # ipv6_adoption was NOT requested, so it must NOT appear in the result —
+    # proves the selector skipped its live SQL branch.
+    assert "ipv6_adoption" not in result

@@ -4,8 +4,25 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.routers.services import core as services_core
 
 client = TestClient(app)
+
+
+def _seed_cache(service_id: str, **overrides) -> dict:
+    """Drop a known payload into the logging-settings cache and return it."""
+    payload = {
+        "prefix": "stale_prefix",
+        "period": 60,
+        "sample_rate": 100,
+        "edge_only": False,
+        "custom_condition": "",
+        "format_match": False,
+        "version": 1,
+    }
+    payload.update(overrides)
+    services_core._logging_settings_cache[service_id] = payload
+    return payload
 
 
 @patch("backend.config.load_config")
@@ -141,3 +158,112 @@ def test_update_logging_settings_passes_custom_condition(
 
     # Verify it was saved to disk
     assert fake_disk_state["provisioning"]["custom_condition"] == 'req.http.x-test == "1"'
+
+
+@patch("backend.config.load_config")
+@patch("backend.config.save_config")
+@patch("backend.provision.update_logging_endpoint")
+@patch("backend.core.duckdb.get_source_for_service")
+def test_update_pre_warms_cache_on_changed_with_format(
+    mock_get_source, mock_update, mock_save_config, mock_load_config
+):
+    """A successful Fastly mutation with update_format=true pre-warms the
+    GET cache so the next read skips the 2-3 round-trip cold path."""
+    mock_get_source.return_value = None
+    mock_load_config.return_value = {
+        "service_id": "svc-prewarm",
+        "log_period": 60,
+        "provisioning": {"sample_rate": 100, "edge_only": False},
+    }
+
+    def fake_generator(cfg, token):
+        yield {"type": "status", "message": "starting"}
+        yield {"type": "done", "changed": True, "version": 42}
+
+    mock_update.side_effect = fake_generator
+
+    _seed_cache("svc-prewarm", version=1, format_match=False, period=60)
+
+    response = client.post(
+        "/api/services/svc-prewarm/logging-settings/update",
+        params={
+            "period": 120,
+            "sample_rate": 25,
+            "prefix": "newpfx",
+            "edge_only": True,
+            "custom_condition": 'req.http.x == "1"',
+            "update_format": True,
+        },
+    )
+    assert response.status_code == 200
+
+    cached = services_core._logging_settings_cache.get("svc-prewarm")
+    assert cached is not None, "cache must be pre-warmed, not popped"
+    assert cached["period"] == 120
+    assert cached["sample_rate"] == 25
+    assert cached["prefix"] == "newpfx"
+    assert cached["edge_only"] is True
+    assert cached["custom_condition"] == 'req.http.x == "1"'
+    assert cached["format_match"] is True
+    assert cached["version"] == 42
+
+
+@patch("backend.config.load_config")
+@patch("backend.config.save_config")
+@patch("backend.provision.update_logging_endpoint")
+@patch("backend.core.duckdb.get_source_for_service")
+def test_update_leaves_cache_on_no_change(mock_get_source, mock_update, mock_save_config, mock_load_config):
+    """changed=False means Fastly applied no diff; the cached payload is
+    still consistent with deployed state and must not be popped."""
+    mock_get_source.return_value = None
+    mock_load_config.return_value = {
+        "service_id": "svc-nochange",
+        "log_period": 60,
+        "provisioning": {"sample_rate": 100, "edge_only": False},
+    }
+
+    def fake_generator(cfg, token):
+        yield {"type": "done", "changed": False, "version": 7}
+
+    mock_update.side_effect = fake_generator
+
+    seeded = _seed_cache("svc-nochange", version=7, format_match=True, period=60)
+
+    response = client.post(
+        "/api/services/svc-nochange/logging-settings/update",
+        params={"period": 60, "sample_rate": 100, "update_format": True},
+    )
+    assert response.status_code == 200
+
+    cached = services_core._logging_settings_cache.get("svc-nochange")
+    assert cached == seeded, "no-op save must leave the cache untouched"
+
+
+@patch("backend.config.load_config")
+@patch("backend.config.save_config")
+@patch("backend.provision.update_logging_endpoint")
+@patch("backend.core.duckdb.get_source_for_service")
+def test_update_pops_cache_when_format_not_deployed(mock_get_source, mock_update, mock_save_config, mock_load_config):
+    """changed=True without update_format=true means we can't prove the
+    cached format_match still holds — fall back to invalidation."""
+    mock_get_source.return_value = None
+    mock_load_config.return_value = {
+        "service_id": "svc-fallback",
+        "log_period": 60,
+        "provisioning": {"sample_rate": 100, "edge_only": False},
+    }
+
+    def fake_generator(cfg, token):
+        yield {"type": "done", "changed": True, "version": 9}
+
+    mock_update.side_effect = fake_generator
+
+    _seed_cache("svc-fallback", version=8, format_match=True)
+
+    response = client.post(
+        "/api/services/svc-fallback/logging-settings/update",
+        params={"period": 120, "update_format": False},
+    )
+    assert response.status_code == 200
+
+    assert services_core._logging_settings_cache.get("svc-fallback") is None

@@ -13,8 +13,9 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { client, extractApiError } from '@/lib/api'
+import { client } from '@/lib/api'
 
+import { useShareMutation } from './useShareMutation'
 import { formatStamp, type RateLimitFailure, type RateLimitLockout, type ShareStatus } from './utils'
 
 interface SessionsPanelProps {
@@ -24,7 +25,7 @@ interface SessionsPanelProps {
 }
 
 export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps) {
-  const [busy, setBusy] = React.useState(false)
+  const { busy, run } = useShareMutation(onError, onRefresh)
 
   const lockoutsByIp = React.useMemo(() => {
     const map = new Map<string, RateLimitLockout>()
@@ -38,19 +39,12 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
     return map
   }, [status?.rate_limits?.failures])
 
-  const handleBootSession = async (sid: string) => {
-    setBusy(true)
-    try {
-      await client.POST('/api/admin/share/sessions/{session_id}/boot' as any, {
+  const handleBootSession = (sid: string) =>
+    run(() =>
+      client.POST('/api/admin/share/sessions/{session_id}/boot' as any, {
         params: { path: { session_id: sid } },
-      } as any)
-      await onRefresh()
-    } catch (e: any) {
-      onError(extractApiError(e))
-    } finally {
-      setBusy(false)
-    }
-  }
+      } as any),
+    )
 
   const sessions = status?.sessions || []
 

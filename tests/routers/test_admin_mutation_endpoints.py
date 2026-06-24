@@ -335,7 +335,9 @@ def test_download_file_502s_when_fos_raises(client, test_service_source):
             params={"key": "x"},
         )
     assert resp.status_code == 502
-    assert "creds expired" in resp.json()["detail"]["error"]
+    detail = resp.json()["detail"]
+    assert detail["error"] == "fos_fetch_failed"
+    assert "error_id" in detail
 
 
 def test_download_file_fails_on_sibling_prefix_partial_match(client, test_service_source):
@@ -379,7 +381,7 @@ def test_commit_iceberg_starts_commit_in_background(client):
     ):
         resp = client.post("/api/admin/commit-iceberg", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     body = resp.json()
     assert body["run_id"] == "commit-run-789"
     assert started["task"] == "commit"
@@ -398,7 +400,7 @@ def test_commit_iceberg_returns_existing_run_when_already_running(client, test_s
     finally:
         _run_metadata.clear()
 
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     assert resp.json()["run_id"] == "existing-commit"
 
 
@@ -447,7 +449,7 @@ def test_rebuild_local_view_clears_caches_and_spawns_sync(client, tmp_path):
     ):
         resp = client.post("/api/admin/rebuild-local-view", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     body = resp.json()
     assert body["ok"] is True
     assert body["run_id"] == "rebuild-run-1"
@@ -510,7 +512,7 @@ def test_purge_usage_log_calls_metadata_db_clear(client, test_service_source):
     """DELETE clears all usage_log rows for the service. Pinned because
     the FE renders a confirmation "all entries cleared" on this 200
     — silent no-op would mislead admins into thinking the clear failed."""
-    with patch("backend.core.metadata_db.clear_usage_log") as mock_clear:
+    with patch("backend.core.metadata.clear_usage_log") as mock_clear:
         resp = client.delete("/api/admin/usage-log", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
     assert resp.status_code == 200
@@ -753,7 +755,7 @@ def test_usage_log_export_returns_csv_attachment_with_correct_filename(client):
             "status": "OK",
         }
     ]
-    with patch("backend.core.metadata_db.get_usage_logs", return_value=(fake_rows, 1, {})):
+    with patch("backend.core.metadata.iter_usage_logs_chunks", return_value=iter([fake_rows])):
         resp = client.get(
             "/api/admin/usage-log/export",
             headers={"x-fastly-service-id": MOCK_SERVICE_ID},
@@ -794,7 +796,7 @@ def test_usage_log_export_includes_header_row_and_data_rows(client):
             "status": "OK",
         },
     ]
-    with patch("backend.core.metadata_db.get_usage_logs", return_value=(fake_rows, 2, {})):
+    with patch("backend.core.metadata.iter_usage_logs_chunks", return_value=iter([fake_rows])):
         resp = client.get(
             "/api/admin/usage-log/export",
             headers={"x-fastly-service-id": MOCK_SERVICE_ID},
@@ -816,7 +818,7 @@ def test_usage_log_export_returns_just_header_when_no_rows(client):
     """No rows in the time range → CSV with just the header (not
     error). Pinned because the FE renders an empty download as
     success — losing this would 500 on empty service days."""
-    with patch("backend.core.metadata_db.get_usage_logs", return_value=([], 0, {})):
+    with patch("backend.core.metadata.iter_usage_logs_chunks", return_value=iter([])):
         resp = client.get(
             "/api/admin/usage-log/export",
             headers={"x-fastly-service-id": MOCK_SERVICE_ID},
@@ -829,6 +831,57 @@ def test_usage_log_export_returns_just_header_when_no_rows(client):
     # No data rows means just one line (or possibly empty after header)
     lines = [line for line in text.splitlines() if line.strip()]
     assert len(lines) == 1
+
+
+def test_usage_log_export_escapes_formula_triggers_with_leading_whitespace(client):
+    """Finding 015: the CSV export prepended ``'`` to any cell whose first
+    character was a formula trigger (=, +, -, @) to defang spreadsheet-side
+    formula injection. The check used ``str.startswith`` directly, so a
+    payload like ``" =cmd|' /C calc.exe'!A0"`` (with one leading space) slipped
+    past — Excel/Sheets strip leading whitespace before evaluating, so the
+    formula still detonated on import. The fix uses ``v.lstrip().startswith``
+    so whitespace-prefixed triggers get the same defensive ``'`` prefix."""
+    fake_rows = [
+        {
+            "timestamp": "2026-05-18T00:00:00Z",
+            "service_id": "svc",
+            "operation_class": "Class A",
+            "operation_type": "PUT_OBJECT",
+            # Attacker-controlled URL field: leading whitespace + formula trigger.
+            "url": " =cmd|' /C calc.exe'!A0",
+            "bytes": 100,
+            "duration_ms": 1.0,
+            "function_name": "ingest",
+            "process_context": "cron",
+            "status": "OK",
+        },
+    ]
+    with patch("backend.core.metadata.iter_usage_logs_chunks", return_value=iter([fake_rows])):
+        resp = client.get(
+            "/api/admin/usage-log/export",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        )
+
+    text = resp.text
+    # The escaped variant is what the spreadsheet sees as a literal string,
+    # not as a formula. We don't pin the exact field-position because the
+    # column order can shift — just assert the defensive prefix landed on
+    # the malicious value.
+    assert "' =cmd|' /C calc.exe'!A0" in text or "\"' =cmd|' /C calc.exe'!A0\"" in text, (
+        f"whitespace-prefixed formula trigger must be defanged with a leading apostrophe; export text was:\n{text}"
+    )
+    # Negative assertion: the raw payload (without the leading apostrophe)
+    # must NOT appear, otherwise the export would still detonate on import.
+    # We have to be careful — the escaped form contains the original as a
+    # substring. Pin "the cell starts with a quoted apostrophe + space + ="
+    # by counting occurrences of the apostrophe form vs the raw form.
+    raw_count = text.count("=cmd|' /C calc.exe'!A0")
+    apostrophe_count = text.count("' =cmd|' /C calc.exe'!A0")
+    assert apostrophe_count >= 1
+    # Every occurrence of the raw substring must be preceded by the apostrophe.
+    assert raw_count == apostrophe_count, (
+        f"raw formula appeared {raw_count} times but only {apostrophe_count} are escaped"
+    )
 
 
 # ── _fetch_file_to_zip helper (new extraction) ────────────────────────────
@@ -1020,11 +1073,11 @@ def test_usage_log_export_passes_filter_params_to_metadata_db(client):
     silently export the unfiltered superset."""
     capture = {}
 
-    def fake_get_logs(**kwargs):
+    def fake_iter_chunks(**kwargs):
         capture.update(kwargs)
-        return ([], 0, {})
+        return iter([])
 
-    with patch("backend.core.metadata_db.get_usage_logs", side_effect=fake_get_logs):
+    with patch("backend.core.metadata.iter_usage_logs_chunks", side_effect=fake_iter_chunks):
         client.get(
             "/api/admin/usage-log/export",
             headers={"x-fastly-service-id": MOCK_SERVICE_ID},
@@ -1059,7 +1112,7 @@ def test_download_folder_returns_zip_with_attachment_disposition(client, test_se
 
     with (
         patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
-        patch("backend.routers.admin._fetch_file_to_zip"),  # never called for empty pages
+        patch("backend.routers.admin.downloads._fetch_file_to_zip"),  # never called for empty pages
     ):
         resp = client.get("/api/download-folder", params={"prefix": "subdir", "root": "raw"})
 
@@ -1078,7 +1131,7 @@ def test_download_folder_uses_root_as_filename_when_prefix_empty(client, test_se
 
     with (
         patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
-        patch("backend.routers.admin._fetch_file_to_zip"),
+        patch("backend.routers.admin.downloads._fetch_file_to_zip"),
     ):
         resp = client.get("/api/download-folder", params={"prefix": "", "root": "raw"})
 
@@ -1092,7 +1145,7 @@ def test_download_folder_invokes_fetch_for_each_listed_object(in_memory_duckdb):
     missing logs)."""
     from fastapi.testclient import TestClient
 
-    from backend.deps import get_con, get_meta_con, get_source
+    from backend.deps import get_con, get_source
     from backend.main import app
 
     src_with_bucket = {"name": "test_service", "service_id": "tsid", "bucket": "my-bucket"}
@@ -1105,13 +1158,13 @@ def test_download_folder_invokes_fetch_for_each_listed_object(in_memory_duckdb):
     fetch_calls = []
 
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
-    app.dependency_overrides[get_meta_con] = lambda: in_memory_duckdb
+    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: src_with_bucket
     try:
         with (
             patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
             patch(
-                "backend.routers.admin._fetch_file_to_zip",
+                "backend.routers.admin.downloads._fetch_file_to_zip",
                 side_effect=lambda *a, **k: fetch_calls.append(a[3]),  # 4th arg is the key
             ),
             TestClient(app) as c,
@@ -1168,7 +1221,7 @@ def test_download_all_returns_zip_with_service_named_filename(client, test_servi
             patch("backend.core.duckdb.get_source_for_service", return_value=src),
             patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc-123"}),
             patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
-            patch("backend.routers.admin._fetch_file_to_zip"),
+            patch("backend.routers.admin.downloads._fetch_file_to_zip"),
         ):
             resp = client.get("/api/download-all", params={"service_id": "svc-123"})
     finally:
@@ -1180,6 +1233,69 @@ def test_download_all_returns_zip_with_service_named_filename(client, test_servi
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
     assert 'filename="fastly_logs_svc-123.zip"' in resp.headers.get("content-disposition", "")
+
+
+def test_download_all_rejects_path_traversal_in_prefix(client, tmp_path):
+    """Finding Jun14-003: ``download_all_files`` joined ``src["prefix"]``
+    to the per-service cache dir without canonicalising the result, so a
+    config with a hostile prefix like ``../../etc`` would walk the
+    backend filesystem and zip up arbitrary files (the prefix is
+    persisted to ``configs/{id}.json`` and stays attacker-controlled if
+    a config-update endpoint is misconfigured). Real-path resolution
+    + ``commonpath`` rejection now contains the walk to the service's
+    own cache subtree."""
+    from backend.deps import get_service_id, get_source
+    from backend.main import app
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    # Create a file OUTSIDE the cache dir to verify it never makes the zip.
+    sibling = tmp_path / "secret_outside_cache.txt"
+    sibling.write_bytes(b"do not include")
+
+    src = {
+        "name": "svc-trav",
+        "service_id": "svc-trav",
+        "duckdb_path": str(tmp_path / "x.duckdb"),
+        "bucket": "b",
+        # Prefix with a traversal: with the buggy code this resolved to
+        # the parent of cache_dir and walked it; with the fix it gets
+        # rejected by the commonpath check, raising "invalid prefix"
+        # from the worker (which translates to 500 — at least it doesn't
+        # leak the sibling file).
+        "prefix": "../../",
+    }
+
+    old_source = app.dependency_overrides.pop(get_source, None)
+    old_sid = app.dependency_overrides.pop(get_service_id, None)
+    try:
+        with (
+            patch("backend.core.duckdb.get_source_for_service", return_value=src),
+            patch("backend.config.load_config", return_value={"name": "svc-trav", "service_id": "svc-trav"}),
+            patch("backend.core.duckdb._cache_dir", return_value=str(cache_dir)),
+        ):
+            resp = client.get("/api/download-all", params={"service_id": "svc-trav", "include": "local"})
+            body = b"".join(resp.iter_bytes())
+    finally:
+        if old_source is not None:
+            app.dependency_overrides[get_source] = old_source
+        if old_sid is not None:
+            app.dependency_overrides[get_service_id] = old_sid
+
+    # Even on success (200), the sibling file MUST NOT appear in the zip.
+    import io
+    import zipfile
+
+    if resp.status_code == 200 and body:
+        try:
+            with zipfile.ZipFile(io.BytesIO(body)) as zf:
+                names = set(zf.namelist())
+        except zipfile.BadZipFile:
+            names = set()
+        for name in names:
+            assert "secret_outside_cache" not in name, (
+                f"path-traversal prefix leaked outside the cache dir; zip contained: {name}"
+            )
 
 
 def test_download_all_local_mode_zips_duckdb_and_cache_files(client, tmp_path, test_service_source):
@@ -1344,23 +1460,34 @@ def test_sync_status_503s_on_db_busy_error(client, test_service_source):
     assert resp.status_code == 503
     body = resp.json()
     assert body["detail"]["busy"] is True
-    assert "locked" in body["detail"]["error"]
+    # Error code shifted "locked" → "db_busy" when the envelope refactor
+    # (commit f0f206b → 08149c9) routed this branch through make_error
+    # for the unified {"error": code} shape.
+    assert body["detail"]["error"] == "db_busy"
 
 
 def test_sync_status_500s_on_unexpected_exception(client, test_service_source):
-    """Any other exception → 500 with the message. Pinned because
-    losing this would surface a 200 with garbage data (the
-    `with_telemetry` wrapper wouldn't be reached)."""
+    """Any non-DBBusyError exception → 500 with the ``raise_internal``
+    shape (generic ``error`` code + ``error_id``, no leaked exception
+    string). Pinned because losing this would surface a 200 with
+    garbage data (the `with_telemetry` wrapper wouldn't be reached) —
+    and pinning the leak shape prevents a regression that puts the
+    raw exception back on the wire (e.g. a DuckDB stack frame
+    revealing filesystem paths)."""
     src = {"name": "test_service", "service_id": "test-service-id"}
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.duckdb.get_connection", side_effect=RuntimeError("disk full")),
+        patch("backend.core.duckdb.get_connection", side_effect=RuntimeError("disk full at /mnt/internal/path")),
     ):
         resp = client.get("/api/sync-status")
 
     assert resp.status_code == 500
-    assert "disk full" in resp.json()["detail"]["error"]
+    body = resp.json()["detail"]
+    assert body["error"] == "sync_status_failed"
+    assert "error_id" in body
+    assert "disk full" not in body["error"]
+    assert "/mnt/internal" not in str(body)
 
 
 def test_stream_from_worker_disconnect_closes_worker_thread():
@@ -1368,9 +1495,8 @@ def test_stream_from_worker_disconnect_closes_worker_thread():
     the background thread is notified via ClientDisconnected and exits cleanly
     instead of blocking indefinitely on a full queue.
     """
-    import time
-
     from backend.routers.admin import ClientDisconnected, _stream_from_worker
+    from tests.utils.polling import wait_until
 
     thread_failed = []
     thread_success = []
@@ -1392,8 +1518,62 @@ def test_stream_from_worker_disconnect_closes_worker_thread():
     # Simulate client disconnect by closing the generator
     gen.close()
 
-    # Give the thread a moment to execute its next put and catch ClientDisconnected
-    time.sleep(0.1)
+    wait_until(lambda: bool(thread_success or thread_failed), timeout=1.0)
 
     assert thread_success == [True]
     assert thread_failed == []
+
+
+def test_usage_log_export_caps_at_max_rows_across_5k_chunks(client):
+    """d180c4c bounded the export via max_rows; the keyset rewrite pushed
+    the chunking logic into iter_usage_logs_chunks. Pin (a) max_rows +
+    chunk_size kwargs reach the helper, (b) the streaming loop emits
+    exactly the rows the helper yielded — so a regression that drops
+    the max_rows kwarg can't silently over-fetch."""
+    captured_kwargs: dict = {}
+
+    def make_row(i: int) -> dict:
+        return {
+            "timestamp": f"2026-05-18T{i // 60:02d}:{i % 60:02d}:00Z",
+            "service_id": "svc",
+            "operation_class": "Class B",
+            "operation_type": "GET_OBJECT",
+            "url": f"https://x.example/raw/{i}.gz",
+            "bytes": 100,
+            "duration_ms": 1.0,
+            "function_name": "fetch",
+            "process_context": "ui",
+            "status": "OK",
+        }
+
+    def fake_iter_chunks(**kwargs):
+        captured_kwargs.update(kwargs)
+        yield [make_row(i) for i in range(5000)]
+        yield [make_row(i) for i in range(5000, 10000)]
+        yield [make_row(i) for i in range(10000, 12000)]
+
+    with patch("backend.core.metadata.iter_usage_logs_chunks", side_effect=fake_iter_chunks):
+        resp = client.get(
+            "/api/admin/usage-log/export",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            params={"max_rows": 12000},
+        )
+
+    assert resp.status_code == 200
+    assert captured_kwargs.get("max_rows") == 12000
+    assert captured_kwargs.get("chunk_size") == 5000
+    # Body has 12000 data rows + 1 header row.
+    data_lines = [ln for ln in resp.text.split("\n") if ln]
+    assert len(data_lines) == 12001
+
+
+def test_usage_log_export_rejects_max_rows_above_ceiling(client):
+    """The le=1_000_000 upper bound prevents callers from un-doing the
+    cap. FastAPI's Query validator returns 422 before the handler
+    runs (so no get_usage_logs call is made)."""
+    resp = client.get(
+        "/api/admin/usage-log/export",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        params={"max_rows": 5_000_000},
+    )
+    assert resp.status_code == 422

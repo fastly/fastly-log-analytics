@@ -162,15 +162,21 @@ def test_validate_does_not_persist_to_cfg(seeded_service):
 
 
 def test_validate_rejects_non_string_body(seeded_service):
-    """body.regex must be a string — int / null / array → 400 with a
-    clear message, same shape as the PUT endpoint."""
+    """body.regex must be a string — int / null / array → 422 from the
+    Pydantic body validator, matching the body/query validation
+    classification (see commit 3c036cf)."""
     with TestClient(app) as c:
         r = c.post(
             f"/api/services/{_SERVICE_ID}/scoring/exclude-regex/validate",
             json={"regex": 42},
         )
-    assert r.status_code == 400
-    assert "string" in r.json()["detail"]["error"]
+    assert r.status_code == 422
+    # Pydantic envelope is a list of error objects under detail; pin the
+    # field name + the string-input expectation so a future schema change
+    # surfaces here rather than masquerading as a generic 422.
+    errors = r.json()["detail"]
+    assert any(e.get("loc", [])[-1] == "regex" for e in errors)
+    assert any("string" in e.get("msg", "").lower() for e in errors)
 
 
 def test_get_reports_is_default_when_literal_default_stored(seeded_service):
@@ -286,7 +292,7 @@ def test_put_happy_path_with_stubbed_orchestrator(seeded_service):
             "backend.provision.session_scoring_orchestrator.update_recv_exclusion_regex",
             return_value=fake_result,
         ) as stub_update,
-        patch("backend.core.metadata_db.record_scoring_audit") as stub_audit,
+        patch("backend.core.metadata.record_scoring_audit") as stub_audit,
     ):
         r = c.put(
             f"/api/services/{_SERVICE_ID}/scoring/exclude-regex",
@@ -324,7 +330,7 @@ def test_put_reset_to_default(seeded_service):
             "backend.provision.session_scoring_orchestrator.update_recv_exclusion_regex",
             return_value=fake_result,
         ),
-        patch("backend.core.metadata_db.record_scoring_audit"),
+        patch("backend.core.metadata.record_scoring_audit"),
     ):
         r = c.put(
             f"/api/services/{_SERVICE_ID}/scoring/exclude-regex",

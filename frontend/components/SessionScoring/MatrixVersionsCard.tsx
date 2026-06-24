@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import {
   Table,
   TableBody,
@@ -64,7 +65,7 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
   const qc = useQueryClient()
   const [pendingVersion, setPendingVersion] = React.useState<string | null>(null)
   const [restoreResult, setRestoreResult] = React.useState<RestoreResponse | null>(null)
-  const [copied, setCopied] = React.useState(false)
+  const { copied, copy: copyText } = useCopyToClipboard(1500)
 
   const { data, isLoading, isFetching, isError, error } = useQuery({
     queryKey: ['scoring-matrix-versions', serviceId],
@@ -113,10 +114,7 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
   })
 
   const onCopyHint = () => {
-    if (!restoreResult?.deploy_hint) return
-    navigator.clipboard.writeText(restoreResult.deploy_hint)
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 1500)
+    if (restoreResult?.deploy_hint) copyText(restoreResult.deploy_hint)
   }
 
   if (isError) {
@@ -221,6 +219,7 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
               <Button
                 variant="ghost"
                 size="icon"
+                aria-label={copied ? 'Copied deploy command' : 'Copy deploy command'}
                 className="h-6 w-6 hover:bg-muted-foreground/10"
                 onClick={onCopyHint}
                 title={copied ? 'Copied!' : 'Copy to clipboard'}
