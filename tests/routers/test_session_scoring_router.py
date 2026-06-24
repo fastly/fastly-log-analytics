@@ -19,6 +19,10 @@ LOG_SVC = "TestScoringRouterSvc"
 
 @pytest.fixture
 def client():
+    """Plain TestClient(app) — deliberately shadows conftest's ``client``
+    fixture (which installs DuckDB/source dependency overrides) because
+    these tests mock ``backend.config.load_config`` directly and don't
+    need the in-memory DB plumbing."""
     return TestClient(app)
 
 
@@ -32,9 +36,11 @@ def _clear_analytics_cache_between_tests():
 
     _ss._analytics_cache.clear()
     _ss._inflight.clear()
+    _ss._scoring_svc_version_cache.clear()
     yield
     _ss._analytics_cache.clear()
     _ss._inflight.clear()
+    _ss._scoring_svc_version_cache.clear()
 
 
 @pytest.fixture
@@ -86,6 +92,59 @@ def test_status_returns_block_when_enabled(client, with_config):
     assert body["scoring_service_id"] == "scoring_xyz"
 
 
+def test_status_includes_active_version_when_token_present(client, with_config):
+    """When the config has a fastly_api_key + scoring_service_id, the status
+    endpoint surfaces the scoring Compute service's live active version and
+    activation timestamp (best-effort via the Fastly API)."""
+    with_config[LOG_SVC] = {
+        "service_id": LOG_SVC,
+        "fastly_api_key": "tok_abc123",
+        "scoring": {"enabled": True, "scoring_service_id": "scoring_present"},
+    }
+    with patch(
+        "backend.core.fastly.service.get_active_version_info",
+        return_value={"number": 42, "updated_at": "2026-06-17T18:41:04Z", "created_at": "2026-06-17T18:40:00Z"},
+    ) as mock_info:
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["scoring_active_version"] == 42
+    assert body["scoring_activated_at"] == "2026-06-17T18:41:04Z"
+    mock_info.assert_called_once_with("scoring_present", "tok_abc123")
+
+
+def test_status_omits_active_version_without_token(client, with_config):
+    """No fastly_api_key → no Fastly call, no version fields (the status page
+    still works on a scrubbed/local config that has the IDs but no token)."""
+    with_config[LOG_SVC] = {
+        "service_id": LOG_SVC,
+        "scoring": {"enabled": True, "scoring_service_id": "scoring_notoken"},
+    }
+    with patch("backend.core.fastly.service.get_active_version_info") as mock_info:
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert "scoring_active_version" not in body
+    assert "scoring_activated_at" not in body
+    mock_info.assert_not_called()
+
+
+def test_status_survives_fastly_lookup_failure(client, with_config):
+    """A Fastly error during the active-version lookup must not break the
+    status page — the version fields are simply omitted."""
+    with_config[LOG_SVC] = {
+        "service_id": LOG_SVC,
+        "fastly_api_key": "tok_abc123",
+        "scoring": {"enabled": True, "scoring_service_id": "scoring_fail"},
+    }
+    with patch("backend.core.fastly.service.get_active_version_info", side_effect=RuntimeError("fastly down")):
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["enabled"] is True
+    assert "scoring_active_version" not in body
+
+
 def test_status_strips_aes_key_if_somehow_present(client, with_config):
     """Belt-and-suspenders: the AES key should never be in cfg, but if it
     is the status endpoint must not echo it back."""
@@ -102,9 +161,95 @@ def test_status_strips_aes_key_if_somehow_present(client, with_config):
     assert "aes_key_hex" not in r.json()
 
 
+# ── /scoring/status: edge drift ───────────────────────────────────────────────
+
+_SHIPPED = "backend.provision.session_scoring_orchestrator.shipped_scorer_identity"
+
+
+def _enabled_cfg(**scoring):
+    base = {"enabled": True, "scoring_service_id": "scoring_drift"}
+    base.update(scoring)
+    return {"service_id": LOG_SVC, "scoring": base}
+
+
+def test_status_scorer_drift_true_when_wasm_sha_differs(client, with_config):
+    with_config[LOG_SVC] = _enabled_cfg(deployed_package_sha="old_pkg", deployed_vcl_sha="vcl1")
+    with patch(_SHIPPED, return_value={"package_sha": "new_pkg", "vcl_sha": "vcl1"}):
+        body = client.get(f"/api/services/{LOG_SVC}/scoring/status").json()
+    assert body["scorer_drift"] is True
+    assert body["drift_detail"] == "wasm"
+
+
+def test_status_scorer_drift_true_when_vcl_sha_differs(client, with_config):
+    with_config[LOG_SVC] = _enabled_cfg(deployed_package_sha="pkg1", deployed_vcl_sha="old_vcl")
+    with patch(_SHIPPED, return_value={"package_sha": "pkg1", "vcl_sha": "new_vcl"}):
+        body = client.get(f"/api/services/{LOG_SVC}/scoring/status").json()
+    assert body["scorer_drift"] is True
+    assert body["drift_detail"] == "vcl"
+
+
+def test_status_scorer_drift_reports_both_parts(client, with_config):
+    with_config[LOG_SVC] = _enabled_cfg(deployed_package_sha="old_pkg", deployed_vcl_sha="old_vcl")
+    with patch(_SHIPPED, return_value={"package_sha": "new_pkg", "vcl_sha": "new_vcl"}):
+        body = client.get(f"/api/services/{LOG_SVC}/scoring/status").json()
+    assert body["scorer_drift"] is True
+    assert body["drift_detail"] == "wasm+vcl"
+
+
+def test_status_no_drift_when_hashes_match(client, with_config):
+    with_config[LOG_SVC] = _enabled_cfg(deployed_package_sha="pkg1", deployed_vcl_sha="vcl1")
+    with patch(_SHIPPED, return_value={"package_sha": "pkg1", "vcl_sha": "vcl1"}):
+        body = client.get(f"/api/services/{LOG_SVC}/scoring/status").json()
+    assert body["scorer_drift"] is False
+    assert body["drift_detail"] is None
+
+
+def test_status_no_drift_when_stamp_absent(client, with_config):
+    """A service enabled before drift-stamping shipped has no stamp → unknown,
+    not stale. Don't nag with a false 'redeploy needed' badge."""
+    with_config[LOG_SVC] = _enabled_cfg()  # no deployed_*_sha
+    with patch(_SHIPPED, return_value={"package_sha": "anything", "vcl_sha": "anything"}):
+        body = client.get(f"/api/services/{LOG_SVC}/scoring/status").json()
+    assert body["scorer_drift"] is False
+    assert body["drift_detail"] is None
+
+
+def test_status_drift_check_survives_exception(client, with_config):
+    """A failure computing the shipped identity must not break the status panel."""
+    with_config[LOG_SVC] = _enabled_cfg(deployed_package_sha="pkg1", deployed_vcl_sha="vcl1")
+    with patch(_SHIPPED, side_effect=RuntimeError("hash boom")):
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["enabled"] is True
+    assert body["scorer_drift"] is False
+    assert body["drift_detail"] is None
+
+
 def test_status_404_on_unknown_service(client, with_config):
     r = client.get("/api/services/does-not-exist/scoring/status")
     assert r.status_code == 404
+
+
+def test_scoring_admin_routes_reject_service_id_with_invalid_chars(client):
+    """Defense in depth: the ``ServiceId`` Annotated type on every
+    /scoring/* admin endpoint rejects path params containing characters
+    outside ``[A-Za-z0-9_-]`` at the FastAPI boundary (422), so malformed
+    ids never reach load_config / SQL / filesystem code paths. The
+    application layer also rejects unknown ids (via load_config →
+    404), but this catches anything stage-shaped like ``svc;DROP`` or
+    ``svc.dot`` before the request handler even runs.
+
+    Use endpoints that have the ServiceId type guard — /scoring/status
+    is on the main session_scoring router (no guard); the admin routes
+    in session_scoring_admin.py are what we're pinning.
+    """
+    # Semicolon and dot both fall outside [A-Za-z0-9_-] but pass through
+    # FastAPI's route-matching (they're URL-safe inside a single segment).
+    r = client.get("/api/services/svc;DROP/scoring/threshold")
+    assert r.status_code == 422
+    r = client.get("/api/services/svc.dot/scoring/threshold")
+    assert r.status_code == 422
 
 
 # ── /scoring/enable: token resolution ────────────────────────────────────────
@@ -150,7 +295,7 @@ def test_enable_query_token_overrides_config_token(client, with_config):
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable?token=FROM_QUERY")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "FROM_QUERY"})
     assert r.status_code == 200
     assert captured_token["t"] == "FROM_QUERY"
 
@@ -185,7 +330,7 @@ def test_enable_streams_status_events_then_done(client, with_config):
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable?token=TOKEN")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "TOKEN"})
 
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
@@ -214,7 +359,7 @@ def test_enable_streams_error_event_on_orchestrator_failure(client, with_config)
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable?token=TOKEN")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "TOKEN"})
 
     assert r.status_code == 200  # streaming endpoint always 200; error is in the body
     events = [json.loads(line[len("data: ") :]) for line in r.text.splitlines() if line.startswith("data: ")]
@@ -242,7 +387,7 @@ def test_disable_streams_status_events_then_done(client, with_config):
         "backend.provision.orchestrator.run_with_events",
         side_effect=fake_run_with_events,
     ):
-        r = client.post(f"/api/services/{LOG_SVC}/scoring/disable?token=TOKEN")
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/disable", json={"token": "TOKEN"})
 
     assert r.status_code == 200
     events = [json.loads(line[len("data: ") :]) for line in r.text.splitlines() if line.startswith("data: ")]
@@ -279,7 +424,9 @@ def test_labels_create_400_when_sid_missing(client):
         json={"label": "bad"},
     )
     assert r.status_code == 400
-    assert "sid" in r.json()["detail"]["error"].lower()
+    body = r.json()["detail"]
+    assert body["error"] == "invalid_label"
+    assert "sid" in body["message"].lower()
 
 
 def test_labels_create_400_when_label_invalid(client):
@@ -355,13 +502,258 @@ def test_labels_delete_is_idempotent(client):
     assert r2.status_code == 200  # second delete no-ops cleanly
 
 
+# ── /scoring/labels analyst PII projection (audit R-4) ──────────────────────
+
+_LABEL_PII_KEYS = ("notes", "flagged_by", "sample_ip", "sample_ua", "sample_url")
+_LABEL_SAFE_KEYS = ("id", "service_id", "sid", "label", "created_at", "updated_at")
+
+
+def test_project_label_for_analyst_strips_pii_fields_only():
+    """The helper must strip exactly the PII fields and nothing else."""
+    from backend.routers.session_scoring import _project_label_for_analyst
+
+    full = {
+        "id": "abc",
+        "service_id": "svc",
+        "sid": "sid1",
+        "label": "bad",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "notes": "user@example.com flagged this",
+        "flagged_by": "analyst@example.com",
+        "sample_ip": "1.2.3.4",
+        "sample_ua": "Mozilla/5.0",
+        "sample_url": "/admin/super-secret-path",
+    }
+    out = _project_label_for_analyst(full)
+    for k in _LABEL_PII_KEYS:
+        assert k not in out, f"PII field {k!r} should be stripped"
+    for k in _LABEL_SAFE_KEYS:
+        assert k in out, f"safe field {k!r} should be kept"
+
+
+def test_labels_list_admin_returns_full_pii(client):
+    """Admin path (no analyst session) must still return PII for the
+    scoring-labels admin UI."""
+    client.post(
+        f"/api/services/{LOG_SVC}/scoring/labels",
+        json={
+            "sid": "admin-pii-test",
+            "label": "bad",
+            "notes": "n",
+            "sample_ip": "9.9.9.9",
+            "sample_ua": "ua",
+            "sample_url": "/x",
+        },
+    )
+    listing = client.get(f"/api/services/{LOG_SVC}/scoring/labels").json()
+    row = next(r for r in listing["labels"] if r["sid"] == "admin-pii-test")
+    # All PII fields present for admin
+    for k in _LABEL_PII_KEYS:
+        assert k in row, f"admin row missing {k!r}"
+    assert row["sample_ip"] == "9.9.9.9"
+    assert row["sample_url"] == "/x"
+
+
+def test_labels_list_analyst_omits_pii(client, monkeypatch):
+    """Analyst path must get rows without PII / operator-attribution fields.
+
+    Simulate by monkeypatching the analyst-detection helper to flip every
+    request into the analyst branch; this is the same shape the middleware
+    achieves by stamping request.state.analyst_session.
+    """
+    from backend.routers import session_scoring as _ss
+
+    client.post(
+        f"/api/services/{LOG_SVC}/scoring/labels",
+        json={"sid": "analyst-pii-test", "label": "bad", "notes": "n", "sample_ip": "1.1.1.1"},
+    )
+    monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
+    listing = client.get(f"/api/services/{LOG_SVC}/scoring/labels").json()
+    row = next(r for r in listing["labels"] if r["sid"] == "analyst-pii-test")
+    for k in _LABEL_PII_KEYS:
+        assert k not in row, f"analyst response should NOT include {k!r}"
+    for k in _LABEL_SAFE_KEYS:
+        assert k in row, f"analyst response should include {k!r}"
+
+
+def test_labels_create_response_analyst_omits_pii(client, monkeypatch):
+    """POST response (the echoed row) must also be projected for analyst."""
+    from backend.routers import session_scoring as _ss
+
+    monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
+    r = client.post(
+        f"/api/services/{LOG_SVC}/scoring/labels",
+        json={"sid": "analyst-post-test", "label": "good", "notes": "n", "sample_ip": "2.2.2.2"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    for k in _LABEL_PII_KEYS:
+        assert k not in body, f"analyst POST response should NOT include {k!r}"
+
+
+def test_labels_patch_response_analyst_omits_pii(client, monkeypatch):
+    """PATCH response must also be projected for analyst."""
+    from backend.routers import session_scoring as _ss
+
+    created = client.post(
+        f"/api/services/{LOG_SVC}/scoring/labels",
+        json={"sid": "analyst-patch-test", "label": "bad", "notes": "initial"},
+    ).json()
+    monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
+    r = client.patch(
+        f"/api/services/{LOG_SVC}/scoring/labels/{created['id']}",
+        json={"notes": "revised"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    for k in _LABEL_PII_KEYS:
+        assert k not in body, f"analyst PATCH response should NOT include {k!r}"
+
+
+def test_labels_create_analyst_does_not_persist_pii(client, monkeypatch):
+    """Finding 003 (run 80e9f210), defense-in-depth: the WRITE path must
+    strip operator-attribution / PII fields for analyst callers, not just
+    the response. (The middleware already blocks analyst writes to this
+    path; this is the belt-and-suspenders router-level gate, mirroring the
+    cross-tenant write gates.) Read the full row back via the labels module
+    to prove the analyst's injected values were never persisted."""
+    from backend.routers import session_scoring as _ss
+    from backend.scoring import labels as _labels
+
+    sid = "analyst-write-pii"
+    monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
+    r = client.post(
+        f"/api/services/{LOG_SVC}/scoring/labels",
+        json={
+            "sid": sid,
+            "label": "bad",
+            "notes": "injected",
+            "flagged_by": "spoofed-operator",
+            "sample_ip": "9.9.9.9",
+            "sample_ua": "evil-agent",
+            "sample_url": "/admin/secret",
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    stored = next(row for row in _labels.list_labels(LOG_SVC) if row["sid"] == sid)
+    assert stored["label"] == "bad"  # the legitimate classification still persists
+    assert stored["notes"] == ""
+    assert stored["flagged_by"] == "admin"  # model default, NOT "spoofed-operator"
+    assert stored["sample_ip"] == ""
+    assert stored["sample_ua"] == ""
+    assert stored["sample_url"] == ""
+
+
+def test_labels_patch_analyst_cannot_overwrite_notes(client, monkeypatch):
+    """Finding 003 (update path): an analyst PATCH must not modify ``notes``,
+    but may still change the label classification."""
+    from backend.routers import session_scoring as _ss
+    from backend.scoring import labels as _labels
+
+    sid = "analyst-patch-notes"
+    created = client.post(
+        f"/api/services/{LOG_SVC}/scoring/labels",
+        json={"sid": sid, "label": "bad", "notes": "admin-original"},
+    ).json()
+
+    monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
+    r = client.patch(
+        f"/api/services/{LOG_SVC}/scoring/labels/{created['id']}",
+        json={"label": "good", "notes": "analyst-overwrite"},
+    )
+    assert r.status_code == 200, r.text
+
+    stored = next(row for row in _labels.list_labels(LOG_SVC) if row["sid"] == sid)
+    assert stored["notes"] == "admin-original"  # analyst PATCH left notes untouched
+    assert stored["label"] == "good"  # label is not restricted
+
+
+# ── /scoring/analytics composite block-bypass (audit R-3) ───────────────────
+#
+# The /evaluation/per-reason endpoint is admin-only via
+# _ANALYST_BLOCKED_SCORING_SUFFIXES. The composite at /scoring/analytics
+# must mirror that — analysts get the four analyst-safe sub-results, admins
+# get all six. Without this, the path-suffix block was bypassable.
+
+_ANALYST_COMPOSITE_KEYS = {"top_flagged", "score_distribution", "compliance_breakdown", "latency_timeseries", "health"}
+_ADMIN_ONLY_COMPOSITE_KEYS = {"evaluation", "evaluation_per_reason"}
+
+
+def _patch_composite_subcalls(monkeypatch, *, eval_raises=False):
+    """Stub the six sub-functions the composite calls; raise from the two
+    admin-only ones if eval_raises so the test proves we don't even call
+    them on the analyst path."""
+    from backend.routers import session_scoring as _ss
+
+    monkeypatch.setattr(_ss, "scoring_top_flagged", lambda **kw: {"rows": []})
+    monkeypatch.setattr(_ss, "scoring_score_distribution", lambda **kw: {"rows": []})
+    monkeypatch.setattr(_ss, "scoring_compliance_breakdown", lambda **kw: {"rows": []})
+    monkeypatch.setattr(_ss, "scoring_latency_timeseries", lambda **kw: {"rows": [], "has_latency": False})
+    monkeypatch.setattr(_ss, "scoring_health", lambda **kw: {"ok": True})
+    if eval_raises:
+
+        def _boom(**kw):
+            raise RuntimeError("scoring_evaluation must not be called on the analyst path")
+
+        monkeypatch.setattr(_ss, "scoring_evaluation", _boom)
+        import backend.routers.session_scoring_admin as _admin
+
+        monkeypatch.setattr(_admin, "scoring_evaluation_per_reason", _boom)
+    else:
+        monkeypatch.setattr(_ss, "scoring_evaluation", lambda **kw: {"score": 0.5})
+        import backend.routers.session_scoring_admin as _admin
+
+        monkeypatch.setattr(_admin, "scoring_evaluation_per_reason", lambda **kw: {"reasons": []})
+
+
+def test_analytics_composite_admin_includes_all_six_keys(client, monkeypatch):
+    """Admin path (no analyst session) must keep all six sub-keys."""
+    _patch_composite_subcalls(monkeypatch)
+    r = client.get(f"/api/services/{LOG_SVC}/scoring/analytics?since_hours=24")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    keys = set(body.keys())
+    assert _ANALYST_COMPOSITE_KEYS.issubset(keys)
+    assert _ADMIN_ONLY_COMPOSITE_KEYS.issubset(keys), f"admin missing keys: {_ADMIN_ONLY_COMPOSITE_KEYS - keys}"
+
+
+def test_analytics_composite_analyst_omits_evaluation_keys(client, monkeypatch):
+    """Analyst path must NOT include evaluation / evaluation_per_reason."""
+    from backend.routers import session_scoring as _ss
+
+    _patch_composite_subcalls(monkeypatch)
+    monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
+    r = client.get(f"/api/services/{LOG_SVC}/scoring/analytics?since_hours=24")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    keys = set(body.keys())
+    assert _ANALYST_COMPOSITE_KEYS.issubset(keys), f"analyst missing safe keys: {_ANALYST_COMPOSITE_KEYS - keys}"
+    assert "evaluation" not in keys, "analyst response leaked 'evaluation'"
+    assert "evaluation_per_reason" not in keys, "analyst response leaked 'evaluation_per_reason'"
+
+
+def test_analytics_composite_analyst_does_not_call_evaluation_subfunctions(client, monkeypatch):
+    """Analyst path must SKIP the evaluation sub-calls entirely — not just
+    omit them from the response. Pinned via a sub-function that raises."""
+    from backend.routers import session_scoring as _ss
+
+    _patch_composite_subcalls(monkeypatch, eval_raises=True)
+    monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
+    r = client.get(f"/api/services/{LOG_SVC}/scoring/analytics?since_hours=24")
+    # The eval functions are wired to RAISE; if the composite called them
+    # we'd see a 500 here. 200 proves the analyst path never invoked them.
+    assert r.status_code == 200, r.text
+
+
 # ── /scoring/{top-flagged,score-distribution,compliance-breakdown} ──────────
 
 
 def _patch_query_logs(rows: list[dict]):
     """Patch the router's _query_logs helper to return canned rows so we
     don't need a live DuckDB connection for these tests."""
-    return patch("backend.routers.session_scoring._query_logs", return_value=rows)
+    return patch("backend.repositories.session_scoring.query_logs", return_value=rows)
 
 
 def test_top_flagged_returns_query_rows(client):
@@ -409,6 +801,165 @@ def test_compliance_breakdown_returns_grouped_rows(client):
     assert r.status_code == 200
     compliances = {row["compliance"] for row in r.json()["rows"]}
     assert compliances == {"ok", "missing"}
+
+
+# ── /scoring/health latency + /scoring/latency-timeseries ───────────────────
+#
+# Fixtures use the column ALIASES the SQL actually emits (rtt_p95_us,
+# fail_open_count, ...) — derived from the producer, not the consumer's
+# .get() args (see test-fixture-from-producer-not-consumer). _table_columns
+# is patched directly so the tests don't need a live DESCRIBE.
+
+
+def test_health_includes_latency_when_columns_present(client, monkeypatch):
+    from backend.routers import session_scoring as _ss
+
+    monkeypatch.setattr(
+        _ss,
+        "_table_columns",
+        lambda sid: {
+            "edge_score",
+            "edge_score_l2",
+            "edge_score_reason",
+            "edge_cookie_compliance",
+            "edge_sid",
+            "edge_score_rtt_us",
+            "edge_score_exec_us",
+        },
+    )
+    canned = [
+        {
+            "total_edge_rows": 1000,
+            "scored_rows": 800,
+            "distinct_sids": 50,
+            "avg_score": 12.5,
+            "p50_score": 5,
+            "p95_score": 60,
+            "max_score": 100,
+            "scorer_errors": 40,
+            "top_reasons": [],
+            "l2_evaluated": 200,
+            "l2_high_count": 10,
+            "rtt_p50_us": 8000,
+            "rtt_p95_us": 42000,
+            "rtt_p99_us": 91000,
+            "rtt_max_us": 100000,
+            "exec_p50_us": 540,
+            "exec_p95_us": 880,
+        }
+    ]
+    with _patch_query_logs(canned):
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=24")
+    assert r.status_code == 200, r.text
+    lat = r.json()["latency"]
+    assert lat["available"] is True
+    assert lat["rtt_p95_us"] == 42000
+    assert lat["exec_p95_us"] == 880
+
+
+def test_health_omits_latency_when_columns_absent(client, monkeypatch):
+    """Older service without the latency columns: latency.available is
+    False and the percentile fields are null — no binder error, no 500."""
+    from backend.routers import session_scoring as _ss
+
+    monkeypatch.setattr(_ss, "_table_columns", lambda sid: {"edge_score", "edge_score_reason"})
+    canned = [
+        {
+            "total_edge_rows": 10,
+            "scored_rows": 8,
+            "distinct_sids": 2,
+            "avg_score": 1.0,
+            "p50_score": 0,
+            "p95_score": 0,
+            "max_score": 5,
+            "scorer_errors": 0,
+            "top_reasons": [],
+            "l2_evaluated": 0,
+            "l2_high_count": 0,
+        }
+    ]
+    with _patch_query_logs(canned):
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=12")
+    assert r.status_code == 200, r.text
+    lat = r.json()["latency"]
+    assert lat["available"] is False
+    assert lat["rtt_p95_us"] is None
+
+
+def test_latency_timeseries_returns_rows_with_latency(client, monkeypatch):
+    from backend.routers import session_scoring as _ss
+
+    monkeypatch.setattr(
+        _ss,
+        "_table_columns",
+        lambda sid: {"edge_score", "edge_score_reason", "edge_score_rtt_us", "edge_score_exec_us"},
+    )
+    canned = [
+        {
+            "hour": "2026-06-17 10:00:00",
+            "scored_count": 500,
+            "fail_open_count": 30,
+            "rtt_p50_us": 8000,
+            "rtt_p95_us": 45000,
+            "rtt_p99_us": 95000,
+            "exec_p50_us": 540,
+            "exec_p95_us": 900,
+        }
+    ]
+    with _patch_query_logs(canned):
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/latency-timeseries?since_hours=24")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["has_latency"] is True
+    assert body["rows"][0]["fail_open_count"] == 30
+    assert body["rows"][0]["rtt_p95_us"] == 45000
+
+
+def test_latency_timeseries_errors_only_when_columns_absent(client, monkeypatch):
+    """Without latency columns the endpoint still returns the fail-open
+    series (errors over time) with has_latency=False."""
+    from backend.routers import session_scoring as _ss
+
+    monkeypatch.setattr(_ss, "_table_columns", lambda sid: {"edge_score", "edge_score_reason"})
+    canned = [{"hour": "2026-06-17 10:00:00", "scored_count": 500, "fail_open_count": 30}]
+    with _patch_query_logs(canned):
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/latency-timeseries?since_hours=6")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["has_latency"] is False
+    assert body["rows"][0]["fail_open_count"] == 30
+
+
+def test_latency_timeseries_buckets_by_minute_for_1h_window(client, monkeypatch):
+    """A 1h window at hourly granularity collapses to a single bar, so the
+    endpoint buckets by MINUTE for since_hours<=1 (granularity='minute') and
+    stays hourly for wider windows. Powers the per-minute Scorer errors +
+    Scorer latency charts at the 1h range."""
+    from backend.routers import session_scoring as _ss
+
+    monkeypatch.setattr(_ss, "_table_columns", lambda sid: {"edge_score", "edge_score_reason"})
+
+    captured: dict[str, str] = {}
+
+    def _fake_query_logs(*args, **kwargs):
+        captured["sql"] = next(
+            (a for a in [*args, *kwargs.values()] if isinstance(a, str) and "date_trunc" in a),
+            "",
+        )
+        return [{"hour": "2026-06-17 10:00:00", "scored_count": 1, "fail_open_count": 0}]
+
+    with patch("backend.repositories.session_scoring.query_logs", side_effect=_fake_query_logs):
+        _ss._analytics_cache.clear()
+        r1 = client.get(f"/api/services/{LOG_SVC}/scoring/latency-timeseries?since_hours=1")
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["granularity"] == "minute"
+        assert "date_trunc('minute'" in captured["sql"]
+
+        _ss._analytics_cache.clear()
+        r2 = client.get(f"/api/services/{LOG_SVC}/scoring/latency-timeseries?since_hours=24")
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["granularity"] == "hour"
+        assert "date_trunc('hour'" in captured["sql"]
 
 
 def test_bust_analytics_cache_actually_invalidates_targeted_service():
@@ -503,7 +1054,7 @@ def test_evaluation_returns_auc_when_min_samples_met(client, with_config):
         patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
         patch("backend.routers.session_scoring._load_matrix", return_value={"transitions": {}}),
         patch(
-            "backend.routers.session_scoring._reconstruct_labeled_sessions",
+            "backend.repositories.session_scoring.reconstruct_labeled_sessions",
             return_value=[
                 ({"session_id": lbl["sid"], "events": [], "max_edge_score": 0}, lbl["label"]) for lbl in fake_labels
             ],
@@ -564,7 +1115,7 @@ def test_curves_computes_perfect_separation_correctly(client, with_config):
     with (
         patch("backend.scoring.labels.list_labels", return_value=fake_labels),
         patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
-        patch("backend.routers.session_scoring._reconstruct_labeled_sessions", return_value=reconstructed),
+        patch("backend.repositories.session_scoring.reconstruct_labeled_sessions", return_value=reconstructed),
     ):
         from backend.routers import session_scoring as _ss
 
@@ -584,33 +1135,30 @@ def test_threshold_preview_buckets_sessions_correctly(client, with_config):
     others in `passed`. Within each bucket, breakdown by label is
     accurate. Precision = bad-flagged / total-flagged-labeled.
 
-    009: the route now issues TWO queries (aggregate counts across all
-    sids, then per-sid scores for the bounded labeled set) instead of
-    materialising one row per sid in Python. The mock returns the
-    right shape per call based on the SQL it sees.
+    Post-009 implementation: route now issues a SINGLE CTE query
+    that joins sid_scores against a labels(VALUES…) inline relation
+    and emits ``total / flagged_total / flagged_good / flagged_bad /
+    passed_good / passed_bad`` in one row. The test mocks query_logs
+    to return the row that single SQL would produce for the seeded
+    fixture.
     """
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
 
-    # 6 sessions: 2 labeled-bad above threshold, 1 labeled-good above
-    # (false positive), 1 unlabeled above, 1 labeled-good below, 1
-    # labeled-bad below (false negative).
-    labeled_score_rows = [
-        {"edge_sid": "bad1", "max_score": 80},
-        {"edge_sid": "bad2", "max_score": 75},
-        {"edge_sid": "good1", "max_score": 60},  # false positive at threshold 50
-        {"edge_sid": "good2", "max_score": 10},
-        {"edge_sid": "bad3", "max_score": 20},  # false negative at threshold 50
-    ]
-    # Aggregate row: 6 total, 4 flagged (bad1, bad2, good1, unlbl1),
-    # 2 passed (good2, bad3). Mirrors the labeled_score_rows + the
-    # un-labeled unlbl1 sid at max_score=55.
-    agg_row = {"total": 6, "flagged_total": 4, "passed_total": 2}
-
-    def _route_query(_service_id, sql, *_args, **_kwargs):
-        # Aggregate-counts SQL uses ``WITH sid_scores AS (...) SELECT
-        # COUNT(*) ...``. The labeled-sid query uses ``WHERE edge_sid
-        # IN (?, ?, ...)``. Route on the ``IN (`` marker.
-        return labeled_score_rows if " IN (" in sql else [agg_row]
+    # Fixture: 6 sessions, threshold = 50
+    #   bad1 (80) bad — flagged_bad
+    #   bad2 (75) bad — flagged_bad
+    #   good1 (60) good — flagged_good (false positive)
+    #   unlbl1 (55) unlabeled — flagged_unlabeled (falls out by subtraction)
+    #   good2 (10) good — passed_good
+    #   bad3 (20) bad — passed_bad (false negative)
+    aggregate_row = {
+        "total": 6,
+        "flagged_total": 4,
+        "flagged_good": 1,
+        "flagged_bad": 2,
+        "passed_good": 1,
+        "passed_bad": 1,
+    }
 
     fake_labels = [
         {"sid": "bad1", "label": "bad"},
@@ -622,7 +1170,7 @@ def test_threshold_preview_buckets_sessions_correctly(client, with_config):
     fake_counts = {"good": 2, "bad": 3, "neutral": 0}
 
     with (
-        patch("backend.routers.session_scoring._query_logs", side_effect=_route_query),
+        patch("backend.repositories.session_scoring.query_logs", return_value=[aggregate_row]),
         patch("backend.scoring.labels.list_labels", return_value=fake_labels),
         patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
         patch("backend.routers.session_scoring._bust_analytics_cache"),
@@ -638,7 +1186,7 @@ def test_threshold_preview_buckets_sessions_correctly(client, with_config):
     assert body["threshold"] == 50
     assert body["flagged"]["bad"] == 2
     assert body["flagged"]["good"] == 1  # false positive
-    assert body["flagged"]["unlabeled"] == 1
+    assert body["flagged"]["unlabeled"] == 1  # 4 flagged_total − 1 good − 2 bad
     assert body["passed"]["good"] == 1
     assert body["passed"]["bad"] == 1  # false negative
     # Precision = 2 bad of 3 labeled flagged = 0.6667
@@ -662,13 +1210,33 @@ def test_threshold_preview_extreme_thresholds(client, with_config):
 
     call_count = {"n": 0}
 
+    # The core scoring columns a provisioned service carries — so the
+    # _table_columns() probe reports a full schema and _scoring_source
+    # passes the table through unwrapped.
+    _provisioned_cols = [
+        {"column_name": c}
+        for c in (
+            "edge",
+            "edge_sid",
+            "edge_score",
+            "edge_score_l1",
+            "edge_score_l2",
+            "edge_score_reason",
+            "edge_cookie_compliance",
+        )
+    ]
+
     def _route_query(_service_id, sql, *_args, **_kwargs):
+        # _table_columns() fires a DESCRIBE before the aggregate query;
+        # answer it with a provisioned schema and don't count it.
+        if sql.strip().upper().startswith("DESCRIBE"):
+            return _provisioned_cols
         # No labels in this test → only the aggregate query fires.
         call_count["n"] += 1
         return agg_low if call_count["n"] == 1 else agg_high
 
     with (
-        patch("backend.routers.session_scoring._query_logs", side_effect=_route_query),
+        patch("backend.repositories.session_scoring.query_logs", side_effect=_route_query),
         patch("backend.scoring.labels.list_labels", return_value=[]),
         patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
     ):
@@ -695,7 +1263,7 @@ def test_retrain_smoke(client, with_config, tmp_path, monkeypatch):
     200 with the documented keys."""
     with_config[LOG_SVC] = {
         "service_id": LOG_SVC,
-        "scoring": {"enabled": True, "scoring_service_id": "scorer-x"},
+        "scoring": {"enabled": True, "scoring_service_id": "scorer-x", "scoring_matrix_store_id": "MATRIX_STORE"},
     }
 
     from backend.scoring.matrix import MatrixStats, TransitionMatrix
@@ -724,6 +1292,8 @@ def test_retrain_smoke(client, with_config, tmp_path, monkeypatch):
         patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
         patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", tmp_path / "matrix.json"),
         patch("backend.state_sync.publish_matrix_to_fos"),
+        patch("backend.routers.session_scoring_admin._resolve_token", return_value="tok"),
+        patch("backend.core.fastly.client.fastly_raw") as mock_raw,
     ):
         mock_get_con.return_value.close = lambda: None
         r = client.post(f"/api/services/{LOG_SVC}/scoring/retrain?since_days=7")
@@ -736,6 +1306,11 @@ def test_retrain_smoke(client, with_config, tmp_path, monkeypatch):
     assert body["rejected"]["kept"] == 5
     assert body["rejected"]["too_few_events"] == 3
     assert body["local_matrix_saved"] is True
+    # New matrix pushed to the live scorer via KV — no Wasm rebuild.
+    assert body["matrix_kv_written"] is True
+    assert mock_raw.call_count == 1
+    kv_path = mock_raw.call_args.args[1]
+    assert kv_path == "/resources/stores/kv/MATRIX_STORE/keys/matrix"
 
 
 def test_session_events_returns_event_timeline(client, with_config):
@@ -767,7 +1342,7 @@ def test_session_events_returns_event_timeline(client, with_config):
             "edge_score_reason": "",
         },
     ]
-    with patch("backend.routers.session_scoring._query_logs", return_value=canned):
+    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/sessions/abc123/events")
     assert r.status_code == 200
     body = r.json()
@@ -784,7 +1359,7 @@ def test_session_events_empty_when_sid_not_in_duckdb(client, with_config):
     yet (or rotated away). Return event_count=0, NOT 404 — the UI
     surfaces a 'no events yet' message."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
-    with patch("backend.routers.session_scoring._query_logs", return_value=[]):
+    with patch("backend.repositories.session_scoring.query_logs", return_value=[]):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/sessions/nosuch/events")
     assert r.status_code == 200
     assert r.json()["event_count"] == 0
@@ -840,7 +1415,7 @@ def test_scoring_health_returns_expected_shape(client, with_config):
             "l2_high_count": 5,
         }
     ]
-    with patch("backend.routers.session_scoring._query_logs", return_value=canned):
+    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
         from backend.routers import session_scoring as _ss
 
         _ss._analytics_cache.clear()
@@ -854,6 +1429,66 @@ def test_scoring_health_returns_expected_shape(client, with_config):
     assert body["matrix_staleness"]["is_stale"] is False  # 5% < 25% threshold
 
 
+def test_scoring_health_surfaces_fail_open_breakdown(client, with_config):
+    """/scoring/health passes the fail-open-by-reason breakdown through so the
+    admin page can group fail-opens by EXACT status (compute-unavailable-503
+    vs -500 vs internal-error-keys) rather than a single lumped count."""
+    with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
+    canned = [
+        {
+            "total_edge_rows": 1000,
+            "scored_rows": 200,
+            "distinct_sids": 50,
+            "avg_score": 10.0,
+            "p50_score": 0.0,
+            "p95_score": 0.0,
+            "max_score": 75,
+            "scorer_errors": 7,
+            "top_reasons": [{"reason": "cookie-missing", "count": 180}],
+            "fail_open_breakdown": [
+                {"reason": "compute-unavailable-503", "count": 5},
+                {"reason": "compute-unavailable-500", "count": 1},
+                {"reason": "internal-error-keys", "count": 1},
+            ],
+            "l2_evaluated": 100,
+            "l2_high_count": 5,
+        }
+    ]
+    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
+        from backend.routers import session_scoring as _ss
+
+        _ss._analytics_cache.clear()
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=24")
+    assert r.status_code == 200
+    body = r.json()
+    # Highest-count fail-open first; each exact status is its own bucket.
+    assert body["fail_open_breakdown"][0] == {"reason": "compute-unavailable-503", "count": 5}
+    assert {b["reason"] for b in body["fail_open_breakdown"]} == {
+        "compute-unavailable-503",
+        "compute-unavailable-500",
+        "internal-error-keys",
+    }
+    # SRE-15: the traffic-normalized fail-open rate (7 / 1000 = 0.7%) so the
+    # admin tile can tone on a spike instead of an absolute count that moves
+    # with traffic.
+    assert body["fail_open_rate_pct"] == 0.7
+
+
+def test_scoring_health_fail_open_breakdown_defaults_empty(client, with_config):
+    """When the SQL row omits fail_open_breakdown (no fail-opens in window),
+    the endpoint returns an empty list rather than null so the UI can render
+    a clean 'no fail-opens' state."""
+    with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
+    canned = [{"total_edge_rows": 10, "scored_rows": 10, "top_reasons": []}]
+    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
+        from backend.routers import session_scoring as _ss
+
+        _ss._analytics_cache.clear()
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=24")
+    assert r.status_code == 200
+    assert r.json()["fail_open_breakdown"] == []
+
+
 # ── /scoring/dashboard composite endpoint ────────────────────────────────────
 
 
@@ -864,7 +1499,7 @@ def test_scoring_dashboard_returns_all_subobjects(client, with_config):
     with (
         patch("backend.scoring.labels.list_labels", return_value=[]),
         patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
-        patch("backend.routers.session_scoring._query_logs", return_value=[]),
+        patch("backend.repositories.session_scoring.query_logs", return_value=[]),
     ):
         from backend.routers import session_scoring as _ss
 
@@ -877,16 +1512,34 @@ def test_scoring_dashboard_returns_all_subobjects(client, with_config):
         "threshold",
         "status",
         "evaluation",
+        "evaluation_per_reason",
         "health",
         "top_flagged",
         "score_distribution",
         "compliance_breakdown",
         "curves",
         "threshold_preview",
+        # Config block — folded in so the FE can drop the separate
+        # /scoring/config + /scoring/evaluation/per-reason round-trips
+        # and read everything off the single dashboard payload.
+        "config_threshold",
+        "exclude_regex",
+        "enforce_status_code",
     ):
         assert key in body, f"missing key {key!r}"
     assert body["since_hours"] == 24
     assert body["threshold"] == 75
+    # The config sub-objects use the shapes their per-endpoint twins
+    # already return — pin the discriminating keys so a future shape
+    # drift breaks here before the FE silently renders the wrong card.
+    assert "threshold" in body["config_threshold"], "config_threshold should mirror /scoring/threshold shape"
+    assert "enforced" in body["config_threshold"]
+    assert "current" in body["exclude_regex"], "exclude_regex should mirror /scoring/exclude-regex shape"
+    assert "default" in body["exclude_regex"]
+    assert "current" in body["enforce_status_code"], (
+        "enforce_status_code should mirror /scoring/enforce-status-code shape"
+    )
+    assert "effective" in body["enforce_status_code"]
 
 
 # ── /scoring/threshold GET/PUT (operator's chosen threshold) ────────────────
@@ -1031,10 +1684,15 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
     restore_scoring_matrix_version, unlinks the local matrix.json so
     _load_matrix falls through to the FOS-restored copy, records a
     'matrix_restored' audit, updates cfg.scoring.matrix_version, and
-    returns ok + restored_version + deploy_hint."""
+    returns ok + restored_version + deploy_hint, and pushes the restored
+    matrix into the scoring_matrix KV Store for the live scorer."""
     with_config[LOG_SVC] = {
         "service_id": LOG_SVC,
-        "scoring": {"enabled": True, "matrix_version": "2026-06-03-c"},
+        "scoring": {
+            "enabled": True,
+            "matrix_version": "2026-06-03-c",
+            "scoring_matrix_store_id": "MATRIX_STORE",
+        },
     }
     saved: dict = {}
     monkeypatch.setattr("backend.config.save_config", lambda sid, cfg: saved.update(sid=sid, cfg=cfg))
@@ -1054,7 +1712,9 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
             return_value={"version": "2026-06-01-a", "restored_at": "2026-06-03T11:00:00+00:00"},
         ) as mock_restore,
         patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_matrix_path),
-        patch("backend.core.metadata_db.record_scoring_audit", side_effect=fake_audit),
+        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
+        patch("backend.routers.session_scoring_admin._resolve_token", return_value="tok"),
+        patch("backend.provision.session_scoring_orchestrator._write_matrix_to_kv") as mock_kv,
     ):
         r = client.post(f"/api/services/{LOG_SVC}/scoring/matrix-versions/2026-06-01-a/restore?confirm=true")
 
@@ -1063,8 +1723,10 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
     assert body["ok"] is True
     assert body["restored_version"] == "2026-06-01-a"
     assert body["restored_at"] == "2026-06-03T11:00:00+00:00"
-    assert "deploy_hint" in body
-    assert "deploy_wasm.sh" in body["deploy_hint"]
+    # Restored matrix pushed to the live scorer via KV (no Wasm rebuild).
+    assert body["matrix_kv_written"] is True
+    assert "KV" in body["deploy_hint"]
+    mock_kv.assert_called_once_with("MATRIX_STORE", LOG_SVC, "tok")
 
     # state_sync was invoked with (service_id, version)
     mock_restore.assert_called_once_with(LOG_SVC, "2026-06-01-a")
@@ -1092,7 +1754,7 @@ def test_matrix_versions_restore_404_when_version_missing_in_fos(client, with_co
     }
     with (
         patch("backend.state_sync.restore_scoring_matrix_version", return_value=None),
-        patch("backend.core.metadata_db.record_scoring_audit") as mock_audit,
+        patch("backend.core.metadata.record_scoring_audit") as mock_audit,
     ):
         r = client.post(f"/api/services/{LOG_SVC}/scoring/matrix-versions/no-such-version/restore?confirm=true")
     assert r.status_code == 404
@@ -1160,7 +1822,7 @@ def test_matrix_versions_restore_500s_when_state_sync_raises(client, with_config
             "backend.state_sync.restore_scoring_matrix_version",
             side_effect=RuntimeError("S3 connection reset"),
         ),
-        patch("backend.core.metadata_db.record_scoring_audit") as mock_audit,
+        patch("backend.core.metadata.record_scoring_audit") as mock_audit,
     ):
         r = no_reraise_client.post(f"/api/services/{LOG_SVC}/scoring/matrix-versions/2026-06-01-a/restore?confirm=true")
     assert r.status_code == 500
@@ -1176,7 +1838,7 @@ def test_audit_returns_empty_list_when_no_rows(client, with_config):
     'no operator actions yet' placeholder; 404 would falsely imply
     the service itself doesn't exist."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
-    with patch("backend.core.metadata_db.list_scoring_audit", return_value=[]):
+    with patch("backend.core.metadata.list_scoring_audit", return_value=[]):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/audit")
     assert r.status_code == 200
     assert r.json()["audit"] == []
@@ -1210,7 +1872,7 @@ def test_audit_returns_rows_newest_first(client, with_config):
             "details": None,
         },
     ]
-    with patch("backend.core.metadata_db.list_scoring_audit", return_value=canned):
+    with patch("backend.core.metadata.list_scoring_audit", return_value=canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/audit")
     assert r.status_code == 200
     body = r.json()
@@ -1232,7 +1894,7 @@ def test_audit_limit_default_is_100(client, with_config):
         captured["since"] = since
         return []
 
-    with patch("backend.core.metadata_db.list_scoring_audit", side_effect=fake_list):
+    with patch("backend.core.metadata.list_scoring_audit", side_effect=fake_list):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/audit")
     assert r.status_code == 200
     assert captured["limit"] == 100
@@ -1245,7 +1907,7 @@ def test_audit_limit_capped_at_1000(client, with_config):
     must 422 instead of being silently clamped (a 5000-row request
     likely indicates the caller is paginating wrong)."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
-    with patch("backend.core.metadata_db.list_scoring_audit", return_value=[]):
+    with patch("backend.core.metadata.list_scoring_audit", return_value=[]):
         r_ok = client.get(f"/api/services/{LOG_SVC}/scoring/audit?limit=1000")
         r_too_big = client.get(f"/api/services/{LOG_SVC}/scoring/audit?limit=1001")
     assert r_ok.status_code == 200
@@ -1272,7 +1934,7 @@ def test_audit_since_param_forwarded_to_db_layer(client, with_config):
             }
         ]
 
-    with patch("backend.core.metadata_db.list_scoring_audit", side_effect=fake_list):
+    with patch("backend.core.metadata.list_scoring_audit", side_effect=fake_list):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/audit?since=2026-06-03T11:00:00")
     assert r.status_code == 200
     assert captured["service_id"] == LOG_SVC
@@ -1405,7 +2067,8 @@ def test_scoring_enforce_threshold_get_502_on_generic_configstore_error(client, 
 
     assert r.status_code == 502
     detail = r.json()["detail"]
-    assert "failed to read enforce threshold" in detail["error"]
+    assert detail["error"] == "enforce_threshold_read_failed"
+    assert "error_id" in detail
 
 
 def test_scoring_enforce_threshold_put_requires_confirm_flag(client, with_config):
@@ -1444,7 +2107,7 @@ def test_scoring_enforce_threshold_put_writes_value_and_records_audit(client, wi
 
     with (
         patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
-        patch("backend.core.metadata_db.record_scoring_audit", side_effect=fake_audit),
+        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
     ):
         r = client.put(
             f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true",
@@ -1492,7 +2155,7 @@ def test_scoring_enforce_threshold_put_clears_when_null(client, with_config):
 
     with (
         patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
-        patch("backend.core.metadata_db.record_scoring_audit", side_effect=fake_audit),
+        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
     ):
         r = client.put(
             f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true",
@@ -1549,6 +2212,326 @@ def test_scoring_enforce_threshold_put_400_when_scoring_not_enabled(client, with
     )
     assert r.status_code == 400
     assert "Scoring not enabled" in r.json()["detail"]["error"]
+
+
+# ── /scoring/l2-enforce GET/PUT (operator opt-in for edge L2 enforcement) ─────
+#
+# L2's contribution to the *enforced* combined score is gated by an explicit
+# operator opt-in (l2_enforce_enabled in the scoring_config ConfigStore) and
+# fades in over 3 days from the l2_enabled_at anchor — NOT from deployment age.
+# These mirror the enforce-threshold tests above (same with_config + fastly mock
+# strategy); the pure ramp math is pinned separately in
+# test_build_l2_enforce_block_* so the HTTP tests can stay shape-focused.
+
+
+def test_build_l2_enforce_block_ramp_math():
+    """Pin the opt-in fade-in + readiness math directly (no HTTP, fixed ``now``).
+    This is the new-behaviour pinning test: ramp_progress tracks days-since-opt-in
+    over a 3-day window, ``ready`` is the advisory deploy-age≥7 gauge, and a future
+    anchor clamps to 0 — all decoupled from deployment age."""
+    from backend.routers.session_scoring_admin import _build_l2_enforce_block
+
+    day = 86_400
+    now = 1_000_000_000
+    # Opted in 1.5 days ago, deployed 10 days ago → half-ramped, ready.
+    b = _build_l2_enforce_block(
+        scoring_enabled_at_raw=str(now - 10 * day),
+        l2_enforce_raw="1",
+        l2_enabled_at_raw=str(now - int(1.5 * day)),
+        now_epoch=now,
+    )
+    assert b["available"] is True
+    assert b["enabled"] is True
+    assert b["days_since_optin"] == pytest.approx(1.5, abs=1e-6)
+    assert b["ramp_progress"] == pytest.approx(0.5, abs=1e-6)
+    assert b["fully_ramped"] is False
+    assert b["warmup_days_remaining"] == pytest.approx(1.5, abs=1e-6)
+    assert b["deployment_age_days"] == pytest.approx(10.0, abs=1e-6)
+    assert b["ready"] is True
+
+    # Flag off → enabled False even with a stale (fully-ramped) anchor.
+    off = _build_l2_enforce_block(
+        scoring_enabled_at_raw=str(now - 30 * day),
+        l2_enforce_raw="0",
+        l2_enabled_at_raw=str(now - 30 * day),
+        now_epoch=now,
+    )
+    assert off["enabled"] is False
+    assert off["fully_ramped"] is True  # anchor math still reported
+    assert off["ready"] is True
+
+    # Just opted in (anchor == now) → ramp opens at 0; young deploy → not ready.
+    fresh = _build_l2_enforce_block(
+        scoring_enabled_at_raw=str(now - 2 * day),
+        l2_enforce_raw="1",
+        l2_enabled_at_raw=str(now),
+        now_epoch=now,
+    )
+    assert fresh["ramp_progress"] == 0.0
+    assert fresh["fully_ramped"] is False
+    assert fresh["ready"] is False  # 2 days < 7-day readiness gauge
+
+    # No anchor seeded → opt-in fields null, ramp 0 (the pre-opt-in default).
+    none = _build_l2_enforce_block(
+        scoring_enabled_at_raw=None,
+        l2_enforce_raw=None,
+        l2_enabled_at_raw=None,
+        now_epoch=now,
+    )
+    assert none["enabled"] is False
+    assert none["days_since_optin"] is None
+    assert none["ramp_progress"] == 0.0
+    assert none["deployment_age_days"] is None
+    assert none["ready"] is False
+
+
+def test_scoring_l2_enforce_get_400_when_scoring_not_enabled(client, with_config):
+    """No scoring_config_store_id → 400 before any Fastly call, matching the
+    enforce-threshold GET contract."""
+    with_config[LOG_SVC] = {"service_id": LOG_SVC}  # no scoring block
+    r = client.get(f"/api/services/{LOG_SVC}/scoring/l2-enforce")
+    assert r.status_code == 400
+    assert "Scoring not enabled" in r.json()["detail"]["error"]
+
+
+def test_scoring_l2_enforce_get_returns_state_shape(client, with_config):
+    """Happy path: GET reads the flag + anchors and returns the enabled/ramp/
+    readiness shape. Uses anchors deep in the past so the ramp/readiness are
+    fully saturated regardless of the wall clock."""
+    with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
+
+    def fake_fastly(method, path, *args, **kwargs):
+        assert method == "GET"
+        if path.endswith("/item/l2_enforce_enabled"):
+            return {"item_value": "1"}
+        if path.endswith("/item/l2_enabled_at"):
+            return {"item_value": "1700000000"}  # 2023 → fully ramped
+        if path.endswith("/item/scoring_enabled_at"):
+            return {"item_value": "1700000000"}  # 2023 → ready
+        raise AssertionError(f"unexpected GET {path}")
+
+    with patch("backend.core.fastly.client.fastly", side_effect=fake_fastly):
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/l2-enforce")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] is True
+    assert body["enabled"] is True
+    assert body["fully_ramped"] is True
+    assert body["ramp_progress"] == 1.0
+    assert body["ready"] is True
+    assert body["l2_enabled_at"] == 1700000000
+
+
+def test_scoring_l2_enforce_put_requires_confirm_flag(client, with_config):
+    """Without ?confirm=true the PUT must 400 — same kill switch as
+    enforce-threshold (it changes live edge blocking)."""
+    with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
+    r = client.put(
+        f"/api/services/{LOG_SVC}/scoring/l2-enforce",
+        json={"enabled": True},
+    )
+    assert r.status_code == 400
+    assert "confirm=true" in r.json()["detail"]["error"]
+
+
+def test_scoring_l2_enforce_put_enable_writes_flag_anchor_and_audit(client, with_config):
+    """Enable from off: writes l2_enforce_enabled="1" AND stamps a fresh
+    l2_enabled_at anchor (epoch seconds), and audits 'l2_enforce_enabled'."""
+    with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
+
+    writes: list[tuple] = []
+
+    def fake_fastly(method, path, body=None, *args, **kwargs):
+        if method == "GET":
+            # currently-off + no anchor yet.
+            raise RuntimeError("Fastly API 404: not found")
+        writes.append((method, path, body))
+        return {}
+
+    audit_calls: list[tuple] = []
+
+    def fake_audit(service_id, action, *, actor="operator", details=None):
+        audit_calls.append((service_id, action, details))
+
+    with (
+        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
+        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
+    ):
+        r = client.put(
+            f"/api/services/{LOG_SVC}/scoring/l2-enforce?confirm=true",
+            json={"enabled": True},
+        )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["enabled"] is True
+    assert body["ok"] is True
+    assert isinstance(body["l2_enabled_at"], int)
+
+    # Both the flag and the anchor were written.
+    def _wrote(key, value_pred):
+        for method, path, payload in writes:
+            payload = payload or {}
+            key_match = path.endswith(f"/item/{key}") or payload.get("item_key") == key
+            if key_match and value_pred(payload.get("item_value")):
+                return True
+        return False
+
+    assert _wrote("l2_enforce_enabled", lambda v: v == "1"), writes
+    assert _wrote("l2_enabled_at", lambda v: v and str(v).isdigit()), writes
+
+    assert len(audit_calls) == 1
+    svc, action, details = audit_calls[0]
+    assert svc == LOG_SVC
+    assert action == "l2_enforce_enabled"
+    assert details["enabled"] is True
+    assert isinstance(details["l2_enabled_at"], int)
+
+
+def test_scoring_l2_enforce_put_enable_when_already_on_preserves_anchor(client, with_config):
+    """Re-confirming an already-on service must NOT reset an in-progress fade-in:
+    the flag is re-written but the existing l2_enabled_at anchor is preserved
+    (no anchor write)."""
+    with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
+
+    writes: list[tuple] = []
+
+    def fake_fastly(method, path, body=None, *args, **kwargs):
+        if method == "GET":
+            if path.endswith("/item/l2_enforce_enabled"):
+                return {"item_value": "1"}  # already on
+            if path.endswith("/item/l2_enabled_at"):
+                return {"item_value": "1700000000"}  # existing anchor
+            raise RuntimeError("Fastly API 404: not found")
+        writes.append((method, path, body))
+        return {}
+
+    with (
+        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
+        patch("backend.core.metadata.record_scoring_audit", side_effect=lambda *a, **k: None),
+    ):
+        r = client.put(
+            f"/api/services/{LOG_SVC}/scoring/l2-enforce?confirm=true",
+            json={"enabled": True},
+        )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["enabled"] is True
+    assert body["l2_enabled_at"] == 1700000000  # preserved, not reset
+
+    # The anchor key must NOT have been (re)written.
+    for method, path, payload in writes:
+        payload = payload or {}
+        is_anchor = path.endswith("/item/l2_enabled_at") or payload.get("item_key") == "l2_enabled_at"
+        assert not is_anchor, f"anchor must be preserved, but a write targeted it: {(method, path, payload)}"
+
+
+def test_scoring_l2_enforce_put_disable_writes_zero(client, with_config):
+    """Disable: writes l2_enforce_enabled="0" and audits 'l2_enforce_disabled'.
+    The anchor is left untouched so a later re-enable restarts the fade-in."""
+    with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
+
+    writes: list[tuple] = []
+
+    def fake_fastly(method, path, body=None, *args, **kwargs):
+        if method == "GET":
+            raise RuntimeError("Fastly API 404: not found")
+        writes.append((method, path, body))
+        return {}
+
+    audit_calls: list[tuple] = []
+
+    def fake_audit(service_id, action, *, actor="operator", details=None):
+        audit_calls.append((service_id, action, details))
+
+    with (
+        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
+        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
+    ):
+        r = client.put(
+            f"/api/services/{LOG_SVC}/scoring/l2-enforce?confirm=true",
+            json={"enabled": False},
+        )
+
+    assert r.status_code == 200
+    assert r.json()["enabled"] is False
+
+    # Wrote "0" to the flag; never wrote the anchor.
+    flag_writes = [
+        p
+        for (m, path, p) in writes
+        if path.endswith("/item/l2_enforce_enabled") or (p or {}).get("item_key") == "l2_enforce_enabled"
+    ]
+    assert flag_writes, writes
+    assert (flag_writes[0] or {}).get("item_value") == "0"
+    for method, path, payload in writes:
+        payload = payload or {}
+        is_anchor = path.endswith("/item/l2_enabled_at") or payload.get("item_key") == "l2_enabled_at"
+        assert not is_anchor
+
+    assert len(audit_calls) == 1
+    _svc, action, details = audit_calls[0]
+    assert action == "l2_enforce_disabled"
+    assert details["enabled"] is False
+
+
+def test_scoring_l2_enforce_body_defaults_to_false():
+    """ScoringL2EnforceBody.enabled defaults to False so an empty body is a
+    no-op-toward-off, never an accidental enable."""
+    from backend.models.session_scoring import ScoringL2EnforceBody
+
+    assert ScoringL2EnforceBody().enabled is False
+    assert ScoringL2EnforceBody(enabled=True).enabled is True
+
+
+def test_scoring_health_includes_l2_enforce_readiness_block(client, with_config):
+    """scoring_health carries the admin-only l2_enforce readiness block built
+    from the scoring_config ConfigStore (best-effort, separately cached). Pin its
+    presence + shape so the L2EnforcementCard can read it off the composite."""
+    cfg = _EnforceThresholdFixtures.enabled_cfg()
+    with_config[LOG_SVC] = cfg
+    canned = [{"total_edge_rows": 100, "scored_rows": 50, "top_reasons": [], "l2_evaluated": 0, "l2_high_count": 0}]
+
+    def fake_fastly(method, path, *args, **kwargs):
+        if path.endswith("/item/l2_enforce_enabled"):
+            return {"item_value": "1"}
+        if path.endswith("/item/l2_enabled_at"):
+            return {"item_value": "1700000000"}
+        if path.endswith("/item/scoring_enabled_at"):
+            return {"item_value": "1700000000"}
+        raise AssertionError(f"unexpected fastly call {method} {path}")
+
+    with (
+        patch("backend.repositories.session_scoring.query_logs", return_value=canned),
+        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
+    ):
+        from backend.routers import session_scoring as _ss
+
+        _ss._analytics_cache.clear()
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=24")
+
+    assert r.status_code == 200
+    block = r.json()["l2_enforce"]
+    assert block["available"] is True
+    assert block["enabled"] is True
+    assert block["ready"] is True
+    assert block["fully_ramped"] is True
+
+
+def test_scoring_health_l2_enforce_unavailable_without_config_store(client, with_config):
+    """When the service has no scoring_config_store_id, the readiness block
+    degrades to available=False (no Fastly call) rather than breaking health."""
+    with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
+    canned = [{"total_edge_rows": 0, "scored_rows": 0, "top_reasons": []}]
+    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
+        from backend.routers import session_scoring as _ss
+
+        _ss._analytics_cache.clear()
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=24")
+    assert r.status_code == 200
+    assert r.json()["l2_enforce"]["available"] is False
 
 
 # ── /scoring/enforce-status-code (operator-overridable HTTP code) ──────────
@@ -1608,14 +2591,17 @@ def test_scoring_enforce_status_code_put_rejects_out_of_range(client, with_confi
 
 
 def test_scoring_enforce_status_code_put_rejects_non_int(client, with_config):
-    """status_code that can't be coerced to int → 400 with a clear message."""
+    """status_code that can't be coerced to int → 422 from the Pydantic
+    body validator (matches the body/query validation classification
+    introduced in commit 3c036cf)."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
     r = client.put(
         f"/api/services/{LOG_SVC}/scoring/enforce-status-code?confirm=true",
         json={"status_code": "not-an-int"},
     )
-    assert r.status_code == 400
-    assert "integer" in r.json()["detail"]["error"]
+    assert r.status_code == 422
+    errors = r.json()["detail"]
+    assert any(e.get("loc", [])[-1] == "status_code" for e in errors)
 
 
 def test_scoring_enforce_status_code_put_400_when_scoring_not_enabled(client, with_config):
@@ -1655,7 +2641,7 @@ def test_scoring_enforce_status_code_put_happy_path(client, with_config):
             "backend.provision.session_scoring_orchestrator.update_enforce_status_code",
             side_effect=fake_update,
         ),
-        patch("backend.core.metadata_db.record_scoring_audit", side_effect=fake_audit),
+        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
     ):
         r = client.put(
             f"/api/services/{LOG_SVC}/scoring/enforce-status-code?confirm=true",
@@ -1696,7 +2682,7 @@ def test_scoring_enforce_status_code_put_null_resets_to_default(client, with_con
             "backend.provision.session_scoring_orchestrator.update_enforce_status_code",
             side_effect=fake_update,
         ),
-        patch("backend.core.metadata_db.record_scoring_audit"),
+        patch("backend.core.metadata.record_scoring_audit"),
     ):
         r = client.put(
             f"/api/services/{LOG_SVC}/scoring/enforce-status-code?confirm=true",
@@ -1708,3 +2694,284 @@ def test_scoring_enforce_status_code_put_null_resets_to_default(client, with_con
     assert body["is_default"] is True
     assert body["effective_status_code"] == 429
     assert "Reset to default" in body["message"]
+
+
+def test_cached_drops_inflight_entry_on_cache_hit():
+    """Regression: _cached previously skipped the ``_inflight.pop(key)``
+    cleanup whenever the cache-hit branch early-returned, because the
+    cleanup lived in the producer-path try/finally. The result was at
+    most one stuck Lock object per distinct key — bounded by key
+    cardinality but slow growth across the TTL window — and a runtime
+    contract that didn't match the comment above the pop line. Pinned
+    so a regression that puts the try/finally back inside the producer
+    branch fails this test immediately.
+    """
+    from backend.routers import session_scoring as _ss
+
+    _ss._analytics_cache.clear()
+    _ss._inflight.clear()
+    key = ("test_endpoint", "svc-test", 24)
+
+    # Prime the cache via the first call (producer runs once).
+    _ss._cached(key, lambda: {"foo": 1})
+    # First call's finally already cleared _inflight.
+    assert key not in _ss._inflight
+
+    # Second call hits the cache. The fix's outer try/finally must also
+    # clear _inflight on this path, even though the producer never runs.
+    # If a regression collapses the try/finally back around just the
+    # producer, this would leak a Lock here.
+    produced = {"flag": False}
+
+    def producer():
+        produced["flag"] = True
+        return {"foo": 999}
+
+    _ss._cached(key, producer)
+    assert produced["flag"] is False, "cache hit must not invoke producer"
+    assert key not in _ss._inflight, (
+        "regression: _inflight retains a Lock after a cache hit. The fix's "
+        "outer try/finally was reverted into a producer-branch-only finally."
+    )
+
+
+# ── H3: analyst time-window clamp on scoring reads ───────────────────────────
+#
+# H3 clamps the per-invite query window on the analyst-reachable scoring reads
+# (the scope bypass). IP masking stays the response middleware's job (key-name
+# pass over the ``ip`` column); ua/url are intentionally left intact — analysts
+# triage flagged sessions on them.
+
+
+def _fake_request(analyst_session):
+    """Minimal stand-in for the per-request object the scoring helpers read.
+
+    The middleware stamps ``request.state.analyst_session``; ``_scoring_time_window``
+    and the ``get_analyst_time_bounds`` dependency only touch that attribute.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(state=SimpleNamespace(analyst_session=analyst_session))
+
+
+def test_scoring_time_window_admin_uses_relative_interval():
+    from backend.routers import session_scoring as _ss
+
+    pred, disc = _ss._scoring_time_window(_fake_request(None), 24)
+    assert pred == "timestamp >= now() - INTERVAL 24 HOUR"
+    assert disc is None
+
+
+def test_scoring_time_window_analyst_clamps_to_invite_window():
+    """An analyst scoped to 1h who asks for 168h gets an absolute window
+    clamped to ~1h — not the relative 168h interval."""
+    import re
+    from types import SimpleNamespace
+
+    from backend.routers import session_scoring as _ss
+    from backend.utils.date_utils import parse_iso_utc
+
+    session = SimpleNamespace(query_window_hours=1, query_start_time=None, query_end_time=None, pii_policy={})
+    pred, disc = _ss._scoring_time_window(_fake_request(session), 168)
+
+    assert "INTERVAL" not in pred  # not the relative form
+    assert pred.startswith("timestamp >= TIMESTAMPTZ '")
+    assert "AND timestamp < TIMESTAMPTZ '" in pred
+    assert disc is not None  # discriminator keeps scoped results out of the admin cache
+
+    lits = re.findall(r"TIMESTAMPTZ '([^']+)'", pred)
+    span_h = (parse_iso_utc(lits[1]) - parse_iso_utc(lits[0])).total_seconds() / 3600
+    assert 0.9 <= span_h <= 1.1, f"expected ~1h clamp, got {span_h}h"
+
+
+def test_top_flagged_analyst_clamps_window_and_keeps_ua_url(monkeypatch):
+    """End-to-end through the handler: analyst → SQL uses the clamped absolute
+    window (not INTERVAL 168), and ua/url stay in the rows (analysts need
+    them; ip is masked downstream by the middleware)."""
+    from types import SimpleNamespace
+
+    from backend.routers import session_scoring as _ss
+
+    captured: dict = {}
+
+    def fake_query_logs(service_id, sql, params=()):
+        captured["sql"] = sql
+        return [{"ip": "1.2.3.4", "ua": "Mozilla", "url": "/secret", "edge_score": 91, "edge_sid": "s1"}]
+
+    monkeypatch.setattr(_ss, "_query_logs", fake_query_logs)
+    session = SimpleNamespace(
+        query_window_hours=1, query_start_time=None, query_end_time=None, pii_policy={"mask_ips": True}
+    )
+    out = _ss.scoring_top_flagged(request=_fake_request(session), service_id="svc", since_hours=168, limit=50)
+
+    assert "INTERVAL 168 HOUR" not in captured["sql"]
+    assert "TIMESTAMPTZ" in captured["sql"]
+    # ua/url preserved for the analyst triage view; ip masking is the middleware's job.
+    assert out["rows"][0]["ua"] == "Mozilla"
+    assert out["rows"][0]["url"] == "/secret"
+
+
+def test_top_flagged_admin_keeps_full_window(monkeypatch):
+    from backend.routers import session_scoring as _ss
+
+    captured: dict = {}
+
+    def fake_query_logs(service_id, sql, params=()):
+        captured["sql"] = sql
+        return [{"ip": "1.2.3.4", "ua": "Mozilla", "url": "/x", "edge_score": 91}]
+
+    monkeypatch.setattr(_ss, "_query_logs", fake_query_logs)
+    out = _ss.scoring_top_flagged(request=_fake_request(None), service_id="svc", since_hours=24, limit=50)
+
+    assert "INTERVAL 24 HOUR" in captured["sql"]
+    assert out["rows"][0]["ua"] == "Mozilla"
+    assert out["rows"][0]["url"] == "/x"
+
+
+def test_session_events_analyst_clamps_window(monkeypatch):
+    """The admin events route is analyst-reachable: an analyst gets the
+    lookback clamped (a ts_predicate is passed to the repo); ua/url stay."""
+    from types import SimpleNamespace
+
+    from backend.routers import session_scoring_admin as _admin
+
+    captured: dict = {}
+
+    def fake_fetch(service_id, sids, since_days=30, limit_per_sid=500, *, ts_predicate=None):
+        captured["ts_predicate"] = ts_predicate
+        return {sids[0]: [{"ts": "t", "url": "/secret", "status": 200, "ip": "1.2.3.4", "ua": "Mozilla"}]}
+
+    monkeypatch.setattr(_admin, "_fetch_session_events", fake_fetch)
+    session = SimpleNamespace(
+        query_window_hours=1, query_start_time=None, query_end_time=None, pii_policy={"mask_ips": True}
+    )
+    out = _admin.scoring_session_events(request=_fake_request(session), service_id="svc", sid="abc", since_days=90)
+
+    # Analyst → the repo received a clamped absolute predicate, not None.
+    assert captured["ts_predicate"] is not None
+    assert "TIMESTAMPTZ" in captured["ts_predicate"]
+    ev = out["events"][0]
+    assert ev["ua"] == "Mozilla"
+    assert ev["url"] == "/secret"
+
+
+def test_session_events_admin_full_window(monkeypatch):
+    from backend.routers import session_scoring_admin as _admin
+
+    captured: dict = {}
+
+    def fake_fetch(service_id, sids, since_days=30, limit_per_sid=500, *, ts_predicate=None):
+        captured["ts_predicate"] = ts_predicate
+        return {sids[0]: [{"ts": "t", "url": "/x", "status": 200, "ip": "1.2.3.4", "ua": "Mozilla"}]}
+
+    monkeypatch.setattr(_admin, "_fetch_session_events", fake_fetch)
+    out = _admin.scoring_session_events(request=_fake_request(None), service_id="svc", sid="abc", since_days=90)
+
+    # Admin → no clamp predicate; repo uses its own relative since_days window.
+    assert captured["ts_predicate"] is None
+    assert out["events"][0]["ua"] == "Mozilla"
+
+
+# ── _scoring_source: graceful degradation pre-enablement ──────────────────────
+#
+# Before scoring is provisioned on a service, the parquet schema lacks the
+# edge_score* / edge_sid / edge_cookie_compliance columns the scoring VCL adds.
+# Every scoring read endpoint binds those columns directly, so without the
+# _scoring_source wrapper DuckDB raises a binder error and the whole admin page
+# 500s before the operator has even turned scoring on. These tests pin the
+# wrapper + verify the endpoints degrade to empty/zero (HTTP 200) instead.
+
+
+def test_scoring_source_passthrough_when_all_present():
+    from backend.routers import session_scoring as _ss
+
+    cols = set(_ss._SCORING_COLUMN_TYPES) | {"edge", "timestamp"}
+    assert _ss._scoring_source("logs_x", cols) == "logs_x"
+
+
+def test_scoring_source_passthrough_on_empty_cols():
+    """Empty col set = schema unknown / view not ready → don't synthesize
+    (avoids a duplicate-column error if a column actually exists)."""
+    from backend.routers import session_scoring as _ss
+
+    assert _ss._scoring_source("logs_x", set()) == "logs_x"
+
+
+def test_scoring_source_synthesizes_missing_core_columns():
+    from backend.routers import session_scoring as _ss
+
+    # Base-only schema: has `edge` but none of the scoring columns.
+    src = _ss._scoring_source("logs_x", {"edge", "timestamp", "ip"})
+    assert src.startswith("(SELECT *, ") and src.endswith(" FROM logs_x)")
+    for col, typ in _ss._SCORING_COLUMN_TYPES.items():
+        assert f"CAST(NULL AS {typ}) AS {col}" in src
+    # Latency cols are handled separately and must NOT be synthesized here.
+    assert "edge_score_rtt_us" not in src
+    assert "edge_score_exec_us" not in src
+
+
+@pytest.fixture
+def _noscore_table(monkeypatch):
+    """Seed a real in-memory DuckDB ``logs_noscore`` table with BASE columns
+    only (no edge_score*), and route ``session_scoring._query_logs`` at it so
+    both ``_table_columns``' DESCRIBE and the endpoint SQL execute for real.
+
+    Yields the service_id whose ``_safe_table_name`` maps to ``logs_noscore``.
+    """
+    import duckdb
+
+    from backend.routers import session_scoring as _ss
+
+    con = duckdb.connect(":memory:")
+    con.execute(
+        """
+        CREATE TABLE logs_noscore (
+            timestamp TIMESTAMP, edge BOOLEAN, ip VARCHAR,
+            ua VARCHAR, url VARCHAR, status INTEGER, country VARCHAR
+        )
+        """
+    )
+    # One edge row, no scores — inside the default 24h window.
+    con.execute("INSERT INTO logs_noscore VALUES (now()::TIMESTAMP, true, '1.2.3.4', 'UA', '/', 200, 'US')")
+
+    def fake_query_logs(service_id, sql, params=()):
+        cur = con.execute(sql, params) if params else con.execute(sql)
+        rows = cur.fetchall()
+        cnames = [d[0] for d in cur.description] if cur.description else []
+        return [dict(zip(cnames, r)) for r in rows]
+
+    monkeypatch.setattr(_ss, "_query_logs", fake_query_logs)
+    yield "noscore"
+    con.close()
+
+
+def test_scoring_endpoints_degrade_when_scoring_never_enabled(_noscore_table):
+    """The reported bug: every scoring card showed a DuckDB binder error
+    ('Referenced column "edge_score" not found') before scoring was enabled.
+    With _scoring_source the endpoints must return 200 empty/zero shapes."""
+    from backend.routers import session_scoring as _ss
+
+    svc = _noscore_table
+    req = _fake_request(None)  # admin (no analyst session) → relative window
+
+    # List endpoints: no scored rows → empty rows, no binder error.
+    assert _ss.scoring_top_flagged(request=req, service_id=svc, since_hours=24, limit=50)["rows"] == []
+    assert _ss.scoring_score_distribution(request=req, service_id=svc, since_hours=24)["rows"] == []
+    assert _ss.scoring_compliance_breakdown(request=req, service_id=svc, since_hours=24)["rows"] == []
+
+    # Latency timeseries: runs over edge rows; has_latency False (no rtt/exec).
+    lat = _ss.scoring_latency_timeseries(request=req, service_id=svc, since_hours=24)
+    assert lat["has_latency"] is False
+
+    # Threshold preview: no scored sids → zero totals.
+    prev = _ss.scoring_threshold_preview(request=req, service_id=svc, threshold=75, since_hours=24)
+    assert prev["total_scored_sessions"] == 0
+
+    # Health: the big composite — degrades to all-zero, no binder error.
+    health = _ss.scoring_health(request=req, service_id=svc, since_hours=24)
+    assert health["scored_rows"] == 0
+    assert health["fire_rate_pct"] == 0.0
+    assert health["avg_score"] == 0
+    assert health["scorer_errors"] == 0
+    assert health["top_reasons"] == []
+    assert health["fail_open_breakdown"] == []

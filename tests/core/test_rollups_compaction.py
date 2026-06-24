@@ -202,6 +202,256 @@ def test_compact_skips_when_per_day_file_is_already_up_to_date(tmp_path):
         assert second == 0, "already-current day must be skipped"
 
 
+def _write_hour_bundle(buf: str, hour: str, rows: list[dict]) -> str:
+    """Write a bundled-hour parquet to
+    ``<buf>/rollups/hour_bundled/hour=<hour>/all_fields.parquet`` and
+    return the path. Mirrors the schema the hour-bundler produces:
+    ``field`` is a regular column (not hive-partitioned)."""
+    import uuid as _uuid
+
+    d = os.path.join(buf, "rollups", "hour_bundled", f"hour={hour}")
+    os.makedirs(d, exist_ok=True)
+    table = pa.table(
+        {
+            "field": pa.array([r["field"] for r in rows]),
+            "value": pa.array([r["value"] for r in rows]),
+            "count": pa.array([r["count"] for r in rows], type=pa.int64()),
+        }
+    )
+    # The real bundler writes to all_fields.parquet directly. Mirror.
+    p = os.path.join(d, "all_fields.parquet")
+    # Use a tmp + rename so a half-written file can't trip the reader's
+    # ``os.path.isfile`` check during this test.
+    tmp = os.path.join(d, f".tmp_{_uuid.uuid4().hex[:8]}.parquet")
+    pq.write_table(table, tmp)
+    os.replace(tmp, p)
+    return p
+
+
+def test_compact_falls_back_to_hour_bundled_when_per_field_hours_cleaned_up(tmp_path):
+    """Regression: the hour-bundler's _cleanup_per_field_after_bundle sweep
+    deletes rollups/hour/field=*/hour=H/ once an hour-bundle is published.
+    Before this fix, compact_closed_days_to_daily walked ONLY the per-field
+    hour tree — so a closed day whose per-field hours had all been swept
+    yielded an EMPTY per-field-per-day file (or none at all). The reader's
+    day_covered_by_any_field check then treated the partial day as
+    authoritative and bundled-hour data for that day was silently dropped
+    via the bundled-hour walk's ``hour[:10] in day_covered_by_any_field``
+    skip. Surfaced 2026-06-15 as a ~16% undercount of POSTs on the
+    dashboard method panel.
+
+    Fix: the compactor reads BOTH sources and SUMs. Per-field hour files
+    (still present for not-yet-bundled hours) UNION ALL'd with
+    bundled-hour files filtered to the current field. This test pins the
+    bundled-only case — the per-field tree is empty for the closed day,
+    so the entire per-field-per-day must come from the bundle.
+    """
+    from backend.core import rollups
+
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    src = {"name": "svc-compact-fallback"}
+
+    # Two closed bundled hours on the same day, both holding method+POST
+    # rows. NO per-field-per-hour files for this day exist (mimicking
+    # post-cleanup state).
+    _write_hour_bundle(
+        str(cache_root),
+        "2026-06-04-10",
+        [
+            {"field": "method", "value": "POST", "count": 1000},
+            {"field": "method", "value": "GET", "count": 2000},
+            {"field": "country", "value": "US", "count": 3000},
+        ],
+    )
+    _write_hour_bundle(
+        str(cache_root),
+        "2026-06-04-11",
+        [
+            {"field": "method", "value": "POST", "count": 1500},
+            {"field": "method", "value": "GET", "count": 2500},
+        ],
+    )
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        rebuilt = rollups.compact_closed_days_to_daily("svc-compact-fallback", src)
+
+    # Both ``method`` and ``country`` should land per-day files for the day.
+    assert rebuilt >= 2, f"expected per-day files for method + country; got {rebuilt}"
+
+    import duckdb as _ddb
+
+    con = _ddb.connect(":memory:")
+    try:
+        method_day = cache_root / "rollups" / "day" / "field=method" / "day=2026-06-04" / "compacted.parquet"
+        country_day = cache_root / "rollups" / "day" / "field=country" / "day=2026-06-04" / "compacted.parquet"
+        assert method_day.exists(), f"method per-day missing at {method_day}"
+        assert country_day.exists(), f"country per-day missing at {country_day}"
+
+        method_rows = sorted(con.execute(f"SELECT value, count FROM read_parquet('{method_day}')").fetchall())
+        assert method_rows == [("GET", 4500), ("POST", 2500)], (
+            f"per-day file must sum bundled-hour counts; got {method_rows}"
+        )
+        country_rows = con.execute(f"SELECT value, count FROM read_parquet('{country_day}')").fetchall()
+        assert country_rows == [("US", 3000)]
+    finally:
+        con.close()
+
+
+def test_compact_unions_per_field_hour_and_bundled_hour_sources(tmp_path):
+    """When BOTH per-field hour AND hour-bundled data exist for the same
+    (field, day) — e.g. some hours bundled-and-cleaned-up, others still
+    pending — the compactor must SUM both sources. Without this the
+    per-field-per-day would either drop the bundled hours (old code) or
+    the still-pending hours (broken alternative)."""
+    from backend.core import rollups
+
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    src = {"name": "svc-compact-mixed"}
+
+    # Per-field-per-hour for one hour (not yet bundled).
+    _write_hour_rollup(
+        str(cache_root),
+        "method",
+        "2026-06-04-12",
+        [{"field": "method", "value": "POST", "count": 500}],
+    )
+    # Hour-bundled for two earlier hours (per-field files already swept).
+    _write_hour_bundle(
+        str(cache_root),
+        "2026-06-04-10",
+        [{"field": "method", "value": "POST", "count": 200}],
+    )
+    _write_hour_bundle(
+        str(cache_root),
+        "2026-06-04-11",
+        [{"field": "method", "value": "POST", "count": 300}],
+    )
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        rollups.compact_closed_days_to_daily("svc-compact-mixed", src)
+
+    import duckdb as _ddb
+
+    con = _ddb.connect(":memory:")
+    try:
+        method_day = cache_root / "rollups" / "day" / "field=method" / "day=2026-06-04" / "compacted.parquet"
+        assert method_day.exists()
+        rows = con.execute(f"SELECT value, count FROM read_parquet('{method_day}')").fetchall()
+        assert rows == [("POST", 1000)], f"per-day must sum 200+300+500; got {rows}"
+    finally:
+        con.close()
+
+
+def test_backfill_missing_hour_bundles_detects_gaps_via_view(tmp_path, monkeypatch):
+    """Pin the discovery half of the self-heal pass: an hour where the
+    iceberg view has rows but no hour_bundled file exists must end up
+    in the recompute call's hour set. Models the 2026-06-15 prod gap
+    where ingest's "touched hours" report under-reported and 18 hours
+    of dashboard data went silently missing.
+
+    Recompute itself opens the per-service .duckdb file (which the
+    test sandbox doesn't host); stub recompute_touched_hours so the
+    test stays scoped to the discovery + dispatch contract.
+    """
+    from backend.core import rollups
+
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    src = {"name": "svc-heal", "service_id": "svc-heal"}
+
+    # Existing bundle for one hour; no bundle for an earlier hour even
+    # though the view will have data there.
+    _write_hour_bundle(
+        str(cache_root),
+        "2026-06-04-10",
+        [{"field": "method", "value": "GET", "count": 100}],
+    )
+
+    def _fake_update_iceberg_view(con, _src):
+        con.execute(
+            "CREATE OR REPLACE VIEW logs_test AS SELECT * FROM (VALUES "
+            "(TIMESTAMP '2026-06-04 09:30:00+00'), "
+            "(TIMESTAMP '2026-06-04 09:45:00+00'), "
+            "(TIMESTAMP '2026-06-04 10:15:00+00')"
+            ") AS t(timestamp)"
+        )
+
+    monkeypatch.setattr("backend.core.iceberg.update_iceberg_view", _fake_update_iceberg_view)
+
+    from datetime import UTC, datetime
+
+    class _FrozenNow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 6, 5, 0, 0, 0, tzinfo=tz or UTC)
+
+    monkeypatch.setattr("backend.core.rollups.recompute.datetime", _FrozenNow)
+
+    captured_hours: list[set[str]] = []
+
+    def _fake_recompute(_sid, _src, hours):
+        captured_hours.append(set(hours))
+
+    monkeypatch.setattr("backend.core.rollups.recompute.recompute_touched_hours", _fake_recompute)
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        result = rollups.backfill_missing_hour_bundles("svc-heal", src, lookback_days=2)
+
+    # Discovery: the 09:00 hour had view rows and NO bundle on entry.
+    # The 10:00 hour was already bundled. Self-heal must target ONLY
+    # the missing hour.
+    assert captured_hours == [{"2026-06-04-09"}], f"unexpected dispatch: {captured_hours}"
+    assert result["missing"] == 1, f"expected 1 missing; got {result}"
+
+
+def test_backfill_missing_hour_bundles_noop_when_complete(tmp_path, monkeypatch):
+    """Bundle tree is complete → no dispatch, no log noise, returns 0."""
+    from backend.core import rollups
+
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    src = {"name": "svc-noop", "service_id": "svc-noop"}
+
+    # Bundle exists for the only hour the view will surface.
+    _write_hour_bundle(
+        str(cache_root),
+        "2026-06-04-09",
+        [{"field": "method", "value": "GET", "count": 50}],
+    )
+
+    def _fake_update_iceberg_view(con, _src):
+        con.execute(
+            "CREATE OR REPLACE VIEW logs_test AS SELECT * FROM (VALUES "
+            "(TIMESTAMP '2026-06-04 09:30:00+00')"
+            ") AS t(timestamp)"
+        )
+
+    monkeypatch.setattr("backend.core.iceberg.update_iceberg_view", _fake_update_iceberg_view)
+
+    from datetime import UTC, datetime
+
+    class _FrozenNow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 6, 5, 0, 0, 0, tzinfo=tz or UTC)
+
+    monkeypatch.setattr("backend.core.rollups.recompute.datetime", _FrozenNow)
+
+    dispatched = []
+    monkeypatch.setattr(
+        "backend.core.rollups.recompute.recompute_touched_hours",
+        lambda *args, **kw: dispatched.append(True),
+    )
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        result = rollups.backfill_missing_hour_bundles("svc-noop", src, lookback_days=2)
+
+    assert dispatched == [], "must not dispatch when everything is already bundled"
+    assert result == {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
+
+
 def test_compact_returns_zero_when_rollups_dir_missing(tmp_path):
     """No rollups dir → no work, returns 0. Pinned because a freshly-
     provisioned service has no rollups yet and the cron MUST be a

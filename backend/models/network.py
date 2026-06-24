@@ -12,6 +12,12 @@ class NetworkWorstEntry(BaseModel):
     score: float | None = None
 
 
+class NetworkCityEntry(BaseModel):
+    name: str
+    lat: float | None = None
+    lon: float | None = None
+
+
 class NetworkHealthSummary(BaseModel):
     global_health_score: float
     avg_rtt_ms: float
@@ -29,6 +35,13 @@ class NetworkHealthResponse(BaseResponse):
     buckets: list[str] = []
     heatmap: list[dict[str, Any]] = []
     map_buckets: list[dict[str, Any]] = []
+    # Deduplicated city lookup for map_buckets. Each entry in
+    # map_buckets[i].cities references a city by integer ``city_idx``
+    # that resolves to ``cities[city_idx]`` (``{name, lat, lon}``). Hoisting
+    # lat/lon up here lets the per-cell dicts drop both fields entirely;
+    # interning keys by (name, lat, lon) so distinct geocenter entries for
+    # the same name (e.g. duplicate "Boston" rows from MaxMind) stay distinct.
+    cities: list[NetworkCityEntry] = []
     leaderboard: list[dict[str, Any]] = []
     metro_leaderboard: list[dict[str, Any]] = []
     summary: NetworkHealthSummary | None = None

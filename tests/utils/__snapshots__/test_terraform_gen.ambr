@@ -1,0 +1,599 @@
+# serializer version: 1
+# name: test_baseline_output_matches_snapshot
+  dict({
+    'capture_snippets/miss.vcl': '''
+      if (req.backend.is_origin) {
+        unset bereq.http.x-fos-edge-data;
+      }
+  
+    ''',
+    'capture_snippets/pass.vcl': '''
+      if (req.backend.is_origin) {
+        unset bereq.http.x-fos-edge-data;
+      }
+  
+    ''',
+    'capture_snippets/recv.vcl': '''
+      # [security] strip client-supplied internal-routing headers
+      if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+        unset req.http.x-is-cluster-fetch;
+        unset req.http.x-fos-edge-data;
+        unset req.http.x-fos-origin-data;
+        unset req.http.x-of-start;
+        unset req.http.x-of-ttfb;
+        unset req.http.x-of-ttlb;
+        unset req.http.x-of-ost;
+        unset req.http.x-of-oip;
+        unset req.http.x-of-oretries;
+        unset req.http.x-of-status;
+        unset req.http.x-edge-req-id;
+        # Session-scoring internal markers. X-Edge-Scoring-Pass=1 from a
+        # client would bypass scoring entirely; x-edge-score* / X-Edge-Sid
+        # from a client could forge a clean score / sid that the deliver
+        # subfields propagate into the log line. Scrub them all at the
+        # client edge regardless of whether scoring is currently enabled.
+        unset req.http.X-Edge-Scoring-Pass;
+        unset req.http.x-edge-score;
+        unset req.http.X-Edge-Score;
+        unset req.http.X-Edge-Score-Reason;
+        unset req.http.X-Edge-Score-Enforce;
+        unset req.http.X-Edge-Sid;
+        unset req.http.X-Edge-Score-Set-Cookie;
+      }
+      if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+        # Capture edge data for logging before shielding or backend fetch
+        set req.http.x-fos-edge-data:host = req.http.Host;
+        set req.http.x-fos-edge-data:ip = client.ip;
+        set req.http.x-fos-edge-data:referer = substr(req.http.Referer, 0, 1000);
+        set req.http.x-fos-edge-data:ua = substr(req.http.User-Agent, 0, 1000);
+      }
+    ''',
+    'cdn_proxy.tf.json': '''
+      {
+        "resource": {
+          "fastly_service_dictionary_items": {
+            "cdn_auth": {
+              "dictionary_id": "${{ for d in fastly_service_vcl.cdn_proxy.dictionary : d.name => d.dictionary_id }[\"cdn_auth\"]}",
+              "items": {
+                "secret": "test-secret-do-not-use"
+              },
+              "service_id": "${fastly_service_vcl.cdn_proxy.id}"
+            },
+            "fos_credentials": {
+              "dictionary_id": "${{ for d in fastly_service_vcl.cdn_proxy.dictionary : d.name => d.dictionary_id }[\"fos_credentials\"]}",
+              "items": {
+                "access_key": "AKIATESTSTABLE",
+                "bucket": "${aws_s3_bucket.fos_bucket.bucket}",
+                "region": "us-east-1",
+                "secret_key": "test-secret-stable"
+              },
+              "service_id": "${fastly_service_vcl.cdn_proxy.id}"
+            }
+          },
+          "fastly_service_vcl": {
+            "cdn_proxy": {
+              "backend": [
+                {
+                  "address": "us-east-1.object.fastlystorage.app",
+                  "between_bytes_timeout": 30000,
+                  "connect_timeout": 5000,
+                  "first_byte_timeout": 60000,
+                  "name": "fos_origin",
+                  "port": 443,
+                  "shield": "iad-va-us",
+                  "ssl_cert_hostname": "us-east-1.object.fastlystorage.app",
+                  "ssl_sni_hostname": "us-east-1.object.fastlystorage.app",
+                  "use_ssl": true
+                }
+              ],
+              "dictionary": [
+                {
+                  "name": "fos_credentials",
+                  "write_only": true
+                },
+                {
+                  "name": "cdn_auth",
+                  "write_only": true
+                }
+              ],
+              "domain": [
+                {
+                  "name": "my-test-bucket.global.ssl.fastly.net"
+                }
+              ],
+              "name": "Test CDN Proxy",
+              "snippet": [
+                {
+                  "content": "${file(\"${path.module}/cdn_snippets/iceberg_metadata_pointer_ttl.vcl\")}",
+                  "name": "iceberg-metadata-pointer-ttl",
+                  "priority": 10,
+                  "type": "fetch"
+                },
+                {
+                  "content": "${file(\"${path.module}/cdn_snippets/cdn_swr_shield_disable.vcl\")}",
+                  "name": "cdn-swr-shield-disable",
+                  "priority": 10,
+                  "type": "recv"
+                },
+                {
+                  "content": "${file(\"${path.module}/cdn_snippets/cdn_race_condition_generation.vcl\")}",
+                  "name": "cdn-race-condition-generation",
+                  "priority": 20,
+                  "type": "fetch"
+                },
+                {
+                  "content": "${file(\"${path.module}/cdn_snippets/cdn_no_cache_404.vcl\")}",
+                  "name": "cdn-no-cache-404",
+                  "priority": 30,
+                  "type": "fetch"
+                }
+              ],
+              "vcl": [
+                {
+                  "content": "${file(\"${path.module}/cdn_proxy.vcl\")}",
+                  "main": true,
+                  "name": "main"
+                }
+              ]
+            }
+          }
+        }
+      }
+  
+    ''',
+    'cdn_proxy.vcl': '''
+      #RATELIMIT_BEGIN
+      ratecounter auth_fail_rc {}
+      penaltybox auth_fail_pb {}
+      #RATELIMIT_END
+      
+      sub miss_pass {
+          # Fastly Object Storage signing https://www.fastly.com/documentation/guides/integrations/non-fastly-services/amazon-s3/
+          if ((req.method == "GET" || req.method == "HEAD") && !req.backend.is_shield) {
+              declare local var.fosAccessKey STRING;
+              declare local var.fosSecretKey STRING;
+              declare local var.fosBucket STRING;
+              declare local var.fosRegion STRING;
+              declare local var.fosHost STRING;
+              declare local var.canonicalHeaders STRING;
+              declare local var.signedHeaders STRING;
+              declare local var.canonicalRequest STRING;
+              declare local var.canonicalQuery STRING;
+              declare local var.stringToSign STRING;
+              declare local var.dateStamp STRING;
+              declare local var.signature STRING;
+              declare local var.scope STRING;
+      
+              set var.fosAccessKey = table.lookup(fos_credentials, "access_key", "missing");
+              set var.fosSecretKey = table.lookup(fos_credentials, "secret_key", "missing");
+              set var.fosBucket = table.lookup(fos_credentials, "bucket", "missing");
+              set var.fosRegion = table.lookup(fos_credentials, "region", "missing");
+              set var.fosHost = var.fosRegion ".object.fastlystorage.app";
+      
+              set bereq.http.x-amz-content-sha256 = digest.hash_sha256("");
+              # Round x-amz-date down to the minute (finding 006). The SigV4
+              # signature is computed over this header — making it per-request
+              # invalidates Fastly's per-(URL, method) collapsed-forwarding /
+              # request coalescing: every concurrent request gets its own unique
+              # signed Authorization, so they all forward to FOS in parallel
+              # instead of riding on a single in-flight fetch. Pinning the seconds
+              # to ``00`` collapses all requests within a minute to the SAME
+              # signature, restoring coalescing and capping the per-minute origin
+              # spend regardless of incoming RPS. Still well inside AWS SigV4's
+              # 15-minute validity window. (Audit limited VCL arithmetic — no %
+              # or / operator — so per-minute granularity via strftime format
+              # is the cleanest expression of the rounding.)
+              set bereq.http.x-amz-date = strftime({"%Y%m%dT%H%M00Z"}, now);
+              set bereq.http.host = var.fosHost;
+      
+              # Only prepend bucket if not already present (handles direct S3-style paths from DuckDB/Boto3)
+              if (regsub(bereq.url.path, "^/([^/]+)/.*$", "\1") != var.fosBucket) {
+                   set bereq.url = "/" var.fosBucket bereq.url;
+              }
+      
+              # Keep query parameters for S3 API calls (ListObjectsV2, etc)
+              # BUT remove our auth 'key' parameter so it doesn't leak to FOS or mess with signing
+              set bereq.url = querystring.filter(bereq.url, "key");
+      
+              # Sort for canonical request
+              set var.canonicalQuery = querystring.sort(bereq.url.qs);
+      
+              # Normalize path for signing (S3 expects encoded path)
+              set bereq.url = regsuball(urlencode(urldecode(bereq.url.path)), {"%2F"}, "/") + if(bereq.url.qs != "", "?" + bereq.url.qs, "");
+      
+              set var.dateStamp = strftime({"%Y%m%d"}, now);
+      
+              set var.canonicalHeaders = ""
+                  "host:" bereq.http.host LF
+                  "x-amz-content-sha256:" bereq.http.x-amz-content-sha256 LF
+                  "x-amz-date:" bereq.http.x-amz-date LF
+              ;
+              set var.signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+              set var.canonicalRequest = ""
+                  req.method LF
+                  bereq.url.path LF
+                  var.canonicalQuery LF
+                  var.canonicalHeaders LF
+                  var.signedHeaders LF
+                  digest.hash_sha256("")
+              ;
+      
+              set var.scope = var.dateStamp "/" var.fosRegion "/s3/aws4_request";
+      
+              set var.stringToSign = ""
+                  "AWS4-HMAC-SHA256" LF
+                  bereq.http.x-amz-date LF
+                  var.scope LF
+                  regsub(digest.hash_sha256(var.canonicalRequest),"^0x", "")
+              ;
+      
+              set var.signature = digest.awsv4_hmac(
+                  var.fosSecretKey,
+                  var.dateStamp,
+                  var.fosRegion,
+                  "s3",
+                  var.stringToSign
+              );
+      
+              set bereq.http.Authorization = "AWS4-HMAC-SHA256 "
+                  "Credential=" var.fosAccessKey "/" var.scope ", "
+                  "SignedHeaders=" var.signedHeaders ", "
+                  "Signature=" + regsub(var.signature,"^0x", "")
+              ;
+              unset bereq.http.Accept;
+              unset bereq.http.Accept-Language;
+              unset bereq.http.User-Agent;
+              unset bereq.http.Fastly-Client-IP;
+          }
+      }
+      
+      sub vcl_recv {
+        # Authenticate and take authority over the client IP exactly once, on
+        # the first Fastly POP to handle the request (the edge).
+        # ``fastly.ff.visits_this_service`` is 0 only on that first touch; any
+        # request arriving with it > 0 has already transited — and been
+        # authenticated by — our own edge, so re-running the gate here would
+        # only 401 a legitimately-forwarded request (the ``key`` param is
+        # stripped before forwarding). Unauthenticated requests ``error 401``
+        # at the edge and are never forwarded to the shield. A client cannot
+        # forge ``visits_this_service`` > 0: each ``Fastly-FF`` entry is a
+        # salted hash that only genuine Fastly hops can produce.
+        if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+          # A client may supply Fastly-Client-IP; overwrite it with the real
+          # connection IP so downstream logging / rate-limiting can't be spoofed.
+          set req.http.Fastly-Client-IP = client.ip;
+      
+          # Block requests that do not provide the correct secret key.
+          # NOTE on the auth fallback: the third argument to ``table.lookup`` is
+          # returned when ``cdn_auth.secret`` is absent from the edge dictionary.
+          # Defaulting to ``""`` is fail-open — an attacker who sends an empty
+          # ``key`` query param trivially matches. The literal fallback string
+          # below is substituted in load_vcl() with an unguessable
+          # ``unprovisioned-fallback-`` + ``secrets.token_hex(32)`` value, which
+          # is never knowable to an attacker and therefore fails closed when the
+          # dictionary is unprovisioned. The human-readable prefix makes clear in
+          # the rendered VCL that this is a throwaway placeholder, NOT the real
+          # ``cdn_auth.secret`` (which lives only in the write-only edge dict).
+          if (subfield(req.url.qs, "key", "&") != table.lookup(cdn_auth, "secret", "unprovisioned-fallback-<HEX64>") && req.http.x-fastly-key != table.lookup(cdn_auth, "secret", "unprovisioned-fallback-<HEX64>")) {
+      #RATELIMIT_BEGIN
+            declare local var.last_minute INTEGER;
+            set var.last_minute = ratelimit.ratecounter_increment(auth_fail_rc, req.http.Fastly-Client-IP, 1);
+            if (var.last_minute >= 2) {
+              ratelimit.penaltybox_add(auth_fail_pb, req.http.Fastly-Client-IP, 1m);
+            }
+      #RATELIMIT_END
+            error 401 "Unauthorized";
+          }
+      #RATELIMIT_BEGIN
+          if (req.method != "FASTLYPURGE" && ratelimit.penaltybox_has(auth_fail_pb, req.http.Fastly-Client-IP)) {
+            error 401 "Unauthorized";
+          }
+      #RATELIMIT_END
+        }
+      
+        # Enable segmented caching for potentially large log or parquet files
+        set req.enable_segmented_caching = true;
+        set segmented_caching.block_size = 20971520; # 20 MB, the maximum
+      
+        # Cache-key hardening (post-auth — auth check above still reads the
+        # `key` qs param from the original req.url):
+        #   1. querystring.filter_except keeps ONLY the S3-API parameters the
+        #      FOS origin actually understands and strips everything else
+        #      (including our auth `key` secret, any caller-injected tracking
+        #      params, marketing UTM params, session IDs, etc.). Unexpected
+        #      params no longer fracture the cache or leak into req.hash.
+        #   2. querystring.sort canonicalises the remaining param order so
+        #      `?prefix=foo&max-keys=10` and `?max-keys=10&prefix=foo` resolve
+        #      to one cache entry instead of two.
+        # Allow-list rationale (S3 API surface FOS exposes):
+        #   - List objects v2: list-type, prefix, delimiter, continuation-token,
+        #                       start-after, max-keys, encoding-type, fetch-owner
+        #   - List objects v1: marker
+        #   - Get object:      versionId, partNumber, response-content-type,
+        #                       response-content-disposition, response-cache-control
+        # Anything else is silently dropped. If a legitimate S3 param needs to
+        # pass through later, add it to this list and re-deploy.
+        set req.url = querystring.filter_except(req.url, "list-type,prefix,delimiter,continuation-token,start-after,max-keys,encoding-type,fetch-owner,marker,versionId,partNumber,response-content-type,response-content-disposition,response-cache-control");
+        set req.url = querystring.sort(req.url);
+      
+        # Never cache admin_state.json — it changes on every mutation
+        if (req.url ~ "/iceberg/meta/admin_state\.json$") {
+          return(pass);
+        }
+      
+        # Race condition handling: disable SWR on shield nodes so only edge serves stale
+        if (fastly.ff.visits_this_service > 1) {
+          set req.max_stale_while_revalidate = 0s;
+        }
+      
+      #FASTLY recv
+        # Normally, you should consider requests other than GET and HEAD to be uncacheable
+        # (to this we add the special FASTLYPURGE method)
+        if (req.method != "HEAD" && req.method != "GET" && req.method != "FASTLYPURGE") {
+          return(pass);
+        }
+        # If you are using image optimization, insert the code to enable it here
+        # See https://www.fastly.com/documentation/reference/io/ for more information.
+        return(lookup);
+      }
+      sub vcl_hash {
+        # Security: hash on the full URL (path + query string), not just
+        # req.url.path. Before this fix, two requests that differed only in
+        # query parameters (e.g. ListObjectsV2 with different ?prefix= values,
+        # or ?versionId= variants) shared a single cache entry — the second
+        # caller would receive the first caller's object listing. The CDN
+        # auth `key` querystring has already been stripped from req.url by
+        # the querystring.filter_except in vcl_recv, AND remaining params are
+        # sorted by querystring.sort, so the cache key (a) does NOT include
+        # the secret and (b) is normalised across param-order variants.
+        # Expect a one-time cache-hit-rate dip + origin egress spike on
+        # rollout while prior entries are stranded; the canary monitors
+        # those signals and auto-rolls back if they exceed v6 §6 thresholds.
+        set req.hash += req.url;
+        set req.hash += req.http.host;
+      #FASTLY hash
+        return(hash);
+      }
+      sub vcl_hit {
+      #FASTLY hit
+        return(deliver);
+      }
+      sub vcl_miss {
+      #FASTLY miss
+          call miss_pass;
+        return(fetch);
+      }
+      sub vcl_pass {
+      #FASTLY pass
+          call miss_pass;
+        return(pass);
+      }
+      sub vcl_fetch {
+      #FASTLY fetch
+      
+      # Unset Fastly Object Storage headers https://www.fastly.com/documentation/guides/integrations/non-fastly-services/amazon-s3/
+      unset beresp.http.x-amz-id-2;
+      unset beresp.http.x-amz-request-id;
+      unset beresp.http.x-amz-delete-marker;
+      unset beresp.http.x-amz-version-id;
+      
+        # Unset headers that reduce cacheability for images processed using the Fastly image optimizer
+        if (req.http.X-Fastly-Imageopto-Api) {
+          unset beresp.http.Set-Cookie;
+          unset beresp.http.Vary;
+        }
+        # Log the number of restarts for debugging purposes
+        if (req.restarts > 0) {
+          set beresp.http.Fastly-Restarts = req.restarts;
+        }
+        # If the response is setting a cookie, make sure it is not cached
+        if (beresp.http.Set-Cookie) {
+          return(pass);
+        }
+        # By default we set a TTL based on the `Cache-Control` header but we don't parse additional directives
+        # like `private` and `no-store`. Private in particular should be respected at the edge:
+        if (beresp.http.Cache-Control ~ "(?:private|no-store)") {
+          return(pass);
+        }
+        # If no TTL has been provided in the response headers, set a default
+        if (!beresp.http.Expires && !beresp.http.Surrogate-Control ~ "max-age" && !beresp.http.Cache-Control ~ "(?:s-maxage|max-age)") {
+          set beresp.ttl = 3600s;
+          # Apply a longer default TTL for images processed using Image Optimizer
+          if (req.http.X-Fastly-Imageopto-Api) {
+            set beresp.ttl = 2592000s; # 30 days
+            set beresp.http.Cache-Control = "max-age=2592000, public";
+          }
+        }
+        return(deliver);
+      }
+      sub vcl_error {
+      #FASTLY error
+        return(deliver);
+      }
+      sub vcl_deliver {
+      #FASTLY deliver
+      
+        # Remove AWS headers returned from Fastly Object Storage https://www.fastly.com/documentation/solutions/examples/using-s3-compatible-buckets-as-private-origins/
+        unset resp.http.x-amz-id-2;
+        unset resp.http.x-amz-request-id;
+        unset resp.http.server;
+      
+        return(deliver);
+      }
+      sub vcl_log {
+      #FASTLY log
+      }
+    ''',
+    'cdn_snippets/cdn_no_cache_404.vcl': '''
+        if ((req.method == "GET" || req.method == "HEAD") && beresp.status == 404) {
+          set beresp.cacheable = false;
+          set beresp.ttl = 0s;
+          set beresp.stale_while_revalidate = 0s;
+          set beresp.stale_if_error = 0s;
+        }
+    ''',
+    'cdn_snippets/cdn_race_condition_generation.vcl': '''
+        if (req.backend.is_origin) {
+          set beresp.http.X-Shield-Generation = req.vcl.generation;
+        } else {
+          declare local var.local INTEGER;
+          set var.local = std.atoi(req.vcl.generation);
+          if (std.atoi(beresp.http.X-Shield-Generation) < var.local) {
+            set beresp.ttl = 1s;
+          }
+          set beresp.http.X-Edge-Generation = req.vcl.generation;
+        }
+    ''',
+    'cdn_snippets/cdn_swr_shield_disable.vcl': '''
+        if (fastly.ff.visits_this_service > 1) {
+          set req.max_stale_while_revalidate = 0s;
+        }
+    ''',
+    'cdn_snippets/iceberg_metadata_pointer_ttl.vcl': '''
+        if (req.url ~ "metadata_location\.txt($|\?)") {
+          set beresp.http.Surrogate-Key = "iceberg-metadata-pointer";
+          set beresp.ttl = 10s;
+          set beresp.stale_while_revalidate = 5s;
+          set beresp.stale_if_error = 60s;
+        }
+        if (req.url ~ "table_summary\.json($|\?)") {
+          set beresp.http.Surrogate-Key = "iceberg-table-summary";
+          set beresp.ttl = 300s;
+          set beresp.stale_while_revalidate = 60s;
+          set beresp.stale_if_error = 3600s;
+        }
+    ''',
+    'fos.tf.json': '''
+      {
+        "resource": {
+          "aws_s3_bucket": {
+            "fos_bucket": {
+              "bucket": "my-test-bucket"
+            }
+          }
+        }
+      }
+  
+    ''',
+    'instructions': '''
+      # Fastly Log Analysis Terraform Export
+      
+      This directory contains the Terraform configuration to set up Fastly Object Storage logging and a CDN proxy for the Fastly Log Analysis tool.
+      
+      Configuration is emitted as Terraform's JSON syntax (`.tf.json`). All Terraform commands (`init`, `fmt`, `validate`, `plan`, `apply`) accept it interchangeably with HCL.
+      
+      ## Files
+      - `versions.tf.json`: Terraform CLI floor + pinned major versions for the `aws` and `fastly` providers.
+      - `fos.tf.json`: The Fastly Object Storage bucket resource (created via the AWS S3-compatible provider).
+      - `cdn_proxy.tf.json`: A NEW Fastly Delivery service that fronts the FOS bucket for fast dashboard access.
+      - `logging_service.tf.json`: The logging endpoint and capture snippets for your existing service.
+      - `cdn_proxy.vcl`: The main VCL for the CDN proxy service (loaded by `cdn_proxy.tf.json`).
+      - `log_format.vcl`: The JSON log format string (loaded by `logging_service.tf.json`).
+      - `cdn_snippets/`: VCL snippets for the CDN proxy service (loaded by `cdn_proxy.tf.json`).
+      - `capture_snippets/`: VCL snippets for your existing logging service (loaded by `logging_service.tf.json`).
+      
+      ## AWS provider configuration
+      
+      `fos.tf.json` declares an `aws_s3_bucket` resource. Fastly Object Storage is S3-compatible, so the AWS provider works against the Fastly FOS endpoint. Configure it in your root module (or alongside these files) like this:
+      
+      ```hcl
+      provider "aws" {
+        region                      = "us-east-1"
+        access_key                  = "<your fos access key>"
+        secret_key                  = "<your fos secret key>"
+        endpoints { s3 = "https://us-east-1.object.fastlystorage.app" }
+        skip_credentials_validation = true
+        skip_region_validation      = true
+        skip_requesting_account_id  = true
+      }
+      ```
+      
+      ## Instructions
+      1. Review `fos.tf.json` and ensure the `aws` provider above is correctly configured.
+      2. `cdn_proxy.tf.json` creates a NEW Fastly service to accelerate your log reads.
+      3. `logging_service.tf.json` contains the configuration for your ACTIVE service. You should copy the `logging_s3`, `condition`, and `snippet` blocks into your existing `fastly_service_vcl` resource for service ID `SU3xxxxxxxxxxxxxx0000`.
+      4. Run `terraform init` and `terraform apply` to deploy the changes.
+  
+    ''',
+    'log_format.vcl': '{"timestamp":"%{strftime(\\{"%Y-%m-%dT%H:%M:%S%z"\\},time.start)}V","ip":"%{json.escape(if(req.http.x-fos-edge-data:ip != "", req.http.x-fos-edge-data:ip, req.http.Fastly-Client-IP))}V","status":%{if(resp.status > 0, "" + resp.status, "null")}V,"elapsed":%{if(time.elapsed.usec != "", time.elapsed.usec, "null")}V,"cache":"%{json.escape(fastly_info.state)}V","resp_bytes":%{if(resp.bytes_written > 0, "" + resp.bytes_written, "0")}V,"host":"%{json.escape(substr(if(req.http.x-fos-edge-data:host != "", req.http.x-fos-edge-data:host, req.http.Host), 0, 512))}V","url":"%{json.escape(substr(req.url, 0, 2000))}V","method":"%{json.escape(substr(req.method, 0, 128))}V","proto":"%{if(req.proto != "", regsub(req.proto, "^HTTP/", ""), "")}V","ua":"%{json.escape(substr(if(req.http.x-fos-edge-data:ua != "", req.http.x-fos-edge-data:ua, req.http.User-Agent), 0, 1000))}V","referer":"%{json.escape(substr(if(req.http.x-fos-edge-data:referer != "", req.http.x-fos-edge-data:referer, req.http.Referer), 0, 1000))}V","req_bytes":%{if(req.http.Content-Length ~ "^[0-9]+$", req.http.Content-Length, "0")}V,"req_header_bytes":%{if(req.header_bytes_read > 0, "" + req.header_bytes_read, "0")}V}',
+    'logging_service.tf.json': '''
+      {
+        "resource": {
+          "fastly_service_vcl": {
+            "logging_service": {
+              "condition": [
+                {
+                  "name": "Log Sampling - fastly_log_analysis",
+                  "statement": "!segmented_caching.is_inner_req",
+                  "type": "RESPONSE"
+                }
+              ],
+              "domain": [
+                {
+                  "name": "example.com"
+                }
+              ],
+              "logging_s3": [
+                {
+                  "bucket_name": "${aws_s3_bucket.fos_bucket.bucket}",
+                  "domain": "us-east-1.object.fastlystorage.app",
+                  "format": "${file(\"${path.module}/log_format.vcl\")}",
+                  "format_version": 2,
+                  "gzip_level": 9,
+                  "message_type": "blank",
+                  "name": "fastly_log_analysis",
+                  "path": "/logs/raw/%Y-%m-%d/%H/",
+                  "period": 60,
+                  "response_condition": "Log Sampling - fastly_log_analysis",
+                  "s3_access_key": "AKIATESTSTABLE",
+                  "s3_secret_key": "test-secret-stable",
+                  "timestamp_format": "%Y-%m-%dT%H:%M:%S.000"
+                }
+              ],
+              "name": "Logging Service",
+              "snippet": [
+                {
+                  "content": "${file(\"${path.module}/capture_snippets/recv.vcl\")}",
+                  "name": "Fastly Log Analysis Capture",
+                  "priority": 1,
+                  "type": "recv"
+                },
+                {
+                  "content": "${file(\"${path.module}/capture_snippets/miss.vcl\")}",
+                  "name": "Fastly Log Analysis Miss",
+                  "priority": 100,
+                  "type": "miss"
+                },
+                {
+                  "content": "${file(\"${path.module}/capture_snippets/pass.vcl\")}",
+                  "name": "Fastly Log Analysis Pass",
+                  "priority": 100,
+                  "type": "pass"
+                }
+              ]
+            }
+          }
+        }
+      }
+  
+    ''',
+    'versions.tf.json': '''
+      {
+        "terraform": {
+          "required_providers": {
+            "aws": {
+              "source": "hashicorp/aws",
+              "version": "~> 5.0"
+            },
+            "fastly": {
+              "source": "fastly/fastly",
+              "version": "~> 5.0"
+            }
+          },
+          "required_version": ">= 1.6"
+        }
+      }
+  
+    ''',
+  })
+# ---

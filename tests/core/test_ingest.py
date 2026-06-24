@@ -62,14 +62,15 @@ def test_get_catalog_field_ids_with_custom_fields():
 
 def test_get_ingest_columns_sql_renders_duckdb_types_map():
     """DuckDB ``read_csv(..., types={...})`` requires a brace-wrapped
-    list of ``fid: 'TYPE'`` pairs. Pinned because losing the braces
-    or quoting the field id would silently fall back to inferred
-    types, breaking the partitioning."""
+    list of ``'fid': 'TYPE'`` pairs. Pinned because losing the braces
+    would silently fall back to inferred types, breaking the
+    partitioning. (Field ids and type names are wrapped in
+    ``escape_sql_literal``-quoted single quotes per finding Jun14-001;
+    the timestamp partition column must still be present and explicitly
+    TIMESTAMPTZ.)"""
     sql = get_ingest_columns_sql()
     assert sql.startswith("{") and sql.endswith("}")
-    # Timestamp gets TIMESTAMPTZ explicitly (vs the generic type) — pinned to
-    # catch a regression that would shift the partitioning column.
-    assert "timestamp: 'TIMESTAMPTZ'" in sql
+    assert "'timestamp': 'TIMESTAMPTZ'" in sql
 
 
 def test_get_ingest_columns_sql_includes_enabled_custom_fields_only():
@@ -80,8 +81,46 @@ def test_get_ingest_columns_sql_includes_enabled_custom_fields_only():
         ]
     }
     sql = get_ingest_columns_sql(cfg)
-    assert "extra_a: 'VARCHAR'" in sql
+    assert "'extra_a': 'VARCHAR'" in sql
     assert "extra_disabled" not in sql
+
+
+def test_get_ingest_columns_sql_escapes_quote_in_field_metadata():
+    """Finding Jun14-001: ``get_ingest_columns_sql`` previously
+    interpolated custom-field ids and DuckDB type names raw into the
+    DuckDB types-map literal that drives ``read_csv``. A custom field
+    with a hostile ``duckdb_type`` like ``VARCHAR'; ATTACH '/etc/passwd' AS x; --``
+    would have broken out of the SQL string and executed multi-statement
+    SQL against the ingest connection. The fix wraps both halves of
+    every map entry with ``escape_sql_literal`` (doubles embedded
+    single quotes), so a quote in either position renders as ``''``
+    inside the string instead of terminating it.
+
+    Admin-write surface (custom-field schema is validated on save by
+    a strict regex today), but defense in depth on the ingest hot
+    path — the only thing standing between a misconfigured /
+    bypassed validator and a fully-controlled DuckDB statement."""
+    cfg = {
+        "custom_fields": [
+            {
+                "name": "hostile",
+                # The validator would reject this; this test bypasses by
+                # constructing the config dict directly to verify the
+                # SQL-string-escaping behaviour at the ingest seam.
+                "duckdb_type": "VARCHAR'; DROP TABLE",
+                "enabled": True,
+            }
+        ]
+    }
+    sql = get_ingest_columns_sql(cfg)
+    # The embedded single quote must be doubled, neutralising the
+    # statement-terminator. ``escape_sql_literal`` does ' → ''.
+    assert "VARCHAR''" in sql, f"single-quote in duckdb_type must be doubled; got: {sql}"
+    # And there must be no UNESCAPED quote sequence that would close
+    # the map-entry string — a bare ``'; DROP`` after the value is the
+    # bad shape. After escaping, ``'; DROP`` becomes ``''; DROP``
+    # which stays inside the quoted literal.
+    assert "VARCHAR'; DROP" not in sql, f"raw quote sequence escaped from the SQL literal; got: {sql}"
 
 
 # ── _delete_objects_robust: bulk delete with fallback ──────────────────────
@@ -368,9 +407,11 @@ def test_ingest_yields_error_when_bucket_missing():
 
 
 def test_ingest_short_circuits_to_done_when_no_new_files():
-    """When the FOS scan returns no new files (everything already
-    ingested), yield a done event with skipped count + zero new
-    files. Pinned because this is the steady-state cron behavior."""
+    """When the FOS scan returns no new files, yield a done event with zero
+    new files and ``skipped_files`` = the count actually re-seen this run.
+    An empty LIST means nothing was skipped → 0, regardless of how many
+    files sit in the dedup ledger. Pinned because this is the steady-state
+    cron behavior under delete_after=True (bucket purged post-ingest)."""
     from backend.core.ingest import ingest
 
     fake_paginator = MagicMock()
@@ -382,7 +423,7 @@ def test_ingest_short_circuits_to_done_when_no_new_files():
 
     with (
         patch("backend.core.ingest._ensure_source_registered"),
-        patch("backend.core.metadata_db.get_ingested_filenames", return_value={"already1.gz", "already2.gz"}),
+        patch("backend.core.metadata.get_ingested_filenames", return_value={"already1.gz", "already2.gz"}),
         patch("backend.core.ingest._get_fos_client", return_value=fake_s3),
     ):
         events, _ = _drain_ingest(ingest(source=src))
@@ -390,7 +431,8 @@ def test_ingest_short_circuits_to_done_when_no_new_files():
     done = next((e for e in events if e["type"] == "done"), None)
     assert done is not None
     assert done["new_files"] == 0
-    assert done["skipped_files"] == 2
+    # Empty LIST → nothing re-seen → 0 skipped, even though the ledger holds 2.
+    assert done["skipped_files"] == 0
 
 
 def test_ingest_yields_error_on_fos_list_failure():
@@ -406,7 +448,7 @@ def test_ingest_yields_error_on_fos_list_failure():
 
     with (
         patch("backend.core.ingest._ensure_source_registered"),
-        patch("backend.core.metadata_db.get_ingested_filenames", return_value=set()),
+        patch("backend.core.metadata.get_ingested_filenames", return_value=set()),
         patch("backend.core.ingest._get_fos_client", return_value=fake_s3),
     ):
         events, _ = _drain_ingest(ingest(source=src))
@@ -463,7 +505,7 @@ def test_ingest_sets_force_download_on_mem_con():
     }
     with (
         patch("backend.core.ingest._ensure_source_registered"),
-        patch("backend.core.metadata_db.get_ingested_filenames", return_value=set()),
+        patch("backend.core.metadata.get_ingested_filenames", return_value=set()),
         patch("backend.core.ingest._get_fos_client", return_value=fake_s3),
         patch("backend.core.duckdb.get_memory_connection", side_effect=_fake_get_mem_con),
         # Short-circuit the actual read_json_auto call — we only care that

@@ -32,9 +32,9 @@ export function ColumnVisibilityDropdown({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger render={
-        <Button 
-          variant="outline" 
-          size={size} 
+        <Button
+          variant="outline"
+          size={size}
           className={cn("h-8 gap-2 px-2 text-xs font-normal", className)}
         />
       }>

@@ -189,7 +189,7 @@ def test_commit_iceberg_starts_commit_thread_and_returns_run_id():
             client = TestClient(app)
             response = client.post("/api/admin/commit-iceberg")
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["ok"] is True
         assert data["run_id"] == 55
@@ -210,7 +210,7 @@ def test_commit_iceberg_already_running_returns_existing_run_id():
             client = TestClient(app)
             response = client.post("/api/admin/commit-iceberg")
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         assert response.json()["run_id"] == run_id
     finally:
         _reset()

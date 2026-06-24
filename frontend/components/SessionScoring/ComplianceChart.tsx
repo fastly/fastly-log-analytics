@@ -1,11 +1,10 @@
 'use client'
 
-import { useQuery } from '@tanstack/react-query'
-
-import { client } from '@/lib/api'
+import { type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ComplianceHelp } from '@/components/SessionScoring/help-content'
 
 import { StackedHourlyBarChart } from './StackedHourlyBarChart'
+import { useScoringQuery } from './useScoringQuery'
 
 interface ComplianceChartProps {
   serviceId: string
@@ -27,22 +26,12 @@ const COMPLIANCE_COLORS: Record<string, string> = {
 }
 
 export function ComplianceChart({ serviceId, sinceHours = 24 }: ComplianceChartProps) {
-  const { data, isLoading, isFetching } = useQuery({
-    queryKey: ['scoring-compliance', serviceId, sinceHours],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/compliance-breakdown' as any,
-        {
-          params: {
-            path: { service_id: serviceId },
-            query: { since_hours: sinceHours },
-          },
-        } as any,
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as { rows: CompRow[] }
-    },
-  })
+  const { data, isLoading, isFetching, isError, error } = useScoringQuery<{ rows: CompRow[] }>(
+    ['scoring-compliance', serviceId, sinceHours],
+    serviceId,
+    'compliance-breakdown',
+    { since_hours: sinceHours },
+  )
 
   return (
     <StackedHourlyBarChart<CompRow>
@@ -52,6 +41,7 @@ export function ComplianceChart({ serviceId, sinceHours = 24 }: ComplianceChartP
       helpTitle="About Cookie Compliance"
       isLoading={isLoading}
       isFetching={isFetching}
+      error={isError ? (error as AnalyticsCardError) : null}
       rows={data?.rows ?? []}
       categoryKey="compliance"
       colors={COMPLIANCE_COLORS}

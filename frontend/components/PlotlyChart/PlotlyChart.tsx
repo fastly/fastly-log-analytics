@@ -4,6 +4,9 @@ import React, { useRef, useEffect, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { useTheme } from 'next-themes'
 
+import { ChartA11yTable } from './ChartA11yTable'
+import { tracesToTable } from './tracesToTable'
+
 // Use the cartesian-only Plotly distribution via react-plotly.js's factory
 // API. The default `import 'react-plotly.js'` pulls full plotly.js (~4.7 MB
 // minified) — we only render scatter / line / bar / pie / heatmap (see the
@@ -27,6 +30,21 @@ const Plot = dynamic(
   { ssr: false },
 )
 
+// Kick off the Plotly chunk fetch on demand. PlotlyPrewarm calls this in
+// a mount effect so the 1.4MB cartesian-dist chunk starts downloading in
+// parallel with React's render of the invisible prewarm chart, rather
+// than after the prewarm's inner IntersectionObserver gate flips. Safe
+// to call multiple times — the dynamic import cache de-dupes.
+let plotlyPreloadPromise: Promise<unknown> | null = null
+export function preloadPlotlyChunk(): Promise<unknown> {
+  if (plotlyPreloadPromise) return plotlyPreloadPromise
+  plotlyPreloadPromise = Promise.all([
+    import('react-plotly.js/factory'),
+    import('plotly.js-cartesian-dist-min' as any),
+  ])
+  return plotlyPreloadPromise
+}
+
 interface PlotlyChartProps {
   data: any[]
   layout?: any
@@ -36,6 +54,13 @@ interface PlotlyChartProps {
   onRelayout?: (event: any) => void
   onSelected?: (event: any) => void
   onUpdate?: (event: any) => void
+  /**
+   * Optional caption for the screen-reader-only data table emitted
+   * alongside the chart. Defaults to "Chart data". Pass something
+   * descriptive (e.g., "Requests over the last 24 hours") so assistive
+   * tech announces useful context before reading the data.
+   */
+  a11yTitle?: string
 }
 
 export const PlotlyChart = React.memo(function PlotlyChart({
@@ -46,22 +71,25 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   height = 300,
   onRelayout,
   onSelected,
-  onUpdate
+  onUpdate,
+  a11yTitle = 'Chart data'
 }: PlotlyChartProps) {
   const { theme } = useTheme()
   const isDark = theme === 'dark'
-  // Keep a ref to the latest callbacks so the initialized handler is always current
+  // Keep refs to the latest callbacks so the initialized handler is always current
   const onRelayoutRef = useRef(onRelayout)
   const onSelectedRef = useRef(onSelected)
-  useEffect(() => { onRelayoutRef.current = onRelayout }, [onRelayout])
-  useEffect(() => { onSelectedRef.current = onSelected }, [onSelected])
+  useEffect(() => {
+    onRelayoutRef.current = onRelayout
+    onSelectedRef.current = onSelected
+  }, [onRelayout, onSelected])
 
   // Store the graphDiv so we can re-attach listeners if needed
   const graphDivRef = useRef<any>(null)
 
   const handleInitialized = useRef((_figure: any, graphDiv: any) => {
     graphDivRef.current = graphDiv
-    
+
     // react-plotly.js has known issues with the onRelayout prop dropping events
     // during zoom interactions, so we attach it directly to the graphDiv here.
     graphDiv.on('plotly_relayout', (event: any) => {
@@ -69,14 +97,48 @@ export const PlotlyChart = React.memo(function PlotlyChart({
     })
   }).current
 
-  // Stable callbacks for Plotly to prevent it from detaching listeners on render
-  const handleRelayout = React.useCallback((e: any) => onRelayoutRef.current?.(e), [])
+  // Stable callback for Plotly to prevent it from detaching the listener
+  // on render. `plotly_relayout` is wired imperatively in handleInitialized
+  // above to work around react-plotly.js dropping zoom events; no stable
+  // onRelayout prop is passed to <Plot> below.
   const handleSelected = React.useCallback((e: any) => onSelectedRef.current?.(e), [])
+
+  // Container ref + narrow-viewport flag. Declared above defaultLayout
+  // so the layout block can read `narrow` for the responsive legend
+  // reflow below. The IntersectionObserver `visible` gate stays here
+  // for the same reason — both observers attach to containerRef in
+  // effects further down.
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(false)
+  // Plotly's `responsive: true` resizes the plot but does NOT reflow
+  // the legend orientation. A many-series chart (e.g. POP breakdown
+  // across 20+ regions on /performance) overflows the chart area on
+  // narrow screens. Switch legend to horizontal-below when the
+  // container itself drops below 720 px (NOT viewport — a chart in a
+  // 6-of-12-column grid on a 1280 px screen sits in ~640 px and
+  // should use the narrow layout).
+  const [narrow, setNarrow] = useState(false)
+
+  // Narrow-viewport legend defaults: horizontal orientation pinned to
+  // the bottom of the plot so labels stack horizontally instead of
+  // crowding the right side. Caller's `layout.legend` (if any) gets
+  // merged on top so explicit overrides still win.
+  const narrowLegendDefaults = narrow
+    ? { orientation: 'h' as const, x: 0, y: -0.2, yanchor: 'top' as const, xanchor: 'left' as const }
+    : {}
+
+  // Narrow viewports bump the chart height ~20% so the horizontal-below
+  // legend (see narrowLegendDefaults) doesn't compete with the plot for
+  // pixels — vertical scroll is cheap on phones, cramped plots aren't.
+  const effectiveHeight =
+    typeof height === 'number' && narrow ? Math.round(height * 1.2) : height
 
   const defaultLayout = {
     autosize: true,
-    height: typeof height === 'number' ? height : undefined,
-    margin: { l: 40, r: 20, t: 20 },
+    height: typeof effectiveHeight === 'number' ? effectiveHeight : undefined,
+    // Make room for the bottom legend on narrow viewports — Plotly's
+    // default bottom margin is too tight for an h-orientation legend.
+    margin: { l: 40, r: 20, t: 20, b: narrow ? 60 : undefined },
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
     font: {
@@ -91,6 +153,10 @@ export const PlotlyChart = React.memo(function PlotlyChart({
       namelength: -1
     },
     ...layout,
+    // After the ...layout spread so callers can override individual
+    // legend fields without losing the narrow-viewport defaults
+    // entirely. Caller's full legend overrides take precedence here.
+    legend: { ...narrowLegendDefaults, ...(layout?.legend || {}) },
     xaxis: {
       gridcolor: isDark ? '#27272a' : '#e4e4e7',
       zerolinecolor: isDark ? '#27272a' : '#e4e4e7',
@@ -131,8 +197,6 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   // below promotes to true on mount when no IntersectionObserver
   // exists, which is the same effective behaviour without the SSR
   // divergence.
-  const containerRef = useRef<HTMLDivElement>(null)
-  const [visible, setVisible] = useState(false)
 
   useEffect(() => {
     if (visible || !containerRef.current) return
@@ -154,8 +218,31 @@ export const PlotlyChart = React.memo(function PlotlyChart({
     return () => observer.disconnect()
   }, [visible])
 
+  // ResizeObserver tracks the container's actual rendered width — not
+  // viewport. A chart placed in a 6-of-12-column grid on a 1280px
+  // screen sits in ~640 px of real estate and SHOULD use the narrow
+  // legend layout even though the viewport is wide. 720 px matches
+  // the breakpoint shadcn/Tailwind treats as the small/medium hinge.
+  useEffect(() => {
+    if (!containerRef.current || typeof ResizeObserver === 'undefined') return
+    const node = containerRef.current
+    const ro = new ResizeObserver(([entry]) => {
+      const w = entry.contentRect?.width ?? 0
+      setNarrow((prev) => (w > 0 && w < 720 ? true : w >= 720 ? false : prev))
+    })
+    ro.observe(node)
+    return () => ro.disconnect()
+  }, [])
+
+  // Screen-reader companion. Computed from `data`, NOT from the
+  // rendered Plotly figure, so it's available even before the chart
+  // visibility gate flips and even when Plotly fails to render.
+  // Memoized on the array reference — callers almost always
+  // recompute `data` only on real changes, so the memo is cheap.
+  const a11yShape = React.useMemo(() => tracesToTable(data, a11yTitle), [data, a11yTitle])
+
   return (
-    <div ref={containerRef} className={className} style={{ height }}>
+    <div ref={containerRef} className={className} style={{ height: effectiveHeight }}>
       {visible ? (
         <Plot
           data={data}
@@ -168,6 +255,7 @@ export const PlotlyChart = React.memo(function PlotlyChart({
           onSelected={handleSelected}
         />
       ) : null}
+      <ChartA11yTable shape={a11yShape} />
     </div>
   )
 })

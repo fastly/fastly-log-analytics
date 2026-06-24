@@ -1,9 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+import logging
 
-from backend.core import metadata_db
+from fastapi import APIRouter, Depends, Query
+
+from backend.core import metadata as metadata_db
 from backend.deps import get_source
+from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.utils.router_utils import raise_internal
 
-router = APIRouter(prefix="/api/audit-logs", tags=["audit-logs"])
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/audit-logs", tags=["audit-logs"], responses=DEFAULT_ERROR_RESPONSES)
 
 
 @router.get("")
@@ -35,4 +41,4 @@ def api_audit_logs(
             "_debug_calls": get_tracked_calls(),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": str(e)})
+        raise_internal(logger, e, code="audit_logs_read_failed")

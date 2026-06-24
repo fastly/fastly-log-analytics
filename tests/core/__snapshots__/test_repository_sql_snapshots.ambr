@@ -1,0 +1,727 @@
+# serializer version: 1
+# name: test_dashboard_field_values_bot_ua_sql
+  '''
+  
+              SELECT ua, COUNT(*) AS cnt
+              FROM t_logs
+              WHERE 1=1 AND ua IS NOT NULL 
+              GROUP BY ua
+              ORDER BY cnt DESC
+              LIMIT 5000
+          
+  '''
+# ---
+# name: test_dashboard_field_values_native_column_sql
+  '''
+  
+              SELECT "status" AS value, COUNT(*) AS count
+              FROM t_logs
+              WHERE 1=1 
+              GROUP BY 1 ORDER BY 2 DESC LIMIT 100
+          
+  '''
+# ---
+# name: test_dashboard_map_data_by_country_sql
+  '''
+  
+                      SELECT "country" AS country, COUNT(*) AS count
+                      FROM t_logs
+                      WHERE "country" IS NOT NULL AND 1=1
+                      GROUP BY 1
+                  
+  '''
+# ---
+# name: test_dashboard_time_series_sql
+  '''
+  
+                      SELECT time_bucket(INTERVAL '5 minutes', timestamp) AS bucket,
+                             COUNT(*) AS value
+                      FROM t_logs
+                      WHERE timestamp IS NOT NULL AND 1=1
+                      GROUP BY 1 ORDER BY 1
+                  
+  '''
+# ---
+# name: test_insights_asn_concentration_sql
+  '''
+  
+          SELECT "asn",
+              COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
+              COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt,
+              (SELECT COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) FROM t_logs) AS b_total,
+              (SELECT COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) FROM t_logs) AS w_total
+          FROM t_logs WHERE "asn" IS NOT NULL GROUP BY "asn"
+          HAVING w_total > 0 AND w_cnt * 1.0 / w_total >= 0.20 AND (b_total = 0 OR w_cnt * 1.0 / w_total >= b_cnt * 1.0 / NULLIF(b_total, 0) * 3 + 0.10)
+          ORDER BY w_cnt DESC LIMIT 10
+      
+  '''
+# ---
+# name: test_insights_botnet_grouping_sql
+  '''
+  
+          WITH base AS (
+              SELECT "ja4", "ip",
+                  (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+                  (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+              FROM t_logs WHERE "ja4" IS NOT NULL AND "ja4" != ''
+          )
+          SELECT "ja4",
+              COUNT(DISTINCT "ip") FILTER (WHERE is_w) AS w_ips,
+              COUNT(*) FILTER (WHERE is_w) AS w_reqs,
+              COUNT(DISTINCT "ip") FILTER (WHERE is_b) AS b_ips,
+              w_ips * 1.0 / GREATEST(COALESCE(b_ips, 0) / GREATEST(24, 1.0) * 1, 1) AS ip_ratio
+          FROM base GROUP BY "ja4"
+          HAVING w_ips >= 5 AND w_ips > COALESCE(b_ips, 0) / GREATEST(24, 1.0) * 1 * 3
+          ORDER BY ip_ratio DESC LIMIT 10
+      
+  '''
+# ---
+# name: test_insights_error_spikes_sql
+  '''
+  
+          WITH base AS (
+              SELECT "url", status,
+                  (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+                  (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+              FROM t_logs
+          )
+          SELECT "url",
+              SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_w) * 1.0 / NULLIF(COUNT(*) FILTER (WHERE is_w), 0) AS w_rate,
+              SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_b) * 1.0 / NULLIF(COUNT(*) FILTER (WHERE is_b), 0) AS b_rate,
+              SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_errors,
+              COUNT(*) FILTER (WHERE is_w) AS w_total,
+              COUNT(*) FILTER (WHERE is_b) AS b_total
+          FROM base GROUP BY "url"
+          HAVING w_total >= 3 AND w_rate >= 0.05 AND (b_total < 10 OR w_rate >= b_rate * 2 + 0.05)
+          ORDER BY (w_rate - COALESCE(b_rate, 0)) DESC LIMIT 15
+      
+  '''
+# ---
+# name: test_insights_latency_regression_sql
+  '''
+  
+          WITH base AS (
+              SELECT "url", elapsed,
+                  (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+                  (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+              FROM t_logs WHERE elapsed IS NOT NULL
+          )
+          SELECT "url",
+              PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_w) / 1000.0 AS w_p95,
+              PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_b) / 1000.0 AS b_p95,
+              COUNT(*) FILTER (WHERE is_w) AS w_total,
+              COUNT(*) FILTER (WHERE is_b) AS b_total
+          FROM base GROUP BY "url"
+          HAVING w_total >= 5 AND b_total >= 20 AND w_p95 >= b_p95 * 2.0 AND w_p95 - b_p95 >= 200
+          ORDER BY (w_p95 / NULLIF(b_p95, 0)) DESC LIMIT 15
+      
+  '''
+# ---
+# name: test_insights_origin_error_rate_sql
+  '''
+  
+          WITH base AS (
+              SELECT "ost" AS status,
+                  (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+                  (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+              FROM t_logs WHERE "ost" IS NOT NULL
+          ),
+          totals AS (
+              SELECT
+                  COUNT(*) FILTER (WHERE is_w) AS w_total,
+                  COUNT(*) FILTER (WHERE is_b) AS b_total,
+                  COUNT(*) FILTER (WHERE is_w AND status >= 500) AS w_5xx,
+                  COUNT(*) FILTER (WHERE is_b AND status >= 500) AS b_5xx
+              FROM base
+          ),
+          by_status AS (
+              SELECT status, COUNT(*) FILTER (WHERE is_w) AS w_cnt
+              FROM base WHERE is_w AND status >= 500
+              GROUP BY status
+          )
+          SELECT s.status, s.w_cnt, t.w_total, t.b_total, t.w_5xx, t.b_5xx
+          FROM by_status s, totals t
+          WHERE (t.w_5xx * 100.0 / NULLIF(t.w_total, 0)) >= 1.0
+            AND (t.w_5xx * 100.0 / NULLIF(t.w_total, 0)) > (t.b_5xx * 100.0 / NULLIF(t.b_total, 0)) * 2
+      
+  '''
+# ---
+# name: test_insights_proxy_surge_sql
+  '''
+  
+          WITH base AS (
+              SELECT "p_type",
+                  COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
+                  COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
+              FROM t_logs WHERE "p_type" IS NOT NULL AND "p_type" != '' GROUP BY "p_type"
+          ),
+          totals AS (
+              SELECT
+                  SUM(w_cnt) AS w_proxy_total,
+                  SUM(b_cnt) AS b_proxy_total,
+                  (SELECT COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) FROM t_logs WHERE "p_type" IS NOT NULL) AS w_total_all,
+                  (SELECT COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) FROM t_logs WHERE "p_type" IS NOT NULL) AS b_total_all
+              FROM base
+          )
+          SELECT b."p_type", b.w_cnt, b.b_cnt, t.w_total_all, t.b_total_all
+          FROM base b, totals t
+          WHERE (t.w_proxy_total * 100.0 / NULLIF(t.w_total_all, 0)) >= 5
+            AND (t.w_proxy_total * 100.0 / NULLIF(t.w_total_all, 0)) >= (t.b_proxy_total * 100.0 / NULLIF(t.b_total_all, 0)) * 2 + 5
+      
+  '''
+# ---
+# name: test_insights_waf_signal_spikes_sql
+  '''
+  
+          SELECT signal,
+              COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
+              COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt,
+              w_cnt * 1.0 / GREATEST(COALESCE(b_cnt, 0) * 1.0 / 24 * 1, 0.5) AS spike_ratio
+          FROM insights_waf_1
+          GROUP BY signal
+          HAVING w_cnt >= 3 AND w_cnt > COALESCE(b_cnt, 0) * 1.0 / 24 * 1 * 2 + 2
+          ORDER BY spike_ratio DESC LIMIT 15
+      
+  '''
+# ---
+# name: test_network_heatmap_by_asn_bucket_sql
+  '''
+  
+              WITH top_cells AS (
+                  SELECT
+                      asn,
+                      EPOCH_MS(
+                          CAST((EPOCH_MS(timestamp)::BIGINT // 300000) * 300000 AS BIGINT)
+                      )::TIMESTAMP AS bucket,
+                      COUNT(*) AS reqs,
+                      SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS err_count
+                  FROM "t_logs"
+                  WHERE 1=1
+                    AND asn IS NOT NULL
+                    AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                  GROUP BY 1, 2
+                  ORDER BY reqs DESC
+                  LIMIT 1000
+              )
+              SELECT
+                  tc.asn,
+                  tc.bucket,
+                  APPROX_QUANTILE(
+                      CASE WHEN cache LIKE '%HIT%' AND elapsed > 0
+                      THEN resp_bytes * 1000000.0 / elapsed END,
+                      0.5
+                  ) AS throughput_bps,
+                  APPROX_QUANTILE(tcp_rtt, 0.5)          AS rtt_med_us,
+                  MEDIAN(rtt_min)           AS rtt_baseline_us,
+                  NULL        AS rtt_congestion_us,
+                  NULL             AS avg_ploss,
+                  MEDIAN(rtt_var)           AS rtt_jitter_us,
+                  tc.err_count * 100.0 / NULLIF(tc.reqs, 0) AS error_pct,
+                  tc.reqs
+              FROM "t_logs"
+              INNER JOIN top_cells tc
+                  ON "t_logs".asn = tc.asn
+                 AND EPOCH_MS(
+                         CAST((EPOCH_MS("t_logs".timestamp)::BIGINT // 300000) * 300000 AS BIGINT)
+                     )::TIMESTAMP = tc.bucket
+              WHERE 1=1
+                AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+              GROUP BY tc.asn, tc.bucket, tc.reqs, tc.err_count
+              ORDER BY tc.reqs DESC
+          
+  '''
+# ---
+# name: test_network_map_by_country_bucket_sql
+  '''
+  
+                  WITH top_cells AS (
+                      SELECT
+                          country,
+                          "city" AS city,
+                          lat  AS lat,
+                          lon  AS lon,
+                          NULL AS metro,
+                          EPOCH_MS(
+                              CAST((EPOCH_MS(timestamp)::BIGINT // 300000) * 300000 AS BIGINT)
+                          )::TIMESTAMP AS bucket,
+                          COUNT(*) AS reqs,
+                          SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS err_count
+                      FROM "t_logs"
+                      WHERE 1=1
+                        AND country IS NOT NULL AND country != ''
+                        AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                      GROUP BY 1, 2, 3, 4, 5, 6
+                      ORDER BY reqs DESC
+                      LIMIT 5000
+                  )
+                  SELECT * FROM (
+                      SELECT
+                          tc.country,
+                          tc.city,
+                          tc.lat,
+                          tc.lon,
+                          tc.metro,
+                          tc.bucket,
+                          APPROX_QUANTILE(tcp_rtt, 0.5) AS rtt_med_us,
+                          NULL    AS avg_ploss,
+                          tc.err_count * 100.0 / NULLIF(tc.reqs, 0) AS error_pct,
+                          tc.reqs
+                      FROM "t_logs"
+                      INNER JOIN top_cells tc
+                          ON "t_logs".country = tc.country
+                         AND ("city")  IS NOT DISTINCT FROM tc.city
+                         AND (lat)   IS NOT DISTINCT FROM tc.lat
+                         AND (lon)   IS NOT DISTINCT FROM tc.lon
+                         AND (NULL) IS NOT DISTINCT FROM tc.metro
+                         AND EPOCH_MS(
+                                 CAST((EPOCH_MS("t_logs".timestamp)::BIGINT // 300000) * 300000 AS BIGINT)
+                             )::TIMESTAMP = tc.bucket
+                      WHERE 1=1
+                        AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                      GROUP BY tc.country, tc.city, tc.lat, tc.lon, tc.metro, tc.bucket, tc.reqs, tc.err_count
+                  ) ranked
+                  ORDER BY bucket, reqs DESC
+              
+  '''
+# ---
+# name: test_network_metro_leaderboard_sql
+  '''
+  
+                  WITH top_cells AS (
+                      SELECT
+                          country,
+                          "city"   AS city,
+                          "region" AS region,
+                          NULL  AS metro,
+                          COUNT(*) AS reqs,
+                          SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS err_count
+                      FROM "t_logs"
+                      WHERE 1=1
+                        AND country IS NOT NULL AND country != ''
+                        AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                      GROUP BY 1, 2, 3, 4
+                      ORDER BY reqs DESC
+                      LIMIT 100
+                  )
+                  SELECT
+                      tc.country,
+                      tc.city,
+                      tc.region,
+                      tc.metro,
+                      APPROX_QUANTILE(tcp_rtt, 0.5) AS rtt_med_us,
+                      NULL AS avg_ploss,
+                      tc.err_count * 100.0 / NULLIF(tc.reqs, 0) AS error_pct,
+                      tc.reqs
+                  FROM "t_logs"
+                  INNER JOIN top_cells tc
+                      ON "t_logs".country = tc.country
+                     AND ("city")   IS NOT DISTINCT FROM tc.city
+                     AND ("region") IS NOT DISTINCT FROM tc.region
+                     AND (NULL)  IS NOT DISTINCT FROM tc.metro
+                  WHERE 1=1
+                    AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                  GROUP BY tc.country, tc.city, tc.region, tc.metro, tc.reqs, tc.err_count
+                  ORDER BY tc.reqs DESC
+              
+  '''
+# ---
+# name: test_network_quality_bar_by_group_sql
+  '''
+  
+              SELECT "country" AS label, APPROX_QUANTILE(tcp_rtt, 0.5) / 1000.0 AS rtt_ms, COUNT(*) AS reqs
+              FROM "t_logs"
+              WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                AND "country" IS NOT NULL AND CAST("country" AS VARCHAR) != ''
+              GROUP BY "country"
+              ORDER BY reqs DESC
+              LIMIT 25
+          
+  '''
+# ---
+# name: test_network_quality_countries_distinct_sql
+  '''
+  
+          SELECT DISTINCT country FROM "t_logs"
+          WHERE 1=1 AND country IS NOT NULL AND country != ''
+          ORDER BY country
+      
+  '''
+# ---
+# name: test_network_quality_scatter_sql
+  '''
+  
+              SELECT tcp_rtt / 1000.0 AS rtt_ms, ttfb * 1000.0 AS ttfb_ms,
+                     COALESCE(cache, 'UNKNOWN') AS cache_state
+              FROM "t_logs"
+              WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0 AND ttfb IS NOT NULL AND ttfb > 0
+              USING SAMPLE 2000
+          
+  '''
+# ---
+# name: test_network_rtt_percentiles_by_asn_sql
+  '''
+  
+                  SELECT asn,
+                      APPROX_QUANTILE(tcp_rtt, 0.95) AS p95_us,
+                      APPROX_QUANTILE(tcp_rtt, 0.99) AS p99_us
+                  FROM "t_logs"
+                  WHERE 1=1 AND asn IN (?,?,?)
+                    AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                  GROUP BY asn
+                  
+  '''
+# ---
+# name: test_network_speed_distribution_by_asn_sql
+  '''
+  
+                  SELECT asn, c_speed, COUNT(*) AS cnt FROM "t_logs"
+                  WHERE 1=1 AND asn IN (?,?,?)
+                    AND c_speed IS NOT NULL AND c_speed != ''
+                  GROUP BY asn, c_speed
+                  ORDER BY asn, cnt DESC
+                  
+  '''
+# ---
+# name: test_origin_path_breakdown_sql
+  '''
+  
+          SELECT
+            "edge",
+            COUNT(*)                                                          AS requests,
+            MEDIAN(elapsed) / 1000.0                                        AS p50_ms,
+            APPROX_QUANTILE(elapsed, 0.95) / 1000.0                         AS p95_ms
+          FROM "t_logs"
+          WHERE 1=1 AND (elapsed IS NOT NULL)
+          GROUP BY "edge"
+          
+  '''
+# ---
+# name: test_origin_pop_latency_sql
+  '''
+  
+          SELECT
+            "pop",
+            COUNT(*)                                                          AS requests,
+            MEDIAN(elapsed) / 1000.0                                        AS p50_ms,
+            APPROX_QUANTILE(elapsed, 0.95) / 1000.0                         AS p95_ms
+          FROM "t_logs"
+          WHERE 1=1 AND (elapsed IS NOT NULL) AND "pop" IS NOT NULL AND "pop" != ''
+          GROUP BY "pop"
+          ORDER BY p95_ms DESC
+          LIMIT ?
+          
+  '''
+# ---
+# name: test_origin_slow_urls_sql
+  '''
+  
+          SELECT
+            "url",
+            COUNT(*)                                                         AS requests,
+            MEDIAN(elapsed) / 1000.0                                       AS p50_ms,
+            APPROX_QUANTILE(elapsed, 0.95) / 1000.0                        AS p95_ms,
+            APPROX_QUANTILE(elapsed, 0.99) / 1000.0                        AS p99_ms
+          FROM "t_logs"
+          WHERE 1=1 AND (elapsed IS NOT NULL) AND "url" IS NOT NULL
+          GROUP BY "url"
+          HAVING COUNT(*) >= ?
+          ORDER BY p95_ms DESC
+          LIMIT ?
+          
+  '''
+# ---
+# name: test_origin_status_codes_sql
+  '''
+  
+          SELECT
+            CASE
+              WHEN "ost" BETWEEN 100 AND 599 THEN "ost"
+              ELSE -1
+            END                                              AS status,
+            COUNT(*)                                         AS count,
+            COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()        AS pct
+          FROM "t_logs"
+          WHERE 1=1 AND "ost" IS NOT NULL
+          GROUP BY 1
+          ORDER BY count DESC
+          
+  '''
+# ---
+# name: test_origin_summary_rollup_sql
+  '''
+  
+          SELECT
+            COUNT(*)                                                                            AS requests,
+            COUNT(*) FILTER (WHERE "cache" ILIKE 'MISS%')                                       AS total_misses,
+            COUNT(*) FILTER (WHERE "cache" ILIKE 'PASS%')                                       AS total_passes,
+            MEDIAN(elapsed) / 1000.0                                                          AS ottfb_p50_ms,
+            APPROX_QUANTILE(elapsed, 0.75) / 1000.0                                           AS ottfb_p75_ms,
+            APPROX_QUANTILE(elapsed, 0.95) / 1000.0                                           AS ottfb_p95_ms,
+            APPROX_QUANTILE(elapsed, 0.99) / 1000.0                                           AS ottfb_p99_ms,
+            NULL                                                                          AS ottlb_p50_ms,
+            NULL                                                                          AS ottlb_p95_ms,
+            0                                                                            AS cdn_overhead_p50_ms,
+            NULL                                                                            AS origin_error_rate,
+            NULL                                                                         AS obytes_p50
+          FROM "t_logs"
+          WHERE 1=1 AND (elapsed IS NOT NULL)
+          
+  '''
+# ---
+# name: test_origin_timeseries_bucketed_sql
+  '''
+  
+          SELECT
+            time_bucket(INTERVAL '5 minutes', "timestamp")                              AS ts,
+            COUNT(*)                                                          AS miss_count,
+            AVG(elapsed) / 1000.0                                            AS value
+            
+          FROM "t_logs"
+          WHERE 1=1 AND (elapsed IS NOT NULL)
+          GROUP BY ts ''
+          ORDER BY ts
+          
+  '''
+# ---
+# name: test_security_conn_reuse_dist_sql
+  '''
+  
+              SELECT
+                  CASE
+                      WHEN conn_requests = 1 THEN '1 (None)'
+                      WHEN conn_requests <= 5 THEN '2-5'
+                      WHEN conn_requests <= 20 THEN '6-20'
+                      WHEN conn_requests <= 100 THEN '21-100'
+                      ELSE '>100'
+                  END as bucket,
+                  count(*) as count,
+                  MIN(conn_requests) as min_val
+              FROM t_origin_tmp
+              WHERE conn_requests IS NOT NULL AND conn_requests > 0
+              GROUP BY 1 ORDER BY min_val
+          
+  '''
+# ---
+# name: test_security_fingerprint_coverage_bulk_sql
+  '''
+  
+              SELECT count(*) AS total_rows, COUNT(*) AS hits
+              FROM t_origin_tmp
+          
+  '''
+# ---
+# name: test_security_fingerprint_top_n_sql
+  '''
+  
+              SELECT ""ja4"",
+                     count(DISTINCT ip) as ip_count,
+                     count(*) as req_count
+              FROM t_origin_tmp
+              WHERE ""ja4"" IS NOT NULL AND ""ja4"" != ''
+              GROUP BY 1 ORDER BY 3 DESC LIMIT 20
+          
+  '''
+# ---
+# name: test_security_ngwaf_top_bots_join_sql
+  '''
+  
+                      SELECT nb.bot_name, nb.category, count(*) AS cnt
+                      FROM t_origin_tmp t
+                      INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id)
+                      WHERE nb.bot_name IS NOT NULL
+                      GROUP BY 1, 2
+                      ORDER BY 3 DESC
+                      LIMIT 50
+                  
+  '''
+# ---
+# name: test_security_ngwaf_verified_bots_sql
+  '''
+  
+                  SELECT
+                      nb.bot_name,
+                      nb.wellknown_bot_name,
+                      nb.category,
+                      count(*) AS request_count
+                  FROM t_origin_tmp t
+                  INNER JOIN ngwaf_cache.ngwaf_bots nb USING (waf_req_id)
+                  WHERE nb.bot_name IS NOT NULL
+                  GROUP BY 1, 2, 3
+                  ORDER BY 4 DESC
+              
+  '''
+# ---
+# name: test_security_ngwaf_verified_bots_ts_sql
+  '''
+  
+                  SELECT
+                      time_bucket(INTERVAL '300 seconds', t.timestamp) AS bucket,
+                      nb.bot_name,
+                      count(*) AS count
+                  FROM t_origin_tmp t
+                  INNER JOIN ngwaf_cache.ngwaf_bots nb USING (waf_req_id)
+                  WHERE nb.bot_name IS NOT NULL
+                  GROUP BY 1, 2
+                  ORDER BY 1, 2
+              
+  '''
+# ---
+# name: test_security_proxy_type_dist_sql
+  '''
+  
+              SELECT p_type, count(*) as count
+              FROM t_origin_tmp
+              WHERE p_type IS NOT NULL AND p_type != ''
+              GROUP BY 1 ORDER BY 2 DESC
+          
+  '''
+# ---
+# name: test_security_req_header_size_dist_sql
+  '''
+  
+              SELECT
+                  CASE
+                      WHEN req_header_bytes <= 256 THEN '0-256B'
+                      WHEN req_header_bytes <= 512 THEN '256-512B'
+                      WHEN req_header_bytes <= 768 THEN '512-768B'
+                      WHEN req_header_bytes <= 1024 THEN '768B-1KB'
+                      WHEN req_header_bytes <= 1536 THEN '1-1.5KB'
+                      WHEN req_header_bytes <= 2048 THEN '1.5-2KB'
+                      WHEN req_header_bytes <= 3072 THEN '2-3KB'
+                      WHEN req_header_bytes <= 4096 THEN '3-4KB'
+                      WHEN req_header_bytes <= 6144 THEN '4-6KB'
+                      WHEN req_header_bytes <= 8192 THEN '6-8KB'
+                      WHEN req_header_bytes <= 12288 THEN '8-12KB'
+                      WHEN req_header_bytes <= 16384 THEN '12-16KB'
+                      WHEN req_header_bytes <= 24576 THEN '16-24KB'
+                      WHEN req_header_bytes <= 32768 THEN '24-32KB'
+                      ELSE '>32KB'
+                  END as bucket,
+                  count(*) as count,
+                  MIN(req_header_bytes) as min_val
+              FROM t_origin_tmp
+              WHERE req_header_bytes IS NOT NULL
+              GROUP BY 1 ORDER BY min_val
+          
+  '''
+# ---
+# name: test_security_top_ips_by_max_header_sql
+  '''
+  
+              SELECT ip, MAX(req_header_bytes) as max_header
+              FROM t_origin_tmp
+              WHERE ip IS NOT NULL AND req_header_bytes IS NOT NULL
+              GROUP BY 1 ORDER BY 2 DESC LIMIT 10
+          
+  '''
+# ---
+# name: test_security_top_uas_by_count_sql
+  '''
+  
+                      SELECT ua, count(*) AS cnt
+                      FROM t_origin_tmp
+                      WHERE ua IS NOT NULL
+                      GROUP BY ua
+                      ORDER BY cnt DESC
+                      LIMIT 50000
+                  
+  '''
+# ---
+# name: test_security_verified_bots_ts_sql
+  '''
+  
+              SELECT
+                  time_bucket(INTERVAL '300 seconds', timestamp) AS bucket,
+                  replace(tag, 'VERIFIED-BOT.', '') AS bot_type,
+                  count(*) AS count
+              FROM (
+                  SELECT timestamp, unnest(string_split(waf_sig, ',')) AS tag
+                  FROM t_origin_tmp
+                  WHERE waf_sig IS NOT NULL AND waf_sig ILIKE '%VERIFIED-BOT.%'
+              ) sub
+              WHERE tag LIKE 'VERIFIED-BOT.%'
+              GROUP BY 1, 2
+              ORDER BY 1, 2
+          
+  '''
+# ---
+# name: test_security_wellknown_bots_ua_ip_sql
+  '''
+  
+                  SELECT ua, ip, count(*) AS cnt
+                  FROM t_origin_tmp
+                  1=1
+                  GROUP BY ua, ip
+                  ORDER BY cnt DESC
+                  LIMIT 10000
+              
+  '''
+# ---
+# name: test_sessions_count_wrapper_sql
+  '''
+  
+      
+      SELECT COUNT(*) FROM (SELECT (req_count >= 1000) AS flagged FROM sessions_agg) sub
+      
+  
+  '''
+# ---
+# name: test_sessions_cte_pipeline_sql
+  '''
+  
+      WITH base AS (
+          SELECT "ip"
+                 
+                 , timestamp AS ts
+                 
+                 
+                 
+                 
+                 
+                 
+                 
+                 
+          FROM t_logs
+          WHERE 1=1 AND timestamp IS NOT NULL
+      ),
+      gaps AS (
+          SELECT *,
+                 ts - LAG(ts) OVER (PARTITION BY "ip" ORDER BY ts) AS gap
+          FROM base
+      ),
+      marks AS (
+          SELECT *,
+                 CASE WHEN gap IS NULL OR gap > INTERVAL 30 MINUTES THEN 1 ELSE 0 END AS is_new
+          FROM gaps
+      ),
+      sessions_raw AS (
+          SELECT *,
+                 SUM(is_new) OVER (PARTITION BY "ip" ORDER BY ts
+                                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sid
+          FROM marks
+      ),
+      sessions_agg AS (
+          SELECT "ip",
+                 MIN(ts) AS session_start,
+                 MAX(ts) AS session_end,
+                 COUNT(*) AS req_count
+                 
+                 , sid
+          FROM sessions_raw
+          GROUP BY "ip", sid
+      )
+  
+  '''
+# ---
+# name: test_sessions_page_select_sql
+  '''
+  
+      
+      SELECT *, (req_count >= 1000) AS flagged
+      FROM sessions_agg
+      
+      ORDER BY req_count DESC
+      LIMIT 100 OFFSET 0
+  
+  '''
+# ---

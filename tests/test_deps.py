@@ -214,7 +214,7 @@ def test_connection_holder_exit_with_no_open_connection_is_noop():
     holder.__exit__(None, None, None)  # must not raise
 
 
-# ── get_con / get_meta_con: generator-style dependencies ─────────────────────
+# ── get_con: generator-style dependency ──────────────────────────────────────
 
 
 def test_get_con_yields_connection_and_closes_after(disable_pool):
@@ -233,15 +233,18 @@ def test_get_con_yields_connection_and_closes_after(disable_pool):
         fake_con.close.assert_called_once()
 
 
-def test_get_meta_con_passes_skip_view_update_true():
-    """``get_meta_con`` is the metadata variant — must skip the Iceberg
-    view refresh so admin/cron pages don't block on S3 manifest reads."""
-    fake_con = MagicMock()
-
-    with patch("backend.deps.get_connection", return_value=fake_con) as mock_get:
-        gen = deps.get_meta_con(source={"name": "x"})
-        next(gen)
-        assert mock_get.call_args.kwargs["skip_view_update"] is True
+def test_get_meta_con_symbol_removed():
+    """v2.0 cut: ``get_meta_con`` was deleted. The pool fingerprint check
+    in ``duckdb_pool.checkout_connection`` skips ``update_iceberg_view``
+    when the (view-cache identity, buffer mtime) tuple is unchanged, so
+    the dedicated skip-view-update dep that bootstrap routes used is
+    no longer needed. Pin removal so a future refactor doesn't quietly
+    re-introduce it."""
+    assert not hasattr(deps, "get_meta_con"), (
+        "get_meta_con was removed at the v2.0 cut. Routes that used it should use "
+        "get_con instead; the pool fingerprint check makes the skip-view "
+        "optimization unnecessary."
+    )
 
 
 def test_get_con_default_is_read_only(disable_pool):
@@ -323,16 +326,18 @@ def test_connection_holder_pool_path_discards_on_error():
         assert called_exc_type is RuntimeError
 
 
-# ── AnalyticsDeps: bundled source + connection ───────────────────────────────
+# ── AnalyticsDeps: removed at v2.0 cut ───────────────────────────────────────
 
 
-def test_analytics_deps_bundles_source_and_con():
-    """``AnalyticsDeps`` is a thin DI bundle — the test pins that both
-    fields are stored as attributes (the routes do ``deps.source`` /
-    ``deps.con``, so the attribute names are part of the contract)."""
-    fake_src = {"name": "x"}
-    fake_con = MagicMock()
-
-    bundle = deps.AnalyticsDeps(source=fake_src, con=fake_con)
-    assert bundle.source is fake_src
-    assert bundle.con is fake_con
+def test_analytics_deps_symbol_removed():
+    """v2.0 cut Phase 8: the bundled ``AnalyticsDeps`` (get_source + get_con)
+    was replaced by :class:`backend.core.request_context.RequestContext`
+    via ``Depends(build_request_context)``. The new dep enforces analyst
+    tenancy structurally (the old bundle skipped it because
+    ``require_service_access`` was never wired as a sibling dep on any
+    route). Pin removal so a refactor doesn't quietly re-introduce it."""
+    assert not hasattr(deps, "AnalyticsDeps"), (
+        "AnalyticsDeps was removed at v2.0 cut. Routes use "
+        "RequestContext via Depends(build_request_context); access "
+        "ctx.source / ctx.con / ctx.service_id."
+    )

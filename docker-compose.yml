@@ -1,11 +1,34 @@
+# Local quickstart: `docker compose up --build`, then open http://localhost
+# (also http://fastly.localhost with zero setup; http://fastly.analytics with a
+# /etc/hosts entry — see README).
+#
+# Topology: Caddy is the single ingress on :80. The `frontend` and `caddy`
+# services join the `backend` container's network namespace
+# (network_mode: "service:backend"), so all three share one loopback. That
+# reproduces the production trust model — Caddy/frontend reach the backend on
+# 127.0.0.1, so the backend sees a loopback peer and treats the request as the
+# local admin (backend/utils/remote_access.py:is_request_remote). Shared
+# namespaces work identically on native Docker and Colima across Mac/PC/Linux;
+# production (docker-compose.prod.yml) overrides this to network_mode: host.
 services:
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped
+    # Give the backend up to 75s to drain on SIGTERM before Docker SIGKILLs.
+    # Pairs with _bounded_scheduler_shutdown in backend/main.py (60s scheduler
+    # drain budget + 15s uvicorn / connection-close headroom). Without this
+    # bump, the default 10s sigkill window cuts ingest crons mid-chunk on
+    # every restart, producing partial buffers + orphan in_flight rows that
+    # _recover_in_flight then has to reconcile on the next boot.
+    stop_grace_period: 75s
+    # Backend owns the shared network namespace, so it publishes the only
+    # externally-reachable port: Caddy's :80 (Caddy runs inside this netns).
+    # The frontend (:3000) and backend (:8000) stay internal — reach the app
+    # through Caddy at http://localhost.
     ports:
-      - "8000:8000"
+      - "80:80"
     volumes:
       - ./configs:/app/configs
       - ./data:/app/data
@@ -13,6 +36,11 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DUCKDB_MEMORY_LIMIT=4GB
+      # Friendly local hostnames added to the backend's Host allowlist
+      # (localhost / 127.0.0.1 are allowed by default). fastly.localhost
+      # auto-resolves to 127.0.0.1 in browsers; fastly.analytics needs a
+      # /etc/hosts entry (see README). See backend/utils/remote_access.py.
+      - LOCAL_HOSTS=fastly.localhost,fastly.analytics
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -27,15 +55,29 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    # Share the backend's network namespace so the frontend's SSR fetches and
+    # the Next.js /api rewrite reach the backend on loopback (127.0.0.1:8000) —
+    # the address the backend trusts as local admin. No `ports`/`networks` here:
+    # a service using network_mode: "service:..." inherits the owner's network.
+    network_mode: "service:backend"
     environment:
-      - API_PROXY_URL=http://backend:8000
+      # Loopback in the shared namespace (NOT backend:8000 — a service-name
+      # address would resolve to the bridge IP and be classified remote → 400).
+      - API_PROXY_URL=http://127.0.0.1:8000
     depends_on:
       backend:
         condition: service_healthy
-    networks:
-      - app-network
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    # Also joins the backend's namespace: Caddy proxies to 127.0.0.1:3000
+    # (frontend) and 127.0.0.1:8000 (backend) over that shared loopback.
+    network_mode: "service:backend"
+    volumes:
+      - ./caddy/Caddyfile.local:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - frontend
 
 networks:
   app-network:

@@ -1,13 +1,21 @@
 /**
- * MSW migration (TESTING_PLAN_3 item 9). Previously
- * ``vi.mock('@/lib/api')`` stubbed ``client.GET`` at the module
- * boundary. Now the real openapi-fetch client runs and MSW intercepts
- * at the fetch boundary so the request-middleware (header injection)
- * and response-middleware (error throwing) get exercised too.
+ * MSW-backed integration: the admin /api/services list flows through
+ * openapi-fetch (with the request/response middleware) into the
+ * ``ServicesTable`` component.
+ *
+ * Targets ``ServicesTable`` directly rather than ``AdminPage``: the
+ * 2026-06-14 RSC conversion (commit 27a5c68) made the page a React
+ * Server Component, which jsdom can't render — only the static
+ * ``PageHeader`` chrome paints, the rest of the tree is server-side.
+ * The test's load-bearing assertion has always been "services from
+ * /api/services flow into the rendered table"; pointing at the
+ * ``'use client'`` ``ServicesTable`` component delivers that
+ * contract without depending on the RSC boundary.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { createTestQueryClient } from '../helpers/query'
 import { expect, test, vi, beforeEach } from 'vitest'
 import React from 'react'
 
@@ -19,14 +27,31 @@ vi.mock('next/navigation', () => ({
   useRouter: vi.fn(() => ({ replace: vi.fn(), push: vi.fn() })),
 }))
 
-const API_BASE = 'http://127.0.0.1:8000'
+
+import { getApiBase } from '@/lib/api'
+
+const API_BASE = getApiBase()
+
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: (options: any) => ({
+    getVirtualItems: () => {
+      const count = options.count || 0
+      return Array.from({ length: count }).map((_, i) => ({
+        index: i,
+        start: i * 40,
+        size: 40,
+      }))
+    },
+    getTotalSize: () => (options.count || 0) * 40,
+  }),
+}))
 
 beforeEach(() => {
   vi.clearAllMocks()
   useServiceStore.setState({ activeServiceId: 'test-svc', isInitialized: true } as never)
 })
 
-test('renders admin page and lists services', async () => {
+test('ServicesTable renders services flowed through MSW + openapi-fetch', async () => {
   server.use(
     http.get(`${API_BASE}/api/services`, () =>
       HttpResponse.json({
@@ -40,30 +65,17 @@ test('renders admin page and lists services', async () => {
         ],
       }),
     ),
-    http.get(`${API_BASE}/api/admin/bot-sources`, () =>
-      HttpResponse.json({ sources: [], rdns: { total: 0, pending: 0 } }),
-    ),
-    http.get(`${API_BASE}/api/admin/system-jobs`, () =>
-      HttpResponse.json({ jobs: [] }),
-    ),
-    http.get(`${API_BASE}/api/admin/usage-logging`, () =>
-      HttpResponse.json({ enabled: false, retention_days: 30 }),
-    ),
   )
 
   // Per-test QueryClient avoids cross-test cache leakage and lets us
   // disable retries cleanly.
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: 0 } },
-  })
-  const { default: AdminPage } = await import('@/app/admin/page')
+  const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
+  const { ServicesTable } = await import('@/app/admin/_sections/ServicesTable')
   render(
     <QueryClientProvider client={queryClient}>
-      <AdminPage />
+      <ServicesTable />
     </QueryClientProvider>,
   )
-
-  expect(screen.getByText('Admin')).toBeInTheDocument()
 
   await waitFor(
     () => {

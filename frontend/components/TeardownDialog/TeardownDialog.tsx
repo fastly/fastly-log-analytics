@@ -127,8 +127,8 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
                   <h3 className="text-lg font-semibold tracking-tight">Executing Teardown Actions</h3>
                   <p className="text-sm text-muted-foreground">Please do not close this window until the process is complete.</p>
                </div>
-               
-               <SSEProgressView 
+
+               <SSEProgressView
                  lines={lines}
                  status={status}
                  error={sseError}
@@ -188,18 +188,18 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
                     <div className="space-y-3">
                       <div className="flex items-center justify-between group">
                         <div className="space-y-0.5">
-                          <Label className="text-sm font-medium">Delete Fastly logging endpoint</Label>
+                          <Label htmlFor="rem-logging" className="text-sm font-medium">Delete Fastly logging endpoint</Label>
                           <p className="text-[10px] text-muted-foreground">Removes the S3 logging configuration from the service.</p>
                         </div>
-                        <Switch checked={true} disabled={true} className="opacity-50" />
+                        <Switch id="rem-logging" checked={true} disabled={true} className="opacity-50" />
                       </div>
 
                       <div className="flex items-center justify-between group">
                         <div className="space-y-0.5">
-                          <Label className="text-sm font-medium">Delete CDN VCL proxy service</Label>
+                          <Label htmlFor="rem-cdn" className="text-sm font-medium">Delete CDN VCL proxy service</Label>
                           <p className="text-[10px] text-muted-foreground">Permanently removes the secondary CDN service.</p>
                         </div>
-                        <Switch checked={true} disabled={true} className="opacity-50" />
+                        <Switch id="rem-cdn" checked={true} disabled={true} className="opacity-50" />
                       </div>
 
                       <div className="flex items-center justify-between group">

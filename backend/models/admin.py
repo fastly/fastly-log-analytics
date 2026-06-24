@@ -2,9 +2,175 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, Field, RootModel
 
-from backend.models.common import BaseResponse
+from backend.models.common import BaseResponse, LogExtentsMixin
+
+# ── Metric snapshots history ───────────────────────────────────────────────
+
+
+class MetricHistoryPoint(BaseModel):
+    """One sample from the metric_snapshots time-series."""
+
+    ts: str
+    value: float
+
+
+class MetricHistoryBatchResponse(BaseModel):
+    """Every series newer than ``since``, returned by ``GET /api/admin/metric-history/batch``.
+
+    Key shape: ``"{metric}"`` for global metrics, ``"{metric}|{service_id}"``
+    for per-service, ``"{metric}|{service_id}|{task}"`` for per-task.
+    """
+
+    series: dict[str, list[MetricHistoryPoint]] = Field(default_factory=dict)
+
+
+# ── Compaction stats ───────────────────────────────────────────────────────
+
+
+class CompactionStatsResponse(BaseModel):
+    """File-count distribution across local cache partitions.
+
+    Returned by ``GET /api/admin/compaction-stats`` and consumed by the
+    admin System Health card.
+    """
+
+    total_files: int = 0
+    partitions: int = 0
+    partitions_above_3: int = 0
+    partitions_above_10: int = 0
+    daily_files: int = 0
+    weekly_files: int = 0
+    avg_files_per_partition: float = 0.0
+
+
+# ── Health snapshot ──────────────────────────────────────────────────────
+
+
+class HealthLoadAverages(BaseModel):
+    avg_1m: float
+    avg_5m: float
+    avg_15m: float
+
+
+class HealthMemoryStats(BaseModel):
+    total_mb: int
+    available_mb: int
+    used_pct: float | None = None
+
+
+class HealthDiskStats(BaseModel):
+    total_gb: float
+    used_gb: float
+    free_gb: float
+    used_pct: float | None = None
+
+
+class HealthInFlightRun(BaseModel):
+    run_id: int
+    service_id: str | None = None
+    task: str | None = None
+    started_at: str | None = None
+
+
+class HealthPoolWaitStat(BaseModel):
+    """One per-pool snapshot from the DuckDB-pool wait sampler.
+
+    Shape is open — different pool types report slightly different
+    fields (the Phase 6 sampler returns a dict-of-dicts keyed by pool
+    name). The Any escape hatch matches what callers read.
+    """
+
+    name: str
+    samples: int = 0
+    wait_p95_ms: float | None = None
+    wait_p99_ms: float | None = None
+    extras: dict[str, Any] = {}
+
+
+class HealthCronFailure(BaseModel):
+    """One service+task whose most recent terminal cron run ended in error.
+
+    Powers the SRE-03 ``recent_cron_failures`` glance surface: a non-``sync``
+    per-service cron (commit / optimize / rollup_compact / metadata_sync / …)
+    erroring every tick is otherwise visible only by opening that service's
+    Cron History. The aggregate keeps the standing System Health card honest.
+    """
+
+    service_id: str
+    task: str
+    status: str
+    started_at: str | None = None
+    error_message: str | None = None
+
+
+class HealthObservability(BaseModel):
+    """Effective logging/telemetry mode (SRE-20).
+
+    Tells an incident responder what their ``jq``/``grep`` over ``docker logs``
+    will actually match: prod leaves ``STRUCTLOG_FORMAT`` unset → ConsoleRenderer
+    (bracketed text, not JSON), and ``OTEL_EXPORTER=none`` means no span records
+    → empty trace fields. The ADR documents the wiring; this is the runtime truth.
+    """
+
+    log_format: str  # "console" | "json"
+    otel_exporter: str  # "none" | "console" | "otlp"
+
+
+class HealthConfigBackup(BaseModel):
+    """Freshness of the off-VM service-config backup (SRE-11 / ADR-13 §2.1).
+
+    Read from a VM-local marker the backup writes on success. ``None`` fields
+    mean no backup has ever been recorded — the honest answer when the only
+    unrecoverable VM state has never been captured.
+    """
+
+    last_backup_at: str | None = None
+    age_s: float | None = None
+    source: str | None = None
+
+
+class HealthFosProbe(BaseModel):
+    """Per-service FOS reachability result (SRE-13), populated only when the
+    snapshot is requested with ``?probe_fos=1``."""
+
+    reachable: bool
+    error: str | None = None
+
+
+class HealthSnapshotResponse(BaseModel):
+    """One-shot health snapshot served by ``GET /api/admin/health-snapshot``.
+
+    The endpoint synthesises independent sub-system probes (load / memory /
+    per-mount disk / in-flight runs / per-service compaction / DuckDB pool
+    waits / scheduler-liveness / recent cron failures). Any individual probe
+    that fails returns the null sentinel of its slot rather than failing the
+    whole response, so the UI can render partial data when one subsystem is
+    sick.
+    """
+
+    load: HealthLoadAverages | None = None
+    vcpus: int | None = None
+    memory: HealthMemoryStats | None = None
+    data_mount: HealthDiskStats | None = None
+    root_disk: HealthDiskStats | None = None
+    in_flight_runs: list[HealthInFlightRun] = Field(default_factory=list)
+    compaction: dict[str, CompactionStatsResponse | None] = Field(default_factory=dict)
+    pool_wait: list[dict[str, Any]] = Field(default_factory=list)
+    # SRE-06: age of the newest metric_snapshots row. The 60s sampler is a
+    # global scheduler job, so a large/None value witnesses a dead scheduler
+    # (vs. a healthy-idle one). None = no samples yet (fresh boot).
+    scheduler_last_tick_age_s: float | None = None
+    # SRE-03: services+tasks whose latest terminal cron run errored — the
+    # cross-service glance the ADR-09 §2.3 runbook assumes exists.
+    recent_cron_failures: list[HealthCronFailure] = Field(default_factory=list)
+    # SRE-20: effective log/exporter mode so an incident grep is informed.
+    observability: HealthObservability | None = None
+    # SRE-11: freshness of the off-VM service-config backup (None = no marker).
+    config_backup: HealthConfigBackup | None = None
+    # SRE-13: per-service FOS reachability — only populated when probe_fos=1.
+    fos: dict[str, HealthFosProbe] | None = None
 
 
 class TreeNode(BaseModel):
@@ -46,14 +212,12 @@ class IngestedFilesResponse(BaseResponse):
     files: list[IngestedFile]
 
 
-class SyncStatus(BaseModel):
+class SyncStatus(LogExtentsMixin):
     configured: bool = True
     busy: bool = False
     storage_mode: str | None = None
     access_level: str | None = None
     local_rows: int | None = None
-    earliest_log_at: str | None = None
-    latest_log_at: str | None = None
     latest_ingested_file_at: str | None = None
     latest_available_file_at: str | None = None
     duckdb_size_bytes: int | None = None
@@ -64,6 +228,20 @@ class SyncStatus(BaseModel):
 
 class SyncStatusResponse(BaseResponse, SyncStatus):
     pass
+
+
+class LogExtentsResponse(BaseResponse, LogExtentsMixin):
+    """Minimal extents projection for the FilterBar's time-range snap.
+
+    Sibling of ``SyncStatusResponse`` but strips every field that the
+    middleware blocks ``/api/sync-status`` for an analyst over: no
+    ``ngwaf_workspace_id``, no ``active_run``, no cron task state, no
+    DuckDB size, no storage mode. Just the two timestamps the
+    FilterBar needs to snap its range, plus a ``configured`` flag so
+    the frontend can short-circuit when a service has no source.
+    """
+
+    configured: bool = True
 
 
 class BotSourceMeta(BaseModel):
@@ -116,9 +294,12 @@ class IcebergTableInfoResponse(BaseResponse, IcebergTableInfo):
 
 
 class UsageLogEntry(BaseModel):
+    # service_id is hoisted to UsageLogResponse — every row in the
+    # response is scoped to a single service anyway, so repeating it
+    # per row was wire-byte overhead. The frontend page mapper
+    # re-injects it into each row for the table renderer.
     id: int
     timestamp: str
-    service_id: str | None = None
     operation_class: str | None = None
     operation_type: str | None = None
     url: str | None = None
@@ -146,6 +327,7 @@ class UsageLogAggregate(BaseModel):
 
 
 class UsageLogResponse(BaseResponse):
+    service_id: str | None = None
     entries: list[UsageLogEntry]
     total: int
     aggregate: UsageLogAggregate
@@ -207,3 +389,34 @@ class LogAccountingResponse(BaseResponse):
     totals: LogAccountingTotals
     sustained_loss: SustainedLossAlert | None = None
     catchup: IngestCatchupStatus | None = None
+
+
+# ── POP locations admin ────────────────────────────────────────────────────
+
+
+class RefreshPopLocationsRequest(BaseModel):
+    """Body for ``POST /api/admin/pop-locations/refresh`` — the Fastly API
+    key used to pull the live POP catalog. Token can also arrive as a
+    ``?token=`` query param for backward compat with older clients."""
+
+    token: str = Field(..., description="Fastly API key")
+
+
+# ── /api/admin/usage-logging POST/PATCH body ───────────────────────────────
+
+
+class UsageLoggingUpdateBody(BaseModel):
+    """Body for ``PATCH /api/admin/usage-logging``.
+
+    All fields are optional — only keys explicitly present in the request
+    are applied (preserves the existing partial-update semantics). Numeric
+    fields are validated for positivity at the handler so the existing
+    error envelope stays intact; the model just pins types for OpenAPI."""
+
+    enabled: bool | None = None
+    retention_days: float | None = None
+    class_a_rate_per_1k: float | None = None
+    class_b_rate_per_10k: float | None = None
+    cdn_egress_rate_per_gb: float | None = None
+    storage_rate_per_gb_month: float | None = None
+    min_billed_days: float | None = None

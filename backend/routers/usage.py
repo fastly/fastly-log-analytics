@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -9,29 +10,54 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+logger = logging.getLogger(__name__)
+
+from backend.config import get_fastly_api_key
 from backend.core.fastly.utils import FASTLY_LOG_FIELDS
-from backend.deps import get_con, get_source
+from backend.deps import get_source
+from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.usage import (
     CurrentStorageResponse,
+    PrefillRatesResponse,
     PrefillResponse,
     UsageBandwidthResponse,
     UsageLogActivityResponse,
     UsageOperationsResponse,
 )
 from backend.repositories import usage as repo
-from backend.utils.router_utils import query_errors
+from backend.repositories._base import SectionTimer
+from backend.utils.date_utils import window_to_epoch
+from backend.utils.router_utils import query_errors, raise_internal
 
-router = APIRouter(prefix="/api/usage", tags=["usage"])
+router = APIRouter(prefix="/api/usage", tags=["usage"], responses=DEFAULT_ERROR_RESPONSES)
+# Short-TTL cache over the /stats/* Fastly hops. /usage cold-loads fan
+# 3 endpoints (operations, bandwidth, log-activity) that hit the same
+# `(service_id, by, from, to)` tuples with `from`/`to` rounded to the
+# auto-set 24 h window. Without caching, tab-switching, second-tab
+# admin sessions, and the playwright fan-out each pay ~210-330 ms per
+# Fastly hop. Stats API records are debounced to hourly buckets, so a
+# 60 s staleness window is invisible to the operator and absorbs every
+# burst without changing chart numbers.
+from backend.utils.bounded_cache import BoundedTTLCache
+
+_FASTLY_STATS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 
 
 def _fastly_api(path: str, api_key: str) -> dict:
     """Thin wrapper delegating to the central Fastly client. Kept as a
     function so the existing 3 call sites in this module read the same;
     the central wrapper adds retry-on-429/5xx + telemetry tracking that
-    used to live in each caller."""
+    used to live in each caller. GET responses are TTL-cached on
+    ``path`` (api_key never changes within a process — it's read from
+    the same module-level config — so it is NOT part of the cache key)."""
     from backend.core.fastly.client import fastly
 
-    return fastly("GET", path, token=api_key)
+    cached = _FASTLY_STATS_CACHE.get(path)
+    if cached is not None:
+        return cached
+    response = fastly("GET", path, token=api_key)
+    _FASTLY_STATS_CACHE[path] = response
+    return response
 
 
 def _extract_fos_ops(record: dict) -> tuple[int, int]:
@@ -56,19 +82,20 @@ def _extract_fos_ops(record: dict) -> tuple[int, int]:
     return 0, 0
 
 
-@router.get("/prefill", response_model=PrefillResponse)
-@query_errors()
-async def prefill(source: dict = Depends(get_source)):
-    import asyncio
+def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
+    """Local-config-only prefill payload (FAST path — no Fastly, no DuckDB).
 
+    Returned shape:
+      (result, prov)
+    where ``result`` is the dict-shaped subset of PrefillResponse fields the
+    cost-page stat cards need on first paint, and ``prov`` is the
+    provisioning sub-dict the SLOW path reuses (saves a second
+    ``load_service_config`` round-trip when /prefill calls this helper).
+    """
     from backend import config as svcconfig
-    from backend.config import get_fastly_api_key, get_fastly_logging_service_id
 
     global_rates = svcconfig.load_usage_logging_config()
-
     result: dict = {
-        "requests_per_day": None,
-        "edge_requests_per_day": None,
         "avg_log_file_size_kb": None,
         "estimated_bytes_per_line": None,
         "data_days": 0,
@@ -76,7 +103,6 @@ async def prefill(source: dict = Depends(get_source)):
         "commit_interval_mins": 5,
         "sample_rate": 100,
         "edge_only": False,
-        "edge_ratio": None,
         "compaction_enabled": True,
         "delete_after": True,
         "log_retention_days": 90,
@@ -87,8 +113,7 @@ async def prefill(source: dict = Depends(get_source)):
         "min_billed_days": int(global_rates.get("min_billed_days", 30)),
     }
 
-    cfg = None
-    prov = {}
+    prov: dict = {}
     try:
         cfg = svcconfig.load_config(source["name"])
         if cfg:
@@ -101,12 +126,35 @@ async def prefill(source: dict = Depends(get_source)):
             result["commit_interval_mins"] = int(cron_sync.get("commit_interval_mins", 5))
             result["log_retention_days"] = int(cfg.get("log_retention_days", 90))
             try:
-                from backend.core import log_fields as lf
+                from backend.core.field_registry import BY_CODE, REGISTRY, Group
 
                 lf_cfg = cfg.get("log_fields") or prov.get("log_fields", {})
                 if not lf_cfg:
                     lf_cfg = {"groups": ["A", "B", "C", "D"], "field_overrides": {}}
-                result["estimated_bytes_per_line"] = lf.estimate_log_line_bytes(lf_cfg)
+
+                enabled_groups: set[str] = set(lf_cfg.get("groups", []))
+                _GROUP_DEPS = {"E": "D", "G": "F"}
+                changed = True
+                while changed:
+                    changed = False
+                    for grp, required in _GROUP_DEPS.items():
+                        if grp in enabled_groups and required not in enabled_groups:
+                            enabled_groups.add(required)
+                            changed = True
+
+                enabled_codes: set[str] = {f.code for f in REGISTRY if f.group is Group.CORE}
+                for f in REGISTRY:
+                    if f.group is not Group.CORE and f.group.value in enabled_groups:
+                        enabled_codes.add(f.code)
+                for fid, on in lf_cfg.get("field_overrides", {}).items():
+                    if on:
+                        enabled_codes.add(fid)
+                    else:
+                        enabled_codes.discard(fid)
+
+                field_bytes = sum(BY_CODE[c].typical_bytes for c in enabled_codes if c in BY_CODE)
+                structural = 2 + len(enabled_codes) * 5
+                result["estimated_bytes_per_line"] = structural + field_bytes
             except Exception:
                 pass
             try:
@@ -120,7 +168,6 @@ async def prefill(source: dict = Depends(get_source)):
     except Exception:
         pass
 
-    # Use cached status — fastest source for avg file size and data date range.
     try:
         cached_status = svcconfig.get_status(source["name"])
         if cached_status:
@@ -131,16 +178,64 @@ async def prefill(source: dict = Depends(get_source)):
             latest = cached_status.get("latest_log_at")
             if earliest and latest:
                 try:
-                    from backend.utils.date_utils import _parse_dt as _pdt
+                    from backend.utils.date_utils import parse_iso_utc
 
                     _now = datetime.now(UTC)
-                    e_dt = _pdt(earliest, _now)
-                    l_dt = _pdt(latest, _now)
+                    e_dt = parse_iso_utc(earliest) or _now
+                    l_dt = parse_iso_utc(latest) or _now
                     result["data_days"] = max(1, (l_dt - e_dt).days + 1)
                 except Exception:
                     pass
     except Exception:
         pass
+
+    # Empirical node count analysis — SQLite-only, doesn't need a DuckDB hop.
+    try:
+        from backend.core import metadata as metadata_db
+
+        avg = metadata_db.get_node_count_avg(source["name"])
+        if avg:
+            result["avg_nodes_per_flush"] = round(float(avg))
+    except Exception:
+        pass
+
+    return result, prov
+
+
+@router.get("/prefill/rates", response_model=PrefillRatesResponse)
+@query_errors()
+def prefill_rates(source: dict = Depends(get_source)):
+    """Instant prefill subset for stat cards — local config + cached
+    status + node-count SQLite read only. No Fastly API calls, no
+    DuckDB hop. Frontend pairs this with the lazy /prefill call inside
+    the Cost Estimator viewport so the cards paint while the estimator
+    is still scrolling into view."""
+    result, _prov = _compute_prefill_rates(source)
+    return PrefillRatesResponse.with_telemetry(**result)
+
+
+@router.get("/prefill", response_model=PrefillResponse)
+@query_errors()
+async def prefill(source: dict = Depends(get_source)):
+    import asyncio
+    import time as _time
+
+    from backend import config as svcconfig
+    from backend.config import get_fastly_logging_service_id
+
+    # Per-phase timings — /api/usage/prefill clocks ~1.4 s p50 per perf
+    # audit; section_timings shows whether the cost is in the Fastly
+    # endpoint chain, the /stats fetch, or the DuckDB edge-ratio hop.
+    timer = SectionTimer()
+    section_timings = timer.entries
+
+    fast_result, prov = _compute_prefill_rates(source)
+    result: dict = {
+        "requests_per_day": None,
+        "edge_requests_per_day": None,
+        "edge_ratio": None,
+        **fast_result,
+    }
 
     # Pull real traffic numbers and live logging config from Fastly Stats API.
     api_key = get_fastly_api_key(source["service_id"])
@@ -215,7 +310,9 @@ async def prefill(source: dict = Depends(get_source)):
                 return None
 
         try:
+            _t = _time.perf_counter()
             chain_updates, payload = await asyncio.gather(_resolve_endpoint_chain(), _fetch_stats())
+            timer.mark("fastly_chain_and_stats", _t)
             # Chain updates feed into the response shape's existing keys
             # — overrides any defaults set above and any cron_sync values
             # set from the local config, matching the prior precedence
@@ -258,29 +355,25 @@ async def prefill(source: dict = Depends(get_source)):
             # Wrapped in asyncio.to_thread so this sync I/O doesn't block
             # the event loop now that prefill is an async handler.
             def _edge_ratio_blocking() -> tuple:
-                con = get_connection(source=source, max_wait=5, read_only=True)
+                # EDGE_RATIO is a coarse count-filter; a few seconds of
+                # view-resolution staleness is fine here, so skip the
+                # rebind step on this code path (saves ~80-150 ms/call).
+                con = get_connection(source=source, max_wait=5, read_only=True, skip_view_update=True)
                 try:
                     return repo.get_edge_ratio(con, source)
                 finally:
                     con.close()
 
+            _t = _time.perf_counter()
             edge_ratio, debug_queries = await asyncio.to_thread(_edge_ratio_blocking)
+            timer.mark("edge_ratio_query", _t)
             if edge_ratio is not None:
                 result["edge_ratio"] = edge_ratio
         except Exception:
             pass
 
-    # Empirical node count analysis — SQLite-only, doesn't need a DuckDB hop.
-    try:
-        from backend.core import metadata_db
-
-        avg = metadata_db.get_node_count_avg(source["name"])
-        if avg:
-            result["avg_nodes_per_flush"] = round(float(avg))
-    except Exception:
-        pass
-
-    return PrefillResponse.with_telemetry(debug_queries=debug_queries, **result)
+    # ``avg_nodes_per_flush`` already populated by _compute_prefill_rates above.
+    return PrefillResponse.with_telemetry(debug_queries=debug_queries, section_timings=section_timings, **result)
 
 
 @router.get("/current-storage", response_model=CurrentStorageResponse)
@@ -346,16 +439,27 @@ def usage_current_storage(
         iceberg_bytes = 0
         iceberg_files = 0
         iceberg_info_success = False
-        try:
-            from backend.core import iceberg as db_iceberg
+        # First try the cron-written cached values in svcconfig.status —
+        # the heavy refresh_config_status tick already populated these,
+        # so this endpoint stays sub-50 ms even on a cold-cache process.
+        cached_status = svcconfig.get_status(src["name"]) or {}
+        cached_ib = cached_status.get("iceberg_bytes")
+        cached_if = cached_status.get("iceberg_files")
+        if cached_ib is not None and cached_if is not None:
+            iceberg_bytes = int(cached_ib)
+            iceberg_files = int(cached_if)
+            iceberg_info_success = True
+        else:
+            try:
+                from backend.core import iceberg as db_iceberg
 
-            iceberg_info = db_iceberg.get_table_info(src)
-            if not iceberg_info.get("error"):
-                iceberg_bytes = iceberg_info.get("size_bytes", 0)
-                iceberg_files = iceberg_info.get("data_files", 0)
-                iceberg_info_success = True
-        except Exception:
-            pass
+                iceberg_info = db_iceberg.get_table_info(src)
+                if not iceberg_info.get("error"):
+                    iceberg_bytes = iceberg_info.get("size_bytes", 0)
+                    iceberg_files = iceberg_info.get("data_files", 0)
+                    iceberg_info_success = True
+            except Exception:
+                pass
 
         if not iceberg_info_success:
             try:
@@ -404,7 +508,7 @@ def usage_current_storage(
             end=end_str,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": str(e)})
+        raise_internal(logger, e, code="usage_storage_failed")
 
 
 @router.get("/operations", response_model=UsageOperationsResponse)
@@ -423,8 +527,6 @@ def usage_operations(
         by = "hour"
     clamped_from_sub_hour = requested_by != by
 
-    from backend.config import get_fastly_api_key
-
     src = source
     api_key = get_fastly_api_key(src["logging_service_id"])
     if not api_key:
@@ -432,16 +534,7 @@ def usage_operations(
 
     from datetime import UTC, datetime
 
-    from backend.utils.date_utils import parse_date_window
-
-    start_str, end_str = parse_date_window(start, end)
-    from backend.utils.date_utils import parse_window_str_to_dt
-
-    start_dt = parse_window_str_to_dt(start_str)
-    end_dt = parse_window_str_to_dt(end_str)
-
-    from_ts = int(start_dt.timestamp())
-    to_ts = int(end_dt.timestamp())
+    start_str, end_str, from_ts, to_ts = window_to_epoch(start, end)
 
     agg: dict[str, dict] = {}
     fos_fields_found: set[str] = set()
@@ -477,12 +570,12 @@ def usage_operations(
         # explicit tracked_call wrapper was duplicating the entry.
         payload = _fastly_api(f"/stats/aggregate?by={by}&from={from_ts}&to={to_ts}", api_key)
         _accumulate(payload.get("data", []))
-    except RuntimeError as e:
-        # fastly() raises RuntimeError("HTTP 502 GET /stats/aggregate ...")
-        # on non-2xx, with the upstream body included. Surface as 502.
-        raise HTTPException(status_code=502, detail={"error": f"Fastly Stats API: {e}"})
     except Exception as e:
-        raise HTTPException(status_code=502, detail={"error": str(e)})
+        # fastly() raises RuntimeError("HTTP 502 GET /stats/aggregate ...")
+        # on non-2xx, with the upstream body included. The body can contain
+        # internal hostnames or token fragments, so log server-side and
+        # return a generic code keyed by error_id for correlation.
+        raise_internal(logger, e, code="fastly_stats_aggregate_failed", status=502)
 
     points = [{"date": d, **v} for d, v in sorted(agg.items())]
     total_a = sum(d["class_a"] for d in points)
@@ -516,7 +609,6 @@ def usage_bandwidth(
     by: str = Query(default="hour"),
     source: dict = Depends(get_source),
 ):
-    from backend.config import get_fastly_api_key
 
     src = source
     api_key = get_fastly_api_key(src["logging_service_id"])
@@ -528,16 +620,7 @@ def usage_bandwidth(
 
     from datetime import UTC, datetime
 
-    from backend.utils.date_utils import parse_date_window
-
-    start_str, end_str = parse_date_window(start, end)
-    from backend.utils.date_utils import parse_window_str_to_dt
-
-    start_dt = parse_window_str_to_dt(start_str)
-    end_dt = parse_window_str_to_dt(end_str)
-
-    from_ts = int(start_dt.timestamp())
-    to_ts = int(end_dt.timestamp())
+    start_str, end_str, from_ts, to_ts = window_to_epoch(start, end)
 
     cdn_svc = src.get("cdn_service_id", "").strip()
     agg: dict[int, dict] = {}
@@ -561,7 +644,7 @@ def usage_bandwidth(
             payload = _fastly_api(f"/stats/service/{cdn_svc}?by={by}&from={from_ts}&to={to_ts}", api_key)
             _merge(payload)
         except Exception as e:
-            raise HTTPException(status_code=502, detail={"error": str(e)})
+            raise_internal(logger, e, code="fastly_stats_service_failed", status=502)
 
     fmt = "%Y-%m-%dT%H:00" if by == "hour" else "%Y-%m-%dT%H:%M" if by == "minute" else "%Y-%m-%d"
     points = [{"time": datetime.fromtimestamp(ts, tz=UTC).strftime(fmt), **v} for ts, v in sorted(agg.items())]
@@ -577,7 +660,6 @@ def usage_bandwidth(
 @query_errors()
 def usage_log_activity(
     source: dict = Depends(get_source),
-    con=Depends(get_con),
     start: str = Query(default=""),
     end: str = Query(default=""),
     by: str = Query(default="hour"),
@@ -587,13 +669,15 @@ def usage_log_activity(
 
     from datetime import UTC, datetime
 
-    from backend.config import get_fastly_api_key
     from backend.utils.date_utils import parse_date_window
 
     now = datetime.now(UTC)
     start_str, end_str = parse_date_window(start, end)
 
-    res = repo.get_log_activity(con, source, start_str, end_str, by)
+    # Dropped the Depends(get_con) — repo reads metadata SQLite only, never
+    # touched the DuckDB connection. Saves one get_connection() lookup
+    # + update_iceberg_view rebind per call.
+    res = repo.get_log_activity(source, start_str, end_str, by)
 
     # Fetch Fastly API stats for the logging service to compare generated vs processed
     api_key = get_fastly_api_key(source.get("logging_service_id", ""))

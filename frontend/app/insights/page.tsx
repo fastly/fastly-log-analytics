@@ -7,12 +7,12 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { InsightCard } from '@/components/Insights/InsightCard'
 import { InsightCardSkeleton } from '@/components/Insights/InsightCardSkeleton'
 import { InsightCardData } from '@/types/api'
-import { 
-  Select, 
-  SelectContent, 
-  SelectItem, 
-  SelectTrigger, 
-  SelectValue 
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
 } from "@/components/ui/select"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Info, AlertCircle, CheckCircle, Lightbulb, Filter, Loader2 } from 'lucide-react'
@@ -45,6 +45,9 @@ const STATUS_OPTIONS = [
   { label: 'Warning', value: 'warning' },
   { label: 'Info', value: 'info' },
   { label: 'Clean', value: 'clean' },
+  // `error` severity insights (the insight computation itself failed) were
+  // silently dropped from every non-"all" filter without this option.
+  { label: 'Error', value: 'error' },
 ]
 
 // Lifted out of the ReportLayout render-prop so the hooks live at the
@@ -88,7 +91,7 @@ function InsightsBody({
     staleTime: 60000
   })
 
-  const { data: availability } = useQuery({
+  const { data: availability, error: availabilityError } = useQuery({
     queryKey: ['insights', 'availability', activeServiceId],
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/insight-availability", { signal })
@@ -133,6 +136,16 @@ function InsightsBody({
         </Alert>
       )}
 
+      {availabilityError && !availability && (
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>Availability check failed</AlertTitle>
+          <AlertDescription className="text-xs">
+            Couldn't determine which insights apply to this service — results below may be incomplete.
+          </AlertDescription>
+        </Alert>
+      )}
+
       {isLoading ? (
         availableInsights.length > 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -161,7 +174,12 @@ function InsightsBody({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredInsights.map((insight: InsightCardData) => (
-            <InsightCard key={insight.id} insight={insight} />
+            <InsightCard
+              key={insight.id}
+              insight={insight}
+              windowHours={windowHours}
+              baselineHours={baselineHours}
+            />
           ))}
           {filteredInsights.length === 0 && (
             <div className="col-span-full py-20 text-center border rounded-xl border-dashed">
@@ -200,6 +218,20 @@ export default function InsightsPage() {
   const [baselineHours, setBaselineHours] = useState('168')
   const [statusFilter, setStatusFilter] = useState('all')
   const { relative, full, abbr } = useDateFormat()
+
+  // Debounce window/baseline so chained dropdown changes (e.g. switching
+  // both window AND baseline in succession) only fire one /api/insights
+  // request instead of two. 400ms gives the user enough time to flip
+  // both selects without firing the intermediate query.
+  const [appliedWindowHours, setAppliedWindowHours] = useState(windowHours)
+  const [appliedBaselineHours, setAppliedBaselineHours] = useState(baselineHours)
+  React.useEffect(() => {
+    const t = setTimeout(() => {
+      setAppliedWindowHours(windowHours)
+      setAppliedBaselineHours(baselineHours)
+    }, 400)
+    return () => clearTimeout(t)
+  }, [windowHours, baselineHours])
 
   // Compact header controls (Status / Window / vs / Baseline) — rendered
   // in the header row next to the title instead of a separate band below.
@@ -249,7 +281,7 @@ export default function InsightsPage() {
         </Select>
       </div>
 
-      <span className="text-xs font-bold text-muted-foreground opacity-50 uppercase tracking-widest pb-2">vs</span>
+      <span className="text-xs font-bold text-muted-foreground uppercase tracking-widest pb-2">vs</span>
 
       <div className="flex flex-col gap-1">
         <div className="flex items-center gap-1 ml-1 text-muted-foreground">
@@ -289,8 +321,8 @@ export default function InsightsPage() {
       {(ctx) => (
         <InsightsBody
           activeServiceId={ctx.activeServiceId}
-          windowHours={windowHours}
-          baselineHours={baselineHours}
+          windowHours={appliedWindowHours}
+          baselineHours={appliedBaselineHours}
           statusFilter={statusFilter}
           relative={relative}
           full={full}

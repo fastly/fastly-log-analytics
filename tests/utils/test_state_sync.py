@@ -105,7 +105,7 @@ def test_import_ignores_alerts_key():
         state_sync_module.import_admin_state("svc1")
 
     # Alerts table must remain untouched — verify by querying the per-service SQLite directly.
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     alerts = metadata_db.list_alerts("svc1")
     assert alerts == [], "import_admin_state should not write to the alerts table"
@@ -365,8 +365,8 @@ def test_import_cdn_path_parses_payload_and_calls_metadata_writes():
         patch("backend.state_sync.get_source_for_service", return_value=src),
         patch("backend.state_sync._cdn_get", return_value=payload),
         patch("backend.state_sync.svcconfig.load_config", return_value=None),
-        patch("backend.core.metadata_db.replace_audit_for_service") as mock_audit,
-        patch("backend.core.metadata_db.replace_views_for_service") as mock_views,
+        patch("backend.core.metadata.replace_audit_for_service") as mock_audit,
+        patch("backend.core.metadata.replace_views_for_service") as mock_views,
     ):
         from backend.state_sync import import_admin_state
 
@@ -403,8 +403,8 @@ def test_import_merges_custom_fields_into_local_config():
         patch("backend.state_sync._cdn_get", return_value=payload),
         patch("backend.state_sync.svcconfig.load_config", return_value=starting_cfg),
         patch("backend.state_sync.svcconfig.save_config", side_effect=capture_save),
-        patch("backend.core.metadata_db.replace_audit_for_service"),
-        patch("backend.core.metadata_db.replace_views_for_service"),
+        patch("backend.core.metadata.replace_audit_for_service"),
+        patch("backend.core.metadata.replace_views_for_service"),
     ):
         from backend.state_sync import import_admin_state
 
@@ -433,8 +433,8 @@ def test_import_skips_custom_fields_merge_when_local_config_missing():
         patch("backend.state_sync._cdn_get", return_value=payload),
         patch("backend.state_sync.svcconfig.load_config", return_value=None),
         patch("backend.state_sync.svcconfig.save_config") as mock_save,
-        patch("backend.core.metadata_db.replace_audit_for_service"),
-        patch("backend.core.metadata_db.replace_views_for_service"),
+        patch("backend.core.metadata.replace_audit_for_service"),
+        patch("backend.core.metadata.replace_views_for_service"),
     ):
         from backend.state_sync import import_admin_state
 
@@ -451,13 +451,13 @@ def test_import_reinjects_scoring_fields_when_scoring_enabled():
     FOS (last written before scoring was enabled) had custom_fields=[],
     and the metadata_sync cron on the GCE read_only backend called
     ``import_admin_state`` every ~30s, silently overwriting the local
-    config's 6 scoring custom_fields with []. This made the ingest path
+    config's scoring custom_fields with []. This made the ingest path
     drop the scoring columns from its read_json_auto columns spec, so
     every new parquet row had edge_score / edge_sid / etc. NULL — even
     though Fastly was still emitting the values correctly.
 
     The fix: ``import_admin_state`` MERGES rather than overwrites. When
-    ``cfg["scoring"]["enabled"]`` is True, the 6 canonical entries from
+    ``cfg["scoring"]["enabled"]`` is True, the canonical entries from
     ``_SCORING_CUSTOM_FIELDS`` are always re-added after merge. This test
     pins the merge semantics so the bug can't silently regress."""
     src = _src(cdn_url="https://cdn-test.fastly.net")
@@ -500,8 +500,8 @@ def test_import_reinjects_scoring_fields_when_scoring_enabled():
         patch("backend.state_sync._cdn_get", return_value=remote_payload),
         patch("backend.state_sync.svcconfig.load_config", return_value=cfg_mock),
         patch("backend.state_sync.svcconfig.save_config", side_effect=capture_save),
-        patch("backend.core.metadata_db.replace_audit_for_service"),
-        patch("backend.core.metadata_db.replace_views_for_service"),
+        patch("backend.core.metadata.replace_audit_for_service"),
+        patch("backend.core.metadata.replace_views_for_service"),
     ):
         from backend.state_sync import import_admin_state
 
@@ -612,8 +612,8 @@ def test_import_does_not_reinject_scoring_fields_when_scoring_disabled():
         patch("backend.state_sync._cdn_get", return_value=remote_payload),
         patch("backend.state_sync.svcconfig.load_config", return_value=cfg_mock),
         patch("backend.state_sync.svcconfig.save_config", side_effect=capture_save),
-        patch("backend.core.metadata_db.replace_audit_for_service"),
-        patch("backend.core.metadata_db.replace_views_for_service"),
+        patch("backend.core.metadata.replace_audit_for_service"),
+        patch("backend.core.metadata.replace_views_for_service"),
     ):
         from backend.state_sync import import_admin_state
 

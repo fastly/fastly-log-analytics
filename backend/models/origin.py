@@ -17,19 +17,22 @@ class OriginSummaryResponse(HasDataMixin, BaseResponse):
     cdn_overhead_p50_ms: float | None = None
     origin_error_rate: float | None = None
     obytes_p50: float | None = None
-    by_leg: list[dict[str, Any]] = []
 
 
 class OriginTimeseriesResponse(HasDataMixin, BaseResponse):
     series: list[dict[str, Any]] = []
 
 
-class OriginSlowUrlsResponse(HasDataMixin, BaseResponse):
+class _OriginRowsResponse(HasDataMixin, BaseResponse):
     rows: list[dict[str, Any]] = []
 
 
-class OriginStatusCodesResponse(HasDataMixin, BaseResponse):
-    rows: list[dict[str, Any]] = []
+class OriginSlowUrlsResponse(_OriginRowsResponse):
+    pass
+
+
+class OriginStatusCodesResponse(_OriginRowsResponse):
+    pass
 
 
 class OriginPathBreakdownResponse(HasDataMixin, BaseResponse):
@@ -43,8 +46,8 @@ class OriginPopLatencyResponse(HasDataMixin, BaseResponse):
     rows: list[dict[str, Any]] = []
 
 
-class OriginIpHealthResponse(HasDataMixin, BaseResponse):
-    rows: list[dict[str, Any]] = []
+class OriginIpHealthResponse(_OriginRowsResponse):
+    pass
 
 
 class OriginShieldingAnalysisResponse(HasDataMixin, BaseResponse):

@@ -23,15 +23,18 @@ import pytest
 from backend.core import local_compaction as lc
 
 
-def _write_parquet(path: str, rows: int, ts_start: int = 0) -> None:
-    """Write a tiny parquet file with `rows` records."""
-    table = pa.table(
-        {
-            "timestamp": pa.array(range(ts_start, ts_start + rows), type=pa.int64()),
-            "ip": pa.array([f"10.0.0.{i % 255}" for i in range(rows)]),
-            "status": pa.array([200 + (i % 5) for i in range(rows)], type=pa.int32()),
-        }
-    )
+def _write_parquet(path: str, rows: int, ts_start: int = 0, rid_start: int | None = None) -> None:
+    """Write a tiny parquet file with `rows` records. When ``rid_start``
+    is provided, every row gets a unique ``rid`` (used to exercise the
+    dedup-by-rid pass)."""
+    cols = {
+        "timestamp": pa.array(range(ts_start, ts_start + rows), type=pa.int64()),
+        "ip": pa.array([f"10.0.0.{i % 255}" for i in range(rows)]),
+        "status": pa.array([200 + (i % 5) for i in range(rows)], type=pa.int32()),
+    }
+    if rid_start is not None:
+        cols["rid"] = pa.array([f"r{rid_start + i}" for i in range(rows)])
+    table = pa.table(cols)
     pq.write_table(table, path, compression="zstd")
 
 
@@ -61,28 +64,67 @@ def patched_cache_dir(tmp_path, monkeypatch):
         return source["_test_cache_root"]
 
     monkeypatch.setattr("backend.core.duckdb._cache_dir", fake_cache_dir)
-    # Insulate hourly compaction tests from temporal drift by forcing the daily
-    # tier threshold to 30 days.
-    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 30)
+    # Insulate the hourly tests from temporal drift. Tests use fixed date
+    # strings like "2026-05-15"; without these pins, once those dates drift
+    # past the default _DAILY_TIER_AGE_DAYS=30 / _WEEKLY_TIER_AGE_DAYS=30
+    # boundaries the daily/weekly tiers silently roll up the hour partitions
+    # and the hour-tier tests fail. Pin both to 365 so neither tier
+    # activates for any test that doesn't explicitly want it; tests that DO
+    # want daily/weekly behavior already override the relevant constant
+    # locally.
+    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 365)
+    monkeypatch.setattr("backend.core.local_compaction._WEEKLY_TIER_AGE_DAYS", 365)
     return src
 
 
 def test_skips_partitions_below_threshold(patched_cache_dir):
-    """A partition with <= min_files_per_partition files is left alone."""
+    """A single-file partition is left alone — no compaction to do."""
     src = patched_cache_dir
     cache_root = src["_test_cache_root"]
     part = os.path.join(cache_root, "data", "timestamp_hour=2026-05-30-00")
     os.makedirs(part)
-    # Only 3 files; default min_files_per_partition=3 means we need >3.
-    for i in range(3):
-        _write_parquet(os.path.join(part, f"f{i}.parquet"), rows=10, ts_start=i * 10)
+    # Only 1 file; default min_files_per_partition=1 means we need >1.
+    _write_parquet(os.path.join(part, "f0.parquet"), rows=10, ts_start=0)
 
     result = lc.compact_local_partitions(src)
 
     assert result["partitions_scanned"] == 0
     assert result["partitions_compacted"] == 0
-    # All three original files still on disk.
-    assert len([f for f in os.listdir(part) if f.endswith(".parquet")]) == 3
+    assert len([f for f in os.listdir(part) if f.endswith(".parquet")]) == 1
+
+
+def test_dedup_removes_cross_file_duplicate_rids(patched_cache_dir):
+    """Two parquet files in the same partition containing OVERLAPPING rids
+    (the orphan-pattern produced by the buffer-commit ↔ tombstone race)
+    must merge into ONE file with each rid appearing exactly once. Without
+    this guarantee the dashboard double-counts every request for hours
+    affected by the race (the 2026-06-12 audit found ~12 days affected)."""
+    src = patched_cache_dir
+    cache_root = src["_test_cache_root"]
+    part = os.path.join(cache_root, "data", "timestamp_hour=2026-05-30-02")
+    os.makedirs(part)
+    # File A: rids 1..10. File B: rids 6..15 (5 overlap with A). Merged
+    # file should contain rids 1..15 (15 unique), not 20 rows.
+    _write_parquet(os.path.join(part, "a.parquet"), rows=10, ts_start=0, rid_start=1)
+    _write_parquet(os.path.join(part, "b.parquet"), rows=10, ts_start=10, rid_start=6)
+
+    result = lc.compact_local_partitions(src)
+    assert result["partitions_compacted"] == 1
+
+    remaining = [f for f in os.listdir(part) if f.endswith(".parquet")]
+    assert len(remaining) == 1
+    merged_path = os.path.join(part, remaining[0])
+    import duckdb as _ddb
+
+    con = _ddb.connect(":memory:")
+    try:
+        n_rows, n_uniq = con.execute(
+            f"SELECT COUNT(*), COUNT(DISTINCT rid) FROM read_parquet('{merged_path}')"
+        ).fetchone()
+    finally:
+        con.close()
+    assert n_rows == 15, f"merged file must dedupe by rid, got {n_rows} rows"
+    assert n_uniq == 15
 
 
 def test_merges_partitions_above_threshold(patched_cache_dir):
@@ -308,7 +350,7 @@ def test_compaction_registers_deleted_basenames(patched_cache_dir, monkeypatch):
     def fake_register(service_id: str, names: list[str]) -> None:
         captured.append((service_id, list(names)))
 
-    monkeypatch.setattr("backend.core.metadata_db.register_locally_compacted", fake_register)
+    monkeypatch.setattr("backend.core.metadata.register_locally_compacted", fake_register)
 
     result = lc.compact_local_partitions(src)
 
@@ -357,22 +399,35 @@ def test_compaction_outputs_survive_iceberg_sync_orphan_cleanup(tmp_path, monkey
     monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 15)
     monkeypatch.setattr("backend.core.local_compaction._WEEKLY_TIER_AGE_DAYS", 0)
     # Avoid touching a real metadata DB during the compaction step.
-    monkeypatch.setattr("backend.core.metadata_db.register_locally_compacted", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.core.metadata.register_locally_compacted", lambda *a, **kw: None)
 
     data_dir = cache_root / "data"
 
     # ── Phase 1: seed hour partitions and run real compaction ───────────
-    # Three single-file partitions on 2026-05-04 → eligible for daily rollup
-    # because age threshold is 0 here.
+    # Dates are relative to today so the wall-clock age check inside
+    # compact_local_partitions stays correctly stratified as time passes.
+    # _DAILY_TIER_AGE_DAYS is monkeypatched to 15 above, so anything ≥ 16
+    # days ago goes through daily rollup; anything < 15 days ago is
+    # hourly-only.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    _today = _dt.now(_UTC).date()
+    _old_day = (_today - _td(days=30)).isoformat()  # well past the 15-day cutoff
+    _recent_day = (_today - _td(days=1)).isoformat()  # safely inside hourly window
+
+    # Three single-file partitions OLD → eligible for daily rollup
+    # because they're past the 15-day daily-tier cutoff.
     for hh in ("00", "01", "02"):
-        part = data_dir / f"timestamp_hour=2026-05-04-{hh}"
+        part = data_dir / f"timestamp_hour={_old_day}-{hh}"
         part.mkdir()
         _write_parquet(str(part / "f0.parquet"), rows=10, ts_start=int(hh) * 10)
 
     # Plus one RECENT partition with >3 files → eligible for hourly tier (writes
     # `compacted_*.parquet` INSIDE the partition dir, the local-only output that
     # was being deleted by orphan-cleanup in production).
-    hourly_part = data_dir / "timestamp_hour=2026-05-31-08"
+    hourly_part = data_dir / f"timestamp_hour={_recent_day}-08"
     hourly_part.mkdir()
     for i in range(5):
         _write_parquet(str(hourly_part / f"src-{i}.parquet"), rows=10, ts_start=i * 10)
@@ -394,11 +449,11 @@ def test_compaction_outputs_survive_iceberg_sync_orphan_cleanup(tmp_path, monkey
     assert all(p.exists() for p in daily_files_before + weekly_files_before)
 
     # ── Phase 2: simulate an iceberg-pointed active partition + run sync_data ──
-    active_part = data_dir / "timestamp_hour=2026-05-31-15"
+    active_part = data_dir / f"timestamp_hour={_recent_day}-15"
     active_part.mkdir()
     active_file = active_part / "00000-0-active.parquet"
     _write_parquet(str(active_file), rows=10)
-    orphan_part = data_dir / "timestamp_hour=2026-05-31-14"
+    orphan_part = data_dir / f"timestamp_hour={_recent_day}-14"
     orphan_part.mkdir()
     orphan_file = orphan_part / "00000-0-orphan.parquet"
     _write_parquet(str(orphan_file), rows=10)
@@ -569,7 +624,7 @@ def test_daily_tier_migrates_single_file_bins_and_removes_dir(patched_cache_dir,
     def fake_register(service_id: str, names: list[str]) -> None:
         captured.append((service_id, list(names)))
 
-    monkeypatch.setattr("backend.core.metadata_db.register_locally_compacted", fake_register)
+    monkeypatch.setattr("backend.core.metadata.register_locally_compacted", fake_register)
 
     result = lc.compact_local_partitions(src)
 
@@ -582,3 +637,129 @@ def test_daily_tier_migrates_single_file_bins_and_removes_dir(patched_cache_dir,
     assert captured[0][1] == ["single_file.parquet"]
 
     assert not os.path.isdir(part)
+
+
+# ── rid-dedup edge cases (audit follow-up) ──────────────────────────────────
+
+
+def _write_parquet_with_explicit_rids(path: str, rids: list[str | None], ts_offsets: list[int]) -> None:
+    """Like ``_write_parquet`` but takes explicit per-row rid + timestamp.
+
+    Lets the caller mix NULL and non-NULL rids in one file to exercise
+    the dedup branch on a row-by-row basis.
+    """
+    assert len(rids) == len(ts_offsets)
+    cols = {
+        "timestamp": pa.array(ts_offsets, type=pa.int64()),
+        "ip": pa.array([f"10.0.0.{i}" for i in range(len(rids))]),
+        "status": pa.array([200] * len(rids), type=pa.int32()),
+        "rid": pa.array(rids, type=pa.string()),
+    }
+    pq.write_table(pa.table(cols), path, compression="zstd")
+
+
+def test_null_rid_rows_pass_through_unchanged(patched_cache_dir):
+    """NULL-rid rows must be preserved verbatim (no dedup, no drop).
+
+    The dedup SQL filters ``WHERE rid IS NOT NULL`` for the dedup branch
+    and ``WHERE rid IS NULL`` for the passthrough branch — without the
+    second branch every NULL-rid row would silently disappear.
+    """
+    src = patched_cache_dir
+    cache_root = src["_test_cache_root"]
+    part = os.path.join(cache_root, "data", "timestamp_hour=2026-05-30-03")
+    os.makedirs(part)
+    # File A: 2 NULL-rid rows + 1 non-NULL. File B: 1 NULL-rid + 1 dup of A's non-NULL.
+    _write_parquet_with_explicit_rids(
+        os.path.join(part, "a.parquet"),
+        rids=[None, None, "shared-1"],
+        ts_offsets=[0, 1, 2],
+    )
+    _write_parquet_with_explicit_rids(
+        os.path.join(part, "b.parquet"),
+        rids=[None, "shared-1"],
+        ts_offsets=[3, 4],
+    )
+
+    result = lc.compact_local_partitions(src)
+    assert result["partitions_compacted"] == 1
+
+    remaining = [f for f in os.listdir(part) if f.endswith(".parquet")]
+    assert len(remaining) == 1
+    merged = os.path.join(part, remaining[0])
+
+    con = duckdb.connect(":memory:")
+    try:
+        n_total = con.execute(f"SELECT COUNT(*) FROM read_parquet('{merged}')").fetchone()[0]
+        n_null = con.execute(f"SELECT COUNT(*) FROM read_parquet('{merged}') WHERE rid IS NULL").fetchone()[0]
+        n_non_null = con.execute(f"SELECT COUNT(*) FROM read_parquet('{merged}') WHERE rid IS NOT NULL").fetchone()[0]
+    finally:
+        con.close()
+
+    # All 3 NULL-rid rows from both files preserved + 1 deduped non-NULL = 4.
+    assert n_null == 3, f"NULL-rid rows must pass through unchanged, got {n_null}"
+    assert n_non_null == 1, f"non-NULL rid must dedupe to 1, got {n_non_null}"
+    assert n_total == 4
+
+
+def test_dedup_keeps_earliest_timestamp_for_same_rid(patched_cache_dir):
+    """``ROW_NUMBER() OVER (PARTITION BY rid ORDER BY timestamp)`` keeps
+    the row with the lowest timestamp — pinned because a refactor that
+    flipped to ``DESC`` would silently invert the dedup behaviour and
+    surface as last-write-wins instead of first-write-wins.
+    """
+    src = patched_cache_dir
+    cache_root = src["_test_cache_root"]
+    part = os.path.join(cache_root, "data", "timestamp_hour=2026-05-30-04")
+    os.makedirs(part)
+    _write_parquet_with_explicit_rids(os.path.join(part, "a.parquet"), rids=["shared"], ts_offsets=[100])
+    _write_parquet_with_explicit_rids(os.path.join(part, "b.parquet"), rids=["shared"], ts_offsets=[50])
+    _write_parquet_with_explicit_rids(os.path.join(part, "c.parquet"), rids=["shared"], ts_offsets=[200])
+
+    lc.compact_local_partitions(src)
+
+    remaining = [f for f in os.listdir(part) if f.endswith(".parquet")]
+    assert len(remaining) == 1
+    merged = os.path.join(part, remaining[0])
+
+    con = duckdb.connect(":memory:")
+    try:
+        rows = con.execute(f"SELECT timestamp FROM read_parquet('{merged}') WHERE rid = 'shared'").fetchall()
+    finally:
+        con.close()
+    # Exactly one row, with the EARLIEST timestamp (50, not 100 or 200).
+    assert rows == [(50,)], f"earliest-timestamp must win, got {rows}"
+
+
+def test_schema_without_rid_column_falls_back_to_plain_select(patched_cache_dir):
+    """Older sources (and test fixtures without rid_start) produce
+    parquet files with no ``rid`` column. The dedup branch is gated on
+    ``has_rid`` — when False, the helper must emit a plain SELECT
+    rather than reference the missing column (which would raise).
+    """
+    src = patched_cache_dir
+    cache_root = src["_test_cache_root"]
+    part = os.path.join(cache_root, "data", "timestamp_hour=2026-05-30-05")
+    os.makedirs(part)
+    # rid_start=None → no rid column in either file.
+    _write_parquet(os.path.join(part, "a.parquet"), rows=5, ts_start=0)
+    _write_parquet(os.path.join(part, "b.parquet"), rows=5, ts_start=10)
+
+    # Compaction must succeed (no SQL error from missing column).
+    result = lc.compact_local_partitions(src)
+    assert result["partitions_compacted"] == 1
+
+    remaining = [f for f in os.listdir(part) if f.endswith(".parquet")]
+    assert len(remaining) == 1
+    merged = os.path.join(part, remaining[0])
+
+    con = duckdb.connect(":memory:")
+    try:
+        n = con.execute(f"SELECT COUNT(*) FROM read_parquet('{merged}')").fetchone()[0]
+        # rid column absent in output schema.
+        cols = {row[0] for row in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{merged}')").fetchall()}
+    finally:
+        con.close()
+    # No dedup applied → all 10 rows preserved.
+    assert n == 10
+    assert "rid" not in cols

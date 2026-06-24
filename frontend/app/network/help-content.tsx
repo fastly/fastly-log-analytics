@@ -1,6 +1,7 @@
 import React from "react";
 import { Badge } from "@/components/ui/badge";
-import { DashboardLinkCell } from "@/components/DashboardLinkCell";
+import { FilterValueCell } from "@/components/FilterValueCell";
+import { PopLabel } from "@/components/PopLabel";
 import { cn } from "@/lib/utils";
 import { Activity, Shield, AlertTriangle, Search, ActivitySquare, AlertCircle, Globe, Zap, Network as NetworkIcon } from "lucide-react";
 export const GlobalHealthHelp = () => (
@@ -122,7 +123,7 @@ export const MetroLeaderboardHelp = () => (
 export const ShieldingHelp = () => (
   <div className="space-y-4 text-sm text-muted-foreground">
     <p>Edge-to-Shield round-trip latency, isolated by subtracting the Shield-to-Origin fetch time from the Edge&apos;s total upstream wait. Requests are correlated via the <code>rid</code>/<code>prid</code> fields.</p>
-    
+
     <div className="space-y-2 border-t pt-4">
       <h4 className="font-semibold text-foreground text-xs uppercase tracking-wider">Efficiency Legend</h4>
       <ul className="space-y-2 list-none pl-0">
@@ -162,6 +163,26 @@ export const ShieldingHelp = () => (
   </div>
 )
 
+export const NetworkQualityHelp = () => (
+  <div className="space-y-4 text-sm text-muted-foreground">
+    <p>Breaks down <strong>average TCP Round Trip Time</strong> (<code>tcp_rtt</code>) by country, ASN, region, and Fastly POP so you can localise where latency is concentrated, plus an RTT-vs-TTFB sample to separate network latency from origin/edge processing time.</p>
+    <ul className="space-y-3 list-none pl-0">
+      <li className="flex gap-3">
+        <NetworkIcon className="h-5 w-5 shrink-0 text-blue-500 mt-0.5" />
+        <span><strong>Bars (by country / ASN / region / POP):</strong> mean RTT in ms for the busiest groups in the window. The region breakdown is scoped to the selected country.</span>
+      </li>
+      <li className="flex gap-3">
+        <Zap className="h-5 w-5 shrink-0 text-blue-500" />
+        <span><strong>RTT vs TTFB scatter:</strong> points far above the diagonal mean time-to-first-byte is dominated by something other than network RTT (origin or edge work); points hugging it are network-bound.</span>
+      </li>
+      <li className="flex gap-3">
+        <AlertCircle className="h-5 w-5 shrink-0 text-yellow-500" />
+        <span><strong>Requires Network Quality (Group F) fields</strong> — <code>tcp_rtt</code> must be enabled in Fastly logging, with <code>ttfb</code> for the scatter. The cards hide when those fields aren't present.</span>
+      </li>
+    </ul>
+  </div>
+)
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 export function HealthBadge({ score }: { score: number | null }) {
@@ -180,9 +201,9 @@ export const SHIELDING_COLUMNS = [
     accessorKey: 'edge_pop',
     id: 'edge_pop', meta: { label: 'Edge POP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Edge POP</span>,
     cell: (info: any) => (
-      <DashboardLinkCell
-        value={info.getValue()}
-        href={`/dashboard?filter_pop=${encodeURIComponent(info.getValue())}`}
+      <FilterValueCell
+        filters={[{ column: 'pop', value: info.getValue() }]}
+        display={<PopLabel code={info.getValue()} />}
         className={cn('font-bold', info.row.original.anomaly_static ? 'text-destructive' : '')}
       />
     )
@@ -191,9 +212,9 @@ export const SHIELDING_COLUMNS = [
     accessorKey: 'shield_pop',
     id: 'shield_pop', meta: { label: 'Shield POP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Shield POP</span>,
     cell: (info: any) => (
-      <DashboardLinkCell
-        value={info.getValue()}
-        href={`/dashboard?filter_shield_pop=${encodeURIComponent(info.getValue())}`}
+      <FilterValueCell
+        filters={[{ column: 'shield_pop', value: info.getValue() }]}
+        display={<PopLabel code={info.getValue()} />}
         className="font-bold text-purple-500"
       />
     )
@@ -213,12 +234,9 @@ export const SHIELDING_COLUMNS = [
   },
 ]
 
-export const SHIELDING_LABELS: Record<string, string> = {
+const SHIELDING_LABELS: Record<string, string> = {
   edge_pop: 'Edge POP', shield_pop: 'Shield POP', requests: 'Requests',
   p50_ms: 'Median (P50)', p95_ms: 'P95 Latency', p99_ms: 'P99 Latency',
   light_speed_rtt_ms: 'Light-Speed Floor', efficiency_ratio: 'Efficiency',
 }
 export const getShieldingLabels = (ids: string[]) => ids.map(id => ({ id, label: SHIELDING_LABELS[id] || id }))
-
-// ── Page ──────────────────────────────────────────────────────────────────────
-

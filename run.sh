@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
 # run.sh - Starts the FastAPI backend and Next.js frontend.
-# Usage: ./run.sh [--dev] [--no-reload] [--kill] [--refresh] [--no-refresh]
+# Usage: ./run.sh [--dev] [--no-reload] [--kill] [--stop] [--refresh] [--no-refresh]
 #                 [--frontend-port PORT] [--backend-port PORT]
+#   --kill  kill any stale stack, THEN start a fresh one.
+#   --stop  kill the stale stack and return to the shell (do NOT start).
 
 # If the user has a virtualenv activated in their shell, it might point to a
 # different path (e.g. if the directory was renamed). We unset it here so that
@@ -19,8 +21,15 @@ fi
 DEV_MODE=false
 NO_RELOAD=false
 KILL_EXISTING=false
+STOP_ONLY=false
 FORCE_REFRESH=false
 SKIP_REFRESH=false
+# Track whether each port was explicitly chosen (env var now, or a CLI flag
+# in the arg loop below) vs left at the built-in default. The reserved-port
+# guard further down only trips on an explicit choice, so a bare `./run.sh`
+# still binds the documented 3000 / 8000.
+FRONTEND_PORT_EXPLICIT=false; [ -n "${FRONTEND_PORT:-}" ] && FRONTEND_PORT_EXPLICIT=true
+BACKEND_PORT_EXPLICIT=false; [ -n "${BACKEND_PORT:-}" ] && BACKEND_PORT_EXPLICIT=true
 FRONTEND_PORT=${FRONTEND_PORT:-3000}
 BACKEND_PORT=${BACKEND_PORT:-8000}
 LOCAL_REFRESH_MAX_AGE_HOURS=${LOCAL_REFRESH_MAX_AGE_HOURS:-24}
@@ -30,22 +39,29 @@ while [ $# -gt 0 ]; do
         --dev) DEV_MODE=true ;;
         --no-reload) NO_RELOAD=true ;;
         --kill) KILL_EXISTING=true ;;
+        --stop) STOP_ONLY=true; KILL_EXISTING=true ;;
         --refresh) FORCE_REFRESH=true ;;
         --no-refresh) SKIP_REFRESH=true ;;
-        --frontend-port) FRONTEND_PORT="$2"; shift ;;
-        --backend-port) BACKEND_PORT="$2"; shift ;;
+        --frontend-port) FRONTEND_PORT="$2"; FRONTEND_PORT_EXPLICIT=true; shift ;;
+        --backend-port) BACKEND_PORT="$2"; BACKEND_PORT_EXPLICIT=true; shift ;;
     esac
     shift
 done
 
-# Refuse to take ports that are commonly used by an SSH tunnel forwarding
-# a remote backend/frontend (8000 backend, 3001 frontend). Trampling these
-# silently routes local requests to the wrong backend and looks like a
-# perfectly normal-running app.
+# Refuse to take ports commonly used by an SSH tunnel forwarding a remote
+# backend/frontend (8000 backend, 3001 frontend) — but ONLY when the port was
+# explicitly chosen (CLI flag or env var). Trampling these silently routes
+# local requests to the wrong backend and looks like a perfectly normal-running
+# app. A bare `./run.sh` keeps the documented defaults (3000 / 8000).
 for RESERVED in 8000 3001; do
-    if [ "$BACKEND_PORT" = "$RESERVED" ] || [ "$FRONTEND_PORT" = "$RESERVED" ]; then
-        echo "[!] Refusing to bind port $RESERVED — commonly used by an SSH tunnel to a remote backend/frontend."
-        echo "    Override --backend-port / --frontend-port, or set BACKEND_PORT / FRONTEND_PORT in .env."
+    if [ "$BACKEND_PORT" = "$RESERVED" ] && [ "$BACKEND_PORT_EXPLICIT" = true ]; then
+        echo "[!] Refusing to bind backend port $RESERVED — commonly used by an SSH tunnel to a remote backend/frontend."
+        echo "    Pick a different --backend-port, or set BACKEND_PORT in .env."
+        exit 1
+    fi
+    if [ "$FRONTEND_PORT" = "$RESERVED" ] && [ "$FRONTEND_PORT_EXPLICIT" = true ]; then
+        echo "[!] Refusing to bind frontend port $RESERVED — commonly used by an SSH tunnel to a remote backend/frontend."
+        echo "    Pick a different --frontend-port, or set FRONTEND_PORT in .env."
         exit 1
     fi
 done
@@ -83,25 +99,25 @@ cleanup_existing() {
 # Function to clean up the spawned background processes when the user presses Ctrl+C
 cleanup() {
     echo -e "\nStopping all services..."
-    
+
     # 1. Ask nicely (SIGTERM to the process groups)
     if [ -n "$BACKEND_PGID" ]; then kill -TERM -$BACKEND_PGID 2>/dev/null; fi
     if [ -n "$FRONTEND_PGID" ]; then kill -TERM -$FRONTEND_PGID 2>/dev/null; fi
     kill -TERM $BACKEND_PID $FRONTEND_PID 2>/dev/null
-    
+
     # 2. Give them a second to clean up
     sleep 1
-    
+
     # 3. Force kill (SIGKILL) if they are stubborn
     if [ -n "$BACKEND_PGID" ]; then kill -9 -$BACKEND_PGID 2>/dev/null; fi
     if [ -n "$FRONTEND_PGID" ]; then kill -9 -$FRONTEND_PGID 2>/dev/null; fi
     kill -9 $BACKEND_PID $FRONTEND_PID 2>/dev/null
-    
+
     # 4. Nuclear option: Mop up any stray processes spawned in this directory
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     pkill -9 -f "$SCRIPT_DIR.*uvicorn" 2>/dev/null || true
     pkill -9 -f "$SCRIPT_DIR.*node.*next" 2>/dev/null || true
-    
+
     exit 0
 }
 
@@ -109,6 +125,12 @@ trap cleanup SIGINT SIGTERM
 
 if [ "$KILL_EXISTING" = true ]; then
     cleanup_existing
+fi
+
+# --stop: stack is now down; return to the shell without starting a new one.
+if [ "$STOP_ONLY" = true ]; then
+    echo "Stack stopped."
+    exit 0
 fi
 
 echo "=================================================="
@@ -119,6 +141,23 @@ echo "=================================================="
 echo "=================================================="
 if [ "$DEV_MODE" = true ]; then
     echo "Starting Backend (DEV mode with reload on port $BACKEND_PORT)..."
+    # Local dev runs against the same FOS bucket as prod — any
+    # background ingestion would race the prod cron and double-write
+    # rows into the shared Iceberg snapshot. The kill switch in
+    # backend/cron/scheduler.py reads this env var and refuses to
+    # register OR execute any scheduled cron job (including the
+    # ingest-class jobs that gap_heal / manual /admin/ingest-logs
+    # would otherwise trigger). HTTP API calls remain functional
+    # so /api/admin/rebuild-local-view (metadata refresh from cloud)
+    # still works. Override with FLA_DEV_NO_CRONS=0 if you need to
+    # exercise the cron path locally (rare).
+    : "${FLA_DEV_NO_CRONS:=1}"
+    export FLA_DEV_NO_CRONS
+    if [ "$FLA_DEV_NO_CRONS" != "0" ]; then
+        echo "  ↳ Cron kill switch: FLA_DEV_NO_CRONS=$FLA_DEV_NO_CRONS (no background ingestion)"
+    else
+        echo "  ↳ Cron kill switch: DISABLED via FLA_DEV_NO_CRONS=0 — crons will run!"
+    fi
 else
     echo "Starting Backend (PRODUCTION mode on port $BACKEND_PORT)..."
 fi

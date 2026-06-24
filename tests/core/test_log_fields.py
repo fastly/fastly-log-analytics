@@ -90,6 +90,50 @@ def test_custom_edge_field_not_in_deliver():
     assert "deliver" not in snippets or "edge_randomint" not in snippets.get("deliver", "")
 
 
+def test_numeric_custom_fields_do_not_starve_line_budget():
+    """REGRESSION: numeric custom fields defaulted to a 2000-char substr
+    reservation. Greedy budget allocation runs alphabetically, so several
+    numeric fields each grabbing 2000 exhausted the 16 KiB line budget before
+    the alphabetically-last fields, which then got substr(..., 0, 0) and
+    always logged null (e.g. edge_score_rtt_us + edge_sid after the latency
+    fields landed). Numeric fields must clamp to a short length so later
+    fields keep a non-zero substr.
+    """
+    import re
+
+    cfg = {
+        "groups": [],
+        "custom_fields": [
+            {
+                "name": f"z_num_{i}",
+                "vcl_log_expression": f"req.http.x-edge-score:n{i}",
+                "collection_stage": "deliver",
+                "value_type": "numeric",
+                "enabled": True,
+            }
+            for i in range(8)
+        ]
+        # An alphabetically-last STRING field that previously got starved to 0.
+        + [
+            {
+                "name": "zzz_tail",
+                "vcl_log_expression": "req.http.x-edge-score:tail",
+                "collection_stage": "deliver",
+                "value_type": "string",
+                "enabled": True,
+            }
+        ],
+    }
+    fmt = generate_log_format(cfg)
+
+    # Every numeric field clamps to <= 20 (not 2000).
+    num_lens = [int(m) for m in re.findall(r"x-edge-score:n\d+, 0, (\d+)\)", fmt)]
+    assert num_lens and all(n <= 20 for n in num_lens), num_lens
+    # The alphabetically-last string field is NOT starved to a zero-length substr.
+    tail = re.search(r"x-edge-score:tail, 0, (\d+)\)", fmt)
+    assert tail and int(tail.group(1)) > 0, "trailing field was starved to substr(...,0,0)"
+
+
 def test_validate_group_deps():
     """Verify that dependent groups throw validation errors if not met."""
     # E requires D

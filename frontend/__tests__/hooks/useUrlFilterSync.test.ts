@@ -1,5 +1,13 @@
 /**
  * @vitest-environment jsdom
+ *
+ * URL → filterStore hydration for the legacy ?filter_<col>= short form,
+ * absolute ?start_time/?end_time, and ?range= is handled synchronously
+ * in lib/urlFilterHydration.ts (covered by urlFilterHydration.test.ts).
+ *
+ * useUrlFilterSync now only handles the two cases that can't run
+ * pre-render: async ?view=<id> loading and ?metric=<val>. The legacy
+ * tests for filter_/start_time/end_time hydration moved with the code.
  */
 import { renderHook } from '@testing-library/react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -11,12 +19,26 @@ const mockSetMetric = vi.fn()
 const mockClientGet = vi.fn()
 const mockGetQueryData = vi.fn()
 
+// The hook uses selector form — `useFilterStore(s => s.addFilter)` etc.
+// Apply the selector to the mock store so each call returns the right
+// slice instead of the whole object (which would TypeError when called
+// like a function). Includes the toggle-state fields the restore-handler
+// compares against, defaulting to the same store-init values.
+const mockStore = {
+  addFilter: mockAddFilter,
+  clearFilters: mockClearFilters,
+  setRange: mockSetRange,
+  setRelativeRange: vi.fn(),
+  toggleEdgeOnly: vi.fn(),
+  toggleCompareMode: vi.fn(),
+  setCompareRange: vi.fn(),
+  edgeOnly: false,
+  compareMode: false,
+}
 vi.mock('@/stores/filterStore', () => ({
-  useFilterStore: vi.fn(() => ({
-    addFilter: mockAddFilter,
-    clearFilters: mockClearFilters,
-    setRange: mockSetRange,
-  })),
+  useFilterStore: vi.fn((selector?: (s: typeof mockStore) => unknown) =>
+    typeof selector === 'function' ? selector(mockStore) : mockStore
+  ),
 }))
 
 // useUrlFilterSync calls useQueryClient() to read the bootstrap-seeded
@@ -27,8 +49,8 @@ vi.mock('@tanstack/react-query', () => ({
   useQueryClient: vi.fn(() => ({ getQueryData: mockGetQueryData })),
 }))
 
-vi.mock('@/hooks/usePageContext', () => ({
-  usePageContext: vi.fn(() => ({ activeServiceId: 'test-service-id' })),
+vi.mock('@/hooks/useActiveService', () => ({
+  useActiveService: vi.fn(() => ({ activeServiceId: 'test-service-id', services: [] })),
 }))
 
 vi.mock('@/hooks/useReportConfig', () => ({
@@ -61,22 +83,6 @@ describe('useUrlFilterSync', () => {
     expect(mockSetMetric).not.toHaveBeenCalled()
   })
 
-  it('parses filter_col=val params and calls addFilter', async () => {
-    setSearch('filter_status=200&filter_country=US')
-    const { useUrlFilterSync } = await import('@/hooks/useUrlFilterSync')
-    renderHook(() => useUrlFilterSync())
-    expect(mockClearFilters).toHaveBeenCalledOnce()
-    expect(mockAddFilter).toHaveBeenCalledWith('status', '200', 'include')
-    expect(mockAddFilter).toHaveBeenCalledWith('country', 'US', 'include')
-  })
-
-  it('parses start_time / end_time params and calls setRange', async () => {
-    setSearch('start_time=2026-01-01T00:00:00Z&end_time=2026-01-02T00:00:00Z')
-    const { useUrlFilterSync } = await import('@/hooks/useUrlFilterSync')
-    renderHook(() => useUrlFilterSync())
-    expect(mockSetRange).toHaveBeenCalledWith('2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')
-  })
-
   it('parses metric param and calls setMetric', async () => {
     setSearch('metric=bandwidth')
     const { useUrlFilterSync } = await import('@/hooks/useUrlFilterSync')
@@ -84,14 +90,11 @@ describe('useUrlFilterSync', () => {
     expect(mockSetMetric).toHaveBeenCalledWith('bandwidth')
   })
 
-  it('removes filter_, start_time, end_time, metric params from URL after processing', async () => {
-    setSearch('filter_status=200&start_time=2026-01-01T00:00:00Z&end_time=2026-01-02T00:00:00Z&metric=requests&other=keep')
+  it('strips metric param from URL after processing while leaving unrelated params untouched', async () => {
+    setSearch('metric=requests&other=keep')
     const { useUrlFilterSync } = await import('@/hooks/useUrlFilterSync')
     renderHook(() => useUrlFilterSync())
     const remaining = new URLSearchParams(window.location.search)
-    expect(remaining.get('filter_status')).toBeNull()
-    expect(remaining.get('start_time')).toBeNull()
-    expect(remaining.get('end_time')).toBeNull()
     expect(remaining.get('metric')).toBeNull()
     expect(remaining.get('other')).toBe('keep')
   })

@@ -115,7 +115,7 @@ def test_ingest_skips_corrupted_gzip_files(fos_source, in_memory_duckdb, monkeyp
     assert done["rows_inserted"] == 1
 
     # Check metadata_db record - only the valid file should be tracked
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     ingested = metadata_db.get_ingested_filenames(test_src["name"])
 

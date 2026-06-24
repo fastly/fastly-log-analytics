@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { client, extractApiError } from '@/lib/api'
 
+import { useShareMutation } from './useShareMutation'
 import { formatUptime, type ShareStatus } from './utils'
 
 interface SharingControlPanelProps {
@@ -16,7 +17,7 @@ interface SharingControlPanelProps {
   onError: (msg: string) => void
 }
 
-type SharingMode = 'tunnel' | 'hostname' | 'ip'
+type SharingMode = 'hostname' | 'ip'
 
 const IPV4_RE = /^(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?$/
 
@@ -28,19 +29,28 @@ function buildEndpoint(mode: SharingMode, raw: string): string {
 }
 
 export function SharingControlPanel({ status, onRefresh, onError }: SharingControlPanelProps) {
-  const [busy, setBusy] = React.useState(false)
-  const [mode, setMode] = React.useState<SharingMode>('tunnel')
+  const { busy, run } = useShareMutation(onError, onRefresh)
+  const [mode, setMode] = React.useState<SharingMode>('hostname')
   const [hostnameValue, setHostnameValue] = React.useState('')
   const [ipValue, setIpValue] = React.useState('')
+  // Editable copy of the global concurrent-analyst cap. `capDraft` is null
+  // while the input mirrors the server value; once the admin types it holds
+  // their edit. Deriving the displayed value during render (rather than syncing
+  // via an effect) means a refresh that brings a new server value is reflected
+  // automatically whenever the field isn't being edited.
+  const [capDraft, setCapDraft] = React.useState<string | null>(null)
+  const [capBusy, setCapBusy] = React.useState(false)
+  const serverCap = status?.max_concurrent_sessions
+  const capValue = capDraft ?? (serverCap != null ? String(serverCap) : '')
+  const capDirty = capDraft != null && capDraft !== String(serverCap ?? '')
 
   const sharingActive = !!status?.sharing_active
 
-  const handleStart = async () => {
+  const handleStart = () => {
     onError('')
-    const useTunnel = mode === 'tunnel'
-    const raw = mode === 'hostname' ? hostnameValue : mode === 'ip' ? ipValue : ''
-    const publicEndpoint = useTunnel ? null : buildEndpoint(mode, raw)
-    if (!useTunnel && !publicEndpoint) {
+    const raw = mode === 'hostname' ? hostnameValue : ipValue
+    const publicEndpoint = buildEndpoint(mode, raw)
+    if (!publicEndpoint) {
       onError(
         mode === 'hostname'
           ? 'Enter a hostname (e.g. logs.example.com).'
@@ -48,55 +58,52 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
       )
       return
     }
-    if (mode === 'ip' && publicEndpoint && !IPV4_RE.test(raw.trim())) {
+    if (mode === 'ip' && !IPV4_RE.test(raw.trim())) {
       onError('Expected an IPv4 address, optionally with a port (e.g. 203.0.113.42:8443).')
       return
     }
-    setBusy(true)
-    try {
-      await client.POST('/api/admin/share/start' as any, {
+    return run(() =>
+      client.POST('/api/admin/share/start' as any, {
         body: {
-          use_tunnel: useTunnel,
           public_endpoint: publicEndpoint,
           forward_port: 3000,
         },
-      } as any)
-      await onRefresh()
-    } catch (e: any) {
-      onError(extractApiError(e))
-    } finally {
-      setBusy(false)
-    }
+      } as any),
+    )
   }
 
-  const handleStop = async () => {
-    setBusy(true)
-    try {
-      await client.POST('/api/admin/share/stop' as any, {} as any)
-      await onRefresh()
-    } catch (e: any) {
-      onError(extractApiError(e))
-    } finally {
-      setBusy(false)
-    }
-  }
+  const handleStop = () => run(() => client.POST('/api/admin/share/stop' as any, {} as any))
 
-  const handlePanic = async () => {
-    if (!confirm('Sever ALL remote access immediately? This boots every analyst and stops the tunnel.')) return
-    setBusy(true)
-    try {
-      await client.POST('/api/admin/share/panic' as any, {} as any)
-      await onRefresh()
-    } catch (e: any) {
-      onError(extractApiError(e))
-    } finally {
-      setBusy(false)
-    }
+  const handlePanic = () => {
+    if (!confirm('Sever ALL remote access immediately? This boots every analyst and stops sharing.')) return
+    run(() => client.POST('/api/admin/share/panic' as any, {} as any))
   }
 
   const handlePreviewInNewTab = () => {
     if (!status?.public_url) return
     window.open(`${status.public_url}/share-login`, '_blank', 'noopener,noreferrer')
+  }
+
+  const handleSaveCap = async () => {
+    onError('')
+    const n = Number(capValue)
+    if (!Number.isInteger(n) || n < 1) {
+      onError('Max concurrent analysts must be a whole number of 1 or more.')
+      return
+    }
+    setCapBusy(true)
+    try {
+      await client.PATCH('/api/admin/share/settings' as any, {
+        body: { max_concurrent_analyst_sessions: n },
+      } as any)
+      await onRefresh()
+      // Drop back to mirroring the (now-updated) server value.
+      setCapDraft(null)
+    } catch (e: any) {
+      onError(extractApiError(e))
+    } finally {
+      setCapBusy(false)
+    }
   }
 
   return (
@@ -200,35 +207,6 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
             <legend className="text-sm font-medium">Sharing mode</legend>
 
             <label
-              htmlFor="mode-tunnel"
-              className="flex items-start gap-2 cursor-pointer rounded-md border p-2 hover:bg-muted/50"
-            >
-              <input
-                type="radio"
-                id="mode-tunnel"
-                name="sharing-mode"
-                className="mt-1"
-                checked={mode === 'tunnel'}
-                onChange={() => setMode('tunnel')}
-              />
-              <div className="flex-1 space-y-0.5">
-                <div className="text-sm font-medium">SSH reverse tunnel (localhost.run)</div>
-                <p className="text-xs text-muted-foreground">
-                  Easiest option. Analyst traffic transits a third-party relay
-                  (<a
-                    href="https://localhost.run"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline"
-                  >
-                    localhost.run
-                  </a>
-                  ). Review with your legal team if you have GDPR or HIPAA exposure.
-                </p>
-              </div>
-            </label>
-
-            <label
               htmlFor="mode-hostname"
               className="flex items-start gap-2 cursor-pointer rounded-md border p-2 hover:bg-muted/50"
             >
@@ -293,6 +271,34 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
           </fieldset>
         </div>
       )}
+
+      <div className="flex items-center justify-between gap-3 border-t pt-3 mt-2">
+        <div className="space-y-0.5">
+          <label htmlFor="max-concurrent-analysts" className="text-sm font-medium">
+            Max concurrent analysts
+          </label>
+          <p className="text-[11px] text-muted-foreground">
+            Cap on simultaneous analyst sessions; logins past the cap are refused.
+            {status?.active_session_count != null && (
+              <> Currently <span className="font-mono">{status.active_session_count}</span> active.</>
+            )}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <Input
+            id="max-concurrent-analysts"
+            type="number"
+            min={1}
+            value={capValue}
+            onChange={(e) => setCapDraft(e.target.value)}
+            className="w-20"
+          />
+          <Button size="sm" variant="outline" onClick={handleSaveCap} disabled={capBusy || !capDirty}>
+            {capBusy ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+            {capBusy ? 'Saving…' : 'Save'}
+          </Button>
+        </div>
+      </div>
     </section>
   )
 }

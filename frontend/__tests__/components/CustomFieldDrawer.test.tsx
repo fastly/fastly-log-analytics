@@ -60,6 +60,23 @@ window.HTMLElement.prototype.releasePointerCapture = vi.fn()
 const queryClient = new QueryClient()
 
 test('submits valid custom field and displays validation errors when invalid', async () => {
+  // Radix Dialog's FocusScope schedules focus-management state updates on
+  // timers. Under this test's fake timers (required for the 500ms lint
+  // debounce) those updates flush *between* userEvent's act() wrappers, so
+  // React 19 logs benign "not wrapped in act(...)" warnings for
+  // DialogRoot/FocusScope/DialogInteractions. The component is correct —
+  // every assertion below passes and the key transitions are awaited via
+  // waitFor. Filter ONLY that specific React message so this one test stays
+  // quiet while any genuine console.error still surfaces.
+  const realError = console.error
+  const actFilter = vi
+    .spyOn(console, 'error')
+    .mockImplementation((...args: unknown[]) => {
+      if (typeof args[0] === 'string' && args[0].includes('not wrapped in act')) return
+      realError(...args)
+    })
+  const restoreActFilter = () => actFilter.mockRestore()
+
   // Fake timers must be installed BEFORE render so the drawer's two
   // ``useDebounce`` hooks (vcl_log_expression + collection_stage)
   // schedule their setTimeouts under fake time. shouldAdvanceTime lets
@@ -147,6 +164,7 @@ test('submits valid custom field and displays validation errors when invalid', a
   })
 
   vi.useRealTimers()
+  restoreActFilter()
 })
 
 // TESTING_PLAN_3 item 19. The drawer has many form inputs that screen-

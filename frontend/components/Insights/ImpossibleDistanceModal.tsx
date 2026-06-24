@@ -15,6 +15,7 @@ import { useTheme } from 'next-themes'
 import { Info, Zap, Globe } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ImpossibleDistanceData } from './types'
+import { addCountryBaseLayer, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
 
 function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: boolean }) {
   const mapContainer = useRef<HTMLDivElement>(null)
@@ -51,20 +52,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
       map.current.on('load', () => {
         if (!map.current || !data) return
 
-        map.current.addSource('world', {
-          type: 'geojson',
-          data: '/geo/world.geojson'
-        })
-
-        map.current.addLayer({
-          id: 'countries',
-          type: 'fill',
-          source: 'world',
-          paint: {
-            'fill-color': isDark ? '#27272a' : '#e4e4e7',
-            'fill-outline-color': isDark ? '#3f3f46' : '#d4d4d8'
-          }
-        })
+        addCountryBaseLayer(map.current, { isDark })
 
         const features: any[] = [
           {
@@ -138,11 +126,8 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
     } else {
       if (map.current.isStyleLoaded()) {
         map.current.setPaintProperty('background', 'background-color', isDark ? '#18181b' : '#f4f4f5')
-        
-        if (map.current.getLayer('countries')) {
-          map.current.setPaintProperty('countries', 'fill-color', isDark ? '#27272a' : '#e4e4e7')
-          map.current.setPaintProperty('countries', 'fill-outline-color', isDark ? '#3f3f46' : '#d4d4d8')
-        }
+
+        updateCountryBaseLayerTheme(map.current, isDark)
 
         const source = map.current.getSource('points') as maplibregl.GeoJSONSource
         if (source) {
@@ -172,7 +157,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
               }
             ]
           })
-          
+
           const bounds = new maplibregl.LngLatBounds()
           bounds.extend([data.client_lon, data.client_lat])
           bounds.extend([data.pop_lon, data.pop_lat])
@@ -249,7 +234,7 @@ export function ImpossibleDistanceModal({ isOpen, onOpenChange, data }: Impossib
   const c_fibre = 200000
   const one_way_ms = data.tcp_rtt / 2 / 1000
   const required_speed = data.distance_km / (one_way_ms / 1000)
-  
+
   const violation_ratio = required_speed / c_fibre
   const exceeds_vacuum = required_speed > c
 
@@ -258,7 +243,7 @@ export function ImpossibleDistanceModal({ isOpen, onOpenChange, data }: Impossib
       <DialogContent className="max-w-3xl p-6">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Zap className="h-5 w-5 text-yellow-500" />
+            <Zap className="h-5 w-5 text-yellow-600" />
             Physics Violation: {data.label}
           </DialogTitle>
           <DialogDescription>
@@ -271,11 +256,11 @@ export function ImpossibleDistanceModal({ isOpen, onOpenChange, data }: Impossib
             {isOpen && <PhysicsMap data={data} isDark={isDark} />}
             {hasCoords && (
               <div className="absolute top-2 left-2 flex flex-col gap-1 z-10 pointer-events-none">
-                <div className="flex items-center gap-2 bg-background/90 backdrop-blur-sm px-2 py-1 rounded border text-[10px] shadow-sm">
+                <div className="flex items-center gap-2 bg-background/90 backdrop-blur-sm px-2 py-1 rounded border text-[11px] sm:text-[10px] shadow-sm">
                   <div className="h-2 w-2 rounded-full bg-[#3b82f6]" />
                   <span>Client: {data.client_lat.toFixed(2)}, {data.client_lon.toFixed(2)}{data.city || data.country ? ` (${[data.city, data.country].filter(Boolean).join(', ')})` : ''}</span>
                 </div>
-                <div className="flex items-center gap-2 bg-background/90 backdrop-blur-sm px-2 py-1 rounded border text-[10px] shadow-sm">
+                <div className="flex items-center gap-2 bg-background/90 backdrop-blur-sm px-2 py-1 rounded border text-[11px] sm:text-[10px] shadow-sm">
                   <div className="h-2 w-2 rounded-full bg-[#22c55e]" />
                   <span>POP ({data.pop}): {data.pop_lat.toFixed(2)}, {data.pop_lon.toFixed(2)}</span>
                 </div>
@@ -290,11 +275,11 @@ export function ImpossibleDistanceModal({ isOpen, onOpenChange, data }: Impossib
               </h4>
               <div className="grid grid-cols-2 gap-2">
                 <div className="p-2 rounded-md bg-muted/50 border">
-                  <p className="text-[10px] text-muted-foreground">TCP RTT</p>
+                  <p className="text-[11px] sm:text-[10px] text-muted-foreground">TCP RTT</p>
                   <p className="font-mono text-sm">{(data.tcp_rtt / 1000).toFixed(1)} ms</p>
                 </div>
                 <div className="p-2 rounded-md bg-muted/50 border">
-                  <p className="text-[10px] text-muted-foreground">Geo Distance</p>
+                  <p className="text-[11px] sm:text-[10px] text-muted-foreground">Geo Distance</p>
                   <p className="font-mono text-sm">{data.distance_km.toLocaleString()} km</p>
                 </div>
               </div>
@@ -309,13 +294,13 @@ export function ImpossibleDistanceModal({ isOpen, onOpenChange, data }: Impossib
               </h4>
               <div className="space-y-1">
                 <p className="text-xs leading-relaxed">
-                  To cover {data.distance_km.toLocaleString()} km in {one_way_ms.toFixed(2)} ms (one-way), 
+                  To cover {data.distance_km.toLocaleString()} km in {one_way_ms.toFixed(2)} ms (one-way),
                   the signal would need to travel at:
                 </p>
                 <p className="font-mono text-lg font-bold text-center py-1">
                   {required_speed.toLocaleString(undefined, { maximumFractionDigits: 0 })} km/s
                 </p>
-                <div className="space-y-1 text-[11px]">
+                <div className="space-y-1 text-xs sm:text-[11px]">
                   <div className="flex justify-between items-center">
                     <span>vs. Fibre Speed (~200k km/s)</span>
                     <span className="font-bold text-red-500">{(violation_ratio * 100).toFixed(0)}% of limit</span>
@@ -330,8 +315,8 @@ export function ImpossibleDistanceModal({ isOpen, onOpenChange, data }: Impossib
               </div>
             </div>
 
-            <div className="p-2 rounded bg-blue-500/5 border border-blue-500/20 text-[10px] leading-relaxed">
-              <Info className="h-3 w-3 inline mr-1 mb-0.5 text-blue-500" />
+            <div className="p-2 rounded bg-blue-500/5 border border-blue-500/20 text-[11px] sm:text-[10px] leading-relaxed">
+              <Info className="h-3 w-3 inline mr-1 mb-0.5 text-blue-600" />
               <strong>Conclusion:</strong> The user is likely using a VPN, proxy, or GPS spoofing to appear in a location physically distant from the Fastly POP they are actually hitting.
             </div>
           </div>

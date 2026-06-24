@@ -8,10 +8,18 @@ from backend.core.duckdb import _get_fos_client, get_source_for_service
 logger = logging.getLogger(__name__)
 
 
-def get_admin_state_key(source: dict) -> str:
+def _iceberg_meta_prefix(source: dict) -> str:
+    """Return the ``iceberg/meta/`` (or ``<prefix>/iceberg/meta/``) prefix
+    under which admin_state, scoring matrix, and scoring matrix history
+    live. Shared so the four key-builder helpers don't drift from each
+    other on the prefix-resolution rule."""
     base_prefix = source.get("prefix", "").strip("/")
     iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-    return f"{iceberg_root}/meta/admin_state.json"
+    return f"{iceberg_root}/meta/"
+
+
+def get_admin_state_key(source: dict) -> str:
+    return f"{_iceberg_meta_prefix(source)}admin_state.json"
 
 
 def get_scoring_matrix_key(source: dict) -> str:
@@ -21,9 +29,7 @@ def get_scoring_matrix_key(source: dict) -> str:
     not in admin_state.custom_fields). Lives under the same iceberg/meta/ prefix
     so analyst hosts read the same blob the admin host wrote.
     """
-    base_prefix = source.get("prefix", "").strip("/")
-    iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-    return f"{iceberg_root}/meta/scoring_matrix.json"
+    return f"{_iceberg_meta_prefix(source)}scoring_matrix.json"
 
 
 def get_scoring_matrix_history_key(source: dict, version: str) -> str:
@@ -33,9 +39,7 @@ def get_scoring_matrix_history_key(source: dict, version: str) -> str:
     so the operator can list past matrices and roll back to a known-good
     one if a fresh retrain regresses AUC.
     """
-    base_prefix = source.get("prefix", "").strip("/")
-    iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-    return f"{iceberg_root}/meta/scoring_matrix_history/{version}.json"
+    return f"{_iceberg_meta_prefix(source)}scoring_matrix_history/{version}.json"
 
 
 def list_scoring_matrix_versions(service_id: str) -> list[dict]:
@@ -48,9 +52,7 @@ def list_scoring_matrix_versions(service_id: str) -> list[dict]:
     source = get_source_for_service(service_id)
     if not source:
         return []
-    base_prefix = source.get("prefix", "").strip("/")
-    iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-    prefix = f"{iceberg_root}/meta/scoring_matrix_history/"
+    prefix = f"{_iceberg_meta_prefix(source)}scoring_matrix_history/"
     try:
         s3 = _get_fos_client(source)
         out: list[dict] = []
@@ -140,7 +142,7 @@ def restore_scoring_matrix_version(service_id: str, version: str) -> dict | None
 
 def publish_matrix_to_fos(service_id: str, matrix: dict) -> None:
     """Upload the trained scoring matrix JSON to FOS so analyst replicas
-    + GCE backend can fetch the same matrix the admin host has on disk.
+    + the prod VM backend can fetch the same matrix the admin host has on disk.
 
     Without this, every fresh container needs the matrix scp'd in
     manually (which is how the AUC field got bootstrapped the first
@@ -231,7 +233,7 @@ def export_admin_state(service_id: str):
         return
 
     try:
-        from backend.core import metadata_db
+        from backend.core import metadata as metadata_db
 
         state: dict = {
             "_audit_logs": metadata_db.export_audit(service_id, limit=200),
@@ -241,7 +243,7 @@ def export_admin_state(service_id: str):
         # Export custom_fields from the service config file
         cfg = svcconfig.load_config(service_id)
         if cfg:
-            from backend.core import log_fields as _lf
+            from backend.core import field_registry as _lf
 
             lf = _lf.get_lf_config(cfg)
             state["custom_fields"] = lf.get("custom_fields", [])
@@ -264,13 +266,14 @@ def _cdn_get(source: dict, key: str) -> bytes:
     import urllib.parse
     import urllib.request
 
-    from backend.models.lake import _safe_cdn_url
+    from backend.core.iceberg.lake_info import _safe_cdn_url
     from backend.utils.telemetry import record_cdn_call
 
     # SSRF guard: ``cdn_url`` is user-supplied at provision time. Reject
     # anything that isn't an https Fastly hostname so the helper can't be
-    # turned into an outbound HTTP probe of internal services (GCE
-    # metadata, peer VMs, link-local addresses).
+    # turned into an outbound HTTP probe of internal services (cloud
+    # metadata at 169.254.169.254 on AWS/GCE/Azure, peer VMs, link-local
+    # addresses).
     cdn_url = _safe_cdn_url((source.get("cdn_url") or "").rstrip("/"))
     if not cdn_url:
         raise urllib.error.URLError("cdn_url missing or not on the Fastly allowlist")
@@ -329,7 +332,7 @@ def import_admin_state(service_id: str):
                 return
             state = json.loads(resp["Body"].read().decode("utf-8"))
 
-        from backend.core import metadata_db
+        from backend.core import metadata as metadata_db
 
         # NON-DESTRUCTIVE on read_only analyst hosts: the analyst pod
         # writes views and audit_logs locally (the routers have no
@@ -351,9 +354,10 @@ def import_admin_state(service_id: str):
         # UI catalog matches what the admin has defined.
         #
         # WHY THIS IS A MERGE (not an overwrite): scoring is enabled by code
-        # that injects 6 well-known custom_fields (edge_score, edge_score_l1,
-        # edge_score_l2, edge_cookie_compliance, edge_score_reason, edge_sid)
-        # via _SCORING_CUSTOM_FIELDS. If the FOS-stored admin_state.json
+        # that injects 8 well-known custom_fields (edge_score, edge_score_l1,
+        # edge_score_l2, edge_cookie_compliance, edge_score_reason, edge_sid,
+        # edge_score_rtt_us, edge_score_exec_us) via _SCORING_CUSTOM_FIELDS.
+        # If the FOS-stored admin_state.json
         # predates scoring enablement (or was last written by a host that
         # didn't have scoring), an unconditional overwrite silently strips
         # those fields on every metadata_sync tick — which makes ingest
@@ -365,7 +369,7 @@ def import_admin_state(service_id: str):
         if "custom_fields" in state:
             cfg = svcconfig.load_config(service_id)
             if cfg is not None:
-                from backend.core import log_fields as _lf
+                from backend.core import field_registry as _lf
 
                 lf = _lf.get_lf_config(cfg)
                 remote_fields = list(state["custom_fields"])

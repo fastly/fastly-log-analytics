@@ -68,7 +68,6 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
     } catch (err: any) {
       alert(`Failed to import: ${err.message}`);
     }
-    // reset input
     e.target.value = '';
   }
 
@@ -88,10 +87,10 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
             <div className="relative">
                 <Button variant="outline" size="sm" title="Import Custom Fields" className="cursor-pointer">
                    <Upload className="h-4 w-4" />
-                   <input 
-                       type="file" 
-                       accept=".json" 
-                       className="absolute inset-0 opacity-0 cursor-pointer" 
+                   <input
+                       type="file"
+                       accept=".json"
+                       className="absolute inset-0 opacity-0 cursor-pointer"
                        onChange={handleImport}
                    />
                 </Button>
@@ -102,7 +101,10 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
         </div>
       </div>
 
-      <div className="border rounded-md overflow-hidden text-sm">
+      {/* M-6 (audit, mobile UX): overflow-x-auto so the 6-column custom
+          fields table scrolls on narrow viewports instead of clipping
+          (overflow-hidden was hiding the actions column on phones). */}
+      <div className="border rounded-md overflow-x-auto text-sm">
         <table className="w-full">
           <thead className="bg-muted/40">
             <tr>

@@ -1,0 +1,280 @@
+"""Generic input validators + PII masking helpers used by the share flow.
+
+Self-contained — no DB access — so other layers (routers, middleware) can
+import this module without dragging in the connection pool.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import re
+from typing import Any
+
+# Conservative ASCII-leaning name regex. Refuses HTML special chars
+# (<, >, &, ", '), NULL bytes, and control characters. Allows international
+# letters, digits, spaces, periods, commas, apostrophes, hyphens.
+_NAME_RE = re.compile(r"^[\w .,'\-]{1,80}$", re.UNICODE)
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+
+class InvalidNameError(ValueError):
+    pass
+
+
+class InvalidEmailError(ValueError):
+    pass
+
+
+class InvalidPiiPolicyError(ValueError):
+    pass
+
+
+def validate_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        raise InvalidNameError("name is required")
+    # Reject HTML metacharacters that have no business in a person's name.
+    # Straight apostrophes are KEPT so Irish/Italian/Polynesian names work
+    # (O'Brien, D'Angelo, Le'aupepe). React + the backend never interpolate
+    # these into raw HTML attributes; they go through proper escaping.
+    if "<" in name or ">" in name or "&" in name or '"' in name:
+        raise InvalidNameError("name contains disallowed characters (HTML special characters not permitted)")
+    if "\x00" in name or any(ord(c) < 32 for c in name):
+        raise InvalidNameError("name contains control characters")
+    if not _NAME_RE.match(name):
+        raise InvalidNameError(
+            "name must be 1-80 characters; letters, digits, spaces, periods, commas, apostrophes, hyphens only"
+        )
+    return name
+
+
+def validate_email(email: str) -> str:
+    email = (email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise InvalidEmailError("email is not in a valid format")
+    return email
+
+
+def validate_pii_policy(policy: dict | None) -> dict:
+    """Coerce + validate the PII policy dict.
+
+    The only enforced control is ``mask_ips: bool``.
+
+    ``mask_user_agent`` / ``mask_geo`` / ``redact_fields`` are NOT enforced
+    anywhere. Rather than accept-and-store them — which let an operator enable
+    "mask user agent" and believe PII was hidden when it wasn't — we reject any
+    attempt to turn them on. Turning them OFF (or an empty ``redact_fields``)
+    is a harmless no-op and accepted. Move each key into the enforced set here
+    once its masking actually ships.
+    """
+    if policy is None:
+        return {"mask_ips": False}
+    if not isinstance(policy, dict):
+        raise InvalidPiiPolicyError("pii_policy must be an object")
+    out: dict[str, Any] = {"mask_ips": bool(policy.get("mask_ips", False))}
+    for k in ("mask_user_agent", "mask_geo"):
+        if policy.get(k):
+            raise InvalidPiiPolicyError(f"pii_policy.{k} is not supported yet — it would not be enforced. Remove it.")
+    rf = policy.get("redact_fields")
+    if rf:
+        # Validate the shape first so a malformed value gets the precise error,
+        # then reject: redact_fields is accepted-but-ignored today, which is
+        # exactly the silent no-op this guard exists to prevent.
+        if not isinstance(rf, list) or not all(isinstance(x, str) for x in rf):
+            raise InvalidPiiPolicyError("redact_fields must be a list of strings")
+        raise InvalidPiiPolicyError(
+            "pii_policy.redact_fields is not supported yet — it would not be enforced. Remove it."
+        )
+    return out
+
+
+def parse_ip_whitelist(s: str | None) -> list[str]:
+    """Parse a comma-separated list of IPs/CIDRs; validates each entry.
+
+    Returns the list of normalized entries. Raises ``ValueError`` on any
+    malformed entry.
+    """
+    if not s or not s.strip():
+        return []
+    out: list[str] = []
+    for raw in s.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        try:
+            if "/" in item:
+                net = ipaddress.ip_network(item, strict=False)
+                out.append(str(net))
+            else:
+                ip = ipaddress.ip_address(item)
+                out.append(str(ip))
+        except ValueError as exc:
+            raise ValueError(f"invalid IP/CIDR entry {item!r}: {exc}") from exc
+    return out
+
+
+def ip_in_whitelist(ip: str, whitelist_csv: str | None) -> bool:
+    """True iff ``ip`` is permitted by the comma-separated whitelist.
+
+    Empty / None whitelist allows all (existing call sites encode "no
+    restriction" as NULL on the invite row).
+    """
+    if not whitelist_csv:
+        return True
+    try:
+        client = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    for raw in whitelist_csv.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        try:
+            if "/" in item:
+                net = ipaddress.ip_network(item, strict=False)
+                if client in net:
+                    return True
+            else:
+                if client == ipaddress.ip_address(item):
+                    return True
+        except ValueError:
+            continue
+    return False
+
+
+def mask_ip(ip: str) -> str:
+    """Mask the final octet of IPv4, last 80 bits of IPv6.
+
+    Used by the middleware when ``session.pii_policy.mask_ips`` is True.
+    """
+    # Fail closed: a value that doesn't cleanly parse as an IP (an XFF list
+    # like "1.2.3.4, 5.6.7.8", a malformed octet, trailing whitespace, etc.)
+    # must NOT be returned verbatim — that would leak the very PII this
+    # control exists to mask. Empty / missing values stay empty (nothing to
+    # leak, and "[redacted]" for a blank field is just noise).
+    if not ip:
+        return ip
+    # Idempotency: a value already in masked IPv4 form ("a.b.c.xxx") is a
+    # no-op. The /api/query path masks by value shape in the repo layer, and
+    # the analyst-response middleware then runs the key-name masker over the
+    # same body — without this guard a column literally named ``ip`` would be
+    # double-masked from "1.2.3.xxx" to "[redacted]" (no leak, but uglier and
+    # inconsistent with the analytics endpoints). The masked IPv6 form is a
+    # valid address so it re-masks to itself already; only IPv4 needs the
+    # short-circuit. ".xxx" is not a valid IP tail so this can't excuse a real
+    # address.
+    if ip.endswith(".xxx"):
+        return ip
+    try:
+        addr = ipaddress.ip_address(ip)
+    except (ValueError, TypeError):
+        return "[redacted]"
+    if isinstance(addr, ipaddress.IPv4Address):
+        parts = str(addr).split(".")
+        return ".".join(parts[:3] + ["xxx"])
+    # IPv6: keep first 48 bits, zero the rest.
+    packed = bytearray(addr.packed)
+    for i in range(6, 16):
+        packed[i] = 0
+    return str(ipaddress.IPv6Address(bytes(packed)))
+
+
+def apply_pii_policy(obj, policy: dict):
+    """Walk a JSON-serialisable object, masking by policy.
+
+    Today: ``mask_ips`` masks anything that string-parses as an IP in fields
+    named ``ip``, ``ip_address``, ``client_ip``, ``remote_addr``.
+    """
+    if not policy or not policy.get("mask_ips"):
+        return obj
+    masked_keys = {"ip", "ip_address", "client_ip", "remote_addr"}
+
+    def _walk(node, parent_key=None):
+        if isinstance(node, dict):
+            return {
+                k: (mask_ip(v) if isinstance(v, str) and k in masked_keys else _walk(v, parent_key=k))
+                for k, v in node.items()
+            }
+        if isinstance(node, list):
+            # Array fields inherit the parent dict key for masking — e.g.
+            # ``{"client_ip": ["1.2.3.4", "5.6.7.8"]}`` must mask each string
+            # the same way the scalar form would. Without threading the
+            # parent key through, list-of-string IP fields slipped past the
+            # masker entirely.
+            return [
+                (mask_ip(x) if isinstance(x, str) and parent_key in masked_keys else _walk(x, parent_key=parent_key))
+                for x in node
+            ]
+        return node
+
+    return _walk(obj)
+
+
+# Cheap pre-filter: only a string made entirely of hex digits, dots and
+# colons can possibly be a bare IPv4/IPv6 literal. Rejects URLs, user-agents,
+# country codes, JA4 fingerprints, hashes, etc. before the more expensive
+# ``ipaddress`` parse — keeps the per-cell cost negligible on the large
+# free-form result sets ``/api/query`` can return (up to MAX_QUERY_ROWS rows).
+_MAYBE_IP_RE = re.compile(r"^[0-9A-Fa-f:.]+$")
+
+
+def _mask_ip_scalar(value: str) -> str:
+    """Mask ``value`` iff it is *shaped* like an IP (single address or XFF list).
+
+    Unlike :func:`mask_ip` (which redacts whole fields and fails closed on
+    non-IPs), this only touches cells that genuinely parse as an IP and leaves
+    everything else verbatim — the right behavior when masking by value across
+    columns whose names we don't control.
+
+      * ``"1.2.3.4"`` / ``"2001:db8::1"`` → masked.
+      * ``"1.2.3.4, 5.6.7.8"`` (XFF list, every element an IP) → each masked.
+      * any string with a non-IP element → returned unchanged.
+    """
+    if _MAYBE_IP_RE.match(value):
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            pass
+        else:
+            return mask_ip(value)
+    # XFF-style list: mask only when EVERY comma-separated element is an IP.
+    # mask_ip's own fail-closed branch can't help here (the whole string isn't
+    # an IP), so we split and verify before masking — a list with any non-IP
+    # token is left untouched rather than partially masked.
+    if "," in value:
+        parts = [p.strip() for p in value.split(",")]
+        if len(parts) > 1 and all(parts):
+            masked: list[str] = []
+            for p in parts:
+                try:
+                    ipaddress.ip_address(p)
+                except ValueError:
+                    return value
+                masked.append(mask_ip(p))
+            return ", ".join(masked)
+    return value
+
+
+def mask_ip_values(obj):
+    """Recursively mask every IP-shaped string value in ``obj``, by VALUE.
+
+    Value-shape masking for the free-form ``/api/query`` surface. There the
+    analyst names the output columns, so the key-name masker
+    (:func:`apply_pii_policy`) is trivially bypassed by aliasing
+    (``SELECT ip AS addr``). This walker masks any cell that parses as an IP
+    regardless of its column name; non-IP strings pass through untouched.
+
+    NOTE: output-side masking on a free-form SQL surface is inherently
+    incomplete — an analyst can still defeat it with string manipulation
+    (``SELECT 'x' || ip``). It closes the trivial alias bypass; the fully
+    robust control would mask at the data source. See the H1 time-window
+    rebind in ``backend/repositories/query.py`` for where source-side masking
+    would hook in if we tighten this further.
+    """
+    if isinstance(obj, dict):
+        return {k: mask_ip_values(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [mask_ip_values(x) for x in obj]
+    if isinstance(obj, str):
+        return _mask_ip_scalar(obj)
+    return obj

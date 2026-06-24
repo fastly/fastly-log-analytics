@@ -17,7 +17,7 @@
 #
 # What it does:
 #   1. Refuses to run while a local backend is using the data tree.
-#   2. Wipes local data/, cache/, configs/ (preserves configs/ssh_known_hosts).
+#   2. Wipes local data/, cache/, configs/ (keeps the tracked configs/.gitkeep marker).
 #   3. Streams data/, cache/, configs/ from REMOTE_PATH on the GCE instance
 #      via `gcloud compute ssh ... -- tar -c | tar -x` (one SSH session).
 #   4. Scrubs each configs/*.json:
@@ -151,7 +151,7 @@ fi
 # existing configs/*.json as the source of truth for "valid services".
 if [ "$PRUNE_ONLY" = 1 ]; then
   section "${I_BROOM} prune-only mode"
-  info "scanning local tree against configs/*.json — no wipe, no sync, no scrub."
+  info "scanning local tree against configs/*.json — no wipe, no sync (configs are still scrubbed)."
   ALREADY_PRUNED_ONLY=1
   # Jump straight to the prune block via the existing path: define the
   # variables it expects and run the same logic.
@@ -246,7 +246,7 @@ for c in $ACTIVE_CATEGORIES; do
     LSIZE="$(du -sh "$c" 2>/dev/null | awk '{print $1}')"
   fi
   RBYTES="$(echo "$REMOTE_BYTES_RAW" | awk -v p="$c" '$2==p {print $1; exit}')"
-  if [ -n "$RBYTES" ]; then
+  if [[ "$RBYTES" =~ ^[0-9]+$ ]]; then
     REMOTE_BYTES_TOTAL=$((REMOTE_BYTES_TOTAL + RBYTES))
     RHUMAN="$(fmt_bytes "$RBYTES")"
   else
@@ -271,12 +271,12 @@ section "${I_BROOM} wipe local"
 for c in $ACTIVE_CATEGORIES; do
   if [ "$c" = "configs" ]; then
     if [ "$DRY_RUN" = 1 ]; then
-      step "${C_DIM}[dry-run]${C_RESET} would wipe configs/* (keep ssh_known_hosts)"
+      step "${C_DIM}[dry-run]${C_RESET} would wipe configs/* (keep .gitkeep)"
     else
       mkdir -p configs
-      # configs/ssh_known_hosts is source-controlled — preserve it.
-      find configs -mindepth 1 -maxdepth 1 ! -name ssh_known_hosts -exec rm -rf {} +
-      ok "wiped ${C_BOLD}configs/${C_RESET} ${C_DIM}(kept ssh_known_hosts)${C_RESET}"
+      # configs/.gitkeep is the tracked dir marker — preserve it.
+      find configs -mindepth 1 -maxdepth 1 ! -name .gitkeep -exec rm -rf {} +
+      ok "wiped ${C_BOLD}configs/${C_RESET} ${C_DIM}(kept .gitkeep)${C_RESET}"
     fi
   else
     if [ "$DRY_RUN" = 1 ]; then
@@ -297,10 +297,8 @@ if [ "$DRY_RUN" = 1 ]; then
 else
   # Exclude ephemeral SQLite WAL/SHM sidecars — they're tied to the writer
   # process on the remote and will be recreated by ours.
-  # Exclude configs/ssh_known_hosts so we don't trample the committed file.
   REMOTE_TAR_CMD="$SUDO tar -C \"$REMOTE_PATH\" \
     --exclude='*-wal' --exclude='*-shm' --exclude='*.duckdb.wal' \
-    --exclude='configs/ssh_known_hosts' \
     -cf - ${ACTIVE_CATEGORIES}"
 
   step "expected ~$(fmt_bytes "$REMOTE_BYTES_TOTAL") on the wire"
@@ -391,7 +389,13 @@ fi
 fi  # end pre-flight/wipe/sync block (skipped under --prune-only)
 
 # ── Scrub configs ───────────────────────────────────────────────────────────
-if [ "$PRUNE_ONLY" != 1 ] && ! is_skipped configs && [ -d configs ]; then
+# Runs under --prune-only too: restore_dev_from_snapshot.sh extracts a RAW prod
+# snapshot (live FOS/Fastly/NGWAF creds + enabled crons) and then calls this in
+# --prune-only mode expecting the scrub. Gating the scrub on `PRUNE_ONLY != 1`
+# previously meant the restored dev sandbox kept live prod credentials and
+# enabled provisioning crons. The scrub block is self-contained (operates only
+# on configs/*.json), so it is safe in both modes.
+if ! is_skipped configs && [ -d configs ]; then
   section "${I_SOAP} scrub configs ${C_DIM}(strip FOS creds + disable crons)${C_RESET}"
   python3 - "$REPO_ROOT/configs" <<'PY'
 """Render every configs/*.json safe for local dev:

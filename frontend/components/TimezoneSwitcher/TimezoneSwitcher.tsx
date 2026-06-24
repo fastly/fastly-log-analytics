@@ -36,7 +36,7 @@ export function TimezoneSwitcher() {
 
   return (
     <Select value={timezone} onValueChange={(value) => { if (value) setTimezone(value) }}>
-      <SelectTrigger className="w-[180px]">
+      <SelectTrigger className="w-[180px]" aria-label="Display timezone">
         <SelectValue placeholder="Select timezone" />
       </SelectTrigger>
       <SelectContent>

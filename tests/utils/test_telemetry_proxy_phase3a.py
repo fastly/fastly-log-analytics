@@ -245,7 +245,7 @@ async def test_duckdb_read_through_proxy_logs_telemetry(proxy_server, moto_s3_se
     telemetry_proxy._bust_config_cache()
     with (
         patch("backend.config.load_config", return_value=mock_cfg),
-        patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
     ):
         con = _ddb.get_connection(source, skip_view_update=True)
         try:

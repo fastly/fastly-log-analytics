@@ -28,17 +28,27 @@ export function DashboardHeader({
 }: DashboardHeaderProps) {
   return (
     <Popover>
-      <PopoverTrigger render={
-        <Button variant="outline" size="sm" className="h-9 gap-1.5">
-          <span className="flex items-center gap-1.5">
-            <LayoutDashboard className="h-4 w-4" />
-            <span className="hidden sm:inline text-xs">Cards</span>
-            <Badge variant="secondary" className="h-4 text-[10px] px-1.5">
-              {visibleCardsCount}
-            </Badge>
-          </span>
-        </Button>
-      } />
+      {/* aria-label lives on the PopoverTrigger directly (not on
+          the Button render-prop) so it survives SSR — Base UI's
+          render-prop merge drops aria-label from the inner element
+          on the server pass, leaving the SSR'd button with no
+          accessible name. The visible "Cards" text is
+          `hidden sm:inline` so on <640px viewports it's empty too —
+          the label is the only reliable name across both states. */}
+      <PopoverTrigger
+        aria-label="Toggle visible dashboard cards"
+        render={
+          <Button variant="outline" size="sm" className="h-9 gap-1.5">
+            <span className="flex items-center gap-1.5">
+              <LayoutDashboard className="h-4 w-4" />
+              <span className="hidden sm:inline text-xs">Cards</span>
+              <Badge variant="secondary" className="h-4 text-[10px] px-1.5">
+                {visibleCardsCount}
+              </Badge>
+            </span>
+          </Button>
+        }
+      />
       <PopoverContent align="end" className="w-72 p-3">
         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
           Visible cards
@@ -55,7 +65,20 @@ export function DashboardHeader({
                 {card.label}
                 {card.inActiveFormat === false && (
                   <Tooltip>
-                    <TooltipTrigger render={<span className="inline-flex items-center" />}>
+                    {/* A-8 (a11y, WCAG 2.1.1): tabIndex + role="button" so
+                        keyboard users can focus the EyeOff icon and reveal
+                        the tooltip. A Button here would intercept clicks
+                        meant for the parent Label/Checkbox. */}
+                    <TooltipTrigger
+                      render={
+                        <span
+                          className="inline-flex items-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          tabIndex={0}
+                          role="button"
+                          aria-label="Not in active log format"
+                        />
+                      }
+                    >
                       <EyeOff className="h-3 w-3 text-muted-foreground/70" />
                     </TooltipTrigger>
                     <TooltipContent>

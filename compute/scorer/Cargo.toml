@@ -16,9 +16,9 @@ path = "src/main.rs"
 fastly = "0.11"
 # Authenticated encryption. aes-gcm = pure-Rust, audited; ships in Wasm cleanly.
 aes-gcm = "0.10"
-# Matrix.json deserialization.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Matrix is loaded from the KV Store in a hand-rolled binary format (FSM1, see
+# matrix.rs) — no serde/serde_json dependency, which keeps the .wasm small for
+# fast cold-start instantiation (Fastly Compute is instance-per-request).
 # Cookie wire format.
 base64 = "0.22"
 # For HashMap with deterministic iteration (used for scoring).

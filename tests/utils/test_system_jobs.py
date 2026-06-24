@@ -7,7 +7,6 @@ so we reset it per-test to keep the suite deterministic.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from unittest.mock import patch
 
 from backend.utils import system_jobs
@@ -56,8 +55,6 @@ def test_get_returns_a_copy_not_live_state():
 
 
 def test_last_run_at_format():
-    fixed = datetime(2026, 5, 15, 12, 30, 45, tzinfo=UTC)
-    with patch("backend.utils.system_jobs.datetime") as m:
-        m.now.return_value = fixed
+    with patch("backend.utils.system_jobs.iso_z_now", return_value="2026-05-15T12:30:45Z"):
         system_jobs.record_job_run("bots", "success", 0.1)
     assert system_jobs.get_system_job_status()["bots"]["last_run_at"] == "2026-05-15T12:30:45Z"

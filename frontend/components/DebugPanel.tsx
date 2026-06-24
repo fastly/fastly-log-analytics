@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { useDebugStore } from '@/stores/debugStore'
 import { Button } from '@/components/ui/button'
@@ -21,6 +21,14 @@ export function DebugPanel() {
   const queryClient = useQueryClient()
   const [queries, setQueries] = useState<any[]>([])
   const [calls, setCalls] = useState<any[]>([])
+  // Mirror the latest state inside the subscribe callback so we can bail
+  // out when the new extraction is semantically equal. Every cache event
+  // (sqliteQuery's 5s poll + every API response) used to re-create the
+  // arrays and call setQueries/setCalls with fresh references, which
+  // re-rendered, which re-fired the cache subscribers, which looped to
+  // "Maximum update depth exceeded" in dev.
+  const queriesRef = useRef<any[]>([])
+  const callsRef = useRef<any[]>([])
 
   // SQLite ring-buffer poll. Only active when SQL debug is on AND the
   // browser tab is focused (skip when hidden). Refetched every 5s — was
@@ -51,11 +59,28 @@ export function DebugPanel() {
 
   useEffect(() => {
     if (!enabled && !apiCallsEnabled) {
-      setTimeout(() => {
+      if (queriesRef.current.length > 0 || callsRef.current.length > 0) {
+        queriesRef.current = []
+        callsRef.current = []
         setQueries([])
         setCalls([])
-      }, 0)
+      }
       return
+    }
+
+    const sameQueries = (a: any[], b: any[]) => {
+      if (a.length !== b.length) return false
+      for (let i = 0; i < a.length; i++) {
+        if (a[i].sql !== b[i].sql || a[i].time_ms !== b[i].time_ms || a[i].is_cached !== b[i].is_cached) return false
+      }
+      return true
+    }
+    const sameCalls = (a: any[], b: any[]) => {
+      if (a.length !== b.length) return false
+      for (let i = 0; i < a.length; i++) {
+        if (a[i].service !== b[i].service || a[i].method !== b[i].method || a[i].path !== b[i].path || a[i].time_ms !== b[i].time_ms) return false
+      }
+      return true
     }
 
     const updateDebugInfo = () => {
@@ -118,10 +143,15 @@ export function DebugPanel() {
           }
         }
       }
-      
+
+      const queriesChanged = !sameQueries(extractedQueries, queriesRef.current)
+      const callsChanged = !sameCalls(extractedCalls, callsRef.current)
+      if (!queriesChanged && !callsChanged) return
+      queriesRef.current = extractedQueries
+      callsRef.current = extractedCalls
       setTimeout(() => {
-        setQueries(extractedQueries)
-        setCalls(extractedCalls)
+        if (queriesChanged) setQueries(extractedQueries)
+        if (callsChanged) setCalls(extractedCalls)
       }, 0)
     }
 
@@ -156,9 +186,9 @@ export function DebugPanel() {
                 <Database className="h-4 w-4 text-primary" />
               </div>
               <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">DuckDB Queries</h3>
-              <Button 
-                variant="ghost" 
-                size="sm" 
+              <Button
+                variant="ghost"
+                size="sm"
                 className="h-6 text-[10px] px-2"
                 onClick={() => setIsQueryOpen(!isQueryOpen)}
               >
@@ -173,11 +203,11 @@ export function DebugPanel() {
               </div>
             </div>
           </div>
-          
+
           {isQueryOpen && (
             <div className="grid gap-4 max-h-[500px] overflow-auto pr-2 custom-scrollbar">
               {queries.map((q, i) => (
-                <div key={i} className="bg-muted/30 p-4 rounded-md border font-mono text-[11px] relative group">
+                <div key={`query-${i}-${q.sql.length}-${q.time_ms}`} className="bg-muted/30 p-4 rounded-md border font-mono text-[11px] relative group">
                   <div className="flex justify-between items-center mb-2 pb-2 border-b border-muted">
                     <span className="text-muted-foreground font-semibold">
                       QUERY #{i + 1} {q.is_cached && <span className="text-blue-500 ml-2">(CACHED)</span>}
@@ -225,7 +255,7 @@ export function DebugPanel() {
             <div className="flex items-center gap-3">
               <div className="text-xs font-mono bg-muted/50 border px-2.5 py-1.5 rounded-md text-muted-foreground flex items-center gap-2">
                 {sqliteQuery.data && sqliteQuery.data.dropped > 0 && (
-                  <span className="text-yellow-500 text-[10px] uppercase tracking-wider">
+                  <span className="text-yellow-600 text-[10px] uppercase tracking-wider">
                     {sqliteQuery.data.dropped} dropped
                   </span>
                 )}
@@ -293,12 +323,12 @@ export function DebugPanel() {
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-3">
               <div className="bg-orange-500/10 p-1.5 rounded-md">
-                <Network className="h-4 w-4 text-orange-500" />
+                <Network className="h-4 w-4 text-orange-600" />
               </div>
               <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">Fastly API & FOS Calls</h3>
-              <Button 
-                variant="ghost" 
-                size="sm" 
+              <Button
+                variant="ghost"
+                size="sm"
                 className="h-6 text-[10px] px-2"
                 onClick={() => setIsCallsOpen(!isCallsOpen)}
               >
@@ -312,7 +342,7 @@ export function DebugPanel() {
               </div>
             </div>
           </div>
-          
+
           {isCallsOpen && (
             <div className="grid gap-3 max-h-[500px] overflow-auto pr-2 custom-scrollbar">
               {calls.length === 0 ? (
@@ -321,7 +351,7 @@ export function DebugPanel() {
                 </div>
               ) : (
                 calls.map((c, i) => (
-                  <div key={i} className="bg-muted/30 p-3 rounded-md border font-mono text-[11px] flex flex-col gap-2">
+                  <div key={`${c.service}-${c.method}-${c.path}-${i}`} className="bg-muted/30 p-3 rounded-md border font-mono text-[11px] flex flex-col gap-2">
                     <div className="flex justify-between items-start">
                       <div className="flex items-center gap-2 flex-wrap">
                         <Badge variant="outline" className={`text-[10px] ${c.service === 'FOS' ? 'bg-blue-500/10 text-blue-500 border-blue-500/20' : 'bg-orange-500/10 text-orange-500 border-orange-500/20'}`}>
@@ -339,7 +369,7 @@ export function DebugPanel() {
                         <Badge variant={c.status === 'Error' ? 'destructive' : 'outline'} className="text-[10px]">
                           {c.status}
                         </Badge>
-                        <span className={`font-bold ${c.time_ms > 1000 ? 'text-red-500' : c.time_ms > 200 ? 'text-yellow-500' : 'text-green-500'}`}>
+                        <span className={`font-bold ${c.time_ms > 1000 ? 'text-red-500' : c.time_ms > 200 ? 'text-yellow-600' : 'text-green-500'}`}>
                           {c.time_ms.toFixed(1)}ms
                         </span>
                       </div>

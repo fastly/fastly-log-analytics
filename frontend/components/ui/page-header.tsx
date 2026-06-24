@@ -1,5 +1,8 @@
-'use client'
-
+// No 'use client': PageHeader is pure presentational (title/description/
+// icon/children, no state, hooks, or handlers), so it renders as a server
+// component when a server parent imports it (e.g. app/admin/page.tsx and the
+// route loading.tsx skeletons) — shipping zero client JS there — and is
+// pulled into the client bundle unchanged when a client parent imports it.
 import * as React from "react"
 import { cn } from "@/lib/utils"
 
@@ -11,12 +14,12 @@ interface PageHeaderProps {
   children?: React.ReactNode
 }
 
-export function PageHeader({ 
-  title, 
-  description, 
-  icon: Icon, 
-  className, 
-  children 
+export function PageHeader({
+  title,
+  description,
+  icon: Icon,
+  className,
+  children
 }: PageHeaderProps) {
   return (
     <div className={cn("flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6", className)}>

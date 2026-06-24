@@ -5,6 +5,543 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0-beta.1] - 2026-06-23
+
+### Added
+
+Feature work shipped alongside the cleanup sweep below.
+
+- **In-UI scorer redeploy.** The Session Scoring admin page gains a
+  **Redeploy** button plus an edge-drift warning when the deployed Wasm
+  lags the current scorer build, so re-shipping the edge scorer no longer
+  requires the CLI.
+- **Scoring dashboard depth.** A fail-open breakdown card surfaces how
+  often the edge scorer failed open, a two-phase redeploy log shows code
+  vs matrix propagation, and the 1-hour window renders per-minute charts.
+- **`enable-scoring` / `disable-scoring` CLI subcommands** for headless
+  provisioning and teardown of session scoring on a service.
+- **Opt-in RUM Web Vitals collection.** Real-user Core Web Vitals can be
+  collected to a rotating JSONL sink, **off by default** and enabled only
+  via a host `.env` flag (never baked into the image). Ships with a dev
+  analysis script and size-based log rotation.
+- **Edge Layer-2 enforcement is an explicit operator opt-in.** The
+  route-transition (L2) sub-score is always computed and logged, but its
+  contribution to the *enforced* combined score is now gated behind a
+  per-service switch instead of an automatic deployment-age ramp, so
+  there is no clock-driven monitoring-to-blocking transition. An
+  `L2EnforcementCard` near the threshold controls (confirm-dialog gated,
+  with a readiness banner) and a `GET`/`PUT /scoring/l2-enforce` endpoint
+  drive it; enabling fades L2 in over three days from the moment of
+  consent, disabling returns it to observe-only. Deployment age is now
+  only an advisory readiness gauge.
+- **Request correlation + operations hardening.** Every request now mints
+  an app-level request id that threads through the admin/analyst access
+  log (which also gains per-request latency) and the slow-query
+  attribution, so a slow request can be pivoted to the queries it ran.
+  The admin health snapshot gains scheduler-tick liveness, recent
+  cross-service cron failures, the effective log/exporter mode,
+  config-backup freshness, an opt-in FOS reachability probe, DuckDB pool
+  saturation-reject / last-warmed counters, and a traffic-normalized
+  scoring fail-open rate; deep `/api/health` additionally degrades on a
+  stuck `running` sync row and on errored commit / metadata-sync crons.
+  The System Health card surfaces the new tiles and a cron-failure banner.
+- **Human-readable PoP and ASN labels everywhere.** Points of presence
+  now render as `DEN (Denver, CO - USA)` (code prominent, location muted)
+  through one shared component sourced from a `pop_geo` map seeded by
+  `/api/bootstrap`. Wired into the Network Quality Avg RTT by PoP, the
+  Shielding Analysis table / map tooltip / a11y table, the dashboard
+  top-N PoP card, and origin by PoP. The Network Quality Avg RTT by ASN
+  breakdown likewise shows the ASN name alongside the number.
+  Click-to-filter keeps the raw code / ASN while the label is
+  display-only.
+
+### Performance
+
+- **Filter bar** no longer causes a pre-hydration layout shift on load.
+- **Session scoring** paints its status panel immediately instead of
+  blocking on the analytics fetch.
+- **Edge scorer** ships ~13% smaller (491 KB → 429 KB) via a gated
+  `wasm-opt` build pass on top of the existing cargo LTO/strip, and opens
+  each edge ConfigStore once per request instead of up to four times
+  (same fail-open / reject behavior).
+- **Scoring sub-fetch** `first_byte_timeout` lowered 200 ms → 100 ms on the
+  Compute scoring backend, tightening the worst-case added latency before
+  the request fails open.
+
+### Changed
+
+- **CI** gates frontend ESLint with a count-ceiling ratchet so the error
+  count can only ratchet down.
+
+### Dependencies
+
+- **Dependency freshness sweep** across all ecosystems. Python in-range:
+  `fastapi 0.136.3 → 0.138.0`, `duckdb 1.5.3 → 1.5.4`, `uvicorn 0.48.0 →
+  0.49.0`, `sqlalchemy 2.0.50 → 2.0.51`, `pytest 9.0.3 → 9.1.1`, `ruff
+  0.15.15 → 0.15.18`. Frontend majors: `@types/node 25 → 26`,
+  `react-plotly.js 2 → 4` (drops the redundant `@types/react-plotly.js`);
+  TypeScript stays at `^5.9` (the 6.0 bump broke the Docker `npm ci` via an
+  `openapi-typescript` peer). Frontend in-range: `next 16.2.6 → 16.2.9`,
+  `lucide-react`, `@radix-ui/react-slider`, `@playwright/test`, `vitest`,
+  `tailwindcss`. Scorer Cargo lockfile refreshed within constraints.
+
+### Documentation
+
+- **OSS front-door tidy** — the README Quick Start uses `docker compose`
+  (v2) with an EOL note for the v1 binary, CONTRIBUTING gains
+  development-setup and test-running sections, ARCHITECTURE glosses
+  FOS/NGWAF on first use and links a new ADR index, and the orphaned
+  `configs/ssh_known_hosts` plumbing left from the removed SSH
+  reverse-tunnel is dropped.
+
+### Cleanup
+
+Cleanup sweep applying an in-tree code-quality review. The pattern
+across the work was the same on every front: kill the dual maintenance
+that survived the package carve-up.
+
+- **Three SQLite pools collapse into one.** `metadata.base`,
+  `metadata.usage_log_db`, and `share_db.connection` all owned
+  identical thread-local pool machinery (same module globals, same
+  PRAGMAs, same init lock). They now share `ThreadLocalPool` in
+  `backend/core/sqlite_pool.py`. share_db queries flow through
+  `InstrumentedConnection` for the first time — they now appear in
+  the Live Query Monitor under `service=__global_share__`.
+- **Origin summary's per-query templates collapse into one path.**
+  `TEMP_SUMMARY_ROLLUP` + `TEMP_SUMMARY_BY_EDGE` are gone; the live
+  and TEMP-table paths both use `SUMMARY_GROUPING_SETS` through a
+  shared `_shape_summary` helper that reads rows by column name
+  (`cursor.description` dict access) instead of positional indices.
+- **Cron job tails consolidated.** Five `finally:` blocks ending in
+  the same `if run_id: update_cron_duration ... except: pass`
+  boilerplate route through `finalize_cron_duration`. The 16+
+  `load_config / 404` preambles funnel through `load_service_config`.
+  Three `start_cron_run → spawn-thread → 503` triples collapse into
+  one `start_or_resume_cron`. Per-hour bundle walks
+  (`collect_hourly_bundle_paths`) and the two cross-package migration
+  runners (`run_pending_migrations`) get the same treatment.
+- **Mixins + helpers for the small repeated shapes.**
+  `LogExtentsMixin` (`earliest_log_at` + `latest_log_at`),
+  `OkResponse` (`ok: bool = True`), `_atomic_write_json`,
+  `_get_cfg_field`, `client_ip`, `shim_attr`, plus iceberg
+  `_iceberg_root_prefix` + `_metadata_pointer_candidates`.
+- **`fetch_service_name` now routes through the shared `fastly()`
+  client** instead of an inline urllib body. Adds a `timeout` keyword
+  to `fastly()` (default 30 s preserves the existing behavior of the
+  ~50 other call sites) and the name-fetch call site pins
+  `timeout=10` + `max_retries=1` so the cold-path tail caps at ~21 s
+  vs the client default of ~127 s. Caller is behind a 300 s name
+  cache so steady-state cost is unchanged.
+- **`_run_falco_lint` absorbs the falco subprocess plumbing** shared
+  by `vcl_utils.lint_log_format` (logging-endpoint VCL check) and
+  `vcl_validator.lint_vcl` (scoring-snippet VCL check). Each caller
+  keeps its own falco-not-available handling, timeout budget, and
+  output parser — the helper only owns the tempfile lifecycle,
+  `subprocess.run` invocation, and tempfile-path redaction. The two
+  use cases stay distinct on purpose (logging is best-effort, scoring
+  is a security boundary).
+- **Comment hygiene pass.** Removed stale, redundant, and duplicate-divider
+  comments across the tree and condensed embedded changelog blocks (the CI
+  coverage gates and the ESLint ceiling) down to their conventions. Load-bearing
+  rationale, incident references, and functional directives are left intact.
+
+### Fixed
+
+- `start_proxy_server` race that surfaced as
+  "proxy server is not running" when N reader threads called
+  `get_connection` simultaneously on a cold process. Concurrent
+  first-callers now serialise the thread-start decision and wait
+  on `_READY` outside the lock so every caller reads `_PORT` after
+  the server has bound.
+- `get_metadata_storage_stats` + `cleanup_metadata` silently
+  ignored the `usage_log` table on every fresh service after
+  the v2.0 per-service-file split — the helpers still read
+  `metadata.db`. Routed through `usage_log_db` so admin storage
+  stats and the retention cleanup job actually see the rows.
+- `sync.py` cron tail used to emit a misleading
+  "View refresh + warm: Xms" status event even on failure (the
+  success log sat outside the try/except). The shared
+  `refresh_view_and_warm_pool` puts the success log inside the
+  try/except so failure means no event.
+- `start_cron_run` non-sync task types fell back to
+  `cron_compact.log_retention_days` via a buggy ternary; the
+  promoted `_TASK_TO_CRON_KEY` mapping plus a default 7-day
+  fallback gets the correct retention applied per task.
+- `query_instrumentation._safe_weakref` silently no-op'd the
+  memory probe when wrapping non-weakref-able cursors; promoted
+  the registry-version's strong-ref-closure fallback so the probe
+  always tracks.
+- `local_compaction` hour-tier tests were flaky on any clock more
+  than 30 days past the hardcoded sample dates — the fixture now
+  pins both `_DAILY_TIER_AGE_DAYS` and `_WEEKLY_TIER_AGE_DAYS` so
+  neither tier sweeps the test partitions out from under the
+  assertions.
+- **Edge scorer** now treats encoded slashes (`%2F`) as data during
+  route normalization, so paths with encoded slashes are scored
+  correctly (the Wasm package was rebuilt to ship it).
+- **Scoring sub-fetch** is no longer inspected by NGWAF, fixing
+  intermittent `compute-unavailable` 406s on the scoring path.
+- **Analyst idle timeout now tracks real interaction only.** A share
+  session's 2-hour idle clock was being reset by activity the analyst never
+  initiated, so sessions could stay alive indefinitely: the SSE
+  log-extents stream re-stamped activity every ~30s even while the tab was
+  backgrounded, background telemetry beacons and react-query refetches
+  counted as interaction, and an IP change (rotating NAT) reset the clock
+  on its own. Requests now carry an `X-User-Active` signal so the
+  middleware refreshes the idle deadline only on genuine analyst activity;
+  SSE streams are exempt; IP roaming updates the session's recorded address
+  without bumping the clock; and the lightweight heartbeat doubles as the
+  activity channel for an otherwise-quiet dashboard. The analyst access log
+  records the signal per request (`act`, `idle_touch`) for observability.
+- **Sync cron** never leaves an orphaned `running` row behind; a
+  per-task orphan timeout reaps a stalled run instead of wedging
+  ingestion on every subsequent tick.
+- **Origin analytics** holds its pool connections until every parallel
+  gather worker finishes, fixing a connection released mid-query.
+- **Stale browser tabs** no longer get stuck in a hard-reload loop.
+- **Scoring admin** modal copy matches the orchestrator's actual
+  behavior, the redeploy modal text is no longer clipped, and status
+  fetches are type-clean.
+- **Structured logging** surfaces stdlib `extra=` fields via
+  `ExtraAdder`.
+- Restored the router-independence import contract.
+- **Backend failures surface inline instead of silently.** Where a 5xx
+  previously left a forever spinner or fabricated zeros (the network map
+  and Network Quality section, the dashboard chart and bot cards, session
+  detail, the `/usage` storage + cost cards, and the logs import / commit
+  quick actions) the UI now shows an inline alert with a Retry. The
+  analytics request `sections` and several response reads are typed
+  through the generated OpenAPI schema so a backend rename is a compile
+  error rather than a blank card.
+- **Interrupted-delete raw files** are now reclaimed automatically. A
+  restart between the dedup-ledger write and the object-storage delete
+  used to strand a raw `.gz` in the bucket, invisible until the daily
+  ledger trim re-listed it; the sync reconcile now re-issues the delete
+  from durable state (default-deny: only files positively proven to hold
+  ingested data are removed).
+- **DuckDB object-cache leak** that grew unbounded under continuous
+  buffer + compaction file churn (and OOM-killed the container) is bounded
+  by a periodic, timeout-guarded instance-recycle job that briefly drains
+  connections — reads queue rather than fail during the drain — to free the
+  cache and let it re-warm lazily. Off by default
+  (`DUCKDB_RECYCLE_INTERVAL_MIN=0`), opt-in via deploy config.
+- **SQLite connection leak that drove the backend into an OOM-restart
+  loop.** A jemalloc heap profile attributed ~93% of the unbounded RSS
+  growth to live SQLite memory: the cron watchdog built a fresh
+  `ThreadPoolExecutor` every tick, and `ThreadLocalPool` opens one
+  `check_same_thread` connection per thread (metadata + usage-log) pinned
+  in a process registry until shutdown — so every tick orphaned ~2
+  connections (WAL file descriptors + up-to-64 MB page caches) that never
+  freed, accumulating hundreds within minutes. `ThreadLocalPool` now reaps
+  connections whose owning thread has exited (swept on cold-open) and
+  guards cached borrows against an out-of-band close; the cron watchdog
+  reuses a single bounded executor instead of one per tick.
+- **Process-level memory guard** converts a destructive cgroup
+  OOM-`SIGKILL` into a graceful self-restart (SIGTERM → uvicorn drains →
+  container restart) when RSS crosses a configurable ceiling
+  (`BACKEND_GRACEFUL_RESTART_RSS_MB`, opt-in). The DuckDB connection pool
+  is also capped to the host core count with a lower recycle RSS threshold
+  so the object-cache recycle can actually drain and free the cache.
+- **Fresh-install provisioning** no longer aborts step 1 with
+  "No active service — request aborted"; `/api/provision` is exempt from
+  the API client's serviceless-request guard (regression-pinned).
+- **Custom Caddy image build** gives its rate-limit build a distinct image
+  tag instead of overwriting its `caddy:2-alpine` base, so the privileged
+  build steps no longer fail on rebuild.
+- **Total Logs badge and ingest skipped-files counts** no longer drift
+  upward over time. The `ingested_files_summary` rollup is now recomputed
+  after a retention trim (it was incremented on ingest but never
+  decremented on delete), per-run `skipped_files` reports the files
+  actually re-seen and skipped rather than the dedup-ledger size, and the
+  Total Logs badge prefers the last-known-good row count during a
+  transient catalog rebuild.
+- **Access logs render through structlog.** Uvicorn's private
+  `uvicorn.access` handler used to emit plaintext access lines (carrying no
+  `trace_id`) into the otherwise-structured stream; they are now bridged
+  through the shared root handler at startup so every post-boot line is
+  structured.
+- **Accessibility remediation** brings every loopback-reachable admin and
+  usage route axe-clean: light-mode status / destructive color tokens
+  deepened to clear 4.5:1 contrast, a duplicate focus trap removed from
+  dialogs so nested selects stay open, and the cost-calculator number
+  inputs given accessible names.
+
+### Removed
+
+- `backend/utils/retry.py`, `backend/utils/cdn.py`,
+  `backend/core/settings.py` (Path-B removal of three migration
+  scaffolds that never adopted in tree). `pydantic-settings`
+  removed as a *direct* dependency from `pyproject.toml` (it was the
+  sole first-party consumer; it remains in `uv.lock` transitively via
+  the OpenAPI spec/schema validators used in tests).
+- Legacy `usage_log` DDL + 3 triggers + 4 indexes in
+  `metadata.base._SCHEMA` (the table moved to its own per-service
+  file pre-2.0). `migrate_from_metadata_db` and
+  `_migration_003_rebuild_usage_log_hourly_summary` deleted.
+- Scrypt passcode verify path + `PASSCODE_DEFAULT_ALGO_KEY` +
+  `_migration_003_passcode_algo_marker` (cutover happened
+  pre-2.0; fresh installs have no scrypt rows).
+- `TunnelState.use_tunnel` + `tunnel_url` + the
+  `share_admin` response keys that exposed them (always
+  False/None since v2.0 deleted the SSH path).
+- Per-checkin `_cleanup_temp_tables` sweep in `duckdb_pool` —
+  the "safety net" was unreachable because the failure path
+  discards the connection before the sweep can run.
+
+### Release overview
+
+Architecture cleanup release. The post-`v1.2.0` perf branch closed the
+worst read-path latency by stacking remediation on top of an
+architecture that wasn't designed for the workload; this release pays
+that down. The largest backend files were carved into per-concern
+packages, telemetry moved to OpenTelemetry + structlog, tenancy got a
+typed `RequestContext` boundary, frontend hydration warm-up hacks were
+replaced with policy, and the test + type gates ratcheted to a level
+that catches regressions on the way in. Composite endpoints land as a
+hard cutover — frontend + backend ship together, granular endpoints
+deleted.
+
+### Architecture
+
+- **`backend/core/iceberg.py` (4,232 LOC)** → `iceberg/` package
+  (`view`, `catalog`, `warehouse`, `manifest`, `fs`, `_core`,
+  `buffer`, `ddl`, `snapshot_cache`, `dedup`, …). Custom
+  `FosFsspecFileIO(FsspecFileIO)` + `CachedFosS3FileSystem(S3FileSystem)`
+  subclasses replace 5 of the 6 historical `s3fs` monkeypatches;
+  only the `ThreadPoolExecutor.submit` ContextVar wrapper remains
+  (see [MONKEYPATCHES.md](MONKEYPATCHES.md)).
+- **`backend/scheduler.py` (2,843 LOC)** → `backend/cron/` package
+  with `scheduler`, `decorators`, and per-job modules under
+  `cron/jobs/` (`sync`, `commit`, `compaction`, `optimize`, `expire`,
+  `metadata`, `gap_heal`, `rollup_compact_daily`). The scheduler
+  picks the **separate-pool** isolation strategy based on Phase 1
+  thread-wait telemetry; the deferred-view-cache-invalidation hack
+  is gone.
+- **`backend/core/metadata_db.py` (3,168 LOC)** → `backend/core/metadata/`
+  package with concern-partitioned mixins (`base`, `alerts`, `views`,
+  `ingest_log`, `cron_log`, `asn_cache`, `usage_log`, `reconciliation`,
+  `state`). `metadata_db.py` becomes a thin backward-compatible shim.
+- **`backend/utils/tunnel.py` (1,022 LOC)** → `backend/utils/tunnel/`
+  package (`manager`, `session`, `rate_limiter`, `state`,
+  `fingerprint`). The SSH-to-localhost.run path is **deleted entirely**
+  (~400 lines): no more SSH subprocess + sleep-listener + reconnect
+  state machine. Direct-mode only; production has always used direct.
+- **`backend/core/share_db.py` (1,312 LOC)** → `backend/core/share_db/`
+  package (`connection`, `schema`, `invites`, `sessions`, `audit`,
+  `passcode`, `tos`, `settings`). `argon2-cffi` replaces `scrypt` for
+  passcode hashing.
+- **`backend/routers/admin.py` (1,650 LOC)** → `backend/routers/admin/`
+  package (14 sub-modules: `pop_locations`, `ingest`, `trees`,
+  `downloads`, `sync_status`, `compaction`, `health`,
+  `log_accounting`, `iceberg`, `bot_sources` + shared
+  `_helpers` / `_dir_size` / `_router`).
+- **`backend/core/rollups.py` (2,045 LOC)** → `backend/core/rollups/`
+  package (8 sub-modules: `_common`, `time_series`, `sessions`,
+  `hour_bundles`, `day_bundles`, `recompute`, `wellknown_bots`).
+- **`RequestContext` replaces `AnalyticsDeps`** ([`backend/core/request_context.py`](backend/core/request_context.py)).
+  Tenancy is enforced at context construction; routes never parse a
+  `service_id` from a path param. The security-load-bearing private
+  `read_only` attribute is now structurally unexposable as a query
+  param.
+- **Composite endpoints + hard cutover** — `dashboard/bundle`,
+  `security/bundle`, `network/bundle` ship together with the frontend
+  swap. Granular per-card endpoints deleted, `_meta_con` parallel path
+  dropped, `is_cached/_is_cached` alias collapsed,
+  `AnalyticsDeps = RequestContext` shim removed. Top-5 backend files
+  now ≤ 1,461 LOC; no backend file > 1,500.
+
+### Telemetry, observability
+
+- **OpenTelemetry** (`opentelemetry-api/sdk` +
+  `fastapi`/`botocore`/`aiohttp` instrumentors) replaces the four
+  fragmented custom telemetry surfaces. Console exporter ships by
+  default; backends (Jaeger / Tempo / Honeycomb / …) are a
+  deploy-config decision, not part of this release.
+- **`structlog`** wires `trace_id` + `span_id` into structured log
+  output via a custom processor.
+- **`process_context_scope` + `_ACTIVE_CONTEXTS` mirror kept** at
+  [`backend/utils/telemetry.py`](backend/utils/telemetry.py). OTel context
+  propagation uses Python ContextVars under the hood, which inherit
+  the cross-thread limitation (fsspec iothread, pyiceberg
+  ThreadPoolExecutor) the manual mirror was built to solve; removing
+  the mirror would re-introduce the ~80%-NULL telemetry bucket
+  observed on 2026-05-20. Docstring + plan entry document the
+  reasoning.
+- **`RequestTelemetry`** thin wrapper owns section spans, query
+  attribution, call log, and the custom `app.thread_wait_ms` metric
+  that fed the Phase 6 separate-pool decision.
+
+### Reliability, perf
+
+- **`aiodns` + `asyncio.gather` + bulk-transaction sqlite writes** in
+  [`backend/utils/rdns_cache.py`](backend/utils/rdns_cache.py) replace the
+  serial-blocking `socket.gethostbyaddr` loop that wedged the sync
+  worker for minutes on bulk lookups.
+- **`tenacity`** decorator-based retry replaces ad-hoc try/except loops
+  for Fastly API + NGWAF + SQLite WAL-busy paths; centralised policy
+  on `Settings`.
+- **`pydantic-settings`** centralises env-var reads + boot validation
+  (the "TRUSTED_PROXY_IPS required in prod" gate is now a pydantic
+  validator).
+- **`cachetools`** replaces `bounded_cache` / `rdns_cache` /
+  `ngwaf_bot_cache` in-process LRU/TTL implementations.
+- **Structured `.tf.json`** generation replaces f-string HCL +
+  `_hcl_escape` regex (`backend/utils/terraform_gen.py`), eliminating
+  the custom-HCL escaping injection vector.
+- **`orjson` via FastAPI `ORJSONResponse`** for ~5–10× faster JSON
+  serialisation on composite endpoint payloads.
+- **`rich` + `typer`** for the provision CLI; `httpx` everywhere
+  except `telemetry_proxy.py` (which stays on `aiohttp` for the proxy
+  server role).
+- **`nuqs`** as the URL state source on the frontend, replacing the
+  custom Zustand/Effect sync hooks that produced hydration desync on
+  refresh.
+- **`session_scoring._cached`** clears `_inflight` on the cache-hit
+  path too, not only on producer-path teardown — concurrent callers
+  on a hot cache key no longer leak the inflight registration when
+  the producer finishes before they wake up.
+- **`iceberg/buffer.tombstone_buffer_files`** logs + skips on
+  marker-write failure (the immediate-`os.remove` fallback re-opened
+  the in-flight-query race the tombstone grace window exists to
+  close). Pair regression test pins the contract.
+- **`DROP TABLE IF EXISTS` identifier quoting** at 11 temp-table
+  cleanup sites so the drop tolerates reserved keywords / hyphenated
+  service slugs that would otherwise raise.
+
+### Trust topology, middleware
+
+- **Middleware order asserted at boot AND in tests** — the
+  multi-paragraph prose comments in `main.py` were replaced with
+  one-line `# INVARIANT` markers + a boot-time crash if
+  `app.user_middleware` doesn't match the declared tuple. Snapshot
+  tests cover Caddy + docker-compose middleware order too.
+- **`@pytest.mark.security_regression` marker + monotonic-count CI
+  gate** (floor: 24, from `audit-findings/`). Every test covering a
+  verified security fix carries the mark; a refactor cannot silently
+  drop coverage of a known fix.
+- **Trust-topology snapshot tests** pin Caddy `@from_fastly` matcher,
+  XFF forwarding, `/share-login` rate-limit, and the backend
+  `--forwarded-allow-ips=127.0.0.1` flags.
+- **`raise_internal(logger, exc, code, status)`** replaces
+  `raise HTTPException(detail={"error": str(e)})` at every backend
+  except site that previously echoed the original exception message
+  to the client. Detail is now `{"error": <code>, "error_id": <8-hex>}`;
+  the full exception lands in the server log with the same
+  `error_id` so operators triage without the upstream body / token
+  fragments leaking on the wire.
+- **`escape_sql_literal`** applied at every `read_parquet()` /
+  `glob()` site that interpolates a computed path. Closes the
+  injection surface a partially-validated path could open through
+  DuckDB's `read_parquet()` glob expansion.
+- **Caddy container drops privileges** — `caddy/Dockerfile` adds
+  `USER caddy` (the base image ships the user). Caddy is the only
+  externally-facing socket and binds nothing below port 1024, so
+  there's no reason to keep `root` in the runtime.
+
+### Frontend
+
+- **RSC/CSR boundary** documented in `app/_routing.md`. The
+  hidden-Plotly + hidden-MapLibre + `setTimeout` warm-up hacks are
+  dropped; replaced with `modulepreload` + the styledata-event swap
+  pattern.
+- **16 frontend files > 500 LOC split.** `ProvisionWizard.tsx`
+  (3,582 LOC) → `wizard/steps/*` + `state.ts` + `api.ts`;
+  `app/logs/page.tsx` (2,136 LOC) → `_sections/*` + `_state.ts`.
+  `app/admin`, `app/dashboard`, `app/alerts`, `app/security`, etc.
+  all post-split < 500. **No frontend file > 499 LOC.**
+- **Live Query Monitor** — live-first sort, peak-memory column,
+  keyboard shortcuts, URL-persisted filters, per-run inline expand
+  for ×N cron-grouped rows, ≥ 30 s stuck-query pulse, copy-SQL,
+  sound notification removed.
+- **Operations Overview cards** on the admin landing page surface
+  ingest gap + live query activity + slow-query count so the things
+  operators actually care about don't live three clicks deep.
+  Tone-coded (default → attention → warning → critical) so a
+  sustained_loss event jumps out.
+- **Stable React keys on dynamic lists** — `DebugPanel`, `CronLiveLog`,
+  the network metro leaderboard, the query toolbar, and the
+  custom-field drawer now key off a stable identity instead of array
+  index. `useSSE` attaches a monotonic `_id` to each line so
+  append-only feeds (cron progress, query streams) keep stable keys
+  across re-renders.
+- **Accessibility pass** — `FieldGroups` and `FileBrowser` disclosure
+  widgets are real `<button>`s with `aria-expanded`; `SSEModal` uses
+  the base-ui `Dialog` render prop instead of a non-keyboard `<div>`
+  wrapper; per-row "view audit logs" buttons carry an `aria-label`
+  that includes the row's email so screen readers don't read 20
+  identical "View" buttons in a row.
+- **`fetchWithTimeout` helper** (30 s default; heartbeat tightens to
+  10 s) applied to `share-login`, `acknowledge`, and
+  `useAnalystHeartbeat` so a hung request surfaces as an error
+  instead of an infinite spinner.
+
+### Quality gates
+
+- **Backend coverage gate `--cov-fail-under` 78 → 85** (final actual
+  85.05 %). Per-module test waves cover every cleanup-touched module
+  + the post-split `rollups/` and `admin/` packages.
+- **Frontend coverage gate `coverage.thresholds.lines` 44 → 58**
+  (final actual 61.66 %).
+- **`tool.mypy.overrides` `ignore_errors` list: 36 modules → 0.**
+  Every backend module type-checks under default settings. Three real
+  bugs surfaced + fixed during the burndown
+  (`repositories/network.py:260` was passing the DuckDB connection
+  where `get_asn_names` expected `service_id`;
+  `routers/share_auth.py:125,203` had an `iso_z_now() and 24*60*60`
+  cookie `max_age` expression where the `and` was a no-op leftover;
+  `routers/admin.py` shadowed loop variable that defeated narrowing).
+- **mypy per-module strict block: 19 modules opted in**
+  (`disallow_untyped_defs` + `disallow_incomplete_defs` +
+  `check_untyped_defs` + `warn_return_any` + `warn_unused_ignores`).
+  Live-query-monitor surface + every module the v2.0 waves added
+  tests for. Full mypy: 221 source files clean.
+- **Load-harness CI step**: `scripts/emit_perf_latest.py` runs a
+  100K-row synthetic DuckDB workload (~2 s wall); `scripts/perf_gate.sh`
+  fails on > 50 % regression vs `tests/perf/baseline.json`. Production
+  targets (≤ 2,800 / ≤ 1,900 ms on 36 M rows) documented in
+  `baseline.json` `production_targets_comment` and validated by the
+  manual `scripts/dev/loadtest_probe.sh`, not the CI gate (GH Actions
+  runner variance is too high).
+
+### Operations, portability
+
+- **VM-agnostic deploy runbooks** at
+  [`docs/deploy/`](docs/deploy/): `aws_ec2.md`, `azure_vm.md`,
+  `gce.md`, `generic_linux.md`. Storage stays Fastly Object Storage
+  (S3-compatible API; boto3 keeps working). GCE-specific wording in
+  comments renamed to "cloud" / "VM" (the link-local
+  169.254.169.254 metadata IP is identical on AWS + GCE; the SSRF
+  gate works on both).
+- **`scripts/refresh_fastly_cidrs.py`** pulls
+  `api.fastly.com/public-ip-list` and rewrites the Caddy
+  `@from_fastly` block. Manual or cron-scheduled.
+
+### Breaking
+
+- **Composite-endpoint cutover.** The granular per-card dashboard
+  endpoints `/api/dashboard/raw` and `/api/dashboard/top_n` are
+  **deleted**; callers must use the composite (`/api/dashboard/bundle`).
+  (`/api/dashboard/aggregates` remains.) External integrators were
+  notified 24–48 h ahead.
+- **Removed endpoints.** `/api/sources`, `/api/dma.json`,
+  `/api/performance/origin-ts`, and `/api/services/{id}/rename` are
+  **deleted**.
+- **GET → POST.** `/api/provision/check-fos`, `/api/provision/lake-info`,
+  and `/api/share/claim/{token}` moved from GET to **POST** so a
+  cross-origin `<img>` / prefetch GET can no longer trigger their
+  side-effecting work.
+- **PATCH alias dropped.** `/api/services/{id}/cron-settings` and
+  `/api/services/{id}/logging-settings/update` are now **POST-only**; the
+  former PATCH alias is removed.
+- **`AnalyticsDeps`** alias for `RequestContext` is removed.
+- **`is_cached` / `_is_cached`** alias on `BaseResponse` is removed
+  (`is_cached` is the canonical name).
+- **SSH-to-localhost.run analyst sharing** is removed. The laptop-
+  admin tunnel use case is no longer supported; production has always
+  been direct-mode against the Fastly+Caddy public URL.
+
+[2.0.0-beta.1]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.0.0-beta.1
+
 ## [1.2.0] - 2026-06-09
 
 Dashboard performance overhaul plus capability-focused security hardening. Cold and warm dashboard loads drop from seconds to sub-second on large services; sustained concurrent load no longer wedges the backend. Read-path I/O is structurally cut by a per-service DuckDB connection pool, a per-minute time-series rollup bundle, size-capped bin-packing local compaction, composite endpoints that collapse multi-card admin pages into one request, and a frontend pre-warm / hover-prefetch pattern that makes navigation feel instant. Security hardening tightens cross-tenant boundaries, closes a ContextVar propagation hole in the s3fs proxy hook, removes a secret-in-URL leak on downloads, and adds strict validation across the destructive-op surface.
@@ -220,7 +757,7 @@ Capability-focused hardening across the FastAPI backend, Fastly VCL, Next.js fro
 - Rate limiting at the edge is NOT included. The DDoS gate (`fastly.ddos_detected`) handles attack-scale traffic by bypassing Compute; sustained-low-rate abuse is left to the operator's existing WAF/NGWAF policies. A future rate-limiting feature is tracked separately.
 - When a matrix is rolled back via the UI, the edge Wasm continues to use its embedded matrix until `scripts/scoring/deploy_wasm.sh` re-runs. The Restore endpoint returns a `deploy_hint` with the exact command. See `docs/session_scoring_runbook.md`.
 
-[1.1.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v1.1.0
+[1.1.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/1.1.0
 
 ## [1.0.0] - 2026-06-01
 

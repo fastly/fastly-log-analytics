@@ -32,6 +32,14 @@ export const useServiceStore = create<ServiceState>()(
         activeServiceId: state.activeServiceId,
         services: state.services,
       }),
+      // SSR safety: do NOT read localStorage during module load. A
+      // synchronous rehydrate would make the first client render use the
+      // persisted activeServiceId while the server rendered with the null
+      // default (no localStorage on the server) — the sidebar nav
+      // `?service=` hrefs and the ServicesTable "Active" badge would then
+      // diverge and throw React #418 across the whole tree. <StoreHydrator>
+      // calls persist.rehydrate() in a post-mount effect instead.
+      skipHydration: true,
     }
   )
 )

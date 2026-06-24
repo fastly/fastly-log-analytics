@@ -6,11 +6,12 @@ that previously had zero direct coverage:
 
   - ``/api/admin/pop-locations``
   - ``/api/sync-status``
+  - ``/api/log-extents``
   - ``/api/admin/ingested-files``
   - ``/api/admin/iceberg-info``
   - ``/api/admin/iceberg-calendar``
   - ``/api/admin/bot-sources``
-  - ``/api/admin/usage-logging`` (GET, POST, PATCH)
+  - ``/api/admin/usage-logging`` (GET, PATCH)
   - ``/api/admin/usage-log``
   - ``/api/admin/system-jobs``
 """
@@ -102,6 +103,72 @@ def test_sync_status_500s_on_unexpected_exception(client):
         resp = client.get("/api/sync-status", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
     assert resp.status_code == 500
+
+
+# ── /api/log-extents ─────────────────────────────────────────────────
+
+
+def test_log_extents_returns_configured_false_when_no_service():
+    """No service set up → ``configured=False`` (same shape as
+    sync-status). The FilterBar uses this to short-circuit the
+    snap-to-extents flow."""
+    from backend.main import app
+
+    with patch("backend.core.duckdb.get_source_for_service", return_value=None):
+        from fastapi.testclient import TestClient
+
+        with TestClient(app) as c:
+            resp = c.get("/api/log-extents")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["configured"] is False
+    assert "ngwaf_workspace_id" not in body
+    assert "active_run" not in body
+
+
+def test_log_extents_returns_cached_extents(client):
+    """Reads only the persisted status snapshot — no DuckDB hit, no
+    503 path. Confirms the extents come through and the analyst-
+    sensitive fields stay out."""
+    fake_src = {"name": "test_service", "service_id": MOCK_SERVICE_ID, "bucket": "b"}
+    cached = {
+        "earliest_log_at": "2026-06-09T00:00:00Z",
+        "latest_log_at": "2026-06-10T12:34:56Z",
+        "ngwaf_workspace_id": "ws-should-not-leak",
+        "active_run": {"task": "sync", "status": "running"},
+    }
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.config.get_status", return_value=cached),
+    ):
+        resp = client.get("/api/log-extents", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["configured"] is True
+    assert body["earliest_log_at"] == "2026-06-09T00:00:00Z"
+    assert body["latest_log_at"] == "2026-06-10T12:34:56Z"
+    assert "ngwaf_workspace_id" not in body
+    assert "active_run" not in body
+
+
+def test_log_extents_returns_null_extents_when_cache_empty(client):
+    """Pre-first-cron-tick state: status dict empty → extents are
+    null but ``configured`` is true. FilterBar's refetchInterval
+    keeps polling until extents populate."""
+    fake_src = {"name": "test_service", "service_id": MOCK_SERVICE_ID, "bucket": "b"}
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.config.get_status", return_value={}),
+    ):
+        resp = client.get("/api/log-extents", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["configured"] is True
+    assert body["earliest_log_at"] is None
+    assert body["latest_log_at"] is None
 
 
 # ── /api/admin/ingested-files ──────────────────────────────────────────────
@@ -232,7 +299,7 @@ def test_usage_logging_get_returns_current_config(client, tmp_path, monkeypatch)
     assert body["retention_days"] == 60
 
 
-def test_usage_logging_post_updates_only_allowed_fields(client, tmp_path, monkeypatch):
+def test_usage_logging_patch_updates_only_allowed_fields(client, tmp_path, monkeypatch):
     """Only the documented field list updates; arbitrary keys are
     silently dropped. Pinned because letting unknown keys land in
     the JSON file would slowly corrupt the schema."""
@@ -242,7 +309,7 @@ def test_usage_logging_post_updates_only_allowed_fields(client, tmp_path, monkey
     monkeypatch.setattr(config, "_USAGE_LOGGING_CONFIG_PATH", tmp_path / "usage_logging.json")
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
 
-    resp = client.post(
+    resp = client.patch(
         "/api/admin/usage-logging",
         json={
             "enabled": True,
@@ -261,9 +328,9 @@ def test_usage_logging_post_updates_only_allowed_fields(client, tmp_path, monkey
     assert "another_unknown" not in body
 
 
-def test_usage_logging_patch_is_same_as_post(client, tmp_path, monkeypatch):
-    """PATCH and POST share the same handler — pinned because the FE
-    uses PATCH for partial updates and we want them equivalent."""
+def test_usage_logging_patch_partial_update_preserves_unchanged_fields(client, tmp_path, monkeypatch):
+    """PATCH applies only the keys present in the body — pinned because
+    the FE uses PATCH for partial updates and must not null the rest."""
     from backend import config
 
     monkeypatch.setattr(config, "SYSTEM_DATA_DIR", tmp_path)
@@ -327,7 +394,7 @@ def test_usage_log_endpoint_returns_paginated_rows(client):
     }
 
     with patch(
-        "backend.core.metadata_db.get_usage_logs",
+        "backend.core.metadata.get_usage_logs",
         return_value=(fake_rows, 2, fake_agg),
     ):
         resp = client.get(

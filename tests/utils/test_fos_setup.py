@@ -427,7 +427,7 @@ def test_provisioning_tracker_records_create_bucket_to_usage_log():
 
     with (
         patch("boto3.client", return_value=fake_s3),
-        patch("backend.core.metadata_db.log_usage_calls") as mock_log,
+        patch("backend.core.metadata.log_usage_calls") as mock_log,
     ):
         fos_setup.ensure_fos_bucket("new-bucket", "us-east-1", "k", "s", service_id="svc-x")
 
@@ -457,7 +457,7 @@ def test_provisioning_tracker_marks_create_bucket_as_class_a_in_details():
 
     with (
         patch("boto3.client", return_value=fake_s3),
-        patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
     ):
         fos_setup.ensure_fos_bucket("b", "us-east-1", "k", "s", service_id="svc-x")
 
@@ -485,7 +485,7 @@ def test_provisioning_tracker_records_errors_as_rows_too():
 
     with (
         patch("boto3.client", return_value=fake_s3),
-        patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
     ):
         with pytest.raises(RuntimeError):
             fos_setup.ensure_fos_bucket("b", "us-east-1", "k", "s", service_id="svc-x")
@@ -513,7 +513,7 @@ def test_provisioning_tracker_tags_teardown_context_separately_from_provision():
 
     with (
         patch("boto3.client", return_value=fake_s3),
-        patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
     ):
         fos_setup.delete_fos_bucket("doomed-bucket", "us-east-1", "k", "s", service_id="svc-x")
 
@@ -531,7 +531,7 @@ def test_provisioning_tracker_skips_logging_when_no_service_id():
 
     with (
         patch("boto3.client", return_value=fake_s3),
-        patch("backend.core.metadata_db.log_usage_calls") as mock_log,
+        patch("backend.core.metadata.log_usage_calls") as mock_log,
     ):
         fos_setup.ensure_fos_bucket("b", "us-east-1", "k", "s")  # no service_id
 
@@ -563,7 +563,7 @@ def test_provisioning_tracker_records_delete_objects_pagination():
 
     with (
         patch("boto3.client", return_value=fake_s3),
-        patch("backend.core.metadata_db.log_usage_calls", side_effect=_capture),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
     ):
         fos_setup.delete_fos_bucket("doomed-bucket", "us-east-1", "k", "s", service_id="svc-x")
 

@@ -9,21 +9,34 @@ list.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from sse_starlette.sse import EventSourceResponse
 
 from backend import config as svcconfig
 from backend.core import share_db
+from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.share_admin import (
+    BackupExportPayload,
+    GdprErasePayload,
+    InvitePayload,
+    PasscodePayload,
+    ServiceScopePayload,
+    SettingsPayload,
+    ShareStartPayload,
+)
+from backend.utils.remote_access import client_ip
+from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
 from backend.utils.tunnel import get_tunnel_manager
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/admin/share", tags=["share-admin"])
-
-
+router = APIRouter(prefix="/api/admin/share", tags=["share-admin"], responses=DEFAULT_ERROR_RESPONSES)
 # ── Status ──────────────────────────────────────────────────────────────────
 
 
@@ -45,8 +58,15 @@ def share_banner():
     }
 
 
-@router.get("/status")
-def share_status():
+def build_share_status() -> dict:
+    """Compose the /admin/share/status response shape.
+
+    Extracted from the router so /api/bootstrap can call it directly
+    and seed React Query's [admin, share, status] cache — saving the
+    /admin/share page's cold-load mount round-trip (187 ms p95 admin
+    tunnel). Pure-Python read against in-memory tunnel state +
+    SQLite-backed invites/sessions/audit; no FOS / no DuckDB.
+    """
     mgr = get_tunnel_manager()
     state = mgr.state
     invites = share_db.get_remote_invites()
@@ -65,8 +85,6 @@ def share_status():
         logger.exception("[share_admin] could not list services")
     return {
         "sharing_active": mgr.is_sharing_active(),
-        "use_tunnel": state.use_tunnel,
-        "tunnel_url": state.tunnel_url,
         "public_endpoint": state.public_endpoint,
         "public_url": mgr.public_url(),
         "forward_port": state.forward_port,
@@ -82,19 +100,93 @@ def share_status():
     }
 
 
+@router.get("/status")
+def share_status():
+    return build_share_status()
+
+
+def _live_payload() -> dict:
+    """Compose the /live payload shape — extracted so the polling
+    endpoint and the SSE stream share one source of truth."""
+    mgr = get_tunnel_manager()
+    return {
+        "sharing_active": mgr.is_sharing_active(),
+        "public_url": mgr.public_url(),
+        "active_session_count": mgr.active_session_count(),
+        "rate_limits": mgr.get_rate_limit_snapshot(),
+        "telemetry": mgr.get_telemetry(),
+    }
+
+
+@router.get("/live")
+def share_live():
+    """Lean 10-s poll payload for the share dashboard. Returns only the
+    fields that change in real time and are surfaced continuously by
+    SharingControlPanel (tunnel state + counters + rate limits +
+    telemetry). The full /status mount-time payload (services /
+    invites / sessions / audit_logs, ~11 KB) is fetched once on
+    mount and refreshed on mutations — no need to re-ship it every
+    10 seconds.
+
+    Kept as a polling endpoint alongside the /stream channel so the
+    page can fetch a one-shot snapshot on mutations (refresh button,
+    session revoke) without waiting for the next stream tick.
+    """
+    return _live_payload()
+
+
+_SHARE_STREAM_SAMPLE_SECONDS = 10.0
+
+
+@router.get("/stream")
+async def share_stream(request: Request) -> EventSourceResponse:
+    """Push the lean /live payload only when it changes.
+
+    Replaces the 10-s poll the /admin/share page used to drive. Per-
+    subscriber sampler (same pattern as
+    /api/admin/system-metrics/stream): payload is dominated by
+    in-memory tunnel-manager getters, so per-connection sampling is
+    fine and lets us skip the publisher-binding lifecycle.
+
+    Admin-only via the ``/api/admin/share`` prefix gate.
+    """
+
+    async def stream() -> AsyncIterator[str]:
+        last_payload: dict | None = None
+        initial = _live_payload()
+        yield json.dumps(initial)
+        last_payload = initial
+
+        while True:
+            if await request.is_disconnected():
+                break
+            await asyncio.sleep(_SHARE_STREAM_SAMPLE_SECONDS)
+            try:
+                payload = _live_payload()
+            except Exception:
+                logger.exception("share-stream sample failed; will retry next tick")
+                continue
+            if payload != last_payload:
+                yield json.dumps(payload)
+                last_payload = payload
+
+    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
+
+
 # ── Audit log (filterable) ─────────────────────────────────────────────────
 
 
 @router.get("/audit-logs")
 def audit_logs(
-    limit: int = 200,
+    # Out-of-band limit was 400-on-fail; FastAPI's Query(ge/le) emits a
+    # structured 422 with the failing field path, which is what every
+    # other validated param in this app uses.
+    limit: int = Query(default=200, ge=1, le=2000),
     event_type: str | None = None,
     email: str | None = None,
     since: str | None = None,
     until: str | None = None,
 ):
-    if limit < 1 or limit > 2000:
-        raise HTTPException(status_code=400, detail={"error": "invalid_limit"})
     rows = share_db.get_share_audit_logs(
         limit=limit,
         event_type=event_type,
@@ -108,32 +200,16 @@ def audit_logs(
 # ── Tunnel lifecycle ───────────────────────────────────────────────────────
 
 
-class ShareStartPayload(BaseModel):
-    use_tunnel: bool = True
-    public_endpoint: str | None = None
-    forward_port: int = 3000
-
-
 @router.post("/start")
 def share_start(payload: ShareStartPayload):
     mgr = get_tunnel_manager()
     try:
         result = mgr.start_sharing(
-            use_tunnel=payload.use_tunnel,
             public_endpoint=payload.public_endpoint,
             forward_port=payload.forward_port,
         )
-    except RuntimeError as exc:
-        msg = str(exc)
-        if "port" in msg.lower() and "not bound" in msg.lower():
-            raise HTTPException(
-                status_code=409,
-                detail={"error": "port_unavailable", "hint": msg},
-            ) from exc
-        raise HTTPException(status_code=500, detail={"error": "tunnel_start_failed", "message": msg}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": "invalid_request", "message": str(exc)}) from exc
-    mgr.start_sleep_listener()
     return result
 
 
@@ -150,19 +226,6 @@ def share_panic():
 
 
 # ── Invites ────────────────────────────────────────────────────────────────
-
-
-class InvitePayload(BaseModel):
-    name: str
-    email: str
-    passcode: str
-    duration_hours: int | None = Field(default=24)
-    ip_whitelist: str | None = None
-    service_ids: list[str] = Field(default_factory=list)
-    pii_policy: dict | None = None
-    query_window_hours: int | None = None
-    query_start_time: str | None = None
-    query_end_time: str | None = None
 
 
 @router.post("/invites")
@@ -195,14 +258,10 @@ def create_invite(payload: InvitePayload, request: Request):
     share_db.log_share_audit_event(
         event_type="INVITE_CREATE",
         email=invite["email"],
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=f"invite_id={invite['id']} services={','.join(payload.service_ids)}",
     )
     return invite
-
-
-class ServiceScopePayload(BaseModel):
-    service_ids: list[str]
 
 
 @router.patch("/invites/{invite_id}/services")
@@ -211,10 +270,6 @@ def update_invite_services(invite_id: str, payload: ServiceScopePayload):
         raise HTTPException(status_code=404, detail={"error": "not_found"})
     share_db.update_remote_invite_services(invite_id, payload.service_ids)
     return share_db.get_remote_invite(invite_id)
-
-
-class PasscodePayload(BaseModel):
-    passcode: str
 
 
 @router.patch("/invites/{invite_id}/passcode")
@@ -230,11 +285,11 @@ def update_invite_passcode(invite_id: str, payload: PasscodePayload, request: Re
     try:
         share_db.update_remote_invite_passcode(invite_id, payload.passcode)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail={"error": str(e)})
+        raise HTTPException(status_code=400, detail=make_error("invalid_passcode", str(e)))
     share_db.log_share_audit_event(
         event_type="INVITE_PASSCODE_UPDATE",
         email=None,
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=f"invite_id={invite_id}",
     )
     return {"ok": True}
@@ -248,7 +303,7 @@ def revoke_invite(invite_id: str, request: Request):
     share_db.log_share_audit_event(
         event_type="INVITE_REVOKE",
         email=None,
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=f"invite_id={invite_id} booted_sessions={booted}",
     )
     return {"ok": True, "booted_sessions": booted}
@@ -267,7 +322,7 @@ def delete_invite(invite_id: str, request: Request):
     share_db.log_share_audit_event(
         event_type="INVITE_DELETE",
         email=None,
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=f"invite_id={invite_id} booted_sessions={booted}",
     )
     return {"ok": True, "booted_sessions": booted}
@@ -295,10 +350,6 @@ def boot_session(session_id: str, request: Request):
 # ── Backup / Restore ────────────────────────────────────────────────────────
 
 
-class BackupExportPayload(BaseModel):
-    passphrase: str
-
-
 @router.post("/backup/export")
 def backup_export(payload: BackupExportPayload, request: Request):
     if len(payload.passphrase) < 12:
@@ -310,7 +361,7 @@ def backup_export(payload: BackupExportPayload, request: Request):
     share_db.log_share_audit_event(
         event_type="BACKUP_EXPORTED",
         email=None,
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=f"bytes={len(blob)}",
     )
     return Response(
@@ -339,18 +390,13 @@ async def backup_import(
     share_db.log_share_audit_event(
         event_type="BACKUP_IMPORTED",
         email=None,
-        ip_address=request.client.host if request.client else "127.0.0.1",
+        ip_address=client_ip(request, default="127.0.0.1"),
         details=str(result),
     )
     return result
 
 
 # ── GDPR right-to-be-forgotten ──────────────────────────────────────────────
-
-
-class GdprErasePayload(BaseModel):
-    email: str
-    reason: str
 
 
 @router.post("/gdpr/erase")
@@ -366,16 +412,12 @@ def gdpr_erase(payload: GdprErasePayload, request: Request):
 # ── Settings ────────────────────────────────────────────────────────────────
 
 
-class SettingsPayload(BaseModel):
-    max_concurrent_analyst_sessions: int | None = None
-
-
 @router.patch("/settings")
 def update_settings(payload: SettingsPayload):
     if payload.max_concurrent_analyst_sessions is not None:
         if payload.max_concurrent_analyst_sessions < 1:
             raise HTTPException(status_code=400, detail={"error": "invalid_value"})
-        share_db.set_setting("max_concurrent_analyst_sessions", str(payload.max_concurrent_analyst_sessions))
+        share_db.set_setting(share_db.MAX_CONCURRENT_ANALYST_SESSIONS_KEY, str(payload.max_concurrent_analyst_sessions))
     return {"max_concurrent_analyst_sessions": share_db.get_max_concurrent_sessions()}
 
 

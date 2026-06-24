@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { formatBytes, toLocalISO, fromLocalISO, downloadAsCsv } from '@/lib/utils'
+import { downloadAsCsv } from '@/lib/utils';
+import { formatBytes } from '@/lib/format'
 
 describe('formatBytes', () => {
   it('returns "0 B" for zero', () => {
@@ -27,63 +28,6 @@ describe('formatBytes', () => {
 
   it('formats terabytes', () => {
     expect(formatBytes(1024 ** 4)).toBe('1 TB')
-  })
-})
-
-describe('toLocalISO', () => {
-  it('returns empty string for null', () => {
-    expect(toLocalISO(null)).toBe('')
-  })
-
-  it('returns empty string for undefined', () => {
-    expect(toLocalISO(undefined)).toBe('')
-  })
-
-  it('returns empty string for invalid date string', () => {
-    expect(toLocalISO('not-a-date')).toBe('')
-  })
-
-  it('formats a UTC timestamp in UTC timezone', () => {
-    const result = toLocalISO('2024-06-15T12:00:00Z', 'UTC')
-    expect(result).toBe('2024-06-15T12:00:00')
-  })
-
-  it('formats a UTC timestamp in a non-UTC timezone', () => {
-    // America/New_York is UTC-4 in summer (EDT)
-    const result = toLocalISO('2024-06-15T16:00:00Z', 'America/New_York')
-    expect(result).toBe('2024-06-15T12:00:00')
-  })
-
-  it('produces a string matching datetime-local input format', () => {
-    const result = toLocalISO('2024-01-01T00:00:00Z', 'UTC')
-    expect(result).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/)
-  })
-})
-
-describe('fromLocalISO', () => {
-  it('returns empty string for empty input', () => {
-    expect(fromLocalISO('')).toBe('')
-  })
-
-  it('round-trips with toLocalISO in UTC', () => {
-    const original = '2024-06-15T12:00:00.000Z'
-    const local = toLocalISO(original, 'UTC')
-    const back = fromLocalISO(local, 'UTC')
-    // Allow for millisecond differences in ISO string representation
-    expect(new Date(back).getTime()).toBe(new Date(original).getTime())
-  })
-
-  it('round-trips with toLocalISO in a named timezone', () => {
-    const original = '2024-06-15T16:00:00.000Z'
-    const tz = 'America/New_York'
-    const local = toLocalISO(original, tz)
-    const back = fromLocalISO(local, tz)
-    expect(new Date(back).getTime()).toBe(new Date(original).getTime())
-  })
-
-  it('handles UTC explicitly', () => {
-    const result = fromLocalISO('2024-01-01T00:00:00', 'UTC')
-    expect(result).toBe('2024-01-01T00:00:00.000Z')
   })
 })
 

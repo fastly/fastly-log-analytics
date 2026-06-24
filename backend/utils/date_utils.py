@@ -71,3 +71,43 @@ def parse_window_str_to_dt(s: str) -> datetime:
     if dt is None:
         raise ValueError(f"Invalid date window string: {s}")
     return dt
+
+
+def window_to_epoch(start: str, end: str) -> tuple[str, str, int, int]:
+    """Parse a (start, end) request window into its ISO-Z strings plus the
+    matching epoch-second integers.
+
+    Folds the three-step ``parse_date_window`` → ``parse_window_str_to_dt``
+    → ``int(.timestamp())`` dance that the usage router's Fastly /stats
+    handlers each repeated. Returns ``(start_str, end_str, from_ts, to_ts)``.
+    """
+    s, e = parse_date_window(start, end)
+    return s, e, int(parse_window_str_to_dt(s).timestamp()), int(parse_window_str_to_dt(e).timestamp())
+
+
+def parse_relative_time_window(since: str, max_lookback_days: int = 30) -> datetime:
+    """Parse a window string like ``"1h"`` / ``"24h"`` / ``"7d"`` / ``"30m"``
+    into a UTC datetime ``now - delta``.
+
+    Capped at ``max_lookback_days`` so an oversized input can't pull data
+    beyond the retention window. Falls back to ``now - 1 hour`` for empty /
+    malformed input — admin UIs that drive this pass a controlled set of
+    values, so silent fallback is preferable to surfacing a 400.
+    """
+    now = datetime.now(UTC)
+    if not since:
+        return now - timedelta(hours=1)
+    s = since.strip().lower()
+    try:
+        if s.endswith("h"):
+            hours = max(1, min(int(s[:-1]), max_lookback_days * 24))
+            return now - timedelta(hours=hours)
+        if s.endswith("d"):
+            days = max(1, min(int(s[:-1]), max_lookback_days))
+            return now - timedelta(days=days)
+        if s.endswith("m"):
+            minutes = max(1, min(int(s[:-1]), max_lookback_days * 24 * 60))
+            return now - timedelta(minutes=minutes)
+    except ValueError:
+        pass
+    return now - timedelta(hours=1)

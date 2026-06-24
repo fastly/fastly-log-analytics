@@ -6,7 +6,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import * as customFieldsApi from '@/lib/api/custom-fields'
 import React from 'react'
 
-// Mock matchMedia
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
   value: vi.fn().mockImplementation(query => ({
@@ -25,7 +24,6 @@ const queryClient = new QueryClient()
 
 test('renders custom fields and handles deletion', async () => {
   const user = userEvent.setup()
-  // Mock API to return a fake field
   vi.spyOn(customFieldsApi.customFieldsApi, 'listCustomFields').mockResolvedValue({
     fields: [
       {
@@ -69,6 +67,5 @@ test('renders custom fields and handles deletion', async () => {
   const deleteBtn = screen.getByTitle('Delete')
   await user.click(deleteBtn)
 
-  // Verify API was called
   await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith('test-svc', 'test_field_1'))
 })

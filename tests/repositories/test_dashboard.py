@@ -4,21 +4,13 @@ import pytest
 
 from backend.repositories._base import _safe_table
 from backend.repositories.dashboard import (
+    DASHBOARD_CACHE_TTL,
     FIELDS,
-    _dashboard_cache,
     get_aggregates,
     get_field_values,
-    get_raw,
     get_raw_df,
 )
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
-
-
-@pytest.fixture(autouse=True)
-def clear_dashboard_cache():
-    _dashboard_cache.clear()
-    yield
-    _dashboard_cache.clear()
 
 
 def _src_without_table():
@@ -129,7 +121,10 @@ def test_get_aggregates_rollup_path_map_data_uses_per_field_limits(in_memory_duc
     # Track every execute_top_n_rollups call: (fields, limit, per_field_limits).
     calls: list[tuple] = []
 
-    def spy_top_n(self, fields, start_time, end_time, limit=10, per_field_limits=None, _phase_log=None):
+    def spy_top_n(self, fields, start_time, end_time, limit=10, per_field_limits=None, _phase_log=None, **_kwargs):
+        # **_kwargs absorbs new schema-seed kwargs (actual_cols, schema_types)
+        # added by perf commit 6e6a5f9 so this spy stays compatible with future
+        # signature growth without re-pinning the test on each plumbing change.
         calls.append((tuple(fields), limit, dict(per_field_limits or {})))
         # Return 12 country entries to confirm the panel caps at 10 but
         # map_data sees all 12.
@@ -176,6 +171,158 @@ def test_get_aggregates_rollup_path_map_data_uses_per_field_limits(in_memory_duc
     assert countries == {f"C{i:02d}" for i in range(12)}
 
 
+def test_get_aggregates_topten_only_keeps_rollup_batch_whole(in_memory_duckdb, test_service_source, monkeypatch):
+    """Slice 3 invariant: requesting just the topten section MUST keep
+    execute_top_n_rollups as ONE merged scan across the full batch_fields
+    list. Splitting top-N across HTTP requests would re-trigger N
+    active-hour live-temp builds + N rollup-directory enumerations — the
+    exact regression the 4-section plan exists to prevent.
+
+    Drive the rollup fast-path via the same fake-isdir monkeypatch as
+    test_get_aggregates_rollup_path_map_data_uses_per_field_limits, then
+    assert exactly one call AND that include_top_n=True keeps the panel
+    population path on (results[field]['top'] populated)."""
+    import os
+
+    from backend.repositories import dashboard as dash
+    from backend.repositories._base import QueryRunner
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=40)
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    real_isdir = os.path.isdir
+
+    def fake_isdir(path: str) -> bool:
+        if path.endswith(os.path.join("rollups", "hour")):
+            return True
+        return real_isdir(path)
+
+    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+
+    calls: list[tuple] = []
+
+    def spy_top_n(self, fields, start_time, end_time, limit=10, per_field_limits=None, _phase_log=None, **_kwargs):
+        calls.append((tuple(fields), limit, dict(per_field_limits or {})))
+        # One row per field so panel population has something to fill.
+        return [(f, f"{f}_val", 5) for f in fields], list(fields)
+
+    monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", spy_top_n)
+
+    result = dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+        include_time_series=False,
+        include_conn_requests=False,
+        include_map_data=False,
+        include_top_n=True,
+    )
+
+    assert len(calls) == 1, f"topten section must keep the rollup batch whole; got {len(calls)} calls: {calls}"
+    # Many fields were batched, not split into separate calls.
+    fields_called, _, _ = calls[0]
+    assert len(fields_called) > 5, (
+        f"the batch call should cover most of FIELDS in one scan, not a per-card slice; got {fields_called}"
+    )
+    # Per-field totals + tops were populated (proves include_top_n=True flowed through).
+    assert result["data"]["url"]["total"] > 0
+    assert result["data"]["url"]["top"], "top-N panel must populate when include_top_n=True"
+    # Page-shape blocks stayed empty (selector turned them off).
+    assert result["time_series"] == []
+    assert result["map_data"] == []
+    assert result["data"]["conn_requests"]["top"] == []
+
+
+def test_get_aggregates_core_only_skips_top_n_scan(in_memory_duckdb, test_service_source, monkeypatch):
+    """sections=['core'] expands to include_top_n=False — the rollup
+    batch call must NOT fire (there's nothing to populate). Map data on
+    the rollup path falls back to deriving from all_top_res only when
+    map_data is also requested with country in the field list, but with
+    no top-N scan and no map gate, both are empty."""
+    import os
+
+    from backend.repositories import dashboard as dash
+    from backend.repositories._base import QueryRunner
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    real_isdir = os.path.isdir
+
+    def fake_isdir(path: str) -> bool:
+        if path.endswith(os.path.join("rollups", "hour")):
+            return True
+        return real_isdir(path)
+
+    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+
+    calls: list[tuple] = []
+
+    def spy_top_n(self, fields, start_time, end_time, limit=10, per_field_limits=None, _phase_log=None, **_kwargs):
+        calls.append((tuple(fields), limit))
+        return [], list(fields)
+
+    monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", spy_top_n)
+
+    # ``include_top_n=False`` simulates the router's expansion of
+    # sections=['core']. include_map_data stays True so map_data can use
+    # the rollup-derived path (which still fires execute_top_n_rollups for
+    # country) — proves the partial-skip coupling rule from the plan.
+    dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+        include_time_series=True,
+        include_conn_requests=True,
+        include_map_data=True,
+        include_top_n=False,
+    )
+
+    # ONE call expected — the map_data rollup-derive path needs country
+    # entries from the same scan, so the batch fires once even though
+    # the per-field cards are off.
+    assert len(calls) == 1, (
+        f"core section with map enabled must still trigger one rollup scan for country; got {len(calls)}: {calls}"
+    )
+
+    # Now run again with map ALSO off — the batch must skip entirely.
+    calls.clear()
+    dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+        include_time_series=True,
+        include_conn_requests=True,
+        include_map_data=False,
+        include_top_n=False,
+    )
+    assert len(calls) == 0, (
+        f"with top_n + map both off, the rollup batch must not fire at all; got {len(calls)}: {calls}"
+    )
+
+
+@pytest.mark.skipif(
+    DASHBOARD_CACHE_TTL == 0,
+    reason=(
+        "Dashboard cache disabled in commit 0f0887e after a 2026-06-09 "
+        "incident where stale cache entries served 'No data available' "
+        "across tabs. Re-enable this assertion when caching is restored."
+    ),
+)
 def test_get_aggregates_result_is_cached(in_memory_duckdb, test_service_source):
     """Second call with identical params returns a cached result."""
     table_name = _safe_table(test_service_source["name"])
@@ -201,7 +348,10 @@ def test_get_aggregates_result_is_cached(in_memory_duckdb, test_service_source):
         chart_metric="requests",
     )
 
-    assert result2.get("_is_cached") is True
+    # The cache-hit path writes the unaliased ``is_cached`` field
+    # (matches origin.py's pattern); the ``_is_cached`` Pydantic alias
+    # only appears on serialized responses, not raw repository dicts.
+    assert result2.get("is_cached") is True
     assert result1["total_rows"] == result2["total_rows"]
 
 
@@ -277,158 +427,6 @@ def test_get_aggregates_debug_queries_populated(in_memory_duckdb, test_service_s
     first_q = result["debug_queries"][0]
     assert "sql" in first_q
     assert "time_ms" in first_q
-
-
-# ── get_raw: log-table grid endpoint ────────────────────────────────────────
-
-
-def test_get_raw_returns_empty_shape_when_table_missing(in_memory_duckdb):
-    """No table → all-empty shape so the FE grid renders "no data"
-    instead of crashing on missing keys."""
-    src = _src_without_table()
-    out = get_raw(
-        con=in_memory_duckdb,
-        src=src,
-        start_time=None,
-        end_time=None,
-        filters={},
-        page=1,
-        limit=50,
-        sort_col=None,
-        sort_dir="DESC",
-        columns=[],
-    )
-    assert out["data"] == []
-    assert out["total_rows"] == 0
-    assert out["page"] == 1
-    assert out["limit"] == 50
-
-
-def test_get_raw_orders_by_timestamp_descending_by_default(in_memory_duckdb, test_service_source):
-    """Without ``sort_col``, the helper falls back to
-    ``ORDER BY timestamp DESC`` so the latest log is first. Pinned
-    because losing this would silently flip the grid to oldest-first."""
-    logs = generate_mock_logs(test_service_source, num_logs=10, hours_ago=2)
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    out = get_raw(
-        con=in_memory_duckdb,
-        src=test_service_source,
-        start_time=None,
-        end_time=None,
-        filters={},
-        page=1,
-        limit=10,
-        sort_col=None,
-        sort_dir="DESC",
-        columns=["timestamp", "status"],
-    )
-
-    data = out["data"]
-    assert len(data) > 0
-    # Descending → first timestamp >= last timestamp
-    if len(data) >= 2:
-        first_ts = data[0]["timestamp"]
-        last_ts = data[-1]["timestamp"]
-        assert first_ts >= last_ts
-
-
-def test_get_raw_respects_explicit_sort_column(in_memory_duckdb, test_service_source):
-    """``sort_col='status'`` reorders the result by status. Pinned
-    because the FE column-header click sends this and clicking must
-    actually re-sort."""
-    logs = generate_mock_logs(test_service_source, num_logs=20, hours_ago=1)
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    out = get_raw(
-        con=in_memory_duckdb,
-        src=test_service_source,
-        start_time=None,
-        end_time=None,
-        filters={},
-        page=1,
-        limit=20,
-        sort_col="status",
-        sort_dir="ASC",
-        columns=["status", "timestamp"],
-    )
-
-    statuses = [r["status"] for r in out["data"]]
-    assert statuses == sorted(statuses)
-
-
-def test_get_raw_paginates_correctly(in_memory_duckdb, test_service_source):
-    """page=2 + limit=5 → OFFSET 5. Pinned because off-by-one in the
-    offset calc would either show page 1 twice or skip rows."""
-    # Use unique timestamps so DESC sort + LIMIT/OFFSET is deterministic
-    # — the previous reliance on `generate_mock_logs`'s random
-    # second-precision timestamps would occasionally produce ties and
-    # flake the pagination invariant.
-    from datetime import UTC, datetime, timedelta
-
-    logs = generate_mock_logs(test_service_source, num_logs=30, hours_ago=1)
-    base = datetime.now(UTC) - timedelta(hours=1)
-    for i, log in enumerate(logs):
-        log["timestamp"] = (base + timedelta(seconds=i * 30)).isoformat()
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    page1 = get_raw(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-        page=1,
-        limit=5,
-        sort_col="timestamp",
-        sort_dir="DESC",
-        columns=["timestamp"],
-    )
-    page2 = get_raw(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-        page=2,
-        limit=5,
-        sort_col="timestamp",
-        sort_dir="DESC",
-        columns=["timestamp"],
-    )
-
-    page1_ts = {r["timestamp"] for r in page1["data"]}
-    page2_ts = {r["timestamp"] for r in page2["data"]}
-    # No overlap between pages
-    assert not page1_ts & page2_ts
-
-
-def test_get_raw_returns_only_requested_columns(in_memory_duckdb, test_service_source):
-    """``columns=['status']`` → returned records have only ``status``
-    (plus the implicit timestamp the sort needs). Pinned because the
-    FE grid relies on getting exactly the requested columns for its
-    column-config UX."""
-    logs = generate_mock_logs(test_service_source, num_logs=5, hours_ago=1)
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    out = get_raw(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-        page=1,
-        limit=5,
-        sort_col="timestamp",
-        sort_dir="DESC",
-        columns=["status"],
-    )
-
-    if out["data"]:
-        keys = set(out["data"][0].keys())
-        # Only the requested column is returned (timestamp is added internally
-        # for sorting but filtered out before serialisation)
-        assert keys == {"status"}
 
 
 # ── get_raw_df: DataFrame variant for direct manipulation ──────────────────
@@ -833,7 +831,7 @@ def test_get_field_values_asn_search_resolves_via_metadata_db(in_memory_duckdb, 
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)),
-        patch("backend.core.metadata_db.asn_ints_for_search", return_value=[13335]),
+        patch("backend.core.metadata.asn_ints_for_search", return_value=[13335]),
         patch("backend.core.duckdb.enrich_asn_labels"),
     ):
         out = get_field_values(
@@ -861,7 +859,7 @@ def test_get_field_values_asn_search_swallows_metadata_db_exception(in_memory_du
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)),
-        patch("backend.core.metadata_db.asn_ints_for_search", side_effect=RuntimeError("db locked")),
+        patch("backend.core.metadata.asn_ints_for_search", side_effect=RuntimeError("db locked")),
         patch("backend.core.duckdb.enrich_asn_labels"),
     ):
         # Should not raise; returns whatever the ILIKE matches (likely [])
@@ -1222,7 +1220,7 @@ def test_get_field_values_asn_search_includes_matching_asn_ints(in_memory_duckdb
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)),
-        patch("backend.core.metadata_db.asn_ints_for_search", return_value=[15169]),
+        patch("backend.core.metadata.asn_ints_for_search", return_value=[15169]),
         patch("backend.core.duckdb.enrich_asn_labels"),  # avoid SQLite hit
     ):
         out = get_field_values(
@@ -1257,7 +1255,7 @@ def test_get_field_values_asn_search_falls_back_to_ilike_when_no_metadata_match(
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)),
-        patch("backend.core.metadata_db.asn_ints_for_search", return_value=[]),
+        patch("backend.core.metadata.asn_ints_for_search", return_value=[]),
         patch("backend.core.duckdb.enrich_asn_labels"),
     ):
         out = get_field_values(

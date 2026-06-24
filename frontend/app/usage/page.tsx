@@ -1,6 +1,6 @@
 'use client'
 
-import React from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
@@ -19,11 +19,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { formatBytes, cn } from '@/lib/utils'
-import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { cn } from '@/lib/utils';
+import { formatBytes } from '@/lib/format'
+import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
-import { UpdatingBadge } from '@/components/UpdatingBadge'
-
 function fmtN(n: number): string {
   if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B'
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
@@ -74,7 +73,7 @@ export default function UsagePage() {
         setChartInterval,
         intervalButtons,
       }) => {
-        const { services } = useServiceStore();
+        const services = useServiceStore(s => s.services);
         const isAnalyst = services.find((s: any) => s.id === activeServiceId)?.accessLevel === 'read_only'
         const isReady = useIsDataReady()
         const activityBy = config.effectiveInterval.split(' ')[1] || 'hour' // fallback
@@ -96,7 +95,7 @@ export default function UsagePage() {
                   size="sm"
                   onClick={() => React.startTransition(() => setChartInterval(i.value))}
                   className={cn(
-                    'h-6 text-[10px] px-2 shadow-none transition-colors',
+                    'h-9 text-xs px-2 shadow-none transition-colors sm:h-7 sm:text-[11px]',
                     isActive
                       ? 'bg-primary text-primary-foreground hover:bg-primary/90'
                       : 'hover:text-primary hover:bg-muted',
@@ -109,10 +108,10 @@ export default function UsagePage() {
           </ButtonGroup>
         )
 
-        const { data: storage, isLoading: loadingStorage, isFetching: fetchingStorage } = useQuery({
+        const { data: storage, isLoading: loadingStorage, isFetching: fetchingStorage, error: errorStorage } = useQuery({
     queryKey: ['usage', 'storage', activeServiceId, startTime, endTime],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/current-storage", { signal, 
+      const { data } = await client.GET("/api/usage/current-storage", { signal,
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined } }
       })
       return data
@@ -121,11 +120,11 @@ export default function UsagePage() {
     staleTime: 60_000,
   })
 
-  const { data: ops, isLoading: loadingOps, isFetching: fetchingOps } = useQuery({
+  const { data: ops, isLoading: loadingOps, isFetching: fetchingOps, error: errorOps } = useQuery({
     queryKey: ['usage', 'operations', activeServiceId, startTime, endTime, activityBy],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/operations", { signal, 
-        params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
+      const { data } = await client.GET("/api/usage/operations", { signal,
+        params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy } }
       })
       return data
     },
@@ -133,11 +132,11 @@ export default function UsagePage() {
     staleTime: 60_000,
   })
 
-  const { data: bw, isLoading: loadingBw, isFetching: fetchingBw } = useQuery({
+  const { data: bw, isLoading: loadingBw, isFetching: fetchingBw, error: errorBw } = useQuery({
     queryKey: ['usage', 'bandwidth', activeServiceId, startTime, endTime, activityBy],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/bandwidth", { signal, 
-        params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
+      const { data } = await client.GET("/api/usage/bandwidth", { signal,
+        params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy } }
       })
       return data
     },
@@ -145,11 +144,11 @@ export default function UsagePage() {
     staleTime: 60_000,
   })
 
-  const { data: logActivity, isLoading: loadingActivity, isFetching: fetchingActivity } = useQuery({
+  const { data: logActivity, isLoading: loadingActivity, isFetching: fetchingActivity, error: errorActivity } = useQuery({
     queryKey: ['usage', 'log-activity', activeServiceId, startTime, endTime, activityBy],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/log-activity", { signal, 
-        params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy as any } }
+      const { data } = await client.GET("/api/usage/log-activity", { signal,
+        params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy } }
       })
       return data
     },
@@ -157,15 +156,61 @@ export default function UsagePage() {
     staleTime: 60_000,
   })
 
-  const { data: prefill, isLoading: loadingPrefill } = useQuery({
-    queryKey: ['usage', 'prefill', activeServiceId],
+  // /prefill is split into /rates (FAST, local-config only) + /prefill (FULL,
+  // Fastly stats + edge_ratio). Stat cards always need rates, so fire that
+  // immediately. The Cost Estimator needs the full payload but lives below
+  // the fold — defer the slow call until it scrolls into view.
+  const { data: prefillRates } = useQuery({
+    queryKey: ['usage', 'prefill-rates', activeServiceId],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/prefill", { signal })
-      return data as any
+      const { data } = await client.GET("/api/usage/prefill/rates", { signal })
+      return data
     },
     enabled: isReady,
+    // Rates only change on admin config edits; analyst can pay one round-trip
+    // every 5 minutes for safety. (Frontend bound — backend has no cache here.)
     staleTime: 5 * 60_000,
   })
+
+  const estimatorRef = useRef<HTMLDivElement>(null)
+  const [estimatorVisible, setEstimatorVisible] = useState(false)
+  useEffect(() => {
+    if (estimatorVisible || !estimatorRef.current) return
+    if (typeof IntersectionObserver === 'undefined') {
+      setEstimatorVisible(true)
+      return
+    }
+    const node = estimatorRef.current
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setEstimatorVisible(true)
+          observer.disconnect()
+        }
+      },
+      // 600px rootMargin matches the site-wide LazyMount default so the
+      // fetch fires one screen ahead of the user reaching the section.
+      { rootMargin: '600px' },
+    )
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [estimatorVisible])
+
+  const { data: prefillFull, isLoading: loadingPrefillFull } = useQuery({
+    queryKey: ['usage', 'prefill-full', activeServiceId],
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/usage/prefill", { signal })
+      return data
+    },
+    enabled: isReady && estimatorVisible,
+    staleTime: 5 * 60_000,
+  })
+
+  // Stat cards always read from rates. Cost Estimator reads from the merged
+  // shape (full overrides rates when present) so it shows real Fastly traffic
+  // once /prefill resolves, but renders defaults from /rates while waiting.
+  const prefill = prefillFull ?? prefillRates
+  const loadingPrefill = !prefillRates && !prefillFull
 
   const isFetchingAny = fetchingStorage || fetchingOps || fetchingBw || fetchingActivity
   const isLoadingInitial = loadingStorage || loadingOps || loadingBw || loadingActivity
@@ -192,7 +237,7 @@ export default function UsagePage() {
   const bwTimes = bw?.data.map((p: any) => p.time) ?? []
   const bwBytes = bw?.data.map((p: any) => p.bandwidth_bytes ?? 0) ?? []
   const maxBw = bwBytes.length > 0 ? Math.max(...bwBytes) : 0
-  
+
   let bwDiv = 1
   let bwUnit = 'B'
   if (maxBw >= 1e9) { bwDiv = 1e9; bwUnit = 'GB' }
@@ -207,16 +252,16 @@ export default function UsagePage() {
   const bwLayout = { ...baseLayout, yaxis: { title: bwUnit, gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }
 
   // ── Log generation chart ───────────────────────────────────────────────────
-  const genTimes = (logActivity as any)?.data.map((p: any) => p.time) ?? []
-  const ingestCounts = (logActivity as any)?.data.map((p: any) => p.row_count) ?? []
-  const apiCounts = (logActivity as any)?.data.map((p: any) => p.api_requests) ?? []
+  const genTimes = logActivity?.data.map(p => p.time) ?? []
+  const ingestCounts = logActivity?.data.map(p => p.row_count) ?? []
+  const apiCounts = logActivity?.data.map(p => p.api_requests) ?? []
   // Fastly's authoritative "log records emitted to FOS" count — same field
   // backing /api/admin/log-accounting. Overlay on Processed so the user can
   // eyeball emitted-vs-ingested without bouncing to the admin panel.
-  const fastlyLogCounts = (logActivity as any)?.data.map((p: any) => p.fastly_log_records) ?? []
+  const fastlyLogCounts = logActivity?.data.map(p => p.fastly_log_records) ?? []
 
-  const hasApiCounts = apiCounts.some((v: any) => v != null && v > 0)
-  const hasFastlyLogCounts = fastlyLogCounts.some((v: any) => v != null && v > 0)
+  const hasApiCounts = apiCounts.some(v => v != null && v > 0)
+  const hasFastlyLogCounts = fastlyLogCounts.some(v => v != null && v > 0)
 
   const logGenData: any[] = []
 
@@ -271,9 +316,15 @@ export default function UsagePage() {
       <div className={cn("grid grid-cols-2 lg:grid-cols-4 gap-4 transition-opacity duration-100", isFetchingAny && !isLoadingInitial && "opacity-40 pointer-events-none")}>
         <StatCard
           title="Storage Impact (Period)"
-          value={<span className="text-green-600">{(storage?.total_billed_gb_hours ?? 0).toFixed(2)} GB-hrs</span>}
+          value={
+            errorStorage
+              ? <span className="text-muted-foreground">—</span>
+              : <span className="text-green-600">{(storage?.total_billed_gb_hours ?? 0).toFixed(2)} GB-hrs</span>
+          }
           sub={
-            loadingStorage ? (
+            errorStorage ? (
+              <span role="alert" className="text-[11px] text-destructive">Failed to load storage usage.</span>
+            ) : loadingStorage ? (
               <div className="flex flex-col gap-1.5 mt-2">
                 <Skeleton className="h-3 w-full" />
                 <Skeleton className="h-3 w-full" />
@@ -284,7 +335,7 @@ export default function UsagePage() {
                   <span>Live Storage:</span>
                   <strong className="text-foreground">{formatBytes(storage?.live_bytes ?? 0)}</strong>
                 </div>
-                <div className="flex justify-between text-amber-600 dark:text-amber-500">
+                <div className="flex justify-between text-amber-700 dark:text-amber-500">
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger>
@@ -311,7 +362,7 @@ export default function UsagePage() {
             <div className="space-y-1">
               <div>Writes, lists, deletes</div>
               <div className="flex items-center justify-between">
-                <span className="text-[10px] opacity-70 uppercase tracking-wider">Rate: ${rateA}/1k</span>
+                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Rate: ${rateA}/1k</span>
                 <Button variant="link" size="sm" className="h-auto p-0 text-[10px] font-bold text-primary" onClick={() => window.location.href = '/admin'}>Edit</Button>
               </div>
             </div>
@@ -327,7 +378,7 @@ export default function UsagePage() {
             <div className="space-y-1">
               <div>Reads / downloads</div>
               <div className="flex items-center justify-between">
-                <span className="text-[10px] opacity-70 uppercase tracking-wider">Rate: ${prefill?.class_b_rate_per_10k ?? 0.01}/10k</span>
+                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Rate: ${prefill?.class_b_rate_per_10k ?? 0.01}/10k</span>
                 <Button variant="link" size="sm" className="h-auto p-0 text-[10px] font-bold text-primary" onClick={() => window.location.href = '/admin'}>Edit</Button>
               </div>
             </div>
@@ -351,8 +402,10 @@ export default function UsagePage() {
                 <div className="flex justify-between">
                   <span>Storage:</span>
                   <div className="flex flex-col items-end">
-                    <strong className="text-foreground">{fmtUSD(roughStorage)}</strong>
-                    <span className="text-[9px] opacity-60 uppercase tracking-tighter">Rate: ${rateStorage}/GB</span>
+                    {errorStorage
+                      ? <strong className="text-destructive">n/a</strong>
+                      : <strong className="text-foreground">{fmtUSD(roughStorage)}</strong>}
+                    <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">Rate: ${rateStorage}/GB</span>
                   </div>
                 </div>
                 <div className="flex justify-between">
@@ -363,9 +416,12 @@ export default function UsagePage() {
                   <span>CDN Egress:</span>
                   <div className="flex flex-col items-end">
                     <strong className="text-foreground">{fmtUSD(roughBandwidth)}</strong>
-                    <span className="text-[9px] opacity-60 uppercase tracking-tighter">Rate: ${rateEgress}/GB</span>
+                    <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">Rate: ${rateEgress}/GB</span>
                   </div>
                 </div>
+                {errorStorage && (
+                  <div role="alert" className="text-[10px] text-destructive mt-0.5">Partial estimate — storage cost excluded.</div>
+                )}
               </div>
             )
           }
@@ -383,15 +439,13 @@ export default function UsagePage() {
           headerAction={fosOpsIntervalButtons}
           isLoading={loadingOps}
           isFetching={fetchingOps}
+          error={errorOps as AnalyticsCardError | null}
+          isEmpty={opsDates.length === 0}
           className="h-[360px]"
           contentClassName="p-2"
           helpContent={<FosOperationsHelp note={ops?.note} />}
         >
-          {opsDates.length === 0 && !loadingOps ? (
-            <div className="flex items-center justify-center h-full text-muted-foreground text-sm">No data available</div>
-          ) : (
-            <PlotlyChart data={opsData as any[]} layout={opsLayout} height="100%" />
-          )}
+          <PlotlyChart data={opsData as any[]} layout={opsLayout} height="100%" />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -400,14 +454,12 @@ export default function UsagePage() {
           headerAction={intervalButtons}
           isLoading={loadingBw}
           isFetching={fetchingBw}
+          error={errorBw as AnalyticsCardError | null}
+          isEmpty={bwTimes.length === 0}
           className="h-[360px]"
           contentClassName="p-2"
         >
-          {bwTimes.length === 0 && !loadingBw ? (
-            <div className="flex items-center justify-center h-full text-muted-foreground text-sm">No data available</div>
-          ) : (
-            <PlotlyChart data={bwData as any[]} layout={bwLayout} height="100%" />
-          )}
+          <PlotlyChart data={bwData as any[]} layout={bwLayout} height="100%" />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -416,6 +468,7 @@ export default function UsagePage() {
           headerAction={intervalButtons}
           isLoading={loadingActivity}
           isFetching={fetchingActivity}
+          error={errorActivity as AnalyticsCardError | null}
           className="h-[360px]"
           contentClassName="p-2"
           helpContent={<p>Number of requests generated by your Fastly service.</p>}
@@ -433,34 +486,34 @@ export default function UsagePage() {
           headerAction={intervalButtons}
           isLoading={loadingActivity}
           isFetching={fetchingActivity}
+          error={errorActivity as AnalyticsCardError | null}
+          isEmpty={genTimes.length === 0}
           className="h-[360px]"
           contentClassName="p-2"
         >
-          {genTimes.length === 0 && !loadingActivity ? (
-            <div className="flex items-center justify-center h-full text-muted-foreground text-sm">No data available</div>
-          ) : (
-            <PlotlyChart data={logProcData as any[]} layout={baseLayout} height="100%" />
-          )}
+          <PlotlyChart data={logProcData as any[]} layout={baseLayout} height="100%" />
         </AnalyticsCard>
         </div>
 
       {/* ── Cost Estimator ─────────────────────────────────────────────────── */}
       {!isAnalyst && (
-        <AnalyticsCard
-          title="Cost Estimator"
-          description="Estimate your monthly FOS cost based on your configuration and contract rates. Pre-filled from your active service and rate settings."
-        >
-          {loadingPrefill ? (
-            <div className="space-y-3">
-              <SkeletonGrid count={4} height="36px" className="rounded-md" />
-            </div>
-          ) : (
-            <CostCalculator
-              prefillData={prefill ?? undefined}
-              prefillNote={prefillNote}
-            />
-          )}
-        </AnalyticsCard>
+        <div ref={estimatorRef}>
+          <AnalyticsCard
+            title="Cost Estimator"
+            description="Estimate your monthly FOS cost based on your configuration and contract rates. Pre-filled from your active service and rate settings."
+          >
+            {loadingPrefill || (estimatorVisible && loadingPrefillFull) ? (
+              <div className="space-y-3">
+                <SkeletonGrid count={4} height="36px" className="rounded-md" />
+              </div>
+            ) : (
+              <CostCalculator
+                prefillData={prefill ?? undefined}
+                prefillNote={prefillNote}
+              />
+            )}
+          </AnalyticsCard>
+        </div>
       )}
       </>
     )

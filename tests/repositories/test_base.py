@@ -39,16 +39,21 @@ class TestSafeIso:
 
 class TestIsStaleViewError:
     @pytest.mark.parametrize(
-        "msg",
+        "msg,exc_cls",
         [
-            "No files found in the given path",
-            "Catalog Error: Table with name foo does not exist",
-            "does not exist in this context",
-            "No such file or directory: /tmp/buf.parquet",
+            ("No files found in the given path", "IOException"),
+            ("No such file or directory: /tmp/buf.parquet", "IOException"),
+            ("Catalog Error: Table with name foo does not exist", "CatalogException"),
+            ("does not exist in this context", "CatalogException"),
         ],
     )
-    def test_stale_messages_return_true(self, msg):
-        assert _is_stale_view_error(Exception(msg)) is True
+    def test_stale_messages_return_true(self, msg, exc_cls):
+        """Genuine stale-view shapes (IO + Catalog DuckDB exceptions with one
+        of the canonical phrases) trigger the retry/rebuild path."""
+        import duckdb
+
+        exc = getattr(duckdb, exc_cls)(msg)
+        assert _is_stale_view_error(exc) is True
 
     @pytest.mark.parametrize(
         "msg",
@@ -60,7 +65,34 @@ class TestIsStaleViewError:
         ],
     )
     def test_non_stale_messages_return_false(self, msg):
+        """Non-stale error messages must not trigger retry, even when
+        raised through DuckDB IO/Catalog exceptions."""
+        import duckdb
+
+        assert _is_stale_view_error(duckdb.IOException(msg)) is False
         assert _is_stale_view_error(Exception(msg)) is False
+
+    def test_substring_in_non_duckdb_exception_does_not_trigger_rebuild(self):
+        """Finding 005 (2026-06-15): an attacker who can influence a filter
+        value or column name can embed a canonical stale-view phrase
+        into the message of a non-IO/non-Catalog DuckDB exception (e.g.
+        ``ConversionException`` includes the offending input verbatim).
+        Hammered, the prior substring-only detector treated each spoofed
+        error as a stale view and triggered the expensive synchronous
+        rebuild + catalog refresh — a credentialed-DoS vector against
+        the per-service iceberg lock. The class check now rejects."""
+        import duckdb
+
+        spoofed = duckdb.ConversionException("Conversion failed: value 'No files found' is not a valid INTEGER")
+        assert _is_stale_view_error(spoofed) is False, (
+            "ConversionException with attacker-injected substring must not trigger the stale-view rebuild path"
+        )
+
+        # Another high-traffic exception class commonly seen with user-supplied
+        # filter values — BinderException — must also be rejected even when
+        # its message embeds a canonical phrase.
+        binder = duckdb.BinderException("Binder Error: Table 'fake' does not exist")
+        assert _is_stale_view_error(binder) is False
 
 
 # ── QueryRunner ───────────────────────────────────────────────────────────────
@@ -92,10 +124,18 @@ class TestQueryRunner:
 
         attempts = {"n": 0}
 
+        import duckdb as _duckdb_mod
+
         def flaky_execute(sql, params=None):
             attempts["n"] += 1
             if attempts["n"] == 1:
-                raise Exception("IO Error: No files found that match the pattern .../buffer/batch_x.parquet")
+                # Finding 005: the stale-view detector now requires a real
+                # IOException / CatalogException (not a bare Exception with a
+                # matching substring) so attacker-controlled ConversionException
+                # messages can't spoof the rebuild path.
+                raise _duckdb_mod.IOException(
+                    "IO Error: No files found that match the pattern .../buffer/batch_x.parquet"
+                )
             cursor = MagicMock()
             cursor.fetchone.return_value = (1,)
             return cursor
@@ -143,8 +183,10 @@ class TestQueryRunner:
         original stale-view error — not the refresh side-effect error."""
         from unittest.mock import MagicMock
 
+        import duckdb as _duckdb_mod
+
         fake_con = MagicMock()
-        fake_con.execute.side_effect = Exception("IO Error: No files found at path")
+        fake_con.execute.side_effect = _duckdb_mod.IOException("IO Error: No files found at path")
         runner = QueryRunner(fake_con, test_service_source)
 
         with patch("backend.core.iceberg.update_iceberg_view", side_effect=RuntimeError("rebind failed")):
@@ -159,8 +201,10 @@ class TestQueryRunner:
 
     def test_execute_with_retry_retries_on_stale_view(self, in_memory_duckdb, test_service_source):
         """On a stale-view error, the runner refreshes the view and retries."""
+        import duckdb as _duckdb_mod
+
         runner = QueryRunner(in_memory_duckdb, test_service_source)
-        stale_error = Exception("No files found in the given path")
+        stale_error = _duckdb_mod.IOException("No files found in the given path")
 
         call_count = {"n": 0}
         original_execute = runner.execute
@@ -195,8 +239,10 @@ class TestQueryRunner:
 
     def test_create_temp_table_returns_false_on_permanent_stale_failure(self, in_memory_duckdb, test_service_source):
         """Returns False (not raises) when both attempts fail with stale-view errors."""
+        import duckdb as _duckdb_mod
+
         runner = QueryRunner(in_memory_duckdb, test_service_source)
-        stale_error = Exception("No files found in the given path")
+        stale_error = _duckdb_mod.IOException("No files found in the given path")
 
         with (
             patch.object(runner, "execute", side_effect=stale_error),
@@ -589,6 +635,274 @@ class TestExecuteTopNBatchIntegerAggregation:
             f"This is the silent ImportError regression. Got: {country_counts}"
         )
 
+    def test_execute_top_n_rollups_live_skips_nonrendered_identifier_fields(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Lever B: the live active-hour top-up must skip fields in
+        ``_LIVE_TOPN_SKIP_FIELDS`` (non-rendered per-request identifiers /
+        raw metrics) while still merging current-hour data for rendered
+        facet fields. ``rid`` is in the skip set; ``country`` is not.
+
+        With an empty rollup dir, the ONLY source of data is the live
+        branch. So a rendered field (country) must show the current hour,
+        and a skipped field (rid) must be absent entirely — proving the
+        live merge ran AND that it excluded the skip-set field (rather than
+        skipping the whole branch)."""
+        from datetime import UTC, datetime, timedelta
+
+        from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS, QueryRunner
+
+        assert "rid" in _LIVE_TOPN_SKIP_FIELDS and "country" not in _LIVE_TOPN_SKIP_FIELDS
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        in_memory_duckdb.execute("CREATE TABLE logs_liveskip (timestamp TIMESTAMPTZ, country VARCHAR, rid VARCHAR)")
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_liveskip VALUES (?, 'US', 'r1'), (?, 'US', 'r2'), (?, 'JP', 'r3')",
+            [
+                active_dt + timedelta(minutes=5),
+                active_dt + timedelta(minutes=15),
+                active_dt + timedelta(minutes=25),
+            ],
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_liveskip")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "rid"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+                {"name": "rid", "type": "VARCHAR"},
+            ],
+        )
+        (tmp_path / "rollups" / "hour").mkdir(parents=True)
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = active_dt.isoformat()
+        et = (active_dt + timedelta(hours=1)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country", "rid"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_liveskip")
+
+        country_counts = {value: count for (field, value, count) in rows if field == "country"}
+        rid_values = [value for (field, value, count) in rows if field == "rid"]
+        assert country_counts.get("US") == 2 and country_counts.get("JP") == 1, (
+            f"rendered field 'country' lost its current-hour data — live merge regressed. Got {country_counts}"
+        )
+        assert rid_values == [], (
+            f"skip-set field 'rid' must NOT be computed in the live top-up (no rollup data here either), "
+            f"but got live rid values: {rid_values}"
+        )
+
+    def test_execute_top_n_rollups_rollup_path_still_returns_skip_field(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Lever B coverage (rollup direction): ``_LIVE_TOPN_SKIP_FIELDS``
+        narrows the LIVE active-hour top-up ONLY — the rollup path still
+        computes every requested field from parquet (it iterates
+        ``safe_fields``, not the live-filtered list). So a skip-set field
+        that HAS rollup data must still be returned, carrying its closed-hour
+        rollup counts but NOT the current-hour live increment.
+
+        Complements ``..._live_skips_nonrendered_identifier_fields`` (which
+        seeds an empty rollup dir, so the skip-set field is absent entirely):
+        here the rollup HAS data, pinning that the skip set never suppresses
+        the rollup read. ``rid`` is in the skip set; ``country`` is not.
+
+        The ``country`` merge (rollup + live) is also a vacuity guard: the
+        live branch swallows exceptions (``except Exception: pass``), so a
+        broken live setup would silently yield rollup-only counts — the
+        ``country == 7`` assertion fails loudly if the live merge didn't run."""
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS, QueryRunner
+
+        assert "rid" in _LIVE_TOPN_SKIP_FIELDS and "country" not in _LIVE_TOPN_SKIP_FIELDS
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        closed_hour_dt = active_dt - timedelta(hours=1)  # fully-closed hour inside the window
+        closed_hour_str = closed_hour_dt.strftime("%Y-%m-%d-%H")
+
+        # Closed-hour rollup parquets (per-field per-hour layout) for BOTH a
+        # skip-set field (rid) and a rendered field (country).
+        for fld, val, cnt in [("rid", "r_rolled", 7), ("country", "US", 5)]:
+            d = tmp_path / "rollups" / "hour" / f"field={fld}" / f"hour={closed_hour_str}"
+            d.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                pa.table({"value": [val], "count": pa.array([cnt], type=pa.int64())}),
+                str(d / "compacted.parquet"),
+            )
+
+        # Live current-hour rows for BOTH fields, served via the view fallback
+        # (no buffer/ dir → the direct fast path returns None).
+        in_memory_duckdb.execute("CREATE TABLE logs_rollupkeep (timestamp TIMESTAMPTZ, country VARCHAR, rid VARCHAR)")
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_rollupkeep VALUES (?, 'US', 'r_live'), (?, 'US', 'r_live')",
+            [active_dt + timedelta(minutes=5), active_dt + timedelta(minutes=15)],
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_rollupkeep")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "rid"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+                {"name": "rid", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = closed_hour_dt.isoformat()
+        et = (active_dt + timedelta(hours=1)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country", "rid"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_rollupkeep")
+
+        by_field: dict[str, dict] = {}
+        for fld, val, cnt in rows:
+            by_field.setdefault(fld, {})[val] = cnt
+
+        # country: rollup (5) merged with the live current-hour rows (2) = 7.
+        assert by_field.get("country", {}).get("US") == 7, (
+            f"rendered field 'country' must merge rollup (5) + live current-hour (2) = 7; got {by_field.get('country')}"
+        )
+        # rid: rollup data survives — the skip set never touches the rollup read...
+        assert by_field.get("rid", {}).get("r_rolled") == 7, (
+            f"skip-set field 'rid' must still return its closed-hour rollup count (7) — the skip set narrows the "
+            f"LIVE top-up only, not the rollup path; got {by_field.get('rid')}"
+        )
+        # ...but its current-hour live increment must NOT appear (live top-up skipped it).
+        assert "r_live" not in by_field.get("rid", {}), (
+            f"skip-set field 'rid' must NOT pick up the current-hour live increment (live top-up skips it); "
+            f"got {by_field.get('rid')}"
+        )
+
+    def test_execute_top_n_rollups_skip_field_with_no_data_does_not_warn(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Lever B side-effect guard: a ``_LIVE_TOPN_SKIP_FIELDS`` field that
+        ends up with no merged data (live top-up skips it, rollup has none)
+        must NOT emit the '[top_n_rollups] empty result' warning — that's an
+        expected outcome for a non-rendered field, not a backfill gap. A
+        rendered field that is genuinely empty MUST still warn, so the
+        operator signal isn't lost.
+
+        ``rid`` is in the skip set; ``status`` is rendered and here has only
+        NULLs (no top-N values), so it exercises the real empty-warning path."""
+        from datetime import UTC, datetime, timedelta
+
+        from backend.repositories import _base
+        from backend.repositories._base import _EMPTY_ROLLUP_WARN_TS, _LIVE_TOPN_SKIP_FIELDS, QueryRunner
+
+        assert "rid" in _LIVE_TOPN_SKIP_FIELDS and "status" not in _LIVE_TOPN_SKIP_FIELDS
+        # Clear cross-test rate-limit state so prior runs can't suppress our warning.
+        _EMPTY_ROLLUP_WARN_TS.clear()
+        # The rate-limit compares time.monotonic() to the (cleared → 0.0) last-warn
+        # stamp: `now - 0.0 >= _EMPTY_ROLLUP_WARN_INTERVAL_S` (300s). On a freshly
+        # booted CI runner monotonic() can itself be < 300, so the check is False
+        # and the warning is suppressed — an uptime-dependent flake (green locally
+        # and on warm runners, red on cold ones). Drop the interval to 0 so a
+        # genuinely-empty rendered field always warns here.
+        monkeypatch.setattr(_base, "_EMPTY_ROLLUP_WARN_INTERVAL_S", 0.0)
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        in_memory_duckdb.execute(
+            "CREATE TABLE logs_skipwarn (timestamp TIMESTAMPTZ, country VARCHAR, rid VARCHAR, status VARCHAR)"
+        )
+        # country has live data; rid+status do not (status column is all-NULL).
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_skipwarn VALUES (?, 'US', NULL, NULL), (?, 'JP', NULL, NULL)",
+            [active_dt + timedelta(minutes=5), active_dt + timedelta(minutes=15)],
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_skipwarn")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "rid", "status"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+                {"name": "rid", "type": "VARCHAR"},
+                {"name": "status", "type": "VARCHAR"},
+            ],
+        )
+        (tmp_path / "rollups" / "hour").mkdir(parents=True)
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = active_dt.isoformat()
+        et = (active_dt + timedelta(hours=1)).isoformat()
+        # Capture the warning by spying on the module logger directly rather than
+        # via caplog. Under `-n auto`, a concurrent test can leave global logging
+        # state altered (level / propagation / logging.disable), which made caplog
+        # intermittently capture zero records here — green locally and on the push
+        # CI run, red on the PR run of the same commit. A direct spy is immune to
+        # global logging state and preserves the exact assertions below.
+        captured: list[str] = []
+
+        def _spy_warning(msg, *args, **_kwargs):
+            captured.append(msg % args if args else str(msg))
+
+        monkeypatch.setattr(_base._logger, "warning", _spy_warning)
+        runner.execute_top_n_rollups(["country", "rid", "status"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_skipwarn")
+
+        warnings = [m for m in captured if "empty result for field=" in m]
+        assert not any("field='rid'" in m for m in warnings), (
+            f"skip-set field 'rid' must NOT warn when it has no merged data (it's non-rendered by design), "
+            f"but a warning fired: {warnings}"
+        )
+        assert any("field='status'" in m for m in warnings), (
+            f"rendered field 'status' is genuinely empty and MUST still warn so the operator signal isn't lost, "
+            f"but no warning fired: {warnings}"
+        )
+
+    def test_live_topn_skip_fields_are_not_rendered_dashboard_panels(self):
+        """Drift guard: every field in ``_LIVE_TOPN_SKIP_FIELDS`` is dropped
+        from the LIVE active-hour top-up, so if one were ALSO rendered as a
+        dashboard facet panel that panel would silently lose current-hour
+        freshness (it'd show data only through the last closed hour) with no
+        test failure. Assert the skip set stays disjoint from the categorized
+        card IDs the frontend renders (frontend/app/dashboard/_sections/
+        categories.ts → CARD_CATEGORIES).
+
+        Limitation: this covers the *static* categorized cards only. Custom
+        cards (bootstrap ``show_in_dashboard`` fields not in CATEGORIZED_CARD_IDS)
+        are runtime config and can't be checked here — but the skip set is
+        non-rendered identifiers / raw metrics that an admin wouldn't surface,
+        and a category collision is the realistic drift this catches."""
+        import re
+        from pathlib import Path
+
+        from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS
+
+        repo_root = Path(__file__).resolve().parents[2]
+        categories_ts = repo_root / "frontend" / "app" / "dashboard" / "_sections" / "categories.ts"
+        assert categories_ts.is_file(), f"expected dashboard categories file at {categories_ts}"
+
+        text = categories_ts.read_text()
+        rendered: set[str] = set()
+        # cardIds arrays may span multiple lines; capture each [ ... ] block.
+        for block in re.findall(r"cardIds:\s*\[(.*?)\]", text, re.DOTALL):
+            rendered.update(re.findall(r"'([^']+)'", block))
+
+        # Guard against a parse regression silently passing the test.
+        assert "country" in rendered and len(rendered) > 30, (
+            f"categories.ts parse looks wrong (found {len(rendered)} card ids) — "
+            f"fix the parser before trusting this guard"
+        )
+
+        collisions = _LIVE_TOPN_SKIP_FIELDS & rendered
+        assert not collisions, (
+            f"{sorted(collisions)} are in _LIVE_TOPN_SKIP_FIELDS but ALSO rendered as dashboard "
+            f"facet panels (categories.ts) — those panels would silently lose current-hour freshness. "
+            f"Either remove them from the skip set or stop rendering them."
+        )
+
     def test_execute_top_n_rollups_clamps_live_window_to_requested_range(
         self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
     ):
@@ -657,6 +971,601 @@ class TestExecuteTopNBatchIntegerAggregation:
             f"JP row at +45min is OUTSIDE the requested [+5min, +35min] window but inside the "
             f"active hour — must NOT be counted. The clamp regressed. Got {country_counts}"
         )
+
+    def test_execute_top_n_rollups_skips_day_file_on_partial_window(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Partial-day windows (start or end mid-day) must NOT include the
+        boundary day's per-day rollup file — it covers the full 24 hours
+        and would surface values from outside the user's window. Reader
+        must fall back to per-hour rollups for the in-window hours.
+
+        Pinned because the symptom is a phantom top-N value: user sees
+        ``edge_score=50, count=154`` on a 24h window starting at 17:36,
+        clicks it, and ``/query`` returns zero rows because the matching
+        rows are actually at 05:00 (12 hours before the window).
+        """
+        import uuid
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+
+        def _write_per_hour(field: str, hour: str, rows: list[tuple]) -> None:
+            d = cache_root / "rollups" / "hour" / f"field={field}" / f"hour={hour}"
+            d.mkdir(parents=True, exist_ok=True)
+            table = pa.table(
+                {
+                    "value": pa.array([v for v, _ in rows]),
+                    "count": pa.array([c for _, c in rows], type=pa.int64()),
+                }
+            )
+            pq.write_table(table, str(d / f"compacted_{uuid.uuid4().hex[:8]}.parquet"))
+
+        def _write_per_day(field: str, day: str, rows: list[tuple]) -> None:
+            d = cache_root / "rollups" / "day" / f"field={field}" / f"day={day}"
+            d.mkdir(parents=True, exist_ok=True)
+            table = pa.table(
+                {
+                    "field": pa.array([field for _ in rows]),
+                    "value": pa.array([v for v, _ in rows]),
+                    "count": pa.array([c for _, c in rows], type=pa.int64()),
+                }
+            )
+            pq.write_table(table, str(d / "compacted.parquet"))
+
+        # Anchor relative to the active hour so we don't have to mock
+        # datetime. Boundary day D is two days before today (so it's
+        # always closed). Window: [D 17:36, D+1 17:36).
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        day_d = (active_dt - timedelta(days=2)).date()
+        day_d_plus_1 = day_d + timedelta(days=1)
+        day_d_str = day_d.isoformat()
+        day_d_plus_1_str = day_d_plus_1.isoformat()
+
+        # Per-day file for boundary day D contains BOTH:
+        #   "in_window_val" (count=10, would be at hour 20 — inside window)
+        #   "out_of_window_val" (count=99, would be at hour 05 — outside window)
+        # If the reader uses this day file, BOTH values surface in top-N.
+        # With the fix the day file is skipped and only per-hour rollups
+        # for the in-window hours of D contribute — so out_of_window_val
+        # never appears.
+        _write_per_day(
+            "edge_score",
+            day_d_str,
+            [("in_window_val", 10), ("out_of_window_val", 99)],
+        )
+        # Per-hour rollups for D's in-window hours only have in_window_val.
+        for h in range(18, 24):
+            _write_per_hour("edge_score", f"{day_d_str}-{h:02d}", [("in_window_val", 1)])
+        # The boundary hour 17 also exists with in_window_val; the
+        # 00:00-17:36 portion of D is intentionally NOT in any per-hour
+        # file present (mirrors the user repro where out_of_window_val
+        # only lives in the early-morning hours of the day rollup).
+        _write_per_hour("edge_score", f"{day_d_str}-17", [("in_window_val", 1)])
+
+        # D+1 is the active or end-day side. Per-day must NOT cover it
+        # (active-day guard) and its per-hour files contribute in-window
+        # contents.
+        for h in range(0, 18):
+            _write_per_hour("edge_score", f"{day_d_plus_1_str}-{h:02d}", [("in_window_val", 1)])
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "edge_score"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "edge_score", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = (datetime.combine(day_d, datetime.min.time(), tzinfo=UTC) + timedelta(hours=17, minutes=36)).isoformat()
+        et = (
+            datetime.combine(day_d_plus_1, datetime.min.time(), tzinfo=UTC) + timedelta(hours=17, minutes=36)
+        ).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["edge_score"], st, et, limit=10)
+
+        values = {value: count for (field, value, count) in rows if field == "edge_score"}
+        assert "out_of_window_val" not in values, (
+            f"out_of_window_val (count=99) lives only in the boundary day's per-day rollup. "
+            f"It MUST NOT appear when the request window starts mid-day — that's the partial-day "
+            f"over-inclusion bug. Got {values}."
+        )
+        assert values.get("in_window_val", 0) > 0, (
+            f"in_window_val must be surfaced from per-hour rollups for the boundary days; got {values}"
+        )
+
+    def test_execute_top_n_rollups_uses_day_file_when_window_fully_contains_day(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Companion to the partial-window test: when the window FULLY
+        contains a closed day (hour-aligned [D 00:00, D+1 00:00)), the
+        per-day rollup IS used — preserving the ~24x file-open
+        reduction it was built for."""
+        import uuid
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        day_d = (active_dt - timedelta(days=2)).date()
+        day_d_str = day_d.isoformat()
+        day_d_plus_1_str = (day_d + timedelta(days=1)).isoformat()
+
+        # Day file says count=42; if it's not used, per-hour file (count=1)
+        # would surface instead and the count would be wrong.
+        d = cache_root / "rollups" / "day" / "field=edge_score" / f"day={day_d_str}"
+        d.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"field": ["edge_score"], "value": ["v"], "count": pa.array([42], type=pa.int64())}),
+            str(d / "compacted.parquet"),
+        )
+        # Stub per-hour to a different count so a wrong-source read would
+        # be visible.
+        h = cache_root / "rollups" / "hour" / "field=edge_score" / f"hour={day_d_str}-12"
+        h.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"value": ["v"], "count": pa.array([1], type=pa.int64())}),
+            str(h / f"compacted_{uuid.uuid4().hex[:8]}.parquet"),
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "edge_score"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "edge_score", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = f"{day_d_str}T00:00:00+00:00"
+        et = f"{day_d_plus_1_str}T00:00:00+00:00"
+        rows, _ = runner.execute_top_n_rollups(["edge_score"], st, et, limit=10)
+
+        values = {value: count for (field, value, count) in rows if field == "edge_score"}
+        assert values.get("v") == 42, (
+            f"hour-aligned window fully containing day D must use the per-day rollup (count=42), "
+            f"not the per-hour rollup (count=1). Got {values}."
+        )
+
+    def test_execute_top_n_rollups_no_day_vs_bundled_double_count(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """When both a per-day rollup AND per-hour-bundled files exist for
+        the same closed day, the reader must NOT include both — the
+        UNION ALL would sum the same data twice. The bundled-hour walk
+        should skip hours whose day is already covered by a usable
+        per-day file for at least one safe field.
+
+        Pre-fix: a 24h hour-aligned closed-day window returned 2x counts
+        because the day file aggregated the day AND each of the 24
+        bundled-hour files (containing the same data) were also UNION'd."""
+        import uuid
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        day_d = (active_dt - timedelta(days=2)).date()
+        day_d_str = day_d.isoformat()
+        day_d_plus_1_str = (day_d + timedelta(days=1)).isoformat()
+
+        # Per-day file: edge_score = "v" with count=100
+        d = cache_root / "rollups" / "day" / "field=edge_score" / f"day={day_d_str}"
+        d.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"field": ["edge_score"], "value": ["v"], "count": pa.array([100], type=pa.int64())}),
+            str(d / "compacted.parquet"),
+        )
+        # Per-hour-bundled file for one hour of D containing the same
+        # underlying counts. If the reader includes both day file AND
+        # this bundled file, we'd see >100.
+        bd = cache_root / "rollups" / "hour_bundled" / f"hour={day_d_str}-05"
+        bd.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"field": ["edge_score"], "value": ["v"], "count": pa.array([100], type=pa.int64())}),
+            str(bd / "all_fields.parquet"),
+        )
+        # And a per-field per-hour file too, to ensure the per-field walk
+        # also correctly defers to the day file (existing behavior).
+        h = cache_root / "rollups" / "hour" / "field=edge_score" / f"hour={day_d_str}-05"
+        h.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"value": ["v"], "count": pa.array([100], type=pa.int64())}),
+            str(h / f"compacted_{uuid.uuid4().hex[:8]}.parquet"),
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "edge_score"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "edge_score", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = f"{day_d_str}T00:00:00+00:00"
+        et = f"{day_d_plus_1_str}T00:00:00+00:00"
+        rows, _ = runner.execute_top_n_rollups(["edge_score"], st, et, limit=10)
+
+        values = {value: count for (field, value, count) in rows if field == "edge_score"}
+        assert values.get("v") == 100, (
+            f"hour-aligned closed-day window must return day-file count (100), not double-counted "
+            f"day+bundled (200) or day+bundled+per-field (300). Got {values}."
+        )
+
+    def test_execute_top_n_rollups_bundled_still_used_when_no_day_file_for_field(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """When a closed day has a day file for ONE field but not ANOTHER,
+        the bundled-hour file is still skipped (to avoid double-counting
+        the field with a day file) and the field WITHOUT a day file falls
+        back to per-field per-hour. Pinned because the new bundled-skip
+        check is global (any field with a day file), so the cost of
+        avoiding the double-count is per-field per-hour for the
+        uncovered field — must still produce correct counts."""
+        import uuid
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        day_d = (active_dt - timedelta(days=2)).date()
+        day_d_str = day_d.isoformat()
+        day_d_plus_1_str = (day_d + timedelta(days=1)).isoformat()
+
+        # Field A: has a per-day file (count=50)
+        da = cache_root / "rollups" / "day" / "field=field_a" / f"day={day_d_str}"
+        da.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"field": ["field_a"], "value": ["a1"], "count": pa.array([50], type=pa.int64())}),
+            str(da / "compacted.parquet"),
+        )
+        # Field B: NO day file, only per-field per-hour rollups (newly-
+        # added custom field that compaction hasn't run for yet).
+        for h_idx in range(24):
+            h = cache_root / "rollups" / "hour" / "field=field_b" / f"hour={day_d_str}-{h_idx:02d}"
+            h.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                pa.table({"value": ["b1"], "count": pa.array([3], type=pa.int64())}),
+                str(h / f"compacted_{uuid.uuid4().hex[:8]}.parquet"),
+            )
+        # Field A also has a per-field hour dir (the day file was
+        # compacted from it) — must NOT also surface or A double-counts.
+        for h_idx in range(24):
+            h = cache_root / "rollups" / "hour" / "field=field_a" / f"hour={day_d_str}-{h_idx:02d}"
+            h.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                pa.table({"value": ["a1"], "count": pa.array([2], type=pa.int64())}),
+                str(h / f"compacted_{uuid.uuid4().hex[:8]}.parquet"),
+            )
+        # Bundled hour for every hour of D (covering both fields).
+        for h_idx in range(24):
+            bd = cache_root / "rollups" / "hour_bundled" / f"hour={day_d_str}-{h_idx:02d}"
+            bd.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                pa.table(
+                    {
+                        "field": ["field_a", "field_b"],
+                        "value": ["a1", "b1"],
+                        "count": pa.array([2, 3], type=pa.int64()),
+                    }
+                ),
+                str(bd / "all_fields.parquet"),
+            )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "field_a", "field_b"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "field_a", "type": "VARCHAR"},
+                {"name": "field_b", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = f"{day_d_str}T00:00:00+00:00"
+        et = f"{day_d_plus_1_str}T00:00:00+00:00"
+        rows, _ = runner.execute_top_n_rollups(["field_a", "field_b"], st, et, limit=10)
+
+        by_field: dict[str, dict] = {}
+        for f, v, c in rows:
+            by_field.setdefault(f, {})[v] = c
+        assert by_field.get("field_a", {}).get("a1") == 50, (
+            f"field_a must use its day file (50) without double-counting bundled or per-field per-hour. "
+            f"Got {by_field.get('field_a')}."
+        )
+        assert by_field.get("field_b", {}).get("b1") == 24 * 3, (
+            f"field_b has no day file — must fall back to per-field per-hour (24 hours × 3 = 72). "
+            f"Got {by_field.get('field_b')}."
+        )
+
+    # ── execute_ip_spread_rollups ────────────────────────────────────────────
+
+    @staticmethod
+    def _write_per_field_ip_spread(cache_root, field, hour, rows):
+        """Helper for the ip_spread reader tests: write a per-(field, hour)
+        IP-spread parquet that matches the live writer's schema. Rows are
+        dicts with keys (value, ip_sketch, ip_count_observed, sample_capped)."""
+        import os
+        import uuid
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        d = os.path.join(str(cache_root), "rollups", "hour_ip_spread", f"field={field}", f"hour={hour}")
+        os.makedirs(d, exist_ok=True)
+        table = pa.table(
+            {
+                "value": pa.array([r["value"] for r in rows]),
+                "ip_sketch": pa.array([r["ip_sketch"] for r in rows], type=pa.binary()),
+                "ip_count_observed": pa.array([r["ip_count_observed"] for r in rows], type=pa.int64()),
+                "sample_capped": pa.array([r["sample_capped"] for r in rows], type=pa.bool_()),
+            }
+        )
+        p = os.path.join(d, f"compacted_{uuid.uuid4().hex[:12]}.parquet")
+        pq.write_table(table, p)
+        return p
+
+    def test_execute_ip_spread_rollups_returns_empty_when_no_files(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Cold pool (no ip_spread tree at all) returns ({}, {}) — the
+        caller's signal to fall back to live SQL. Pinned because the
+        security FE relies on this empty-result being distinguishable
+        from a real "zero IPs for any fingerprint" answer."""
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        counts, meta = runner.execute_ip_spread_rollups(
+            ["tls_ciphers_sha", "ja3"],
+            "2026-05-15T00:00:00Z",
+            "2026-05-15T01:00:00Z",
+        )
+
+        assert counts == {}
+        assert meta == {}
+
+    def test_execute_ip_spread_rollups_merges_per_field_across_hours(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Happy path: per-field IP-spread parquets across N closed hours
+        merge into a single distinct-IP estimate per (field, value).
+
+        Two hours, same fingerprint, two overlapping IP sets — the merged
+        HLL must estimate the UNION, not the sum (which would double-count
+        the overlap). Pinned because this is the load-bearing invariant
+        the security fingerprint cards rely on (and the entire point of
+        the HLL rollup vs naive per-hour-summing)."""
+        from backend.utils.hll import HyperLogLog
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+        # Hour A: IPs 1-100 saw fingerprint "abc"
+        # Hour B: IPs 51-150 saw fingerprint "abc" (overlap on 51-100)
+        # Union = 150 distinct IPs.
+        hll_a = HyperLogLog()
+        hll_a.update([f"1.1.1.{i}" for i in range(1, 101)])
+        hll_b = HyperLogLog()
+        hll_b.update([f"1.1.1.{i}" for i in range(51, 151)])
+
+        self._write_per_field_ip_spread(
+            cache_root,
+            "tls_ciphers_sha",
+            "2026-05-15-10",
+            [
+                {
+                    "value": "abc",
+                    "ip_sketch": hll_a.to_bytes(),
+                    "ip_count_observed": 100,
+                    "sample_capped": False,
+                }
+            ],
+        )
+        self._write_per_field_ip_spread(
+            cache_root,
+            "tls_ciphers_sha",
+            "2026-05-15-11",
+            [
+                {
+                    "value": "abc",
+                    "ip_sketch": hll_b.to_bytes(),
+                    "ip_count_observed": 100,
+                    "sample_capped": False,
+                }
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        counts, meta = runner.execute_ip_spread_rollups(
+            ["tls_ciphers_sha"],
+            "2026-05-15T10:00:00Z",
+            "2026-05-15T12:00:00Z",
+        )
+
+        assert ("tls_ciphers_sha", "abc") in counts
+        merged_estimate = counts[("tls_ciphers_sha", "abc")]
+        # HLL ~6.5% standard error at p=8; allow 15% bound for test stability.
+        # Naive per-hour-sum would yield 200; correct union is 150. The
+        # estimate MUST be closer to 150 than 200 — that's the whole point.
+        assert abs(merged_estimate - 150) < abs(merged_estimate - 200), (
+            f"merged estimate {merged_estimate} is closer to the naive-sum 200 "
+            f"than to the true-union 150 — the HLL merge isn't reducing the overlap"
+        )
+        assert abs(merged_estimate - 150) <= 25  # within HLL bound
+
+        # Meta carries per-field coverage info.
+        assert "tls_ciphers_sha" in meta
+        assert meta["tls_ciphers_sha"]["coverage_hours"] == 2
+        assert meta["tls_ciphers_sha"]["capped_values"] == 0
+
+    def test_execute_ip_spread_rollups_skips_active_hour(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """The active (current UTC) hour must NOT contribute to the merged
+        estimate — the writer hasn't materialized it yet, and including
+        a stale active-hour parquet would silently miss in-flight IPs."""
+        from datetime import UTC, datetime, timedelta
+
+        from backend.utils.hll import HyperLogLog
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        active_hour = active_dt.strftime("%Y-%m-%d-%H")
+        closed_hour = (active_dt - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
+
+        # Active hour has a sketch — must be ignored.
+        hll_active = HyperLogLog()
+        hll_active.update([f"9.9.9.{i}" for i in range(1, 51)])
+        self._write_per_field_ip_spread(
+            cache_root,
+            "tls_ciphers_sha",
+            active_hour,
+            [
+                {
+                    "value": "abc",
+                    "ip_sketch": hll_active.to_bytes(),
+                    "ip_count_observed": 50,
+                    "sample_capped": False,
+                }
+            ],
+        )
+        # Closed hour has its own sketch — must be the ONLY contributor.
+        hll_closed = HyperLogLog()
+        hll_closed.update([f"1.1.1.{i}" for i in range(1, 11)])
+        self._write_per_field_ip_spread(
+            cache_root,
+            "tls_ciphers_sha",
+            closed_hour,
+            [
+                {
+                    "value": "abc",
+                    "ip_sketch": hll_closed.to_bytes(),
+                    "ip_count_observed": 10,
+                    "sample_capped": False,
+                }
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        # Window covers both hours — but active should be skipped.
+        counts, meta = runner.execute_ip_spread_rollups(
+            ["tls_ciphers_sha"],
+            (active_dt - timedelta(hours=2)).isoformat(),
+            (active_dt + timedelta(hours=1)).isoformat(),
+        )
+
+        estimate = counts.get(("tls_ciphers_sha", "abc"), 0)
+        # If the active hour leaked in, the union would be ~60. Skip working
+        # → only the closed-hour 10 IPs contribute.
+        assert estimate < 25, (
+            f"active hour appears to have leaked in: estimate {estimate} suggests "
+            f"the closed-hour IPs were merged with the active-hour ones"
+        )
+
+    def test_execute_ip_spread_rollups_propagates_capped_flag(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """When any input sketch is marked sample_capped=True, the merged
+        result's per-field meta must surface that — so the caller / FE
+        can render an "approximate (capped)" hint. Pinned because losing
+        this propagation would silently hide the writer's cap-flag
+        signal."""
+        from backend.utils.hll import HyperLogLog
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+        hll = HyperLogLog()
+        hll.update([f"1.1.1.{i}" for i in range(10)])
+        self._write_per_field_ip_spread(
+            cache_root,
+            "tls_ciphers_sha",
+            "2026-05-15-10",
+            [
+                {
+                    "value": "capped-fingerprint",
+                    "ip_sketch": hll.to_bytes(),
+                    "ip_count_observed": 5000,
+                    "sample_capped": True,
+                },
+                {
+                    "value": "uncapped-fingerprint",
+                    "ip_sketch": hll.to_bytes(),
+                    "ip_count_observed": 10,
+                    "sample_capped": False,
+                },
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        _, meta = runner.execute_ip_spread_rollups(
+            ["tls_ciphers_sha"],
+            "2026-05-15T10:00:00Z",
+            "2026-05-15T11:00:00Z",
+        )
+
+        assert meta["tls_ciphers_sha"]["capped_values"] == 1
+
+    def test_execute_ip_spread_rollups_filters_unsafe_field_names(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Defense in depth: fields failing _is_safe_ident are dropped so
+        a caller can't inject through the IN-list in the SQL filter.
+        Same guard execute_top_n_rollups uses on its safe_fields list."""
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        # Field name with single quote attempting to break out of the IN list.
+        counts, meta = runner.execute_ip_spread_rollups(
+            ["tls_ciphers_sha'; DROP TABLE foo; --"],
+            "2026-05-15T10:00:00Z",
+            "2026-05-15T11:00:00Z",
+        )
+
+        # All fields failed the safelist → no parquet read attempted.
+        assert counts == {}
+        assert meta == {}
 
     def test_execute_top_n_batch_prevents_sql_injection(self, in_memory_duckdb, test_service_source):
         in_memory_duckdb.execute("CREATE TABLE logs_safe (status VARCHAR)")

@@ -139,3 +139,110 @@ def test_double_preserves_more_precision_than_float():
         assert abs(d_val - precise) < 1e-9, f"DOUBLE should be exact-ish: drift={d_val - precise}"
     finally:
         con.close()
+
+
+# ── TIMESTAMPTZ + microsecond-scale precision (audit follow-up) ──────────
+
+
+def test_timestamptz_with_explicit_offsets_round_trip():
+    """``backend.core.ingest`` casts the ``timestamp`` field to TIMESTAMPTZ
+    (not plain TIMESTAMP) and the ``end_time`` filter binds ``?::TIMESTAMPTZ``.
+    The plain TIMESTAMP cases above don't validate that values with
+    explicit timezone offsets survive the round-trip — pinned here so a
+    DuckDB minor that changed TZ semantics would fail loudly.
+    """
+    con = duckdb.connect(":memory:")
+    try:
+        # Load ICU so TIMESTAMPTZ formatting is deterministic across hosts.
+        con.execute("INSTALL icu; LOAD icu;")
+        con.execute("SET TimeZone = 'UTC'")
+        con.execute("CREATE TABLE t (ts TIMESTAMPTZ)")
+        # ISO 8601 strings with explicit offsets — DuckDB casts each to
+        # UTC internally; the round-trip must preserve the instant.
+        values = [
+            ("2026-05-15T12:00:00+00:00", "2026-05-15 12:00:00+00"),
+            ("2026-05-15T12:00:00-07:00", "2026-05-15 19:00:00+00"),
+            ("2026-05-15T17:30:00+05:30", "2026-05-15 12:00:00+00"),
+        ]
+        for raw, _ in values:
+            con.execute("INSERT INTO t VALUES (?::TIMESTAMPTZ)", (raw,))
+
+        # Sort by ts so the comparison order is deterministic.
+        rows = con.execute(
+            "SELECT strftime(ts, '%Y-%m-%d %H:%M:%S') AS s, "
+            "       (ts AT TIME ZONE 'UTC')::TIMESTAMP AS utc_ts "
+            "FROM t ORDER BY rowid"
+        ).fetchall()
+        # Strings normalise to UTC; the three rows above all encode the
+        # same UTC instant 2026-05-15 12:00:00 EXCEPT the second row
+        # (which is 19:00:00 UTC). Cross-check on the UTC string.
+        utc_strs = [r[0] for r in rows]
+        assert utc_strs == ["2026-05-15 12:00:00", "2026-05-15 19:00:00", "2026-05-15 12:00:00"]
+    finally:
+        con.close()
+
+
+def test_timestamptz_end_time_filter_pushdown_excludes_future_rows():
+    """The ``end_time`` filter binds the cutoff as ``?::TIMESTAMPTZ``.
+    Pin that ``ts <= ?::TIMESTAMPTZ`` correctly excludes a row whose
+    timestamp is past the cutoff, even when row TZ != cutoff TZ.
+    """
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute("INSTALL icu; LOAD icu;")
+        con.execute("SET TimeZone = 'UTC'")
+        con.execute("CREATE TABLE t (ts TIMESTAMPTZ)")
+        # Row at 2026-05-15 11:59:59 UTC (under cutoff).
+        con.execute("INSERT INTO t VALUES ('2026-05-15T11:59:59Z'::TIMESTAMPTZ)")
+        # Row at 2026-05-15 12:00:01 UTC (over cutoff).
+        con.execute("INSERT INTO t VALUES ('2026-05-15T12:00:01Z'::TIMESTAMPTZ)")
+        # Cutoff supplied in a non-UTC offset to exercise the cast path
+        # ingest actually uses (the API serialises whatever the analyst
+        # picked in their tz).
+        cutoff = "2026-05-15T05:00:00-07:00"  # = 12:00:00 UTC
+        n = con.execute("SELECT COUNT(*) FROM t WHERE ts <= ?::TIMESTAMPTZ", (cutoff,)).fetchone()[0]
+        assert n == 1, f"expected 1 row at/under cutoff, got {n}"
+    finally:
+        con.close()
+
+
+def test_microsecond_precision_for_elapsed_ottfb_round_trip_via_parquet():
+    """Pin that microsecond-scale values for elapsed / ottfb / ottlb
+    survive a parquet write + read cycle without truncation. Catches
+    Arrow / Parquet codec drift that would silently lose precision on
+    timing fields (e.g. p99 latency reported as 63 ms instead of 63 µs).
+    """
+    import os
+    import tempfile
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    # Realistic microsecond-scale values: 50ms request, 1.234s request,
+    # 63s long-poll (prod p99 per memory note), and one large UBIGINT
+    # that DOUBLE could not represent precisely.
+    elapsed_us = [50_000, 1_234_567, 63_000_000, 9_007_199_254_740_993]
+    # ottfb/ottlb are also UBIGINT per the catalog. Use sub-ms values
+    # that would round if accidentally cast to ms.
+    ottfb_us = [128, 4_287, 12_345_678, 1_000_001]
+
+    table = pa.table(
+        {
+            "elapsed": pa.array(elapsed_us, type=pa.uint64()),
+            "ottfb": pa.array(ottfb_us, type=pa.uint64()),
+        }
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "timing.parquet")
+        pq.write_table(table, path, compression="zstd")
+
+        con = duckdb.connect(":memory:")
+        try:
+            rows = con.execute(f"SELECT elapsed, ottfb FROM read_parquet('{path}') ORDER BY elapsed").fetchall()
+        finally:
+            con.close()
+
+    # Sort the expected list by elapsed to match the SQL ORDER BY.
+    expected = sorted(zip(elapsed_us, ottfb_us))
+    assert rows == expected, f"microsecond values drifted across parquet RT: {rows} != {expected}"

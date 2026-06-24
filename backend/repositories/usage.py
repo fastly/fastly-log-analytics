@@ -5,6 +5,7 @@ from __future__ import annotations
 import duckdb
 
 from backend.repositories._base import QueryRunner, _safe_table
+from backend.repositories._sql import usage as SQL
 
 
 def get_edge_ratio(con: duckdb.DuckDBPyConnection, src: dict) -> tuple[float | None, list]:
@@ -16,7 +17,7 @@ def get_edge_ratio(con: duckdb.DuckDBPyConnection, src: dict) -> tuple[float | N
     actual_cols = [col["name"] for col in get_schema(con, src)]
     if "edge" not in actual_cols:
         return None, runner.debug_queries
-    result = runner.execute_with_retry(f"SELECT count(*) FILTER (WHERE edge = true) * 100.0 / count(*) FROM {table}")
+    result = runner.execute_with_retry(SQL.EDGE_RATIO_PCT.format(table=table))
     if result is None:
         return None, runner.debug_queries
     row = result.fetchone()
@@ -35,7 +36,7 @@ def get_storage_stats(
     Window filter is pushed into SQLite (COUNT/SUM against the source_name
     index) so the cost panel doesn't pull every row per service open.
     """
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     total_files, total_bytes = metadata_db.get_storage_stats_window(src["name"], start_str, end_str)
     return {
@@ -47,7 +48,6 @@ def get_storage_stats(
 
 
 def get_log_activity(
-    con: duckdb.DuckDBPyConnection,
     src: dict,
     start_str: str,
     end_str: str,
@@ -55,13 +55,13 @@ def get_log_activity(
 ) -> dict:
     """Return time-bucketed log activity (rows and bytes ingested per bucket).
 
-    Reads from the per-service SQLite ``ingested_files`` table (DuckDB no longer
-    holds operational metadata). The ``con`` argument is kept for signature
-    parity with sibling repository functions but is unused here.
+    Reads from the per-service SQLite ``ingested_files`` table — no DuckDB
+    work involved. The router no longer asks the deps for a connection,
+    which means each call skips one ``get_connection()`` lookup +
+    ``update_iceberg_view`` rebind it never actually used.
     """
-    from backend.core import metadata_db
+    from backend.core import metadata as metadata_db
 
     service_id = src.get("name") or src.get("service_id", "")
-    runner = QueryRunner(con, src)
     out = metadata_db.get_log_activity(service_id, start_str, end_str, by)
-    return {**out, **runner.telemetry()}
+    return {**out, "_debug_queries": [], "_debug_calls": []}

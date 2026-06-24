@@ -249,6 +249,138 @@ def test_get_quality_respects_region_country_param(in_memory_duckdb, test_servic
     assert out["region_country"] == "GB"
 
 
+def test_get_quality_enriches_asn_labels_and_keeps_pop_as_code(in_memory_duckdb, test_service_source, monkeypatch):
+    """by_asn shows the ASN name + number (matching the leaderboard); by_pop,
+    by_country, by_region keep value == label (PoP geo is added on the frontend
+    via the shared <PopLabel> + bootstrap pop_geo). `value` stays the raw
+    click-to-filter key everywhere."""
+    table = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    for log in logs:
+        log["tcp_rtt"] = 25_000
+        log["country"] = "US"
+        log["asn"] = 7922
+        log["pop"] = "SJC"
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    # Team Cymru ASN resolution is mocked; patch the re-export the enrich
+    # helper resolves through (see enrich_asn_labels' docstring).
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_asn_names",
+        lambda service_id, asns: {7922: "Comcast Cable Communications"},
+    )
+
+    out = get_quality(in_memory_duckdb, test_service_source, None, None, {})
+
+    asn_row = next(r for r in out["by_asn"] if r["value"] == "7922")
+    assert asn_row["label"] == "Comcast Cable Communications (7922)"
+
+    # PoP / country / region carry the raw value as label (frontend enriches PoP).
+    pop_row = next(r for r in out["by_pop"] if r["value"] == "SJC")
+    assert pop_row["label"] == "SJC"
+    for r in out["by_country"]:
+        assert r["value"] == r["label"]
+
+
+# ── get_health: section selector ────────────────────────────────────────────
+
+
+def test_get_health_full_response_when_sections_none(in_memory_duckdb, test_service_source):
+    """Default (sections=None) returns every section key — proves the
+    selector wiring is purely additive when no caller opts in."""
+    table = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    for log in logs:
+        log["tcp_rtt"] = 25_000
+        log["asn"] = 7922
+        log["country"] = "US"
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    out = get_health(in_memory_duckdb, test_service_source, None, None, {})
+    for key in ("summary", "heatmap", "buckets", "leaderboard", "metro_leaderboard", "cities", "map_buckets"):
+        assert key in out, f"section {key} missing from default response"
+
+
+def test_get_health_selector_drops_unrequested_keys(in_memory_duckdb, test_service_source):
+    """sections={'summary'} returns ONLY summary (+ envelope fields like
+    available/countries/has_metro/section_timings) — the heatmap/leaderboard/map
+    keys must not appear so the FE's per-card parallel calls don't double-deliver."""
+    table = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    for log in logs:
+        log["tcp_rtt"] = 25_000
+        log["asn"] = 7922
+        log["country"] = "US"
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    out = get_health(in_memory_duckdb, test_service_source, None, None, {}, sections={"summary"})
+    assert "summary" in out
+    for blocked in ("heatmap", "leaderboard", "metro_leaderboard"):
+        assert blocked not in out, f"{blocked} leaked through summary-only selector"
+
+
+def test_get_health_metro_only_skips_heatmap_query(in_memory_duckdb, test_service_source):
+    """sections={'metro_leaderboard'} must skip heatmap_query + map_query.
+    Confirmed via section_timings (suppressed sections don't append)."""
+    table = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    for log in logs:
+        log["tcp_rtt"] = 25_000
+        log["asn"] = 7922
+        log["country"] = "US"
+        log["city"] = "Boston"
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    out = get_health(in_memory_duckdb, test_service_source, None, None, {}, sections={"metro_leaderboard"})
+    timings = {t["section"] for t in out.get("section_timings", [])}
+    assert "heatmap_query" not in timings, f"heatmap_query fired despite metro-only selector: {timings}"
+    assert "map_query" not in timings, f"map_query fired despite metro-only selector: {timings}"
+    # metro_query MUST have fired
+    assert "metro_query" in timings, f"metro_query missing from {timings}"
+    assert "metro_leaderboard" in out
+
+
+def test_get_health_summary_selector_pulls_dependent_queries(in_memory_duckdb, test_service_source):
+    """summary's worst_asn needs heatmap_query (top_asns), worst_country
+    needs map_query (latest_cities). Pinned because a naive 'gate by
+    field name alone' would skip both and crash on .get('worst_asn')."""
+    table = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    for log in logs:
+        log["tcp_rtt"] = 25_000
+        log["asn"] = 7922
+        log["country"] = "US"
+        log["city"] = "Boston"
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    out = get_health(in_memory_duckdb, test_service_source, None, None, {}, sections={"summary"})
+    timings = {t["section"] for t in out.get("section_timings", [])}
+    assert "heatmap_query" in timings, f"heatmap_query missing for summary selector: {timings}"
+    assert "map_query" in timings, f"map_query missing for summary selector: {timings}"
+    assert "summary" in out
+
+
+def test_get_health_selector_skips_response_cache_write(in_memory_duckdb, test_service_source):
+    """A selector call must not poison the response cache — otherwise the
+    next full (sections=None) request would hit the partial payload and
+    drop fields the FE expects. Validate by running the selector call,
+    then a full call, and confirming the full call carries all keys."""
+    table = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    for log in logs:
+        log["tcp_rtt"] = 25_000
+        log["asn"] = 7922
+        log["country"] = "US"
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    # Selector first
+    _ = get_health(in_memory_duckdb, test_service_source, None, None, {}, sections={"summary"})
+    # Full second — must still have everything
+    full = get_health(in_memory_duckdb, test_service_source, None, None, {})
+    for key in ("summary", "heatmap", "buckets", "leaderboard", "metro_leaderboard", "cities", "map_buckets"):
+        assert key in full, f"selector poisoned the cache; full response missing {key}"
+
+
 # silence ruff unused imports — duckdb + pytest are used by the new tests
 _ = duckdb
 _ = pytest

@@ -9,7 +9,18 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.utils.date_utils import parse_date_window, parse_window_str_to_dt
+from backend.utils.date_utils import iso_z_now, parse_date_window, parse_window_str_to_dt
+
+
+def test_iso_z_now_returns_iso8601_z_format():
+    """Pinned because rdns_cache and other callers compare this output
+    against the SQL filter ``looked_up_at < datetime('now', '-48 hours')``
+    — using a different format would silently break the stale-entry
+    refresh path."""
+    out = iso_z_now()
+    assert out.endswith("Z")
+    assert "T" in out
+    assert len(out) == 20  # YYYY-MM-DDTHH:MM:SSZ
 
 
 def test_explicit_iso_strings_passthrough():

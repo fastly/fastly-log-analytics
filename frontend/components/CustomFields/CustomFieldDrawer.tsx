@@ -56,6 +56,11 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
   const [validationError, setValidationError] = useState<string | null>(null)
   const [lintResult, setLintResult] = useState<VclLintResult | null>(null)
   const [isLinting, setIsLinting] = useState(false)
+  // Distinct from `lintResult` (which carries the *parsed* validation
+  // verdict): this captures the case where the validation API CALL
+  // itself failed (network error, 500), so the user sees a visible
+  // hint instead of an empty pane after the spinner disappears.
+  const [lintFetchError, setLintFetchError] = useState<string | null>(null)
 
   const debouncedVcl = useDebounce(formData.vcl_log_expression, 500)
   const debouncedStage = useDebounce(formData.collection_stage, 500)
@@ -69,6 +74,7 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
         return
       }
       setIsLinting(true)
+      setLintFetchError(null)
       try {
         const result = await customFieldsApi.validateCustomVcl(serviceId, {
           vcl_log_expression: debouncedVcl,
@@ -79,7 +85,19 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
         }
       } catch (err) {
         if (active) {
-          console.error("VCL validation failed", err)
+          // Surface to the user — silent console.error left them staring
+          // at an empty validation pane after the spinner disappeared,
+          // unsure whether their VCL was good or whether the lint had
+          // run at all. Keep the console output for devtools triage too.
+          if (process.env.NODE_ENV === 'development') {
+            console.error("VCL validation failed", err)
+          }
+          setLintResult(null)
+          setLintFetchError(
+            (err as Error)?.message
+              ? `Validation could not run: ${(err as Error).message}`
+              : "Validation could not run. Check your connection and try again."
+          )
         }
       } finally {
         if (active) {
@@ -103,7 +121,13 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
     onError: (error: any) => setValidationError(error.message || "Failed to save field")
   })
 
-  // Reset form when opened or field changes
+  // Reset form when the drawer opens or the edited field changes. The deps
+  // intentionally exclude `saveMutation` — TanStack Query's mutation object
+  // is recreated on every render, so listing it would re-fire this effect on
+  // every keystroke and clobber the user's in-progress edits. We only want
+  // to reset on the open/field transition; `saveMutation.reset()` is safe to
+  // call against the current ref each time.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (open) {
       setFormData(field ? {
@@ -112,9 +136,10 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
       } : { ...DEFAULT_FIELD })
       setValidationError(null)
       setLintResult(null)
+      setLintFetchError(null)
       saveMutation.reset()
     }
-  }, [open, field]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, field])
 
   const handleChange = (key: keyof CustomField, value: any) => {
     setFormData(prev => {
@@ -176,8 +201,8 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
             </div>
             <div className="space-y-2">
                 <Label>Description</Label>
-                <Textarea 
-                    placeholder="Describe what this field captures..." 
+                <Textarea
+                    placeholder="Describe what this field captures..."
                     value={formData.description || ''}
                     onChange={e => handleChange('description', e.target.value)}
                     className="h-20 text-sm"
@@ -190,12 +215,19 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
             <div className="flex justify-between items-center border-b pb-2">
                 <h3 className="text-sm font-semibold">VCL Log Expression <span className="text-destructive">*</span></h3>
             </div>
-            
+
             <div className="space-y-3 p-4 bg-muted/30 border rounded-md">
-              <Label className="text-xs">Collection Stage</Label>
-              <div className="grid grid-cols-2 gap-3">
-                <div 
-                  className={`flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors ${formData.collection_stage === 'edge' ? 'border-blue-500 bg-blue-500/5' : 'hover:bg-muted/50'}`}
+              <Label id="cf-stage-label" className="text-xs">Collection Stage</Label>
+              <div role="radiogroup" aria-labelledby="cf-stage-label" className="grid grid-cols-2 gap-3">
+                {/* a11y: <div onClick> radio cards were keyboard-invisible
+                    and not announced as a radio group. Each card is now a
+                    proper <button role="radio">. Tab moves to the group,
+                    arrow keys / Space / Enter activate per ARIA APG. */}
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={formData.collection_stage === 'edge'}
+                  className={`text-left flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${formData.collection_stage === 'edge' ? 'border-blue-500 bg-blue-500/5' : 'hover:bg-muted/50'}`}
                   onClick={() => handleChange('collection_stage', 'edge')}
                 >
                   <span className="font-medium flex items-center gap-2 text-sm">
@@ -203,9 +235,12 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
                     Edge
                   </span>
                   <span className="text-[10px] text-muted-foreground mt-1">Captured before shielding or backend fetches. Best for client data.</span>
-                </div>
-                <div 
-                  className={`flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors ${formData.collection_stage === 'origin' ? 'border-purple-500 bg-purple-500/5' : 'hover:bg-muted/50'}`}
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={formData.collection_stage === 'origin'}
+                  className={`text-left flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${formData.collection_stage === 'origin' ? 'border-purple-500 bg-purple-500/5' : 'hover:bg-muted/50'}`}
                   onClick={() => handleChange('collection_stage', 'origin')}
                 >
                   <span className="font-medium flex items-center gap-2 text-sm">
@@ -213,28 +248,34 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
                     Origin
                   </span>
                   <span className="text-[10px] text-muted-foreground mt-1">Captured from the backend response. Best for origin timing or status.</span>
-                </div>
+                </button>
               </div>
             </div>
 
             {formData.collection_stage === 'origin' && (
               <div className="space-y-3 p-4 bg-muted/30 border rounded-md mt-3">
-                <Label className="text-xs">Origin Log Frequency</Label>
-                <div className="grid grid-cols-2 gap-3">
-                  <div 
-                    className={`flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors ${formData.origin_log_frequency === 'all' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50'}`}
+                <Label id="cf-freq-label" className="text-xs">Origin Log Frequency</Label>
+                <div role="radiogroup" aria-labelledby="cf-freq-label" className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={formData.origin_log_frequency === 'all'}
+                    className={`text-left flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${formData.origin_log_frequency === 'all' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50'}`}
                     onClick={() => handleChange('origin_log_frequency', 'all')}
                   >
                     <span className="font-medium text-sm">All requests</span>
                     <span className="text-[10px] text-muted-foreground mt-1">Log the origin value even on cache hits.</span>
-                  </div>
-                  <div 
-                    className={`flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors ${formData.origin_log_frequency === 'miss_pass' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50'}`}
+                  </button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={formData.origin_log_frequency === 'miss_pass'}
+                    className={`text-left flex flex-col space-y-1 border rounded-md p-3 cursor-pointer transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${formData.origin_log_frequency === 'miss_pass' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50'}`}
                     onClick={() => handleChange('origin_log_frequency', 'miss_pass')}
                   >
                     <span className="font-medium text-sm">Only miss and pass</span>
                     <span className="text-[10px] text-muted-foreground mt-1">Log only when the request actively fetches from the origin.</span>
-                  </div>
+                  </button>
                 </div>
               </div>
             )}
@@ -265,13 +306,22 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
                 <div className="flex items-center gap-2 text-xs text-muted-foreground animate-pulse">
                     <Loader2 className="h-3 w-3 animate-spin" /> Validating VCL...
                 </div>
+            ) : lintFetchError ? (
+                <div className="bg-amber-500/10 border border-amber-500/20 rounded p-3 text-xs text-amber-700 dark:text-amber-500 space-y-1">
+                    <p className="font-semibold flex items-center gap-1.5">
+                        <AlertTriangle className="h-3.5 w-3.5" /> {lintFetchError}
+                    </p>
+                    <p className="text-amber-700/80 dark:text-amber-500/80">
+                        The expression will be re-validated automatically when the connection recovers.
+                    </p>
+                </div>
             ) : lintResult ? (
                 <div className="space-y-2">
                     {lintResult.errors?.length > 0 && (
                         <div className="bg-destructive/10 border border-destructive/20 rounded p-3 text-xs text-destructive space-y-1">
                             <p className="font-semibold flex items-center gap-1.5"><AlertTriangle className="h-3.5 w-3.5" /> Validation Errors</p>
                             <ul className="list-disc pl-5 space-y-1">
-                                {lintResult.errors.map((err, i) => <li key={i}>{err}</li>)}
+                                {lintResult.errors.map((err) => <li key={err}>{err}</li>)}
                             </ul>
                         </div>
                     )}
@@ -279,7 +329,7 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
                         <div className="bg-amber-500/10 border border-amber-500/20 rounded p-3 text-xs text-amber-700 dark:text-amber-500 space-y-1">
                             <p className="font-semibold flex items-center gap-1.5"><AlertTriangle className="h-3.5 w-3.5" /> Warnings</p>
                             <ul className="list-disc pl-5 space-y-1">
-                                {lintResult.warnings.map((warn, i) => <li key={i}>{warn}</li>)}
+                                {lintResult.warnings.map((warn) => <li key={warn}>{warn}</li>)}
                             </ul>
                         </div>
                     )}
@@ -328,13 +378,13 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
                  </div>
                  <div className="space-y-2">
                      <LabelWithInfo labelClassName="text-xs" info="An estimate of the size of this field per log line, used for calculating total storage costs and requirements." label="Bytes Estimate (per log)" />
-                     <Input 
-                        type="number" 
-                        min="1" 
-                        max="1024" 
+                     <Input
+                        type="number"
+                        min="1"
+                        max="1024"
                         className="h-8 text-xs"
-                        value={formData.bytes_estimate} 
-                        onChange={e => handleChange('bytes_estimate', parseInt(e.target.value) || 20)} 
+                        value={formData.bytes_estimate}
+                        onChange={e => handleChange('bytes_estimate', parseInt(e.target.value) || 20)}
                      />
                  </div>
              </div>

@@ -18,3 +18,7 @@ interactions:
       code: 200
       message: OK
 version: 1
+# Hand-authored fixture: GET /service/<id> returning 200. The shape is
+# stable across the Fastly API; refresh this date after re-verifying
+# against the live endpoint (or a fresh recording).
+recorded_at: '2026-06-16T00:00:00Z'

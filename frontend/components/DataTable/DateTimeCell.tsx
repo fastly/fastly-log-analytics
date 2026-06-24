@@ -1,5 +1,6 @@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useDateFormat } from '@/hooks/useDateFormat'
+import { TimeAgo } from '@/components/TimeAgo'
 
 interface DateTimeCellProps {
   iso: string | null | undefined
@@ -8,7 +9,10 @@ interface DateTimeCellProps {
 }
 
 export function DateTimeCell({ iso, className, emptyFallback }: DateTimeCellProps) {
-  const { timeAgo, full, abbr } = useDateFormat()
+  // Absolute time (tooltip content) is static; the relative "X ago" trigger
+  // ticks every second via the shared <TimeAgo> so table cells stop looking
+  // frozen between query refetches. Only the inner text node re-renders.
+  const { full, abbr } = useDateFormat()
   if (!iso) return <>{emptyFallback ?? <span className="text-muted-foreground/40">—</span>}</>
   return (
     <Tooltip>
@@ -22,7 +26,7 @@ export function DateTimeCell({ iso, className, emptyFallback }: DateTimeCellProp
           />
         }
       >
-        {timeAgo(iso)}
+        <TimeAgo timestamp={iso} />
       </TooltipTrigger>
       <TooltipContent className="text-xs">
         {full(iso)} {abbr()}

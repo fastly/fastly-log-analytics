@@ -1,0 +1,193 @@
+# Deploy to Google Compute Engine
+
+This runbook formalizes the current production deploy flow on GCE. The same
+docker compose stack runs unchanged on AWS / Azure / bare metal; only the
+host-provisioning steps differ.
+
+## 1. Host provisioning
+
+- **Image**: `debian-12-bookworm-v*` or `ubuntu-2204-jammy-v*`. Both ship a
+  recent enough kernel for the Docker overlay2 driver.
+- **Machine type**: `e2-standard-2` (2 vCPU / 8 GB) is the minimum. DuckDB
+  and pyarrow load the active session's parquet shards into memory, and the
+  OS plus the Next.js frontend eat ~1 GB before the backend starts.
+  `e2-standard-4` (16 GB) is the comfortable size for a busy single-tenant
+  deploy.
+- **Boot disk**: 50 GB pd-balanced is fine for the OS plus container images.
+- **Data disk**: attach a separate persistent disk (100-500 GB pd-balanced
+  depending on cache retention) and mount at `/mnt/app-data`. The data
+  directory must live on a persistent disk — the boot disk is fine for
+  software but a separate disk lets you snapshot data without snapshotting
+  the OS.
+- **Metadata service**: GCE's metadata service lives at `169.254.169.254`
+  (the same link-local IP as AWS and Azure). The backend's SSRF probe in
+  `backend/models/lake.py` and `backend/utils/remote_access.py` blocks
+  outbound requests to this address from any code path. **Do not** disable
+  the SSRF gates.
+- **Firewall rules** (VPC firewall, applied via tags):
+  - `tcp/443` from Fastly's published v4 CIDR ranges (see `Caddyfile`)
+  - `tcp/80` from Fastly's published v4 CIDR ranges (origin pulls)
+  - `tcp/22` from your bastion or admin IP only — operators reach `/admin`
+    via SSH tunnel (the frontend middleware blocks `/admin` when the Caddy
+    proxy marker header is present)
+  - egress: all (backend pulls from Fastly Object Storage over HTTPS)
+
+## 2. Docker install
+
+```sh
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg git
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | \
+  sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo usermod -aG docker $USER
+# Log out and back in so the group membership applies.
+docker compose version  # confirm v2.x
+```
+
+## 3. Volume mount
+
+```sh
+# After attaching the data disk in the console (it shows up as /dev/sdb):
+sudo mkfs.ext4 /dev/sdb
+sudo mkdir -p /mnt/app-data
+sudo mount /dev/sdb /mnt/app-data
+
+# Persist across reboots:
+echo "UUID=$(sudo blkid -s UUID -o value /dev/sdb) /mnt/app-data ext4 defaults,nofail 0 2" \
+  | sudo tee -a /etc/fstab
+
+sudo chown -R $USER:$USER /mnt/app-data
+mkdir -p /mnt/app-data/{data,cache,configs}
+```
+
+Either edit `docker-compose.yml` to point its volumes at `/mnt/app-data`, or
+keep the repo at `/mnt/app-data/fastly-log-analytics` so the relative `./data`
+paths already resolve to the persistent disk.
+
+## 4. Caddy / SSL
+
+Fastly terminates TLS at the edge and reverse-proxies to the origin on `:80`,
+so Caddy on the VM speaks plain HTTP (see `Caddyfile`'s `auto_https off`).
+
+If you also want a direct LE certificate (for a staging host that bypasses
+Fastly), drop `auto_https off` and replace `:80 {` with `your.host {`.
+LE's HTTP-01 challenge needs port 80 reachable from the public internet —
+open the firewall to `0.0.0.0/0` for `tcp/80` during the cert handshake.
+For DNS-01 with Cloudflare, add the Caddy `cloudflare` DNS module to the
+custom Caddy image and set `CLOUDFLARE_API_TOKEN` in the env file.
+
+## 5. First deploy + restart flow
+
+```sh
+cd /mnt/app-data
+git clone https://github.com/fastly/fastly-log-analytics.git
+cd fastly-log-analytics
+# Copy configs from your local dev box or restore from a GCS backup.
+docker compose up -d --build
+```
+
+The repeat-deploy flow is the existing `~/restart.sh` pattern (canonicalized
+here so it works on every platform):
+
+```sh
+#!/usr/bin/env bash
+# ~/restart.sh on the VM
+set -euo pipefail
+cd /mnt/app-data/fastly-log-analytics
+git pull
+docker compose up -d --build
+sleep 10
+curl -fsS http://localhost:8000/api/health
+```
+
+**After a force-push** to the deploy branch:
+
+```sh
+git fetch && git reset --hard origin/<branch>
+~/restart.sh
+```
+
+The browser needs a hard-refresh after a frontend rebuild — Caddy and the
+Next.js static asset hashes are cached aggressively.
+
+### Optional systemd unit
+
+```ini
+# /etc/systemd/system/fastly-log-analytics.service
+[Unit]
+Description=Fastly Log Analytics docker compose stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/mnt/app-data/fastly-log-analytics
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now fastly-log-analytics
+```
+
+## 6. Secrets management
+
+The backend reads Fastly Object Storage credentials from environment variables.
+Three options, in order of preference:
+
+1. **Google Secret Manager** + a wrapper script that exports the values before
+   `docker compose up`. The instance's default service account needs
+   `roles/secretmanager.secretAccessor` on the specific secret only.
+2. **Instance service account + service account key file** mounted into the
+   container. Less preferred — long-lived JSON keys are a known compromise
+   vector. If you must, restrict the SA's IAM role to the minimum (read one
+   secret).
+3. **`.env` file at `/mnt/app-data/fastly-log-analytics/.env`** with
+   `chmod 600`. Simplest; acceptable for solo-dev deploys. Not acceptable
+   if multiple operators share the VM.
+
+Do **not** bake credentials into the docker image — the image is built from a
+public repo.
+
+## 7. Post-deploy verification
+
+```sh
+# Backend up?
+curl -fsS http://localhost:8000/api/health
+
+# Frontend up?
+curl -fsSI http://localhost:3000 | head -1
+
+# Caddy fronting both?
+curl -fsS http://localhost/api/health
+
+# End-to-end through Fastly:
+curl -fsS https://your.fastly.host/api/health
+
+# Logs:
+docker compose logs --tail 100 backend
+docker compose logs --tail 100 frontend
+docker compose logs --tail 100 caddy | jq 'select(.status >= 400)'
+```
+
+To reach `/admin`, run on your laptop:
+
+```sh
+ssh -L 8080:127.0.0.1:3000 <user>@<instance-external-ip>
+# then browse to http://localhost:8080/admin
+```
+
+The frontend middleware sees no `X-Proxied-By-Caddy` header on the tunneled
+connection and serves `/admin`.

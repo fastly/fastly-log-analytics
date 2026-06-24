@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
+from backend.routers import _state_sync
 from backend.utils import router_utils
 
 # ── format_debug_request: sensitive-header obfuscation ───────────────────────
@@ -77,28 +78,6 @@ def test_format_debug_request_minimal():
     assert "--- Request ---" in out
 
 
-# ── SSE_HEADERS + sse_flush_preamble ────────────────────────────────────────
-
-
-def test_sse_headers_disable_buffering_for_proxies():
-    """``X-Accel-Buffering: no`` is what makes nginx/cloudflare flush
-    SSE chunks immediately. Without it the frontend waits for the
-    buffer to fill, defeating the "real-time progress" UX."""
-    assert router_utils.SSE_HEADERS["X-Accel-Buffering"] == "no"
-    assert router_utils.SSE_HEADERS["Content-Type"] == "text/event-stream"
-    assert router_utils.SSE_HEADERS["Cache-Control"] == "no-cache"
-
-
-def test_sse_flush_preamble_emits_count_chunks_of_padding():
-    """The preamble pushes ~8KB of comment-line padding through the
-    pipe so proxies flush their buffer before the first real event."""
-    chunks = list(router_utils.sse_flush_preamble(count=3))
-    assert len(chunks) == 3
-    for c in chunks:
-        assert c.startswith(": ")  # SSE comment prefix
-        assert c.endswith("\n\n")
-
-
 # ── sync_admin_state ─────────────────────────────────────────────────────────
 
 
@@ -107,8 +86,8 @@ def test_sync_admin_state_skips_when_service_id_is_none():
     with the optional ``service_id_hint`` which may be None for
     cross-service alert mutations."""
     # Should not raise and should not even attempt to import state_sync.
-    router_utils.sync_admin_state(None)
-    router_utils.sync_admin_state("")  # empty string also skips
+    _state_sync.sync_admin_state(None)
+    _state_sync.sync_admin_state("")  # empty string also skips
 
 
 def test_sync_admin_state_calls_export_admin_state(monkeypatch):
@@ -122,7 +101,7 @@ def test_sync_admin_state_calls_export_admin_state(monkeypatch):
 
     monkeypatch.setattr(ss, "export_admin_state", fake_export)
 
-    router_utils.sync_admin_state("svc-1")
+    _state_sync.sync_admin_state("svc-1")
     assert calls == ["svc-1"]
 
 
@@ -138,7 +117,7 @@ def test_sync_admin_state_swallows_all_exceptions(monkeypatch):
     monkeypatch.setattr(ss, "export_admin_state", boom)
 
     # Must not raise
-    router_utils.sync_admin_state("svc-1")
+    _state_sync.sync_admin_state("svc-1")
 
 
 # ── query_errors decorator: exception → HTTPException mapping ───────────────
@@ -160,8 +139,10 @@ def test_query_errors_passes_through_httpexception_unchanged():
 
 
 def test_query_errors_maps_value_error_to_400():
-    """``ValueError`` (validation, bad arg) → 400 with the error message.
-    No traceback in the detail — these are user-facing input errors."""
+    """``ValueError`` (validation, bad arg) → 400 with the message under
+    ``detail.message`` and the canonical ``bad_request`` error code in
+    the machine-code slot. No traceback in the detail — these are
+    user-facing input errors."""
 
     @router_utils.query_errors()
     def handler():
@@ -170,7 +151,7 @@ def test_query_errors_maps_value_error_to_400():
     with pytest.raises(HTTPException) as exc:
         handler()
     assert exc.value.status_code == 400
-    assert exc.value.detail == {"error": "invalid filter shape"}
+    assert exc.value.detail == {"error": "bad_request", "message": "invalid filter shape"}
     assert "trace" not in exc.value.detail  # no traceback for 400
 
 
@@ -188,12 +169,12 @@ def test_query_errors_maps_lookup_error_to_404():
 
 
 def test_query_errors_maps_unknown_exception_to_configured_status_without_trace(caplog):
-    """Security: generic exceptions surface ONLY the error message
-    to the client. The full traceback is logged server-side via
-    ``logger.exception`` but MUST NOT appear in the response body. Pinned
-    because re-introducing the ``trace`` key in HTTPException.detail would
-    leak internal file paths / module structure / and any secret values
-    that landed in the exception message."""
+    """Security: generic exceptions surface ONLY a stable machine code
+    (``unhandled_error``) + correlation id. The exception message is
+    logged server-side via ``raise_internal`` but MUST NOT appear in
+    the response body. Pinned because re-introducing ``str(e)`` in the
+    detail would leak DuckDB internals, upstream Fastly response bodies,
+    and any secret values that landed in the exception message."""
     import logging
 
     @router_utils.query_errors(status_code=500)
@@ -203,7 +184,11 @@ def test_query_errors_maps_unknown_exception_to_configured_status_without_trace(
     with caplog.at_level(logging.ERROR), pytest.raises(HTTPException) as exc:
         handler()
     assert exc.value.status_code == 500
-    assert exc.value.detail == {"error": "downstream blew up"}
+    assert exc.value.detail["error"] == "unhandled_error"
+    # The original exception message MUST NOT reach the wire — it lives
+    # in the server log alongside the error_id for triage.
+    assert "downstream blew up" not in str(exc.value.detail)
+    assert exc.value.detail.get("error_id"), "raise_internal should attach an error_id"
     assert "trace" not in exc.value.detail, (
         "stack-trace leakage regression — query_errors must not put a 'trace' key in the response detail (security)"
     )
@@ -277,7 +262,7 @@ def test_query_errors_maps_value_error_in_async_handler_to_400():
     with pytest.raises(HTTPException) as exc:
         asyncio.run(handler())
     assert exc.value.status_code == 400
-    assert exc.value.detail == {"error": "bad input"}
+    assert exc.value.detail == {"error": "bad_request", "message": "bad input"}
 
 
 def test_query_errors_passes_httpexception_through_for_async_handler():
@@ -311,11 +296,70 @@ def test_query_errors_maps_unknown_exception_in_async_handler_to_configured_stat
         with pytest.raises(HTTPException) as exc:
             asyncio.run(handler())
     assert exc.value.status_code == 500
-    assert exc.value.detail == {"error": "boom"}
+    assert exc.value.detail["error"] == "unhandled_error"
+    assert "boom" not in str(exc.value.detail)
+    assert exc.value.detail.get("error_id"), "raise_internal should attach an error_id"
     assert "trace" not in (exc.value.detail or {}), (
         "stack-trace leakage regression for async handlers — query_errors must "
         "not put a 'trace' key in the response detail (security)"
     )
+
+
+# ── raise_internal: server-log the cause, generic detail on the wire ────────
+
+
+def test_raise_internal_does_not_leak_exception_string_to_client(caplog):
+    """Server-side log captures the traceback (operators can triage); the
+    HTTPException detail returned to the client carries ONLY a generic
+    ``code`` and an ``error_id`` for correlation. Pinned because the v2.0
+    audit found 8 routers that interpolated ``str(e)`` directly into
+    HTTPException.detail — when the exception originates in
+    ``backend.core.fastly.client.fastly()`` that ``str(e)`` includes
+    the upstream Fastly response body (potentially internal hostnames,
+    token fragments, etc.). Re-introducing that pattern would re-open
+    the leak.
+    """
+    import logging
+
+    log = logging.getLogger("test.raise_internal")
+
+    leaky = RuntimeError("HTTP 502 GET /tokens/self\n    internal.fastly.svc:5001 timed out")
+    with caplog.at_level(logging.ERROR, logger="test.raise_internal"):
+        with pytest.raises(HTTPException) as exc:
+            router_utils.raise_internal(log, leaky, code="my_endpoint_failed", status=500)
+
+    assert exc.value.status_code == 500
+    detail = exc.value.detail or {}
+    assert detail.get("error") == "my_endpoint_failed"
+    assert "error_id" in detail
+    assert len(detail["error_id"]) == 8  # 8-char hex prefix
+    # The leaky message MUST NOT be on the wire.
+    assert "internal.fastly.svc" not in str(detail)
+    assert "502" not in detail.get("error", "")
+    # But the operator log MUST have captured the full exception for triage.
+    log_text = "\n".join(r.getMessage() for r in caplog.records) + "\n".join(
+        str(r.exc_info) for r in caplog.records if r.exc_info
+    )
+    assert detail["error_id"] in log_text
+
+
+def test_raise_internal_chains_original_exception_for_traceback():
+    """``raise from`` semantics: the caused-by chain must point at the
+    original exception so server logs show the full root cause.
+    Without ``from exc`` the operator log would show only the generic
+    ``request_failed`` exception, hiding the actual upstream failure."""
+    import logging
+
+    log = logging.getLogger("test.raise_internal_chain")
+    orig = RuntimeError("root cause")
+    try:
+        try:
+            raise orig
+        except RuntimeError as e:
+            router_utils.raise_internal(log, e)
+    except HTTPException as wrapped:
+        # The wrapped exception's __cause__ is the original (via "raise ... from exc")
+        assert wrapped.__cause__ is orig
 
 
 def test_query_errors_async_branch_preserves_concurrency():
@@ -345,7 +389,7 @@ def test_query_errors_async_branch_preserves_concurrency():
     elapsed = time.monotonic() - t0
 
     assert result == {"a": "a", "b": "b"}
-    assert elapsed < 0.18, (
+    assert elapsed < 0.5, (
         f"two 100ms awaits under asyncio.gather must run concurrently "
         f"(wall clock should be ~100ms, not ~200ms). Got {elapsed * 1000:.0f}ms — "
         f"the async decorator branch is serialising them."

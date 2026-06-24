@@ -206,3 +206,47 @@ def test_log_format_overflow_error_reports_chars_and_safe_max(tmp_path, monkeypa
     # Both numbers must appear; either order, with the message phrasing.
     assert "chars" in msg
     assert "8000" in msg, f"expected safe-max 8000 in message: {msg}"
+
+
+def test_drop_a_field_at_the_size_limit_then_re_add_succeeds(tmp_path, monkeypatch):
+    """At the size limit, deleting one field frees template budget so a
+    new (size-equivalent) field is accepted on the next POST. Pins the
+    gate as DYNAMIC (size-based), not a static "high-water-mark" counter
+    that wouldn't free up after deletes.
+    """
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    svc_id = "test_svc_drop_readd"
+    # Seed at the same just-under-limit count the overflow test uses.
+    config.save_config(svc_id, _make_cfg(svc_id, n_existing=94))
+
+    client = TestClient(app)
+    # Adding the 95th tips it over (matches the sibling overflow test).
+    overflow = client.post(
+        f"/api/services/{svc_id}/custom-fields",
+        json=_post_payload("cf094"),
+    )
+    assert overflow.status_code == 422, f"setup invariant: expected 422 at limit; got {overflow.status_code}"
+
+    # Drop one of the seeded fields → the saved config now has 93.
+    resp = client.delete(f"/api/services/{svc_id}/custom-fields/cf050")
+    assert resp.status_code == 200, f"DELETE expected 200; got {resp.status_code} body={resp.text}"
+    saved = config.load_config(svc_id)
+    remaining = [cf["name"] for cf in saved["log_fields"]["custom_fields"]]
+    assert "cf050" not in remaining, f"DELETE did not remove the field; remaining={remaining!r}"
+
+    # Re-add a same-sized field (5 char name) → the freed budget should
+    # accept it. A static count-cap regression would still reject.
+    with patch("backend.provision.fastly_api.shutil.which", return_value=None):
+        resp = client.post(
+            f"/api/services/{svc_id}/custom-fields",
+            json=_post_payload("cf999"),
+        )
+    assert resp.status_code == 200, (
+        f"after dropping one field, re-add at the same template size should 200; "
+        f"got {resp.status_code} body={resp.text}"
+    )
+
+    saved = config.load_config(svc_id)
+    names = {cf["name"] for cf in saved["log_fields"]["custom_fields"]}
+    assert "cf050" not in names
+    assert "cf999" in names

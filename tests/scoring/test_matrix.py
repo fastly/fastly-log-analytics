@@ -10,6 +10,7 @@ from backend.scoring.matrix import (
     TransitionMatrix,
     build_matrix,
     default_version,
+    serialize_kv,
     write_matrix,
 )
 from backend.scoring.normalize import normalize
@@ -223,11 +224,104 @@ def test_built_matrix_round_trips_through_scorer():
 
 def test_default_version_format():
     v = default_version()
-    # YYYY-MM-DD-a
-    assert len(v) == 12
-    assert v[-2:] == "-a"
+    # EC-06: YYYY-MM-DD-HHMMSS (UTC, second resolution) — sub-day component so
+    # same-day retrains don't collide on the version string.
+    assert len(v) == 17
+    # Round-trips through the exact strftime that produced it.
+    assert datetime.strptime(v, "%Y-%m-%d-%H%M%S").strftime("%Y-%m-%d-%H%M%S") == v
     parts = v.split("-")
-    assert len(parts) == 4
+    assert len(parts) == 4  # year, month, day, HHMMSS
     int(parts[0])  # parseable as year
     int(parts[1])
     int(parts[2])
+    int(parts[3])  # HHMMSS
+
+
+def test_default_version_distinct_and_ordered_within_day():
+    """EC-06: two retrains on the same day no longer collide — the sub-day time
+    component makes the auto version distinct AND lexicographically ordered, so
+    the history archive (keyed on the version string) can't overwrite a prior
+    same-day snapshot and two matrices can't report an identical
+    X-Edge-Matrix-Version."""
+    import time_machine
+
+    with time_machine.travel("2026-06-20 09:00:00+00:00"):
+        v1 = default_version()
+    with time_machine.travel("2026-06-20 14:30:52+00:00"):
+        v2 = default_version()
+    assert v1 == "2026-06-20-090000"
+    assert v2 == "2026-06-20-143052"
+    assert v1 != v2
+    assert v1 < v2  # fixed-width → lexicographically sortable
+
+
+# ── FSM1 binary KV encoding ──────────────────────────────────────────────────
+#
+# CROSS-LANGUAGE CONTRACT: SMALL_MATRIX_FSM1_HEX is byte-identical to the fixture
+# the Rust decoder test parses in
+# compute/scorer/src/matrix.rs::tests::parse_fsm1_cross_lang_fixture. Change the
+# FSM1 wire format and BOTH update together — or the build breaks.
+
+# Tiny matrix exercising a curr-only route (/cart, row_total 0), multi-pair rows
+# with ascending col-ids, and uvarint counts. Routes sort by raw bytes to
+# /cart(id0), /home(id1), /products(id2).
+SMALL_MATRIX = {
+    "version": "test-fsm1-a",
+    "vocab_size": 3,
+    "counts": {"/home": {"/products": 15, "/cart": 5}, "/products": {"/cart": 2}},
+    "row_totals": {"/home": 20, "/products": 2},
+    # categories/anchors are intentionally dropped from the KV payload.
+    "categories": {"/home": "home"},
+    "anchors": ["/home"],
+}
+
+SMALL_MATRIX_FSM1_HEX = (
+    "46534d31"  # magic "FSM1"
+    "01"  # fmt_ver = 1
+    "03000000"  # vocab_size = 3
+    "03000000"  # n_routes = 3
+    "0b00"  # ver_len = 11
+    "746573742d66736d312d61"  # "test-fsm1-a"
+    "00000000050000000a00000013000000"  # str_off = [0,5,10,19]
+    "2f636172742f686f6d652f70726f6475637473"  # "/cart/home/products"
+    "001402"  # row_total = [0,20,2]
+    "00000203"  # row_off = [0,0,2,3]
+    "0005020f0002"  # pairs: /home->/cart:5,/products:15 ; /products->/cart:2
+)
+
+
+def test_serialize_kv_byte_exact():
+    assert serialize_kv(SMALL_MATRIX).hex() == SMALL_MATRIX_FSM1_HEX
+
+
+def test_serialize_kv_drops_categories_and_anchors():
+    # The KV payload must NOT grow with categories/anchors — they're Rust-unread.
+    bloated = dict(SMALL_MATRIX)
+    bloated["categories"] = {f"/r{i}": "x" * 100 for i in range(1000)}
+    bloated["anchors"] = [f"/a{i}" for i in range(1000)]
+    assert serialize_kv(bloated) == serialize_kv(SMALL_MATRIX)
+
+
+def test_serialize_kv_empty_matrix():
+    # Untrained / empty → header with vocab_size 0, no rows. Rust decodes → L2 off.
+    b = serialize_kv({"version": "", "vocab_size": 0, "counts": {}, "row_totals": {}})
+    assert b[:4] == b"FSM1"
+    assert b[4] == 1
+    assert int.from_bytes(b[5:9], "little") == 0  # vocab_size
+    assert int.from_bytes(b[9:13], "little") == 0  # n_routes
+
+
+def test_serialize_kv_shrinks_vs_json():
+    # Order-of-magnitude guard: a realistic sparse matrix must encode far smaller
+    # than its JSON (the whole point — faster KV fetch + parse on cold instances).
+    routes = [f"/p/{i}" for i in range(500)]
+    counts = {r: {routes[(i + 1) % 500]: 3, routes[(i + 2) % 500]: 1} for i, r in enumerate(routes)}
+    m = {
+        "version": "2026-06-18-a",
+        "vocab_size": 500,
+        "counts": counts,
+        "row_totals": {r: 4 for r in routes},
+    }
+    binary = serialize_kv(m)
+    js = json.dumps(m, separators=(",", ":")).encode()
+    assert len(binary) < len(js) // 2, f"binary {len(binary)} not <½ of json {len(js)}"

@@ -29,8 +29,8 @@ import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 
 const COMMON_FIELD_IDS = [
   'ip', 'url', 'host', 'method', 'status', 'ua', 'country', 'city',
-  'asn', 'ja4', 'ja3', 'cache', 'edge', 'pop', 'backend', 'proto',
-  'tls', 'referer', 'waf', 'waf_resp',
+  'asn', 'p_type', 'p_desc', 'ja4', 'ja3', 'cache', 'edge', 'pop',
+  'backend', 'proto', 'tls', 'referer', 'waf', 'waf_resp',
 ]
 
 export function AddFilterDialog() {
@@ -46,7 +46,7 @@ export function AddFilterDialog() {
     label: catalog?.fields?.find((f: any) => f.id === id)?.label ?? id,
   }))
 
-  const { addFilter } = useFilterStore()
+  const addFilter = useFilterStore(s => s.addFilter)
 
   const { data: suggestions, isLoading: isLoadingSuggestions } = useFieldValues({
     field,
@@ -73,7 +73,7 @@ export function AddFilterDialog() {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
         render={
-          <Button variant="outline" size="sm" className="h-7 gap-1 pr-2 pl-1.5 border-dashed text-[11px]">
+          <Button variant="outline" size="sm" className="h-9 sm:h-7 gap-1 pr-2.5 sm:pr-2 pl-2 sm:pl-1.5 border-dashed text-xs sm:text-[11px]">
             <Plus className="h-3 w-3" />
             <span>Add Filter</span>
           </Button>
@@ -93,7 +93,6 @@ export function AddFilterDialog() {
           </div>
 
           <div className="px-5 py-6 bg-muted/30 border-y grid gap-5">
-            {/* Mode Selection */}
             <div className="grid gap-2">
               <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
                 Filter Type
@@ -110,7 +109,6 @@ export function AddFilterDialog() {
               </Tabs>
             </div>
 
-            {/* Field Selection */}
             <div className="grid gap-2">
               <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
                 Field
@@ -132,7 +130,6 @@ export function AddFilterDialog() {
               </Select>
             </div>
 
-            {/* Value Input & Suggestions */}
             <div className="grid gap-2">
               <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
                 Match Value
@@ -156,7 +153,6 @@ export function AddFilterDialog() {
                 )}
               </div>
 
-              {/* Suggestions dropdown-like list */}
               {value.length > 0 && suggestions?.values && suggestions.values.length > 0 && (
                 <div className="mt-1 border rounded-md bg-background shadow-lg overflow-hidden animate-in fade-in zoom-in-95 duration-100">
                   <ScrollArea className={cn("max-h-[160px]", suggestions.values.length > 5 ? "h-[160px]" : "")}>

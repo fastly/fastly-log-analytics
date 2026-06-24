@@ -10,7 +10,7 @@ import urllib.request
 from collections.abc import Generator
 from datetime import UTC, datetime
 
-from backend.utils.date_utils import parse_iso_utc
+from backend.utils.date_utils import iso_z, parse_iso_utc
 
 _API_BASE = "https://api.fastly.com/ngwaf/v1"
 
@@ -51,6 +51,16 @@ def fetch_verified_bots_paged(
     }
 
     cursor: str = "initial"  # Non-empty sentinel to enter the loop
+
+    # R-3b: short-circuit on FASTLY_MOCK_MODE so the Playwright E2E + the
+    # contract suite don't need a real NGWAF workspace. Production never
+    # sets the env var; the gate is a no-op outside the test harness.
+    from backend.core.fastly.mock_fixtures import is_mock_mode, mock_ngwaf_verified_bots_page
+
+    if is_mock_mode():
+        payload = mock_ngwaf_verified_bots_page()
+        yield ([], None, len(payload.get("data", [])))
+        return
 
     while cursor:
         query_string = "&".join(f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items())
@@ -203,7 +213,7 @@ def oldest_unenriched_timestamp(src: dict) -> str | None:
                 if ts:
                     # DuckDB returns a datetime object for timestamp columns
                     if hasattr(ts, "strftime"):
-                        return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+                        return iso_z(ts)
                     return str(ts)
         con.close()
     except Exception:

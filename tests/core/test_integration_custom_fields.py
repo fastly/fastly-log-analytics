@@ -9,6 +9,14 @@ def _build_source(tmp_path, svc_id):
     }
 
 
+def _admin_request():
+    """Mock fastapi.Request that satisfies _require_service_scope as admin
+    (no analyst_session on request.state → gate passes through)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(state=SimpleNamespace())
+
+
 def test_ingest_and_query_custom_fields(tmp_path, monkeypatch):
     import gzip
     import json
@@ -56,7 +64,7 @@ def test_ingest_and_query_custom_fields(tmp_path, monkeypatch):
         bytes_estimate=20,
     )
     monkeypatch.setattr(my_duckdb, "get_source_for_service", lambda x: None)
-    services.api_create_custom_field(svc_id, cf_data)
+    services.api_create_custom_field(_admin_request(), svc_id, cf_data)
 
     updated_cfg = config.load_config(svc_id)
     assert len(updated_cfg["log_fields"]["custom_fields"]) == 1
@@ -196,6 +204,7 @@ def test_ingest_and_query_numeric_custom_fields(tmp_path, monkeypatch):
         ("response_time_ms", "DOUBLE", "numeric"),
     ]:
         services.api_create_custom_field(
+            _admin_request(),
             svc_id,
             CustomFieldCreate(
                 name=name,

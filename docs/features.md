@@ -28,7 +28,7 @@ Every Fastly service / bucket / prefix combination gets its own configuration JS
 ## Provisioning
 
 ### Automated provisioning
-A guided wizard (or `backend/provision.py` CLI) creates the FOS bucket, a read-write access key scoped to it, a CDN-fronting Fastly Delivery service, and the logging endpoint on your target VCL service in one flow. Provisioning failures auto-rollback to leave your Fastly account in a clean state.
+A guided wizard (or the `python -m backend.provision.cli` CLI) creates the FOS bucket, a read-write access key scoped to it, a CDN-fronting Fastly Delivery service, and the logging endpoint on your target VCL service in one flow. Provisioning failures auto-rollback to leave your Fastly account in a clean state.
 
 ### Log sampling
 Optionally log only a random percentage (1–100%) of requests to manage storage costs on high-traffic services. Sampling is implemented via Fastly [logging conditions](https://www.fastly.com/documentation/guides/full-site-delivery/conditions/using-conditions/), which the app creates and manages automatically.
@@ -84,7 +84,7 @@ Every FOS Class A / Class B operation and CDN download is recorded with its proc
 
 The app is designed to minimize Fastly Object Storage operation costs:
 
-- **CDN-fronted reads.** With `cdn_url` configured, all Parquet data reads go through a Fastly Delivery service that fronts the FOS bucket. Edge caching means repeated queries cost **zero Class B operations** at the storage layer. The included [`sample-vcl.vcl`](../sample-vcl.vcl) handles AWS4 signing and shared-secret authentication.
+- **CDN-fronted reads.** With `cdn_url` configured, all Parquet data reads go through a Fastly Delivery service that fronts the FOS bucket. Edge caching means repeated queries cost **zero Class B operations** at the storage layer. The provisioning wizard generates the CDN VCL that handles AWS4 signing and shared-secret authentication automatically (see [CDN fronting](../README.md#cdn-fronting-optional-but-strongly-recommended) for hand-managed setups).
 - **Lazy listing.** The UI relies on local metadata for status updates; FOS `LIST` (Class A) only fires when polling for new raw logs. Ingestion uses S3 pagination markers (`StartAfter`) to scan only *new* files instead of iterating the bucket.
 - **Batch processing.** Bulk deletion and multi-file ingestion are batched to minimize API round-trips.
 - **Change-gated metadata writes.** `table_summary.json` is content-hashed before each PUT; identical-payload writes are skipped, eliminating a redundant FOS PUT per Iceberg commit in steady state.
@@ -96,13 +96,14 @@ The app is designed to minimize Fastly Object Storage operation costs:
 Admin generates a read-only invite from the **Invite Analyst** dialog. The dialog produces a JSON blob (bucket, region, read-only FOS credentials, CDN config, Iceberg metadata location). The analyst pastes the JSON into the **Join** flow of their own copy of the app. Their app connects to the admin's bucket, imports the saved admin state (log format history, saved views, custom field definitions), writes a `read_only` config, and starts syncing data. Best for long-lived collaboration — the credentials work until rotated.
 
 ### Live shared instance (admin-as-server)
-Admin opens **Share Dashboard**, picks one of three sharing modes, then mints per-analyst invites (name, email, passcode, scoped services, optional IP allowlist, optional expiry). Analysts log into the public URL, accept a TOS, and reach a read-only dashboard served from the admin's machine. No FOS credentials are issued; sessions exist only while sharing is active. Heartbeat polling surfaces a "Connection interrupted" overlay if the listener drops; admin can revoke a single invite or hit **Sever All Access** to evict everyone in one click.
+Admin opens **Share Dashboard**, picks how analysts will reach the host, then mints per-analyst invites (name, email, passcode, scoped services, optional IP allowlist, optional expiry). Analysts log into the public URL, accept a TOS, and reach a read-only dashboard served from the admin's machine. No FOS credentials are issued; sessions exist only while sharing is active. Heartbeat polling surfaces a "Connection interrupted" overlay if the listener drops; admin can revoke a single invite or hit **Sever All Access** to evict everyone in one click.
 
-The three sharing modes:
+Sharing runs in direct mode against a public HTTPS endpoint you control (no third-party relay). Two connectivity options:
 
-1. **SSH reverse tunnel via [localhost.run](https://localhost.run/)** — easiest setup. No DNS, no TLS, no port forwarding. Traffic transits the third-party relay; **review with legal if you have GDPR / HIPAA / PCI exposure** since the relay operator can see request/response contents at their edge.
-2. **Your own hostname** — no third-party relay. Requires a publicly resolvable hostname pointing at the admin's machine, a TLS cert (Caddy / Cloudflare / Let's Encrypt), and the forward port reachable from the internet.
-3. **Your public IP** — no relay and no DNS required. Still needs HTTPS because analyst session cookies are issued with `secure=true`. Public CAs do not issue certs for raw IPs, so plan on a self-signed cert (analysts must trust the browser warning) or a reverse proxy that terminates TLS for a hostname.
+1. **Your own hostname** — requires a publicly resolvable hostname pointing at the admin's machine, a TLS cert (Caddy / Cloudflare / Let's Encrypt), and the forward port reachable from the internet.
+2. **Your public IP** — no DNS required. Still needs HTTPS because analyst session cookies are issued with `secure=true`. Public CAs do not issue certs for raw IPs, so plan on a self-signed cert (analysts must trust the browser warning) or a reverse proxy that terminates TLS for a hostname.
+
+(An earlier SSH-reverse-tunnel-via-relay option was removed in v2.0.)
 
 See [SECURITY.md](../SECURITY.md#live-dashboard-sharing--trust-model) for the trust model and per-mode caveats. Best for short-lived collaboration where provisioning a second instance is overkill.
 

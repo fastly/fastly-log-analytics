@@ -8,7 +8,7 @@
  * snapshots the initial state on import, mutates the store, then resets via
  * setState() so subsequent tests aren't affected.
  */
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useFilterStore } from '@/stores/filterStore'
 
 const _initial = useFilterStore.getState()
@@ -44,10 +44,11 @@ describe('autoSetRange', () => {
     // Default (isAutoRange = true)
     useFilterStore.getState().autoSetRange('2026-06-01T00:00:00Z', '2026-06-02T00:00:00Z')
     expect(useFilterStore.getState().startTime).toBe('2026-06-01T00:00:00Z')
-    // After autoSetRange, isAutoRange flips to false (so it doesn't reapply on every datum)
-    expect(useFilterStore.getState().isAutoRange).toBe(false)
+    // After autoSetRange, isAutoRange remains true (to prevent URL-sync writing absolute timestamps)
+    expect(useFilterStore.getState().isAutoRange).toBe(true)
 
-    // Second autoSetRange should be a no-op
+    // If isAutoRange is false, autoSetRange should be a no-op
+    useFilterStore.setState({ isAutoRange: false })
     useFilterStore.getState().autoSetRange('2099-01-01T00:00:00Z', '2099-01-02T00:00:00Z')
     expect(useFilterStore.getState().startTime).toBe('2026-06-01T00:00:00Z')
   })
@@ -97,6 +98,25 @@ describe('addFilter / removeFilter', () => {
     useFilterStore.getState().addFilter('status', '500', 'include')
     useFilterStore.getState().removeFilter('nonexistent-id')
     expect(useFilterStore.getState().filters).toHaveLength(1)
+  })
+})
+
+describe('addFilter — dedup-suffix guard', () => {
+  it('drops column names matching /_\\d+$/ (would corrupt on URL round-trip)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    useFilterStore.getState().addFilter('response_1', 'foo', 'include')
+    useFilterStore.getState().addFilter('field_42', 'bar', 'exclude')
+    expect(useFilterStore.getState().filters).toHaveLength(0)
+    expect(warn).toHaveBeenCalledTimes(2)
+    warn.mockRestore()
+  })
+
+  it('allows column names with embedded digits but no trailing _<digit>', () => {
+    const { addFilter } = useFilterStore.getState()
+    addFilter('status_code', '500', 'include')
+    addFilter('http2_pushes', '3', 'include')
+    addFilter('response', '200', 'include')
+    expect(useFilterStore.getState().filters).toHaveLength(3)
   })
 })
 
@@ -166,13 +186,22 @@ describe('toggleCompareMode', () => {
 })
 
 describe('clearFilters', () => {
+  it('only clears filters', () => {
+    const { addFilter } = useFilterStore.getState()
+    addFilter('country', 'US', 'include')
+    useFilterStore.getState().clearFilters()
+    expect(useFilterStore.getState().filters).toEqual([])
+  })
+})
+
+describe('resetAll', () => {
   it('wipes filters, re-enables auto-range, clears compare state', () => {
     const { addFilter, toggleCompareMode } = useFilterStore.getState()
     addFilter('country', 'US', 'include')
     toggleCompareMode()
     useFilterStore.setState({ isAutoRange: false, hasSyncedExtents: true })
 
-    useFilterStore.getState().clearFilters()
+    useFilterStore.getState().resetAll()
     const s = useFilterStore.getState()
     expect(s.filters).toEqual([])
     expect(s.isAutoRange).toBe(true)
@@ -180,5 +209,34 @@ describe('clearFilters', () => {
     expect(s.compareMode).toBe(false)
     expect(s.compareStartTime).toBeNull()
     expect(s.compareEndTime).toBeNull()
+  })
+
+  it('restores startTime/endTime to last-24h-from-now defaults (Reset regression)', () => {
+    // Regression for: prod Reset was a no-op for the time range whenever
+    // data was fresh, because resetAll only flipped flags and the
+    // FilterBar snap effect took its "keep current range" branch
+    // (ageMinutes < 15). resetAll now restores the same defaults the
+    // store initializes with, so Reset always returns to "last 24h from
+    // now" regardless of data freshness.
+    useFilterStore.getState().setRange('2026-05-01T18:00:00.000Z', '2026-05-02T00:00:00.000Z')
+    expect(useFilterStore.getState().isAutoRange).toBe(false)
+    const before = useFilterStore.getState()
+    const spanBefore = new Date(before.endTime).getTime() - new Date(before.startTime).getTime()
+    expect(spanBefore).toBeCloseTo(6 * 3600 * 1000, -2) // 6 hours +/- small
+
+    const nowMs = Date.now()
+    useFilterStore.getState().resetAll()
+    const after = useFilterStore.getState()
+    const startMs = new Date(after.startTime).getTime()
+    const endMs = new Date(after.endTime).getTime()
+
+    // endTime ~= now (within 1s)
+    expect(Math.abs(endMs - nowMs)).toBeLessThan(1000)
+    // span ~= 24h (within 1s)
+    expect(Math.abs((endMs - startMs) - 24 * 3600 * 1000)).toBeLessThan(1000)
+    // auto-range flipped back on so the snap effect can apply the stale-
+    // data branch when extents are old.
+    expect(after.isAutoRange).toBe(true)
+    expect(after.hasSyncedExtents).toBe(false)
   })
 })

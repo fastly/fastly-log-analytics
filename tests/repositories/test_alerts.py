@@ -5,12 +5,12 @@ from unittest.mock import patch
 import duckdb
 import pytest
 
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
 from backend.models.alerts import Alert
 from backend.repositories.alerts import (
-    _find_alert_service,
     delete_alert,
     evaluate_alert,
+    get_alert_by_id,
     get_alerts,
     save_alert,
     toggle_alert,
@@ -115,82 +115,56 @@ def test_get_alerts_without_service_id_scans_all_configured_services():
     assert "B's alert" in names
 
 
-# ── _find_alert_service: cross-service alert lookup ──────────────────────────
+# ── get_alert_by_id: tenant-scoped lookup (audit finding 018) ────────────────
 
 
-def test_find_alert_service_returns_owning_service():
+def test_get_alert_by_id_returns_row_when_present():
+    sid = "svc-find-b"
     save_alert(_make_alert("svc-find-a"))
-    alert_b = _make_alert("svc-find-b")
+    alert_b = _make_alert(sid)
     save_alert(alert_b)
 
-    with patch(
-        "backend.repositories.alerts.svcconfig.list_configs",
-        return_value=[{"service_id": "svc-find-a"}, {"service_id": "svc-find-b"}],
-    ):
-        found = _find_alert_service(alert_b.id)
-
-    assert found == "svc-find-b"
+    row = get_alert_by_id(alert_b.id, sid)
+    assert row is not None
+    assert row["id"] == alert_b.id
 
 
-def test_find_alert_service_returns_none_for_unknown():
-    with patch(
-        "backend.repositories.alerts.svcconfig.list_configs",
-        return_value=[{"service_id": "svc-find-none"}],
-    ):
-        assert _find_alert_service("nonexistent-alert-id") is None
+def test_get_alert_by_id_returns_none_when_absent():
+    assert get_alert_by_id("nonexistent-alert-id", "svc-find-none") is None
 
 
-# ── toggle_alert / delete_alert: hint path + cross-service fallback ──────────
+# ── toggle_alert / delete_alert: scoped to service (audit finding 018) ───────
 
 
-def test_toggle_alert_with_hint_skips_scan_and_flips_enabled():
+def test_toggle_alert_flips_enabled_in_scoped_service():
     sid = "svc-toggle"
     alert = _make_alert(sid, enabled=True)
     save_alert(alert)
 
-    res = toggle_alert(alert.id, enabled=False, service_id_hint=sid)
+    res = toggle_alert(alert.id, enabled=False, service_id=sid)
     assert res.get("status") != "not_found"
 
-    # Persisted as disabled
     alerts = get_alerts(sid)
     assert any(a["id"] == alert.id and a["enabled"] is False for a in alerts)
 
 
-def test_toggle_alert_without_hint_falls_back_to_scan():
-    sid = "svc-toggle-noscope"
-    alert = _make_alert(sid)
-    save_alert(alert)
-
-    with patch(
-        "backend.repositories.alerts.svcconfig.list_configs",
-        return_value=[{"service_id": sid}],
-    ):
-        res = toggle_alert(alert.id, enabled=False)
-
-    assert res.get("status") != "not_found"
-
-
-def test_toggle_alert_unknown_id_returns_not_found():
-    with patch("backend.repositories.alerts.svcconfig.list_configs", return_value=[]):
-        res = toggle_alert("does-not-exist", enabled=False)
-    assert res["status"] == "not_found"
-    assert res["service_id"] is None
-
-
-def test_delete_alert_with_hint_removes_row():
+def test_delete_alert_removes_row_in_scoped_service():
     sid = "svc-del"
     alert = _make_alert(sid)
     save_alert(alert)
 
-    res = delete_alert(alert.id, service_id_hint=sid)
+    res = delete_alert(alert.id, service_id=sid)
     assert res.get("status") != "not_found"
     assert all(a["id"] != alert.id for a in get_alerts(sid))
 
 
-def test_delete_alert_unknown_id_returns_not_found():
-    with patch("backend.repositories.alerts.svcconfig.list_configs", return_value=[]):
-        res = delete_alert("does-not-exist")
-    assert res["status"] == "not_found"
+def test_delete_alert_unknown_id_returns_status():
+    """Delete is idempotent — deleting an unknown id in a specific
+    service returns a status payload (currently 'success' since the
+    SQLite DELETE matches zero rows without error). Contract: never
+    raise, always return a dict with a status key."""
+    res = delete_alert("does-not-exist", service_id="svc-no-alerts")
+    assert "status" in res
 
 
 # ── update_last_triggered: stamps the timestamp into SQLite ───────────────────

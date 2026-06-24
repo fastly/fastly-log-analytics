@@ -36,7 +36,7 @@ from hypothesis import strategies as st
 
 from backend.models.common import FilterSpec
 from backend.repositories._base import _safe_table
-from backend.repositories.dashboard import _dashboard_cache, get_aggregates
+from backend.repositories.dashboard import get_aggregates
 
 _TABLE_NAME = "test_service"
 
@@ -110,13 +110,6 @@ def seeded_con():
         )
     yield con
     con.close()
-
-
-@pytest.fixture(autouse=True)
-def clear_cache():
-    _dashboard_cache.clear()
-    yield
-    _dashboard_cache.clear()
 
 
 _src = {"name": _TABLE_NAME, "service_id": "tsid"}

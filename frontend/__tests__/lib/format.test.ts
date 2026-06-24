@@ -42,6 +42,37 @@ describe('formatValue', () => {
     expect(formatValue('proto', 3)).toBe('3')
     expect(formatValue('tls', 1.3)).toBe('1.3')
   })
+
+  // Branch coverage: proto/tls path for string inputs (line 44-49 in format.ts)
+  it('parses proto string values: valid numeric string → trimmed decimal', () => {
+    // "2.0" → Number("2.0") = 2 → parseFloat("2.0").toString() = "2"
+    expect(formatValue('proto', '2.0')).toBe('2')
+    // "1.3" stays "1.3"
+    expect(formatValue('tls', '1.3')).toBe('1.3')
+  })
+
+  it('passes invalid proto/tls strings through unchanged', () => {
+    // Non-numeric string: Number() yields NaN, branch falls through to return str
+    expect(formatValue('proto', 'h2')).toBe('h2')
+    expect(formatValue('tls', 'TLSv1.3')).toBe('TLSv1.3')
+  })
+
+  // Branch coverage: Intl.DisplayNames throw path (line 32 catch)
+  it('falls back to raw country code when Intl.DisplayNames throws', () => {
+    const originalDN = Intl.DisplayNames
+    // @ts-expect-error — stubbing for test
+    Intl.DisplayNames = class {
+      constructor() {
+        throw new Error('boom')
+      }
+    }
+    try {
+      expect(formatValue('country', 'US')).toBe('US')
+    } finally {
+      // @ts-expect-error — restoring stub
+      Intl.DisplayNames = originalDN
+    }
+  })
 })
 
 describe('calculateDelta', () => {

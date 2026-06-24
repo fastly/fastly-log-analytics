@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, get_args
 
 from fastapi import APIRouter, Depends
 
-from backend.deps import AnalyticsDeps
+from backend.core.request_context import RequestContext, build_request_context
 from backend.models.common import FilteredRequest, Limit100, Limit200, Limit1440
+from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.origin import (
     OriginAggregatesResponse,
     OriginIpHealthResponse,
@@ -20,9 +21,47 @@ from backend.models.origin import (
     OriginTimeseriesResponse,
 )
 from backend.repositories import origin as repo
-from backend.utils.router_utils import query_errors
+from backend.utils.router_utils import expand_sections, query_errors
 
-router = APIRouter(prefix="/api/origin", tags=["origin"])
+router = APIRouter(prefix="/api/origin", tags=["origin"], responses=DEFAULT_ERROR_RESPONSES)
+# Section selector — names mirror OriginAggregatesResponse fields one-to-one so
+# the FE can request a subset. Coupling reflects the asyncio.gather partition
+# inside get_aggregates so we never split a branch's reads across requests
+# (each branch checks out one pool conn and runs its reads serially on it).
+SectionName = Literal[
+    "summary",
+    "timeseries",
+    "slow_urls",
+    "status_codes",
+    "path_breakdown",
+    "pop_latency",
+    "ip_health",
+]
+
+_ALL_SECTIONS: frozenset[str] = frozenset(get_args(SectionName))
+
+# Branch 3 of get_aggregates' gather — timeseries + status_codes + path_breakdown
+# all run sequentially on extra_runners[1]. Splitting them across requests would
+# either need an extra pool conn or serialize work that already shares one — so
+# requesting any one auto-includes the other two.
+_TS_STATUS_PATH_TRIPLE: frozenset[str] = frozenset({"timeseries", "status_codes", "path_breakdown"})
+
+# Branch 4 of get_aggregates' gather — pop_latency + ip_health share
+# extra_runners[2]. Same reasoning as the triple above.
+_POP_IP_PAIR: frozenset[str] = frozenset({"pop_latency", "ip_health"})
+
+
+def _couple(expanded: set[str]) -> set[str]:
+    if expanded & _TS_STATUS_PATH_TRIPLE:
+        expanded |= _TS_STATUS_PATH_TRIPLE
+    if expanded & _POP_IP_PAIR:
+        expanded |= _POP_IP_PAIR
+    return expanded
+
+
+def _expand_sections(sections: list[SectionName] | None) -> set[str] | None:
+    """Apply coupling rules + validate. None → no selector (full response)."""
+    return expand_sections(sections, _ALL_SECTIONS, couple=_couple)
 
 
 class OriginRequest(FilteredRequest):
@@ -62,25 +101,33 @@ class OriginAggregatesRequest(FilteredRequest):
     slow_urls_min_requests: int = 10
     ip_health_limit: Limit100 = 30
     pop_latency_limit: Limit100 = 30
+    sections: list[SectionName] | None = None
 
 
 @router.post("/aggregates", response_model=OriginAggregatesResponse)
 @query_errors()
-def origin_aggregates(req: OriginAggregatesRequest, deps: AnalyticsDeps = Depends()):
-    """Composite of the six origin cards (summary, timeseries, slow-urls,
+async def origin_aggregates(
+    req: OriginAggregatesRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    """Composite of the seven origin cards (summary, timeseries, slow-urls,
     status-codes, path-breakdown, pop-latency, ip-health) backed by ONE
-    parquet scan. Shielding-analysis stays at /api/origin/shielding-analysis
-    until item 13 folds it into /api/network-health.
+    catalog-table materialization that four pool connections read in
+    parallel via ``asyncio.gather``. Shielding-analysis stays at
+    /api/origin/shielding-analysis until item 13 folds it into
+    /api/network-health.
 
     Granular endpoints below are unchanged so the frontend can roll back
     to the per-card pattern by flipping a feature flag without a backend
     redeploy.
     """
-    res = repo.get_aggregates(
-        con=deps.con,
-        src=deps.source,
-        start_time=req.start_time,
-        end_time=req.end_time,
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    sections = _expand_sections(req.sections)
+    res = await repo.get_aggregates(
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
         filters=req.filters,
         bucket_minutes=req.bucket_minutes,
         split_by_leg=req.split_by_leg,
@@ -90,18 +137,23 @@ def origin_aggregates(req: OriginAggregatesRequest, deps: AnalyticsDeps = Depend
         slow_urls_min_requests=req.slow_urls_min_requests,
         ip_health_limit=req.ip_health_limit,
         pop_latency_limit=req.pop_latency_limit,
+        sections=sections,
     )
     return OriginAggregatesResponse.with_telemetry(**res)
 
 
 @router.post("/summary", response_model=OriginSummaryResponse)
 @query_errors()
-def origin_summary(req: OriginRequest, deps: AnalyticsDeps = Depends()):
+def origin_summary(
+    req: OriginRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     res = repo.get_summary(
-        con=deps.con,
-        src=deps.source,
-        start_time=req.start_time,
-        end_time=req.end_time,
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
         filters=req.filters,
     )
     return OriginSummaryResponse.with_telemetry(**res)
@@ -109,12 +161,16 @@ def origin_summary(req: OriginRequest, deps: AnalyticsDeps = Depends()):
 
 @router.post("/timeseries", response_model=OriginTimeseriesResponse)
 @query_errors()
-def origin_timeseries(req: OriginTimeseriesRequest, deps: AnalyticsDeps = Depends()):
+def origin_timeseries(
+    req: OriginTimeseriesRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     res = repo.get_timeseries(
-        con=deps.con,
-        src=deps.source,
-        start_time=req.start_time,
-        end_time=req.end_time,
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
         filters=req.filters,
         bucket_minutes=req.bucket_minutes,
         split_by_leg=req.split_by_leg,
@@ -126,12 +182,16 @@ def origin_timeseries(req: OriginTimeseriesRequest, deps: AnalyticsDeps = Depend
 
 @router.post("/slow-urls", response_model=OriginSlowUrlsResponse)
 @query_errors()
-def origin_slow_urls(req: OriginSlowUrlsRequest, deps: AnalyticsDeps = Depends()):
+def origin_slow_urls(
+    req: OriginSlowUrlsRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     res = repo.get_slow_urls(
-        con=deps.con,
-        src=deps.source,
-        start_time=req.start_time,
-        end_time=req.end_time,
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
         filters=req.filters,
         limit=req.limit,
         min_requests=req.min_requests,
@@ -141,12 +201,16 @@ def origin_slow_urls(req: OriginSlowUrlsRequest, deps: AnalyticsDeps = Depends()
 
 @router.post("/status-codes", response_model=OriginStatusCodesResponse)
 @query_errors()
-def origin_status_codes(req: OriginRequest, deps: AnalyticsDeps = Depends()):
+def origin_status_codes(
+    req: OriginRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     res = repo.get_status_codes(
-        con=deps.con,
-        src=deps.source,
-        start_time=req.start_time,
-        end_time=req.end_time,
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
         filters=req.filters,
     )
     return OriginStatusCodesResponse.with_telemetry(**res)
@@ -154,12 +218,16 @@ def origin_status_codes(req: OriginRequest, deps: AnalyticsDeps = Depends()):
 
 @router.post("/path-breakdown", response_model=OriginPathBreakdownResponse)
 @query_errors()
-def origin_path_breakdown(req: OriginRequest, deps: AnalyticsDeps = Depends()):
+def origin_path_breakdown(
+    req: OriginRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     res = repo.get_path_breakdown(
-        con=deps.con,
-        src=deps.source,
-        start_time=req.start_time,
-        end_time=req.end_time,
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
         filters=req.filters,
     )
     return OriginPathBreakdownResponse.with_telemetry(**res)
@@ -167,12 +235,16 @@ def origin_path_breakdown(req: OriginRequest, deps: AnalyticsDeps = Depends()):
 
 @router.post("/pop-latency", response_model=OriginPopLatencyResponse)
 @query_errors()
-def origin_pop_latency(req: OriginPopLatencyRequest, deps: AnalyticsDeps = Depends()):
+def origin_pop_latency(
+    req: OriginPopLatencyRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     res = repo.get_pop_latency(
-        con=deps.con,
-        src=deps.source,
-        start_time=req.start_time,
-        end_time=req.end_time,
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
         filters=req.filters,
         limit=req.limit,
     )
@@ -181,12 +253,16 @@ def origin_pop_latency(req: OriginPopLatencyRequest, deps: AnalyticsDeps = Depen
 
 @router.post("/ip-health", response_model=OriginIpHealthResponse)
 @query_errors()
-def origin_ip_health(req: OriginIpHealthRequest, deps: AnalyticsDeps = Depends()):
+def origin_ip_health(
+    req: OriginIpHealthRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     res = repo.get_ip_health(
-        con=deps.con,
-        src=deps.source,
-        start_time=req.start_time,
-        end_time=req.end_time,
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
         filters=req.filters,
         limit=req.limit,
     )
@@ -195,12 +271,16 @@ def origin_ip_health(req: OriginIpHealthRequest, deps: AnalyticsDeps = Depends()
 
 @router.post("/shielding-analysis", response_model=OriginShieldingAnalysisResponse)
 @query_errors()
-def origin_shielding_analysis(req: OriginShieldingAnalysisRequest, deps: AnalyticsDeps = Depends()):
+def origin_shielding_analysis(
+    req: OriginShieldingAnalysisRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     res = repo.get_shielding_analysis(
-        con=deps.con,
-        src=deps.source,
-        start_time=req.start_time,
-        end_time=req.end_time,
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
         filters=req.filters,
         limit=req.limit,
     )

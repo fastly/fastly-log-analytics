@@ -18,6 +18,7 @@ from .fastly_api import (
     load_log_format,
     redeploy_cdn_vcl,
     remove_logging_endpoint,
+    resolve_shield_secret,
     update_logging_endpoint,
     validate_log_format,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "load_log_format",
     "redeploy_cdn_vcl",
     "remove_logging_endpoint",
+    "resolve_shield_secret",
     "update_logging_endpoint",
     "validate_log_format",
     # fos_setup

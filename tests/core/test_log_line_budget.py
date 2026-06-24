@@ -232,3 +232,44 @@ def test_post_no_change_path_does_not_crash(tmp_path, monkeypatch):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body.get("ok") is True
+
+
+def test_generate_log_format_clamps_to_deliver_max_via_budget():
+    """Regression for F013 (audit run 7ba15352).
+
+    The prior generate_log_format() applied per-field substr() limits in
+    isolation: url(2000) + ua(1000) + referer(1000) + 7 custom fields *
+    2000 = ~18 KB substr cap budget, which let a single request's
+    interpolated log line punch through Fastly's 16 KiB silent-truncation
+    cap. Fastly drops the truncated mid-string line entirely, blinding
+    the audit trail (repudiation).
+
+    The aggregate-budget guard tracks a running ``budget`` and clamps
+    each variable-length field's substr cap to ``min(configured, budget)``.
+    We verify by enumerating all substr(*, 0, N) caps in the generated
+    VCL and asserting their sum stays below FASTLY_LOG_LINE_DELIVER_MAX.
+    """
+    import re
+
+    cfg = {
+        # Force the worst-case shape from the audit: url + ua + referer
+        # at max, plus 10 huge custom fields. Without the budget, sum
+        # would be 2000 + 1000 + 1000 + 10*2000 = 24 KB.
+        "field_limits": {"url": 4000, "ua": 4000, "referer": 4000},
+        "custom_fields": _make_custom_fields(10, bytes_each=4000),
+        # Per-field byte_limit overrides (mirror real config shape).
+        "groups": {"core": True, "a": True},
+    }
+    # Attach byte_limit so each custom field requests 4000 bytes.
+    for cf in cfg["custom_fields"]:
+        cf["byte_limit"] = 4000
+
+    fmt = lf.generate_log_format(cfg)
+
+    caps = [int(m) for m in re.findall(r"substr\([^)]*, *0, *(\d+)\)", fmt)]
+    assert caps, f"expected substr() caps in generated format, got: {fmt[:300]}…"
+    total = sum(caps)
+    assert total <= lf.FASTLY_LOG_LINE_DELIVER_MAX, (
+        f"aggregate substr-cap budget {total} exceeds FASTLY_LOG_LINE_DELIVER_MAX "
+        f"{lf.FASTLY_LOG_LINE_DELIVER_MAX} — F013 budget clamp regressed"
+    )

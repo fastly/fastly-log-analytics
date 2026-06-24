@@ -42,7 +42,7 @@ def test_update_usage_logging_settings(mock_save, mock_load):
 
 
 @patch("backend.config.load_usage_logging_config", return_value=dict(_DEFAULT_UL_CFG))
-@patch("backend.core.metadata_db.get_usage_logs")
+@patch("backend.core.metadata.get_usage_logs")
 def test_usage_log_empty_table(mock_get_logs, mock_ul_cfg):
     mock_get_logs.return_value = (
         [],
@@ -72,7 +72,7 @@ def test_usage_log_empty_table(mock_get_logs, mock_ul_cfg):
 
 
 @patch("backend.config.load_usage_logging_config", return_value=dict(_DEFAULT_UL_CFG))
-@patch("backend.core.metadata_db.get_usage_logs")
+@patch("backend.core.metadata.get_usage_logs")
 def test_usage_log_aggregates_correctly(mock_get_logs, mock_ul_cfg):
     mock_get_logs.return_value = (
         [
@@ -126,7 +126,7 @@ def test_usage_log_aggregates_correctly(mock_get_logs, mock_ul_cfg):
 
 
 @patch("backend.config.load_usage_logging_config", return_value=dict(_DEFAULT_UL_CFG))
-@patch("backend.core.metadata_db.get_usage_logs")
+@patch("backend.core.metadata.get_usage_logs")
 def test_usage_log_usage_type_filter_cdn_only(mock_get_logs, mock_ul_cfg):
     mock_get_logs.return_value = (
         [
@@ -174,7 +174,7 @@ def test_usage_log_usage_type_filter_cdn_only(mock_get_logs, mock_ul_cfg):
 
 
 @patch("backend.config.load_usage_logging_config", return_value=dict(_DEFAULT_UL_CFG))
-@patch("backend.core.metadata_db.get_usage_logs")
+@patch("backend.core.metadata.get_usage_logs")
 def test_usage_log_process_context_filter(mock_get_logs, mock_ul_cfg):
     mock_get_logs.return_value = (
         [
@@ -222,7 +222,7 @@ def test_usage_log_process_context_filter(mock_get_logs, mock_ul_cfg):
 
 
 @patch("backend.config.load_usage_logging_config", return_value=dict(_DEFAULT_UL_CFG))
-@patch("backend.core.metadata_db.get_usage_logs")
+@patch("backend.core.metadata.get_usage_logs")
 def test_usage_log_operation_type_filter(mock_get_logs, mock_ul_cfg):
     mock_get_logs.return_value = (
         [

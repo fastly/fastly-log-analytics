@@ -8,6 +8,8 @@ any unintentional drift surfaces immediately."""
 
 from __future__ import annotations
 
+import pytest
+
 from backend.provision.session_scoring_vcl import (
     SCORING_BACKEND_API_NAME,
     SCORING_BACKEND_VCL_NAME,
@@ -123,6 +125,10 @@ def test_recv_snippet_unsets_client_supplied_headers():
         "unset req.http.X-Edge-Score-Enforce",
         "unset req.http.X-Edge-Score-Reason",
         "unset req.http.X-Edge-Score-Set-Cookie",
+        # L2 skip-gram anchor: a client-supplied SEEN high-probability anchor
+        # would raise the L2 transition prob and depress the anomaly score
+        # (audit F009 evasion class). Must be scrubbed at the edge boundary.
+        "unset req.http.X-Edge-Prev-Anchor",
     )
     for unset in required_unsets:
         assert unset in vcl, f"missing client-edge scrub: {unset!r}"
@@ -148,6 +154,15 @@ def test_recv_re_enables_shielding_post_scoring_restart():
     vcl = recv_snippet("Svc", "test_secret_abc123")
     assert "req.restarts == 1 && req.http.x-edge-score" in vcl
     assert "set var.fastly_req_do_shield = true;" in vcl
+
+
+def test_recv_stamps_rtt_start_before_pass():
+    """recv stamps time.elapsed.usec into x-edge-score-t0 just before the
+    scorer sub-fetch so pass-1 deliver can diff it into edge_score_rtt_us.
+    Must be set before return(pass)."""
+    vcl = recv_snippet("Svc", "test_secret_abc123")
+    assert "set req.http.x-edge-score-t0 = time.elapsed.usec;" in vcl
+    assert vcl.index("set req.http.x-edge-score-t0") < vcl.index("return(pass);")
 
 
 def test_recv_sets_scoring_pass_marker_then_pass():
@@ -200,6 +215,58 @@ def test_recv_does_not_set_dead_prev_route_header():
     vcl = recv_snippet("Svc", "test_secret_abc123")
     assert "set req.http.X-Edge-Prev-Route" not in vcl
     assert "set req.http.X-Edge-Last-Route" not in vcl
+
+
+def test_recv_sets_ngwaf_skip_inspection_on_scoring_route():
+    """The scoring sub-fetch must skip NGWAF inspection. NGWAF's edge_security
+    (vcl_miss/pass) 406s attack URLs, and because that runs on the scoring
+    sub-fetch it turns every WAF block into a scorer fail-open
+    (compute-unavailable-406) even though the scorer strips the query string
+    and never sees the payload. Setting x-sigsci-skip-inspection-once = "true"
+    when we route to the scorer makes NGWAF skip THAT hop only.
+
+    Must be set inside the first-pass route block: after `set req.backend`
+    (so it only applies when we actually route to Compute) and before
+    `return(pass)` (so it lands on the sub-fetch's bereq)."""
+    vcl = recv_snippet("Svc", _TEST_SECRET)
+    assert 'set req.http.x-sigsci-skip-inspection-once = "true";' in vcl
+    backend_idx = vcl.find(f"set req.backend = {SCORING_BACKEND_VCL_NAME};")
+    skip_idx = vcl.find('set req.http.x-sigsci-skip-inspection-once = "true";')
+    pass_idx = vcl.find("return(pass);")
+    assert backend_idx != -1 and skip_idx != -1 and pass_idx != -1
+    assert backend_idx < skip_idx < pass_idx, (
+        "x-sigsci-skip-inspection-once must be set inside the scoring route "
+        "block: after `set req.backend` and before `return(pass)`"
+    )
+
+
+def test_recv_strips_client_supplied_skip_inspection_header():
+    """x-sigsci-skip-inspection-once is a REQUEST header — a client who sets
+    it could skip the WAF entirely. Strip any client-supplied copy in the
+    client-edge scrub block (gated by the shield-auth boundary, restarts==0)
+    so only our own scoring-route set survives."""
+    vcl = recv_snippet("Svc", _TEST_SECRET)
+    assert "unset req.http.x-sigsci-skip-inspection-once;" in vcl
+    # Must sit after the shield-auth boundary guard (i.e. inside the
+    # client-edge scrub), like the other anti-spoofing unsets.
+    boundary_idx = vcl.find(f'req.http.X-Edge-Shield-Auth != "{_TEST_SECRET}"')
+    assert boundary_idx != -1
+    assert vcl.find("unset req.http.x-sigsci-skip-inspection-once;") > boundary_idx
+
+
+def test_recv_unsets_skip_inspection_on_real_origin_restart():
+    """req.http persists across the restart and edge_security unsets only its
+    bereq copy, so the value we set on the scoring sub-fetch would otherwise
+    leak into the real-origin pass and skip the WAF on attack traffic. The
+    restart block (req.restarts == 1) must unset it so the real origin is
+    always inspected. There are TWO unsets total: one in the client-edge
+    scrub (restarts==0) and one on the restart path (restarts==1)."""
+    vcl = recv_snippet("Svc", _TEST_SECRET)
+    assert vcl.count("unset req.http.x-sigsci-skip-inspection-once;") == 2
+    restart_idx = vcl.find("req.restarts == 1 && req.http.x-edge-score")
+    assert restart_idx != -1
+    # The second unset lives in the restart block (after the restart guard).
+    assert vcl.find("unset req.http.x-sigsci-skip-inspection-once;", restart_idx) > restart_idx
 
 
 # ── pass snippet ─────────────────────────────────────────────────────────────
@@ -280,7 +347,7 @@ def test_deliver_fail_open_on_non_200_sets_zeros():
     assert "} else {" in vcl
     assert 'set req.http.x-edge-score:score = "0";' in vcl
     assert 'set req.http.x-edge-score:compliance = "unknown";' in vcl
-    assert 'set req.http.x-edge-score:reason = "compute-unavailable";' in vcl
+    assert 'set req.http.x-edge-score:reason = "compute-unavailable-" + resp.status;' in vcl
 
 
 def test_deliver_pass_1_only_fires_under_scoring_pass_marker():
@@ -339,6 +406,29 @@ def test_deliver_pass_2_emits_cookie_additively_at_edge_only():
     assert "add resp.http.Set-Cookie = req.http.x-edge-score:set-cookie;" in vcl
     # Specifically NOT `set` (which would overwrite origin's cookie).
     assert "set resp.http.Set-Cookie =" not in vcl
+
+
+def test_deliver_computes_rtt_for_both_branches():
+    """Edge round-trip (edge_score_rtt_us) is computed from the recv
+    x-edge-score-t0 stamp via the std.atoi(time.elapsed.usec) diff idiom,
+    OUTSIDE the resp.status branch so fail-open/timeout rows also record
+    it (they sit ≈the timeout budget)."""
+    vcl = deliver_snippet(_TEST_SECRET)
+    assert "declare local var.rtt INTEGER;" in vcl
+    assert "set var.rtt = std.atoi(time.elapsed.usec);" in vcl
+    assert "set var.rtt -= std.atoi(req.http.x-edge-score-t0);" in vcl
+    # Stringified — INTEGER var → subfield lands empty without the "" + coercion.
+    assert 'set req.http.x-edge-score:rtt = "" + var.rtt;' in vcl
+    # Computed before the success/fail-open split so both branches inherit it.
+    assert vcl.index("set req.http.x-edge-score:rtt") < vcl.index("if (resp.status == 200)")
+
+
+def test_deliver_captures_exec_subfield_and_strips_header():
+    """Scorer-reported Wasm exec time is captured into the exec subfield on
+    200, and the source response header is unset in the anti-leak list."""
+    vcl = deliver_snippet(_TEST_SECRET)
+    assert "set req.http.x-edge-score:exec = resp.http.x-edge-score-exec-us;" in vcl
+    assert "unset resp.http.x-edge-score-exec-us;" in vcl
 
 
 # ── miss snippet ─────────────────────────────────────────────────────────────
@@ -536,3 +626,44 @@ def test_generate_is_pure_no_randomness():
     a = generate_scoring_vcl("Svc", "test_secret_abc123")
     b = generate_scoring_vcl("Svc", "test_secret_abc123")
     assert a == b
+
+
+# ── EC-07: generator-local VCL string-injection guard ────────────────────────
+
+
+def test_request_secret_with_quote_is_rejected():
+    """EC-07: a request_secret containing a double-quote would terminate the VCL
+    string literal it's substituted into (== "{secret}") and could inject VCL.
+    The generator rejects it (belt-and-suspenders; real secrets are
+    secrets.token_hex). Every snippet that embeds the secret refuses, as does the
+    top-level generator."""
+    bad = 'abc" || req.http.x-evil == "1'
+    callers = (
+        lambda: recv_snippet("Svc", bad),
+        lambda: pass_snippet("Svc", bad),
+        lambda: deliver_snippet(bad),
+        lambda: miss_snippet(bad),
+        lambda: enforce_snippet(bad),
+        lambda: generate_scoring_vcl("Svc", bad),
+    )
+    for call in callers:
+        with pytest.raises(ValueError, match="request_secret"):
+            call()
+
+
+def test_exclude_url_regex_with_quote_is_rejected_but_backslash_is_allowed():
+    """EC-07: the recv exclusion regex is interpolated into a VCL string literal
+    too. A double-quote (or control char) is rejected, but a backslash MUST be
+    allowed — real regexes use ``\\.`` (the default asset regex does)."""
+    with pytest.raises(ValueError, match="exclude_url_regex"):
+        recv_snippet("Svc", _TEST_SECRET, exclude_url_regex=r'\.(png)"; bad')
+    # A normal backslash-bearing regex generates cleanly (no false positive).
+    body = recv_snippet("Svc", _TEST_SECRET, exclude_url_regex=r"^/skip/.*\.(png|jpg)$")
+    assert r"\.(png|jpg)" in body
+
+
+def test_default_secret_and_regex_generate_cleanly():
+    """The guard never fires on the real default inputs (hex secret + the bundled
+    asset-extension regex, which contains backslashes)."""
+    body = generate_scoring_vcl("Svc", "a" * 64)  # hex-shaped secret
+    assert body  # no raise

@@ -38,10 +38,6 @@ paths = [
     '''^tests/repositories/test_alerts\.py$''',                  # zeros Slack webhook fixture
     '''^tests/utils/test_sql_validator\.py$''',                  # blocked-function NAMES (e.g. "AWS_SECRET_ACCESS_KEY")
 
-    # Public SSH host key for localhost.run — sharing is the entire point
-    # (trust anchor for the reverse-tunnel host-key check).
-    '''^configs/ssh_known_hosts$''',
-
     # Documentation: release notes and runbooks may reference example
     # tokens / credentials in prose.
     '''^docs/''',
@@ -49,13 +45,19 @@ paths = [
     '''^AGENTS\.md$''',
 
     # Working-tree-only artifacts (all gitignored; matter only for
-    # ad-hoc `--no-git` runs). gitleaks uses Go's RE2 engine, which
-    # doesn't support negative lookahead, so we list the per-service
-    # config filename pattern explicitly rather than "everything under
-    # configs/ except ssh_known_hosts".
+    # ad-hoc `--no-git` runs). We list the per-service config filename
+    # pattern explicitly.
     '''^frontend/\.next/''',                                  # Next.js build cache
+    '''^frontend/\.next-e2e/''',                              # Next.js e2e build output (ephemeral preview-mode keys)
     '''^configs/.*\.json(\.bak.*)?$''',                       # real per-service Fastly configs (gitignored)
-    '''^data/''',                                             # real SSH share key, share DB, runtime data
+    # data/ is fully gitignored, so these only affect ad-hoc `--no-git`
+    # runs. Scope to the actual runtime artifact types rather than the whole
+    # tree, so a stray plaintext secret accidentally dropped under data/ (a
+    # NEW file type) is still scanned instead of blanket-allowlisted.
+    '''^data/system/share_key(\.pub)?$''',                    # SSH share keypair (the real secret material)
+    '''^data/.*\.(db|duckdb)(-wal|-shm)?$''',                 # SQLite/DuckDB runtime stores (binary blobs)
+    '''^data/.*\.tmp$''',                                     # transient store files
+    '''^data/(tunnel_state|system/usage_logging)\.json$''',  # runtime state blobs
     '''.*/__pycache__/''',                                    # Python bytecode
     '''\.pyc$''',
 ]

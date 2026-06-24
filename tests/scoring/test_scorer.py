@@ -17,9 +17,10 @@ from backend.scoring.scorer import (
     L1_SCORE_FAST,
     L1_SCORE_ROBOTIC,
     L1_TIMING_WARMUP_SEQ,
+    L2_RAMP_DAYS,
     ScoreResult,
-    _blend_weight,
     _l2_score_from_trans_prob,
+    _optin_ramp_weight,
     _running_mean_variance,
     _transition_prob,
     score_combined,
@@ -61,6 +62,18 @@ def test_running_mean_variance_mixed():
     mean, var = _running_mean_variance(state)
     assert mean == pytest.approx(2.5)
     assert var == pytest.approx(1.25)
+
+
+def test_running_mean_variance_long_session_divides_by_full_seq():
+    """#038: the whole-session mean divides by the full seq, NOT a capped
+    min(seq, 20). 40 dwells summing to 80 → mean 2.0; a min(20) divisor
+    would wrongly give 80/20 = 4.0. Pins the divide-by-seq contract and
+    guards against re-introducing the inflating divisor cap. Mirrors the
+    Rust test running_long_session_divides_by_full_seq_not_capped."""
+    state = _state(seq=40, sum_dt=80, sum_dt_sq=200)
+    mean, var = _running_mean_variance(state)
+    assert mean == pytest.approx(2.0)
+    assert var == pytest.approx(1.0)  # 200/40 - 2² = 5 - 4 = 1
 
 
 def test_running_mean_variance_clamps_negative_to_zero():
@@ -204,11 +217,31 @@ def test_transition_prob_with_unseen_pair():
 
 
 def test_transition_prob_with_unseen_prev_row():
-    """Unknown prev route → uniform Laplace prior."""
+    """Unknown prev route in a POPULATED matrix → fail closed at the
+    probability floor (→ max L2 score), not the lenient uniform prior.
+
+    The uniform prior (0.1 here) mapped to a sub-threshold L2 score, which
+    let an attacker dodge the transition shield by prepending an untracked
+    route. An unseen prev row is now treated as maximally anomalous."""
     m = _matrix({"a": {"b": 100}}, vocab=10)
     p = _transition_prob(m, "never-seen-prev", "b", m["vocab_size"])
-    # (0 + 0.5) / (0 + 0.5*10) = 0.5 / 5 = 0.1
-    assert p == pytest.approx(0.1)
+    assert p <= 1e-12
+
+
+def test_transition_prob_present_zero_row_total_fails_closed():
+    """EC-04 cross-language fixture: a prev route PRESENT in row_totals with a
+    value of 0 (a curr-only route — seen as a destination, never a source) is
+    'unseen as a source' and must fail closed to the probability floor (→ max L2),
+    NOT the lenient uniform prior. Decided on the VALUE (<= 0), not key presence.
+    Mirrors the Rust scorer's ``l2_present_prev_zero_row_total_fails_closed``
+    (scorer.rs gates on ``row_total(id) > 0``). Pre-EC-04, Python keyed on
+    presence and returned ~0.1 (→ L2 17) here while Rust returned the floor
+    (→ L2 100) — a silent cross-language contract divergence. Unreachable from
+    prod matrices (the trainer always +1's a source's row_total)."""
+    # "a" is present in row_totals but with total 0 (it has no outgoing counts).
+    m = {"counts": {"b": {"c": 100}}, "row_totals": {"a": 0, "b": 100}, "vocab_size": 50}
+    p = _transition_prob(m, "a", "c", m["vocab_size"])
+    assert p <= 1e-12
 
 
 def test_transition_prob_empty_matrix_falls_back_to_uniform():
@@ -343,23 +376,25 @@ def test_score_layer2_skipgram_unseen_anchor_does_not_override_anomalous_transit
     assert "low-transition-prob" in reasons
 
 
-# ── _blend_weight ────────────────────────────────────────────────────────────
+# ── _optin_ramp_weight ───────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
-    "age_days,expected_w",
+    "days_since_optin,expected_w",
     [
+        (-1.0, 0.0),
         (0.0, 0.0),
-        (3.0, 0.0),
-        (6.99, 0.0),
-        (7.0, 0.0),
-        (8.5, 0.5),
-        (10.0, 1.0),
+        (1.5, 0.5),
+        (3.0, 1.0),
         (30.0, 1.0),
     ],
 )
-def test_blend_weight_ramps_from_day_7_over_3_days(age_days, expected_w):
-    assert _blend_weight(age_days) == pytest.approx(expected_w)
+def test_optin_ramp_weight_pinned(days_since_optin, expected_w):
+    """Parity with the Rust ``optin_ramp_weight_pinned``: linear fade-in over
+    [0, L2_RAMP_DAYS] from the opt-in instant — 0 at (and before) opt-in, 0.5 at
+    the midpoint, 1.0 once fully ramped. Replaces the retired day-7 age-blend."""
+    assert _optin_ramp_weight(days_since_optin) == pytest.approx(expected_w)
+    assert L2_RAMP_DAYS == 3.0
 
 
 # ── score_combined: end-to-end output contract ───────────────────────────────
@@ -376,7 +411,8 @@ def test_score_combined_clean_human_session_returns_zero():
         current_route=Route("/products", "product"),
         prev_route=Route("/home", "home"),
         matrix=m,
-        matrix_age_days=30.0,
+        l2_enforce_enabled=True,
+        l2_days_since_optin=30.0,
     )
     assert result.score == 0
     assert result.l1_score == 0
@@ -457,22 +493,79 @@ def test_score_combined_impossibly_fast_scraper():
     assert result.score >= 50
 
 
-def test_score_combined_l2_disabled_during_warmup():
-    """matrix_age_days < 7 → L2 weight is 0, only L1 contributes."""
+def test_score_combined_l2_off_contributes_nothing():
+    """Parity with the Rust ``l2_off_contributes_nothing``: flag false → L2 stays
+    observe-only forever. Its sub-score is still computed, but it never reaches
+    the enforced combined score regardless of how stale the opt-in anchor is."""
     state = _state(seq=10, sum_dt=50, sum_dt_sq=300)  # clean
     m = _matrix({"/a": {"/b": 1}}, vocab=100)  # /a→/c is RARE
+    for days in (0.0, 1.5, 3.0, 30.0):
+        result = score_combined(
+            state=state,
+            cookie_compliance="ok",
+            current_route=Route("/c", "other"),
+            prev_route=Route("/a", "other"),
+            matrix=m,
+            l2_enforce_enabled=False,
+            l2_days_since_optin=days,
+        )
+        # L2 raw score is high but the flag is off, so combined = L1 (= 0).
+        assert result.l1_score == 0
+        assert result.l2_score > 0, f"days {days}: L2 sub-score still computed"
+        assert result.score == 0, f"days {days}: flag off → combined == clean L1 (0)"
+
+
+def test_score_combined_l2_on_fades_in_from_optin():
+    """Parity with the Rust ``l2_on_fades_in_from_optin``: with the flag on, L2's
+    contribution fades in from the opt-in anchor. At opt-in (day 0) the ramp
+    weight is 0 so the combined score equals L1; once fully ramped
+    (days ≥ L2_RAMP_DAYS) L2 lifts the enforced combined score. The L2 sub-score
+    itself is age-independent."""
+    state = _state(seq=10, sum_dt=50, sum_dt_sq=300)  # clean L1 → 0
+    m = _matrix({"/a": {"/b": 1}}, vocab=100)  # /a→/c is RARE
+    day0 = score_combined(
+        state=state,
+        cookie_compliance="ok",
+        current_route=Route("/c", "other"),
+        prev_route=Route("/a", "other"),
+        matrix=m,
+        l2_enforce_enabled=True,
+        l2_days_since_optin=0.0,
+    )
+    fully = score_combined(
+        state=state,
+        cookie_compliance="ok",
+        current_route=Route("/c", "other"),
+        prev_route=Route("/a", "other"),
+        matrix=m,
+        l2_enforce_enabled=True,
+        l2_days_since_optin=3.0,
+    )
+    assert day0.l1_score == 0 and fully.l1_score == 0
+    assert day0.l2_score > 0 and day0.l2_score == fully.l2_score  # sub-score age-independent
+    assert day0.score == 0  # ramp weight 0 at the instant of opt-in
+    assert fully.score > day0.score  # fully ramped → L2 moves the enforced score
+
+
+def test_score_combined_young_optin_cannot_hard_block():
+    """Parity with the Rust ``l2_on_young_optin_cannot_hard_block``: enabling L2
+    must NOT instantly push a clean-L1 session to the score==100 hard-block bar —
+    the ramp opens at 0 the moment the operator opts in."""
+    state = _state(seq=10, sum_dt=50, sum_dt_sq=300)  # clean L1 → 0
+    m = _matrix({"/a": {"/b": 1}}, vocab=1000)
+    m["row_totals"]["/a"] = 1_000_000  # /a→/c ≈ probability floor → L2 ~100
     result = score_combined(
         state=state,
         cookie_compliance="ok",
         current_route=Route("/c", "other"),
         prev_route=Route("/a", "other"),
         matrix=m,
-        matrix_age_days=3.0,  # before Day 7
+        l2_enforce_enabled=True,
+        l2_days_since_optin=0.0,  # just opted in
     )
-    # L2 raw score is high but weight is 0, so combined = L1 (= 0).
-    assert result.l1_score == 0
-    assert result.l2_score > 0
-    assert result.score == 0
+    assert result.l2_score >= 50, "L2 sub-score still computed"
+    assert result.score < 100, "opt-in day 0 must keep L2 below the hard-block bar"
+    assert result.score == 0, "opt-in day 0: combined must equal clean L1 (0)"
 
 
 def test_score_combined_quantized_to_nearest_5():
@@ -498,7 +591,8 @@ def test_score_combined_caps_at_100():
         current_route=Route("/b", "other"),
         prev_route=Route("/a", "other"),
         matrix=m,
-        matrix_age_days=30.0,
+        l2_enforce_enabled=True,
+        l2_days_since_optin=30.0,  # fully ramped
     )
     assert result.score == 100
 

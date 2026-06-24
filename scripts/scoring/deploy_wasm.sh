@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
-# Build + deploy the session-scorer Wasm with a trained matrix embedded.
+# Build + deploy the matrix-less session-scorer Wasm.
+#
+# The trained transition matrix is NOT embedded in the Wasm — it is served from
+# the `scoring_matrix` KV Store at runtime (see compute/scorer/src/matrix.rs and
+# backend/scoring/matrix.py::serialize_kv, which the backend pushes via the
+# Fastly API). This script only builds + activates the matrix-less Wasm; pushing
+# the trained matrix to KV is a separate backend step.
 #
 # Pipeline:
-#   1. Validate trained matrix.json exists (run scripts/scoring/train.py first).
-#   2. Copy trained matrix.json over matrix.default.json (the include_bytes!
-#      target). The original default is preserved in git so this is a
-#      working-tree change only.
+#   1. Sanity-check that a trained matrix.json exists for this tenant — a
+#      precondition guard ("did you train first?"), NOT an embed; the matrix is
+#      pushed to KV separately, not by this script.
+#   2. Copy the scorer sources into an isolated temp workspace (build outputs
+#      excluded) so the build never mutates the working tree and concurrent
+#      invocations can't clobber each other's build outputs.
 #   3. `fastly compute build` to produce pkg/session-scorer.tar.gz.
 #   4. `fastly compute deploy --service-id <sid>` to activate.
-#   5. Restore matrix.default.json from git so subsequent fresh builds get
-#      the empty placeholder back.
+#   5. The temp workspace is removed on exit; the working tree is never touched.
 #
 # Required:
 #   --service-id   target Compute service id (e.g. eHDt37QGSEfihZOuXJOREe)
@@ -63,14 +70,23 @@ if [ -z "$TOKEN" ]; then
   echo "error: --token or FASTLY_API_TOKEN is required" >&2
   exit 2
 fi
+# Hand the token to the fastly CLI via the environment, NEVER as a --token
+# argv flag: process arguments are world-readable (ps aux, /proc/<pid>/cmdline)
+# for the lifetime of the build/deploy, leaking a token that can edit/activate
+# Compute services on a shared build host or CI runner. The CLI reads
+# FASTLY_API_TOKEN from the environment.
+export FASTLY_API_TOKEN="$TOKEN"
 if [ ! -f "$MATRIX_PATH" ]; then
   echo "error: matrix not found at $MATRIX_PATH" >&2
   echo "       run: ./scripts/scoring/train.py --in <traces.jsonl> --out $MATRIX_PATH" >&2
   exit 2
 fi
 
-# Sanity check the matrix — refuse to deploy an empty matrix as if it were
-# trained. The default placeholder has vocab_size=0; a real matrix has > 0.
+# Precondition guard — refuse to run if no trained matrix exists yet (the
+# default placeholder has vocab_size=0; a real trained matrix has > 0). The
+# matrix is pushed to KV separately by the backend, not embedded by this script;
+# this is just a "did you train first?" check so we don't stand up scoring infra
+# for a tenant with no model.
 VOCAB=$(python3 -c "import json; print(json.load(open('$MATRIX_PATH')).get('vocab_size', 0))")
 if [ "$VOCAB" -eq 0 ]; then
   echo "error: matrix at $MATRIX_PATH is empty (vocab_size=0)" >&2
@@ -78,27 +94,28 @@ if [ "$VOCAB" -eq 0 ]; then
   exit 3
 fi
 VERSION=$(python3 -c "import json; print(json.load(open('$MATRIX_PATH')).get('version', '?'))")
-echo "[deploy_wasm] embedding matrix version=$VERSION vocab_size=$VOCAB"
+echo "[deploy_wasm] trained matrix present: version=$VERSION vocab_size=$VOCAB (served via KV, not embedded)"
 
-# Stash the default in working memory (git tracks it, so we restore from
-# git at the end) and copy the trained matrix on top of the include_bytes!
-# target.
-cp "$MATRIX_PATH" "$SCORER_DIR/matrix.default.json"
-
-# Make sure we restore the default no matter what — including on Ctrl+C or
-# build failure. Otherwise a successful prior deploy would leave the
-# customer matrix sitting in the workspace, vulnerable to accidental commit.
+# Build in an isolated temp workspace so the build never mutates the working
+# tree and concurrent invocations don't clobber each other's build outputs.
+# The temp copy excludes build outputs (target/, pkg/) so it stays small.
+TMP_WORKSPACE="$(mktemp -d)"
 cleanup() {
-  echo "[deploy_wasm] restoring matrix.default.json from git"
-  git -C "$ROOT" checkout -- compute/scorer/matrix.default.json
+  rm -rf "$TMP_WORKSPACE"
 }
 trap cleanup EXIT INT TERM
 
-cd "$SCORER_DIR"
-echo "[deploy_wasm] fastly compute build"
-fastly compute build --token "$TOKEN" 2>&1 | tail -3
+tar -C "$SCORER_DIR" --exclude=target --exclude=pkg --exclude=.DS_Store -cf - . \
+  | tar -C "$TMP_WORKSPACE" -xf -
+
+cd "$TMP_WORKSPACE"
+echo "[deploy_wasm] fastly compute build (isolated workspace)"
+# --auto-yes auto-approves the fastly.toml post_build (wasm-opt) prompt so the
+# build doesn't abort non-interactively. wasm-opt is gated on being installed;
+# if it isn't on PATH here the post_build no-ops and ships the un-optimized Wasm.
+fastly compute build --auto-yes 2>&1 | tail -3
 
 echo "[deploy_wasm] fastly compute deploy --service-id $SERVICE_ID"
-fastly compute deploy --token "$TOKEN" --service-id "$SERVICE_ID" --accept-defaults 2>&1 | tail -10
+fastly compute deploy --service-id "$SERVICE_ID" --accept-defaults 2>&1 | tail -10
 
 echo "[deploy_wasm] done."

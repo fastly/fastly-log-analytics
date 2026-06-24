@@ -5,49 +5,48 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel
 
 from backend.core import share_db
+from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.share_auth import (
     ShareAcknowledgeResponse,
     ShareClaimResponse,
     ShareHeartbeatResponse,
+    ShareLoginPayload,
     ShareLoginResponse,
     ShareLogoutResponse,
+    TosAckPayload,
     TosDocument,
 )
+from backend.utils.remote_access import client_ip
 from backend.utils.tunnel import get_tunnel_manager
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/share", tags=["share-auth"])
-
+router = APIRouter(prefix="/api/share", tags=["share-auth"], responses=DEFAULT_ERROR_RESPONSES)
 COOKIE_NAME = "analyst_session_id"
 PENDING_COOKIE_NAME = "analyst_pending_session_id"
 
 
-def _client_ip(request: Request) -> str:
-    """Extract the real client IP.
+def _safe_audit_email(email: str | None) -> str:
+    """Bound + strip an unauth-supplied email before it reaches the audit log.
 
-    With uvicorn running ``--proxy-headers --forwarded-allow-ips=127.0.0.1``
-    (see docker-compose.prod.yml), ``request.client.host`` is already the
-    real client IP for Caddy-proxied traffic and the loopback address for
-    direct admin connections. We never re-parse X-Forwarded-For ourselves —
-    that was the leftmost-XFF spoofing vector.
+    The login failure / rate-limit paths are reachable pre-auth with a fully
+    attacker-controlled ``email`` (ShareLoginPayload.email is an unvalidated
+    str). Logging it raw lets an attacker inject newlines/control chars into
+    the audit stream (log forging) or bloat it with a megabyte of text. Strip
+    control characters (incl. CR/LF) and cap the length; the value is for
+    operator forensics only, never re-parsed.
     """
-    if request.client and request.client.host:
-        return request.client.host
-    return "0.0.0.0"
-
-
-class ShareLoginPayload(BaseModel):
-    email: str
-    passcode: str
+    if not email:
+        return "-"
+    cleaned = "".join(c for c in email if c.isprintable())
+    return cleaned[:254] or "-"
 
 
 @router.post("/login", response_model=ShareLoginResponse)
 def share_login(payload: ShareLoginPayload, request: Request, response: Response):
-    ip = _client_ip(request)
+    ip = client_ip(request)
     user_agent = request.headers.get("user-agent", "")
     headers = {k.lower(): v for k, v in request.headers.items()}
 
@@ -57,7 +56,7 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
     if locked:
         share_db.log_share_audit_event(
             event_type="LOGIN_FAIL",
-            email=payload.email,
+            email=_safe_audit_email(payload.email),
             ip_address=ip,
             details=f"locked out (remaining {remaining}s)",
         )
@@ -72,7 +71,7 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         mgr.record_login_failure(ip, payload.email)
         share_db.log_share_audit_event(
             event_type="LOGIN_FAIL",
-            email=payload.email,
+            email=_safe_audit_email(payload.email),
             ip_address=ip,
             details="invalid credentials",
         )
@@ -103,8 +102,11 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         )
 
     # Success.
-    mgr.clear_login_failures(ip)
     session = mgr.create_session(invite=invite, ip_address=ip, user_agent=user_agent, headers=headers)
+    # Clear the per-IP failure counter so a successful login resets the
+    # lockout window — otherwise accumulated failures could lock out an IP
+    # even after it authenticates (clear_login_failures had no caller).
+    mgr.clear_login_failures(ip)
     share_db.log_share_audit_event(
         event_type="LOGIN_SUCCESS",
         email=invite["email"],
@@ -117,35 +119,28 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         tos and (invite.get("tos_accepted_at") is None or (invite.get("tos_version") or "") != tos["version"])
     )
 
-    # Cookie contract — see Section #4. secure=True is non-negotiable.
-    # In test mode (TestClient defaults to http://testserver), uvicorn won't
-    # send secure cookies; we tag it anyway because tests can read Set-Cookie.
-    if tos_pending:
-        response.set_cookie(
-            key=PENDING_COOKIE_NAME,
-            value=session.session_id,
-            httponly=True,
-            secure=True,
-            samesite="strict",
-            max_age=share_db.iso_z_now() and 24 * 60 * 60,
-            path="/",
-        )
-        response.delete_cookie(COOKIE_NAME, path="/")
-    else:
-        response.set_cookie(
-            key=COOKIE_NAME,
-            value=session.session_id,
-            httponly=True,
-            secure=True,
-            samesite="strict",
-            max_age=share_db.iso_z_now() and 24 * 60 * 60,
-            path="/",
-        )
-        response.delete_cookie(PENDING_COOKIE_NAME, path="/")
+    # Two-cookie protocol: while tos_pending=True the session id lives in
+    # PENDING_COOKIE_NAME. The middleware refuses analyst-protected endpoints
+    # on a pending session and the SPA redirects to /share-login/acknowledge.
+    # Only after TOS acceptance does the cookie get upgraded to COOKIE_NAME
+    # via /api/share/acknowledge (which also rotates the session id).
+    # Previously the full cookie was issued unconditionally — pending/full
+    # was a fiction and a session-fixation gap across the TOS boundary.
+    target_cookie = PENDING_COOKIE_NAME if tos_pending else COOKIE_NAME
+    other_cookie = COOKIE_NAME if tos_pending else PENDING_COOKIE_NAME
+    response.set_cookie(
+        key=target_cookie,
+        value=session.session_id,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=24 * 60 * 60,
+        path="/",
+    )
+    response.delete_cookie(other_cookie, path="/")
 
     return ShareLoginResponse(
         ok=True,
-        session_id=session.session_id,
         name=session.name,
         email=session.email,
         tos_pending=tos_pending,
@@ -164,10 +159,6 @@ def share_logout(request: Request, response: Response):
     response.delete_cookie(COOKIE_NAME, path="/")
     response.delete_cookie(PENDING_COOKIE_NAME, path="/")
     return ShareLogoutResponse(ok=True)
-
-
-class TosAckPayload(BaseModel):
-    version: str
 
 
 @router.get("/tos", response_model=TosDocument)
@@ -210,13 +201,22 @@ def share_acknowledge_tos(payload: TosAckPayload, request: Request, response: Re
         ip_address=session.ip_address,
         details=f"version={payload.version}",
     )
+
+    # Rotate the session id at the TOS-acceptance boundary so any cookie
+    # value an attacker could have observed during the pending window can
+    # no longer be replayed against the now-fully-scoped session. If the
+    # session evaporated between validate and rotate (extreme race), force
+    # the user back through login rather than re-emitting the old id.
+    new_sid = mgr.rotate_session_id(session.session_id)
+    if new_sid is None:
+        raise HTTPException(status_code=401, detail={"error": "unauthenticated"})
     response.set_cookie(
         key=COOKIE_NAME,
-        value=session.session_id,
+        value=new_sid,
         httponly=True,
         secure=True,
         samesite="strict",
-        max_age=share_db.iso_z_now() and 24 * 60 * 60,
+        max_age=24 * 60 * 60,
         path="/",
     )
     response.delete_cookie(PENDING_COOKIE_NAME, path="/")
@@ -225,9 +225,19 @@ def share_acknowledge_tos(payload: TosAckPayload, request: Request, response: Re
 
 @router.get("/heartbeat", response_model=ShareHeartbeatResponse)
 def share_heartbeat(request: Request):
-    """Cheap session validity probe used by the idle heartbeat poller.
+    """Session validity probe AND the dedicated user-activity channel.
 
     Returns 401 if the session is gone so the frontend redirects to login.
+
+    Also the one reliable way the backend learns the user is still genuinely
+    present: data requests only flow when the dashboard refetches (new logs /
+    navigation), so on a quiet tab an active user would otherwise generate no
+    activity signal and get idle-logged-out. The poller fires every ~30s and
+    carries ``X-User-Active``; when it reports genuine recent interaction
+    ("1") we reset the idle clock. When it reports idle ("0", or the header is
+    absent), we DON'T — so a backgrounded/abandoned tab still expires at the
+    2h idle cap. This is the inverse of the original bug: the heartbeat now
+    keeps the session alive only while the user is actually there.
     """
     sid = request.cookies.get(COOKIE_NAME) or request.cookies.get(PENDING_COOKIE_NAME)
     mgr = get_tunnel_manager()
@@ -235,14 +245,15 @@ def share_heartbeat(request: Request):
     if session is None:
         mgr.record_heartbeat_unauth()
         raise HTTPException(status_code=401, detail={"error": "unauthenticated"})
+    if request.headers.get("x-user-active") == "1":
+        mgr.touch_session(session.session_id, last_activity="heartbeat (active)")
     return ShareHeartbeatResponse(
         ok=True,
-        session_id=session.session_id,
         last_active=session.last_active_time,
     )
 
 
-@router.get("/claim/{token}", response_model=ShareClaimResponse)
+@router.post("/claim/{token}", response_model=ShareClaimResponse)
 def share_claim(token: str, request: Request):
     """One-time-view reveal of an invite's plaintext credentials.
 
@@ -252,7 +263,7 @@ def share_claim(token: str, request: Request):
     URL exists to confirm scope and identity to the analyst without
     putting credentials in a chat tool that retains history.
     """
-    ip = _client_ip(request)
+    ip = client_ip(request)
     row = share_db.claim_token(token, ip)
     if row is None:
         share_db.log_share_audit_event(
@@ -274,5 +285,5 @@ def share_claim(token: str, request: Request):
         name=invite.get("name") if invite else None,
         email=invite.get("email") if invite else None,
         expires_at=invite.get("expires_at") if invite else None,
-        service_ids=invite.get("service_ids") if invite else [],
+        service_ids=(invite.get("service_ids") if invite else []) or [],
     )

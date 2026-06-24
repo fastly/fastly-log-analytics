@@ -1,13 +1,13 @@
 'use client'
 
-import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, Activity, Gauge, Users, XCircle } from 'lucide-react'
+import { AlertTriangle, Activity, Gauge, Users, XCircle, Clock } from 'lucide-react'
 
-import { client } from '@/lib/api'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Button } from '@/components/ui/button'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
 import { ScoringHealthHelp } from '@/components/SessionScoring/help-content'
+
+import { useScoringQuery } from './useScoringQuery'
 
 interface ScoringHealthCardProps {
   serviceId: string
@@ -25,7 +25,17 @@ interface HealthResponse {
   p95_score: number
   max_score: number
   scorer_errors: number
+  fail_open_rate_pct?: number | null
   top_reasons: { reason: string; count: number }[]
+  latency?: {
+    available: boolean
+    rtt_p50_us: number | null
+    rtt_p95_us: number | null
+    rtt_p99_us: number | null
+    rtt_max_us: number | null
+    exec_p50_us: number | null
+    exec_p95_us: number | null
+  }
   matrix_staleness?: {
     l2_evaluated: number
     l2_high_count: number
@@ -67,46 +77,39 @@ function Metric({
 }
 
 export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthCardProps) {
-  const { data, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ['scoring-health', serviceId, sinceHours],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/health' as any,
-        {
-          params: {
-            path: { service_id: serviceId },
-            query: { since_hours: sinceHours },
-          },
-        } as any,
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as HealthResponse
-    },
-  })
+  const { data, isLoading, isError, error, refetch } = useScoringQuery<HealthResponse>(
+    ['scoring-health', serviceId, sinceHours],
+    serviceId,
+    'health',
+    { since_hours: sinceHours },
+  )
 
   if (isError) {
+    // M-6: the raw DuckDB error ("IO Error: No files found that match the
+    // pattern 'cache/fos-<id>-logs/buffer/batch_<hash>.parquet'") used to
+    // be surfaced verbatim — exposing internal cache layout and reading
+    // as if the scoring system was broken. Map the common transient
+    // signatures to friendly copy; fall back to a clean message for
+    // anything else. The original payload is still in the network tab if
+    // an operator needs to dig.
+    const raw = String(error?.message || 'Unknown error')
+    const friendly =
+      /No files found that match the pattern/i.test(raw) || /IO Error/i.test(raw)
+        ? 'Scoring data is still warming up — try again in a few minutes.'
+        : /timed out|timeout/i.test(raw)
+          ? 'The scoring service took too long to respond. Retry, or check the scorer Compute service is reachable.'
+          : raw
     return (
       <AnalyticsCard
         title="Scoring Health"
         description={`Operational metrics for the last ${sinceHours}h.`}
       >
-        <div className="border border-destructive/20 bg-destructive/5 rounded-md p-4">
-          <div className="flex items-center gap-2 text-destructive">
-            <AlertTriangle className="h-4 w-4" />
-            <span className="text-sm font-medium">Failed to load scoring health</span>
-          </div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {(error as any)?.message || 'Unknown error'}
-          </p>
-          <Button
-            size="sm"
-            variant="outline"
-            className="mt-3"
-            onClick={() => refetch()}
-          >
-            Retry
-          </Button>
-        </div>
+        <CardErrorState
+          icon={<AlertTriangle className="h-4 w-4" />}
+          title="Scoring health unavailable"
+          message={friendly}
+          onRetry={() => refetch()}
+        />
       </AnalyticsCard>
     )
   }
@@ -117,9 +120,9 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
         title="Scoring Health"
         description={`Operational metrics for the last ${sinceHours}h.`}
       >
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <Skeleton key={i} className="h-20 w-full" />
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+          {['m1', 'm2', 'm3', 'm4', 'm5', 'm6'].map((k) => (
+            <Skeleton key={k} className="h-20 w-full" />
           ))}
         </div>
       </AnalyticsCard>
@@ -127,8 +130,32 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
   }
 
   const fireRateTone: 'default' | 'warn' = data.fire_rate_pct < 20 ? 'warn' : 'default'
+  // SRE-15: tone on the traffic-normalized fail-open RATE, not the absolute
+  // count. The count scales with request volume (scorer is instance-per-
+  // request → fail-opens track traffic), so a fixed count threshold cries
+  // wolf under load and stays silent on a low-traffic spike. Steady-state is
+  // ~1.6% (scorer-instance-per-request-coldstart); warn above 2.5%. Fall back
+  // to the legacy count tone if the rate field is absent (older backend).
+  const failRate = data.fail_open_rate_pct ?? null
   const errorsTone: 'default' | 'warn' | 'good' =
-    data.scorer_errors === 0 ? 'good' : data.scorer_errors > 10 ? 'warn' : 'default'
+    data.scorer_errors === 0
+      ? 'good'
+      : failRate != null
+        ? failRate > 2.5 ? 'warn' : 'default'
+        : data.scorer_errors > 10 ? 'warn' : 'default'
+
+  // Scorer latency tile. rtt is the edge round-trip (compared against the
+  // ~100ms backend timeout); exec is the scorer's own Wasm time (~µs).
+  const lat = data.latency
+  const rttP95Us = lat?.rtt_p95_us ?? null
+  const fmtMs = (us: number | null | undefined) =>
+    us == null ? '—' : `${(us / 1000).toFixed(us < 10_000 ? 1 : 0)}ms`
+  const fmtUs = (us: number | null | undefined) =>
+    us == null ? '—' : us >= 1_000 ? `${(us / 1000).toFixed(1)}ms` : `${us}µs`
+  // Warn as p95 round-trip approaches the timeout budget — that's when
+  // fail-opens start. 80ms ≈ 80% of the 100ms ceiling.
+  const latencyTone: 'default' | 'warn' =
+    rttP95Us != null && rttP95Us / 1000 > 80 ? 'warn' : 'default'
 
   return (
     <AnalyticsCard
@@ -136,7 +163,7 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
       description={`Snapshot for the last ${sinceHours}h — fire rate, score distribution, and top reasons.`}
       helpContent={<ScoringHealthHelp />}
     >
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <Metric
           icon={Activity}
           label="Fire Rate"
@@ -160,8 +187,19 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
           icon={XCircle}
           label="Scorer Errors"
           value={data.scorer_errors.toLocaleString()}
-          sub="fail-open + auth fail rows"
+          sub={failRate != null ? `${failRate.toFixed(2)}% of edge rows` : 'fail-open + auth fail rows'}
           tone={errorsTone}
+        />
+        <Metric
+          icon={Clock}
+          label="Scorer Latency"
+          value={rttP95Us != null ? fmtMs(rttP95Us) : '—'}
+          sub={
+            rttP95Us != null
+              ? `p95 rtt · p50 ${fmtMs(lat?.rtt_p50_us)} · exec ${fmtUs(lat?.exec_p95_us)}`
+              : 'awaiting re-provision'
+          }
+          tone={latencyTone}
         />
         <Metric
           icon={AlertTriangle}

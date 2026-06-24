@@ -9,8 +9,6 @@ export type TunnelHistoryEntry = {
 
 export type ShareStatus = {
   sharing_active: boolean
-  use_tunnel: boolean
-  tunnel_url: string | null
   public_endpoint: string | null
   public_url: string | null
   forward_port: number | null
@@ -43,7 +41,29 @@ export function formatUptime(seconds: number | null | undefined): string {
 export function formatStamp(s: string | null | undefined): string {
   if (!s) return '—'
   try {
-    return new Date(s).toLocaleString()
+    // Deterministic across server and client: pin BOTH the locale and the
+    // timezone, AND format the date and time parts SEPARATELY, joining with a
+    // literal separator we control. A single toLocaleString() with both date
+    // and time fields emits a locale-pattern CONNECTOR between them, and that
+    // connector differs across ICU/CLDR versions — Node (SSR) renders
+    // "Jun 11, 2026, 10:04 PM" while WebKit renders "Jun 11, 2026 at 10:04 PM".
+    // Since /admin/share's share_status is dehydrated into the SSR HTML, that
+    // drift threw React #418 on the invites/sessions/audit tables (webkit-
+    // only). Splitting the calls sidesteps the connector entirely. UTC is the
+    // right frame for an admin coordinating share access across timezones.
+    const d = new Date(s)
+    const datePart = d.toLocaleDateString('en-US', {
+      timeZone: 'UTC',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    })
+    const timePart = d.toLocaleTimeString('en-US', {
+      timeZone: 'UTC',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+    return `${datePart}, ${timePart} UTC`
   } catch {
     return s
   }

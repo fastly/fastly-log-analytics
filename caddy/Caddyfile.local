@@ -1,0 +1,55 @@
+# Local ingress for `docker compose up` (the base docker-compose.yml).
+#
+# Why this exists: the production Caddyfile assumes the host-network topology
+# (Caddy ↔ uvicorn over the VM's loopback) and does Fastly-edge things —
+# X-Forwarded-For rewriting, the X-Proxied-By-Caddy analyst marker, Fastly-IP
+# gating, rate limits. None of that applies on a laptop. This file is the
+# minimal local equivalent.
+#
+# How the loopback trust model is satisfied locally: in docker-compose.yml the
+# `frontend` and `caddy` services join the `backend` container's network
+# namespace (network_mode: "service:backend"), so Caddy reaches both upstreams
+# on 127.0.0.1 and the backend sees the TCP peer as loopback → it classifies
+# the request as the local admin (see backend/utils/remote_access.py:
+# is_request_remote). That namespace-sharing is what makes this work portably
+# on native Docker AND Colima, Mac/PC/Linux — `network_mode: host` does not
+# behave consistently across those.
+#
+# Deliberately NO X-Forwarded-For rewrite and NO X-Proxied-By-Caddy header:
+# locally the operator IS the admin, so we want the admin branch, not analyst
+# gating.
+{
+	admin off
+	auto_https off
+}
+
+# Host-agnostic on :80 — serves localhost, *.localhost (e.g. fastly.localhost,
+# which browsers resolve to 127.0.0.1 with no setup), and any custom name a
+# user maps in /etc/hosts (e.g. fastly.analytics). The friendly names must also
+# be in the backend's Host allowlist — see LOCAL_HOSTS in docker-compose.yml.
+:80 {
+	# /api/* → backend (loopback in the shared netns). flush_interval -1 keeps
+	# SSE streams (e.g. /api/cron-runs/stream) unbuffered; the timeouts cover
+	# the occasional slow analytics query.
+	@api path /api/*
+	reverse_proxy @api 127.0.0.1:8000 {
+		# Pin X-Forwarded-For to loopback. uvicorn trusts XFF from its loopback
+		# peer (default --proxy-headers --forwarded-allow-ips=127.0.0.1), and
+		# Caddy would otherwise forward the docker gateway IP as the client — so
+		# the backend would classify the local operator as a remote analyst and
+		# return 400 host_not_allowed. Locally the operator IS the admin, so we
+		# present loopback. (Prod's Caddyfile does the opposite on purpose: it
+		# sets XFF to the real Fastly-Client-IP for analyst classification.)
+		header_up X-Forwarded-For 127.0.0.1
+		flush_interval -1
+		transport http {
+			response_header_timeout 120s
+			read_timeout 120s
+		}
+	}
+
+	# Everything else → Next.js frontend.
+	reverse_proxy 127.0.0.1:3000 {
+		flush_interval -1
+	}
+}

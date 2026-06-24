@@ -1,5 +1,6 @@
 import threading
 import time
+from typing import Any
 
 import boto3
 from botocore.config import Config
@@ -64,7 +65,7 @@ class _ProvisioningTracker:
 
         op = name.upper()
 
-        def tracked(*args, **kwargs):
+        def tracked(*args: Any, **kwargs: Any) -> Any:
             t0 = time.time()
             status: str | int = "OK"
             exc_raised = None
@@ -117,7 +118,7 @@ class _ProvisioningTracker:
             batch = self._calls[:]
             self._calls.clear()
         try:
-            from backend.core import metadata_db
+            from backend.core import metadata as metadata_db
 
             metadata_db.log_usage_calls(self._service_id, batch, process_context=self._context)
             return len(batch)
@@ -182,6 +183,20 @@ def ensure_fos_bucket(
     service_id: str | None = None,
 ) -> bool:
     """Create the bucket via Boto3 (S3 API). Returns True on success."""
+    # R-3b mock branch: skip the real boto3 / FOS roundtrip during
+    # E2E so the orchestrator can stream all 8 banners without a
+    # ThreadedMotoServer attached. `FASTLY_MOCK_MODE` already neuters
+    # every Fastly/NGWAF API call upstream; the bucket call is the
+    # only S3 op left in the provisioning happy path that would
+    # otherwise need wiring through moto. Production never sets the
+    # env, so the real call path stays load-bearing.
+    from backend.core.fastly.mock_fixtures import is_mock_mode
+
+    if is_mock_mode():
+        if status_cb:
+            status_cb(f"✅ Bucket '{name}' (mocked).")
+        return True
+
     s3 = _get_fos_s3_client(
         access_key, secret_key, region, service_id=service_id, bucket_name=name, context=f"provision:{name}"
     )
@@ -222,6 +237,15 @@ def delete_fos_bucket(
     service_id: str | None = None,
 ):
     """Delete the bucket via Boto3, emptying it first if necessary."""
+    # R-3b mock branch — mirrors ensure_fos_bucket so the Playwright
+    # teardown journey can stream its 8 banners without a moto stack.
+    from backend.core.fastly.mock_fixtures import is_mock_mode
+
+    if is_mock_mode():
+        if status_cb:
+            status_cb(f"✅ Bucket '{name}' deleted (mocked).")
+        return
+
     s3 = _get_fos_s3_client(
         access_key, secret_key, region, service_id=service_id, bucket_name=name, context=f"teardown:{name}"
     )
@@ -360,7 +384,7 @@ def ensure_fos_access_key(
     info(f"Creating FOS access key ({permission})…")
     if status_cb:
         status_cb(f"⏳ Creating {permission} access key...")
-    payload = {"permission": permission, "description": description}
+    payload: dict[str, Any] = {"permission": permission, "description": description}
     if buckets:
         payload["buckets"] = buckets
 

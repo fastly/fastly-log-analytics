@@ -29,6 +29,7 @@ import {
 } from '@/components/ui/select'
 import { useScoringLabels, type LabelRow, type LabelValue } from '@/hooks/useScoringLabels'
 import { client, extractApiError } from '@/lib/api'
+import { showToast, showToastWithAction } from '@/lib/toast'
 
 import { SessionEventsDialog } from './SessionEventsDialog'
 
@@ -50,6 +51,17 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
   const [busyId, setBusyId] = React.useState<string | null>(null)
   const [error, setError] = React.useState('')
   const [pendingDelete, setPendingDelete] = React.useState<LabelRow | null>(null)
+  // IDs hidden from the table while the post-confirm undo window is open.
+  // The DELETE fires after the toast duration unless Undo cancels the timer.
+  const [pendingDeleteIds, setPendingDeleteIds] = React.useState<Set<string>>(() => new Set())
+  const pendingTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  React.useEffect(() => {
+    const timers = pendingTimersRef.current
+    return () => {
+      for (const [, t] of timers) clearTimeout(t)
+      timers.clear()
+    }
+  }, [])
 
   const labels = useScoringLabels(serviceId)
 
@@ -77,23 +89,54 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
     }
   }
 
-  const remove = async (row: LabelRow) => {
-    setBusyId(row.id)
+  const remove = (row: LabelRow) => {
     setError('')
-    try {
-      await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}' as any, {
-        params: { path: { service_id: serviceId, label_id: row.id } },
-      } as any)
-      setPendingDelete(null)
-      qc.invalidateQueries({ queryKey: ['scoring-labels', serviceId] })
-    } catch (e: any) {
-      setError(extractApiError(e) || 'Failed to delete label')
-    } finally {
-      setBusyId(null)
-    }
+    setPendingDelete(null)
+    const id = row.id
+    setPendingDeleteIds((prev) => {
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
+    const timer = setTimeout(async () => {
+      pendingTimersRef.current.delete(id)
+      try {
+        await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}' as any, {
+          params: { path: { service_id: serviceId, label_id: id } },
+        } as any)
+        qc.invalidateQueries({ queryKey: ['scoring-labels', serviceId] })
+      } catch (e: any) {
+        setPendingDeleteIds((prev) => {
+          const next = new Set(prev)
+          next.delete(id)
+          return next
+        })
+        showToast(extractApiError(e) || 'Failed to delete label', 'error')
+      }
+    }, 5500)
+    pendingTimersRef.current.set(id, timer)
+    showToastWithAction(`Deleted label for ${row.sid}`, {
+      actionLabel: 'Undo',
+      onAction: () => {
+        const t = pendingTimersRef.current.get(id)
+        if (t) {
+          clearTimeout(t)
+          pendingTimersRef.current.delete(id)
+        }
+        setPendingDeleteIds((prev) => {
+          const next = new Set(prev)
+          next.delete(id)
+          return next
+        })
+      },
+      durationMs: 5500,
+    })
   }
 
-  const rows = labels.labels
+  const rows = React.useMemo(
+    () => labels.labels.filter((r) => !pendingDeleteIds.has(r.id)),
+    [labels.labels, pendingDeleteIds],
+  )
   const counts = labels.counts
 
   return (
@@ -104,6 +147,7 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
       helpTitle="About Session Labels"
       isLoading={labels.isLoading}
       isFetching={labels.isFetching}
+      error={labels.error}
       contentClassName="p-0"
       headerAction={
         <div className="flex items-center gap-2 text-xs">
@@ -175,7 +219,7 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
                     >
                       <PopoverTrigger
                         render={(props: React.ComponentPropsWithRef<'button'>) => (
-                          <Button {...props} variant="ghost" size="icon" className="h-7 w-7" title="Edit label">
+                          <Button {...props} variant="ghost" size="icon" aria-label="Edit label" className="h-7 w-7" title="Edit label">
                             <Pencil className="h-3.5 w-3.5" />
                           </Button>
                         )}
@@ -213,6 +257,7 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
                     <Button
                       variant="ghost"
                       size="icon"
+                      aria-label="Delete label"
                       className="h-7 w-7 text-rose-600 hover:text-rose-700"
                       title="Delete label"
                       onClick={() => {
@@ -233,16 +278,14 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
       <ConfirmDialog
         open={pendingDelete !== null}
         onOpenChange={(open) => {
-          if (!open && busyId !== pendingDelete?.id) setPendingDelete(null)
+          if (!open) setPendingDelete(null)
         }}
         isDangerous
-        isPending={pendingDelete !== null && busyId === pendingDelete.id}
         title="Delete label"
         description={
           pendingDelete ? (
             <>
-              Delete label for sid <span className="font-mono">{pendingDelete.sid}</span>? This
-              cannot be undone.
+              Delete label for sid <span className="font-mono">{pendingDelete.sid}</span>?
             </>
           ) : null
         }

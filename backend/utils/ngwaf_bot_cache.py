@@ -9,6 +9,8 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
+
 _CACHE_DIR = Path("data")
 _DB_NAME = "ngwaf_bot_cache.db"
 
@@ -39,11 +41,11 @@ def get_db_path() -> str:
 
 
 def _get_conn() -> sqlite3.Connection:
+    from backend.core.sqlite_pool import SMALL_CACHE_PRAGMAS
+
     con = sqlite3.connect(str(_db_path()), timeout=10)
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.execute("PRAGMA busy_timeout=10000")
-    con.execute("PRAGMA cache_size=-16000")  # 16MB — small cache table
+    for pragma in SMALL_CACHE_PRAGMAS:
+        con.execute(pragma)
     con.executescript(_DDL)
     con.commit()
     return con
@@ -99,7 +101,7 @@ def update_sync_watermark(workspace_id: str, until_ts: str) -> None:
 def upsert_bots(records: list[dict], workspace_id: str, latest_timestamp: str | None) -> None:
     """Insert or replace bot records and update sync state in one transaction. Idempotent."""
     con = _get_conn()
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = iso_z_now()
     rows = [
         (
             r["waf_req_id"],
@@ -127,10 +129,8 @@ def upsert_bots(records: list[dict], workspace_id: str, latest_timestamp: str | 
                 # Advance by 1 second so the next sync uses an exclusive lower bound
                 # and doesn't re-fetch the last event we already stored.
                 try:
-                    from backend.utils.date_utils import parse_iso_utc
-
                     _pts = parse_iso_utc(latest_timestamp)
-                    next_ts = (_pts + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ") if _pts else latest_timestamp
+                    next_ts = iso_z(_pts + timedelta(seconds=1)) if _pts else latest_timestamp
                 except ValueError:
                     next_ts = latest_timestamp
                 con.execute(
@@ -143,7 +143,7 @@ def upsert_bots(records: list[dict], workspace_id: str, latest_timestamp: str | 
 
 def cleanup_old_bots(retention_days: int) -> int:
     """Delete rows with synced_at older than retention_days. Returns deleted row count."""
-    cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
     con = _get_conn()
     try:
         with con:

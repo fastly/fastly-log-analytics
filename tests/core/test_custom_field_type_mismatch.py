@@ -332,3 +332,67 @@ def test_batch_proceeds_when_one_file_has_only_type_mismatches(custom_field_env)
     n_good = sum(1 for _, v in rows if v is not None)
     assert n_null == 3, f"expected 3 NULL cells (the 'bad' file), got {n_null}"
     assert n_good == 3, f"expected 3 well-typed cells (the 'good' file), got {n_good}"
+
+
+# ── Type-mismatch matrix (audit follow-up) ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "ddb_type,bad_value,description",
+    [
+        ("BIGINT", "NaN", "BIGINT ← string 'NaN' → NULL"),
+        # NOTE: DOUBLE ← string 'NaN' parses to IEEE NaN, NOT NULL —
+        # that's actual DuckDB read_json_auto behaviour. Omitted from
+        # the matrix because the contract for DOUBLE+NaN-string is
+        # "valid IEEE NaN", not "NULL on coerce failure".
+        ("BOOLEAN", "maybe", "BOOLEAN ← arbitrary string → NULL"),
+        ("BIGINT", "not-a-number-at-all", "BIGINT ← clearly invalid string → NULL"),
+        ("DOUBLE", "lol", "DOUBLE ← clearly invalid string → NULL"),
+    ],
+)
+def test_typed_field_with_invalid_string_value_nulls_cell(custom_field_env, ddb_type, bad_value, description):
+    """Matrix coverage for the type-mismatch contract: the row is kept,
+    the bad cell is NULL'd, and a peer typed field on the same row
+    remains valid. The existing test_integer_* tests pin the INTEGER
+    case; this parametrises the contract over the BIGINT / DOUBLE /
+    BOOLEAN variants that the audit flagged as uncovered.
+    """
+    from backend.core import iceberg as ice
+
+    env = custom_field_env
+    env["set_custom_fields"](
+        [
+            {
+                "name": "metric",
+                "duckdb_type": ddb_type,
+                "enabled": True,
+                "vcl": '"metric":%{req.http.X-Metric}V',
+            }
+        ]
+    )
+
+    ice.init_iceberg_table(env["fos_source"])
+    base = datetime.now(UTC) - timedelta(hours=2)
+    env["seed_gz"](
+        "raw/2026-05-21/10/2026-05-21T10-00-00.matrix.gz",
+        [
+            _well_typed_row(base, 0, "metric", 1),
+            _well_typed_row(base + timedelta(seconds=1), 1, "metric", bad_value),
+            _well_typed_row(base + timedelta(seconds=2), 2, "metric", 2),
+        ],
+    )
+
+    events = env["drain_ingest"]()
+    done = next((e for e in events if e["type"] == "done"), None)
+    assert done is not None, f"no 'done' event in: {events}"
+    assert done["rows_inserted"] == 3, (
+        f"row was dropped on type-mismatch ({description}). rows_inserted={done['rows_inserted']} expected 3."
+    )
+
+    ice.commit_buffer(env["fos_source"])
+    rows = _query_view(env, "metric")
+    by_url = dict(rows)
+    # The cell with the bad value must be NULL.
+    assert by_url["/path/1"] is None, (
+        f"contract violation ({description}): bad cell did not NULL — got {by_url['/path/1']!r}"
+    )

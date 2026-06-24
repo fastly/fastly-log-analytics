@@ -21,9 +21,10 @@ export interface ReportConfiguration {
 }
 
 export function useReportConfig(options: ReportConfigOptions = {}) {
-  const { startTime, endTime } = useFilterStore(useShallow(state => ({
+  const { startTime, endTime, hasSyncedExtents } = useFilterStore(useShallow(state => ({
     startTime: state.startTime,
-    endTime: state.endTime
+    endTime: state.endTime,
+    hasSyncedExtents: state.hasSyncedExtents
   })))
 
   const [metric, setMetric] = useState(options.defaultMetric || 'requests')
@@ -34,9 +35,9 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
   const config = useMemo((): ReportConfiguration => {
     const spanSecs = (!startTime || !endTime) ? 0 : (new Date(endTime).getTime() - new Date(startTime).getTime()) / 1000
     const spanHours = spanSecs / 3600
-    
+
     const intervals = new Set(INTERVALS.map(i => i.value))
-    
+
     // Performance limits: prevent massive bucket counts
     if (spanHours > 6) intervals.delete('1 second')
     if (spanHours > 168) intervals.delete('1 minute')
@@ -50,8 +51,13 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
     let effectiveInt: ChartInterval = chartInterval
     // Re-evaluate if manual mode isn't locked in, or if the current interval just became invalid
     if (!manualInterval || !intervals.has(effectiveInt)) {
-      // Find the most appropriate interval for the given span
-      if (spanHours >= 168 && intervals.has('1 day')) effectiveInt = '1 day'
+      // Find the most appropriate interval for the given span.
+      // 720h (30d) is the upper bound at which 1-hour granularity stays
+      // valid (see the perf-limit `if (spanHours > 720)` above), so it's
+      // the natural ceiling for defaulting to 1h — anything in the 7d–30d
+      // band still feels granular at hourly buckets without exploding the
+      // bar count. ≥30d defaults to 1d as before.
+      if (spanHours >= 720 && intervals.has('1 day')) effectiveInt = '1 day'
       else if (spanHours >= 24 && intervals.has('1 hour')) effectiveInt = '1 hour'
       else if (spanSecs >= 300 && intervals.has('1 minute')) effectiveInt = '1 minute'
       else if (intervals.has('1 second')) effectiveInt = '1 second'
@@ -69,11 +75,11 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
       if (secs > curInt) trends.add(t)
     }
 
-    return { 
-      spanHours: spanHours, 
-      validIntervals: intervals, 
-      validTrends: trends, 
-      effectiveInterval: effectiveInt 
+    return {
+      spanHours: spanHours,
+      validIntervals: intervals,
+      validTrends: trends,
+      effectiveInterval: effectiveInt
     }
   }, [startTime, endTime, chartInterval, manualInterval])
 
@@ -87,6 +93,16 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
       setTrend('off')
     }
   }, [config, chartInterval, trend])
+
+  // When the user clicks Reset, filterStore.clearFilters() flips
+  // hasSyncedExtents back to false. Clear the manualInterval lock so
+  // auto-detection resumes from the freshly-reset time range. During
+  // normal use (manual interval pick) the lock stays in place.
+  useEffect(() => {
+    if (!hasSyncedExtents && manualInterval !== null) {
+      setManualInterval(null)
+    }
+  }, [hasSyncedExtents, manualInterval])
 
   return {
     metric,

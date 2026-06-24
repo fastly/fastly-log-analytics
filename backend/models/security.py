@@ -7,6 +7,13 @@ from backend.models.common import BaseResponse
 
 class SecurityAggregatesResponse(BaseResponse):
     tls_fingerprints: list[dict[str, Any]] = []
+    # Per-fingerprint-card coverage: {"tls_ciphers_sha": 0.99}. Drives the FE
+    # "low coverage" hint so an analyst seeing a bare or trivial leaderboard
+    # understands whether it's a field-not-enabled problem vs the field being
+    # legitimately sparse for the current traffic mix (e.g. TLS fingerprints on
+    # a service whose traffic is mostly shielded — the code is fine, the data
+    # just isn't there).
+    fingerprint_coverage: dict[str, float] = {}
     req_size_dist: list[dict[str, Any]] = []
     top_ips_header: list[dict[str, Any]] = []
     ipv6_adoption: list[dict[str, Any]] = []

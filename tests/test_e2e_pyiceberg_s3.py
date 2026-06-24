@@ -29,11 +29,9 @@ Closes TESTING_PLAN_3 item: "No PyIceberg-over-S3 integration test."
 from __future__ import annotations
 
 import os
-import socket
 import tempfile
 import threading
 import uuid
-from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -51,23 +49,28 @@ import pytest
 moto_server = pytest.importorskip("moto.server")
 
 
-def _free_port() -> int:
-    """Bind a random port and release it — moto picks it up next."""
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture
 def moto_s3_server():
     """Stand up moto as a real HTTP S3 server on a random port.
 
     Yields ``(endpoint_url, port)`` and tears the server down even if a
     test raises. Sharing the server across multiple writes within a test
-    is fine; the bucket is per-test."""
-    port = _free_port()
-    server = moto_server.ThreadedMotoServer(ip_address="127.0.0.1", port=port)
+    is fine; the bucket is per-test.
+
+    Port allocation: passes ``port=0`` so the kernel hands ThreadedMotoServer
+    a free port at bind time, then reads back ``server.port`` (or, for
+    older moto, the server's ``server_address``) once it's listening.
+    Avoids the bind-then-release TOCTOU window where another xdist
+    worker could grab the released port between ``_free_port()`` and
+    ``server.start()``.
+    """
+    server = moto_server.ThreadedMotoServer(ip_address="127.0.0.1", port=0)
     server.start()
+    # Newer moto exposes the bound port directly as ``server.port``; older
+    # releases only expose ``_server.server_address`` (a (host, port) tuple).
+    port = getattr(server, "port", None)
+    if not port:
+        port = server._server.server_address[1]
     try:
         yield (f"http://127.0.0.1:{port}", port)
     finally:
@@ -336,6 +339,115 @@ def test_duckdb_httpfs_reads_pyiceberg_parquet_from_s3(s3_iceberg_env, monkeypat
         result = con.execute(f"SELECT COUNT(*) FROM read_parquet('s3://{bucket}/{key}')").fetchone()
         total += result[0]
     assert total == 12, f"DuckDB read {total} rows from PyIceberg-written parquet; expected 12. Keys: {parquet_keys}"
+
+
+def test_e2e_full_s3_with_raw_ingest(s3_iceberg_env, monkeypatch):
+    """R-7: full raw-ingest path against the ThreadedMotoServer (real HTTP)
+    instead of the in-process ``@mock_aws`` used by the sibling
+    ``test_full_pipeline_including_raw_gzip_ingest`` in ``test_e2e_pipeline.py``.
+
+    Why this exists alongside the in-process version: ``@mock_aws`` patches
+    boto3 in-process but s3fs/aiobotocore (used by PyIceberg's commit_buffer)
+    routes through a different async transport that the in-process patches
+    don't fully cover. The real-HTTP variant pins the contract that the
+    ingest → buffer → commit chain still works when every layer talks
+    actual S3-protocol bytes over a socket to moto.
+    """
+    import gzip
+    import io
+    import json
+
+    from backend.core import iceberg as ice
+    from backend.core import ingest as ing
+
+    src = s3_iceberg_env["src"]
+    endpoint_url = s3_iceberg_env["endpoint"]
+    bucket = s3_iceberg_env["bucket"]
+    region = s3_iceberg_env["region"]
+    s3 = s3_iceberg_env["s3"]
+
+    monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    # Stub the FOS proxy + httpfs config so ingest doesn't try to start
+    # the telemetry proxy (it's wired for production FOS, not moto).
+    monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a, **kw: None)
+
+    # ingest.py imports _get_fos_client at module load and keeps its own
+    # reference (separate from backend.core.duckdb._get_fos_client). Point
+    # both at a moto-bound boto3 client wrapped to swallow the production
+    # `caller_hint=` kwarg.
+    class _CallerHintShim:
+        def __init__(self, client):
+            self._client = client
+
+        def get_paginator(self, op, caller_hint=None):
+            return self._client.get_paginator(op)
+
+        def __getattr__(self, name):
+            return getattr(self._client, name)
+
+    def _moto_fos_client(_src):
+        return _CallerHintShim(
+            boto3.client(
+                "s3",
+                endpoint_url=endpoint_url,
+                aws_access_key_id="testing",
+                aws_secret_access_key="testing",
+                region_name=region,
+            )
+        )
+
+    monkeypatch.setattr("backend.core.ingest._get_fos_client", _moto_fos_client)
+    monkeypatch.setattr("backend.core.duckdb._get_fos_client", _moto_fos_client)
+
+    # Seed the moto bucket with two gzipped JSON log files (Fastly key
+    # shape: raw/YYYY-MM-DD/HH/YYYY-MM-DDTHH-MM-SS.<svc>.gz).
+    base = datetime.now(UTC) - timedelta(hours=2)
+    rows_per_file = 5
+    seed_files = [
+        ("raw/2026-05-20/10/2026-05-20T10-00-00.svc.gz", base),
+        ("raw/2026-05-20/10/2026-05-20T10-05-00.svc.gz", base + timedelta(minutes=5)),
+    ]
+    for key, ts in seed_files:
+        rows = [
+            {
+                "timestamp": (ts + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%S+0000"),
+                "ip": f"10.0.0.{i}",
+                "status": 200 if i % 2 == 0 else 404,
+                "url": f"/path/{i}",
+                "method": "GET",
+                "cache": "HIT",
+                "resp_bytes": 1024 + i,
+                "elapsed": 1500 + i * 10,
+            }
+            for i in range(rows_per_file)
+        ]
+        body = io.BytesIO()
+        with gzip.GzipFile(fileobj=body, mode="wb") as gz:
+            gz.write(("\n".join(json.dumps(r) for r in rows) + "\n").encode())
+        s3.put_object(Bucket=bucket, Key=key, Body=body.getvalue())
+
+    # Bootstrap the table BEFORE ingest so commit_buffer has a table to
+    # append into.
+    ice.init_iceberg_table(src)
+
+    events = list(ing.ingest(source=src))
+    done = next((e for e in events if e["type"] == "done"), None)
+    assert done is not None, f"ingest did not emit a 'done' event: {events}"
+    assert done["new_files"] == len(seed_files)
+    assert done["rows_inserted"] == rows_per_file * len(seed_files)
+
+    bufs = ice.buffer_files(src)
+    assert len(bufs) >= 1, "expected a buffer parquet after ingest"
+
+    result = ice.commit_buffer(src)
+    assert result["rows_committed"] == rows_per_file * len(seed_files)
+    assert result["snapshot_id"] is not None
+
+    # Confirm parquet landed in the iceberg/ prefix on the real-HTTP S3
+    # (separate from the buffer dir; commit_buffer promotes via s3fs).
+    listing = s3.list_objects_v2(Bucket=bucket, Prefix="iceberg/")
+    parquet_keys = [obj["Key"] for obj in listing.get("Contents", []) if obj["Key"].endswith(".parquet")]
+    assert parquet_keys, "commit did not land any parquet in S3 under iceberg/"
 
 
 # A note for future maintainers: if PyIceberg or s3fs ships a release that

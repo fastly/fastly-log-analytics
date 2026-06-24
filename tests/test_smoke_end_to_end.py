@@ -132,34 +132,6 @@ def test_smoke_dashboard_aggregates_returns_real_counts(client, seeded_service):
     assert has_top, "Expected at least one field to have top values"
 
 
-def test_smoke_dashboard_raw_returns_log_rows(client, seeded_service):
-    """POST /api/dashboard/raw returns log rows with the requested
-    columns, paginated. Pinned because the explore-logs table is the
-    most-used investigation surface — losing this stack would
-    silently hide every log line."""
-    resp = client.post(
-        "/api/dashboard/raw",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={
-            "start_time": None,
-            "end_time": None,
-            "filters": {},
-            "page": 1,
-            "limit": 5,
-            "sort_col": "timestamp",
-            "sort_dir": "DESC",
-            "columns": ["timestamp", "status", "url"],
-        },
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert len(body["data"]) == 5
-    for row in body["data"]:
-        assert "timestamp" in row
-        assert "status" in row
-        assert "url" in row
-
-
 def test_smoke_dashboard_aggregates_with_filter_narrows_results(client, seeded_service):
     """Same POST as the aggregates smoke, but with a `country=GB` filter
     — must return strictly fewer total_rows than the unfiltered case.
@@ -256,3 +228,64 @@ def test_smoke_origin_timeseries_with_sub_minute_bucket(client, seeded_service):
     assert resp.status_code == 200
     body = resp.json()
     assert "has_data" in body
+
+
+# ── Error-envelope shape on @query_errors paths (audit follow-up) ───────────
+
+
+def test_query_errors_decorator_returns_documented_envelope_for_malformed_sql(client, seeded_service):
+    """When the dashboard endpoint forwards malformed SQL into DuckDB,
+    the @query_errors decorator converts the exception to an HTTP error
+    with the documented envelope shape {detail: ...} — the frontend's
+    openapi-fetch decoder relies on that key being present.
+
+    Pinned via a request whose filter shape provokes a DuckDB parse
+    error in the WHERE-clause builder rather than mutating route SQL
+    directly (the /query endpoint is SELECT-only via sql_validator).
+    """
+    resp = client.post(
+        "/api/dashboard/aggregates",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={
+            "start_time": None,
+            "end_time": None,
+            # Empty-string mode is not a recognised filter mode; the
+            # builder may either 422 it (FastAPI/Pydantic) or treat it
+            # as a no-op. Either way the response body must carry
+            # `detail` if a 4xx surfaces.
+            "filters": {"status": {"mode": "", "values": [200]}},
+        },
+    )
+    # Either 200 (no-op filter), 4xx (validation), or 500 (decorator
+    # caught a SQL error). The contract this test pins: if the response
+    # is NOT 200, the body MUST be JSON with a `detail` key — that's
+    # what openapi-fetch and the frontend error toast rely on.
+    if resp.status_code != 200:
+        body = resp.json()
+        assert "detail" in body, (
+            f"non-2xx response missing 'detail' envelope key: status={resp.status_code} body={body!r}"
+        )
+
+
+def test_query_errors_envelope_for_filter_type_mismatch(client, seeded_service):
+    """The existing numeric-on-string-column smoke test asserts the
+    request does not 500; this asserts the broader envelope contract:
+    if the @query_errors decorator catches anything (which it does for
+    this exact regression history), the response carries a `detail`
+    key. The frontend's QueryProvider error toast subscribes to this
+    field — a regression that returned `{error: ...}` instead would
+    silently break the toast.
+    """
+    resp = client.post(
+        "/api/dashboard/aggregates",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={
+            "start_time": None,
+            "end_time": None,
+            "filters": {"country": {"mode": "include", "values": [0]}},
+        },
+    )
+    # Smoke test asserts 200; envelope test takes either path:
+    if resp.status_code != 200:
+        body = resp.json()
+        assert "detail" in body

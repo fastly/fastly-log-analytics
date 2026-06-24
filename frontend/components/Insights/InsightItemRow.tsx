@@ -1,6 +1,6 @@
 import React from 'react'
 import Link from 'next/link'
-import { ArrowUpRight, MapIcon } from 'lucide-react'
+import { ArrowUpRight, MapIcon, LineChart } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DeltaIndicator } from '@/components/DeltaIndicator'
 import { InsightItem } from '@/types/api'
@@ -10,9 +10,10 @@ interface InsightItemRowProps {
   item: InsightItem
   insightId: string
   onMapClick?: (data: ImpossibleDistanceData) => void
+  onCacheCollapseClick?: (url: string) => void
 }
 
-export function InsightItemRow({ item, insightId, onMapClick }: InsightItemRowProps) {
+export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseClick }: InsightItemRowProps) {
   return (
     <div className="flex items-center justify-between text-xs p-2 rounded-md bg-muted/50 gap-2">
       <div className="flex flex-col min-w-0 flex-1">
@@ -26,7 +27,8 @@ export function InsightItemRow({ item, insightId, onMapClick }: InsightItemRowPr
             <Button
               variant="ghost"
               size="icon"
-              className="h-4 w-4 text-primary hover:text-primary/80 shrink-0"
+              aria-label={`Show ${item.label} on map`}
+              className="h-6 w-6 text-primary hover:text-primary/80 shrink-0"
               onClick={() => {
                 if (!item.meta) return
                 onMapClick({
@@ -45,12 +47,26 @@ export function InsightItemRow({ item, insightId, onMapClick }: InsightItemRowPr
               }}
               title="View on Map"
             >
-              <MapIcon className="h-3 w-3" />
+              <MapIcon className="h-3 w-3" aria-hidden="true" />
+            </Button>
+          )}
+          {(insightId === 'cache_collapse' || insightId === 'cacheability_regression') && onCacheCollapseClick && (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={`Analyze ${item.label} cache behavior`}
+              className="h-6 w-6 text-primary hover:text-primary/80 shrink-0"
+              onClick={() => {
+                onCacheCollapseClick(item.label)
+              }}
+              title="View Cache Analysis"
+            >
+              <LineChart className="h-3 w-3" aria-hidden="true" />
             </Button>
           )}
         </div>
         {item.tooltip && (
-          <span className="text-[10px] text-muted-foreground truncate">{item.tooltip}</span>
+          <span className="text-[11px] sm:text-[10px] text-muted-foreground truncate">{item.tooltip}</span>
         )}
       </div>
       <div className="flex flex-col items-end gap-0.5 shrink-0">
@@ -61,18 +77,18 @@ export function InsightItemRow({ item, insightId, onMapClick }: InsightItemRowPr
           </span>
         </div>
         {item.baseline_val != null && (
-          <span className="text-[10px] text-muted-foreground tabular-nums">
+          <span className="text-[11px] sm:text-[10px] text-muted-foreground tabular-nums">
             {item.baseline_label || 'baseline'}: {item.baseline_val.toLocaleString(undefined, { maximumFractionDigits: 1 })} {item.unit}
           </span>
         )}
         {item.investigate_url && (
           <Link
             href={item.investigate_url}
-            className="text-primary hover:underline flex items-center gap-0.5 text-[10px] mt-0.5"
+            className="text-primary hover:underline flex items-center gap-0.5 text-[11px] sm:text-[10px] mt-0.5"
             target="_blank"
             rel="noopener noreferrer"
           >
-            Investigate <ArrowUpRight className="h-2.5 w-2.5" />
+            Investigate <ArrowUpRight className="h-2.5 w-2.5" aria-hidden="true" />
           </Link>
         )}
       </div>

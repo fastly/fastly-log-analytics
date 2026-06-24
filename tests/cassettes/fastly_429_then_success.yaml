@@ -1,0 +1,45 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Fastly-Key:
+      - test-token-not-real
+    method: GET
+    uri: https://api.fastly.com/service/SU3xxxxxxxxxxxxxx0000
+  response:
+    body:
+      string: '{"msg": "rate limit exceeded"}'
+    headers:
+      Content-Type:
+      - application/json
+      Fastly-Ratelimit-Remaining:
+      - '0'
+    status:
+      code: 429
+      message: Too Many Requests
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Fastly-Key:
+      - test-token-not-real
+    method: GET
+    uri: https://api.fastly.com/service/SU3xxxxxxxxxxxxxx0000
+  response:
+    body:
+      string: '{"id": "SU3xxxxxxxxxxxxxx0000", "name": "Test CDN", "active_version": {"number": 42}}'
+    headers:
+      Content-Type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+version: 1
+# Hand-authored fixture: 429 then 200, used to pin that the
+# orchestrator's Fastly calls survive a transient rate-limit without
+# aborting the provision. Refresh after verifying that Fastly's 429
+# wire shape hasn't changed.
+recorded_at: '2026-06-16T00:00:00Z'

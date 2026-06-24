@@ -9,7 +9,8 @@ import tempfile
 import time
 from datetime import UTC, datetime, timedelta
 
-from backend.core import iceberg, metadata_db
+from backend.core import iceberg
+from backend.core import metadata as metadata_db
 from backend.core.duckdb import (
     _DEFAULT_SOURCE,
     INGEST_CHUNK_SIZE,
@@ -19,11 +20,39 @@ from backend.core.duckdb import (
     _get_fos_client,
     _load_httpfs,  # noqa: F401  re-exported for test monkey-patching
 )
-from backend.core.log_fields import LOG_FIELD_CATALOG
+from backend.core.field_registry import LOG_FIELD_CATALOG
 from backend.utils import field_codes as fc
+from backend.utils.active_requests import yield_to_api
 from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
+
+# When delete_after is on, files seen in the LIST that are already in the dedup
+# ledger are strands: ingested but never deleted (a restart landed between the
+# ledger write and the FOS delete). We re-delete them to make deletion
+# self-healing. Cap how many we collect per run so a large backlog can't balloon
+# memory; whatever exceeds the cap is reclaimed on subsequent ticks/full_syncs.
+_STRANDED_DELETE_CAP = 10_000
+
+# Throttle the strand reconcile on the incremental cron path so a strand whose
+# delete keeps FAILING (e.g. a FOS permissions outage) can't drive a delete API
+# call every tick (the real-time tier fires every ~5s). The happy path clears a
+# strand in one successful delete, so this only bounds the pathological loop.
+# full_sync (incremental_only=False) ignores this and always reconciles — it is
+# the backstop for old/over-cap strands. In-process state, so a restart re-arms
+# at most one extra attempt; that is fine.
+_RECONCILE_MIN_INTERVAL_S = 300.0
+_reconcile_last_attempt: dict[str, float] = {}
+
+# Durability epoch for the strand reconcile. Ledger rows written BEFORE this fix
+# shipped can carry a NON-zero row_count for a file with NO durable data (the
+# pre-fix code stored the PRE-filter count for fully-filtered / all-corrupt files),
+# so row_count is not a trustworthy "is this durable?" signal for them. The
+# reconcile therefore only deletes strands ingested at/after this boundary, where
+# the new code guarantees a no-data file is recorded with row_count 0. Pre-epoch
+# strands drain via the existing 1-day ledger trim instead. Format matches the
+# SQLite ``ingested_at`` column (``datetime('now')``: "YYYY-MM-DD HH:MM:SS", UTC).
+_RECONCILE_LEDGER_EPOCH = "2026-06-21 00:00:00"
 
 
 def get_ingest_type_hints(log_fields_config: dict | None = None) -> dict[str, str]:
@@ -54,7 +83,11 @@ def get_catalog_field_ids(log_fields_config: dict | None = None) -> list[str]:
 
 def get_ingest_columns_sql(log_fields_config: dict | None = None) -> str:
     hints = get_ingest_type_hints(log_fields_config)
-    return "{" + ", ".join(f"{fid}: '{dtype}'" for fid, dtype in hints.items()) + "}"
+    return (
+        "{"
+        + ", ".join(f"'{escape_sql_literal(fid)}': '{escape_sql_literal(dtype)}'" for fid, dtype in hints.items())
+        + "}"
+    )
 
 
 _FASTLY_FNAME_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}[-:]\d{2}[-:]\d{2})")
@@ -131,8 +164,9 @@ def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
             if errors:
                 for error in errors[:1]:  # Log the first error
                     if "AccessDenied" in error.get("Code", "") or "UnauthorizedAccess" in error.get("Code", ""):
-                        print(
-                            f"Warning: Bulk delete skipped due to missing permissions ({error.get('Code')}). Disabling further delete attempts for this batch."
+                        logger.warning(
+                            "Bulk delete skipped due to missing permissions (%s). Disabling further delete attempts for this batch.",
+                            error.get("Code"),
                         )
                         return total_deleted
             total_deleted += len(batch) - len(errors)
@@ -140,11 +174,14 @@ def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
     except Exception as e:
         err_str = str(e)
         if "AccessDenied" in err_str or "UnauthorizedAccess" in err_str:
-            print(f"Warning: Delete failed due to missing permissions: {err_str.split(':', 1)[-1].strip() or err_str}")
+            logger.warning(
+                "Delete failed due to missing permissions: %s",
+                err_str.split(":", 1)[-1].strip() or err_str,
+            )
             return 0
 
         # Fallback to individual deletion if bulk is not supported or fails
-        print(f"Bulk delete failed, falling back to individual: {e}")
+        logger.warning("Bulk delete failed, falling back to individual", exc_info=True)
         deleted_count = 0
         for k in keys:
             try:
@@ -153,11 +190,12 @@ def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
             except Exception as individual_err:
                 ind_err_str = str(individual_err)
                 if "AccessDenied" in ind_err_str or "UnauthorizedAccess" in ind_err_str:
-                    print(
-                        f"Warning: Individual delete failed due to missing permissions: {ind_err_str}. Stopping further deletes."
+                    logger.warning(
+                        "Individual delete failed due to missing permissions: %s. Stopping further deletes.",
+                        ind_err_str,
                     )
                     break
-                print(f"Warning: Failed to delete object {k}: {individual_err}")
+                logger.warning("Failed to delete object %s", k, exc_info=True)
         return deleted_count
 
 
@@ -240,7 +278,7 @@ def _recover_in_flight(source: dict) -> dict:
     if not pending:
         return {"promoted": 0, "dropped": 0, "rows_recovered": 0}
 
-    buf_dir = iceberg._buffer_dir(source)
+    buf_dir = iceberg._buffer_dir(source)  # type: ignore[attr-defined]
     promoted = 0
     dropped = 0
     rows_recovered = 0
@@ -338,20 +376,11 @@ def ingest(
     # Capping the fetch to 200k rows turns this from a ~4 s full-table
     # fetchall into ~600 ms on services with >1 M ingested_files. Full sweeps
     # (incremental_only=False) keep the unbounded load because they LIST the
-    # entire bucket and may match arbitrarily old files. The user-facing
-    # "skipped" count comes from the rollup summary so we still report the
-    # accurate total even when the dedup set itself is bounded.
+    # entire bucket and may match arbitrarily old files.
     yield {"type": "status", "message": f"{elapsed()} Fetching ingestion history..."}
 
     dedup_limit: int | None = 200_000 if incremental_only else None
     already = metadata_db.get_ingested_filenames(source_name, limit=dedup_limit)
-    if dedup_limit is not None:
-        try:
-            skipped = metadata_db.get_ingested_files_status_summary(source_name)["file_count"]
-        except Exception:
-            skipped = len(already)
-    else:
-        skipped = len(already)
 
     # Determine StartAfter marker for incremental discovery to avoid scanning the entire bucket.
     start_after_key = None
@@ -382,9 +411,22 @@ def ingest(
                 "[ingest] %s: Failed to calculate lookback marker, scanning full bucket: %s", display_name, e
             )
 
+    from backend.core.fastly.mock_fixtures import is_mock_mode
+
     fos_client = _get_fos_client(src)
     file_sizes: dict[str, int] = {}
     new_files: list[str] = []
+    # Files seen in this LIST that we'd already ingested — the TRUE per-run
+    # "skipped" count. With delete_after=True (the common case) the bucket is
+    # purged right after ingest, so the LIST only surfaces new files and this
+    # stays ~0; with delete_after=False the daily full LIST re-surfaces every
+    # prior file and this becomes the real (large) skip count.
+    skipped_already = 0
+    # Strands: files present in the LIST that are ALREADY in the ledger. With
+    # delete_after=True the only reason such a file still exists is that a prior
+    # delete didn't finish, so we re-delete them below (the integer counter is
+    # always kept; the path list is only collected when we'll act on it).
+    stranded_already: list[str] = []
     total_listed = 0
 
     try:
@@ -398,7 +440,13 @@ def ingest(
 
         yield {"type": "status", "message": f"{elapsed()} Discovering new files in Fastly Object Storage..."}
 
-        for page in paginator.paginate(**kwargs):
+        # In FASTLY_MOCK_MODE (the E2E / contract harness) there is no real FOS
+        # endpoint, so paginate() would 400 on ListObjectsV2 and fall through the
+        # error path. There are no real objects to discover, so skip the listing
+        # entirely — mirrors the is_mock_mode() short-circuit in
+        # provision/fos_setup.py's bucket ops.
+        pages = [] if is_mock_mode() else paginator.paginate(**kwargs)
+        for page in pages:
             for obj in page.get("Contents", []):
                 key = obj["Key"]
                 if not key.endswith(".gz"):
@@ -429,6 +477,10 @@ def ingest(
                 if full_path not in already:
                     new_files.append(full_path)
                     file_sizes[full_path] = obj["Size"]
+                else:
+                    skipped_already += 1
+                    if delete_after and len(stranded_already) < _STRANDED_DELETE_CAP:
+                        stranded_already.append(full_path)
 
             if et_dt and total_listed > 0:
                 # Check the last key in the page to see if we can stop listing
@@ -446,30 +498,98 @@ def ingest(
         yield {"type": "error", "message": f"Could not list FOS objects: {e}"}
         return
 
+    # Reconcile interrupted deletes. Any file we LISTed that is already in the
+    # ledger is, by the delete_after contract, one we ingested but never finished
+    # deleting (a restart hit between the ledger write and the FOS delete). Re-issue
+    # the delete now. This makes deletion self-healing: every sync re-derives the
+    # strand from (bucket LIST ∩ ledger), so a delete interrupted at any point is
+    # retried on the next tick — idempotently (deleting an absent key is a no-op),
+    # with no schema, no extra LIST, and no wait for the 1-day ledger trim.
+    # full_sync LISTs the whole bucket so it catches strands of any age; the
+    # incremental sync's 4h lookback catches recent ones within a tick.
+    reclaimed = 0
+    if delete_after and stranded_already:
+        # Throttle the high-frequency incremental path so a persistently-failing
+        # delete can't hammer FOS every tick; full_sync always runs (it is the
+        # backstop for old/over-cap strands).
+        throttled = False
+        if incremental_only:
+            now = time.time()
+            last = _reconcile_last_attempt.get(source_name, 0.0)
+            if now - last < _RECONCILE_MIN_INTERVAL_S:
+                throttled = True
+            else:
+                _reconcile_last_attempt[source_name] = now
+
+        if not throttled:
+            # Default-deny: only delete strands we can POSITIVELY prove are safe —
+            # durable data (row_count>0) AND ingested at/after the durability epoch
+            # (so row_count is trustworthy). This excludes both no-data markers
+            # (row_count==0; their raw .gz may be the only copy) and pre-fix ledger
+            # rows whose row_count can't be trusted. Anything not proven safe is
+            # left for the normal 1-day ledger trim.
+            try:
+                deletable = metadata_db.get_reclaimable_strand_filenames(
+                    source_name, set(stranded_already), _RECONCILE_LEDGER_EPOCH
+                )
+            except Exception as classify_err:
+                # Fail SAFE: if we can't classify, reclaim nothing this run.
+                logger.warning(
+                    "[ingest] %s: could not classify reclaimable strands (%s) — skipping reclaim this run",
+                    display_name,
+                    classify_err,
+                )
+                deletable = set()
+
+            stranded_keys = [
+                p[len(f"s3://{src['bucket']}/") :]
+                for p in stranded_already
+                if p in deletable and p.startswith(f"s3://{src['bucket']}/")
+            ]
+            if stranded_keys:
+                yield {
+                    "type": "status",
+                    "message": (
+                        f"{elapsed()} Reclaiming {len(stranded_keys)} raw file(s) "
+                        "ingested but not deleted by an interrupted prior run..."
+                    ),
+                }
+                try:
+                    reclaimed = _delete_objects_robust(fos_client, src["bucket"], stranded_keys)
+                except Exception as recl_err:
+                    logger.warning(
+                        "[ingest] %s: stranded-delete reconcile failed (%s) — will retry next run",
+                        display_name,
+                        recl_err,
+                    )
+
     if not new_files:
+        msg = "Already up to date — no new files to ingest."
+        if reclaimed:
+            msg = f"No new files; reclaimed {reclaimed} raw file(s) left by an interrupted prior run."
         yield {
             "type": "done",
             "new_files": 0,
-            "skipped_files": skipped,
+            "skipped_files": skipped_already,
             "rows_inserted": 0,
-            "deleted_files": 0,
-            "message": f"Already up to date. {skipped} files previously processed.",
+            "deleted_files": reclaimed,
+            "message": msg,
         }
         return
 
     chunk_size = INGEST_CHUNK_SIZE
     total_inserted = 0
     total_corrupt = 0
-    total_corrupt_details = []
+    total_corrupt_details: list[str] = []
     processed_count = 0
     deleted = 0
-    successfully_processed_files = []
+    successfully_processed_files: list[str] = []
     touched_hours: set[str] = set()
 
     mem_con = None
     # Increase parallelism for S3 deletions
     _delete_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="ingest_delete")
-    _pending_deletes = []
+    _pending_deletes: list = []
     from backend import config as svcconfig
 
     cfg = svcconfig.load_config(source.get("service_id") or source.get("name")) if source else None
@@ -511,6 +631,12 @@ def ingest(
 
         failed_paths = set()
         for chunk_start in range(0, len(new_files), chunk_size):
+            # Cooperative yield: if API requests came in mid-ingest, pause
+            # briefly so the dashboard query gets CPU before the next chunk's
+            # CREATE TEMP TABLE + Arrow export burns it. The 30s starvation
+            # guard at the top-of-tick gate is the backstop for sustained
+            # API load — this helper just smooths the per-chunk contention.
+            yield_to_api()
             if max_seconds and (time.time() - start_time_exec) > max_seconds:
                 yield {
                     "type": "status",
@@ -700,7 +826,8 @@ def ingest(
                     }
                     touched_hours.update(chunk_hours)
 
-                total_rows_batch = mem_con.execute("SELECT count(*) FROM _ingest_staging").fetchone()[0]
+                _row = mem_con.execute("SELECT count(*) FROM _ingest_staging").fetchone()
+                total_rows_batch = _row[0] if _row else 0
                 corrupt_in_batch = total_rows_batch - valid_rows
 
                 repairs_made = False
@@ -731,8 +858,8 @@ def ingest(
                             bad_rows = _execute_query_with_retry(mem_con, q).fetchall()
 
                             _EMPTY_VALUE_RE = re.compile(r":(?=[,}])")
-                            repaired_by_fname = {}
-                            truly_corrupt = []
+                            repaired_by_fname: dict[str, list] = {}
+                            truly_corrupt: list = []
                             for fname, raw_line in bad_rows:
                                 # DuckDB filenames here are local paths; translate
                                 # back so all downstream attribution stays s3://.
@@ -825,12 +952,14 @@ def ingest(
 
                                 # Force re-calculation of counts and re-fetch of arrow_table
                                 repairs_made = True
-                                valid_rows = mem_con.execute(
+                                _valid_row = mem_con.execute(
                                     "SELECT count(*) FROM _ingest_staging WHERE timestamp IS NOT NULL"
-                                ).fetchone()[0]
-                                corrupt_in_batch = mem_con.execute(
+                                ).fetchone()
+                                valid_rows = _valid_row[0] if _valid_row else 0
+                                _corrupt_row = mem_con.execute(
                                     "SELECT count(*) FROM _ingest_staging WHERE timestamp IS NULL"
-                                ).fetchone()[0]
+                                ).fetchone()
+                                corrupt_in_batch = _corrupt_row[0] if _corrupt_row else 0
                         else:
                             total_corrupt_details.append(f"[Error extracting lines: {e}]")
 
@@ -838,7 +967,37 @@ def ingest(
             finally:
                 chunk_tmpdir_obj.cleanup()
 
-            rows_to_track = [(f, count_map.get(f, 0), file_sizes.get(f)) for f in chunk if f not in failed_paths]
+            good_files = [f for f in chunk if f not in failed_paths]
+            # Files that actually contributed DURABLE rows (survived the time-range
+            # WHERE filter and have a non-null timestamp = rows really written to the
+            # buffer/Iceberg). A file with zero durable rows produced NO stored data;
+            # we still ledger it to suppress re-LIST, but record row_count 0 so the
+            # later strand RECONCILE can tell it apart from a genuine interrupted
+            # delete and skip it (its raw .gz may be the only copy). Note this guards
+            # only the reconcile: on THIS run the per-chunk delete below still removes
+            # the raw under delete_after=True — that is the configured "delete after
+            # processing" contract for out-of-range / corrupt files, unchanged here.
+            # Per-file: a buffered chunk can still hold a file whose own rows were all
+            # filtered out, and count_map holds PRE-filter counts, so durability can't
+            # be inferred from count_map alone.
+            try:
+                durable_files = {
+                    r[0]
+                    for r in mem_con.execute(
+                        "SELECT DISTINCT _source_file FROM _ingest_staging WHERE timestamp IS NOT NULL"
+                    ).fetchall()
+                    if r[0] is not None
+                }
+            except Exception:
+                # Staging table unavailable (chunk errored earlier). Fail toward NO
+                # DATA LOSS: treat every file as a zero-row marker so the reconcile
+                # will never delete its raw .gz. Worst case is a benign raw-file leak
+                # (and a small summary under-count) on a path that, in practice, never
+                # fires once a chunk has been processed — never an erroneous delete.
+                durable_files = set()
+            rows_to_track = [
+                (f, count_map.get(f, 0) if f in durable_files else 0, file_sizes.get(f)) for f in good_files
+            ]
 
             if valid_rows > 0:
                 if repairs_made:
@@ -852,7 +1011,7 @@ def ingest(
                 # buffer filename is hashed from the chunk's sorted source
                 # filenames so a re-ingest of the same chunk overwrites the
                 # same buffer file — Iceberg can't double-commit it.
-                buf_filename = _deterministic_buffer_name([f for f in chunk if f not in failed_paths])
+                buf_filename = _deterministic_buffer_name(good_files)
                 if rows_to_track:
                     metadata_db.record_in_flight(source_name, buf_filename, rows_to_track)
                 iceberg.write_to_buffer(src, arrow_table, buf_filename)
@@ -864,14 +1023,14 @@ def ingest(
                 # but we still need to mark these files ingested so we don't
                 # re-LIST them every tick.
                 metadata_db.insert_ingested_files(source_name, rows_to_track)
-            successfully_processed_files.extend([f for f in chunk if f not in failed_paths])
+            successfully_processed_files.extend(good_files)
 
             # Per-file ingest downloads are captured by the telemetry proxy on
             # every duckdb.httpfs GET/HEAD; recording them again here would
             # double-count CDN GETs in the usage log. The cron's
             # process_context tags this work as `cron:sync:*`.
 
-            if delete_after and valid_rows > 0:
+            if delete_after:
                 # Clean up completed futures to avoid unbounded list growth
                 _pending_deletes = [f for f in _pending_deletes if not f.done()]
 
@@ -890,12 +1049,55 @@ def ingest(
                     def _do_delete(keys, bucket, client):
                         return _delete_objects_robust(client, bucket, keys)
 
-                    future = _delete_executor.submit(_do_delete, chunk_keys, src["bucket"], fos_client)
-                    _pending_deletes.append(future)
-                    yield {
-                        "type": "status",
-                        "message": f"{elapsed()} Batch {chunk_num}: Submitted deletion of {len(chunk_keys)} raw files (async)...",
-                    }
+                    try:
+                        future = _delete_executor.submit(_do_delete, chunk_keys, src["bucket"], fos_client)
+                        _pending_deletes.append(future)
+                        yield {
+                            "type": "status",
+                            "message": f"{elapsed()} Batch {chunk_num}: Submitted deletion of {len(chunk_keys)} raw files (async)...",
+                        }
+                    except RuntimeError as submit_err:
+                        # Python's concurrent.futures.thread module-global
+                        # ``_shutdown`` flag has been flipped (its atexit
+                        # cleanup fires once and is process-wide), so every
+                        # subsequent ``.submit()`` raises "cannot schedule
+                        # new futures after interpreter shutdown" — even on
+                        # a fresh ThreadPoolExecutor. The cause has been
+                        # observed under uvicorn worker recycling and some
+                        # multiprocessing-using libraries.
+                        #
+                        # Without this fallback the ingest loop crashes here
+                        # AFTER the chunk's rows are already written to the
+                        # buffer + recorded in ``ingested_files``, so the
+                        # .gz files stay in FOS forever as orphans (the dedup
+                        # check makes them invisible to every future sync —
+                        # 2026-06-16 incident: 167 orphans across 4 hours).
+                        # Fall back to a synchronous inline delete: slower
+                        # per chunk, but no orphans leaked.
+                        logger.warning(
+                            "[ingest] %s: delete executor submit failed (%s) — falling back to inline delete",
+                            source_name,
+                            submit_err,
+                        )
+                        try:
+                            inline_deleted = _delete_objects_robust(fos_client, src["bucket"], chunk_keys)
+                            deleted += inline_deleted
+                            yield {
+                                "type": "status",
+                                "message": f"{elapsed()} Batch {chunk_num}: Deleted {inline_deleted} raw files inline (executor unavailable).",
+                            }
+                        except Exception as inline_err:
+                            logger.error(
+                                "[ingest] %s: inline delete also failed for batch %d (%d files): %s",
+                                source_name,
+                                chunk_num,
+                                len(chunk_keys),
+                                inline_err,
+                            )
+                            yield {
+                                "type": "status",
+                                "message": f"{elapsed()} Batch {chunk_num}: WARN — failed to delete {len(chunk_keys)} raw files: {inline_err}",
+                            }
 
             total_inserted += valid_rows
 
@@ -913,11 +1115,17 @@ def ingest(
 
     finally:
         # Wait for all in-flight S3 deletions
-        for f in concurrent.futures.as_completed(_pending_deletes, timeout=60):
-            try:
-                deleted += f.result()
-            except Exception as _de:
-                logger.warning("[ingest] %s: async delete error: %s", source_name, _de)
+        try:
+            for f in concurrent.futures.as_completed(_pending_deletes, timeout=300):
+                try:
+                    deleted += f.result()
+                except Exception as _de:
+                    logger.warning("[ingest] %s: async delete error: %s", source_name, _de)
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "[ingest] %s: timed out waiting for all async deletions to complete. Some files may still be deleting in the background.",
+                source_name,
+            )
 
         _delete_executor.shutdown(wait=False)
         if mem_con:
@@ -926,14 +1134,19 @@ def ingest(
             except Exception:
                 pass
 
+    total_deleted = deleted + reclaimed
+    reclaimed_note = f" (incl. {reclaimed} reclaimed from an interrupted prior run)" if reclaimed else ""
     yield {
         "type": "done",
         "new_files": processed_count,
-        "skipped_files": skipped,
+        "skipped_files": skipped_already,
         "rows_inserted": total_inserted,
         "corrupt_rows": total_corrupt,
         "corrupt_details": total_corrupt_details,
-        "deleted_files": deleted,
-        "message": f"Successfully ingested {processed_count} new files ({total_inserted} rows) and deleted {deleted} raw files.",
+        "deleted_files": total_deleted,
+        "message": (
+            f"Successfully ingested {processed_count} new files ({total_inserted} rows) "
+            f"and deleted {total_deleted} raw files{reclaimed_note}."
+        ),
         "touched_hours": list(touched_hours),
     }

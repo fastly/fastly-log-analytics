@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from backend import config
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
 from backend.routers.usage import _extract_fos_ops, _fastly_api
 
 

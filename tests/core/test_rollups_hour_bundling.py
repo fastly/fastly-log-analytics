@@ -36,6 +36,28 @@ def _write_per_field_hour(cache_root: str, field: str, hour: str, rows: list[dic
     return p
 
 
+def _write_per_field_hour_ip_spread(cache_root: str, field: str, hour: str, rows: list[dict]) -> str:
+    """Write a per-(field, hour) IP-spread rollup parquet. Returns path.
+
+    Schema mirrors the live writer's output (see _common.IP_SPREAD_*
+    constants + recompute._run_ip_spread_per_field): (value,
+    ip_sketch, ip_count_observed, sample_capped) — field+hour come
+    from the hive partition path on read."""
+    d = os.path.join(cache_root, "rollups", "hour_ip_spread", f"field={field}", f"hour={hour}")
+    os.makedirs(d, exist_ok=True)
+    table = pa.table(
+        {
+            "value": pa.array([r["value"] for r in rows]),
+            "ip_sketch": pa.array([r["ip_sketch"] for r in rows], type=pa.binary()),
+            "ip_count_observed": pa.array([r["ip_count_observed"] for r in rows], type=pa.int64()),
+            "sample_capped": pa.array([r["sample_capped"] for r in rows], type=pa.bool_()),
+        }
+    )
+    p = os.path.join(d, f"compacted_{uuid.uuid4().hex[:12]}.parquet")
+    pq.write_table(table, p)
+    return p
+
+
 def test_bundle_hours_writes_one_parquet_per_hour(tmp_path):
     """Per-(field, hour) parquets get combined into a single
     rollups/hour_bundled/hour=H/all_fields.parquet containing rows for
@@ -132,7 +154,6 @@ def test_bundle_hours_skips_when_bundle_is_up_to_date(tmp_path):
 
         # Re-run with no source changes. Bundle must NOT be rebuilt
         # (mtime would jump if it were).
-        time.sleep(0.01)
         n2 = rollups.bundle_hours("svc-bundle-skip", src, ["2026-05-15-10"])
         assert n2 == 0, f"second run with no source changes should rebuild 0; got {n2}"
         assert os.path.getmtime(bundle) == mtime_first
@@ -141,7 +162,19 @@ def test_bundle_hours_skips_when_bundle_is_up_to_date(tmp_path):
 def test_bundle_hours_rebuilds_when_source_files_newer(tmp_path):
     """If a per-field file is newer than the bundle, the bundle MUST be
     rebuilt — otherwise the bundle would miss a sync's worth of new
-    top-K values."""
+    top-K values.
+
+    The replacement per-field write here mirrors production's
+    `_run_per_field_copy` behaviour: a touched hour rewrites the per-
+    field tree from a full re-scan of base data, so the new write
+    contains both the old "/x" row AND the freshly-added "/y" row.
+    (Pre-cleanup the test wrote only "/y" and relied on the prior
+    bundle's "/x" surviving via the union of bundle + new per-field;
+    the per-field-cleanup-after-bundle pass introduced in 2026-06-12
+    deletes the per-field tree once bundled, so the rebuild reads only
+    what the second per-field write provides — same invariant as
+    production.)
+    """
     from backend.core import rollups
 
     cache_root = tmp_path / "cache"
@@ -152,10 +185,17 @@ def test_bundle_hours_rebuilds_when_source_files_newer(tmp_path):
         _write_per_field_hour(str(cache_root), "url", "2026-05-15-10", [{"value": "/x", "count": 1}])
         rollups.bundle_hours("svc-bundle-stale", src, ["2026-05-15-10"])
 
-        # Write a NEW per-field parquet for the SAME (field, hour) with
-        # newer mtime — simulating a sync re-running the rebuild.
-        time.sleep(0.05)
-        _write_per_field_hour(str(cache_root), "url", "2026-05-15-10", [{"value": "/y", "count": 2}])
+        # Full-replacement per-field write (the production recompute path
+        # is non-incremental). Force mtime strictly forward so the
+        # freshness check fires regardless of FS timer resolution.
+        new_p = _write_per_field_hour(
+            str(cache_root),
+            "url",
+            "2026-05-15-10",
+            [{"value": "/x", "count": 1}, {"value": "/y", "count": 2}],
+        )
+        future = time.time() + 10
+        os.utime(new_p, (future, future))
 
         n = rollups.bundle_hours("svc-bundle-stale", src, ["2026-05-15-10"])
 
@@ -165,6 +205,7 @@ def test_bundle_hours_rebuilds_when_source_files_newer(tmp_path):
     t = pq.read_table(str(bundle))
     values = set(t["value"].to_pylist())
     assert "/y" in values, "newly-written per-field row must appear in the rebuilt bundle"
+    assert "/x" in values, "previous-bundle row that the per-field rewrite preserved must be present"
 
 
 def test_reader_uses_bundle_when_available_skipping_per_field_files(tmp_path):
@@ -284,30 +325,258 @@ def test_reader_mixed_bundled_and_per_field_hours(tmp_path):
     assert rows == [("url", "/login", 150)], f"mixed bundled+per-field union must sum correctly; got {rows}"
 
 
-def test_backfill_hour_bundles_processes_all_closed_hours(tmp_path):
-    """backfill_hour_bundles enumerates the per-field tree and bundles
-    every closed hour that doesn't have an up-to-date bundle. Pinned
-    because this drives the one-shot migration that delivers the cold-
-    path win on existing data."""
+def test_bundle_hours_cleans_up_per_field_files_after_publish(tmp_path):
+    """After a fresh bundle is published, the per-field per-hour parquet
+    files that fed into it are redundant — the reader prefers the bundle
+    and the writer's recompute path is non-incremental (rewrites all
+    per-field for any touched hour from base data). The cleanup pass
+    inside bundle_hours sweeps the per-field dirs to keep the file
+    count down on the active-day query window."""
     from backend.core import rollups
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
-    src = {"name": "svc-backfill"}
+    src = {"name": "svc-cleanup"}
 
     with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        # Three closed hours across two days.
-        for h in ["2026-05-15-10", "2026-05-15-11", "2026-05-16-09"]:
-            _write_per_field_hour(str(cache_root), "url", h, [{"value": "/x", "count": 1}])
-            _write_per_field_hour(str(cache_root), "country", h, [{"value": "US", "count": 1}])
+        _write_per_field_hour(str(cache_root), "url", "2026-05-15-10", [{"value": "/login", "count": 100}])
+        _write_per_field_hour(str(cache_root), "country", "2026-05-15-10", [{"value": "US", "count": 80}])
 
-        n = rollups.backfill_hour_bundles("svc-backfill", src)
+        n = rollups.bundle_hours("svc-cleanup", src, ["2026-05-15-10"])
 
-    assert n == 3, f"expected 3 hour bundles built; got {n}"
-    for h in ["2026-05-15-10", "2026-05-15-11", "2026-05-16-09"]:
-        assert (cache_root / "rollups" / "hour_bundled" / f"hour={h}" / "all_fields.parquet").exists()
+    assert n == 1
+    bundle = cache_root / "rollups" / "hour_bundled" / "hour=2026-05-15-10" / "all_fields.parquet"
+    assert bundle.exists()
+    # The per-field/hour dirs for the bundled hour should be gone.
+    for f in ("url", "country"):
+        per_field_hour_dir = cache_root / "rollups" / "hour" / f"field={f}" / "hour=2026-05-15-10"
+        assert not per_field_hour_dir.exists(), f"per-field dir {per_field_hour_dir} must be swept after bundling"
+
+
+def test_bundle_hours_cleanup_dry_run_logs_but_does_not_unlink(tmp_path, caplog):
+    """ROLLUP_CLEANUP_DRY_RUN=1 makes the cleanup pass log the file
+    count it WOULD delete without actually unlinking — first-deploy
+    safety so an operator can confirm the math before flipping it off."""
+    import logging
+
+    from backend.core import rollups
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-dry-run"}
+
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch.dict(os.environ, {"ROLLUP_CLEANUP_DRY_RUN": "1"}),
+        caplog.at_level(logging.INFO, logger="backend.core.rollups"),
+    ):
+        _write_per_field_hour(str(cache_root), "url", "2026-05-15-10", [{"value": "/x", "count": 1}])
+        rollups.bundle_hours("svc-dry-run", src, ["2026-05-15-10"])
+
+    # Per-field dir survives the dry run.
+    per_field_hour_dir = cache_root / "rollups" / "hour" / "field=url" / "hour=2026-05-15-10"
+    assert per_field_hour_dir.exists()
+    # And we logged what we would have deleted.
+    assert any("ROLLUP_CLEANUP_DRY_RUN" in r.message for r in caplog.records), (
+        "dry-run mode must emit a log line naming the file count it would unlink"
+    )
+
+
+# ── bundle_hours_ip_spread ───────────────────────────────────────────────────
+
+
+def test_bundle_hours_ip_spread_writes_one_parquet_per_hour(tmp_path):
+    """Per-(field, hour) IP-spread parquets get combined into a single
+    rollups/hour_bundled/hour=H/all_fields_ip.parquet containing rows
+    for all fields. Schema: field, value, ip_sketch, ip_count_observed,
+    sample_capped. The HLL ``ip_sketch`` BLOB column must pass through
+    byte-identical so the reader's deserialize-and-merge step sees the
+    same sketches the writer produced."""
+    from backend.utils.hll import HyperLogLog
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-ipsp-bundle"}
+
+    # Build two sketches with known input sets so the test can verify
+    # byte-for-byte preservation after the bundle round-trip.
+    hll_us = HyperLogLog()
+    hll_us.update([f"1.1.1.{i}" for i in range(50)])
+    hll_jp = HyperLogLog()
+    hll_jp.update([f"2.2.2.{i}" for i in range(30)])
+    sketch_us = hll_us.to_bytes()
+    sketch_jp = hll_jp.to_bytes()
 
     with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        # Second call is a no-op — all bundles already exist and are fresh.
-        n2 = rollups.backfill_hour_bundles("svc-backfill", src)
-    assert n2 == 0, "re-running backfill with no source changes must be a no-op"
+        _write_per_field_hour_ip_spread(
+            str(cache_root),
+            "country",
+            "2026-05-15-10",
+            [
+                {
+                    "value": "US",
+                    "ip_sketch": sketch_us,
+                    "ip_count_observed": 50,
+                    "sample_capped": False,
+                },
+                {
+                    "value": "JP",
+                    "ip_sketch": sketch_jp,
+                    "ip_count_observed": 30,
+                    "sample_capped": False,
+                },
+            ],
+        )
+        # Second field on the same hour — to confirm the bundle merges
+        # multiple field dirs into one file.
+        hll_ja3 = HyperLogLog()
+        hll_ja3.update([f"3.3.3.{i}" for i in range(10)])
+        sketch_ja3 = hll_ja3.to_bytes()
+        _write_per_field_hour_ip_spread(
+            str(cache_root),
+            "ja3",
+            "2026-05-15-10",
+            [
+                {
+                    "value": "ja3-abc",
+                    "ip_sketch": sketch_ja3,
+                    "ip_count_observed": 10,
+                    "sample_capped": False,
+                },
+            ],
+        )
+
+        from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
+
+        n = bundle_hours_ip_spread("svc-ipsp-bundle", src, ["2026-05-15-10"])
+
+    assert n == 1, f"expected 1 hour bundled; got {n}"
+
+    bundle = cache_root / "rollups" / "hour_bundled" / "hour=2026-05-15-10" / "all_fields_ip.parquet"
+    assert bundle.exists(), f"bundled ip_spread file missing at {bundle}"
+
+    t = pq.read_table(str(bundle))
+    assert {"field", "value", "ip_sketch", "ip_count_observed", "sample_capped"}.issubset(set(t.column_names)), (
+        f"bundle must carry all five columns; got {t.column_names}"
+    )
+
+    # Pull rows into a (field, value) -> row dict for assertion clarity.
+    by_key: dict[tuple[str, str], dict] = {}
+    for row in t.to_pylist():
+        by_key[(row["field"], row["value"])] = row
+    assert set(by_key.keys()) == {("country", "US"), ("country", "JP"), ("ja3", "ja3-abc")}
+
+    # HLL sketches must pass through byte-identical so the reader's
+    # merge produces the same estimates as if we'd added the inputs
+    # directly. This is THE invariant the rollup tree relies on.
+    assert by_key[("country", "US")]["ip_sketch"] == sketch_us
+    assert by_key[("country", "JP")]["ip_sketch"] == sketch_jp
+    assert by_key[("ja3", "ja3-abc")]["ip_sketch"] == sketch_ja3
+    assert by_key[("country", "US")]["ip_count_observed"] == 50
+    assert by_key[("country", "US")]["sample_capped"] is False
+
+    # And the merged reader-side estimate must be close to the true count.
+    # (For a single-hour bundle, the merge is a no-op — verify the
+    # sketch deserializes and gives a sensible cardinality estimate.)
+    restored = HyperLogLog.from_bytes(by_key[("country", "US")]["ip_sketch"])
+    assert abs(restored.count() - 50) <= 10  # generous bound at p=8 small-range
+
+
+def test_bundle_hours_ip_spread_skips_active_hour(tmp_path):
+    """Active hour must be skipped — same race-with-writer reason the
+    count bundler skips it."""
+    import datetime as _dt
+
+    from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
+    from backend.utils.hll import HyperLogLog
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-ipsp-active"}
+    active_hour = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d-%H")
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        _write_per_field_hour_ip_spread(
+            str(cache_root),
+            "country",
+            active_hour,
+            [
+                {
+                    "value": "US",
+                    "ip_sketch": HyperLogLog().to_bytes(),
+                    "ip_count_observed": 0,
+                    "sample_capped": False,
+                },
+            ],
+        )
+        n = bundle_hours_ip_spread("svc-ipsp-active", src, [active_hour])
+
+    assert n == 0
+    bundle = cache_root / "rollups" / "hour_bundled" / f"hour={active_hour}" / "all_fields_ip.parquet"
+    assert not bundle.exists()
+
+
+def test_bundle_hours_ip_spread_skips_when_bundle_is_up_to_date(tmp_path):
+    """If the bundle file is newer than every per-field source, the
+    bundler must skip rebuilding (cheap mtime check, expensive COPY
+    avoided). Mirrors bundle_hours' fast-path."""
+    from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
+    from backend.utils.hll import HyperLogLog
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-ipsp-fresh"}
+    hour = "2026-05-15-10"
+    sketch = HyperLogLog().to_bytes()
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        _write_per_field_hour_ip_spread(
+            str(cache_root),
+            "country",
+            hour,
+            [{"value": "US", "ip_sketch": sketch, "ip_count_observed": 0, "sample_capped": False}],
+        )
+        # First call produces the bundle.
+        n_first = bundle_hours_ip_spread("svc-ipsp-fresh", src, [hour])
+        # Touch the bundle to make it strictly newer than the per-field source.
+        bundle = cache_root / "rollups" / "hour_bundled" / f"hour={hour}" / "all_fields_ip.parquet"
+        time.sleep(0.05)
+        os.utime(bundle, None)
+        # Second call should NOT rebuild — the bundle is up-to-date.
+        n_second = bundle_hours_ip_spread("svc-ipsp-fresh", src, [hour])
+
+    assert n_first == 1
+    assert n_second == 0
+
+
+def test_bundle_hours_ip_spread_returns_zero_when_no_per_field_files(tmp_path):
+    """An hour with NO per-field IP-spread parquets yields a 0 return
+    and no bundle file — handles the case where ip_spread writer
+    hasn't run yet for any field on that hour."""
+    from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-ipsp-empty"}
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        n = bundle_hours_ip_spread("svc-ipsp-empty", src, ["2026-05-15-10"])
+
+    assert n == 0
+    assert not (cache_root / "rollups" / "hour_bundled" / "hour=2026-05-15-10").exists()
+
+
+def test_bundle_hours_ip_spread_returns_zero_when_root_missing(tmp_path):
+    """When the ip_spread root dir doesn't exist at all (cold pool, no
+    writer tick has run yet), the bundler returns 0 immediately
+    without raising an OSError on the listdir."""
+    from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-ipsp-cold"}
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        n = bundle_hours_ip_spread("svc-ipsp-cold", src, ["2026-05-15-10"])
+
+    assert n == 0

@@ -1,17 +1,20 @@
 'use client'
 
 import React from 'react'
-import { usePageContext } from '@/hooks/usePageContext'
+import { useActiveService } from '@/hooks/useActiveService'
+import { useTimeRange } from '@/hooks/useTimeRange'
+import { useTimezone } from '@/hooks/useTimezone'
 import { useReportConfig, type ReportConfiguration } from '@/hooks/useReportConfig'
-import { useFilterPayload } from '@/hooks/useFilterPayload'
+import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
 import { useUrlFilterSync } from '@/hooks/useUrlFilterSync'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { ReportShell } from '@/components/ReportShell'
 import { INTERVAL_SECONDS, type ChartInterval } from '@/lib/constants'
 import { ChartIntervalButtons } from '@/components/ChartIntervalButtons'
+import { extractApiError } from '@/lib/api'
 import { type LucideIcon } from 'lucide-react'
 
-interface ReportLayoutProps {
+interface ReportLayoutProps<TData = unknown> {
   title: string
   description: string
   icon: LucideIcon
@@ -21,13 +24,19 @@ interface ReportLayoutProps {
     endTime: string | null
     filters: any
     bucketSeconds: number
-  }) => Promise<any>
+  }) => Promise<TData | undefined>
   defaultInterval?: ChartInterval
   headerActions?: React.ReactNode
   children: (props: {
-    data: any
+    data: TData | undefined
     isLoading: boolean
     isFetching: boolean
+    /** E-6 (audit): expose error/refetch so pages that own their own
+     *  useQuery (e.g. sessions) can surface failures through the same
+     *  banner instead of letting them disappear into an empty table. */
+    isError: boolean
+    error: Error | null
+    refetch: () => void
     config: ReportConfiguration
     setChartInterval: (interval: ChartInterval) => void
     trend: string
@@ -42,7 +51,7 @@ interface ReportLayoutProps {
   }) => React.ReactNode
 }
 
-export function ReportLayout({
+export function ReportLayout<TData = unknown>({
   title,
   description,
   icon,
@@ -51,23 +60,28 @@ export function ReportLayout({
   defaultInterval = '1 hour',
   headerActions,
   children
-}: ReportLayoutProps) {
-  const { startTime, endTime, activeServiceId, timezone } = usePageContext()
+}: ReportLayoutProps<TData>) {
+  const { startTime, endTime } = useTimeRange()
+  const { activeServiceId } = useActiveService()
+  const timezone = useTimezone()
   const { config, setChartInterval, trend, setTrend } = useReportConfig({ defaultInterval })
-  const filterPayload = useFilterPayload()
-  
+  // Pass `true` so the FilterBar's "Edge only" toggle injects
+  // `edge=include[true]` into every report query. Without it the toggle
+  // was visible in the UI but discarded before reaching the backend.
+  const filterPayload = useDebouncedFilterPayload(true)
+
   useUrlFilterSync()
 
   const bucketSeconds = INTERVAL_SECONDS[config.effectiveInterval as keyof typeof INTERVAL_SECONDS] ?? 3600
 
-  const query = useServiceQuery(
+  const query = useServiceQuery<TData | undefined>(
     [queryKey || 'report', 'aggregates', activeServiceId, startTime, endTime, filterPayload, bucketSeconds],
     () => apiCall ? apiCall({
       startTime,
       endTime,
       filters: filterPayload,
       bucketSeconds
-    }) : Promise.resolve(null),
+    }) : Promise.resolve(undefined),
     { enabled: !!apiCall }
   )
 
@@ -79,17 +93,31 @@ export function ReportLayout({
     />
   )
 
+  // E-6 (audit): when ReportLayout owns the query (apiCall provided)
+  // and it failed, surface it through ReportShell's banner. Pages that
+  // manage their own useQuery (e.g. /sessions) get isError/error/refetch
+  // in the children callback and can render the banner themselves via
+  // the same ReportShell prop path.
+  const ownsQuery = !!apiCall
+  const queryError = ownsQuery && query.isError
+    ? { message: extractApiError(query.error), onRetry: () => { void query.refetch() } }
+    : null
+
   return (
     <ReportShell
       title={title}
       description={description}
       icon={icon}
       headerActions={headerActions}
+      queryError={queryError}
     >
       {children({
         data: query.data,
         isLoading: query.isLoading,
         isFetching: query.isFetching,
+        isError: query.isError,
+        error: query.error ?? null,
+        refetch: () => { void query.refetch() },
         config,
         setChartInterval,
         trend,

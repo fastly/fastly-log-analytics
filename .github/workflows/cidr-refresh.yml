@@ -1,0 +1,53 @@
+name: Refresh Fastly CIDRs
+
+# Weekly refresh of the Fastly edge CIDR list in the repo-root Caddyfile.
+# The @from_fastly_v4 matcher gates X-Forwarded-For rewriting on Fastly's
+# published v4 ranges; a stale list silently classifies traffic from new
+# POPs as direct (untrusted) until somebody refreshes it and reloads
+# Caddy. The script is well-tested (scripts/refresh_fastly_cidrs.py);
+# this workflow just runs it on a cadence and opens a PR if the file
+# changed. Off-minute schedule on purpose so the runner pool isn't
+# hammered at :00 alongside everybody else's hourly jobs.
+
+on:
+  schedule:
+    - cron: '13 9 * * 1'  # Mondays at 09:13 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    name: Fetch + open PR on diff
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Refresh Caddyfile
+        # No-op if the published list already matches what's in the
+        # Caddyfile (script prints "No changes …" and exits 0). Writes
+        # the updated matcher block otherwise; peter-evans/create-pull-
+        # request below only opens a PR when the working tree is dirty.
+        run: uv run python scripts/refresh_fastly_cidrs.py
+
+      - name: Open PR if Caddyfile changed
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: 'chore: refresh Fastly edge CIDR list in Caddyfile'
+          branch: chore/refresh-fastly-cidrs
+          delete-branch: true
+          title: 'chore: refresh Fastly edge CIDR list'
+          body: |
+            Automated update from `scripts/refresh_fastly_cidrs.py`, triggered by the weekly `cidr-refresh.yml` workflow.
+
+            The `@from_fastly_v4` matcher in [Caddyfile](../blob/main/Caddyfile) gates the `X-Forwarded-For` rewrite on Fastly-published edge ranges. A stale list silently classifies traffic from new POPs as direct (untrusted) until Caddy reloads.
+
+            After merge: run `~/restart.sh caddy` (or equivalent) on the VM to pick up the new ranges.

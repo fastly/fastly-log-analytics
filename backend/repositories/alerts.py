@@ -1,6 +1,6 @@
 """Repository for alerts.
 
-Storage lives in per-service SQLite via ``backend.core.metadata_db``. This
+Storage lives in per-service SQLite via ``backend.core.metadata``. This
 module is a thin domain wrapper plus the alert-evaluation logic that still
 needs a DuckDB connection (to read the log table).
 """
@@ -12,72 +12,60 @@ from datetime import UTC
 import duckdb
 
 from backend import config as svcconfig
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
 from backend.core.metrics import get_metric_sql
 from backend.models.alerts import Alert
+from backend.repositories._sql import alerts as SQL
 from backend.utils.telemetry import track_query
 
 
-def _all_service_ids() -> list[str]:
-    return [c["service_id"] for c in svcconfig.list_configs() if c.get("service_id")]
+def get_alerts(service_id: str | None = None, *, limit: int = 500) -> list[dict]:
+    """Return alerts. With service_id, only that service's (no limit applied —
+    bounded by the per-service-bucket cap inside list_alerts). Without
+    service_id, return the globally-newest ``limit`` alerts across all
+    services via a single ATTACH+UNION query.
 
-
-def get_alerts(service_id: str | None = None) -> list[dict]:
-    """Return alerts. With service_id, only that service's; otherwise all services'."""
+    Previously the cross-service path looped one connection-open + SELECT
+    per service then sliced in Python — the slice gave per-service-bucket
+    ordering rather than true cross-service newest-N, and the N
+    connection opens dominated runtime on installs with many services.
+    """
     if service_id:
         return metadata_db.list_alerts(service_id, filter_service_id=service_id)
-    out: list[dict] = []
-    for sid in _all_service_ids():
-        out.extend(metadata_db.list_alerts(sid, filter_service_id=sid))
-    return out
+    service_ids: list[str] = [sid for cfg in svcconfig.list_configs() if (sid := cfg.get("service_id"))]
+    return metadata_db.list_alerts_cross_service(service_ids, limit=limit)
 
 
 def save_alert(alert: Alert) -> dict:
     return metadata_db.save_alert(alert.service_id, alert)
 
 
-def _find_alert_service(alert_id: str) -> str | None:
-    """Scan all per-service metadata DBs to find which service owns this alert."""
-    for sid in _all_service_ids():
-        for a in metadata_db.list_alerts(sid, filter_service_id=sid):
-            if a["id"] == alert_id:
-                return sid
-    return None
-
-
-def get_alert_by_id(alert_id: str) -> dict | None:
-    """Return the alert row whose id matches ``alert_id`` (or None).
+def get_alert_by_id(alert_id: str, service_id: str) -> dict | None:
+    """Return the alert row whose id matches ``alert_id`` in the given
+    service (or None).
 
     Security (defense-in-depth): the cross-tenant scope check in
     ``backend/routers/alerts.py:delete_alert`` calls this to look up
     ``service_id`` BEFORE mutating, so an analyst attempting a
     cross-tenant delete gets 403 and the underlying row stays untouched.
-    Without this helper that check is dead code and the gate falls
-    through to the middleware (which already blocks DELETE on
-    /api/alerts for analysts, but the router-level gate is the
-    secondary belt-and-suspenders).
+
+    ``service_id`` is required — see audit finding 018 (same O(N)
+    cross-tenant-scan vulnerability the views.py module had).
     """
-    for sid in _all_service_ids():
-        for a in metadata_db.list_alerts(sid, filter_service_id=sid):
-            if a.get("id") == alert_id:
-                return a
+    for a in metadata_db.list_alerts(service_id, filter_service_id=service_id):
+        if a.get("id") == alert_id:
+            return a
     return None
 
 
-def toggle_alert(alert_id: str, enabled: bool, service_id_hint: str | None = None) -> dict:
-    """Toggle an alert. ``service_id_hint`` (from request context) avoids the
-    cross-service scan when known; falls back to scan when not provided."""
-    sid = service_id_hint or _find_alert_service(alert_id)
-    if not sid:
-        return {"id": alert_id, "status": "not_found", "service_id": None}
-    return metadata_db.toggle_alert(sid, alert_id, enabled)
+def toggle_alert(alert_id: str, enabled: bool, service_id: str) -> dict:
+    """Toggle an alert. ``service_id`` is required — see audit finding 018."""
+    return metadata_db.toggle_alert(service_id, alert_id, enabled)
 
 
-def delete_alert(alert_id: str, service_id_hint: str | None = None) -> dict:
-    sid = service_id_hint or _find_alert_service(alert_id)
-    if not sid:
-        return {"status": "not_found", "service_id": None}
-    return metadata_db.delete_alert(sid, alert_id)
+def delete_alert(alert_id: str, service_id: str) -> dict:
+    """Delete an alert. ``service_id`` is required — see audit finding 018."""
+    return metadata_db.delete_alert(service_id, alert_id)
 
 
 def update_last_triggered(service_id: str, alert_id: str, triggered_ts: str | None = None) -> None:
@@ -101,7 +89,7 @@ def evaluate_alert(
     status_codes = alert.get("status_codes")
 
     try:
-        max_ts_query = f"SELECT max(timestamp) FROM {table_name}"
+        max_ts_query = SQL.MAX_TIMESTAMP.format(table=table_name)
         with track_query(con, max_ts_query, [], "alerts") as cursor:
             max_ts = cursor.fetchone()[0]
 
@@ -129,16 +117,18 @@ def evaluate_alert(
                 return f"{agg_or_sel} WHERE {where_clause}"
             return f"SELECT {agg_or_sel} FROM {table_name} WHERE {where_clause}"
 
-        current_start = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '{window} minutes'"
-        current_end = f"(SELECT max(timestamp) FROM {table_name})"
+        current_start = SQL.WINDOW_OFFSET_EXPR.format(table=table_name, minutes_ago=window)
+        current_end = SQL.MAX_TIMESTAMP_SUBQUERY_EXPR.format(table=table_name)
         q_current = build_metric_query(current_start, current_end)
 
         with track_query(con, q_current, [], "alerts") as cursor:
             val = cursor.fetchone()[0] or 0
 
         if metric != "requests":
-            q_req = (
-                f"SELECT count(*) FROM {table_name} WHERE timestamp >= {current_start} AND timestamp <= {current_end}"
+            q_req = SQL.COUNT_REQUESTS_IN_WINDOW.format(
+                table=table_name,
+                window_start_expr=current_start,
+                window_end_expr=current_end,
             )
             with track_query(con, q_req, [], "alerts") as cursor:
                 req_count = cursor.fetchone()[0] or 0
@@ -149,8 +139,8 @@ def evaluate_alert(
             if req_count < 10:
                 return False, None, None, None
 
-            hist_start = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '{comp_period + window} minutes'"
-            hist_end = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '{comp_period} minutes'"
+            hist_start = SQL.WINDOW_OFFSET_EXPR.format(table=table_name, minutes_ago=comp_period + window)
+            hist_end = SQL.WINDOW_OFFSET_EXPR.format(table=table_name, minutes_ago=comp_period)
             q_hist = build_metric_query(hist_start, hist_end)
 
             with track_query(con, q_hist, [], "alerts") as cursor:

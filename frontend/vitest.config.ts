@@ -27,6 +27,17 @@ export default defineConfig({
     // shape no longer typechecks under tsc (which `next build` runs
     // over every .ts file, including this config).
     maxWorkers: 4,
+    // Pin the API base for openapi-fetch under jsdom. lib/api.ts's
+    // getApiBase() returns "" in the browser (same-origin via Caddy in
+    // prod) — fine for real fetches, fatal for MSW: the openapi-fetch
+    // client captures baseUrl at module load, builds Request("/api/…"),
+    // and jsdom's URL parser rejects the relative href before MSW can
+    // see it. Setting NEXT_PUBLIC_API_URL here short-circuits the
+    // browser branch so the client's baseUrl matches the absolute URLs
+    // the MSW handlers register under (`http://127.0.0.1:8000`).
+    env: {
+      NEXT_PUBLIC_API_URL: 'http://127.0.0.1:8000',
+    },
   },
   resolve: {
     alias: {

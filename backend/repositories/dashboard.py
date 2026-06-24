@@ -7,6 +7,7 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Collection
 from typing import Any
 
 import duckdb
@@ -15,6 +16,7 @@ from backend.models.common import FiltersDict
 from backend.repositories._base import (
     CANONICAL_METRICS,
     QueryRunner,
+    SectionTimer,
     _get_schema,
     _safe_table,
     get_source_extent,
@@ -23,8 +25,8 @@ from backend.repositories._base import (
     safe_iso,
     time_bucket_select,
 )
-from backend.repositories.utils.filters import build_where_clause, resolve_col
-from backend.repositories.utils.pagination import calc_offset
+from backend.repositories._sql import dashboard as SQL
+from backend.repositories.utils.filters import build_where_clause
 
 # ── In-memory caches ──────────────────────────────────────────────────────────
 # Bounded + actively-reaped: dashboard responses can be 30-240MB per entry,
@@ -53,9 +55,36 @@ DASHBOARD_CACHE_TTL = 0  # seconds; 0 disables read+write
 _dashboard_cache: BoundedTTLCache = BoundedTTLCache(maxsize=500, ttl_seconds=max(DASHBOARD_CACHE_TTL, 1))
 
 
+def invalidate_service(service_name: str) -> None:
+    """Drop every cached dashboard response keyed to ``service_name``.
+
+    Public surface for cron / admin callers that need to invalidate after
+    an ingest tick or a config change — keeps them out of the private
+    ``_dashboard_cache`` deque so its internal shape can change without
+    breaking three out-of-package callers.
+    """
+    if not service_name:
+        return
+    stale = [k for k in list(_dashboard_cache) if k.endswith(f":{service_name}")]
+    for k in stale:
+        try:
+            del _dashboard_cache[k]
+        except KeyError:
+            pass
+    # Also drop a direct-keyed entry (the admin ingest path uses .pop(name)).
+    try:
+        _dashboard_cache.pop(service_name, None)
+    except (KeyError, AttributeError):
+        pass
+
+
 # ── aggregates ────────────────────────────────────────────────────────────────
 
-from backend.core.log_fields import LOG_FIELD_CATALOG
+# Phase 7 caller migration: read field codes from the frozen-dataclass
+# REGISTRY instead of LOG_FIELD_CATALOG. REGISTRY is derived from the
+# catalog at import time and preserves wire-order, so FIELDS comes out
+# byte-identical (Rust scorer parity invariant).
+from backend.core.field_registry import REGISTRY as _FIELD_REGISTRY
 
 # Virtual fields are catalog ids whose value is computed by exploding a
 # real backing column (CSV string) into individual rows via DuckDB's
@@ -64,10 +93,10 @@ from backend.core.log_fields import LOG_FIELD_CATALOG
 # them in batch-stats / column-need passes (their backing column is what
 # actually goes into the temp table).
 _VIRTUAL_FIELDS = ("waf_sig_ind", "edge_score_reason_ind")
-FIELDS = [f["id"] for f in LOG_FIELD_CATALOG if f["id"] != "_source_file"] + list(_VIRTUAL_FIELDS)
+FIELDS = [f.code for f in _FIELD_REGISTRY if f.code != "_source_file"] + list(_VIRTUAL_FIELDS)
 
 
-def _add_bot_columns(actual_cols: set[str], columns: list[str], select_cols: list[str]) -> tuple[bool, bool]:
+def _add_bot_columns(actual_cols: Collection[str], columns: list[str], select_cols: list[str]) -> tuple[bool, bool]:
     """Ensure UA + IP (Arcjet) or waf_req_id (NGWAF) columns are in select_cols
     when the caller requested the virtual `_bot_name` / `_ngwaf_bot_name` fields.
 
@@ -93,7 +122,19 @@ def get_aggregates(
     filters: FiltersDict,
     chart_interval: str,
     chart_metric: str,
+    fields_filter: list[str] | None = None,
+    *,
+    include_time_series: bool | None = True,
+    include_conn_requests: bool | None = True,
+    include_map_data: bool | None = True,
+    include_top_n: bool | None = True,
 ) -> dict:
+    # Normalize tri-state (model passes None when the caller doesn't override).
+    include_time_series = True if include_time_series is None else include_time_series
+    include_conn_requests = True if include_conn_requests is None else include_conn_requests
+    include_map_data = True if include_map_data is None else include_map_data
+    include_top_n = True if include_top_n is None else include_top_n
+
     source_name = src["name"]
     table_name = _safe_table(source_name)
 
@@ -103,21 +144,35 @@ def get_aggregates(
         for cf in lf_config.get("custom_fields", [])
         if cf.get("enabled", True) and cf.get("show_in_dashboard", True)
     ]
-    fields = FIELDS + _custom_field_names
+    all_fields = FIELDS + _custom_field_names
+    if fields_filter is not None:
+        fields = [f for f in fields_filter if f in all_fields]
+    else:
+        fields = all_fields
 
-    _key_payload = json.dumps(
-        {
-            "s": start_time,
-            "e": end_time,
-            "f": {k: (v.mode, sorted(str(x) for x in v.values)) for k, v in sorted(filters.items())},
-            "ci": chart_interval,
-            "cm": chart_metric,
-        },
-        separators=(",", ":"),
-    )
-    cache_key = hashlib.sha256(f"{_key_payload}:{source_name}".encode()).hexdigest()
+    # Cache is hard-disabled today (DASHBOARD_CACHE_TTL = 0). Gate the
+    # key-build + read together so the SHA-256 over the filter payload
+    # doesn't run on every request just to be discarded — saves a small
+    # per-request cost while keeping the legacy rollback hatch intact.
+    cache_key: str | None = None
     now = time.time()
     if DASHBOARD_CACHE_TTL > 0:
+        _key_payload = json.dumps(
+            {
+                "s": start_time,
+                "e": end_time,
+                "f": {k: (v.mode, sorted(str(x) for x in v.values)) for k, v in sorted(filters.items())},
+                "ci": chart_interval,
+                "cm": chart_metric,
+                "fields": sorted(fields_filter) if fields_filter is not None else None,
+                "its": include_time_series,
+                "icr": include_conn_requests,
+                "imd": include_map_data,
+                "itn": include_top_n,
+            },
+            separators=(",", ":"),
+        )
+        cache_key = hashlib.sha256(f"{_key_payload}:{source_name}".encode()).hexdigest()
         # BoundedTTLCache's ``__contains__`` / ``[]`` already enforce TTL
         # internally, so an entry that reads as present is by definition
         # still fresh — no need for the legacy ``now - cached_at`` check.
@@ -138,19 +193,13 @@ def get_aggregates(
     # _section_timings so we can attribute the cold dashboard wall
     # without re-running ad-hoc instrumentation. Matches the
     # bootstrap.py pattern. Negligible overhead (perf_counter is ~50ns).
-    section_timings: list[dict] = []
-
-    def _timed(name: str, fn):
-        t0 = time.perf_counter()
-        try:
-            return fn()
-        finally:
-            section_timings.append({"section": name, "time_ms": round((time.perf_counter() - t0) * 1000, 2)})
+    timer = SectionTimer()
+    section_timings = timer.entries
 
     runner = QueryRunner(con, src)
     interval = "1 minute"
 
-    actual_cols = _timed("get_schema_cols", runner.get_schema_cols)
+    actual_cols = timer.call("get_schema_cols", runner.get_schema_cols)
     if not actual_cols:
         empty = {f: {"top": [], "total": 0} for f in fields}
         return {
@@ -165,7 +214,7 @@ def get_aggregates(
             **runner.telemetry(),
         }
 
-    params, where_clause = _timed(
+    params, where_clause = timer.call(
         "build_where_clause",
         lambda: build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True),
     )
@@ -221,22 +270,47 @@ def get_aggregates(
 
     rollup_dir = os.path.join(_cache_dir_for_rollups(src), "rollups", "hour")
     use_rollups = not filters and os.path.isdir(rollup_dir)
-    # Note on freshness when use_rollups=True: the per-field top-N IS
-    # current. execute_top_n_rollups (backend/repositories/_base.py:432)
-    # excludes the active hour from its rollup-file enumeration AND
-    # runs a separate execute_top_n_batch query on the live base table
-    # for the active hour, then merges the two via a combined dict
-    # before truncating to top-N. So the current hour's contribution is
-    # not lost — it joins the merge from the live side. The narrow
-    # live_temp built below is for OTHER queries (time_series, signal
-    # unnests, conn_requests histogram) that don't go through the
-    # rollup path.
+    # Freshness contract on the rollup path: execute_top_n_rollups
+    # (backend/repositories/_base.py:563) is window-correct.
+    #   - Fully-contained UTC days: served from the per-day compacted rollup.
+    #   - Partial-day boundary days (window cuts through midnight): the
+    #     per-day rollup is SKIPPED (it covers [00:00, +24h) and would
+    #     over-count hours outside the window); the in-window portion of
+    #     such days is live-queried from the base table. Per-hour rollups
+    #     for compacted days have already been deleted, so live is the
+    #     only correct source.
+    #   - Active hour: live-queried, intersected with the window.
+    # All three sources are merged before truncation. The narrow live_temp
+    # built below is for OTHER queries (time_series, signal unnests,
+    # conn_requests histogram) that don't go through the rollup path.
 
     # `temp_table` ends up holding the per-request materialization (if
     # any) so the `finally` cleanup at the bottom of the function can
     # DROP it regardless of which branch built it.
     temp_table: str | None = None
-    if use_rollups:
+    # Stash the originals so fallback paths (e.g. the runtime CSV
+    # explode for virtual fields when the rollup is missing rows) can
+    # query the base table directly even after live_temp creation has
+    # rewritten table_name/where_clause/params to point at the temp.
+    orig_table_name = _safe_table(source_name)
+    orig_where_clause = where_clause
+    orig_params = list(params) if params is not None else []
+    # Skip the live_temp build on the rollup path when no consumer of
+    # the temp would actually fire. /charts already passes all three
+    # include_X flags false, so its rollup-path requests pay the
+    # 300-1000 ms live_temp_create for nothing — total_rows can be
+    # served by a single count against the base table directly.
+    _live_temp_has_consumer = (
+        include_conn_requests  # CONN_REQUESTS_BUCKET reads the temp
+        or include_time_series  # time_series raw fallback reads the temp
+    )
+    if use_rollups and not _live_temp_has_consumer:
+        # No-temp path: keep table_name/where_clause/params pointed at
+        # the base table. ``total_rows`` below runs as a single count
+        # against the base table — same row count, no narrow-projection
+        # materialisation cost.
+        table_name = _safe_table(source_name)
+    elif use_rollups:
         table_name = _safe_table(source_name)
         # Plan item 14 — live-hour TEMP TABLE on the rollup path.
         # Without this, the rollup branch fires FOUR separate parquet
@@ -248,45 +322,62 @@ def get_aggregates(
         # scan + manifest read across all of them. `execute_top_n_rollups`
         # below reads from disk directly and is unaffected.
         #
-        # NARROW projection: on the rollup path the per-field top-N
-        # comes from execute_top_n_rollups (reads rollup parquet
-        # directly), so the live TEMP TABLE only needs the columns
-        # consumed by the four window-scan branches: waf_sig +
-        # edge_score_reason for signal unnest, conn_requests for the
-        # connection-reuse histogram, timestamp for time_series, plus
-        # the chart_metric helper cols. A WIDE projection (matching
-        # cols_str) made TEMP TABLE materialization itself the
-        # bottleneck (~1.4s on a populated 24h window) and erased the
-        # savings. The narrow set keeps materialization under ~400ms.
-        narrow: list[str] = []
-        for c in (
-            "waf_sig",
-            "edge_score_reason",
+        # NARROW projection: only the columns the temp consumers
+        # actually use. The unconditional base set covers:
+        #   - conn_requests       → conn_requests bucket
+        #   - timestamp           → time_series raw fallback
+        #
+        # Previously the set also included country (for the map_data
+        # fallback), waf_sig (for waf_sig_ind_explode), and
+        # edge_score_reason (for edge_score_reason_ind_explode). The
+        # use_rollups path no longer needs ANY of them: map_data is
+        # derived from all_top_res (per_field_limits country=500), and
+        # the virtual-field rollup serves waf_sig_ind /
+        # edge_score_reason_ind on the hot path. Misses fall back to
+        # base-table scans inside _exploded_top_n.
+        #
+        # The time_series chart usually serves from the per-hour rollup
+        # (F1 — try_time_series_from_rollup), so the chart-metric
+        # helper columns (cache/elapsed/status/resp_bytes/...) are
+        # almost never needed in the temp. We add ONLY the helper(s)
+        # for the SPECIFIC chart_metric being requested — that way the
+        # rare rollup-returns-None fallback still runs against the
+        # temp, but the typical (chart_metric=requests) case keeps the
+        # temp at 2 columns instead of 13.
+        narrow_col_set: list[str] = [
             "conn_requests",
             "timestamp",
-            "cache",
-            "elapsed",
-            "status",
-            "resp_bytes",
-            "req_header_bytes",
-            "req_bytes",
-            "ttfb",
-            "resp_state",
-            # `country` is consumed by the map_data fallback below
-            # (line ~564). The rollup derives map_data from all_top_res
-            # when country is in the top-N field set AND has rows for
-            # the window, but if either condition fails it falls back
-            # to a `SELECT "country" ... FROM table_name` against the
-            # narrow temp. Without `country` here, that fallback raises
-            # BinderException and the dashboard renders empty.
-            "country",
-        ):
-            if c in actual_cols:
-                narrow.append(f'"{c}"')
+        ]
+        # chart_metric → columns the raw time_series fallback would
+        # touch if the rollup returns None. Default ('requests') only
+        # needs timestamp which is already included above.
+        if chart_metric in ("5xx", "4xx"):
+            narrow_col_set.append("status")
+        elif chart_metric == "hit_rate":
+            # `cache` is primary; `resp_state` is the fallback when cache
+            # is missing from the service schema.
+            narrow_col_set.extend(["cache", "resp_state"])
+        elif chart_metric.endswith("_latency"):
+            narrow_col_set.append("elapsed")
+        elif chart_metric == "throughput":
+            narrow_col_set.extend(["cache", "elapsed", "resp_bytes"])
+        elif chart_metric == "req_size":
+            narrow_col_set.extend(["req_header_bytes", "req_bytes"])
+        elif chart_metric == "ttfb":
+            narrow_col_set.append("ttfb")
+        # Dedupe while preserving order; filter to columns the service
+        # actually has.
+        seen: set[str] = set()
+        narrow: list[str] = []
+        for c in narrow_col_set:
+            if c in seen or c not in actual_cols:
+                continue
+            seen.add(c)
+            narrow.append(f'"{c}"')
         narrow_cols_str = ", ".join(narrow) if narrow else "*"
         live_temp = f"t_live_hour_{uuid.uuid4().hex}"
         sql = f"CREATE TEMP TABLE {live_temp} AS SELECT {narrow_cols_str} FROM {table_name} WHERE {where_clause}"
-        if _timed("live_temp_create", lambda: runner.create_temp_table(sql, params)):
+        if timer.call("live_temp_create", lambda: runner.create_temp_table(sql, params)):
             table_name = live_temp
             where_clause = "1=1"
             params = []
@@ -299,7 +390,7 @@ def get_aggregates(
         # This prevents DuckDB from re-scanning the underlying files for every branch of the UNION ALL.
         temp_table = f"t_{uuid.uuid4().hex}"
         sql = f"CREATE TEMP TABLE {temp_table} AS SELECT {cols_str} FROM {table_name} WHERE {where_clause}"
-        if not _timed("wide_temp_create", lambda: runner.create_temp_table(sql, params)):
+        if not timer.call("wide_temp_create", lambda: runner.create_temp_table(sql, params)):
             empty = {f: {"top": [], "total": 0} for f in fields}
             return {
                 "data": empty,
@@ -355,15 +446,19 @@ def get_aggregates(
         else:
             # Non-rollups path keeps the wide COUNT — we have the
             # filtered temp table loaded; one combined scan is cheaper
-            # than re-counting per field downstream.
+            # than re-counting per field downstream. Skip the per-field
+            # COUNT cols when include_top_n=False (their only consumer is
+            # the field_totals dict used by the top-N panels); the bare
+            # requests count is still needed for total_rows.
             count_cols: list[str] = [CANONICAL_METRICS["requests"]]
             valid_fields: list[str] = []
-            for field in fields:
-                if field in _VIRTUAL_FIELDS:
-                    continue
-                if field in actual_cols:
-                    count_cols.append(f"count({resolve_col(field, actual_cols)})")
-                    valid_fields.append(field)
+            if include_top_n:
+                for field in fields:
+                    if field in _VIRTUAL_FIELDS:
+                        continue
+                    if field in actual_cols:
+                        count_cols.append(f"count({field})")
+                        valid_fields.append(field)
             if count_cols:
                 count_res = runner.execute(
                     f"SELECT {', '.join(count_cols)} FROM {table_name} WHERE {where_clause}", params
@@ -372,22 +467,60 @@ def get_aggregates(
                 for i, field in enumerate(valid_fields):
                     field_totals[field] = count_res[i + 1]
 
-        orig_table_name = _safe_table(source_name)
-        total_rows_total, earliest_log_at, latest_log_at = _timed(
+        total_rows_total, earliest_log_at, latest_log_at = timer.call(
             "source_extent", lambda: get_source_extent(runner, src, orig_table_name)
         )
 
-        schema_types = _timed("schema_types", lambda: {col["name"]: col["type"] for col in _get_schema(con, src)})
+        schema_types = timer.call("schema_types", lambda: {col["name"]: col["type"] for col in _get_schema(con, src)})
 
         # When use_rollups=True, field_totals is empty here — populate it
         # below from the rollup query results. Use the full eligible field
         # list (anything non-virtual + in schema) as batch_fields; the
         # rollup helper silently skips fields it has no data for.
+        #
+        # Virtual fields (waf_sig_ind, edge_score_reason_ind) now also
+        # have their own rollup entries (rollups/hour/field=waf_sig_ind/...
+        # — see _build_virtual_field_copy_query in core/rollups.py).
+        # Include them when their BACKING column is in actual_cols so
+        # the rollup reader picks them up via the same path as regular
+        # fields. Saves the runtime-unnest cost in _exploded_top_n
+        # (was ~1.2s + ~0.7s on prod 30d for the two CSV fields).
+        from backend.core.rollups import _VIRTUAL_FIELD_BACKING as _VFB
+
+        def _virtuals_with_backing(in_set) -> list[str]:
+            return [v for v in _VIRTUAL_FIELDS if v in fields and _VFB.get(v) in in_set]
+
         if use_rollups:
             batch_fields = [f for f in fields if f not in _VIRTUAL_FIELDS and f in actual_cols]
+            # Virtual fields go through the rollup reader too — they
+            # have dedicated per-hour entries on disk and the reader
+            # silently skips fields with no data, so a service that
+            # hasn't backfilled yet just falls through to the runtime
+            # explode below.
+            batch_fields += _virtuals_with_backing(actual_cols)
         else:
+            # Non-rollup path uses execute_top_n_batch which COUNT(...)s
+            # the field as a real column. Virtual fields aren't real
+            # columns, so they'd raise a BinderException — keep them on
+            # the existing runtime-explode path (_exploded_top_n
+            # below).
             batch_fields = [f for f in fields if f not in _VIRTUAL_FIELDS and f in field_totals]
-        if use_rollups:
+
+        # all_top_res is the merged (field, value, count) result of the
+        # batch top-N scan; it also feeds the rollup-path map_data
+        # derivation downstream. Initialize to empty so the gated-off
+        # case still has a defined shape.
+        all_top_res: list[tuple[str, Any, int]] = []
+        field_order: list[str] = []
+        # The selector may turn off top-N coverage entirely (sections=['core']
+        # on /aggregates). When it's off AND map_data isn't pulling country
+        # from the same scan, skip the batch call + population loop —
+        # they're the dominant rollup-path cost. The non-rollup path still
+        # falls through to map_data via SQL.MAP_DATA_BY_COUNTRY.
+        _need_topn_scan = include_top_n or (use_rollups and include_map_data and "country" in actual_cols)
+        if not _need_topn_scan:
+            pass
+        elif use_rollups:
             # Bump country's per-field limit to 500 so the map_data path
             # below can use the same call's results — eliminates the
             # second execute_top_n_rollups invocation that was costing
@@ -396,16 +529,30 @@ def get_aggregates(
             # Other fields stay at limit=10. Make sure country is in the
             # field list — it normally is via FIELDS, but the explicit
             # add guards a future change to FIELDS.
+            #
+            # When the caller (e.g. /charts) declared include_map_data
+            # false, the choropleth never renders so the widened limit
+            # is pure waste — analyst body_bytes on /dashboard 24h was
+            # 38 KB vs 12 KB for the same call without the widening
+            # (the 500-row country payload is the dominant slice).
+            # Drop the widening in that case; the country panel still
+            # gets limit=10 like every other field.
             _batch_with_country = batch_fields if "country" in batch_fields else batch_fields + ["country"]
-            all_top_res, field_order = _timed(
+            _per_field_limits = {"country": 500} if include_map_data else {}
+            all_top_res, field_order = timer.call(
                 "top_n_rollups",
                 lambda: runner.execute_top_n_rollups(
                     _batch_with_country,
                     start_time,
                     end_time,
                     limit=10,
-                    per_field_limits={"country": 500},
+                    per_field_limits=_per_field_limits,
                     _phase_log=section_timings,
+                    # Seed the live-active-hour branch's schema lookups so
+                    # it skips a redundant get_schema_cols() + _get_schema()
+                    # round-trip — these were already computed above.
+                    actual_cols=list(actual_cols),
+                    schema_types=schema_types,
                 ),
             )
             # Derive field_totals from the rollup result (cheap Python sum).
@@ -417,12 +564,12 @@ def get_aggregates(
             for f_name, _f_val, f_count in all_top_res:
                 field_totals[f_name] = field_totals.get(f_name, 0) + int(f_count)
         else:
-            all_top_res, field_order = _timed(
+            all_top_res, field_order = timer.call(
                 "top_n_batch",
                 lambda: runner.execute_top_n_batch(batch_fields, table_name, actual_cols, schema_types, limit=10),
             )
 
-        if all_top_res:
+        if all_top_res and include_top_n:
             # Group results back by field
             for field in field_order:
                 results[field] = {"top": [], "total": field_totals.get(field, 0)}
@@ -437,15 +584,25 @@ def get_aggregates(
             if asn_list:
                 from backend.core import duckdb as _db
 
-                asn_names = _timed("asn_names_lookup", lambda: _db.get_asn_names(src["name"], asn_list))
+                asn_names = timer.call("asn_names_lookup", lambda: _db.get_asn_names(src["name"], asn_list))
 
             # Per-panel cap at 10. execute_top_n_rollups may return more
             # than 10 for fields with per_field_limits (e.g. country=500
             # for the choropleth); the panel UI only renders 10, so cap
             # the append here. Other fields stay at <=10 naturally.
+            #
+            # __other__ filter: the per-day bundle (rollups/day_bundled)
+            # truncates to top-DAY_BUNDLE_TOP_K per (field, day) and
+            # emits an aggregated ``__other__`` synthetic row carrying
+            # the tail count. Skip it for the displayed top-N panel
+            # (its `value` is the literal sentinel, not a real value to
+            # render) but DO count it in field_totals so the panel's
+            # "Total" stays correct.
             _PANEL_LIMIT = 10
             _panel_count: dict[str, int] = {}
             for f_name, f_val, f_count in all_top_res:
+                if f_val == "__other__":
+                    continue
                 if _panel_count.get(f_name, 0) >= _PANEL_LIMIT:
                     continue
                 entry = {"value": f_val, "count": f_count}
@@ -462,30 +619,37 @@ def get_aggregates(
         # rows via unnest(string_split(...)). Generalized helper handles both
         # waf_sig_ind (backed by waf_sig) and edge_score_reason_ind (backed
         # by edge_score_reason) — same pattern, different backing columns.
+        #
+        # Fast path: if the rollup already populated results[virtual_id]
+        # via the top_n_rollups call above (the rollup writer now
+        # pre-aggregates virtual fields, see
+        # core/rollups._build_virtual_field_copy_query), skip the
+        # runtime unnest entirely. The runtime fallback only fires
+        # when the rollup is empty for this virtual field (cold start,
+        # writer behind, etc.).
         def _exploded_top_n(virtual_id: str, backing_col: str) -> None:
             if virtual_id not in fields:
+                return
+            existing = results.get(virtual_id)
+            if existing and existing.get("top"):
+                # Rollup already produced rows — keep them, no runtime scan.
                 return
             if backing_col not in actual_cols:
                 results[virtual_id] = {"top": [], "total": 0}
                 return
-            q = f"""
-                WITH split_data AS (
-                    SELECT trim(signal) AS signal
-                    FROM (
-                        SELECT unnest(string_split("{backing_col}", ',')) AS signal
-                        FROM {table_name}
-                        WHERE "{backing_col}" IS NOT NULL AND "{backing_col}" != '' AND {where_clause}
-                    )
-                    WHERE trim(signal) != ''
-                ),
-                total_count AS (SELECT {CANONICAL_METRICS["requests"]} AS tc FROM split_data),
-                top_values AS (
-                    SELECT signal AS value, {CANONICAL_METRICS["requests"]} AS c
-                    FROM split_data GROUP BY 1 ORDER BY 2 DESC LIMIT 10
-                )
-                SELECT tv.value, tv.c, tc.tc FROM top_values tv CROSS JOIN total_count tc
-            """
-            res = runner.execute(q).fetchall()
+            # Query the BASE table, not the temp: the temp's narrow
+            # projection no longer carries waf_sig / edge_score_reason
+            # (the virtual-field rollup serves them on the hot path).
+            # Direct base-table scan keeps this fallback functional
+            # when the rollup is missing rows — paid only on the rare
+            # cold-rollup path.
+            q = SQL.VIRTUAL_FIELD_EXPLODED_TOP_N.format(
+                backing_col=backing_col,
+                table_name=orig_table_name,
+                where_clause=orig_where_clause,
+                requests_metric=CANONICAL_METRICS["requests"],
+            )
+            res = runner.execute(q, orig_params).fetchall()
             if res:
                 results[virtual_id] = {
                     "top": [{"value": r[0], "count": r[1]} for r in res],
@@ -494,26 +658,21 @@ def get_aggregates(
             else:
                 results[virtual_id] = {"top": [], "total": 0}
 
-        _timed("waf_sig_ind_explode", lambda: _exploded_top_n("waf_sig_ind", "waf_sig"))
-        _timed("edge_score_reason_ind_explode", lambda: _exploded_top_n("edge_score_reason_ind", "edge_score_reason"))
+        if include_top_n:
+            timer.call("waf_sig_ind_explode", lambda: _exploded_top_n("waf_sig_ind", "waf_sig"))
+            timer.call(
+                "edge_score_reason_ind_explode", lambda: _exploded_top_n("edge_score_reason_ind", "edge_score_reason")
+            )
 
-        # Special handling for conn_requests (bucketed histogram)
+        # Special handling for conn_requests (bucketed histogram).
+        # Skipped entirely when the caller (e.g. /charts) doesn't render it.
         t_conn_req_0 = time.perf_counter()
-        if "conn_requests" in actual_cols:
-            q = f"""
-                SELECT
-                    CASE
-                        WHEN "conn_requests" = 1 THEN '1'
-                        WHEN "conn_requests" BETWEEN 2 AND 5 THEN '2–5'
-                        WHEN "conn_requests" BETWEEN 6 AND 20 THEN '6–20'
-                        ELSE '21+'
-                    END AS bucket,
-                    {CANONICAL_METRICS["requests"]} AS c
-                FROM {table_name}
-                WHERE "conn_requests" IS NOT NULL AND "conn_requests" > 0 AND {where_clause}
-                GROUP BY 1
-                ORDER BY MIN("conn_requests")
-            """
+        if include_conn_requests and "conn_requests" in actual_cols:
+            q = SQL.CONN_REQUESTS_BUCKET.format(
+                requests_metric=CANONICAL_METRICS["requests"],
+                table_name=table_name,
+                where_clause=where_clause,
+            )
             res = runner.execute(q).fetchall()
             total_conn = sum(r[1] for r in res)
             results["conn_requests"] = {
@@ -526,15 +685,16 @@ def get_aggregates(
             {"section": "conn_requests", "time_ms": round((time.perf_counter() - t_conn_req_0) * 1000, 2)}
         )
 
-        # Time series
+        # Time series. Skipped entirely when the caller (e.g. /charts)
+        # doesn't render the chart.
         t_ts_0 = time.perf_counter()
         time_series: list[dict] = []
         chart_metric_out = "requests"
-        if "timestamp" in actual_cols:
+        if include_time_series and "timestamp" in actual_cols:
             interval = safe_interval(chart_interval, default=interval)
 
-            sql_cache = resolve_col("cache", actual_cols)
-            sql_elapsed = resolve_col("elapsed", actual_cols)
+            sql_cache = "cache"
+            sql_elapsed = "elapsed"
 
             # Time-series rollup fast path. Serves the chart from per-hour
             # 1-minute pre-aggregated parquets when the metric + interval are
@@ -542,7 +702,7 @@ def get_aggregates(
             # `use_rollups` gate already encodes "no filters" — reusing it
             # keeps the two paths consistent. Falls back transparently to the
             # raw branches below when the reader returns None.
-            rollup_metric_ok = chart_metric in QueryRunner._TS_ROLLUP_METRIC_SQL
+            rollup_metric_ok = chart_metric in QueryRunner._TS_ROLLUP_METRIC_PARTS
             rollup_col_ok = (
                 chart_metric == "requests"
                 or (chart_metric in ("5xx", "4xx") and "status" in actual_cols)
@@ -581,34 +741,34 @@ def get_aggregates(
                 pass
             elif chart_metric == "5xx" and "status" in actual_cols:
                 chart_metric_out = "5xx"
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["5xx_rate"]} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["5xx_rate"],
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             elif chart_metric == "4xx" and "status" in actual_cols:
                 chart_metric_out = "4xx"
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["4xx_rate"]} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["4xx_rate"],
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             elif chart_metric == "hit_rate" and ("cache" in actual_cols or "resp_state" in actual_cols):
                 chart_metric_out = "hit_rate"
                 # Fallback to resp_state if cache is missing
                 cache_col = '"cache"' if "cache" in actual_cols else '"resp_state"'
                 hit_rate_expr = CANONICAL_METRICS["hit_rate"].format(cache_col=cache_col)
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {hit_rate_expr} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=hit_rate_expr,
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             elif chart_metric.endswith("_latency") and ("elapsed" in actual_cols or "elapsed_us" in actual_cols):
                 chart_metric_out = chart_metric
                 percentile = 0.95
@@ -616,54 +776,61 @@ def get_aggregates(
                     percentile = 0.50
                 elif chart_metric.startswith("p99"):
                     percentile = 0.99
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {percentile_ms_expr(sql_elapsed, percentile)} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {sql_elapsed} IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=percentile_ms_expr(sql_elapsed, percentile),
+                    table_name=table_name,
+                    extra_where=f" AND {sql_elapsed} IS NOT NULL",
+                    where_clause=where_clause,
+                )
             elif chart_metric == "throughput" and "resp_bytes" in actual_cols and "elapsed" in actual_cols:
                 chart_metric_out = "throughput"
-                sql_resp_bytes = resolve_col("resp_bytes", actual_cols)
+                sql_resp_bytes = "resp_bytes"
                 # Note: elapsed and elapsed_us both map to the same field in DuckDB (µs)
-                sql_elapsed_val = resolve_col("elapsed", actual_cols)
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["throughput"].format(cache_col=sql_cache, elapsed_col=sql_elapsed_val, resp_bytes_col=sql_resp_bytes)} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                sql_elapsed_val = "elapsed"
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["throughput"].format(
+                        cache_col=sql_cache,
+                        elapsed_col=sql_elapsed_val,
+                        resp_bytes_col=sql_resp_bytes,
+                    ),
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             elif chart_metric == "req_size" and any(c in actual_cols for c in ["req_header_bytes", "req_bytes"]):
                 chart_metric_out = "req_size"
                 header_col = '"req_header_bytes"' if "req_header_bytes" in actual_cols else "0"
-                body_col = resolve_col("req_bytes", actual_cols) if "req_bytes" in actual_cols else "0"
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["req_size"].format(header_bytes_col=header_col, req_bytes_col=body_col)} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                body_col = "req_bytes" if "req_bytes" in actual_cols else "0"
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["req_size"].format(
+                        header_bytes_col=header_col,
+                        req_bytes_col=body_col,
+                    ),
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             elif chart_metric == "ttfb" and "ttfb" in actual_cols:
                 chart_metric_out = "ttfb"
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["ttfb_ms"]} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["ttfb_ms"],
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
             else:
                 chart_metric_out = "requests"
-                ts_q = f"""
-                    SELECT {time_bucket_select(interval)},
-                           {CANONICAL_METRICS["requests"]} AS value
-                    FROM {table_name}
-                    WHERE timestamp IS NOT NULL AND {where_clause}
-                    GROUP BY 1 ORDER BY 1
-                """
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=CANONICAL_METRICS["requests"],
+                    table_name=table_name,
+                    extra_where="",
+                    where_clause=where_clause,
+                )
 
             if not _skip_raw_time_series:
                 ts_res = runner.execute(ts_q, params).fetchall()
@@ -676,10 +843,11 @@ def get_aggregates(
                     time_series.append(pt)
         section_timings.append({"section": "time_series", "time_ms": round((time.perf_counter() - t_ts_0) * 1000, 2)})
 
-        # Map data
+        # Map data. Skipped entirely when the caller (e.g. /charts)
+        # doesn't render the world map.
         t_map_0 = time.perf_counter()
         map_data: list[dict] = []
-        if "country" in actual_cols:
+        if include_map_data and "country" in actual_cols:
             if use_rollups:
                 # Derive map_data directly from all_top_res. The batch call
                 # above passed per_field_limits={"country": 500} so the
@@ -694,12 +862,11 @@ def get_aggregates(
                 map_data = [{"country": k, "count": v} for k, v in country_counts.items()]
             else:
                 # Non-rollup path runs over the full filtered temp table.
-                map_q = f"""
-                    SELECT "country" AS country, {CANONICAL_METRICS["requests"]} AS count
-                    FROM {table_name}
-                    WHERE "country" IS NOT NULL AND {where_clause}
-                    GROUP BY 1
-                """
+                map_q = SQL.MAP_DATA_BY_COUNTRY.format(
+                    requests_metric=CANONICAL_METRICS["requests"],
+                    table_name=table_name,
+                    where_clause=where_clause,
+                )
                 map_data = [{"country": r[0], "count": r[1]} for r in runner.execute(map_q, params).fetchall()]
         section_timings.append({"section": "map_data", "time_ms": round((time.perf_counter() - t_map_0) * 1000, 2)})
 
@@ -731,132 +898,12 @@ def get_aggregates(
         # failed and `temp_table` is None, this is a no-op.
         if temp_table is not None:
             try:
-                con.execute(f"DROP TABLE IF EXISTS {temp_table}")
+                con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
                 pass
 
 
 # ── raw ───────────────────────────────────────────────────────────────────────
-
-
-def get_raw(
-    con: duckdb.DuckDBPyConnection,
-    src: dict,
-    start_time: str | None,
-    end_time: str | None,
-    filters: FiltersDict,
-    page: int,
-    limit: int,
-    sort_col: str | None,
-    sort_dir: str,
-    columns: list[str],
-) -> dict:
-    runner = QueryRunner(con, src)
-
-    table_name = _safe_table(src["name"])
-    offset = calc_offset(page, limit)
-
-    actual_cols = runner.get_schema_cols()
-    if not actual_cols:
-        return {
-            "columns": [],
-            "data": [],
-            "total_rows": 0,
-            "total_rows_total": 0,
-            "page": page,
-            "limit": limit,
-            **runner.telemetry(),
-        }
-
-    params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    order_clause = ""
-    if sort_col and sort_col in actual_cols:
-        order_clause = f'ORDER BY "{sort_col}" {sort_dir}'
-    elif "timestamp" in actual_cols:
-        order_clause = f"ORDER BY timestamp {sort_dir}"
-
-    if columns:
-        select_cols = [f'"{c}"' for c in columns if c in actual_cols]
-        if sort_col and sort_col in actual_cols and f'"{sort_col}"' not in select_cols:
-            select_cols.append(f'"{sort_col}"')
-        if "timestamp" in actual_cols and '"timestamp"' not in select_cols:
-            select_cols.append('"timestamp"')
-
-        wants_bot, wants_ngwaf_bot = _add_bot_columns(actual_cols, columns, select_cols)
-
-        select_clause = ", ".join(select_cols)
-    else:
-        wants_bot = True  # By default, calculate bot data if possible
-        wants_ngwaf_bot = True
-        select_clause = "*"
-
-    q = f"SELECT {select_clause} FROM {table_name} WHERE {where_clause} {order_clause} LIMIT {limit} OFFSET {offset}"
-
-    result = runner.execute_with_retry(q, params)
-    if result is None:
-        return {
-            "columns": columns or [],
-            "data": [],
-            "total_rows": 0,
-            "total_rows_total": 0,
-            "page": page,
-            "limit": limit,
-            **runner.telemetry(),
-        }
-    df = result.fetchdf()
-
-    if wants_bot or wants_ngwaf_bot:
-        from backend.utils.bot_sources import enrich_bot_metadata
-
-        enrich_bot_metadata(df)
-
-    total_rows = len(df)
-    total_rows_total = 0
-    earliest_log_at = None
-    latest_log_at = None
-
-    col_names = list(df.columns)
-
-    if wants_bot and "_bot_name" not in col_names and "_bot_name" in columns:
-        df["_bot_name"] = "null"
-        col_names.append("_bot_name")
-
-    if wants_ngwaf_bot and "_ngwaf_bot_name" not in col_names and "_ngwaf_bot_name" in (columns or []):
-        df["_ngwaf_bot_name"] = None
-        col_names.append("_ngwaf_bot_name")
-
-    records = json.loads(df.to_json(orient="records", date_format="iso"))
-
-    if columns:
-        filtered_records = []
-        for r in records:
-            filtered_records.append({c: r.get(c, "null") for c in columns})
-        records = filtered_records
-        col_names = columns
-
-    # Total-rows + extent come from get_source_extent which itself
-    # prefers the cached config status (populated by the sync cron) and
-    # only falls back to a live aggregate when the cache is missing.
-    # The previous inline COUNT/min/max scanned the whole Iceberg
-    # manifest on every dashboard mount — get_source_extent caches the
-    # warm path and skips the scan entirely in steady state.
-    try:
-        total_rows_total, earliest_log_at, latest_log_at = get_source_extent(runner, src, table_name)
-    except Exception:
-        pass
-
-    return {
-        "columns": col_names,
-        "data": records,
-        "total_rows": total_rows,
-        "total_rows_total": total_rows_total,
-        "page": page,
-        "limit": limit,
-        "earliest_log_at": earliest_log_at,
-        "latest_log_at": latest_log_at,
-        **runner.telemetry(),
-    }
 
 
 def get_raw_df(
@@ -987,14 +1034,12 @@ def get_field_values(
             ua_filter = f"AND regexp_matches(ua, '{pattern_sql}')"
 
         # We query unique UAs to keep local bot-matching overhead manageable
-        q = f"""
-            SELECT ua, {CANONICAL_METRICS["requests"]} AS cnt
-            FROM {table_name}
-            WHERE {where_clause} AND ua IS NOT NULL {ua_filter}
-            GROUP BY ua
-            ORDER BY cnt DESC
-            LIMIT 5000
-        """
+        q = SQL.FIELD_VALUES_BOT_UA.format(
+            requests_metric=CANONICAL_METRICS["requests"],
+            table_name=table_name,
+            where_clause=where_clause,
+            ua_filter=ua_filter,
+        )
         rows = runner.execute(q, params).fetchall()
 
         match_ua = build_matcher()
@@ -1040,16 +1085,14 @@ def get_field_values(
         if search:
             search_cond = "AND trim(signal) ILIKE ?"
             search_params.append(f"%{search}%")
-        q = f"""
-            SELECT trim(signal) AS value, {CANONICAL_METRICS["requests"]} AS count
-            FROM (
-                SELECT unnest(string_split("{backing_col}", ',')) AS signal
-                FROM {table_name}
-                WHERE {where_clause} AND "{backing_col}" IS NOT NULL AND "{backing_col}" != ''
-            )
-            WHERE trim(signal) != '' {search_cond}
-            GROUP BY 1 ORDER BY 2 DESC LIMIT {limit}
-        """
+        q = SQL.FIELD_VALUES_VIRTUAL_SIGNALS.format(
+            requests_metric=CANONICAL_METRICS["requests"],
+            backing_col=backing_col,
+            table_name=table_name,
+            where_clause=where_clause,
+            search_cond=search_cond,
+            limit=limit,
+        )
     else:
         search_cond = ""
         if search:
@@ -1072,7 +1115,7 @@ def get_field_values(
                 # ASN-name search: pre-fetch matching ASN ints from per-service
                 # SQLite metadata, then inline them as a parameterised IN list.
                 # Avoids ATTACH overhead / SQLite-extension dependency in DuckDB.
-                from backend.core import metadata_db
+                from backend.core import metadata as metadata_db
 
                 try:
                     matching_asns = metadata_db.asn_ints_for_search(src["name"], f"%{search}%")
@@ -1093,12 +1136,14 @@ def get_field_values(
                 search_cond = f'AND CAST("{clean_field}" AS VARCHAR) ILIKE ?'
                 search_params.append(f"%{search}%")
 
-        q = f"""
-            SELECT "{clean_field}" AS value, {CANONICAL_METRICS["requests"]} AS count
-            FROM {table_name}
-            WHERE {where_clause} {search_cond}
-            GROUP BY 1 ORDER BY 2 DESC LIMIT {limit}
-        """
+        q = SQL.FIELD_VALUES_NATIVE_COLUMN.format(
+            clean_field=clean_field,
+            requests_metric=CANONICAL_METRICS["requests"],
+            table_name=table_name,
+            where_clause=where_clause,
+            search_cond=search_cond,
+            limit=limit,
+        )
 
     result = runner.execute_with_retry(q, search_params)
     if result is None:
@@ -1112,3 +1157,11 @@ def get_field_values(
         enrich_asn_labels(vals, src["name"])
 
     return {"values": vals, "field": field, **runner.telemetry()}
+
+
+# A-3 (CacheRegistry): register the dashboard response cache so the
+# test harness drains it via CacheRegistry.clear_all(). Same leak
+# pattern as the iceberg caches the R-1 work uncovered.
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+
+_CacheRegistry.register("dashboard._dashboard_cache", _dashboard_cache)

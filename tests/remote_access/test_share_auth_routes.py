@@ -44,7 +44,7 @@ def _seed_invite(**overrides) -> dict:
 
 
 def _activate_share():
-    tunnel.get_tunnel_manager().start_sharing(use_tunnel=False, public_endpoint="https://testserver")
+    tunnel.get_tunnel_manager().start_sharing(public_endpoint="https://testserver")
 
 
 # ── /api/share/login ───────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ def test_login_success_sets_cookie_and_returns_session(client):
     body = r.json()
     assert body["ok"] is True
     assert body["email"] == invite["email"]
-    assert body["session_id"]
+    assert "session_id" not in body  # L1: sid is the bearer token, cookie-only
     assert body["service_ids"] == ["svcA"]
     # cookie set
     assert "analyst_session_id" in r.headers.get("set-cookie", "")
@@ -152,7 +152,7 @@ def test_logout_clears_cookie_and_boots_session(client):
         json={"email": invite["email"], "passcode": "ocean-breeze-cabin-42"},
         headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
     )
-    sid = r.json()["session_id"]
+    sid = _sid_from_login(r)
     client.cookies.set("analyst_session_id", sid)
     r2 = client.post(
         "/api/share/logout",
@@ -177,7 +177,7 @@ def test_acknowledge_marks_tos(client):
         headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
     )
     assert r.json()["tos_pending"] is True
-    sid = r.json()["session_id"]
+    sid = _sid_from_login(r)
     client.cookies.set("analyst_session_id", sid)
     r2 = client.post(
         "/api/share/acknowledge",
@@ -215,7 +215,7 @@ def test_acknowledge_rejects_mismatched_tos_version(client):
         json={"email": invite["email"], "passcode": "ocean-breeze-cabin-42"},
         headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
     )
-    sid = r.json()["session_id"]
+    sid = _sid_from_login(r)
     client.cookies.set("analyst_session_id", sid)
     r2 = client.post(
         "/api/share/acknowledge",
@@ -248,7 +248,7 @@ def test_get_tos_returns_current_version_with_pending_cookie(client):
     assert r.json()["tos_pending"] is True
     # Simulate the real cookie state after login: only the pending cookie is set.
     client.cookies.clear()
-    client.cookies.set("analyst_pending_session_id", r.json()["session_id"])
+    client.cookies.set("analyst_pending_session_id", _sid_from_login(r))
 
     r2 = client.get(
         "/api/share/tos",
@@ -290,14 +290,14 @@ def test_heartbeat_valid_session_returns_ok(client):
         json={"email": invite["email"], "passcode": "ocean-breeze-cabin-42"},
         headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
     )
-    sid = r.json()["session_id"]
+    sid = _sid_from_login(r)
     client.cookies.set("analyst_session_id", sid)
     r2 = client.get(
         "/api/share/heartbeat",
         headers={"X-Remote-Analyst": "1", "Host": "testserver"},
     )
     assert r2.status_code == 200
-    assert r2.json()["session_id"] == sid
+    assert r2.json()["ok"] is True  # L1: heartbeat no longer echoes session_id
 
 
 def test_heartbeat_missing_session_returns_401(client):
@@ -309,6 +309,54 @@ def test_heartbeat_missing_session_returns_401(client):
     assert r.status_code == 401
 
 
+def _login_and_get_session(client):
+    invite = _seed_invite()
+    r = client.post(
+        "/api/share/login",
+        json={"email": invite["email"], "passcode": "ocean-breeze-cabin-42"},
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    sid = _sid_from_login(r)
+    client.cookies.set("analyst_session_id", sid)
+    return tunnel.get_tunnel_manager(), sid
+
+
+def test_heartbeat_active_user_resets_idle_clock(client, monkeypatch):
+    """The heartbeat is the activity channel for a quiet tab: when it reports
+    genuine recent interaction (X-User-Active: 1) it bumps last_active_time so
+    an active user on a dashboard with no data traffic isn't idle-logged-out."""
+    _activate_share()
+    mgr, _sid = _login_and_get_session(client)
+    calls: list[dict] = []
+    real = mgr.touch_session
+    monkeypatch.setattr(mgr, "touch_session", lambda s, **kw: (calls.append(kw), real(s, **kw))[1])
+    r = client.get(
+        "/api/share/heartbeat",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "X-User-Active": "1"},
+    )
+    assert r.status_code == 200
+    assert calls, "active heartbeat (X-User-Active: 1) must touch the session"
+
+
+def test_heartbeat_idle_user_does_not_reset_idle_clock(client, monkeypatch):
+    """The complement: an idle heartbeat (X-User-Active: 0, or header absent)
+    must NOT touch the session — otherwise a backgrounded/abandoned tab's
+    heartbeats would keep it alive forever (the original bug)."""
+    _activate_share()
+    mgr, _sid = _login_and_get_session(client)
+    calls: list[dict] = []
+    real = mgr.touch_session
+    monkeypatch.setattr(mgr, "touch_session", lambda s, **kw: (calls.append(kw), real(s, **kw))[1])
+    for headers in (
+        {"X-Remote-Analyst": "1", "Host": "testserver", "X-User-Active": "0"},
+        {"X-Remote-Analyst": "1", "Host": "testserver"},  # absent
+    ):
+        calls.clear()
+        r = client.get("/api/share/heartbeat", headers=headers)
+        assert r.status_code == 200
+        assert not calls, f"idle heartbeat must NOT touch the session (headers={headers})"
+
+
 # ── /api/share/claim/{token} ───────────────────────────────────────────────
 
 
@@ -316,31 +364,86 @@ def test_claim_token_one_shot_reveal(client):
     invite = _seed_invite()
     token = share_db.create_claim_token(invite["id"], ttl_hours=1)
     # No share required — claim happens before login.
-    r = client.get(f"/api/share/claim/{token}")
+    r = client.post(f"/api/share/claim/{token}")
     assert r.status_code == 200
     body = r.json()
     assert body["email"] == invite["email"]
     # second view: token is consumed
-    r2 = client.get(f"/api/share/claim/{token}")
+    r2 = client.post(f"/api/share/claim/{token}")
     assert r2.status_code == 404
     assert r2.json()["detail"]["error"] == "invalid_or_used"
 
 
 def test_claim_invalid_token_returns_404(client):
-    r = client.get("/api/share/claim/not-a-real-token")
+    r = client.post("/api/share/claim/not-a-real-token")
     assert r.status_code == 404
 
 
 # ── Terms of Service Cookie Isolation and Upgrade ──────────────────────────
 
 
+def _parse_set_cookies(response) -> dict[str, dict[str, str]]:
+    """Parse a response's Set-Cookie headers into ``{name: {key: value, ...}}``.
+
+    Uses httpx's ``headers.get_list("set-cookie")`` so the ``, `` inside
+    ``expires=Tue, 17 Jun ...`` doesn't get mis-split (the prior single-string
+    splitter false-flagged a date comma as a cookie boundary). Returns the most
+    recent value per name; ``"_value"`` carries the raw cookie value.
+    """
+    out: dict[str, dict[str, str]] = {}
+    headers = (
+        response.headers.get_list("set-cookie")
+        if hasattr(response.headers, "get_list")
+        else ([response.headers.get("set-cookie", "")] if response.headers.get("set-cookie") else [])
+    )
+    for raw in headers:
+        parts = [p.strip() for p in raw.split(";") if p.strip()]
+        if not parts:
+            continue
+        nv = parts[0]
+        if "=" not in nv:
+            continue
+        name, value = nv.split("=", 1)
+        attrs = {"_value": value}
+        for attr in parts[1:]:
+            if "=" in attr:
+                k, v = attr.split("=", 1)
+                attrs[k.strip().lower()] = v.strip()
+            else:
+                attrs[attr.strip().lower()] = ""
+        out[name.strip()] = attrs
+    return out
+
+
+def _sid_from_login(response) -> str:
+    """Return the live session id from a login/acknowledge response's
+    Set-Cookie headers.
+
+    L1: the session id is no longer mirrored into the JSON body — it's the
+    bearer token and lives ONLY in the httponly cookie (``analyst_pending_
+    session_id`` before TOS, ``analyst_session_id`` after). Skips deletion
+    cookies (Max-Age=0) so it returns the freshly-issued value.
+    """
+    cookies = _parse_set_cookies(response)
+    for name in ("analyst_pending_session_id", "analyst_session_id"):
+        c = cookies.get(name)
+        if c and c.get("_value") and c.get("max-age") != "0":
+            return c["_value"]
+    return ""
+
+
 def test_tos_pending_flow_isolation_and_upgrade(client):
     """Verify the entire TOS pending security lifecycle:
-    1. Login with pending TOS sets analyst_pending_session_id.
+    1. Login with pending TOS sets analyst_pending_session_id ONLY — the full
+       cookie must NOT be emitted (or, if a prior session was set, it must be
+       explicitly deleted via Max-Age=0).
     2. Standard protected endpoints (e.g. /api/sources) return 401 unauthenticated.
     3. /api/share/heartbeat is accessible with analyst_pending_session_id.
-    4. /api/share/acknowledge works with analyst_pending_session_id and upgrades the cookie.
-    5. After upgrade, standard protected endpoints are accessible.
+    4. /api/share/acknowledge upgrades the cookie AND rotates the session id
+       (the post-acknowledge cookie value must differ from the pre-acknowledge
+       value — defense against session fixation across the TOS boundary).
+    5. After upgrade, standard protected endpoints are accessible with the
+       NEW session id.
     """
     _activate_share()
     tos = share_db.get_latest_tos()
@@ -355,12 +458,21 @@ def test_tos_pending_flow_isolation_and_upgrade(client):
     )
     assert r_login.status_code == 200
     assert r_login.json()["tos_pending"] is True
-    sid = r_login.json()["session_id"]
+    sid = _sid_from_login(r_login)
 
-    # Inspect set-cookie header for pending cookie and absence of full cookie
-    cookies_header = r_login.headers.get("set-cookie", "")
-    assert "analyst_pending_session_id=" in cookies_header
-    assert "analyst_session_id=" not in cookies_header or "Max-Age=0" in cookies_header or "expires=" in cookies_header
+    # Per-cookie strict parse — the prior assertion used a permissive OR-chain
+    # that matched the pending-cookie deletion's Max-Age=0 even when the full
+    # cookie was simultaneously set with a 24h Max-Age (the original audit bug).
+    login_cookies = _parse_set_cookies(r_login)
+    assert "analyst_pending_session_id" in login_cookies, "pending cookie must be set"
+    assert login_cookies["analyst_pending_session_id"]["_value"] == sid
+    assert login_cookies["analyst_pending_session_id"].get("max-age") == "86400"
+    # If analyst_session_id appears at all on the login response with tos_pending,
+    # it MUST be a deletion (Max-Age=0) — never a live 24h cookie.
+    if "analyst_session_id" in login_cookies:
+        assert login_cookies["analyst_session_id"].get("max-age") == "0", (
+            "pending login must NOT emit a live analyst_session_id cookie"
+        )
 
     # Let's set the pending cookie on the client and clear any other
     client.cookies.clear()
@@ -382,7 +494,7 @@ def test_tos_pending_flow_isolation_and_upgrade(client):
         headers={"X-Remote-Analyst": "1", "Host": "testserver"},
     )
     assert r_hb.status_code == 200
-    assert r_hb.json()["session_id"] == sid
+    assert r_hb.json()["ok"] is True  # L1: heartbeat no longer echoes session_id
 
     # 4. Acknowledge TOS using analyst_pending_session_id
     r_ack = client.post(
@@ -392,14 +504,23 @@ def test_tos_pending_flow_isolation_and_upgrade(client):
     )
     assert r_ack.status_code == 200
 
-    # Acknowledge response must set the full cookie and delete the pending cookie
-    ack_cookies = r_ack.headers.get("set-cookie", "")
-    assert "analyst_session_id=" in ack_cookies
-    assert "analyst_pending_session_id=" in ack_cookies  # Contains both because it deletes pending (Max-Age=0)
+    # Acknowledge must (a) set the full cookie, (b) delete the pending cookie,
+    # AND (c) ROTATE the session id — defense against fixation across the TOS
+    # boundary.
+    ack_cookies = _parse_set_cookies(r_ack)
+    assert "analyst_session_id" in ack_cookies
+    full_attrs = ack_cookies["analyst_session_id"]
+    assert full_attrs.get("max-age") == "86400"
+    new_sid = full_attrs["_value"]
+    assert new_sid and new_sid != sid, "session id MUST rotate at TOS acceptance"
+    # Pending cookie must be explicitly deleted.
+    assert "analyst_pending_session_id" in ack_cookies
+    assert ack_cookies["analyst_pending_session_id"].get("max-age") == "0"
 
-    # Apply the upgraded cookie to the client and remove the pending one
+    # Apply the upgraded (rotated) cookie. Using the OLD sid here would 401 —
+    # that's the whole point of rotation.
     client.cookies.clear()
-    client.cookies.set("analyst_session_id", sid)
+    client.cookies.set("analyst_session_id", new_sid)
 
     # 5. After upgrade, standard endpoints should let us through (returns 404 instead of 401 because /api/sources is not in our test-only app router)
     r_sources_after = client.get(
@@ -408,6 +529,17 @@ def test_tos_pending_flow_isolation_and_upgrade(client):
         headers={"X-Remote-Analyst": "1", "Host": "testserver"},
     )
     assert r_sources_after.status_code == 404  # Passes middleware authentication successfully!
+
+    # 6. The OLD session id must no longer be valid against the heartbeat
+    # endpoint either — both stores (in-memory + share_db) had the row deleted
+    # in rotate_session_id().
+    client.cookies.clear()
+    client.cookies.set("analyst_session_id", sid)
+    r_hb_old = client.get(
+        "/api/share/heartbeat",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r_hb_old.status_code == 401, "pre-rotation session id must not be replayable"
 
 
 def test_on_demand_session_rehydration(client):
@@ -428,7 +560,7 @@ def test_on_demand_session_rehydration(client):
         headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
     )
     assert r_login.status_code == 200
-    sid = r_login.json()["session_id"]
+    sid = _sid_from_login(r_login)
 
     # 2. Simulate worker boundary by clearing the session from TunnelManager memory
     mgr = get_tunnel_manager()
@@ -444,9 +576,41 @@ def test_on_demand_session_rehydration(client):
         headers={"X-Remote-Analyst": "1", "Host": "testserver"},
     )
     assert r_hb.status_code == 200
-    assert r_hb.json()["session_id"] == sid
+    assert r_hb.json()["ok"] is True  # L1: heartbeat no longer echoes session_id
 
     # Confirm it was restored to memory
     with mgr._lock:
         assert sid in mgr._sessions
 
+
+# ── L2 / L3: login-failure counter reset + audit-email sanitisation ──────────
+
+
+def test_login_success_clears_login_failures(client, monkeypatch):
+    """L2: a successful login resets the per-IP failure counter
+    (clear_login_failures previously had no caller → lockout-after-success)."""
+    _activate_share()
+    _seed_invite(email="l2@example.com")
+    mgr = tunnel.get_tunnel_manager()
+    cleared: list[str] = []
+    monkeypatch.setattr(mgr, "clear_login_failures", lambda ip: cleared.append(ip))
+    r = client.post(
+        "/api/share/login",
+        json={"email": "l2@example.com", "passcode": "ocean-breeze-cabin-42"},
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    assert r.status_code == 200, r.text
+    assert cleared, "clear_login_failures should fire on a successful login"
+
+
+def test_safe_audit_email_sanitizes_and_bounds():
+    """L3: the unauth-reachable failure paths audit-log payload.email; strip
+    control chars (log forging) + cap the length before it lands in the log."""
+    from backend.routers.share_auth import _safe_audit_email
+
+    assert _safe_audit_email("a@b.com") == "a@b.com"
+    assert _safe_audit_email(None) == "-"
+    assert _safe_audit_email("") == "-"
+    out = _safe_audit_email("a@b.com\nLOGIN_SUCCESS forged-line")
+    assert "\n" not in out and "\r" not in out
+    assert len(_safe_audit_email("x" * 9999)) <= 254

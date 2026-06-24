@@ -19,10 +19,15 @@ const badgeVariants = cva(
         ghost:
           "hover:bg-muted hover:text-muted-foreground dark:hover:bg-muted/50",
         link: "text-primary underline-offset-4 hover:underline",
+        // text-*-700/800 (not -600/-700) so the tinted-background pills clear
+        // WCAG 2.1 AA (4.5:1) in light mode: emerald-600 on emerald-500/10 was
+        // 3.43:1 and amber-700 on amber-500/15 was 4.48:1 (both failing the
+        // a11y e2e). emerald-700 = 4.99:1, amber-800 = 6.32:1. Dark variants
+        // (-400 on a dark tint) already pass and are unchanged.
         success:
-          "bg-emerald-500/10 text-emerald-600 border-emerald-500/20 dark:text-emerald-400 dark:border-emerald-500/30",
+          "bg-emerald-500/10 text-emerald-700 border-emerald-500/20 dark:text-emerald-400 dark:border-emerald-500/30",
         warning:
-          "bg-amber-500/15 text-amber-700 border-amber-500/20 dark:text-amber-400 dark:border-amber-500/30",
+          "bg-amber-500/15 text-amber-800 border-amber-500/20 dark:text-amber-400 dark:border-amber-500/30",
       },
     },
     defaultVariants: {

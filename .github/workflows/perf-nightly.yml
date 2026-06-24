@@ -1,0 +1,69 @@
+name: Perf nightly (1M rows)
+
+# Catches superlinear regressions the 100K PR-smoke gate can't see.
+# The smoke gate (in ci.yml) is constant-factor-dominated at 100K, so a
+# refactor that introduces an extra n-ary join or an accidental O(N²)
+# can clear it while spiking nightly_1m by 2-3×. Runs on a daily cron
+# (~06:30 UTC, just after the PR-merge zone) plus on-demand via
+# workflow_dispatch.
+#
+# Wired against the same emit_perf_latest.py + perf_gate.sh as ci.yml
+# — only PERF_NUM_ROWS differs. The scale_key embedded in latest.json
+# tells perf_gate.sh which section of baseline.json's scenarios_by_scale
+# to compare against, so a regression at 1M doesn't false-positive
+# against the 100K thresholds.
+
+on:
+  schedule:
+    # Daily at 06:30 UTC. Off-peak for the GH Actions runner pool and
+    # well after the bulk of PR traffic has merged for the day.
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: "Synthetic dataset row count (default 1,000,000)"
+        required: false
+        default: "1000000"
+
+jobs:
+  perf-nightly:
+    name: Perf gate (1M rows)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python (uv)
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install Python deps
+        run: uv sync
+
+      - name: Emit perf samples (nightly scale)
+        env:
+          # workflow_dispatch override > schedule default of 1_000_000.
+          PERF_NUM_ROWS: ${{ github.event.inputs.rows || '1000000' }}
+        # In-DuckDB synthetic generator does 1M rows in <1s; 5 cold +
+        # 7 warm query runs at 1M land around 60s total wall time.
+        run: uv run python scripts/emit_perf_latest.py
+
+      - name: Perf gate (nightly_1m baseline)
+        # Compares the just-emitted latest.json against the
+        # scenarios_by_scale.nightly_1m section of baseline.json.
+        # Mismatch (e.g. PERF_NUM_ROWS bumped past the 1.5M boundary
+        # without adding nightly_5m baselines) fails fast with the
+        # actual scale_key emitted.
+        run: bash scripts/perf_gate.sh
+
+      - name: Upload latest.json artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: perf-nightly-latest-${{ github.run_id }}
+          path: tests/perf/latest.json
+          # 14 days is enough headroom to debug a regression flagged
+          # on a Friday without paging anyone over the weekend.
+          retention-days: 14

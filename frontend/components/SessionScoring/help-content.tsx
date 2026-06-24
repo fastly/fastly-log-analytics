@@ -189,6 +189,97 @@ export const ScoreDistHelp = () => (
   </div>
 )
 
+export const ScorerLatencyHelp = () => (
+  <div className="space-y-4 text-sm text-muted-foreground leading-relaxed">
+    <p>
+      Hourly latency of the Compute scorer sub-fetch. Read it alongside the
+      Scorer&nbsp;errors chart — fail-opens are a latency symptom.
+    </p>
+    <ul className="space-y-3 list-none pl-0">
+      <li className="flex gap-3">
+        <LineChart className="h-5 w-5 shrink-0 text-primary mt-0.5" />
+        <span>
+          <strong>Round-trip (solid):</strong> edge-observed p50/p95/p99 latency
+          (<code>edge_score_rtt_us</code>) — network + Compute cold-start + Wasm exec.
+          This is the number compared against the backend timeout (~100&nbsp;ms).
+        </span>
+      </li>
+      <li className="flex gap-3">
+        <Activity className="h-5 w-5 shrink-0 text-emerald-500 mt-0.5" />
+        <span>
+          <strong>Exec (dashed):</strong> the scorer&apos;s own Wasm time
+          (<code>edge_score_exec_us</code>) is ~µs; if the round-trip lines sit far
+          above the exec lines, the cost is network/cold-start, not compute.
+        </span>
+      </li>
+    </ul>
+  </div>
+)
+
+export const ScorerErrorsHelp = () => (
+  <div className="space-y-4 text-sm text-muted-foreground leading-relaxed">
+    <p>
+      Hourly count of scorer fail-opens. Read it alongside the Scorer&nbsp;latency
+      chart — these rise as latency does.
+    </p>
+    <ul className="space-y-3 list-none pl-0">
+      <li className="flex gap-3">
+        <AlertTriangle className="h-5 w-5 shrink-0 text-destructive mt-0.5" />
+        <span>
+          <strong>Fail-opens:</strong> rows that timed out or failed auth and were
+          let through unscored (the system fails open rather than blocking on a
+          scorer error).
+        </span>
+      </li>
+      <li className="flex gap-3">
+        <LineChart className="h-5 w-5 shrink-0 text-primary mt-0.5" />
+        <span>
+          <strong>Correlate with latency:</strong> when scorer p95 climbs toward the
+          ~100&nbsp;ms timeout budget, these bars rise with it — that&apos;s the
+          signal to raise the timeout or investigate cold starts.
+        </span>
+      </li>
+    </ul>
+  </div>
+)
+
+export const ScorerFailOpenHelp = () => (
+  <div className="space-y-4 text-sm text-muted-foreground leading-relaxed">
+    <p>
+      When the scorer can&apos;t produce a verdict it fails <strong>open</strong> — the request
+      flows through unscored rather than being blocked. This card groups those fail-opens by
+      the exact reason so you can tell the failure modes apart (the Scorer&nbsp;errors chart
+      shows <em>when</em>; this shows <em>what kind</em>).
+    </p>
+    <ul className="space-y-3 list-none pl-0">
+      <li className="flex gap-3">
+        <AlertTriangle className="h-5 w-5 shrink-0 text-destructive mt-0.5" />
+        <span>
+          <strong>compute-unavailable-503:</strong> the scorer sub-fetch timed out or the
+          service was unreachable — usually cold-start latency past the timeout budget. Raise the
+          timeout or investigate cold starts.
+        </span>
+      </li>
+      <li className="flex gap-3">
+        <XCircle className="h-5 w-5 shrink-0 text-destructive mt-0.5" />
+        <span>
+          <strong>compute-unavailable-500 / -401:</strong> a 500 is a Wasm trap inside the
+          scorer; a 401 means the VCL-stamped <code>X-Edge-Scorer-Auth</code> secret drifted from
+          the scoring_keys store — redeploy to re-sync it.
+        </span>
+      </li>
+      <li className="flex gap-3">
+        <ShieldAlert className="h-5 w-5 shrink-0 text-amber-500 mt-0.5" />
+        <span>
+          <strong>internal-error-keys:</strong> the scorer started but couldn&apos;t load the
+          AES keys / KV store — a provisioning issue on the scoring service, not a transient
+          timeout.
+        </span>
+      </li>
+    </ul>
+  </div>
+)
+
 export const ComplianceHelp = () => (
   <div className="space-y-4 text-sm text-muted-foreground leading-relaxed">
     <p>

@@ -8,8 +8,9 @@ import time
 
 logger = logging.getLogger(__name__)
 
-from backend.core import log_fields as lf
+from backend.core import field_registry as lf
 from backend.core.fastly.client import fastly
+from backend.core.fastly.mock_fixtures import is_mock_mode
 from backend.core.fastly.utils import (
     region_endpoint,
 )
@@ -26,7 +27,7 @@ from backend.provision.fos_setup import (
     ensure_fos_access_key,
     ensure_fos_bucket,
 )
-from backend.provision.utils import ok, step
+from backend.provision.utils import ok, step, warn
 
 
 def _sync_crontab():
@@ -37,6 +38,25 @@ def _sync_crontab():
         get_scheduler().reload()
     except Exception:
         pass
+
+
+def _reject_unsafe_fos_component(field: str, value: str, *, allow_slash: bool) -> None:
+    """Reject path-traversal tokens in an FOS path component before persisting.
+
+    L8: ``fos_bucket`` composes into the local cache path (``cache/<bucket>``),
+    so a value like ``../../tmp`` would escape the cache root when DuckDB / the
+    teardown path later joins it. The ``/execute`` + teardown paths already
+    reject these tokens; the persist path (ingest / register_existing →
+    write_service_config) did not. Buckets never contain ``/``; ``fos_prefix``
+    is an S3 key prefix that legitimately may, so ``/`` is allowed there while
+    ``..`` / backslash / NUL are rejected everywhere.
+    """
+    if not value:
+        return
+    bad = ("\\", "..", "\x00") if allow_slash else ("/", "\\", "..", "\x00")
+    for tok in bad:
+        if tok in value:
+            raise ValueError(f"{field} contains an illegal path token {tok!r}")
 
 
 def write_service_config(state: dict):
@@ -55,6 +75,8 @@ def write_service_config(state: dict):
     from backend import config as svcconfig
 
     service_id = state.get("logging_service_id") or state.get("service_id")
+    if not service_id:
+        raise ValueError("ingest state missing logging_service_id / service_id")
     db_path = svcconfig.duckdb_path(service_id)
 
     # Snapshot the existing on-disk cfg so we can preserve code-managed
@@ -65,6 +87,11 @@ def write_service_config(state: dict):
     fos_key = state.get("fos_access_key_id") or state.get("fos_access_key", "")
     fos_secret = state.get("fos_secret_access_key") or state.get("fos_secret_key", "")
     bucket = state.get("fos_bucket") or state.get("fos_bucket_name", "")
+    fos_prefix = state.get("fos_prefix", "")
+    # L8: validate path-shape before persisting (bucket composes into the
+    # local cache root; prefix checked defensively for traversal).
+    _reject_unsafe_fos_component("fos_bucket", bucket, allow_slash=False)
+    _reject_unsafe_fos_component("fos_prefix", fos_prefix, allow_slash=True)
     region = state.get("fos_region", "us-east-1")
     cdn_url = state.get("cdn_url", "")
 
@@ -82,15 +109,11 @@ def write_service_config(state: dict):
     # carries scoring in the body).
     scoring_block = state.get("scoring") or existing_cfg.get("scoring") or {}
     if scoring_block.get("enabled"):
-        from backend.provision.session_scoring_orchestrator import (
-            _SCORING_CUSTOM_FIELDS,
-            _SCORING_FIELD_NAMES,
-        )
+        from backend.provision.session_scoring_orchestrator import merge_scoring_custom_fields
 
-        current_custom = list(incoming_lf.get("custom_fields") or [])
-        current_custom = [cf for cf in current_custom if cf.get("name") not in _SCORING_FIELD_NAMES]
-        current_custom.extend(dict(cf) for cf in _SCORING_CUSTOM_FIELDS)
-        incoming_lf["custom_fields"] = current_custom
+        incoming_lf["custom_fields"] = merge_scoring_custom_fields(incoming_lf.get("custom_fields"))
+
+    import secrets
 
     cfg = {
         "service_id": service_id,
@@ -101,11 +124,12 @@ def write_service_config(state: dict):
         "fos_access_key_id": fos_key,
         "fos_secret_access_key": fos_secret,
         "fos_bucket": bucket,
-        "fos_prefix": state.get("fos_prefix", ""),
+        "fos_prefix": fos_prefix,
         "fos_region": region,
         "cdn_url": cdn_url,
         "cdn_secret": state.get("cdn_secret", ""),
         "cdn_service_id": state.get("cdn_service_id", ""),
+        "cluster_secret": state.get("cluster_secret") or existing_cfg.get("cluster_secret") or secrets.token_hex(32),
         "fastly_api_key": state.get("fastly_api_key") or state.get("admin_token", ""),
         "log_retention_days": int(state.get("log_retention_days", 30)),
         "duckdb_path": db_path,
@@ -116,7 +140,7 @@ def write_service_config(state: dict):
     # carry — primarily ``scoring`` (set by enable_scoring) and
     # ``ngwaf_workspace_id`` (set by the NGWAF-config PATCH). Anything else
     # the existing cfg has that the wizard body lacks survives the rewrite.
-    for preserved_key in ("scoring", "ngwaf_workspace_id"):
+    for preserved_key in ("scoring", "ngwaf_workspace_id", "cluster_secret"):
         if preserved_key not in state and preserved_key in existing_cfg:
             cfg[preserved_key] = existing_cfg[preserved_key]
         elif preserved_key in state:
@@ -312,6 +336,28 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         state["fos_key_id"] = key["id"]
         state["fos_key_description"] = key_desc
         save_state(state)
+
+        # Persist a readable service config NOW — the moment permanent FOS
+        # creds + bucket exist — BEFORE the fallible CDN/logging steps and
+        # the finalize write at step 8. The config write used to run ONLY as
+        # the last step, and it sits AFTER a `yield` in this SSE-streamed
+        # generator: if the wizard's stream was interrupted (client
+        # disconnect, or the backend torn down mid-provision) any time after
+        # the bucket was created, the generator was closed at that yield and
+        # the config never landed — orphaning the FOS bucket with no config
+        # the backend could read (telemetry-proxy "no config for service_id"
+        # → FOS 403 → empty/"internally inconsistent" dashboard). Writing it
+        # here makes the service readable as soon as FOS is set up; the
+        # finalize write below remains the authoritative, rollback-gated
+        # write that fills in cdn_service_id + the activated logging version.
+        # Best-effort: a failure here must NOT abort the flow — the finalize
+        # write is the real gate (and on a real error it triggers teardown).
+        try:
+            write_service_config(state)
+            ok("Service config persisted early (FOS ready) — survives stream interruption")
+        except Exception as early_cfg_exc:  # noqa: BLE001 — best-effort; finalize write is authoritative
+            warn(f"Early service-config write failed (non-fatal, retried at finalize): {early_cfg_exc}")
+
         yield {"type": "progress", "current": 4, "total": total}
 
         yield {"type": "status", "message": "🧹 Step 5/8: Cleaning up temporary admin key..."}
@@ -330,8 +376,23 @@ def provision(cfg: dict, _resume_from_state: bool = False):
             "message": "🌐 Step 6/8: Creating Fastly CDN service to front Fastly Object Storage...",
         }
         step(6, total, "Creating Fastly CDN service to front Fastly Object Storage")
+
+        def _record_cdn_service_id(svc_id):
+            # Persist the CDN service id the moment it's created so a failure
+            # later inside ensure_cdn_service (e.g. VCL validation) still leaves
+            # it in state for perform_teardown to delete — no orphan service.
+            # Runs on the worker thread while this generator is parked in
+            # run_with_events; the queue + join there synchronise the write.
+            state["cdn_service_id"] = svc_id
+            save_state(state)
+
         cdn_svc = yield from run_with_events(
-            ensure_cdn_service, cfg, state["fos_access_key"], state["fos_secret_key"], token
+            ensure_cdn_service,
+            cfg,
+            state["fos_access_key"],
+            state["fos_secret_key"],
+            token,
+            on_created=_record_cdn_service_id,
         )
         state["cdn_service_id"] = cdn_svc["id"]
         save_state(state)
@@ -355,12 +416,51 @@ def provision(cfg: dict, _resume_from_state: bool = False):
             from backend.core import iceberg as db_iceberg
 
             src = db.get_source_for_service(state["logging_service_id"])
-            if src:
+            if not src:
+                # No source config resolved (config race / missing fields). The
+                # table can't be created here, but commit_buffer self-heals it on
+                # the first commit. Surface it instead of skipping silently — a
+                # swallowed failure here is exactly what shipped a fresh service
+                # with no Iceberg table and a commit cron crashing every cycle.
+                logger.warning(
+                    "[provision] %s: no source resolved after config write — "
+                    "Iceberg table will be created lazily on the first commit",
+                    state.get("logging_service_id"),
+                )
+                warn("Iceberg table not initialized yet (no source resolved) — created on first commit")
+                yield {
+                    "type": "status",
+                    "message": "⚠ Iceberg table not initialized yet (no source resolved) — "
+                    "it will be created on the first commit.",
+                }
+            elif is_mock_mode():
+                # Mock mode (e2e/contract backend): skip the FOS-backed table
+                # init. _get_catalog → catalog.load_table/create_table does a
+                # pyarrow HeadObject on metadata.json that, with no real FOS,
+                # is routed through the telemetry proxy to the unreachable
+                # endpoint and returns a synthetic 502 — slow + noisy + the
+                # source of the provision-teardown e2e's intermittent 502s.
+                # Real mode is unchanged (production never sets FASTLY_MOCK_MODE);
+                # the table is created lazily on first commit regardless.
+                ok("Iceberg table ready")
+                yield {"type": "status", "message": "✓ Iceberg table init skipped (mock mode)."}
+            else:
                 yield {"type": "status", "message": "🧊 Initializing Iceberg table in Fastly Object Storage..."}
                 try:
                     db_iceberg.init_iceberg_table(src)
-                except Exception:
-                    pass
+                    ok("Iceberg table ready")
+                    yield {"type": "status", "message": "✓ Iceberg table ready."}
+                except Exception as ice_exc:
+                    # Best-effort: do NOT abort the wizard (commit_buffer creates
+                    # the table on the first commit). But never swallow it
+                    # silently — log with traceback + surface in the wizard so a
+                    # broken fresh install is visible at provision time.
+                    logger.exception("[provision] Iceberg table init failed (deferred to first commit)")
+                    warn(f"Iceberg table init deferred to first commit: {ice_exc}")
+                    yield {
+                        "type": "status",
+                        "message": f"⚠ Iceberg table init deferred to first commit: {ice_exc}",
+                    }
                 c = db.get_connection(source=src)
                 initial_lf = state.get("log_fields", {})
                 if initial_lf:
@@ -372,12 +472,14 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                         "fields_removed": [],
                         "format_hash": lf.format_hash(initial_lf),
                     }
-                    from backend.core import metadata_db
+                    from backend.core import metadata as metadata_db
 
                     metadata_db.record_audit(src["name"], "log_format_change", details, actor="provisioning")
                 c.close()
         except Exception:
-            pass
+            # Non-fatal (the service is already provisioned); but log it so a
+            # post-provision audit/connection failure isn't invisible.
+            logger.exception("[provision] post-provision Iceberg/audit step failed (non-fatal)")
 
         yield {"type": "progress", "current": 8, "total": total}
         yield {"type": "done", "message": "🎉 Provisioning complete!"}
@@ -502,7 +604,7 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
 
         if service_id:
             try:
-                from backend.core import metadata_db
+                from backend.core import metadata as metadata_db
 
                 metadata_db.teardown(service_id)
                 ok(f"Cleaned up metadata for {service_id}")
@@ -589,8 +691,8 @@ def generate_analyst_invite(service_id: str) -> dict:
         from backend.core import iceberg as db_iceberg
 
         src = svcconfig.config_to_source(cfg)
-        catalog = db_iceberg._get_catalog(src)
-        table = catalog.load_table(db_iceberg._table_identifier(src))
+        catalog = db_iceberg._get_catalog(src)  # type: ignore[attr-defined]
+        table = catalog.load_table(db_iceberg._table_identifier(src))  # type: ignore[attr-defined]
         iceberg_metadata_location = table.metadata_location
     except Exception:
         pass
@@ -614,6 +716,8 @@ def generate_analyst_invite(service_id: str) -> dict:
 def _build_log_fields_config(args) -> dict:
     preset_name = getattr(args, "preset", None) or "standard"
     preset = lf.PRESETS.get(preset_name)
+    if preset is None:
+        raise ValueError(f"Unknown log-fields preset: {preset_name!r}")
     groups = list(preset["groups"])
     for g in getattr(args, "enable_group", None) or []:
         if g not in groups:

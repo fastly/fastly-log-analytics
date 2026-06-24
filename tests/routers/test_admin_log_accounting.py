@@ -19,7 +19,27 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.core import metadata_db
+from backend.core import metadata as metadata_db
+
+
+@pytest.fixture(autouse=True)
+def _clear_log_accounting_ttl_caches():
+    """Clear the module-level Fastly + DuckDB count caches between tests.
+
+    ``compute_log_accounting`` memoises both fetches by
+    ``(service, from_ts, to_ts, by)`` to silence repeated polls in prod.
+    Tests in this file share the same ``hours=4 by=hour`` window so the
+    second test to run would otherwise receive the FIRST test's mocked
+    payload from the TTL cache. Clear on both setUp and tearDown so the
+    leak can't bleed into unrelated test modules either.
+    """
+    from backend.routers.admin import log_accounting as _la
+
+    _la._FASTLY_COUNTS_CACHE.clear()
+    _la._DUCKDB_COUNTS_CACHE.clear()
+    yield
+    _la._FASTLY_COUNTS_CACHE.clear()
+    _la._DUCKDB_COUNTS_CACHE.clear()
 
 
 @pytest.fixture
@@ -37,11 +57,11 @@ def log_accounting_client(log_accounting_source, in_memory_duckdb):
     `logging_service_id` so the endpoint reaches the Fastly call path."""
     from fastapi.testclient import TestClient
 
-    from backend.deps import get_con, get_meta_con, get_source
+    from backend.deps import get_con, get_source
     from backend.main import app
 
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
-    app.dependency_overrides[get_meta_con] = lambda: in_memory_duckdb
+    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: log_accounting_source
     with TestClient(app) as c:
         yield c
@@ -148,6 +168,37 @@ def test_log_accounting_handles_missing_fastly_field(log_accounting_client, log_
     target_ts = f"{b0.strftime('%Y-%m-%dT%H')}:00:00Z"
     assert by_ts[target_ts]["fastly_logs"] == 0
     assert by_ts[target_ts]["our_rows"] == 500
+
+
+def test_log_accounting_zero_log_field_not_flagged_missing(log_accounting_client, log_accounting_source, caplog):
+    """A quiet hour legitimately reports ``log: 0``. The endpoint must treat
+    that as the log-count field present with value 0 — NOT as a missing field.
+
+    Regression: the old truthiness check (``if v:``) treated a zero count as
+    "field absent", logging a bogus "no log-count field" warning whose own
+    keys list visibly contained ``log`` and returning ``fastly_field_used=None``
+    for any all-zero window (exactly what a brand-new service shows)."""
+    import logging as _logging
+
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    b0 = now - timedelta(hours=1)
+    # ``log`` present but 0, plus unrelated keys — a genuinely empty hour.
+    fastly_payload = {"data": [{"start_time": int(b0.timestamp()), "log": 0, "requests": 5}]}
+    with (
+        patch("backend.config.get_fastly_api_key", return_value="fake-api-key"),
+        patch("urllib.request.urlopen", side_effect=_fake_urlopen(fastly_payload)),
+        caplog.at_level(_logging.WARNING, logger="admin.log_accounting"),
+    ):
+        resp = log_accounting_client.get("/api/admin/log-accounting?hours=2&by=hour")
+    assert resp.status_code == 200
+    body = resp.json()
+    # Field IS present (value 0) — detected, not flagged as missing.
+    assert body["fastly_field_used"] == "log"
+    by_ts = {b["ts"]: b for b in body["buckets"]}
+    target_ts = f"{b0.strftime('%Y-%m-%dT%H')}:00:00Z"
+    assert by_ts[target_ts]["fastly_logs"] == 0
+    # No bogus "no log-count field" warning for a quiet hour.
+    assert not any("no log-count field" in r.message for r in caplog.records)
 
 
 def test_log_accounting_outer_join_handles_orphan_buckets(log_accounting_client, log_accounting_source):
@@ -332,12 +383,12 @@ def test_log_accounting_handles_no_logging_service_id(in_memory_duckdb):
     than a silent 500."""
     from fastapi.testclient import TestClient
 
-    from backend.deps import get_con, get_meta_con, get_source
+    from backend.deps import get_con, get_source
     from backend.main import app
 
     src_no_log = {"name": "test_service", "service_id": "test-service-id"}
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
-    app.dependency_overrides[get_meta_con] = lambda: in_memory_duckdb
+    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: src_no_log
     try:
         with patch("backend.config.get_fastly_logging_service_id", return_value=""):

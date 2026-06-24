@@ -38,7 +38,7 @@ def test_prefill_uses_global_rates(mock_load):
 
 
 @patch("backend.config.load_usage_logging_config", return_value=_MOCK_GLOBAL_CFG)
-@patch("backend.core.metadata_db.get_usage_logs")
+@patch("backend.core.metadata.get_usage_logs")
 def test_usage_log_uses_global_rates_for_cost(mock_get_logs, mock_load):
     """Verify that aggregate cost calculations use the global rates."""
     mock_get_logs.return_value = (

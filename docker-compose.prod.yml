@@ -103,6 +103,16 @@ services:
       # Prevents silent regression to leftmost-XFF spoofing if a
       # future config refactor drops the --proxy-headers flag.
       - TRUSTED_PROXY_IPS=127.0.0.1
+      # Escalate _enforce_proxy_headers_configured from WARNING to FATAL.
+      # In prod this guard MUST be fatal — a config refactor that drops
+      # the trusted-proxy env should refuse to boot rather than silently
+      # serve requests with leftmost-XFF spoofing exploitable.
+      - REQUIRE_PROXY_HEADERS=1
+      # uvicorn's own env-equivalent of the --forwarded-allow-ips CLI flag.
+      # Defense-in-depth: if a future refactor drops the CLI flag, the
+      # startup assertion in backend/main.py still has a signal to detect
+      # the unsafe state via this companion variable.
+      - UVICORN_FORWARDED_ALLOW_IPS=127.0.0.1
       # Pass through DEBUG_RESPONSES from the host environment (typically
       # set via the .env file next to this compose file, which Compose
       # auto-loads for variable substitution). When unset it expands to
@@ -111,6 +121,95 @@ services:
       # were never set. Plain `- DEBUG_RESPONSES` (no value) would also
       # work but the explicit substitution makes the source obvious.
       - DEBUG_RESPONSES=${DEBUG_RESPONSES:-}
+      # Pre-acquire 4 pool conns per service at startup so the first
+      # /api/origin/aggregates request finds idle slots — the three
+      # extras' max_wait=0.2s deadline doesn't cover a cold conn build
+      # (~150 ms each), which silently falls back to serial on a cold
+      # pool. With this on, startup pays ~600 ms per service one time
+      # and the first composite request parallelizes cleanly.
+      - DUCKDB_POOL_WARM_AT_BOOT=true
+      # Cap concurrent pool connections per service. The prod VM is 4 cores,
+      # so the default of 8 oversubscribes (8 conns x up-to-4 DuckDB threads)
+      # AND raises peak RSS — each in-flight query holds uncounted httpfs read
+      # buffers + object-cache growth outside DUCKDB_MEMORY_LIMIT. Lowering to
+      # 4 cuts peak memory and, crucially, lets the recycle drain the pool to
+      # in_use==0 quickly so it can actually destroy+rebuild the instance and
+      # free the leaked cache (an undrainable pool => recycle returns
+      # 'incomplete' and frees nothing => OOM). See [[backend-oom-restart-loop]].
+      - DUCKDB_POOL_MAX_SIZE=4
+      # Periodic DuckDB instance recycle (backend/core/duckdb_recycle.py).
+      # DuckDB's enable_object_cache caches parquet metadata keyed by
+      # filename and never evicts deleted files; under continuous buffer +
+      # compaction file churn the cache grows ~175MB/min and OOM-kills the
+      # 12g container every ~70min. The cache can't be cleared in place
+      # (no pragma_clear_cache in 1.5.3), so when RSS crosses the threshold
+      # we briefly QUIESCE all access to the db file (hold the connection
+      # barrier + drain the pool so live connections reach zero), which
+      # destroys + rebuilds the instance and frees the cache — keeping
+      # object_cache ON for its query perf. Near-zero-downtime: in-flight
+      # requests finish and new ones QUEUE for the ~1-3s drain (the barrier
+      # cap must exceed drain+grace so opens can't leak in mid-recycle —
+      # that 1500ms-too-short cap was the 2026-06-21 OOM regression).
+      # Set INTERVAL_MIN to 0 to disable (instant revert). Interval is 5min
+      # (not 15) so the recycle fires within 5min of crossing the threshold.
+      # Threshold lowered 9000 -> 6000: at 9GB the recycle fired only ~3GB
+      # (~17min) below the 12g cap, when the process is already memory-
+      # pressured and busy, so the pool wouldn't drain inside the timeout ->
+      # the recycle returned 'incomplete' and freed nothing -> OOM at 12.5GB
+      # anyway (observed 2026-06-21, two kills at an identical ~12.5GB ceiling
+      # ~88min apart). Firing at 6GB gives ~35min / ~7 attempts of runway and,
+      # more importantly, recycles while the process is calm and the pool
+      # drains cleanly. Costs a more frequent (~15min) lazy object-cache
+      # re-warm; raise back toward 9000 if that churn shows up in p95.
+      - DUCKDB_RECYCLE_INTERVAL_MIN=5
+      - DUCKDB_RECYCLE_RSS_THRESHOLD_MB=6000
+      - DUCKDB_RECYCLE_BARRIER_CAP_MS=10000
+      # OOM STOPGAP (backend/core/memory_guard.py). The cache recycle above
+      # does NOT bound RSS — the dominant allocation isn't the object cache
+      # (recycle/quiesce/jemalloc all empirically failed). Until the leak is
+      # attributed, restart cleanly BEFORE the 12g cgroup OOM-SIGKILL: when
+      # RSS crosses 9000MB (~3GB headroom for the graceful drain) the backend
+      # SIGTERMs itself, uvicorn exits 0, and restart:unless-stopped brings up
+      # a fresh process. Converts destructive exit-137 kills (strand sync rows
+      # + raw files) into clean ~15s restarts. Rides the 5min recycle job.
+      # Set to 0 to disable. Remove once the real leak is fixed.
+      - BACKEND_GRACEFUL_RESTART_RSS_MB=9000
+      # Allocator tuning passthrough. The Dockerfile bakes the production
+      # default (jemalloc background purge + 5s decay). Override via the VM
+      # .env to layer in jemalloc HEAP PROFILING
+      # (prof:true,prof_active:true,lg_prof_sample:19) without a rebuild and
+      # without committing debug flags to this public repo — /api/debug/jeprof
+      # can only dump if prof was enabled at process start. Keep this default
+      # byte-for-byte in sync with backend/Dockerfile's MALLOC_CONF; an empty
+      # .env resolves to it, so a fresh clone carries zero profiling overhead.
+      # Remove this passthrough once the leak is attributed and fixed.
+      - MALLOC_CONF=${MALLOC_CONF:-background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000}
+      # CORS allowlist for browser-origin XHR. The analyst SPA is same-
+      # origin behind Caddy so this is defense-in-depth — without it the
+      # FastAPI default falls back to a dev allowlist (localhost:3000/3001/
+      # 13002) that has no business being live in prod. Pinning to the
+      # actual public_endpoint here means any future cross-origin caller
+      # is rejected by CORS preflight regardless of SameSite/Origin
+      # gating. Set the value in the VM-side .env file (it isn't repo-
+      # safe — fastly-log-analytics is a public repo).
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      # Shared-secret admin gate (Phase Q). When SET in the VM .env, the
+      # backend's remote_access middleware refuses admin-branch requests
+      # whose X-Admin-Token doesn't match. When UNSET / empty the
+      # middleware is a no-op so this passthrough is safe to ship with
+      # the env absent. The actual secret lives in the VM .env (it isn't
+      # repo-safe — fastly-log-analytics is a public repo).
+      - ADMIN_SHARED_SECRET=${ADMIN_SHARED_SECRET:-}
+      # Real-User-Monitoring (Web Vitals) collection. OFF by default for
+      # every install — collection is opt-in (see
+      # backend/core/web_vitals_store.py). Enable it on a SPECIFIC machine by
+      # setting WEB_VITALS_COLLECT=1 in the VM-side .env file (not repo-
+      # tracked), the same passthrough pattern CORS_ORIGINS /
+      # ADMIN_SHARED_SECRET use. Unset/empty here resolves to the code's
+      # default-off path, so a fresh clone never collects until its operator
+      # explicitly opts in. Enabled samples land in
+      # /app/data/system/web_vitals.jsonl for scripts/analyze_web_vitals.py.
+      - WEB_VITALS_COLLECT=${WEB_VITALS_COLLECT:-}
     volumes: !override
       - /mnt/app-data/configs:/app/configs
       - /mnt/app-data/data:/app/data
@@ -128,9 +227,22 @@ services:
       # HOSTNAME=0.0.0.0).
       - HOSTNAME=127.0.0.1
       - API_PROXY_URL=http://127.0.0.1:8000
+      # SSR helpers in lib/ssr/*.ts inject this on the loopback upstream
+      # fetch when the backend's admin-token gate is active (Phase Q).
+      # Same passthrough rationale as the backend block — empty = no-op
+      # on the SSR fetch.
+      - ADMIN_SHARED_SECRET=${ADMIN_SHARED_SECRET:-}
 
   caddy:
     # Custom build with the caddy-ratelimit plugin (see caddy/Dockerfile).
+    # Distinct image name (NOT the base compose file's `caddy:2-alpine`):
+    # the Dockerfile does `FROM caddy:2-alpine`, so if the build output
+    # reused that tag it would overwrite the base with our image — whose
+    # last line is `USER caddy`. The next rebuild's FROM would then resolve
+    # to our own non-root image and every privileged step (apk/addgroup/
+    # setcap) would fail ("permission denied (are you root?)"). A separate
+    # tag keeps FROM always pointing at the official root base.
+    image: caddy-ratelimit:2-alpine
     build:
       context: .
       dockerfile: caddy/Dockerfile

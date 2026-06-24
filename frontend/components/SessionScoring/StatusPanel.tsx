@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, ExternalLink, Power, PowerOff, ShieldCheck, ShieldOff } from 'lucide-react'
+import { AlertTriangle, ExternalLink, Info, Power, PowerOff, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -23,6 +23,19 @@ interface ScoringStatus {
   scoring_backend_name?: string
   matrix_version?: string
   enabled_at?: string
+  // Live active version of the scoring Compute service + when it was
+  // activated (best-effort from the Fastly API; absent if unavailable).
+  scoring_active_version?: number
+  scoring_activated_at?: string
+  // True when the scorer build the backend would deploy now differs from
+  // what's live at the edge (a redeploy is needed). drift_detail is
+  // "wasm" | "vcl" | "wasm+vcl" describing which part is stale.
+  scorer_drift?: boolean
+  drift_detail?: string
+  // False when this service was enabled before drift stamping shipped, so
+  // drift is "unknown" rather than a confident "no drift". Drives the soft
+  // "redeploy once to baseline" hint below.
+  drift_known?: boolean
 }
 
 interface ScoringEvaluation {
@@ -42,15 +55,15 @@ interface ScoringEvaluation {
 }
 
 export function StatusPanel({ serviceId }: StatusPanelProps) {
-  const { data, isLoading, isFetching, refetch } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ['scoring-status', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/status' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/status',
+        { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as ScoringStatus
+      return data as unknown as ScoringStatus
     },
     // No refetchInterval: polling 4 endpoints every 30-60s caused
     // constant .duckdb-wal churn that ate ~1.5GB of mds_stores + VS Code
@@ -67,8 +80,8 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
     queryKey: ['scoring-evaluation', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/evaluation' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/evaluation',
+        { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
       return data as ScoringEvaluation
@@ -84,20 +97,47 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
       description="Edge scorer that classifies sessions in real-time using the cookie-bound state machine and matrix-based L2 evaluation."
       isLoading={isLoading}
       isFetching={isFetching}
+      error={error as (Error & { status?: number }) | null}
       helpContent={<StatusPanelHelp />}
       helpTitle="About Session Scoring"
       headerAction={
         enabled ? (
+          <div className="flex items-center gap-2">
+          <SSEModal
+            title="Redeploy Scorer"
+            description={
+              <div className="space-y-2">
+                <p>
+                  Push the latest scorer build to the edge for{' '}
+                  <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>:
+                </p>
+                <ul className="text-sm text-muted-foreground list-disc pl-5 space-y-1">
+                  <li>Re-uploads the latest Wasm package (new Compute version) + activates</li>
+                  <li>Regenerates + activates the logging VCL (6 scoring snippets)</li>
+                  <li>No scoring gap, unlike Disable then Enable</li>
+                </ul>
+                <p className="text-xs text-muted-foreground italic">Click <strong>Start</strong> to proceed.</p>
+              </div>
+            }
+            endpoint={`/api/services/${serviceId}/scoring/enable`}
+            body={{}}
+            onClose={() => refetch()}
+            trigger={
+              <Button variant={data?.scorer_drift ? 'default' : 'outline'} size="sm">
+                <RefreshCw className="h-3.5 w-3.5 mr-1" /> Redeploy
+              </Button>
+            }
+          />
           <SSEModal
             title="Disable Session Scoring"
             description={
               <div className="space-y-2">
                 <p>This will disable session scoring on <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>:</p>
                 <ul className="text-sm text-muted-foreground list-disc pl-5 space-y-1">
-                  <li>Removes the 3 VCL snippets (recv / fetch / deliver) that route requests through the scorer</li>
+                  <li>Removes the 6 VCL snippets (recv / pass / fetch / deliver / miss / enforce) that route requests through the scorer</li>
                   <li>Removes the 6 scoring custom_fields from the log format</li>
                   <li>Clones + activates a new VCL version on the customer service</li>
-                  <li>Leaves the scorer Compute service in place — re-enable later without rebuilding</li>
+                  <li>Deletes the scorer Compute service + its ConfigStores and matrix KV Store (a future Enable re-provisions them from scratch)</li>
                 </ul>
                 <p className="text-xs text-muted-foreground italic">Click <strong>Start</strong> to proceed.</p>
               </div>
@@ -111,6 +151,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
               </Button>
             }
           />
+          </div>
         ) : (
           <SSEModal
             title="Enable Session Scoring"
@@ -130,10 +171,21 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                 <p>This will enable session scoring on <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>:</p>
                 <ul className="text-sm text-muted-foreground list-disc pl-5 space-y-1">
                   <li>Provisions the scorer Compute service if it doesn&apos;t exist, deploys the trained Wasm scorer with the latest matrix</li>
-                  <li>Adds the <code>session_scorer</code> backend, 3 VCL snippets, and 6 custom_fields to the customer service</li>
+                  <li>Adds the <code>session_scorer</code> backend, 6 VCL snippets, and 9 score fields (<code>edge_score</code>, session id, reason, L1/L2, latency, …) to the customer service</li>
                   <li>Clones + activates a new VCL version</li>
                   <li>Every request will be routed through the scorer for an L1+L2 score on the response cookie</li>
                 </ul>
+                <div className="flex items-start gap-2 rounded border border-sky-300 bg-sky-50 px-3 py-2 text-sky-900">
+                  <Info className="h-4 w-4 mt-0.5 shrink-0" />
+                  <div className="text-xs space-y-1">
+                    <div className="font-semibold">Log fields</div>
+                    <div>
+                      Scoring also needs the standard request fields for context — <strong>URL, method, user agent, and geo</strong>.
+                      Enabling scoring ensures those stay logged (added automatically if this service was set up with a minimal
+                      log-field set), so scored sessions show <em>which</em> requests were flagged, not just the score.
+                    </div>
+                  </div>
+                </div>
                 <p className="text-xs text-muted-foreground italic">Click <strong>Start</strong> to proceed.</p>
               </div>
             }
@@ -161,6 +213,27 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
 
         {enabled && (
           <>
+            {data?.scorer_drift && (
+              <div className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-900">
+                <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                <div className="text-xs">
+                  <span className="font-semibold">Redeploy needed.</span> The edge is running an older
+                  scorer build{data.drift_detail ? ` (${data.drift_detail})` : ''} than the one shipped to
+                  the backend. Click <strong>Redeploy</strong> above to push the latest.
+                </div>
+              </div>
+            )}
+            {!data?.scorer_drift && data?.drift_known === false && (
+              <div className="flex items-start gap-2 rounded border bg-muted/40 px-2.5 py-1.5 text-muted-foreground">
+                <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                <div className="text-xs">
+                  <span className="font-semibold text-foreground">Drift detection not baselined.</span>{' '}
+                  This service was enabled before edge-drift tracking shipped, so we can&apos;t tell
+                  whether the edge is up to date. Click <strong>Redeploy</strong> once to baseline it —
+                  after that a banner appears here whenever the edge falls behind.
+                </div>
+              </div>
+            )}
             {data?.scoring_service_id && (
               <Field
                 label="Scoring Service ID"
@@ -177,6 +250,37 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                       <ExternalLink className="h-3 w-3" />
                     </a>
                   </div>
+                }
+              />
+            )}
+            {typeof data?.scoring_active_version === 'number' && (
+              <Field
+                label="Active Version"
+                value={
+                  <div className="flex items-center gap-1.5">
+                    <code className="text-xs">v{data.scoring_active_version}</code>
+                    {data?.scoring_service_id && (
+                      <a
+                        href={`https://manage.fastly.com/configure/services/${data.scoring_service_id}/versions`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity"
+                        title="View versions in Fastly"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
+                  </div>
+                }
+              />
+            )}
+            {data?.scoring_activated_at && (
+              <Field
+                label="Activated"
+                value={
+                  <span className="text-xs text-muted-foreground" title={data.scoring_activated_at}>
+                    {formatActivated(data.scoring_activated_at)}
+                  </span>
                 }
               />
             )}
@@ -230,6 +334,14 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
       </div>
     </AnalyticsCard>
   )
+}
+
+// Render a Fastly version timestamp (ISO-ish) as a readable local datetime;
+// fall back to the raw string if it doesn't parse. The raw value is kept in
+// the title attribute by the caller.
+function formatActivated(raw: string): string {
+  const d = new Date(raw)
+  return isNaN(d.getTime()) ? raw : d.toLocaleString()
 }
 
 function Field({ label, value }: { label: string; value: React.ReactNode }) {

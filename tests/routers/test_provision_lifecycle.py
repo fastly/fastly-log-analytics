@@ -31,7 +31,7 @@ from backend.main import app
 
 def _parse_sse_events(text: str) -> list[dict]:
     out: list[dict] = []
-    for chunk in text.split("\n\n"):
+    for chunk in text.replace("\r\n", "\n").split("\n\n"):
         chunk = chunk.strip()
         if chunk.startswith("data:"):
             try:
@@ -134,6 +134,70 @@ def test_teardown_emits_done_and_removes_config(isolated_configs_dir, tmp_path, 
 
     # The config file should be gone — that's the user-visible side effect
     assert not os.path.exists(svcconfig.config_path(sid)), "config should have been removed"
+
+
+def test_teardown_remove_cache_clears_service_metadata(isolated_configs_dir):
+    """``remove_cache=True`` must also clear the per-service metadata SQLite
+    (ingested_files, cron_runs, rollups). It lives in the system data dir —
+    OUTSIDE the cache dir the rmtree handles — so without an explicit
+    ``metadata.teardown`` a re-provision inherits the dead service's
+    ingested_files rollup and the usage-log gap panel shows stale "ours"
+    counts."""
+    sid = "svc-teardown-meta"
+    cfg = {
+        "service_id": sid,
+        "logging_service_id": sid,
+        "name": "Teardown Meta Svc",
+        "fos_bucket": "td-meta-bucket",
+        "fos_region": "us-east-1",
+        "fos_access_key_id": "AKIA",
+        "fos_secret_access_key": "SECRET",
+        "fastly_api_key": "fastly-test-token",
+        "cdn_secret": "x",
+        "provisioning": {
+            "fos_key_id": "fk",
+            "endpoint_name": "EP",
+            "cdn_service_id": "cdn",
+            "cdn_url": "https://cdn.example/",
+        },
+    }
+    svcconfig.save_config(sid, cfg)
+
+    def fake_perform_teardown(state, token, opts=None):
+        yield {"type": "done", "message": "teardown complete"}
+
+    meta_calls: list[str] = []
+
+    with (
+        patch("backend.provision.perform_teardown", side_effect=fake_perform_teardown),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.scheduler.get_scheduler"),
+        patch("backend.core.metadata.teardown", side_effect=lambda s: meta_calls.append(s)),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "c"}
+                if path == "/tokens/self"
+                else {"id": sid, "customer_id": "c"}
+            ),
+        ),
+    ):
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/provision/teardown",
+                json={
+                    "service_id": sid,
+                    "token": "test-tok",
+                    "remove_logging": False,
+                    "remove_cdn": False,
+                    "remove_bucket": False,
+                    "remove_cache": True,  # full local wipe → must include metadata
+                    "remove_cron": False,
+                },
+            )
+
+    assert r.status_code == 200
+    assert meta_calls == [sid], f"metadata.teardown({sid!r}) must be called on remove_cache; got {meta_calls}"
 
 
 def test_teardown_skips_perform_teardown_when_no_logging_service(isolated_configs_dir):

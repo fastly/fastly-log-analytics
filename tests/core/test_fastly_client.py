@@ -226,9 +226,12 @@ def test_fastly_gives_up_after_max_retries_on_5xx():
 
 
 def test_fastly_uses_exponential_backoff_between_retries():
-    """Retry delays are ``2**attempt`` — 1s, 2s, 4s, ... — to avoid
-    hammering Fastly while it recovers. Pinned because a flat retry
-    interval would worsen the load during an outage."""
+    """Retry delays follow ``2**attempt`` (1s, 2s, 4s, …) PLUS a
+    [0, 2)s jitter component so two concurrent admin retries don't
+    collide in lock-step against Fastly's per-token+minute rate-limit
+    window. Pinned because a flat retry interval would worsen load
+    during an outage AND because un-jittered retries thrash the
+    rate-limit ceiling."""
     sleeps: list[float] = []
 
     def _flaky(req, timeout):
@@ -244,8 +247,11 @@ def test_fastly_uses_exponential_backoff_between_retries():
     ):
         fastly_client.fastly("GET", "/x", token="t")
 
-    # First retry: 2^0=1, second retry: 2^1=2
-    assert sleeps == [1, 2]
+    # First retry: ~1s + [0,2) jitter, second: ~2s + [0,2) jitter.
+    # Cap is exp_max=8 + jitter_max=2 = 10s.
+    assert len(sleeps) == 2
+    assert 1.0 <= sleeps[0] < 3.0, f"first sleep {sleeps[0]} out of [1, 3)"
+    assert 2.0 <= sleeps[1] < 4.0, f"second sleep {sleeps[1]} out of [2, 4)"
 
 
 # ── Retry: network errors ─────────────────────────────────────────────────

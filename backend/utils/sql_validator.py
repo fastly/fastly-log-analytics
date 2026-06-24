@@ -15,9 +15,25 @@ SQL string before execution. The walker rejects:
   * Catalog table references that match the dangerous-schema deny list
     (``duckdb_*`` / ``pg_*`` table-name prefixes, ``information_schema`` /
     ``pg_catalog`` / ``system`` schema names, any non-``main`` catalog).
-  * Function calls in a fixed deny set (env-var / setting / secret
-    exfiltration helpers, all ``read_*`` / ``glob`` / ``lsdir`` file-system
-    helpers, external-DB scanners).
+  * Function calls, gated by THREE layers (a pure denylist silently rots —
+    DuckDB shipped ``sniff_csv`` / ``read_duckdb`` / ``parquet_file_metadata``
+    / ``parquet_full_metadata`` / ``parquet_bloom_probe`` *after* the original
+    list was written, and every one read arbitrary server files):
+      1. an explicit name denylist (env/secret scalars like ``getenv`` /
+         ``current_setting`` plus extension table functions such as
+         ``iceberg_scan`` / ``postgres_scan`` that register lazily and so
+         never appear in the startup enumeration);
+      2. a static name-prefix denylist (``read_`` / ``parquet_`` /
+         ``iceberg_`` / ``duckdb_`` / ``sniff_`` / ``glob``) that holds even
+         if the enumeration in (3) is unavailable;
+      3. a TABLE-FUNCTION ALLOWLIST: every table-typed function the live
+         DuckDB build exposes (derived at import from ``duckdb_functions()``)
+         is blocked unless it is in a small vetted, I/O-free set
+         (``generate_series`` / ``range`` / ``unnest`` / …). This is the
+         durable control — it closes the whole file-reader / external-DB /
+         secrets-introspection class (``read_*``, ``query``, ``which_secret``,
+         ``json_execute_serialized_sql``, ``pragma_*`` …) including variants
+         added by future engine builds, not just the names known today.
   * Multi-statement payloads.
   * Inputs larger than 64 KB (DoS guard on the parser itself).
 
@@ -40,7 +56,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 import duckdb
 
@@ -82,12 +98,29 @@ _BLOCKED_SCHEMA_NAMES = frozenset({"information_schema", "pg_catalog", "system"}
 # via ``ATTACH`` (which is itself blocked at the statement-type level).
 ALLOWED_CATALOG = "main"
 
-# Function denylist organised by intent. Each name is matched
+# LAYER 1 — explicit function name denylist. Each name is matched
 # case-insensitively against the ``function_name`` field in the parse
 # tree's ``"class":"FUNCTION"`` nodes.
+#
+# This layer is NOT the primary control any more (the table-function
+# allowlist below is) — it survives for two reasons the allowlist can't
+# cover on its own:
+#
+#   * Scalar exfiltration helpers (``getenv`` / ``current_setting``) are
+#     NOT table functions, so the allowlist never sees them.
+#   * Extension table functions (``iceberg_scan`` / ``postgres_scan`` /
+#     ``sqlite_scan`` / ``mysql_*``) register lazily when their extension
+#     loads. The pooled execution connection HAS iceberg loaded, but the
+#     fresh connection used for the import-time enumeration does not — so
+#     they would be missing from the enumerated table-function set. Naming
+#     them here blocks them regardless of load order.
+#
+# Keeping the historical entries also preserves the stable
+# ``function_denylist:<name>`` audit reason for the names callers/tests
+# already key on.
 _BLOCKED_FUNCTIONS = frozenset(
     {
-        # Environment / config exfiltration
+        # Environment / config exfiltration (scalar — allowlist can't see these)
         "getenv",
         "current_setting",
         "duckdb_secrets",
@@ -124,7 +157,7 @@ _BLOCKED_FUNCTIONS = frozenset(
         # File system discovery
         "glob",
         "lsdir",
-        # External DB scanners
+        # External DB scanners (extension functions — see note above)
         "sqlite_scan",
         "sqlite_attach",
         "postgres_scan",
@@ -137,6 +170,112 @@ _BLOCKED_FUNCTIONS = frozenset(
         "query_table",
     }
 )
+
+# LAYER 2 — static function-name prefix denylist. Any function whose name
+# starts with one of these is rejected even if it is not in LAYER 1 and even
+# if the LAYER 3 enumeration is unavailable. This is what makes the gate
+# robust to *new* file-reader variants: DuckDB has repeatedly added members
+# of these families (``read_duckdb``, ``sniff_csv``, ``parquet_file_metadata``,
+# ``parquet_full_metadata``, ``parquet_bloom_probe``) after the denylist was
+# authored, and each one read arbitrary server-side files. No legitimate
+# analyst function shares these prefixes (verified against the live build:
+# the only matches are introspection table-macros we also want blocked).
+_BLOCKED_FUNCTION_PREFIXES = ("read_", "parquet_", "iceberg_", "duckdb_", "sniff_", "glob")
+
+# LAYER 3 allowlist — the only table-typed functions a user query may call.
+# Every other table function the engine exposes is blocked (the inversion of
+# the old denylist: an unknown table function fails closed instead of slipping
+# through). Restricted to provably I/O-free generators / value-expanders.
+#
+# Names that are BOTH scalar and table (``generate_series`` / ``range`` /
+# ``repeat``) MUST stay here or their ordinary scalar use would be rejected.
+# The other scalar∩table names in this build (``force_checkpoint``,
+# ``enable_profiling`` / ``disable_profiling``, ``json_execute_serialized_sql``)
+# are deliberately omitted — they are side-effecting / SQL-executing and have
+# no place in an analyst query in either form.
+_ALLOWED_TABLE_FUNCTIONS = frozenset(
+    {
+        "generate_series",  # integer/timestamp series — no I/O
+        "range",  # integer/timestamp series — no I/O
+        "repeat",  # value/row repetition — no I/O
+        "repeat_row",  # row repetition — no I/O
+        "unnest",  # list/array expansion — no I/O
+        "json_each",  # JSON value traversal (operates on a value, not a file)
+        "json_tree",  # JSON value traversal (operates on a value, not a file)
+    }
+)
+
+# Fallback used only if the import-time enumeration below fails (e.g. DuckDB
+# can't open a scratch connection). Covers the table functions known to be
+# dangerous in DuckDB 1.5.x so the gate is never silently disabled. The live
+# enumeration is preferred because it also catches build-specific additions.
+_BASELINE_TABLE_FUNCTIONS = frozenset(
+    {
+        "arrow_scan",
+        "arrow_scan_dumb",
+        "checkpoint",
+        "force_checkpoint",
+        "disable_logging",
+        "enable_logging",
+        "disable_profiling",
+        "enable_profiling",
+        "truncate_duckdb_logs",
+        "json_execute_serialized_sql",
+        "pandas_scan",
+        "python_map_function",
+        "seq_scan",
+        "summary",
+        "which_secret",
+        "icu_calendar_names",
+        "pg_timezone_names",
+        "query",
+        "query_table",
+        "sniff_csv",
+        "read_duckdb",
+        "parquet_file_metadata",
+        "parquet_full_metadata",
+        "parquet_bloom_probe",
+        "pragma_collations",
+        "pragma_database_size",
+        "pragma_metadata_info",
+        "pragma_platform",
+        "pragma_show",
+        "pragma_storage_info",
+        "pragma_table_info",
+        "pragma_user_agent",
+        "pragma_version",
+    }
+)
+
+
+def _enumerate_table_functions() -> frozenset[str]:
+    """Return every table-typed function name in the live DuckDB build.
+
+    Derived at import from ``duckdb_functions()`` so the LAYER 3 allowlist
+    gate tracks the actual engine build rather than a hand-maintained list.
+    Uses a throwaway in-memory connection (extension functions that register
+    lazily are intentionally out of scope here — LAYER 1 names them). Falls
+    back to ``_BASELINE_TABLE_FUNCTIONS`` if the enumeration fails so the gate
+    is never silently turned off.
+    """
+    try:
+        con = duckdb.connect(":memory:")
+        try:
+            rows = con.execute(
+                "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'table'"
+            ).fetchall()
+        finally:
+            con.close()
+        names = {r[0].lower() for r in rows if r and isinstance(r[0], str)}
+        if names:
+            return frozenset(names | _BASELINE_TABLE_FUNCTIONS)
+    except Exception:
+        logger.exception("[sql_validator] table-function enumeration failed; using baseline set")
+    return _BASELINE_TABLE_FUNCTIONS
+
+
+# Materialized once at import ("derive the block set at startup").
+_TABLE_FUNCTIONS = _enumerate_table_functions()
 
 
 # ── Public types ─────────────────────────────────────────────────────────────
@@ -178,6 +317,7 @@ def validate_user_sql(
     parser_con: duckdb.DuckDBPyConnection,
     session_id: str | None = None,
     service_id: str | None = None,
+    allowed_tables: frozenset[str] | None = None,
 ) -> ValidationResult:
     """Validate a user-supplied SQL string against the Decision B policy.
 
@@ -194,9 +334,21 @@ def validate_user_sql(
     for attack-pattern detection. Pass ``None`` for system-internal calls
     that bypass the user-query path (those should never invoke this
     function in the first place).
+
+    ``allowed_tables`` is an optional case-insensitive allowlist of bare
+    table names the query may reference. When set, any BASE_TABLE node
+    whose table_name is not in the set is rejected. The /api/query path
+    sets this to ``{"logs", "logs_<active_service_id>"}`` to prevent
+    cross-tenant catalog leakage (an analyst could otherwise SELECT from
+    a foreign service's ``logs_<other_sid>`` table that happened to live
+    in the pooled DuckDB connection). When None, no per-table allowlist
+    is enforced (backwards-compatible default for internal callers).
     """
     if not isinstance(sql, str):
         _reject(sql, "input_type", "SQL must be a string", session_id, service_id)
+
+    if "\x00" in sql:
+        _reject(sql, "nul_byte_injection", "query contains a NUL byte", session_id, service_id)
 
     # Size pre-check (cheap; bounds parser cost).
     encoded = sql.encode("utf-8", errors="replace")
@@ -278,11 +430,48 @@ def validate_user_sql(
             service_id,
         )
 
+    # SHOW / DESCRIBE / SUMMARIZE parse as SELECT_NODE with from_table
+    # of type "SHOW_REF" — they slip past the statement-type gate above.
+    # Reject them outright on the user-query path: SHOW TABLES leaks foreign
+    # service table names (cross-tenant catalog disclosure) and DESCRIBE
+    # leaks schemas. is_simple_select_statement already filters these for
+    # the auto-LIMIT path; the validator now matches that contract.
+    if isinstance(node, dict):
+        from_table = node.get("from_table")
+        if isinstance(from_table, dict) and from_table.get("type") == "SHOW_REF":
+            _reject(
+                sql,
+                "show_ref",
+                "SHOW / DESCRIBE / SUMMARIZE statements are not allowed via /api/query",
+                session_id,
+                service_id,
+            )
+
     # Recursive walk: catalog blocklist (table_name / schema_name /
-    # catalog_name) + function denylist. The walker visits every dict and
-    # list nested under ``parsed`` so a buried sub-select or CTE doesn't
-    # slip through.
-    _walk_and_validate(parsed, sql, session_id, service_id)
+    # catalog_name) + function denylist + optional per-call allowed_tables.
+    # The walker visits every dict and list nested under ``parsed`` so a
+    # buried sub-select or CTE doesn't slip through.
+    #
+    # CTE aliases (``WITH x AS (...) SELECT * FROM x``) appear as
+    # BASE_TABLE references with table_name="x" — without an exception
+    # they'd be wrongly rejected against the ``{logs, logs_<sid>}``
+    # allowlist. We do NOT globally pre-collect every CTE alias and union
+    # it into the allowlist: that desynchronises from DuckDB's lexical
+    # scoping and opened two cross-tenant escapes (audit run 80e9f210,
+    # findings 009 + 017):
+    #
+    #   1. Shadowing (009): an inner subquery's ``WITH logs_victim AS (…)``
+    #      globally whitelisted ``logs_victim``, so a SIBLING outer
+    #      ``FROM logs_victim`` — which DuckDB resolves to the real base
+    #      table — passed validation.
+    #   2. Schema-qualification (017): ``WITH logs_other AS (…) SELECT *
+    #      FROM main.logs_other`` whitelisted the bare name, but DuckDB
+    #      resolves ``main.logs_other`` to the base table, not the CTE.
+    #
+    # Instead the walker tracks CTE names lexically (only in scope for the
+    # subtree that declares them) and ``_check_table_reference`` only honours
+    # a CTE name for an UNQUALIFIED reference (no schema / catalog).
+    _walk_and_validate(parsed, sql, session_id, service_id, allowed_tables=allowed_tables)
 
     elapsed_ms = (time.monotonic() - t0) * 1000
 
@@ -302,6 +491,31 @@ def validate_user_sql(
     return ValidationResult(parse_tree=parsed, elapsed_ms=elapsed_ms)
 
 
+# ── CTE alias extraction (single node, NOT recursive) ───────────────────────
+
+
+def _local_cte_aliases(node: dict) -> set[str]:
+    """Return the CTE aliases declared directly on ``node`` (case-folded).
+
+    Only this node's own ``cte_map`` is read — NOT the whole subtree — so the
+    walker can apply lexical scoping (a CTE is in scope for the subtree that
+    declares it, never for its parents or siblings). CTE definitions land in
+    ``node.cte_map.map`` as ``[{"key": "alias_name", "value": {...}}, ...]``
+    per the json_serialize_sql shape (verified against DuckDB 1.5.x).
+    """
+    out: set[str] = set()
+    cte_map = node.get("cte_map")
+    if isinstance(cte_map, dict):
+        entries = cte_map.get("map")
+        if isinstance(entries, list):
+            for entry in entries:
+                if isinstance(entry, dict):
+                    key = entry.get("key")
+                    if isinstance(key, str) and key:
+                        out.add(key.strip().lower())
+    return out
+
+
 # ── Walker ──────────────────────────────────────────────────────────────────
 
 
@@ -310,32 +524,84 @@ def _walk_and_validate(
     original_sql: str,
     session_id: str | None,
     service_id: str | None,
+    *,
+    allowed_tables: frozenset[str] | None = None,
+    cte_aliases: frozenset[str] = frozenset(),
 ) -> None:
-    """Recursively visit every dict/list in the parse tree."""
+    """Recursively visit every dict/list in the parse tree.
+
+    ``cte_aliases`` is the set of CTE names in lexical scope at this node.
+    When a node declares its own CTEs (``cte_map``) they're added to the set
+    passed DOWN into that node's subtree only — a new frozenset, so parents
+    and siblings never see them (matches DuckDB scoping; closes the 009
+    shadowing escape).
+    """
     if isinstance(node, dict):
+        # Bring this node's own CTE declarations into scope for its subtree.
+        if allowed_tables is not None:
+            local = _local_cte_aliases(node)
+            if local:
+                cte_aliases = cte_aliases | local
+
         # BASE_TABLE: table reference. Check name + schema + catalog.
         if node.get("type") == "BASE_TABLE" or "table_name" in node:
-            _check_table_reference(node, original_sql, session_id, service_id)
+            _check_table_reference(
+                node, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
+            )
 
-        # FUNCTION: function call. Check function_name.
-        # DuckDB also tags table functions inside TABLE_FUNCTION wrappers
-        # but the inner node is still {"class":"FUNCTION", "function_name":...}
+        # FUNCTION: function call. Check function_name against the three
+        # function layers. DuckDB also tags table functions inside
+        # TABLE_FUNCTION wrappers, but the inner node is still
+        # {"class":"FUNCTION", "function_name":...} so this one check covers
+        # both FROM-clause table functions and SELECT-list scalar calls.
         if node.get("class") == "FUNCTION":
             fname = node.get("function_name")
-            if isinstance(fname, str) and fname.lower() in _BLOCKED_FUNCTIONS:
-                _reject(
-                    original_sql,
-                    f"function_denylist:{fname.lower()}",
-                    f"function '{fname}' is not allowed in user queries",
-                    session_id,
-                    service_id,
-                )
+            if isinstance(fname, str):
+                fl = fname.lower()
+                # LAYER 1 — explicit name denylist (stable audit reason;
+                # catches scalar exfil helpers + lazily-loaded extension fns).
+                if fl in _BLOCKED_FUNCTIONS:
+                    _reject(
+                        original_sql,
+                        f"function_denylist:{fl}",
+                        f"function '{fname}' is not allowed in user queries",
+                        session_id,
+                        service_id,
+                    )
+                # LAYER 2 — static prefix denylist (holds even if LAYER 3's
+                # enumeration is unavailable; closes new read_*/parquet_*/…
+                # variants a name-only denylist would miss).
+                for prefix in _BLOCKED_FUNCTION_PREFIXES:
+                    if fl.startswith(prefix):
+                        _reject(
+                            original_sql,
+                            f"function_prefix:{prefix}",
+                            f"function '{fname}' uses blocked prefix '{prefix}'",
+                            session_id,
+                            service_id,
+                        )
+                # LAYER 3 — table-function allowlist. Any table-typed function
+                # the engine exposes is rejected unless explicitly vetted as
+                # I/O-free. This is the durable file-read / external-DB /
+                # secrets-introspection gate.
+                if fl in _TABLE_FUNCTIONS and fl not in _ALLOWED_TABLE_FUNCTIONS:
+                    _reject(
+                        original_sql,
+                        f"function_table_not_allowed:{fl}",
+                        f"table function '{fname}' is not allowed in user queries",
+                        session_id,
+                        service_id,
+                    )
 
         for value in node.values():
-            _walk_and_validate(value, original_sql, session_id, service_id)
+            _walk_and_validate(
+                value, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
+            )
     elif isinstance(node, list):
         for item in node:
-            _walk_and_validate(item, original_sql, session_id, service_id)
+            _walk_and_validate(
+                item, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
+            )
 
 
 def _check_table_reference(
@@ -343,6 +609,9 @@ def _check_table_reference(
     original_sql: str,
     session_id: str | None,
     service_id: str | None,
+    *,
+    allowed_tables: frozenset[str] | None = None,
+    cte_aliases: frozenset[str] = frozenset(),
 ) -> None:
     """Validate a BASE_TABLE node's name / schema / catalog fields."""
     table_name = (node.get("table_name") or "").strip()
@@ -399,6 +668,27 @@ def _check_table_reference(
             service_id,
         )
 
+    # Per-call allowlist (audit F-8/9/10). Closes cross-tenant catalog
+    # leakage on /api/query when the pooled DuckDB connection's catalog
+    # contains foreign service tables (logs_<other_sid>). The caller
+    # (backend/repositories/query.py) passes
+    # ``frozenset({"logs", "logs_<active_sid>"})`` so only the canonical
+    # view name and the per-service table are reachable.
+    if allowed_tables is not None and name_lower and name_lower not in allowed_tables:
+        # A WITH-defined name is permitted ONLY as an unqualified reference
+        # in the scope that declares it. A schema/catalog-qualified form
+        # (``main.logs_other``) resolves to the base table in DuckDB, not the
+        # CTE, so it must NOT be excused by a same-named CTE (finding 017).
+        is_cte_ref = name_lower in cte_aliases and not schema_name and not catalog_name
+        if not is_cte_ref:
+            _reject(
+                original_sql,
+                "catalog_blocklist:foreign_table",
+                f"table '{table_name}' is not in the allowed set",
+                session_id,
+                service_id,
+            )
+
 
 # ── Audit logging + raise ───────────────────────────────────────────────────
 
@@ -409,7 +699,7 @@ def _reject(
     message: str,
     session_id: str | None,
     service_id: str | None,
-) -> None:
+) -> NoReturn:
     """Emit a structured audit log line and raise SQLValidationError.
 
     Never returns — always raises. The log line is JSON-shaped so it can
@@ -537,27 +827,6 @@ def has_limit_clause(sql: str, *, parser_con: duckdb.DuckDBPyConnection) -> bool
                     return True
 
     return False
-
-
-def inject_default_limit(sql: str, *, default_limit: int = 100_000) -> str:
-    """Wrap a user query in ``SELECT * FROM (<sql>) LIMIT N`` when the
-    original lacks an explicit LIMIT clause.
-
-    Belt-and-suspenders with the memory_limit setting: prevents accidental
-    full-table scans from filling the result set even when memory is fine.
-    Caller may pre-strip the trailing semicolon.
-
-    Note: this helper still uses the regex check for backwards-compat
-    with internal callers that don't have a parser connection handy.
-    The route-handler path uses ``has_limit_clause`` directly so the
-    AST-aware check covers the user-supplied-SQL surface (026).
-    """
-    import re
-
-    if re.search(r"\bLIMIT\b", sql, flags=re.IGNORECASE):
-        return sql
-    inner = sql.rstrip().rstrip(";")
-    return f"SELECT * FROM ({inner}) AS _user_q LIMIT {default_limit}"
 
 
 def is_simple_select_statement(sql: str, *, parser_con: duckdb.DuckDBPyConnection) -> bool:

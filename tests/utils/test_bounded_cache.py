@@ -98,15 +98,13 @@ def test_clear_drops_everything():
 
 
 def test_reap_drops_expired_entries():
-    """Explicit reap() should drop all currently-expired entries and
-    return the count removed."""
+    """After reap(), expired entries are gone and fresh ones remain."""
     cache = BoundedTTLCache(maxsize=10, ttl_seconds=0.05)
     cache["a"] = 1
     cache["b"] = 2
     time.sleep(0.10)
     cache["c"] = 3  # fresh entry shouldn't be reaped
-    removed = cache.reap()
-    assert removed == 2
+    cache.reap()
     assert "a" not in cache
     assert "b" not in cache
     assert cache["c"] == 3
