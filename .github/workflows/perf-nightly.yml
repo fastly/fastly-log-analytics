@@ -60,7 +60,7 @@ jobs:
 
       - name: Upload latest.json artifact
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: perf-nightly-latest-${{ github.run_id }}
           path: tests/perf/latest.json
