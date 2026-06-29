@@ -39,7 +39,7 @@ jobs:
         run: uv run python scripts/refresh_fastly_cidrs.py
 
       - name: Open PR if Caddyfile changed
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           commit-message: 'chore: refresh Fastly edge CIDR list in Caddyfile'
           branch: chore/refresh-fastly-cidrs
