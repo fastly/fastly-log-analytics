@@ -72,7 +72,7 @@ function fmtDays(n: number): string {
 export function MetadataStorageCard() {
   const qc = useQueryClient()
   // SSR-safe: ['admin','metadata-storage'] is a live client-only query (fed by
-  // useSystemMetricsStream, no bootstrap seed) so the server renders no table
+  // useAdminEventStream, no bootstrap seed) so the server renders no table
   // while the client paints it once the SSE/fetch lands — a hydration mismatch
   // on /admin. Force the loading state until mounted so both renders agree.
   const mounted = useMounted()
@@ -82,7 +82,7 @@ export function MetadataStorageCard() {
   // fallback. We don't gate on activeServiceId here — the other admin
   // cards (SystemHealthCard etc.) follow the same pattern, and gating
   // means the card sits in loading forever when the store hasn't hydrated.
-  // Freshness via useSystemMetricsStream. Safety-net poll only.
+  // Freshness via useAdminEventStream. Safety-net poll only.
   const { data, isLoading, isFetching, error } = useQuery<StorageResponse>({
     queryKey: ['admin', 'metadata-storage'],
     queryFn: async () => {

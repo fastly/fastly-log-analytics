@@ -10,27 +10,10 @@ import { RocPrCurvesHelp } from '@/components/SessionScoring/help-content'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
+import type { components } from '@/types/api.generated'
 
-interface CurvePoint {
-  threshold: number
-  fpr?: number
-  tpr?: number
-  precision?: number
-  recall?: number
-}
-
-interface CurvesResponse {
-  has_min_samples: boolean
-  min_per_class: number
-  n_good: number
-  n_bad: number
-  n_labels_total?: number
-  auc?: number
-  average_precision?: number
-  roc?: CurvePoint[]
-  pr?: CurvePoint[]
-  note?: string
-}
+// Generated from the /scoring/curves response_model — single source of truth.
+type CurvePoint = NonNullable<components['schemas']['ScoringCurvePoint']>
 
 interface RocPrCurvesProps {
   serviceId: string
@@ -63,7 +46,7 @@ export function RocPrCurves({ serviceId }: RocPrCurvesProps) {
         { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as CurvesResponse
+      return data
     },
     staleTime: 30_000,
   })

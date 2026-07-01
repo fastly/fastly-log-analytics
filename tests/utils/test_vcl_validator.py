@@ -111,7 +111,7 @@ def test_lint_vcl_accepts_recv_snippet_default():
     pass falco when wrapped in vcl_recv with the backends declared."""
     from backend.provision.session_scoring_vcl import recv_snippet
 
-    body = recv_snippet("test_svc", "test_secret_abc")
+    body = recv_snippet("test_svc")
     result = lint_vcl(body, snippet_name="recv_default")
     assert result.ok, f"expected default recv snippet to pass falco; errors={result.errors}"
     assert not result.skipped
@@ -122,7 +122,7 @@ def test_lint_vcl_accepts_custom_regex():
     """A trimmed custom regex must also pass falco."""
     from backend.provision.session_scoring_vcl import recv_snippet
 
-    body = recv_snippet("test_svc", "test_secret_abc", exclude_url_regex=r"\.(css|js|png)$")
+    body = recv_snippet("test_svc", exclude_url_regex=r"\.(css|js|png)$")
     result = lint_vcl(body)
     assert result.ok, f"custom regex must pass falco; errors={result.errors}"
 
@@ -152,7 +152,7 @@ def test_end_to_end_validation_accepts_valid():
     from backend.provision.session_scoring_vcl import recv_snippet
 
     def builder(cleaned: str) -> str:
-        return recv_snippet("svc", "secret_abc", exclude_url_regex=cleaned or None)
+        return recv_snippet("svc", exclude_url_regex=cleaned or None)
 
     cleaned, lint = validate_recv_exclusion_regex_with_lint(
         r"\.(jpg|png)$", build_full_snippet=builder, require_falco=True
@@ -167,7 +167,7 @@ def test_end_to_end_validation_rejects_input_policy_first():
     from backend.provision.session_scoring_vcl import recv_snippet
 
     def builder(cleaned: str) -> str:
-        return recv_snippet("svc", "secret_abc", exclude_url_regex=cleaned or None)
+        return recv_snippet("svc", exclude_url_regex=cleaned or None)
 
     with pytest.raises(RegexValidationError) as exc:
         validate_recv_exclusion_regex_with_lint(r'foo"bar', build_full_snippet=builder, require_falco=True)
@@ -216,7 +216,7 @@ def test_recv_snippet_default_used_when_override_none():
     assert resolve_exclude_url_regex("") == DEFAULT_ASSET_EXT_REGEX
     assert resolve_exclude_url_regex("   ") == DEFAULT_ASSET_EXT_REGEX
 
-    body = recv_snippet("svc", "sec")
+    body = recv_snippet("svc")
     assert DEFAULT_ASSET_EXT_REGEX in body
 
 
@@ -224,6 +224,6 @@ def test_recv_snippet_uses_override_when_supplied():
     from backend.provision.session_scoring_vcl import DEFAULT_ASSET_EXT_REGEX, recv_snippet
 
     custom = r"\.(css)$"
-    body = recv_snippet("svc", "sec", exclude_url_regex=custom)
+    body = recv_snippet("svc", exclude_url_regex=custom)
     assert custom in body
     assert DEFAULT_ASSET_EXT_REGEX not in body

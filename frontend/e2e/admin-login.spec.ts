@@ -44,11 +44,12 @@ test('admin dashboard has no detectable WCAG 2.1 AA violations on first paint', 
   // text-foreground colors not yet applied) — false positives the
   // production app never shows users.
   //
-  // NOT networkidle: AppLayout holds open SSE streams (sync-status,
-  // cron-runs, system-metrics on every admin page), so the connection is
-  // never idle and waitForLoadState('networkidle') just burns its full
-  // 30s timeout and fails. Wait for `main` + a fixed window instead —
-  // the same proven pattern as a11y-admin-routes.spec.ts.
+  // NOT networkidle: AppLayout holds open the multiplexed admin SSE stream
+  // (/api/admin/events/stream — sync-status + cron-runs + system-metrics on
+  // every admin page), so the connection is never idle and
+  // waitForLoadState('networkidle') just burns its full 30s timeout and
+  // fails. Wait for `main` + a fixed window instead — the same proven
+  // pattern as a11y-admin-routes.spec.ts.
   await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
   await page.waitForTimeout(3_000)
 

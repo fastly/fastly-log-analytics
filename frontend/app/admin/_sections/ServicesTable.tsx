@@ -47,6 +47,22 @@ export function ServicesTable() {
     setCredentialsService(service)
   }
 
+  // Switch the active service + navigate to its dashboard. Invalidates the
+  // bootstrap query so its services list / active_service_id refresh BEFORE
+  // useBootstrap's reconcile effect runs — otherwise switching to a freshly-
+  // added service whose id isn't yet in the cached (5-min staleTime)
+  // bootstrap.services makes the reconcile treat the selection as unknown and
+  // revert it to the previous service, bouncing the admin back + to /admin.
+  // Mirrors the teardown invalidate below.
+  const switchToService = React.useCallback(
+    (id: string) => {
+      setActiveServiceId(id)
+      queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
+      router.push(`/dashboard?service=${id}`)
+    },
+    [setActiveServiceId, queryClient, router],
+  )
+
   const { data: services, isLoading, isError, error } = useQuery({
     queryKey: ['services'],
     queryFn: async ({ signal }) => {
@@ -58,8 +74,7 @@ export function ServicesTable() {
   const columns = React.useMemo(
     () => buildServiceColumns({
       activeServiceId,
-      setActiveServiceId,
-      router,
+      switchToService,
       servicesLength: services?.services?.length || 0,
       setCronService,
       setSettingsService,
@@ -68,7 +83,7 @@ export function ServicesTable() {
       openNgwaf: setNgwafService,
       openCredentials,
     }),
-    [activeServiceId, setActiveServiceId, router, services?.services?.length],
+    [activeServiceId, switchToService, services?.services?.length],
   )
 
   return (

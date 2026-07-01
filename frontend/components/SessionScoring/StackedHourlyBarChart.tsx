@@ -4,6 +4,7 @@ import * as React from 'react'
 
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
+import { denseTimeGrid } from '@/lib/chart-helpers'
 
 interface HourlyRow {
   hour: string
@@ -52,20 +53,27 @@ export function StackedHourlyBarChart<R extends HourlyRow>({
   helpTitle,
 }: Props<R>) {
   const traces = React.useMemo(() => {
-    const hours = Array.from(new Set(rows.map((r) => r.hour))).sort()
+    const presentHours = Array.from(new Set(rows.map((r) => r.hour))).sort()
+    // Rows are always hour-bucketed (backend `date_trunc('hour')`). Re-index
+    // onto a contiguous hourly grid so a low-traffic window renders even-width
+    // bars and an empty hour reads as an honest 0 instead of an ambiguous gap.
+    // Falls back to the present hours when a grid can't be built (see
+    // denseTimeGrid). Lookups key by epoch ms so the grid's `Z` suffix matches
+    // the rows' `+00:00` suffix.
+    const xGrid = denseTimeGrid(presentHours, 3600) ?? presentHours
     const cats =
       categoryOrder ??
       Array.from(new Set(rows.map((r) => String(r[categoryKey]))))
     return cats.map((cat) => {
-      const byHour = new Map<string, number>()
+      const byMs = new Map<number, number>()
       for (const r of rows) {
-        if (String(r[categoryKey]) === cat) byHour.set(r.hour, r.count)
+        if (String(r[categoryKey]) === cat) byMs.set(Date.parse(r.hour), r.count)
       }
       return {
         type: 'bar' as const,
         name: cat,
-        x: hours,
-        y: hours.map((h) => byHour.get(h) ?? 0),
+        x: xGrid,
+        y: xGrid.map((h) => byMs.get(Date.parse(h)) ?? 0),
         marker: { color: colors[cat] ?? '#64748b' },
       }
     })

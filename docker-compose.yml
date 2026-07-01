@@ -41,6 +41,15 @@ services:
       # auto-resolves to 127.0.0.1 in browsers; fastly.analytics needs a
       # /etc/hosts entry (see README). See backend/utils/remote_access.py.
       - LOCAL_HOSTS=fastly.localhost,fastly.analytics
+      # Caddy is the single ingress and connects to the backend over loopback
+      # (shared netns, 127.0.0.1:8000) — same posture as docker-compose.prod.yml.
+      # uvicorn's default --proxy-headers/--forwarded-allow-ips=127.0.0.1 already
+      # populates request.client.host from XFF for the loopback peer; setting
+      # these records that the trust is configured and clears the startup
+      # proxy-headers WARNING. Kept NON-fatal here (REQUIRE_PROXY_HEADERS is
+      # prod-only) so a localhost run still boots if someone removes them.
+      - TRUSTED_PROXY_IPS=127.0.0.1
+      - UVICORN_FORWARDED_ALLOW_IPS=127.0.0.1
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s

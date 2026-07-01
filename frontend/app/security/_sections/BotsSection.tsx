@@ -14,6 +14,7 @@ import {
   FINGERPRINT_COLUMN_IDS,
   NgwafVerifiedBot,
 } from './securityInfo'
+import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import type { components } from '@/types/api.generated'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']
@@ -90,6 +91,9 @@ export function BotsSection({
   setFingerprintVisibility,
   onFingerprintVisChange,
 }: Props) {
+  // Distinguish "field group not enabled" from "enabled but no data yet" so a
+  // low-traffic/fresh service doesn't read as misconfigured.
+  const { isFieldActive } = useActiveLogFields()
   // Five sites below pass the same {id, label: getFieldLabel(id)} list to
   // ColumnVisibilityDropdown. Helper closes over the getFieldLabel prop so
   // a future change to label resolution lands once.
@@ -345,7 +349,7 @@ export function BotsSection({
           <DataTable
             columns={fingerprintColumns}
             data={data?.tls_fingerprints || []}
-            emptyMessage={isLoading ? "" : "Requires Security: TLS Fingerprinting (Group H) fields to be enabled in Fastly logging."}
+            emptyMessage={isLoading ? "" : ((isFieldActive('ja3') || isFieldActive('ja4')) ? "No TLS fingerprints in this time range." : "Requires Security: TLS Fingerprinting (Group H) fields to be enabled in Fastly logging.")}
             hideToolbar
             columnVisibility={fingerprintVisibility}
             onColumnVisibilityChange={setFingerprintVisibility}

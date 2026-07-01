@@ -399,7 +399,7 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
                     <Switch id="toggle-nullable" checked={formData.nullable} onCheckedChange={v => handleChange('nullable', v)} />
                 </div>
                 <div className="flex items-center justify-between">
-                    <LabelWithInfo labelClassName="text-sm font-normal cursor-pointer" htmlFor="toggle-dashboard" info="Enables this field for use in high-level charts and metrics. Recommended for fields with low cardinality like status codes or regions." label="Show in Dashboard" />
+                    <LabelWithInfo labelClassName="text-sm font-normal cursor-pointer" htmlFor="toggle-dashboard" info="Displays a leaderboard card on the dashboard. Enabling this automatically pre-calculates hourly rollups for instant, high-performance loading." label="Show in Dashboard" />
                     <Switch id="toggle-dashboard" checked={formData.show_in_dashboard} onCheckedChange={v => handleChange('show_in_dashboard', v)} />
                 </div>
                 <div className="flex items-center justify-between">

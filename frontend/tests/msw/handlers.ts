@@ -436,6 +436,7 @@ export const handlers = [
   http.delete(`${API_BASE}/api/admin/share/invites/:invite_id`, noContent()),
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/passcode`, ok({ ok: true })),
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/services`, ok({ ok: true })),
+  http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/pii`, ok({ ok: true })),
   http.post(`${API_BASE}/api/admin/share/sessions/:session_id/boot`, ok({ ok: true })),
 
   // ── Share-login (analyst auth) ────────────────────────────────────

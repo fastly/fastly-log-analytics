@@ -43,7 +43,7 @@ interface UseServiceStreamOpts {
    *  ``requireService``. Default ``false``.
    *
    *  Callers should gate ``enabled`` on ``useBootstrapSettled()`` (see
-   *  useSystemMetricsStream): an optionalService stream connects before a
+   *  useAdminEventStream): an optionalService stream connects before a
    *  service is chosen, so without it the stream opens on the pre-bootstrap
    *  serviceId / null admin token and aborts + reconnects once bootstrap
    *  seeds them — the per-load "context canceled" the reverse proxy warns

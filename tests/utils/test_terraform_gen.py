@@ -161,6 +161,15 @@ def test_baseline_output_passes_terraform_fmt(tmp_path):
     )
 
 
+# Shares the `tf_provider_cache.lock` with the slower resource-graph
+# `terraform test`; under `-n auto` this test can block on that lock long
+# enough to blow the default 60s pytest-timeout (which `os._exit()`s the worker
+# and loses its coverage). Headroom for lock-wait + its own init/validate.
+# Heavyweight real-terraform subprocess: run in the dedicated serial (`-n 0`,
+# un-niced) test-ci step, excluded from the niced `-n auto` pool where its
+# xdist worker hard-crashed (see Makefile/ci.yml split).
+@pytest.mark.terraform_cli
+@pytest.mark.timeout(300)
 @pytest.mark.skipif(
     not (TERRAFORM_INSTALLED and RUN_VALIDATE), reason="set TERRAFORM_VALIDATE=1 to run validate (needs network)"
 )

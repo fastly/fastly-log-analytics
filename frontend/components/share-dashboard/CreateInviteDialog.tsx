@@ -109,7 +109,11 @@ function CreateInviteDialogInner({
     }
   }
 
-  const canSubmit = !creating && !!name && !!email && !!passcode
+  // Require at least one authorized service: an invite with no services
+  // strands the analyst on "No service found" (bootstrap returns zero
+  // services), so block creation until one is picked.
+  const canSubmit =
+    !creating && !!name && !!email && !!passcode && serviceIds.length > 0
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -226,7 +230,7 @@ function CreateInviteDialogInner({
               />
             </div>
             <div className="md:col-span-2 space-y-2">
-              <Label className="text-xs">Authorized services</Label>
+              <Label className="text-xs">Authorized services <span className="text-destructive">*</span></Label>
               <div className="grid grid-cols-2 gap-2">
                 {services.map((svc) => {
                   const checked = serviceIds.includes(svc.service_id)
@@ -255,6 +259,11 @@ function CreateInviteDialogInner({
                   </p>
                 )}
               </div>
+              {!!services.length && serviceIds.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Select at least one service this analyst can view.
+                </p>
+              )}
             </div>
             <div className="md:col-span-2 flex items-center gap-2">
               <Checkbox

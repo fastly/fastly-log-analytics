@@ -26,7 +26,34 @@ import secrets
 from typing import Any
 
 from backend.core.fastly.client import fastly
+from backend.provision.fos_setup import product_enabled
 from backend.provision.utils import BOLD, _c, info, ok, warn
+
+# Fastly control-panel deep links surfaced to the operator when a required
+# product isn't enabled on their account. The scorer needs all three on a
+# Compute account (Compute itself, plus Config Store + KV Store — both are
+# implicit for VCL services but must be enabled for Compute).
+COMPUTE_MANAGE_URL = "https://manage.fastly.com/products/compute"
+KV_STORE_MANAGE_URL = "https://manage.fastly.com/resources/kv-stores"
+CONFIG_STORE_MANAGE_URL = "https://manage.fastly.com/resources/config-stores"
+
+
+class EntitlementError(Exception):
+    """A Fastly product required by session scoring isn't enabled on the
+    account. Carries a machine-readable ``code`` and an actionable
+    ``link`` (a manage.fastly.com deep link) so the SSE layer can render a
+    clickable "enable it" message instead of a raw ``HTTP 4xx`` string.
+
+    Not a RuntimeError subclass on purpose: the create path maps ``fastly``'s
+    ``RuntimeError("HTTP 4xx …")`` into this richer type, and keeping it off the
+    RuntimeError hierarchy ensures a stray ``except RuntimeError`` upstream
+    can't silently swallow an entitlement failure."""
+
+    def __init__(self, code: str, message: str, link: str = ""):
+        super().__init__(message)
+        self.code = code
+        self.link = link
+
 
 SCORING_SERVICE_NAME_PREFIX = "Session Scoring Service for "
 SCORING_DOMAIN_TEMPLATE = "fos-{sid_lower}-session-scorer.edgecompute.app"
@@ -279,120 +306,192 @@ def ensure_scoring_service(
             "request_secret": store_request_secret,
         }
 
-    # 1. Create the wasm Compute service.
-    svc = fastly("POST", "/service", {"name": name, "type": "wasm"}, token=token)
-    scoring_service_id = svc["id"]
-    ok(f"Created scoring service {scoring_service_id}")
-    if status_cb:
-        status_cb(f"✅ Created scoring service '{name}'.")
+    # ── Fresh create. The scorer runs on Compute, which needs THREE Fastly
+    # product types enabled on the account: Compute itself, Config Store, and
+    # KV Store. (Config + KV stores are implicit for VCL services but must be
+    # separately enabled for Compute.) Only KV Store exposes a status endpoint,
+    # so we check it up front and let the Compute + Config Store *creates* be
+    # their own entitlement checks — a 4xx there means the product is off.
+    # Everything created below is rolled back if any later step fails, so a
+    # botched enable never leaves an orphaned half-built service behind. ───────
+    if not product_enabled(token, "kv_store"):
+        raise EntitlementError(
+            "kv_store_not_enabled",
+            "KV Store isn't enabled on this Fastly account, and the scorer needs it to "
+            "hold the L2 transition matrix. Enable the KV Store product for your account, "
+            "then click Enable again.",
+            KV_STORE_MANAGE_URL,
+        )
 
-    # 2. Add the domain to version 1 (auto-created with the service).
-    fastly(
-        "POST",
-        f"/service/{scoring_service_id}/version/1/domain",
-        {"name": domain},
-        token=token,
-    )
-    ok(f"Added domain {domain}")
-    if status_cb:
-        status_cb(f"✅ Added domain '{domain}'.")
+    # Track ids as we create resources so the rollback can tear down exactly
+    # what exists (delete_scoring_service tolerates empty/missing ids).
+    scoring_service_id = ""
+    keys_store_id = ""
+    cfg_store_id = ""
+    matrix_store_id = ""
+    try:
+        # 1. Create the wasm Compute service. First durable resource → a 4xx
+        #    here means Compute isn't enabled on the account; nothing exists
+        #    yet to clean up.
+        try:
+            svc = fastly("POST", "/service", {"name": name, "type": "wasm"}, token=token)
+        except RuntimeError as exc:
+            if "HTTP 4" in str(exc):
+                raise EntitlementError(
+                    "compute_not_enabled",
+                    "Compute isn't enabled on this Fastly account, and session scoring runs as a "
+                    "Compute (Wasm) service. Enable Compute for your account, then click Enable again.",
+                    COMPUTE_MANAGE_URL,
+                ) from exc
+            raise
+        scoring_service_id = svc["id"]
+        ok(f"Created scoring service {scoring_service_id}")
+        if status_cb:
+            status_cb(f"✅ Created scoring service '{name}'.")
 
-    # 3. Add a placeholder backend (Compute services require at least one).
-    #    The scorer never calls it; it's just to make the service version
-    #    valid.
-    fastly(
-        "POST",
-        f"/service/{scoring_service_id}/version/1/backend",
-        {
-            "name": "placeholder_origin",
-            "address": "127.0.0.1",
-            "port": 80,
-            "override_host": "example.com",
-        },
-        token=token,
-    )
-    ok("Added placeholder backend")
+        # 2. Add the domain to version 1 (auto-created with the service).
+        fastly(
+            "POST",
+            f"/service/{scoring_service_id}/version/1/domain",
+            {"name": domain},
+            token=token,
+        )
+        ok(f"Added domain {domain}")
+        if status_cb:
+            status_cb(f"✅ Added domain '{domain}'.")
 
-    # 4. Create the two ConfigStores, namespaced by the scoring service id.
-    keys_store_name = KEYS_STORE_NAME_TEMPLATE.format(sid=scoring_service_id)
-    cfg_store_name = CONFIG_STORE_NAME_TEMPLATE.format(sid=scoring_service_id)
+        # 3. Add a placeholder backend (Compute services require at least one).
+        #    The scorer never calls it; it's just to make the service version
+        #    valid.
+        fastly(
+            "POST",
+            f"/service/{scoring_service_id}/version/1/backend",
+            {
+                "name": "placeholder_origin",
+                "address": "127.0.0.1",
+                "port": 80,
+                "override_host": "example.com",
+            },
+            token=token,
+        )
+        ok("Added placeholder backend")
 
-    keys_store = fastly("POST", "/resources/stores/config", {"name": keys_store_name}, token=token)
-    cfg_store = fastly("POST", "/resources/stores/config", {"name": cfg_store_name}, token=token)
-    ok(f"Created config stores {keys_store_name}, {cfg_store_name}")
-    if status_cb:
-        status_cb("✅ Created config stores.")
+        # 4. Create the two ConfigStores, namespaced by the scoring service id.
+        #    The create IS the Config Store entitlement check (no status
+        #    endpoint exists) — a 4xx means it isn't enabled for Compute.
+        keys_store_name = KEYS_STORE_NAME_TEMPLATE.format(sid=scoring_service_id)
+        cfg_store_name = CONFIG_STORE_NAME_TEMPLATE.format(sid=scoring_service_id)
 
-    # 4b. Create the matrix KV Store (1.8MB trained matrix won't fit a
-    #     ConfigStore's ~8KB item limit). Seeded with the trained matrix by
-    #     enable_scoring via the Fastly API; read at runtime by the scorer.
-    matrix_store = _ensure_matrix_kv_store(scoring_service_id, token, status_cb=status_cb)
+        try:
+            keys_store = fastly("POST", "/resources/stores/config", {"name": keys_store_name}, token=token)
+            keys_store_id = keys_store["id"]
+            cfg_store = fastly("POST", "/resources/stores/config", {"name": cfg_store_name}, token=token)
+            cfg_store_id = cfg_store["id"]
+        except RuntimeError as exc:
+            if "HTTP 4" in str(exc):
+                raise EntitlementError(
+                    "config_store_not_enabled",
+                    "Config Store isn't enabled for Compute on this Fastly account. The scorer keeps "
+                    "its keys and toggles in two Config Stores. Enable the Config Store product for your "
+                    "account, then click Enable again.",
+                    CONFIG_STORE_MANAGE_URL,
+                ) from exc
+            raise
+        ok(f"Created config stores {keys_store_name}, {cfg_store_name}")
+        if status_cb:
+            status_cb("✅ Created config stores.")
 
-    # 5. Generate the AES-256 key + request secret and write both to
-    #    scoring_keys. The request secret is the shared-secret header
-    #    value that VCL embeds in X-Edge-Scorer-Auth so the Compute
-    #    service can reject requests not coming from "our" VCL.
-    aes_key_hex = secrets.token_hex(32)
-    request_secret = secrets.token_hex(32)
-    fastly(
-        "POST",
-        f"/resources/stores/config/{keys_store['id']}/item",
-        {"item_key": CURRENT_KEY_HEX, "item_value": aes_key_hex},
-        token=token,
-    )
-    fastly(
-        "POST",
-        f"/resources/stores/config/{keys_store['id']}/item",
-        {"item_key": REQUEST_SECRET_KEY, "item_value": request_secret},
-        token=token,
-    )
-    fastly(
-        "POST",
-        f"/resources/stores/config/{cfg_store['id']}/item",
-        {"item_key": DEBUG_LOG_KEY, "item_value": DEBUG_LOG_DEFAULT},
-        token=token,
-    )
-    # Stamp the deployment-age readiness anchor (now) for the admin readiness
-    # gauge. L2 stays observe-only until an operator explicitly opts into
-    # enforcement (the /scoring/l2-enforce endpoint writes the opt-in keys) —
-    # the deploy age never turns L2 on by itself. See _ensure_scoring_enabled_at.
-    _ensure_scoring_enabled_at(cfg_store["id"], token)
-    ok("Populated config stores")
+        # 4b. Create the matrix KV Store (1.8MB trained matrix won't fit a
+        #     ConfigStore's ~8KB item limit). Seeded with the trained matrix by
+        #     enable_scoring via the Fastly API; read at runtime by the scorer.
+        matrix_store = _ensure_matrix_kv_store(scoring_service_id, token, status_cb=status_cb)
+        matrix_store_id = _store_id(matrix_store)
 
-    # 6. Link both stores to the service version so the Wasm can open them
-    #    by the short ResourceLink names (scoring_keys / scoring_config).
-    fastly(
-        "POST",
-        f"/service/{scoring_service_id}/version/1/resource",
-        {"name": KEYS_RESOURCE_LINK_NAME, "resource_id": keys_store["id"]},
-        token=token,
-    )
-    fastly(
-        "POST",
-        f"/service/{scoring_service_id}/version/1/resource",
-        {"name": CONFIG_RESOURCE_LINK_NAME, "resource_id": cfg_store["id"]},
-        token=token,
-    )
-    fastly(
-        "POST",
-        f"/service/{scoring_service_id}/version/1/resource",
-        {"name": MATRIX_RESOURCE_LINK_NAME, "resource_id": _store_id(matrix_store)},
-        token=token,
-    )
-    ok("Linked stores to service v1")
-    if status_cb:
-        status_cb("✅ Linked config + matrix stores to service v1.")
+        # 5. Generate the AES-256 key + request secret and write both to
+        #    scoring_keys. The request secret is the shared-secret header
+        #    value that VCL embeds in X-Edge-Scorer-Auth so the Compute
+        #    service can reject requests not coming from "our" VCL.
+        aes_key_hex = secrets.token_hex(32)
+        request_secret = secrets.token_hex(32)
+        fastly(
+            "POST",
+            f"/resources/stores/config/{keys_store['id']}/item",
+            {"item_key": CURRENT_KEY_HEX, "item_value": aes_key_hex},
+            token=token,
+        )
+        fastly(
+            "POST",
+            f"/resources/stores/config/{keys_store['id']}/item",
+            {"item_key": REQUEST_SECRET_KEY, "item_value": request_secret},
+            token=token,
+        )
+        fastly(
+            "POST",
+            f"/resources/stores/config/{cfg_store['id']}/item",
+            {"item_key": DEBUG_LOG_KEY, "item_value": DEBUG_LOG_DEFAULT},
+            token=token,
+        )
+        # Stamp the deployment-age readiness anchor (now) for the admin readiness
+        # gauge. L2 stays observe-only until an operator explicitly opts into
+        # enforcement (the /scoring/l2-enforce endpoint writes the opt-in keys) —
+        # the deploy age never turns L2 on by itself. See _ensure_scoring_enabled_at.
+        _ensure_scoring_enabled_at(cfg_store["id"], token)
+        ok("Populated config stores")
 
-    return {
-        "scoring_service_id": scoring_service_id,
-        "scoring_service_name": name,
-        "scoring_domain": domain,
-        "scoring_keys_store_id": keys_store["id"],
-        "scoring_config_store_id": cfg_store["id"],
-        "scoring_matrix_store_id": _store_id(matrix_store),
-        "aes_key_hex": aes_key_hex,
-        "request_secret": request_secret,
-    }
+        # 6. Link both stores to the service version so the Wasm can open them
+        #    by the short ResourceLink names (scoring_keys / scoring_config).
+        fastly(
+            "POST",
+            f"/service/{scoring_service_id}/version/1/resource",
+            {"name": KEYS_RESOURCE_LINK_NAME, "resource_id": keys_store["id"]},
+            token=token,
+        )
+        fastly(
+            "POST",
+            f"/service/{scoring_service_id}/version/1/resource",
+            {"name": CONFIG_RESOURCE_LINK_NAME, "resource_id": cfg_store["id"]},
+            token=token,
+        )
+        fastly(
+            "POST",
+            f"/service/{scoring_service_id}/version/1/resource",
+            {"name": MATRIX_RESOURCE_LINK_NAME, "resource_id": _store_id(matrix_store)},
+            token=token,
+        )
+        ok("Linked stores to service v1")
+        if status_cb:
+            status_cb("✅ Linked config + matrix stores to service v1.")
+
+        return {
+            "scoring_service_id": scoring_service_id,
+            "scoring_service_name": name,
+            "scoring_domain": domain,
+            "scoring_keys_store_id": keys_store["id"],
+            "scoring_config_store_id": cfg_store["id"],
+            "scoring_matrix_store_id": _store_id(matrix_store),
+            "aes_key_hex": aes_key_hex,
+            "request_secret": request_secret,
+        }
+    except Exception:
+        # Roll back EVERYTHING we created so a retry starts from a clean slate
+        # (the reuse path above does NOT backfill missing stores, so a partial
+        # service would otherwise wedge every future enable). Best-effort and
+        # never masks the original error.
+        if scoring_service_id:
+            warn(f"Enable failed — rolling back partial scoring service {scoring_service_id}")
+            if status_cb:
+                status_cb("⚠️ Enable failed — rolling back the partially-created scoring service…")
+            try:
+                delete_scoring_service(
+                    scoring_service_id,
+                    scoring_keys_store_id=keys_store_id,
+                    scoring_config_store_id=cfg_store_id,
+                    scoring_matrix_store_id=matrix_store_id,
+                    token=token,
+                )
+            except Exception:
+                warn("Rollback of partial scoring service failed — manual cleanup may be needed")
+        raise
 
 
 def rotate_aes_key(
@@ -475,17 +574,25 @@ def delete_scoring_service(
     scoring_matrix_store_id: str = "",
     token: str,
     status_cb=None,
-) -> None:
+) -> list[tuple[str, str]]:
     """Tear down the Compute service AND its stores (2 ConfigStores + the
     matrix KV Store). Idempotent — deleting an already-deleted resource is a
     no-op.
 
     Order: service first (deactivate → delete), then stores. Service must
     go first because the resource-link tying the stores to the service
-    will block store-deletion otherwise."""
+    will block store-deletion otherwise.
+
+    Returns the list of ``(label, store_id)`` pairs that genuinely failed to
+    delete (a non-404 error) so the caller can surface them for manual cleanup —
+    empty list on full success. A non-404 store/KV delete is downgraded to a
+    warning (+ status_cb) rather than raised so one stuck store can't block the
+    rest of the teardown; the returned list is how that gets reported instead of
+    silently swallowed."""
+    failed: list[tuple[str, str]] = []
     if not scoring_service_id:
         warn("delete_scoring_service called with empty service id — nothing to do")
-        return
+        return failed
 
     info(f"Tearing down scoring service {_c(BOLD, scoring_service_id)}")
     if status_cb:
@@ -506,7 +613,7 @@ def delete_scoring_service(
     except RuntimeError as exc:
         if "404" in str(exc):
             ok("Scoring service already deleted")
-            return
+            return failed
         # fall through; delete still might work
         warn(f"Failed to deactivate versions (will try delete anyway): {exc}")
 
@@ -541,6 +648,9 @@ def delete_scoring_service(
                 ok(f"{label} store already deleted")
             else:
                 warn(f"Could not delete {label} store {store_id}: {exc}")
+                failed.append((label, store_id))
+                if status_cb:
+                    status_cb(f"⚠️ Could not delete {label} store {store_id} — remove it manually: {exc}")
 
     # 4. Delete the matrix KV Store. KV stores must be empty before deletion,
     #    so drop the matrix key first, then the store. Both tolerant of 404.
@@ -556,7 +666,18 @@ def delete_scoring_service(
             except RuntimeError as exc:
                 if "404" not in str(exc):
                     warn(f"Could not delete matrix KV {sub or 'store'} {scoring_matrix_store_id}: {exc}")
+                    # Only the store-level delete (sub == "") is a real orphan;
+                    # a stuck key-delete just means the store delete below/next
+                    # run will report it.
+                    if sub == "":
+                        failed.append(("scoring_matrix", scoring_matrix_store_id))
+                        if status_cb:
+                            status_cb(
+                                f"⚠️ Could not delete matrix KV store {scoring_matrix_store_id} "
+                                f"— remove it manually: {exc}"
+                            )
         ok(f"Deleted matrix KV store ({scoring_matrix_store_id})")
 
     if status_cb:
         status_cb("✅ Scoring service torn down.")
+    return failed

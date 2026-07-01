@@ -30,6 +30,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 
 from backend.core import share_db
+from backend.core.share_db.validation import IP_FAMILY_KEYS
 from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
@@ -658,28 +659,50 @@ async def _strip_analyst_envelope(response: Response, analyst_session: object | 
     )
 
 
-async def _body_service_ids(request: Request) -> list[str]:
-    """Extract ``service_id``/``service`` from a JSON POST body, if any.
+_BODY_INSPECT_UNSET = object()
+_BODY_INSPECT_ATTR = "_analyst_body_json"
 
-    Used by the service-scope gate so a forged ``service_id`` field in the
-    request body is treated as a candidate and rejected when it doesn't
-    match the analyst's authorized services. Closes M-3 (silent fallback
-    on ``POST /api/dashboard/aggregates`` when the body service_id mismatches).
 
-    Buffers the body via the raw ASGI receive callable and re-installs a
-    replay version on ``request._receive`` so downstream handlers see the
-    same bytes. We can't use ``await request.body()`` here because
-    Starlette's ``BaseHTTPMiddleware`` constructs a fresh Request for the
-    inner app whose ``_body`` cache is independent — the downstream
-    handler would then see an empty body. The replay-receive pattern is
-    the documented workaround.
+async def _inspect_request_body(request: Request) -> dict | None:
+    """Drain + replay + parse a JSON POST body ONCE, returning the parsed dict.
+
+    Used by both the service-scope gate (``_body_service_ids``) and the
+    analyst IP-filter lock (``_body_filter_keys``). Idempotent: the first call
+    buffers the body, installs a single-shot replay on ``request._receive`` so
+    downstream handlers still see the bytes, and caches the parsed value on
+    ``request.state``. Subsequent calls return the cached value WITHOUT
+    re-draining — the replay is single-shot, so a second drain would starve the
+    downstream handler of its body.
+
+    We can't use ``await request.body()`` here because Starlette's
+    ``BaseHTTPMiddleware`` constructs a fresh Request for the inner app whose
+    ``_body`` cache is independent — the downstream handler would then see an
+    empty body. The replay-receive pattern is the documented workaround.
+
+    Returns the dict for a JSON-object body, or ``None`` for non-POST /
+    non-JSON / empty / non-dict / unparseable bodies.
+    """
+    cached = getattr(request.state, _BODY_INSPECT_ATTR, _BODY_INSPECT_UNSET)
+    if cached is not _BODY_INSPECT_UNSET:
+        return cached  # type: ignore[return-value]
+
+    parsed = await _drain_request_body(request)
+    setattr(request.state, _BODY_INSPECT_ATTR, parsed)
+    return parsed
+
+
+async def _drain_request_body(request: Request) -> dict | None:
+    """One-shot drain/replay/parse helper backing ``_inspect_request_body``.
+
+    Do not call directly — go through ``_inspect_request_body`` so the result
+    is cached and the body is never drained twice.
     """
     method = request.method.upper()
     if method != "POST":
-        return []
+        return None
     ct = request.headers.get("content-type", "")
     if "application/json" not in ct:
-        return []
+        return None
     # Drain the receive stream once, capture the body bytes.
     #
     # Bound the buffered body to BODY_INSPECT_MAX_BYTES so an authenticated
@@ -697,7 +720,7 @@ async def _body_service_ids(request: Request) -> list[str]:
             if msg.get("type") != "http.request":
                 # Disconnect or something unexpected — bail without replay
                 # (downstream will see the same disconnect).
-                return []
+                return None
             chunk = msg.get("body", b"")
             chunks.append(chunk)
             bytes_read += len(chunk)
@@ -709,7 +732,7 @@ async def _body_service_ids(request: Request) -> list[str]:
                 break
             more_body = bool(msg.get("more_body", False))
     except Exception:
-        return []
+        return None
     body_bytes = b"".join(chunks)
 
     # Install a single-shot replay so the downstream handler can re-read
@@ -734,11 +757,25 @@ async def _body_service_ids(request: Request) -> list[str]:
             pass
 
     if not body_bytes:
-        return []
+        return None
     try:
         body = json.loads(body_bytes)
     except (json.JSONDecodeError, ValueError):
-        return []
+        return None
+    if not isinstance(body, dict):
+        return None
+    return body
+
+
+async def _body_service_ids(request: Request) -> list[str]:
+    """Extract ``service_id``/``service`` from a JSON POST body, if any.
+
+    Used by the service-scope gate so a forged ``service_id`` field in the
+    request body is treated as a candidate and rejected when it doesn't
+    match the analyst's authorized services. Closes M-3 (silent fallback
+    on ``POST /api/dashboard/aggregates`` when the body service_id mismatches).
+    """
+    body = await _inspect_request_body(request)
     if not isinstance(body, dict):
         return []
     out: list[str] = []
@@ -753,6 +790,31 @@ async def _body_service_ids(request: Request) -> list[str]:
             if v_str:
                 out.append(v_str)
     return out
+
+
+# IP-family columns a masking analyst must never be able to filter on — the
+# same set ``apply_pii_policy`` masks in responses (imported as the single
+# source of truth, so the filter-lock and the response masker can't drift).
+# Masking those values in the response is pointless if the analyst can still
+# pivot the whole dataset by an exact IP they're guessing at.
+_PII_FORBIDDEN_FILTER_COLS = IP_FAMILY_KEYS
+
+
+async def _body_filter_keys(request: Request) -> list[str]:
+    """Return the raw filter keys from a JSON POST body's ``filters`` map.
+
+    Backs the analyst IP-filter lock: the caller normalizes each key (via
+    ``normalize_filter_key``) and rejects the request when a masking analyst
+    filters on an IP-family column. Returns [] when there is no JSON body or
+    no ``filters`` object.
+    """
+    body = await _inspect_request_body(request)
+    if not isinstance(body, dict):
+        return []
+    filters = body.get("filters")
+    if not isinstance(filters, dict):
+        return []
+    return [str(k) for k in filters]
 
 
 # ── Sliding-window static-asset rate limiter (per IP) ───────────────────────
@@ -1116,6 +1178,26 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
                     content={"error": "service_not_authorized", "service": ""},
                 )
 
+            # PII lock: a masking analyst must never filter by an IP-family
+            # column. Display masking is response-side only, so an un-blocked
+            # `ip` filter would let an analyst probe for a specific real IP (a
+            # presence oracle) or dead-end on zero rows. Reject at the boundary
+            # — the frontend also hides the affordances, but THIS is the actual
+            # guarantee. Reuses the SAME key normalization as the SQL WHERE
+            # builder so prefixed / dedup-suffixed variants (filter_ip, ip_2,
+            # xfilter_client_ip, …) can't slip past. Body is already drained +
+            # cached by the service-scope check above, so this is a dict read.
+            if session.pii_policy.get("mask_ips"):
+                from backend.repositories.utils.filters import normalize_filter_key
+
+                for raw_key in await _body_filter_keys(request):
+                    col = normalize_filter_key(raw_key)
+                    if col in _PII_FORBIDDEN_FILTER_COLS:
+                        return JSONResponse(
+                            status_code=403,
+                            content={"error": "pii_policy_violation", "field": col},
+                        )
+
         # IP-roaming: update without booting if whitelist still passes. This is
         # NOT user activity — bump_active=False so it doesn't reset the idle
         # clock. Critical for rotating-egress proxies (per-request NAT, e.g.
@@ -1271,6 +1353,36 @@ class TimeBounds:
         return eff_start, eff_end
 
 
+def _time_bounds_from_params(
+    query_start_time: str | None,
+    query_end_time: str | None,
+    query_window_hours: int | None,
+    *,
+    now: datetime | None = None,
+) -> TimeBounds:
+    """Build a :class:`TimeBounds` from raw invite/session window params.
+
+    Shared by :func:`get_analyst_time_bounds` (the request path) and
+    :func:`resolve_analyst_insights_clamp` (the insights prewarmer, which has
+    no ``Request``). ``now`` defaults to wall-clock for the relative-window
+    anchor; callers that need a fixed anchor (the prewarmer, tests) pass it.
+    """
+    end = parse_iso_utc(query_end_time) if query_end_time else None
+    start = parse_iso_utc(query_start_time) if query_start_time else None
+    if query_window_hours:
+        anchor = now if now is not None else datetime.now(UTC)
+        relative_start = anchor - timedelta(hours=int(query_window_hours))
+        start = max(start, relative_start) if start else relative_start
+        # Ceiling the upper bound to the anchor ("now"). Without this a rolling
+        # invite's end stays None, so TimeBounds.clamp would adopt a caller-
+        # supplied req_end verbatim — including a future one (e.g. a 60s-
+        # quantized wire anchor that rounded up past now) — and widen the window
+        # forward. Take the more-restrictive of an explicit end cap and the
+        # anchor; the start floor above is unchanged, so no rows leak.
+        end = min(end, anchor) if end else anchor
+    return TimeBounds(start=start, end=end)
+
+
 def get_analyst_time_bounds(request: Request) -> TimeBounds:
     """FastAPI dependency: returns the active session's clamp window.
 
@@ -1281,12 +1393,57 @@ def get_analyst_time_bounds(request: Request) -> TimeBounds:
     session = getattr(request.state, "analyst_session", None)
     if session is None:
         return TimeBounds()
-    end = parse_iso_utc(session.query_end_time) if session.query_end_time else None
-    start = parse_iso_utc(session.query_start_time) if session.query_start_time else None
-    if session.query_window_hours:
-        relative_start = datetime.now(UTC) - timedelta(hours=int(session.query_window_hours))
-        start = max(start, relative_start) if start else relative_start
-    return TimeBounds(start=start, end=end)
+    return _time_bounds_from_params(
+        session.query_start_time,
+        session.query_end_time,
+        session.query_window_hours,
+    )
+
+
+def analyst_clamp_cache_key(
+    query_start_time: str | None,
+    query_end_time: str | None,
+    query_window_hours: int | None,
+) -> str:
+    """Stable cache-key fragment for an analyst clamp shape.
+
+    Keyed on the invite's window PARAMETERS (not the ``now``-resolved, rolling
+    clamp bounds), so the ``/api/insights`` cache entry is reused across an
+    invite's requests instead of recomputing on every call. Mirrors the admin
+    path's time-independent key + TTL-staleness contract (see the cache key in
+    ``backend/repositories/insights/repository.py``). The insights prewarmer
+    computes the identical fragment for each active invite so it warms exactly
+    the key a live analyst request will look up.
+    """
+    return f"{query_start_time or ''}|{query_end_time or ''}|{query_window_hours or ''}"
+
+
+def resolve_analyst_insights_clamp(
+    query_start_time: str | None,
+    query_end_time: str | None,
+    query_window_hours: int | None,
+    *,
+    baseline_hours: float,
+    window_hours: float,
+    now: datetime | None = None,
+) -> tuple[str | None, str | None, str]:
+    """Request-free analyst clamp resolver for the insights prewarmer.
+
+    Returns ``(clamp_start_iso, clamp_end_iso, clamp_cache_key)`` for one
+    analyst clamp shape over the given insights ``window_hours``/
+    ``baseline_hours`` selection. Mirrors
+    ``backend/routers/insights.py:_analyst_lookback_clamp`` (which uses
+    ``ctx.clamp`` on the request path) so the prewarmer warms the exact key +
+    bounds a live analyst request will look up. Propagates ``ValueError`` from
+    :meth:`TimeBounds.clamp` when the shape's window is empty — the caller
+    skips that shape.
+    """
+    anchor = now if now is not None else datetime.now(UTC)
+    tb = _time_bounds_from_params(query_start_time, query_end_time, query_window_hours, now=anchor)
+    earliest = anchor - timedelta(hours=baseline_hours + window_hours)
+    start, end = tb.clamp(earliest, anchor, max_span=MAX_ANALYST_QUERY_SPAN)
+    cache_key = analyst_clamp_cache_key(query_start_time, query_end_time, query_window_hours)
+    return start.isoformat(), end.isoformat(), cache_key
 
 
 def clamp_or_400(

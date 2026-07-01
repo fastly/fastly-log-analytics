@@ -862,13 +862,6 @@ def scoring_exclude_regex_put(
             status_code=400,
             detail={"error": "Session scoring is not enabled for this service"},
         )
-    request_secret = scoring.get("request_secret") or ""
-    if not request_secret:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Internal: request_secret missing from cfg. Re-run enable_scoring."},
-        )
-
     resolved_token = _resolve_token(service_id, token)
     if not resolved_token:
         raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
@@ -877,7 +870,7 @@ def scoring_exclude_regex_put(
     # assembled snippet. We close over the per-service ids so the
     # validator can build the full snippet body.
     def _build(cleaned_regex: str) -> str:
-        return recv_snippet(service_id, request_secret, exclude_url_regex=cleaned_regex or None)
+        return recv_snippet(service_id, exclude_url_regex=cleaned_regex or None)
 
     try:
         cleaned, lint = validate_recv_exclusion_regex_with_lint(
@@ -949,7 +942,6 @@ def scoring_exclude_regex_validate(
     for a preview. False-positives between falco and Fastly's compiler are
     rare; the publish flow still catches them.
     """
-    from backend import config as svcconfig
     from backend.provision.session_scoring_vcl import recv_snippet
     from backend.utils.vcl_validator import (
         RegexValidationError,
@@ -958,16 +950,8 @@ def scoring_exclude_regex_validate(
 
     raw = body.regex
 
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring = cfg.get("scoring") or {}
-    # The validator needs a request_secret to build the assembled snippet
-    # for falco lint — that's a VCL substitution, not anything the lint
-    # inspects semantically. Use a stable placeholder when scoring isn't
-    # enabled yet so the operator can still pre-validate before turn-on.
-    request_secret = scoring.get("request_secret") or "PLACEHOLDER_FOR_LINT_ONLY"
-
     def _build(cleaned_regex: str) -> str:
-        return recv_snippet(service_id, request_secret, exclude_url_regex=cleaned_regex or None)
+        return recv_snippet(service_id, exclude_url_regex=cleaned_regex or None)
 
     try:
         _cleaned, lint = validate_recv_exclusion_regex_with_lint(

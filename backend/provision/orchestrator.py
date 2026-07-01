@@ -113,8 +113,6 @@ def write_service_config(state: dict):
 
         incoming_lf["custom_fields"] = merge_scoring_custom_fields(incoming_lf.get("custom_fields"))
 
-    import secrets
-
     cfg = {
         "service_id": service_id,
         "name": state.get("name") or state.get("service_name") or service_id,
@@ -129,7 +127,6 @@ def write_service_config(state: dict):
         "cdn_url": cdn_url,
         "cdn_secret": state.get("cdn_secret", ""),
         "cdn_service_id": state.get("cdn_service_id", ""),
-        "cluster_secret": state.get("cluster_secret") or existing_cfg.get("cluster_secret") or secrets.token_hex(32),
         "fastly_api_key": state.get("fastly_api_key") or state.get("admin_token", ""),
         "log_retention_days": int(state.get("log_retention_days", 30)),
         "duckdb_path": db_path,
@@ -140,7 +137,7 @@ def write_service_config(state: dict):
     # carry — primarily ``scoring`` (set by enable_scoring) and
     # ``ngwaf_workspace_id`` (set by the NGWAF-config PATCH). Anything else
     # the existing cfg has that the wizard body lacks survives the rewrite.
-    for preserved_key in ("scoring", "ngwaf_workspace_id", "cluster_secret"):
+    for preserved_key in ("scoring", "ngwaf_workspace_id"):
         if preserved_key not in state and preserved_key in existing_cfg:
             cfg[preserved_key] = existing_cfg[preserved_key]
         elif preserved_key in state:
@@ -151,15 +148,26 @@ def write_service_config(state: dict):
     elif "log_period" in state.get("provisioning", {}):
         cfg["log_period"] = state["provisioning"]["log_period"]
 
+    # Honor the operator's chosen log_period as the sync cadence, with a hard
+    # 5s floor — matching the scheduler's own ``max(5, …)`` clamp and the
+    # settings-PATCH writer (which never applied a 30s floor). Picking a sub-30s
+    # period is an explicit operator choice trading extra FOS LIST/GET cost for
+    # dashboard freshness; it is no longer silently rounded up to 30s.
     log_period_secs = int(cfg.get("log_period", 120))
-    # log_period ≤ 5 is the "real-time" tier: sync every 5s to catch each
-    # rotation. Anything else stays on the conservative 30s floor so dashboard
-    # freshness doesn't drive surprise CDN traffic.
-    if log_period_secs <= 5:
-        sync_interval_seconds = 5
-    else:
-        sync_interval_seconds = max(30, log_period_secs)
+    sync_interval_seconds = max(5, log_period_secs)
     commit_interval_mins = max(max(1, sync_interval_seconds // 60), int(state.get("commit_interval_mins", 5)))
+
+    # Account-level edge rate-limiting entitlement (set by ensure_cdn_service's
+    # proactive probe). Prefer the freshly-detected state, then the carried-over
+    # request provisioning block, then the on-disk value, defaulting True so the
+    # cli.py:handle_update_cdn reader and reactive fallback behave as before when
+    # never detected.
+    _rate_limiting = state.get("rate_limiting")
+    if _rate_limiting is None:
+        _rate_limiting = state.get("provisioning", {}).get("rate_limiting")
+    if _rate_limiting is None:
+        _rate_limiting = (existing_cfg.get("provisioning") or {}).get("rate_limiting")
+    rate_limiting_val = True if _rate_limiting is None else bool(_rate_limiting)
 
     cfg["provisioning"] = {
         "fos_key_id": state.get("provisioning", {}).get("fos_key_id", ""),
@@ -170,6 +178,7 @@ def write_service_config(state: dict):
         "sample_rate": state.get("sample_rate", state.get("provisioning", {}).get("sample_rate", "100")),
         "edge_only": state.get("edge_only", state.get("provisioning", {}).get("edge_only", True)),
         "custom_condition": state.get("custom_condition", state.get("provisioning", {}).get("custom_condition", "")),
+        "rate_limiting": rate_limiting_val,
         "cron_sync": {
             "enabled": state.get(
                 "enable_cron_sync", state.get("provisioning", {}).get("cron_sync", {}).get("enabled", True)
@@ -395,6 +404,11 @@ def provision(cfg: dict, _resume_from_state: bool = False):
             on_created=_record_cdn_service_id,
         )
         state["cdn_service_id"] = cdn_svc["id"]
+        # Persist the proactively-detected account rate-limiting entitlement only
+        # when conclusive; a None (unknown) leaves the default-True read path +
+        # reactive validate fallback intact.
+        if cdn_svc.get("rate_limiting") is not None:
+            state["rate_limiting"] = cdn_svc["rate_limiting"]
         save_state(state)
         yield {"type": "progress", "current": 6, "total": total}
 
@@ -446,16 +460,50 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                 yield {"type": "status", "message": "✓ Iceberg table init skipped (mock mode)."}
             else:
                 yield {"type": "status", "message": "🧊 Initializing Iceberg table in Fastly Object Storage..."}
-                try:
-                    db_iceberg.init_iceberg_table(src)
+                # FOS occasionally returns a transient 5xx (observed: HTTP 500 →
+                # OSError(121)) on the metadata HEAD that pyiceberg runs before
+                # writing a new table's metadata.json. s3fs does NOT retry
+                # generic 5xx, so a single blip would otherwise punt table
+                # creation onto the first-commit fallback below. init_iceberg_
+                # table is idempotent (per-service lock + load-or-create), so
+                # retry a few times with a short backoff first — a momentary FOS
+                # hiccup shouldn't surface during provisioning. Only I/O errors
+                # (OSError: FOS 5xx / timeout / reset) are retried; a config or
+                # programming error falls straight through to the fallback.
+                _ICE_INIT_ATTEMPTS = 3
+                ice_exc: Exception | None = None
+                for _attempt in range(_ICE_INIT_ATTEMPTS):
+                    try:
+                        db_iceberg.init_iceberg_table(src)
+                        ice_exc = None
+                        break
+                    except OSError as e:
+                        ice_exc = e
+                        if _attempt < _ICE_INIT_ATTEMPTS - 1:
+                            yield {
+                                "type": "status",
+                                "message": (
+                                    f"… Object Storage not ready yet "
+                                    f"(attempt {_attempt + 1}/{_ICE_INIT_ATTEMPTS}); retrying…"
+                                ),
+                            }
+                            time.sleep(1.5 * (_attempt + 1))
+                    except Exception as e:
+                        ice_exc = e
+                        break
+                if ice_exc is None:
                     ok("Iceberg table ready")
                     yield {"type": "status", "message": "✓ Iceberg table ready."}
-                except Exception as ice_exc:
+                else:
                     # Best-effort: do NOT abort the wizard (commit_buffer creates
                     # the table on the first commit). But never swallow it
                     # silently — log with traceback + surface in the wizard so a
                     # broken fresh install is visible at provision time.
-                    logger.exception("[provision] Iceberg table init failed (deferred to first commit)")
+                    logger.error(
+                        "[provision] Iceberg table init failed after %d attempt(s) (deferred to first commit)",
+                        _ICE_INIT_ATTEMPTS,
+                        exc_info=ice_exc,
+                    )
                     warn(f"Iceberg table init deferred to first commit: {ice_exc}")
                     yield {
                         "type": "status",
@@ -503,12 +551,37 @@ def provision(cfg: dict, _resume_from_state: bool = False):
 
 def perform_teardown(state: dict, token: str, opts: dict | None = None):
     if opts is None:
-        opts = {"remove_logging": True, "remove_cdn": True, "remove_bucket": True}
+        opts = {"remove_logging": True, "remove_cdn": True, "remove_bucket": True, "remove_scoring": True}
 
-    total_steps = 4
+    total_steps = 5
+    # ── Step 1: session scoring (Compute service + stores + dangling VCL). ───
+    # Runs FIRST so the scoring VCL/backend are stripped before the logging
+    # endpoint removal does its own clone/activate. Gated on opts.get(..., True)
+    # so the internal provision()-failure rollback (no opts) still tears scoring
+    # down. The scoring ids ride in state['scoring'] (the cfg['scoring'] block);
+    # disable_scoring can't be used here because the config file is already gone.
     yield {"type": "progress", "current": 1, "total": total_steps}
+    scoring_meta = state.get("scoring") or {}
+    do_scoring = opts.get("remove_scoring", True) and scoring_meta.get("enabled")
+    step(1, total_steps, "Tearing down session scoring" if do_scoring else "Skipping session scoring teardown")
+    if do_scoring:
+        try:
+            from backend.provision.session_scoring_orchestrator import teardown_scoring_resources
+
+            failed = yield from run_with_events(
+                teardown_scoring_resources, state["logging_service_id"], scoring_meta, token
+            )
+            for label, store_id in failed or []:
+                yield {
+                    "type": "status",
+                    "message": f"Warning: scoring {label} store {store_id} not deleted — remove it manually.",
+                }
+        except Exception as exc:
+            yield {"type": "status", "message": f"Warning: scoring teardown failed: {exc}"}
+
+    yield {"type": "progress", "current": 2, "total": total_steps}
     step(
-        1,
+        2,
         total_steps,
         "Removing logging endpoint" if opts.get("remove_logging") else "Skipping logging endpoint removal",
     )
@@ -520,9 +593,9 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
         except Exception as exc:
             yield {"type": "status", "message": f"Warning: {exc}"}
 
-    yield {"type": "progress", "current": 2, "total": total_steps}
+    yield {"type": "progress", "current": 3, "total": total_steps}
     step(
-        2, total_steps, "Deleting FOS access keys" if opts.get("remove_bucket") else "Skipping FOS access keys deletion"
+        3, total_steps, "Deleting FOS access keys" if opts.get("remove_bucket") else "Skipping FOS access keys deletion"
     )
     if opts.get("remove_bucket"):
         try:
@@ -546,8 +619,8 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
             except Exception:
                 pass
 
-    yield {"type": "progress", "current": 3, "total": total_steps}
-    step(3, total_steps, "Deleting FOS bucket" if opts.get("remove_bucket") else "Skipping FOS bucket deletion")
+    yield {"type": "progress", "current": 4, "total": total_steps}
+    step(4, total_steps, "Deleting FOS bucket" if opts.get("remove_bucket") else "Skipping FOS bucket deletion")
     if opts.get("remove_bucket") and state.get("fos_bucket_name"):
         try:
             temp_desc = f"fos-log-analysis-temp-teardown-{state.get('logging_service_id', 'unknown')}"
@@ -568,8 +641,8 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
         except Exception:
             pass
 
-    yield {"type": "progress", "current": 4, "total": total_steps}
-    step(4, total_steps, "Deleting CDN service" if opts.get("remove_cdn") else "Skipping CDN service deletion")
+    yield {"type": "progress", "current": 5, "total": total_steps}
+    step(5, total_steps, "Deleting CDN service" if opts.get("remove_cdn") else "Skipping CDN service deletion")
     if opts.get("remove_cdn") and state.get("cdn_service_id") and state.get("cdn_service_name"):
         try:
             yield from run_with_events(delete_cdn_service, state["cdn_service_id"], state["cdn_service_name"], token)

@@ -11,11 +11,48 @@ requests" rule both live here so callers can't skip them.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from typing import TYPE_CHECKING, Any
+
+from backend.repositories.utils.filters import filter_spec_attr
 from backend.utils.bounded_cache import BoundedTTLCache
+
+if TYPE_CHECKING:
+    from backend.models.common import FiltersDict
 
 # Keys never persisted in the memo cache: per-request telemetry would leak
 # across requests if kept, and the cache-hit marker is stamped fresh on read.
 _NEVER_CACHE = ("debug_queries", "debug_calls", "is_cached", "_is_cached")
+
+
+def serialize_filters_for_key(filters: FiltersDict | None) -> dict[str, tuple[Any, list[str]]]:
+    """Render a filter spec into the deterministic ``(mode, sorted-values)``
+    shape used inside every response-cache key.
+
+    Sorted by filter key, and each spec's values sorted as strings, so two
+    semantically-equal filter sets hash identically regardless of insertion
+    order. Extracted verbatim from origin/network ``_response_cache_key`` so
+    the produced bytes stay identical (no cold-miss on deploy).
+    """
+    return {
+        k: (filter_spec_attr(v, "mode"), sorted(str(x) for x in (filter_spec_attr(v, "values") or [])))
+        for k, v in sorted((filters or {}).items())
+    }
+
+
+def digest_cache_key(payload: dict, src: dict) -> str:
+    """Hash a per-endpoint ``payload`` dict plus the service identity into a
+    response-cache key.
+
+    The caller owns ``payload``'s key order (it is serialized as-is), so each
+    repository keeps its existing field order and the emitted key bytes are
+    unchanged. ``src`` resolves to ``name`` → ``service_id`` → ``""`` exactly
+    as the inlined builders did.
+    """
+    body = json.dumps(payload, separators=(",", ":"), default=str)
+    svc = src.get("name") or src.get("service_id") or ""
+    return hashlib.sha256(f"{body}:{svc}".encode()).hexdigest()
 
 
 def bucket_time_to_minute(ts: str | None) -> str | None:

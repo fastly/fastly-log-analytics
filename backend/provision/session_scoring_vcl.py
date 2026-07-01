@@ -197,7 +197,6 @@ def resolve_enforce_status_code(operator_override: int | None) -> int:
 
 def recv_snippet(
     logging_service_id: str,
-    request_secret: str,
     *,
     exclude_url_regex: str | None = None,
 ) -> str:
@@ -216,31 +215,26 @@ def recv_snippet(
     function trusts its input and string-substitutes verbatim into the
     VCL boolean expression.
 
-    ``request_secret`` is also baked into the edge/shield boundary check
-    (``req.http.X-Edge-Shield-Auth != "{request_secret}"``). The original
-    boundary used ``fastly.ff.visits_this_service == 0``, which an
-    attacker could flip by setting their own ``Fastly-FF`` header
-    (Fastly's edge propagates the value verbatim to the next hop). The
-    secret-comparison form fails closed: only the edge's own pass/miss
-    subroutines (which know the secret because it's literally baked into
-    their VCL bodies) can set the header to a value that satisfies the
-    check.
+    The edge/shield boundary is detected with
+    ``fastly.ff.visits_this_service == 0`` — true only at the first Fastly
+    POP to handle the request (the true edge). A client cannot forge it:
+    each ``Fastly-FF`` entry is a salted hash only genuine Fastly hops can
+    produce, so an inbound ``Fastly-FF`` header doesn't move this counter.
+    Stays correct even when the nearest POP is a shield (that POP is simply
+    the first hop, so the counter is still 0 there).
 
     Note: `logging_service_id` is kept as an argument for symmetry with
     peer snippet generators."""
     _ = logging_service_id
     effective_regex = resolve_exclude_url_regex(exclude_url_regex)
-    # EC-07: belt-and-suspenders — reject values that would break out of the VCL
-    # string literals they're substituted into below (regex allows backslash).
-    _assert_vcl_string_safe(request_secret, field="request_secret")
+    # EC-07: belt-and-suspenders — reject a regex that would break out of the VCL
+    # string literal it's substituted into below (regex allows backslash).
     _assert_vcl_string_safe(effective_regex, field="exclude_url_regex", allow_backslash=True)
     return f"""# Session Scoring: client-edge header scrub (anti-spoofing).
-# Edge-only — see X-Edge-Shield-Auth note below — so any client-supplied
-# X-Edge-* gets stripped before it can be forged into a clean score.
-# Also strip the X-Edge-Shield-Auth header itself so a client cannot
-# pre-set it and skip our edge-only protections.
-if (req.restarts == 0 && req.http.X-Edge-Shield-Auth != "{request_secret}") {{
-  unset req.http.X-Edge-Shield-Auth;
+# Edge-only (fastly.ff.visits_this_service == 0, unforgeable) so any
+# client-supplied X-Edge-* gets stripped before it can be forged into a
+# clean score.
+if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {{
   unset req.http.X-Edge-Scoring-Pass;
   unset req.http.X-Edge-Score;
   unset req.http.X-Edge-Score-Reason;
@@ -263,12 +257,10 @@ if (req.restarts == 0 && req.http.X-Edge-Shield-Auth != "{request_secret}") {{
 }}
 
 # Session Scoring: route the first-pass dynamic request to the scorer.
-# Edge-only — the pass/miss snippets set X-Edge-Shield-Auth on the
-# bereq going to the shield, so the shield's vcl_recv reads back a
-# matching secret and skips this block. An attacker who tries to spoof
-# the boundary by sending their own Fastly-FF header cannot satisfy the
-# secret comparison, so the edge-only logic still runs on their hop and
-# they get scored / scrubbed normally.
+# Edge-only — fastly.ff.visits_this_service == 0 is true only at the true
+# edge; at a shield POP it is > 0, so the shield skips this block and the
+# real-origin pass is served from the shield normally. Unforgeable, so a
+# client cannot fake having already transited our edge.
 #
 # DDoS bypass (fastly.ddos_detected): when Fastly's L7 DDoS detection
 # flags this request, do NOT route to Compute. Two reasons:
@@ -279,7 +271,7 @@ if (req.restarts == 0 && req.http.X-Edge-Shield-Auth != "{request_secret}") {{
 #      benign traffic shapes; feeding attack traffic in pollutes the
 #      matrix even though those scores wouldn't be acted on.
 # See: https://www.fastly.com/documentation/reference/vcl/variables/miscellaneous/fastly-ddos-detected/
-if (req.http.X-Edge-Shield-Auth != "{request_secret}" && req.restarts == 0 && req.http.X-Edge-Scoring-Pass != "1" && !fastly.ddos_detected && std.tolower(req.url) !~ "{effective_regex}") {{
+if (fastly.ff.visits_this_service == 0 && req.restarts == 0 && req.http.X-Edge-Scoring-Pass != "1" && !fastly.ddos_detected && std.tolower(req.url) !~ "{effective_regex}") {{
   set req.backend = {SCORING_BACKEND_VCL_NAME};
   # Skip NGWAF inspection on the scoring sub-fetch ONLY. The scorer is
   # payload-agnostic — it strips the query string and scores the path — so
@@ -328,15 +320,7 @@ def pass_snippet(logging_service_id: str, request_secret: str) -> str:
     scorer), inject the auth + service-id headers on bereq for the
     upcoming sub-fetch. Also unset bereq.http.x-edge-score so any
     attacker-supplied inbound x-edge-score doesn't get echoed into the
-    scorer's view of the request.
-
-    Also stamps ``bereq.http.X-Edge-Shield-Auth = "{request_secret}"``
-    on every pass — this is what the shield POP's vcl_recv reads back to
-    decide "skip edge-only blocks because this hop already ran them on
-    the edge". An attacker who tries to spoof Fastly-FF cannot satisfy
-    the shield-auth comparison because the secret is only ever set by
-    pass_snippet / miss_snippet (compiled into our VCL, never sent to
-    clients)."""
+    scorer's view of the request."""
     _assert_vcl_string_safe(request_secret, field="request_secret")  # EC-07
     return f"""# Session Scoring: inject auth + service-id on the scorer sub-fetch.
 # vcl_pass is the right subroutine for bereq mutations when recv used
@@ -353,12 +337,7 @@ if (req.backend == {SCORING_BACKEND_VCL_NAME}) {{
 }}
 # Strip any inbound x-edge-score header an attacker may have set; the
 # real one is built by us in vcl_deliver after the scorer responds.
-unset bereq.http.x-edge-score;
-# Shield-auth marker — the shield POP's vcl_recv reads this back via
-# req.http.X-Edge-Shield-Auth and skips the edge-only branches when it
-# matches. Unspoofable from outside because the secret is baked into
-# the compiled VCL and never returned to clients.
-set bereq.http.X-Edge-Shield-Auth = "{request_secret}";"""
+unset bereq.http.x-edge-score;"""
 
 
 def fetch_snippet() -> str:
@@ -373,7 +352,7 @@ if (req.backend == {SCORING_BACKEND_VCL_NAME}) {{
 }}"""
 
 
-def deliver_snippet(request_secret: str) -> str:
+def deliver_snippet() -> str:
     """vcl_deliver snippet — the heart of the pattern.
 
     PASS 1 (X-Edge-Scoring-Pass == "1"): scorer's response is in
@@ -391,18 +370,17 @@ def deliver_snippet(request_secret: str) -> str:
     The subfield writes in pass-1 deliver propagate to vcl_log via the
     req.http persistence across restart. The log format reads
     req.http.x-edge-score:score etc."""
-    _assert_vcl_string_safe(request_secret, field="request_secret")  # EC-07
-    return f"""# Session Scoring: pass-1 stash + naked restart; pass-2 emit cookie.
+    return """# Session Scoring: pass-1 stash + naked restart; pass-2 emit cookie.
 
 # ── PASS 1: capture scorer response into req.http.x-edge-score subfields ──
-if (req.http.X-Edge-Scoring-Pass == "1") {{
+if (req.http.X-Edge-Scoring-Pass == "1") {
   unset req.http.X-Edge-Scoring-Pass;
   # Edge-observed scorer round-trip (µs): diff time.elapsed against the
   # x-edge-score-t0 stamp set in recv just before the sub-fetch. Computed
   # for BOTH success and fail-open (outside the status branch) so timed-out
   # rows record ≈the timeout budget — exactly the signal for tuning it.
   # Same std.atoi(time.elapsed.usec) idiom as the TTFB/TTLB capture VCL.
-  if (req.http.x-edge-score-t0 != "") {{
+  if (req.http.x-edge-score-t0 != "") {
     declare local var.rtt INTEGER;
     set var.rtt = std.atoi(time.elapsed.usec);
     set var.rtt -= std.atoi(req.http.x-edge-score-t0);
@@ -410,8 +388,8 @@ if (req.http.X-Edge-Scoring-Pass == "1") {{
     # header SUBFIELD lands empty (unlike a plain header, which coerces). Every
     # other working subfield is set from a string; match that.
     set req.http.x-edge-score:rtt = "" + var.rtt;
-  }}
-  if (resp.status == 200) {{
+  }
+  if (resp.status == 200) {
     set req.http.x-edge-score:score = resp.http.x-edge-score;
     set req.http.x-edge-score:l1 = resp.http.x-edge-score-l1;
     set req.http.x-edge-score:l2 = resp.http.x-edge-score-l2;
@@ -435,14 +413,14 @@ if (req.http.X-Edge-Scoring-Pass == "1") {{
     # score can be correlated to the matrix version (and rollback) that produced
     # it (EC-03). Empty on cookie-missing requests (L2 skipped → no matrix load).
     set req.http.x-edge-score:matrix = resp.http.X-Edge-Matrix-Version;
-  }} else {{
+  } else {
     # Scorer returned non-200 — fail open. No cookie to rotate.
     set req.http.x-edge-score:score = "0";
     set req.http.x-edge-score:l1 = "0";
     set req.http.x-edge-score:l2 = "0";
     set req.http.x-edge-score:compliance = "unknown";
     set req.http.x-edge-score:reason = "compute-unavailable-" + resp.status;
-  }}
+  }
   # Stash the rotated cookie as a subfield too; pass-2 reads it back
   # and emits via add resp.http.Set-Cookie.
   set req.http.x-edge-score:set-cookie = resp.http.Set-Cookie;
@@ -459,21 +437,19 @@ if (req.http.X-Edge-Scoring-Pass == "1") {{
   unset resp.http.x-edge-score-enforce;
   unset resp.http.x-edge-score-exec-us;
   restart;
-}}
+}
 
 # ── PASS 2: real origin response — emit the rotated cookie additively ──
-# Only emit at the EDGE. We detect "this is the edge hop" via the
-# absence of the shield-auth secret on req.http.X-Edge-Shield-Auth;
-# the shield POP receives that header from us (set in pass/miss), so
-# the shield sees the match and skips this block. A spoofed
-# Fastly-FF header cannot fake the secret, so attacker-induced
-# duplicate Set-Cookie emission is no longer possible.
-if (req.http.X-Edge-Shield-Auth != "{request_secret}" && req.http.x-edge-score:set-cookie != "") {{
+# Only emit at the EDGE (fastly.ff.visits_this_service == 0). At a shield
+# POP the counter is > 0, so the shield skips this block and the cookie is
+# emitted exactly once, at the edge, to the client. Unforgeable, so no
+# attacker-induced duplicate Set-Cookie emission.
+if (fastly.ff.visits_this_service == 0 && req.http.x-edge-score:set-cookie != "") {
   add resp.http.Set-Cookie = req.http.x-edge-score:set-cookie;
-}}"""
+}"""
 
 
-def enforce_snippet(request_secret: str, status_code: int = DEFAULT_ENFORCE_STATUS_CODE) -> str:
+def enforce_snippet(status_code: int = DEFAULT_ENFORCE_STATUS_CODE) -> str:
     """vcl_recv snippet that errors ``status_code`` when the scorer flagged the
     request as over-threshold.
 
@@ -483,16 +459,13 @@ def enforce_snippet(request_secret: str, status_code: int = DEFAULT_ENFORCE_STAT
     the operator has committed an enforce_threshold value via the
     admin UI AND the request's score met it.
 
-    Edge-only — the shield-auth secret comparison replaces the original
-    ``fastly.ff.visits_this_service == 0`` check, which an attacker
-    could flip by sending their own ``Fastly-FF`` header.
-    ``error <status_code>`` instead of a `synth` keeps the door open
-    for a custom vcl_error page later.
+    Edge-only — fastly.ff.visits_this_service == 0 (unforgeable) so shield
+    hops don't double-enforce. ``error <status_code>`` instead of a `synth`
+    keeps the door open for a custom vcl_error page later.
 
     ``status_code`` defaults to 429 (Too Many Requests). Operators can
     override via cfg.scoring.enforce_status_code; valid range 400-599.
     The reason phrase is auto-mapped via ``enforce_reason_phrase``."""
-    _assert_vcl_string_safe(request_secret, field="request_secret")  # EC-07
     code = resolve_enforce_status_code(status_code)
     reason = enforce_reason_phrase(code)
     return (
@@ -502,33 +475,22 @@ def enforce_snippet(request_secret: str, status_code: int = DEFAULT_ENFORCE_STAT
         f"# orchestrator swaps this snippet on change. Default 429.\n"
         f"# Fires only on the post-scoring restart (req.restarts == 1) when the\n"
         f"# deliver pass-1 captured X-Edge-Score-Enforce=1 from the scorer.\n"
-        f"# Edge-only (unspoofable shield-auth comparison) so shield hops don't double-enforce.\n"
-        f'if (req.http.X-Edge-Shield-Auth != "{request_secret}" && req.restarts == 1 && req.http.x-edge-score:enforce == "1") {{\n'
+        f"# Edge-only (fastly.ff.visits_this_service == 0, unforgeable) so shield hops don't double-enforce.\n"
+        f'if (fastly.ff.visits_this_service == 0 && req.restarts == 1 && req.http.x-edge-score:enforce == "1") {{\n'
         f'  error {code} "{reason}";\n'
         f"}}"
     )
 
 
-def miss_snippet(request_secret: str) -> str:
+def miss_snippet() -> str:
     """vcl_miss snippet: defensive unsets. Strip inbound x-edge-score
     (attacker could try to forge it) and X-Edge-Scoring-Pass (don't
-    leak the internal marker to the real origin on pass-2 fetch).
-
-    Also stamps ``bereq.http.X-Edge-Shield-Auth = "{request_secret}"``
-    on every miss-driven backend fetch so the shield POP's vcl_recv
-    sees the secret and skips edge-only blocks. Without this, only
-    pass-driven fetches set the marker, and a cacheable miss flow
-    would leave the marker unset on the shield hop — re-triggering
-    the edge-only branches and double-scoring."""
-    _assert_vcl_string_safe(request_secret, field="request_secret")  # EC-07
-    return f"""# Session Scoring: strip internal scoring headers before forwarding to
+    leak the internal marker to the real origin on pass-2 fetch)."""
+    return """# Session Scoring: strip internal scoring headers before forwarding to
 # the real origin. x-edge-score could be attacker-supplied; the
 # X-Edge-Scoring-Pass marker is internal-only.
 unset bereq.http.x-edge-score;
-unset bereq.http.X-Edge-Scoring-Pass;
-# Shield-auth marker — match pass_snippet so the shield POP recognises
-# this hop as edge-originated and skips re-running edge-only blocks.
-set bereq.http.X-Edge-Shield-Auth = "{request_secret}";"""
+unset bereq.http.X-Edge-Scoring-Pass;"""
 
 
 def generate_scoring_vcl(
@@ -558,12 +520,12 @@ def generate_scoring_vcl(
     a request. None / out-of-range → default (429).
     """
     return {
-        SCORING_RECV_NAME: recv_snippet(logging_service_id, request_secret, exclude_url_regex=exclude_url_regex),
+        SCORING_RECV_NAME: recv_snippet(logging_service_id, exclude_url_regex=exclude_url_regex),
         SCORING_PASS_NAME: pass_snippet(logging_service_id, request_secret),
         SCORING_FETCH_NAME: fetch_snippet(),
-        SCORING_DELIVER_NAME: deliver_snippet(request_secret),
-        SCORING_MISS_NAME: miss_snippet(request_secret),
-        SCORING_ENFORCE_NAME: enforce_snippet(request_secret, resolve_enforce_status_code(enforce_status_code)),
+        SCORING_DELIVER_NAME: deliver_snippet(),
+        SCORING_MISS_NAME: miss_snippet(),
+        SCORING_ENFORCE_NAME: enforce_snippet(resolve_enforce_status_code(enforce_status_code)),
     }
 
 

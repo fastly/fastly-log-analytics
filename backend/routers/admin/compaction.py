@@ -56,33 +56,71 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     from backend.core.rollups import (
         backfill_network_rtt_bundles,
         backfill_network_speed_bundles,
+        backfill_origin_dims_bundles,
+        backfill_origin_latency_ts_bundles,
         backfill_origin_summary_bundles,
+        backfill_perf_dims_bundles,
         backfill_perf_latency_bundles,
+        backfill_security_dims_bundles,
         backfill_slow_urls_bundles,
         backfill_verified_bots_ts_bundles,
+        backfill_wellknown_bots_rollup,
         compact_network_rtt_closed_days_to_daily,
         compact_network_speed_closed_days_to_daily,
+        compact_origin_dims_closed_days_to_daily,
+        compact_origin_latency_ts_closed_days_to_daily,
         compact_origin_summary_closed_days_to_daily,
+        compact_perf_dims_closed_days_to_daily,
         compact_perf_latency_closed_days_to_daily,
+        compact_security_dims_closed_days_to_daily,
         compact_verified_bots_ts_closed_days_to_daily,
     )
 
     sid = source.get("service_id") or source.get("name") or ""
     n_su = backfill_slow_urls_bundles(sid, source)
     n_os = backfill_origin_summary_bundles(sid, source)
+    # status_codes reads the existing all_fields.parquet bundle (no dedicated
+    # writer / backfill); only origin_dims (pop / oip / edge) gets an explicit
+    # backfill + day-compact here.
+    n_od = backfill_origin_dims_bundles(sid, source)
+    # origin_latency_ts: the minute-granular origin-latency percentile time
+    # series feeding the timeseries panel (the last section to roll up — its
+    # backfill is what lets the get_aggregates skip-temp guard fire on 30 d
+    # unfiltered).
+    n_olts = backfill_origin_latency_ts_bundles(sid, source)
     n_nr = backfill_network_rtt_bundles(sid, source)
     n_ns = backfill_network_speed_bundles(sid, source)
     n_vbts = backfill_verified_bots_ts_bundles(sid, source)
     n_perf = backfill_perf_latency_bundles(sid, source)
+    # security_dims: req_size / conn_reuse / topips / cov — the all-rows live
+    # scans behind /api/security/aggregates' equivalent panels. EXACT.
+    n_sd = backfill_security_dims_bundles(sid, source)
+    # perf_dims: ttl_dist — the all-rows live scan behind /api/performance
+    # /aggregates' ttl_dist histogram panel. EXACT (count SUM + MIN-of-MIN).
+    n_pd = backfill_perf_dims_bundles(sid, source)
+    # wellknown_bots: the regex-prefiltered (ua, ip, count) rollup behind the
+    # security wellknown card. Backfilling historical closed hours lets the
+    # reader clear its 50% coverage floor on 7d/30d so the live regex + its
+    # all-rows temp drop off the request path (collapsing the catalog temp to
+    # the NGWAF-only subset).
+    n_wk = backfill_wellknown_bots_rollup(sid, source)
     n_os_day = compact_origin_summary_closed_days_to_daily(sid, source)
+    n_od_day = compact_origin_dims_closed_days_to_daily(sid, source)
+    n_olts_day = compact_origin_latency_ts_closed_days_to_daily(sid, source)
     n_nr_day = compact_network_rtt_closed_days_to_daily(sid, source)
     n_ns_day = compact_network_speed_closed_days_to_daily(sid, source)
     n_vbts_day = compact_verified_bots_ts_closed_days_to_daily(sid, source)
     n_perf_day = compact_perf_latency_closed_days_to_daily(sid, source)
+    n_sd_day = compact_security_dims_closed_days_to_daily(sid, source)
+    n_pd_day = compact_perf_dims_closed_days_to_daily(sid, source)
     return {
         "slow_urls": n_su,
         "origin_summary": n_os,
         "origin_summary_days": n_os_day,
+        "origin_dims": n_od,
+        "origin_dims_days": n_od_day,
+        "origin_latency_ts": n_olts,
+        "origin_latency_ts_days": n_olts_day,
         "network_rtt": n_nr,
         "network_rtt_days": n_nr_day,
         "network_speed": n_ns,
@@ -91,6 +129,11 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         "verified_bots_ts_days": n_vbts_day,
         "perf_latency": n_perf,
         "perf_latency_days": n_perf_day,
+        "security_dims": n_sd,
+        "security_dims_days": n_sd_day,
+        "perf_ttl_dist": n_pd,
+        "perf_ttl_dist_days": n_pd_day,
+        "wellknown_bots": n_wk,
     }
 
 

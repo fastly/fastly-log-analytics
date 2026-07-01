@@ -41,8 +41,8 @@ import json
 from typing import Any
 
 from backend.core.fastly.utils import load_vcl
-from backend.provision import generate_capture_vcl, load_log_format
-from backend.provision.fastly_api import _CDN_SNIPPETS, resolve_shield_secret
+from backend.provision import CAPTURE_SNIPPET_PLAN, generate_capture_vcl, load_log_format
+from backend.provision.fastly_api import _CDN_SNIPPETS
 
 
 def _terraform_template_escape(value: object) -> str:
@@ -105,9 +105,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
 
     log_format = load_log_format(cfg.get("log_fields"))
-    vcl_snippets = generate_capture_vcl(
-        cfg.get("log_fields"), cluster_secret=resolve_shield_secret(cfg), scoring_enabled=scoring_enabled
-    )
+    vcl_snippets = generate_capture_vcl(cfg.get("log_fields"), scoring_enabled=scoring_enabled)
     cdn_vcl = load_vcl(rate_limiting=True)
 
     path = f"/{prefix}/raw/%Y-%m-%d/%H/" if prefix else "/raw/%Y-%m-%d/%H/"
@@ -241,25 +239,21 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     )
 
     # ── 5. logging_service.tf.json — Logging endpoint on existing service ──────
-    snippets_map = {
-        "recv": "Fastly Log Analysis Capture",
-        "miss": "Fastly Log Analysis Miss",
-        "pass": "Fastly Log Analysis Pass",
-        "fetch": "Fastly Log Analysis Origin Fetch",
-        "error": "Fastly Log Analysis Origin Error",
-        "deliver": "Fastly Log Analysis Origin Deliver",
-    }
+    # Snippet name / subroutine / priority come from CAPTURE_SNIPPET_PLAN so the
+    # Terraform output stays in lock-step with the live install path.
+    snippet_meta = {key: (name, sub, prio) for key, name, sub, prio, _req in CAPTURE_SNIPPET_PLAN}
     logging_snippet_blocks: list[dict] = []
-    for phase, snip_vcl in vcl_snippets.items():
-        snip_name = snippets_map.get(phase)
-        if snip_name:
-            snip_filename = f"capture_snippets/{phase}.vcl"
+    for content_key, snip_vcl in vcl_snippets.items():
+        meta = snippet_meta.get(content_key)
+        if meta:
+            snip_name, subroutine, priority = meta
+            snip_filename = f"capture_snippets/{content_key}.vcl"
             files[snip_filename] = snip_vcl
             logging_snippet_blocks.append(
                 {
                     "name": snip_name,
-                    "type": phase,
-                    "priority": 1 if phase == "recv" else 100,
+                    "type": subroutine,
+                    "priority": priority,
                     "content": f'${{file("${{path.module}}/{snip_filename}")}}',
                 }
             )

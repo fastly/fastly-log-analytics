@@ -82,8 +82,8 @@ export function useLogsPageState() {
       return data as any
     },
     enabled: !!activeServiceId && activeTab === 'cron',
-    // Primary update path is the /api/cron-runs/stream SSE channel
-    // (wired in SyncStatusBadge via useCronRunsStream — runs whenever
+    // Primary update path is the /api/admin/events/stream cron-runs channel
+    // (wired in SyncStatusBadge via useAdminEventStream — runs whenever
     // the header is mounted). Every cron lifecycle event invalidates
     // this query key, so this interval is now a safety net only.
     // Five minutes is well under "stale" for a history table and cuts
@@ -119,8 +119,8 @@ export function useLogsPageState() {
       return data as any
     },
     enabled: !!activeServiceId, // Tab independent polling!
-    // Primary update path is the /api/cron-runs/stream SSE channel
-    // (wired in SyncStatusBadge via useCronRunsStream). The toast
+    // Primary update path is the /api/admin/events/stream cron-runs channel
+    // (wired in SyncStatusBadge via useAdminEventStream). The toast
     // notifier reads this query key, so SSE invalidations propagate
     // automatically; this interval is now a safety net only.
     refetchInterval: 5 * 60_000,
@@ -304,7 +304,7 @@ export function useLogsPageState() {
       return data as any
     },
     enabled: !!activeServiceId && activeTab === 'cron',
-    // Freshness via useCronRunsStream (wired in SyncStatusBadge):
+    // Freshness via useAdminEventStream (wired in SyncStatusBadge):
     // every cron lifecycle event invalidates this key so the tiles'
     // last_run / next_run / status update on the moment the cron
     // fires instead of on a 10s drift. 5-min interval is the safety
@@ -389,7 +389,7 @@ export function useLogsPageState() {
       return data as any
     },
     enabled: !!activeServiceId && activeTab === 'service_history',
-    // Kept fresh by useCronRunsStream (invalidates ['admin','audit-logs',svc]
+    // Kept fresh by useAdminEventStream (invalidates ['admin','audit-logs',svc]
     // on cron completion), so the old staleTime:0 — which forced a 1-2s
     // refetch spinner on every tab visit — is no longer needed. 60s makes
     // tab-switches instant from cache between real events.
@@ -403,7 +403,7 @@ export function useLogsPageState() {
       return data as any
     },
     enabled: !!activeServiceId && activeTab === 'ingestion',
-    // Freshness via useCronRunsStream (invalidates
+    // Freshness via useAdminEventStream (invalidates
     // ['admin','ingested-files',svc] on cron completion). 60s staleTime so
     // re-entering the tab is instant instead of re-fetching every time.
     staleTime: 60_000,
@@ -416,7 +416,7 @@ export function useLogsPageState() {
       return data as any
     },
     enabled: !!activeServiceId && activeTab === 'schema',
-    // Freshness via useCronRunsStream (invalidates ['admin','schema',svc]
+    // Freshness via useAdminEventStream (invalidates ['admin','schema',svc]
     // when a data-mutating cron — sync/full_sync/commit — completes).
     // Schema rarely changes, so 60s staleTime keeps the tab instant.
     staleTime: 60_000,
@@ -436,7 +436,7 @@ export function useLogsPageState() {
     setActiveTab(value)
 
     // cron / service_history / ingestion / schema no longer force a refetch
-    // on switch: cron is SSR-seeded and kept live by useCronRunsStream, and
+    // on switch: cron is SSR-seeded and kept live by useAdminEventStream, and
     // the other three are now invalidated by that same stream on cron
     // completion (+ a 60s staleTime safety net). Switching to them serves
     // instantly from cache instead of spinning on every visit.

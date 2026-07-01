@@ -167,6 +167,7 @@ class ScoringLatencyRow(_ScoringRead):
     hour: str | None = None
     scored_count: int | None = None
     fail_open_count: int | None = None
+    total_count: int | None = None
     # Present only when the edge_score_rtt_us / edge_score_exec_us columns exist.
     rtt_p50_us: int | None = None
     rtt_p95_us: int | None = None
@@ -301,3 +302,29 @@ class ScoringAnalyticsResponse(_ScoringRead):
     # but evaluation/per-reason is admin-only and intentionally untyped.
     evaluation: dict | None = None
     evaluation_per_reason: dict | None = None
+
+
+class ScoringLabelRow(_ScoringRead):
+    # Fields ordered to match labels._row_to_dict so the serialized key order
+    # is byte-identical. All Optional: the analyst path projects out the PII /
+    # attribution fields (notes/flagged_by/sample_*), and response_model_exclude_unset
+    # then drops them from the wire so the analyst shape is unchanged.
+    # created_at/updated_at are plain SQLite text strings (datetime('now')), so
+    # no .isoformat() coercion is needed — they pass through verbatim. id is a
+    # UUID string (not an autoincrement int).
+    id: str | None = None
+    service_id: str | None = None
+    sid: str | None = None
+    label: str | None = None
+    notes: str | None = None
+    flagged_by: str | None = None
+    sample_ip: str | None = None
+    sample_ua: str | None = None
+    sample_url: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class ScoringLabelsListResponse(_ScoringRead):
+    labels: list[ScoringLabelRow] = []
+    counts: dict[str, int] = {}

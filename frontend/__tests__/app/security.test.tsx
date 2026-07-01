@@ -1,6 +1,9 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
-import SecurityPage from '@/app/security/page'
+// app/security/page.tsx is now an async RSC shell that SSR-prefetches and
+// dehydrates into <SecurityClient />; RTL can't render an async component, so
+// the smoke test targets the client component that owns the title + sections.
+import SecurityClient from '@/app/security/_sections/SecurityClient'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
 import React from 'react'
@@ -95,7 +98,7 @@ afterEach(() => {
 test('security page mounts and renders title', async () => {
   render(
     <QueryClientProvider client={queryClient}>
-      <SecurityPage />
+      <SecurityClient />
     </QueryClientProvider>,
   )
 

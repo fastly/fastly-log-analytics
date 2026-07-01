@@ -152,7 +152,7 @@ def lint_log_format(format_str: str, snippets: dict[str, str] | None = None) -> 
     snip = snippets or {}
 
     vcl_src = (
-        f"sub vcl_recv    {{\n  #FASTLY recv\n{snip.get('recv', '')}\n}}\n"
+        f"sub vcl_recv    {{\n  #FASTLY recv\n{snip.get('recv_reset', '')}\n{snip.get('recv', '')}\n}}\n"
         f"sub vcl_hash    {{\n  #FASTLY hash\n{snip.get('hash', '')}\n}}\n"
         f"sub vcl_hit     {{\n  #FASTLY hit\n{snip.get('hit', '')}\n}}\n"
         f"sub vcl_miss    {{\n  #FASTLY miss\n{snip.get('miss', '')}\n}}\n"

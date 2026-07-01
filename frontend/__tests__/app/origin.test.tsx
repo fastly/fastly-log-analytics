@@ -1,6 +1,9 @@
 import { render, screen } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
-import OriginPage from '@/app/origin/page'
+// app/origin/page.tsx is now an async RSC shell that SSR-prefetches and
+// dehydrates into <OriginClient />; RTL can't render an async component, so
+// the smoke test targets the client component that owns the title + sections.
+import OriginClient from '@/app/origin/_sections/OriginClient'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
 import React from 'react'
@@ -60,7 +63,7 @@ afterEach(() => {
 test('origin page mounts and renders title', () => {
   render(
     <QueryClientProvider client={queryClient}>
-      <OriginPage />
+      <OriginClient />
     </QueryClientProvider>,
   )
   expect(screen.getByText('Origin Performance')).toBeInTheDocument()

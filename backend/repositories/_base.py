@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 import duckdb
 
+from backend.core.rollups._common import quote_path_list
+
 if TYPE_CHECKING:
     from datetime import datetime
 
@@ -517,6 +519,104 @@ def get_source_extent(
         except Exception:
             pass
     return 0, None, None
+
+
+def _latest_log_in_window(
+    latest_log_at: str | None,
+    start_time: str | None,
+    end_time: str | None,
+) -> bool:
+    """Return True when the all-time latest log falls inside ``[start, end]``.
+
+    ``start_time`` / ``end_time`` are open bounds when ``None`` (the
+    default-range dashboard request passes neither). The comparison is a
+    lexicographic ISO-8601 string compare — both ``latest_log_at`` (from
+    the status cache via ``get_source_extent``) and the window bounds are
+    UTC ISO strings, which sort chronologically. A normalisation pass via
+    ``parse_iso_utc`` guards against trailing-Z vs +00:00 / fractional-
+    second differences that would break a naive string compare.
+
+    Returns False when ``latest_log_at`` is None (no data at all) — the
+    self-heal must NOT fire in that case.
+    """
+    if not latest_log_at:
+        return False
+    from backend.utils.date_utils import parse_iso_utc
+
+    try:
+        latest_dt = parse_iso_utc(latest_log_at)
+    except Exception:
+        return False
+    if latest_dt is None:
+        return False
+    if start_time:
+        try:
+            st_dt = parse_iso_utc(start_time)
+            if st_dt is not None and latest_dt < st_dt:
+                return False
+        except Exception:
+            pass
+    if end_time:
+        try:
+            et_dt = parse_iso_utc(end_time)
+            if et_dt is not None and latest_dt > et_dt:
+                return False
+        except Exception:
+            pass
+    return True
+
+
+def should_self_heal_stale_view(
+    *,
+    windowed_count: int,
+    filters,
+    latest_log_at: str | None,
+    start_time: str | None,
+    end_time: str | None,
+) -> bool:
+    """Decide whether a zero-row window is a STALE VIEW vs a legitimately
+    empty window.
+
+    Tight trigger (cheap, false-positive-resistant): fire ONLY when
+
+      * the windowed result is empty (``windowed_count == 0``), AND
+      * no user filters are applied, AND
+      * the all-time latest log (from the status cache) is non-null AND
+        falls inside the queried ``[start_time, end_time]``.
+
+    Rationale: if the window contains the all-time-latest log but the view
+    returns nothing, the view MUST be stale — the latest log should be in
+    it. A legitimately low-traffic / gap window will NOT contain the
+    all-time latest log, so this returns False and no rebuild fires. This
+    keeps the rebuild rare in prod (only when the view is actually broken)
+    and reliable for the fresh/single-log case where the status cache
+    already shows data but the cached view SQL hasn't been rebuilt yet
+    (dev runs no crons, so it never self-corrects otherwise).
+    """
+    if windowed_count != 0:
+        return False
+    if filters:
+        return False
+    return _latest_log_in_window(latest_log_at, start_time, end_time)
+
+
+def force_rebuild_view(con: duckdb.DuckDBPyConnection, src: dict) -> None:
+    """Force ONE synchronous rebuild of the per-service Iceberg view.
+
+    Busts the cached view SQL first (``keep_snapshot_cache=True`` mirrors
+    the get_sync_status / QueryRunner self-heal pattern — preserve the
+    snapshot/path cache so a transient catalog blip can't collapse the
+    view to "WHERE false"), then force-rebuilds under the per-service
+    lock. Swallows errors: a failed rebuild leaves the caller on the
+    existing (empty) path rather than 500ing.
+    """
+    try:
+        from backend.core import iceberg as db_iceberg
+
+        db_iceberg.clear_source_caches(src.get("name", "default"), keep_snapshot_cache=True)
+        db_iceberg.update_iceberg_view(con, src, force=True)
+    except Exception:
+        _logger.debug("[self-heal] force view rebuild failed", exc_info=True)
 
 
 class QueryRunner:
@@ -1205,13 +1305,13 @@ class QueryRunner:
             # matching types per column.
             branches = []
             if day_paths:
-                paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in day_paths)
+                paths_sql = quote_path_list(day_paths)
                 branches.append(
                     f"SELECT field, value, CAST(count AS BIGINT) AS count "
                     f"FROM read_parquet([{paths_sql}], hive_partitioning=1)"
                 )
             if hour_paths:
-                paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in hour_paths)
+                paths_sql = quote_path_list(hour_paths)
                 branches.append(
                     f"SELECT field, value, CAST(count AS BIGINT) AS count "
                     f"FROM read_parquet([{paths_sql}], hive_partitioning=1)"
@@ -1221,7 +1321,7 @@ class QueryRunner:
                 # bundler SELECTs it from the per-field source files).
                 # hive_partitioning=0 because the only hive segment here
                 # is `hour=...` which we don't need for the projection.
-                paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in bundled_hour_paths)
+                paths_sql = quote_path_list(bundled_hour_paths)
                 branches.append(
                     f"SELECT field, value, CAST(count AS BIGINT) AS count "
                     f"FROM read_parquet([{paths_sql}], hive_partitioning=0)"
@@ -1229,7 +1329,7 @@ class QueryRunner:
             if bundled_day_paths:
                 # Same shape as bundled_hour (field/value/count as
                 # columns, no hive partitioning on the projection).
-                paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in bundled_day_paths)
+                paths_sql = quote_path_list(bundled_day_paths)
                 branches.append(
                     f"SELECT field, value, CAST(count AS BIGINT) AS count "
                     f"FROM read_parquet([{paths_sql}], hive_partitioning=0)"
@@ -1571,7 +1671,7 @@ class QueryRunner:
         # (out_bucket, num, den) for the UNION ALL.
         select_clauses: list[str] = []
         if rollup_paths:
-            paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in rollup_paths)
+            paths_sql = quote_path_list(rollup_paths)
             select_clauses.append(
                 f"SELECT time_bucket(INTERVAL '{interval}', bucket) AS out_bucket, "
                 f"       {parts['num_rollup']} AS num, {parts['den_rollup']} AS den "
@@ -1655,6 +1755,45 @@ class QueryRunner:
     # for the 7 d / 30 d cases that actually hurt.
     _SLOW_URLS_ROLLUP_MIN_HOURS = 48
 
+    def _eligible_rollup_window(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        require_top_asns: list[int] | None = None,
+    ) -> tuple[datetime, datetime] | None:
+        """Shared eligibility preamble for the ``try_*_from_rollup`` readers.
+
+        Returns the parsed ``(st, et)`` UTC window when every guard passes,
+        else ``None`` (caller falls back to its live/TEMP path). Guards, in
+        order: unfiltered only; both bounds present; optional non-empty
+        ``require_top_asns`` (network readers pass their top-N list); both
+        bounds parse as ISO-8601 UTC with ``et > st``; window spans at least
+        :attr:`_SLOW_URLS_ROLLUP_MIN_HOURS` and at most 366 days. Every guard
+        is a side-effect-free ``return None``, so the short-circuit order is
+        equivalent to the per-method preambles it replaces.
+        """
+        from datetime import timedelta
+
+        from backend.utils.date_utils import parse_iso_utc
+
+        if has_filters:
+            return None
+        if not start_time or not end_time:
+            return None
+        if require_top_asns is not None and not require_top_asns:
+            return None
+        st = parse_iso_utc(start_time)
+        et = parse_iso_utc(end_time)
+        if st is None or et is None or et <= st:
+            return None
+        if (et - st) < timedelta(hours=self._SLOW_URLS_ROLLUP_MIN_HOURS):
+            return None
+        if (et - st) > timedelta(days=366):
+            return None
+        return st, et
+
     def try_slow_urls_from_rollup(
         self,
         start_time: str | None,
@@ -1706,20 +1845,11 @@ class QueryRunner:
         from datetime import UTC, datetime, timedelta
 
         from backend.core.rollups import SLOW_URLS_BUNDLE_FILENAME, _hour_bundled_root
-        from backend.utils.date_utils import parse_iso_utc
 
-        if has_filters:
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
             return None
-        if not start_time or not end_time:
-            return None
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
-        if st is None or et is None or et <= st:
-            return None
-        if (et - st) < timedelta(hours=self._SLOW_URLS_ROLLUP_MIN_HOURS):
-            return None
-        if (et - st) > timedelta(days=366):
-            return None
+        st, et = win
 
         bundled_root = _hour_bundled_root(self.src)
         if not os.path.isdir(bundled_root):
@@ -1766,7 +1896,7 @@ class QueryRunner:
         # average so a URL that's slow for a few requests in one hour
         # doesn't outrank a URL that's consistently slow across the
         # period.
-        paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in rollup_paths)
+        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT url, "
             f"       CAST(SUM(requests) AS BIGINT) AS requests, "
@@ -1904,29 +2034,18 @@ class QueryRunner:
         added ``_approx: True`` marker. ``None`` means caller should
         run its existing path.
         """
-        from datetime import timedelta
-
         from backend.core.rollups._common import ORIGIN_SUMMARY_BUNDLE_FILENAME
-        from backend.utils.date_utils import parse_iso_utc
 
-        if has_filters:
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
             return None
-        if not start_time or not end_time:
-            return None
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
-        if st is None or et is None or et <= st:
-            return None
-        if (et - st) < timedelta(hours=self._SLOW_URLS_ROLLUP_MIN_HOURS):
-            return None
-        if (et - st) > timedelta(days=366):
-            return None
+        st, et = win
 
         rollup_paths = self._collect_rollup_paths(st, et, ORIGIN_SUMMARY_BUNDLE_FILENAME)
         if rollup_paths is None:
             return None
 
-        paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in rollup_paths)
+        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT "
             f"  CAST(SUM(requests) AS BIGINT)                                AS requests, "
@@ -1997,6 +2116,508 @@ class QueryRunner:
             "_approx": True,
         }
 
+    def try_origin_pop_latency_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        limit: int,
+    ) -> dict | None:
+        """Serve the /api/origin/aggregates ``pop_latency`` panel from the
+        per-hour + per-day origin_pop rollup (per-(pop, hour) ``lat_us``
+        percentiles).
+
+        Same eligibility posture as :meth:`try_origin_summary_from_rollup`
+        (unfiltered, >= 48 h, <= 366 d, >= 50 % closed-hour coverage,
+        day-prefer + hour-fallback walk). Percentiles are request-weight-
+        averaged across hours/files (biased → ``_approx``); counts SUM exact.
+        Ranks by p95 DESC LIMIT, mirroring POP_LATENCY's live ORDER BY.
+
+        Returns the same dict shape as
+        :func:`backend.repositories.origin._origin_pop_latency_from_temp`
+        (``{has_data, requires_group_c, median_p95_ms, rows:[{pop, requests,
+        p50_ms, p95_ms, elevated}], _approx}``) or ``None`` on any eligibility
+        miss / read error.
+        """
+        from backend.core.rollups._common import ORIGIN_POP_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, ORIGIN_POP_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        sql = (
+            f"SELECT pop, "
+            f"       CAST(SUM(requests) AS BIGINT) AS requests, "
+            f"       SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w, "
+            f"       SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"GROUP BY pop "
+            f"ORDER BY p95_us_w DESC "
+            f"LIMIT ?"
+        )
+        try:
+            rows = self.execute(sql, [limit]).fetchall()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[origin_pop_rollup] read failed, falling back: %s", e)
+            return None
+
+        if not rows:
+            return None
+
+        # median_p95_ms + elevated flag computed exactly as the live/TEMP path
+        # (origin._origin_pop_latency_from_temp): p95 values are us here, so
+        # convert to ms first to keep the threshold math identical.
+        p95_ms_list = [(float(r[3]) / 1000.0) for r in rows if r[3] is not None]
+        valid_p95s = sorted(p95_ms_list)
+        median_p95 = valid_p95s[len(valid_p95s) // 2] if valid_p95s else 0
+        out_rows = []
+        for r in rows:
+            p95_ms = (float(r[3]) / 1000.0) if r[3] is not None else None
+            out_rows.append(
+                {
+                    "pop": r[0],
+                    "requests": int(r[1] or 0),
+                    "p50_ms": (float(r[2]) / 1000.0) if r[2] is not None else None,
+                    "p95_ms": p95_ms,
+                    "elevated": p95_ms is not None and median_p95 is not None and p95_ms > median_p95 * 2,
+                }
+            )
+        return {
+            "has_data": True,
+            "requires_group_c": False,
+            "median_p95_ms": median_p95,
+            "rows": out_rows,
+            "_approx": True,
+        }
+
+    def try_origin_ip_health_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        limit: int,
+    ) -> dict | None:
+        """Serve the /api/origin/aggregates ``ip_health`` panel from the
+        per-hour + per-day origin_ip rollup (per-(oip, hour) ``lat_us``
+        percentiles + carried 5xx/total counts).
+
+        Same eligibility posture as :meth:`try_origin_pop_latency_from_rollup`.
+        Percentiles are request-weight-averaged (biased → ``_approx``);
+        ``error_pct`` is EXACT across hours = SUM(ost_5xx_count) /
+        SUM(ost_total_count). Re-applies the live IP_HEALTH window-level
+        ``HAVING SUM(requests) >= 10`` + ``ORDER BY error_pct DESC LIMIT`` (the
+        writer pre-cut each hour at >= 5 + top-K; see origin_dims docstring for
+        the per-hour-floor approximation).
+
+        Returns the same dict shape as
+        :func:`backend.repositories.origin._origin_ip_health_from_temp`
+        (``{has_data, rows:[{oip, requests, p50_ms, p95_ms, error_pct}],
+        _approx}``) or ``None`` on any eligibility miss / read error.
+        """
+        from backend.core.rollups._common import ORIGIN_IP_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, ORIGIN_IP_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        # error_pct mirrors IP_HEALTH's ROUND(... , 1); HAVING + ORDER + LIMIT
+        # re-applied at the window grain (the live HAVING is COUNT >= 10).
+        paths_sql = quote_path_list(rollup_paths)
+        sql = (
+            f"SELECT oip, "
+            f"       CAST(SUM(requests) AS BIGINT) AS requests, "
+            f"       SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w, "
+            f"       SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w, "
+            f"       ROUND(SUM(ost_5xx_count) * 100.0 / NULLIF(SUM(ost_total_count), 0), 1) AS error_pct "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"GROUP BY oip "
+            f"HAVING SUM(requests) >= 10 "
+            f"ORDER BY error_pct DESC "
+            f"LIMIT ?"
+        )
+        try:
+            rows = self.execute(sql, [limit]).fetchall()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[origin_ip_rollup] read failed, falling back: %s", e)
+            return None
+
+        if not rows:
+            return None
+
+        out_rows = [
+            {
+                "oip": r[0],
+                "requests": int(r[1] or 0),
+                "p50_ms": (float(r[2]) / 1000.0) if r[2] is not None else None,
+                "p95_ms": (float(r[3]) / 1000.0) if r[3] is not None else None,
+                "error_pct": float(r[4]) if r[4] is not None else None,
+            }
+            for r in rows
+        ]
+        return {"has_data": len(out_rows) > 0, "rows": out_rows, "_approx": True}
+
+    def try_origin_path_breakdown_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> dict | None:
+        """Serve the /api/origin/aggregates ``path_breakdown`` panel from the
+        per-hour + per-day origin_path rollup (per-(edge, hour) ``lat_us``
+        percentiles).
+
+        Same eligibility posture as :meth:`try_origin_pop_latency_from_rollup`.
+        Percentiles are request-weight-averaged (biased → ``_approx``); counts
+        SUM exact. NO top-K / HAVING (2 rows max). ``shielding_detected`` is
+        derived from the presence of an ``edge = false`` row, matching
+        :func:`backend.repositories.origin._origin_path_breakdown_from_temp`.
+
+        Returns the same dict shape as the temp path
+        (``{has_data, shielding_detected, rows:[{edge, requests, p50_ms,
+        p95_ms}], _approx}``) or ``None`` on any eligibility miss / read error.
+        """
+        from backend.core.rollups._common import ORIGIN_PATH_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, ORIGIN_PATH_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        sql = (
+            f"SELECT edge, "
+            f"       CAST(SUM(requests) AS BIGINT) AS requests, "
+            f"       SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w, "
+            f"       SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"GROUP BY edge"
+        )
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[origin_path_rollup] read failed, falling back: %s", e)
+            return None
+
+        if not rows:
+            return None
+
+        shielding_detected = any(r[0] is False for r in rows)
+        out_rows = [
+            {
+                "edge": r[0],
+                "requests": int(r[1] or 0),
+                "p50_ms": (float(r[2]) / 1000.0) if r[2] is not None else None,
+                "p95_ms": (float(r[3]) / 1000.0) if r[3] is not None else None,
+            }
+            for r in rows
+        ]
+        return {
+            "has_data": len(out_rows) > 0,
+            "shielding_detected": shielding_detected,
+            "rows": out_rows,
+            "_approx": True,
+        }
+
+    def try_origin_status_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> dict | None:
+        """Serve the /api/origin/aggregates ``status_codes`` panel from the
+        existing ``all_fields.parquet`` per-field bundle (no dedicated writer —
+        ``ost`` is already a dashboard FIELDS column maintained by the count
+        rollup + backfill).
+
+        Reads ``field='ost' AND value IS NOT NULL`` from the closed-hour /
+        closed-day bundles, normalizes ``value`` into the STATUS_CODES bucket
+        (``CASE WHEN TRY_CAST(value AS INTEGER) BETWEEN 100 AND 599 THEN that
+        ELSE -1 END``), ``SUM(count)`` per status, and computes ``pct =
+        count * 100 / SUM(count) OVER ()``. The cross-hour math is a pure SUM
+        of integer counts → **EXACT** (no ``_approx`` flag).
+
+        Same eligibility posture as :meth:`try_origin_summary_from_rollup`
+        (unfiltered, >= 48 h, <= 366 d, >= 50 % closed-hour coverage,
+        day-prefer + hour-fallback walk; active hour skipped — closed hours
+        only, so no temp is needed). Returns the same dict shape as
+        :func:`backend.repositories.origin._origin_status_codes_from_temp`
+        (``{has_data, rows:[{status, count, pct}]}``) or ``None`` on any
+        eligibility miss / read error.
+        """
+        from backend.core.rollups._common import DAY_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        # all_fields.parquet is the shared per-field bundle (schema:
+        # field, hour, value, count). Day-prefer / hour-fallback walk.
+        rollup_paths = self._collect_rollup_paths(st, et, DAY_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        sql = (
+            f"SELECT status, "
+            f"       CAST(SUM(count) AS BIGINT) AS count, "
+            f"       SUM(count) * 100.0 / SUM(SUM(count)) OVER () AS pct "
+            f"FROM ("
+            f"  SELECT CASE "
+            f"           WHEN TRY_CAST(value AS INTEGER) BETWEEN 100 AND 599 "
+            f"             THEN TRY_CAST(value AS INTEGER) "
+            f"           ELSE -1 "
+            f"         END AS status, "
+            f"         count "
+            f"  FROM read_parquet([{paths_sql}]) "
+            f"  WHERE field = 'ost' AND value IS NOT NULL"
+            f") "
+            f"GROUP BY status "
+            f"ORDER BY count DESC"
+        )
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[origin_status_rollup] read failed, falling back: %s", e)
+            return None
+
+        if not rows:
+            return None
+
+        return {
+            "has_data": True,
+            "rows": [
+                {"status": int(r[0]), "count": int(r[1]), "pct": float(r[2]) if r[2] is not None else None}
+                for r in rows
+            ],
+        }
+
+    def try_origin_latency_ts_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        bucket_minutes: float,
+        metric: str,
+        percentile: str,
+        split_by_leg: bool,
+        table_name: str,
+        where_clause: str,
+        params: list,
+    ) -> dict | None:
+        """Serve the /api/origin/aggregates ``timeseries`` panel from the
+        minute-granular origin_latency_ts rollup, filling the in-progress
+        (active) UTC hour live from the base table.
+
+        Hybrid shape — no existing reader did time-series + percentile. It
+        combines :meth:`try_time_series_from_rollup`'s active-hour-merge
+        re-bucket shape with the request-weighted percentile merge math of
+        :meth:`try_slow_urls_from_rollup` (``SUM(p_us*cnt)/SUM(cnt)``).
+
+        Eligibility → return ``None`` (caller falls to the temp path):
+          * ``has_filters`` (rollups are unfiltered).
+          * ``split_by_leg`` True (rollup aggregates over edge; the page
+            sends ``split_by_leg=false`` so this only ever hits on a non-
+            default request).
+          * ``bucket_minutes < 1`` (sub-minute — the rollup is minute-grain,
+            no intra-minute resolution to give back) or a non-integer-minute
+            bucket.
+          * ``_eligible_rollup_window`` (unfiltered, >= 48 h, <= 366 d).
+          * Any closed hour in the window missing its rollup file — FAIL-CLOSED
+            (a time-series undercount misleads; matches
+            :meth:`try_time_series_from_rollup`, NOT slow_urls' 50 % floor).
+
+        Per-metric columns: ``metric == 'ttfb'`` → ``ttfb_count`` /
+        ``ttfb_p{50,95,99}_us``; ``metric == 'ttlb'`` → the ``ttlb_*`` block.
+        The percentile column is picked from ``percentile``.
+
+        Returns the same dict shape as
+        :func:`backend.repositories.origin._origin_timeseries_from_temp`
+        (``{has_data, series:[{time, miss_count, value}], _approx}``) or
+        ``None`` on any eligibility miss / read error. Percentiles are
+        request-weighted approximations across minutes → ``_approx: True``.
+        """
+        import os
+        from datetime import UTC, datetime
+
+        from backend.core.rollups import ORIGIN_LATENCY_TS_BUNDLE_FILENAME, _hour_bundled_root
+
+        if split_by_leg:
+            return None
+        if metric not in ("ttfb", "ttlb"):
+            return None
+        if percentile not in ("p50", "p95", "p99"):
+            return None
+        # Minute-grain rollup: sub-minute buckets have no resolution to give
+        # back, and a non-integer-minute bucket can't re-bucket exactly.
+        try:
+            bm = float(bucket_minutes)
+        except (TypeError, ValueError):
+            return None
+        if bm < 1 or bm != int(bm):
+            return None
+        n_min = int(bm)
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        bundled_root = _hour_bundled_root(self.src)
+        if not os.path.isdir(bundled_root):
+            return None
+
+        # Fail-closed on any missing closed hour (collect_hourly_bundle_paths
+        # returns None when a closed hour had data but no bundle on disk). The
+        # crosses_active flag tells us whether to splice in the live tail.
+        collected = collect_hourly_bundle_paths(self.src, st, et, bundled_root, ORIGIN_LATENCY_TS_BUNDLE_FILENAME)
+        if collected is None:
+            return None
+        rollup_paths, crosses_active = collected
+        if not rollup_paths and not crosses_active:
+            return None
+
+        cnt_col = f"{metric}_count"
+        pcol = f"{metric}_{percentile}_us"
+
+        st_tz = st.astimezone(UTC).isoformat()
+        et_tz = et.astimezone(UTC).isoformat()
+
+        # Each branch emits raw (out_bucket, num, den) per re-bucketed slot; the
+        # outer query re-aggregates with SUM(num)/SUM(den) so a coarse bucket
+        # straddling the closed/active boundary combines into one row.
+        select_clauses: list[str] = []
+        if rollup_paths:
+            paths_sql = quote_path_list(rollup_paths)
+            select_clauses.append(
+                f"SELECT time_bucket(INTERVAL '{n_min} minutes', bucket_ts) AS out_bucket, "
+                f"       SUM({pcol} * {cnt_col}) AS num, SUM({cnt_col}) AS den "
+                f"FROM read_parquet([{paths_sql}]) "
+                f"WHERE bucket_ts >= TIMESTAMPTZ '{st_tz}' "
+                f"  AND bucket_ts <  TIMESTAMPTZ '{et_tz}' "
+                f"GROUP BY 1"
+            )
+
+        if crosses_active:
+            # Live SQL for the [active_hour_start, et) slice over the base
+            # table, mirroring _origin_timeseries_from_temp's lat derivation
+            # for this metric so the buckets align exactly with the rollup.
+            # First per-MINUTE percentile + count (request-weight unit), then
+            # re-bucket to the caller's width — matching the rollup branch's
+            # weighting so the outer SUM(num)/SUM(den) composes correctly.
+            active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+            live_start = max(st, active_hour_start)
+            live_st_tz = live_start.astimezone(UTC).isoformat()
+            live_et_tz = et.astimezone(UTC).isoformat()
+
+            cols = self.get_schema_cols()
+            lat = self._origin_ts_live_lat_expr(metric, set(cols))
+            if lat is None:
+                # The live tail can't be computed (metric column absent); the
+                # rollup-only result would be missing the active hour, so fail
+                # closed rather than undercount the chart's tail.
+                return None
+            pct_val = {"p50": 0.5, "p95": 0.95, "p99": 0.99}[percentile]
+            per_min_pct = f"MEDIAN({lat})" if percentile == "p50" else f"APPROX_QUANTILE({lat}, {pct_val})"
+
+            select_clauses.append(
+                f"SELECT time_bucket(INTERVAL '{n_min} minutes', m) AS out_bucket, "
+                f"       SUM(p_us * cnt) AS num, SUM(cnt) AS den "
+                f"FROM ("
+                f"  SELECT date_trunc('minute', timestamp) AS m, "
+                f"         {per_min_pct} AS p_us, COUNT(*) AS cnt "
+                f"  FROM {table_name} "
+                f"  WHERE {where_clause} "
+                f"    AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
+                f"    AND timestamp <  TIMESTAMPTZ '{live_et_tz}' "
+                f"    AND ({lat}) IS NOT NULL "
+                f"  GROUP BY 1"
+                f") GROUP BY 1"
+            )
+
+        if not select_clauses:
+            return {"has_data": False, "series": [], "_approx": True}
+
+        unioned = " UNION ALL ".join(f"({c})" for c in select_clauses)
+        final_sql = (
+            f"SELECT out_bucket, "
+            f"       ROUND(SUM(num) / NULLIF(SUM(den), 0) / 1000.0, 3) AS value, "
+            f"       CAST(SUM(den) AS BIGINT) AS miss_count "
+            f"FROM ({unioned}) "
+            f"WHERE out_bucket IS NOT NULL "
+            f"GROUP BY out_bucket "
+            f"ORDER BY out_bucket"
+        )
+
+        try:
+            rows = self.execute(final_sql, params if crosses_active else []).fetchall()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[origin_latency_ts_rollup] read failed, falling back to raw: %s", e)
+            return None
+
+        series: list[dict] = []
+        for r in rows:
+            if r[0] is None:
+                continue
+            series.append(
+                {
+                    "time": safe_iso(r[0]),
+                    "miss_count": int(r[2]) if r[2] is not None else 0,
+                    "value": float(r[1]) if r[1] is not None else None,
+                }
+            )
+        return {"has_data": len(series) > 0, "series": series, "_approx": True}
+
+    @staticmethod
+    def _origin_ts_live_lat_expr(metric: str, cols: set[str]) -> str | None:
+        """Live-tail latency-us expression for the origin timeseries reader's
+        active-hour merge, matching the origin_latency_ts WRITER's per-metric
+        lat (ttfb = COALESCE("ottfb","ttfb"*1e6); ttlb = "ottlb"). Returns
+        ``None`` when the metric's column is absent.
+        """
+        if metric == "ttfb":
+            if "ottfb" in cols and "ttfb" in cols:
+                return 'COALESCE("ottfb", "ttfb" * 1000000.0)'
+            if "ottfb" in cols:
+                return '"ottfb"'
+            if "ttfb" in cols:
+                return '"ttfb" * 1000000.0'
+            return None
+        # ttlb
+        if "ottlb" in cols:
+            return '"ottlb"'
+        return None
+
     def try_network_rtt_from_rollup(
         self,
         start_time: str | None,
@@ -2020,23 +2641,12 @@ class QueryRunner:
         of per-hour percentiles. Returns ``None`` on any eligibility
         miss (caller falls back to live SQL).
         """
-        from datetime import timedelta
-
         from backend.core.rollups._common import NETWORK_RTT_BUNDLE_FILENAME
-        from backend.utils.date_utils import parse_iso_utc
 
-        if has_filters:
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, require_top_asns=top_asns)
+        if win is None:
             return None
-        if not start_time or not end_time or not top_asns:
-            return None
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
-        if st is None or et is None or et <= st:
-            return None
-        if (et - st) < timedelta(hours=self._SLOW_URLS_ROLLUP_MIN_HOURS):
-            return None
-        if (et - st) > timedelta(days=366):
-            return None
+        st, et = win
 
         # Same day-prefer / hour-fallback walk as the other percentile
         # rollups. Network_rtt has no day-level compaction yet, but the
@@ -2048,7 +2658,7 @@ class QueryRunner:
 
         # Parameterise the top-N ASN list; never interpolate ints into SQL.
         asn_placeholders = ", ".join(["?"] * len(top_asns))
-        paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in rollup_paths)
+        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT asn, "
             f"  SUM(p95_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS p95_us, "
@@ -2094,30 +2704,19 @@ class QueryRunner:
         live SQL's row shape; the live caller iterates them into a
         dict keyed by asn. Returns ``None`` on any eligibility miss.
         """
-        from datetime import timedelta
-
         from backend.core.rollups._common import NETWORK_SPEED_BUNDLE_FILENAME
-        from backend.utils.date_utils import parse_iso_utc
 
-        if has_filters:
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, require_top_asns=top_asns)
+        if win is None:
             return None
-        if not start_time or not end_time or not top_asns:
-            return None
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
-        if st is None or et is None or et <= st:
-            return None
-        if (et - st) < timedelta(hours=self._SLOW_URLS_ROLLUP_MIN_HOURS):
-            return None
-        if (et - st) > timedelta(days=366):
-            return None
+        st, et = win
 
         rollup_paths = self._collect_rollup_paths(st, et, NETWORK_SPEED_BUNDLE_FILENAME)
         if rollup_paths is None:
             return None
 
         asn_placeholders = ", ".join(["?"] * len(top_asns))
-        paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in rollup_paths)
+        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT asn, c_speed, CAST(SUM(count) AS BIGINT) AS cnt "
             f"FROM read_parquet([{paths_sql}]) "
@@ -2203,7 +2802,7 @@ class QueryRunner:
         if rollup_paths is None:
             return None
 
-        paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in rollup_paths)
+        paths_sql = quote_path_list(rollup_paths)
         st_iso = st.isoformat()
         et_iso = et.isoformat()
         active_iso = active_hour_start.isoformat()
@@ -2263,35 +2862,24 @@ class QueryRunner:
         p99_ms}], "_approx": True}`` or ``None`` on any eligibility miss /
         read error.
         """
-        from datetime import timedelta
-
         from backend.core.rollups._common import (
             PERF_TOP_ASNS_BUNDLE_FILENAME,
             PERF_TOP_URLS_BUNDLE_FILENAME,
         )
-        from backend.utils.date_utils import parse_iso_utc
 
-        if has_filters:
-            return None
-        if not start_time or not end_time:
-            return None
         filename = PERF_TOP_URLS_BUNDLE_FILENAME if dimension == "url" else PERF_TOP_ASNS_BUNDLE_FILENAME
         # Whitelist → safe to interpolate; default p99 mirrors the live sort.
         sort_col = {"avg": "avg_us", "p50": "p50_us_w", "p95": "p95_us_w", "p99": "p99_us_w"}.get(sort_by, "p99_us_w")
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
-        if st is None or et is None or et <= st:
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
             return None
-        if (et - st) < timedelta(hours=self._SLOW_URLS_ROLLUP_MIN_HOURS):
-            return None
-        if (et - st) > timedelta(days=366):
-            return None
+        st, et = win
 
         rollup_paths = self._collect_rollup_paths(st, et, filename)
         if rollup_paths is None:
             return None
 
-        paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in rollup_paths)
+        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT value, "
             f"       CAST(SUM(requests) AS BIGINT) AS requests, "
@@ -2328,6 +2916,245 @@ class QueryRunner:
             for r in rows
         ]
         return {"rows": out_rows, "_approx": True}
+
+    def try_security_req_size_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> list[dict] | None:
+        """Serve /api/security/aggregates' ``req_size`` panel from per-hour +
+        per-day security_req_size parquets (req_header_bytes histogram buckets).
+
+        Same eligibility posture as :meth:`try_network_speed_from_rollup`
+        (unfiltered, >= 48 h, <= 366 d, >= 50 % closed-hour coverage, day-prefer
+        + hour-fallback walk). Math is EXACT across hours — ``count`` SUMs and
+        the bucket order is by MIN(min_val), the same lower-bound ordering the
+        live ``REQ_HEADER_SIZE_DIST`` (``ORDER BY min_val``) produces. No
+        ``_approx`` flag.
+
+        Returns ``[{"bucket": str, "count": int}, ...]`` ordered by min_val
+        ascending (matching the live SQL's row shape after the caller drops
+        min_val), or ``None`` on any eligibility miss / read error.
+        """
+        from backend.core.rollups._common import SECURITY_REQ_SIZE_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_REQ_SIZE_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        sql = (
+            f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c, MIN(min_val) AS mv "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"GROUP BY bucket "
+            f"ORDER BY mv"
+        )
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[security_req_size_rollup] read failed, falling back: %s", e)
+            return None
+        if not rows:
+            return None
+        return [{"bucket": r[0], "count": int(r[1] or 0)} for r in rows]
+
+    def try_security_conn_reuse_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> list[dict] | None:
+        """Serve /api/security/aggregates' ``conn_reuse`` panel from per-hour +
+        per-day security_conn_reuse parquets (conn_requests reuse buckets).
+
+        Same eligibility + EXACT-count posture as
+        :meth:`try_security_req_size_from_rollup`. Bucket order is by
+        MIN(min_val) ascending, matching the live ``CONN_REUSE_DIST``
+        (``ORDER BY min_val``). No ``_approx`` flag.
+
+        Returns ``[{"bucket": str, "count": int}, ...]`` ordered by min_val
+        ascending, or ``None`` on any eligibility miss / read error.
+        """
+        from backend.core.rollups._common import SECURITY_CONN_REUSE_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_CONN_REUSE_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        sql = (
+            f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c, MIN(min_val) AS mv "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"GROUP BY bucket "
+            f"ORDER BY mv"
+        )
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[security_conn_reuse_rollup] read failed, falling back: %s", e)
+            return None
+        if not rows:
+            return None
+        return [{"bucket": r[0], "count": int(r[1] or 0)} for r in rows]
+
+    def try_security_top_ips_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> list[dict] | None:
+        """Serve /api/security/aggregates' top-IPs-by-max-header panel from
+        per-hour + per-day security_topips parquets.
+
+        Same eligibility posture as :meth:`try_security_req_size_from_rollup`.
+        The cross-hour merge is MAX-of-MAX (NOT SUM) — re-ranked top-10 by
+        max_header DESC, matching the live ``TOP_IPS_BY_MAX_HEADER``
+        (``MAX(req_header_bytes) ... ORDER BY 2 DESC LIMIT 10``). EXACT; no
+        ``_approx`` flag.
+
+        Returns ``[{"ip": str, "max_header": int}, ...]`` top-10 by max_header
+        descending, or ``None`` on any eligibility miss / read error.
+        """
+        from backend.core.rollups._common import SECURITY_TOPIPS_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_TOPIPS_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        sql = (
+            f"SELECT ip, CAST(MAX(max_header) AS BIGINT) AS mh "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"GROUP BY ip "
+            f"ORDER BY mh DESC "
+            f"LIMIT 10"
+        )
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[security_top_ips_rollup] read failed, falling back: %s", e)
+            return None
+        if not rows:
+            return None
+        return [{"ip": r[0], "max_header": int(r[1] or 0)} for r in rows]
+
+    def try_security_coverage_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> tuple[int, int] | None:
+        """Serve /api/security/aggregates' TLS-fingerprint coverage counts from
+        per-hour + per-day security_cov parquets.
+
+        Same eligibility posture as :meth:`try_security_req_size_from_rollup`.
+        ``total_rows`` and ``tls_populated`` SUM exactly across hours, matching
+        the live ``FINGERPRINT_COVERAGE_BULK`` over ``tls_ciphers_sha``. EXACT.
+
+        Returns ``(total_rows, tls_populated)`` summed across the window, or
+        ``None`` on any eligibility miss / read error / zero-or-NULL total
+        (so the caller's no-coverage shape matches the live path).
+        """
+        from backend.core.rollups._common import SECURITY_COV_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_COV_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        sql = f"SELECT SUM(total_rows), SUM(tls_populated) FROM read_parquet([{paths_sql}])"
+        try:
+            row = self.execute(sql).fetchone()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[security_coverage_rollup] read failed, falling back: %s", e)
+            return None
+        if row is None or row[0] is None or int(row[0]) == 0:
+            return None
+        return int(row[0]), int(row[1] or 0)
+
+    def try_perf_ttl_dist_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> list[dict] | None:
+        """Serve /api/performance/aggregates' ``ttl_dist`` histogram panel from
+        per-hour + per-day perf_ttl_dist parquets (the ``ttl`` histogram buckets).
+
+        Same eligibility posture as :meth:`try_network_speed_from_rollup`
+        (unfiltered, >= 48 h, <= 366 d, >= 50 % closed-hour coverage, day-prefer
+        + hour-fallback walk) but with NO ``top_asns`` requirement. Math is EXACT
+        across hours — ``count`` SUMs and the bucket order is by MIN(min_ttl), the
+        same lower-bound ordering the live ttl_dist histogram (``ORDER BY
+        min_ttl``) produces. No ``_approx`` flag.
+
+        Closed-hours-only via :meth:`_collect_rollup_paths` (it skips the active
+        hour); no active-hour merge — the live <48 h path covers narrow windows.
+
+        Returns ``[{"bucket": str, "count": int}, ...]`` ordered by min_ttl
+        ascending (matching the live SQL's row shape after the caller drops
+        min_ttl), or ``None`` on any eligibility miss / read error.
+        """
+        from backend.core.rollups._common import PERF_TTL_DIST_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, PERF_TTL_DIST_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        sql = (
+            f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS count "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"GROUP BY bucket "
+            f"ORDER BY MIN(min_ttl)"
+        )
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[perf_ttl_dist_rollup] read failed, falling back: %s", e)
+            return None
+        return [{"bucket": r[0], "count": int(r[1])} for r in rows]
 
     def execute_ip_spread_rollups(
         self,
@@ -2496,14 +3323,14 @@ class QueryRunner:
 
         branches: list[str] = []
         if bundled_paths:
-            paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in bundled_paths)
+            paths_sql = quote_path_list(bundled_paths)
             branches.append(
                 f"SELECT field, value, ip_sketch, sample_capped "
                 f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
                 f"WHERE field IN {field_filter_sql}"
             )
         if per_field_paths:
-            paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in per_field_paths)
+            paths_sql = quote_path_list(per_field_paths)
             branches.append(
                 f"SELECT field, value, ip_sketch, sample_capped "
                 f"FROM read_parquet([{paths_sql}], hive_partitioning=1) "

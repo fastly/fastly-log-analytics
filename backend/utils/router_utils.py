@@ -15,7 +15,7 @@ import uuid
 from collections.abc import Callable, Collection
 from functools import wraps
 from logging import Logger
-from typing import NoReturn
+from typing import Any, NoReturn, get_args
 
 from fastapi import HTTPException
 
@@ -230,6 +230,50 @@ def expand_sections(
             detail={"error": "unknown_section", "unknown": sorted(unknown)},
         )
     return couple(expanded) if couple else expanded
+
+
+def make_section_expander(
+    section_literal: Any,
+    *,
+    union_groups: tuple[frozenset[str], ...] = (),
+    implies: tuple[tuple[frozenset[str], str], ...] = (),
+) -> Callable[[Collection[str] | None], set[str] | None]:
+    """Build a router's section-selector validator from its section ``Literal``.
+
+    Removes the ``frozenset(get_args(...))`` + ``_expand_sections`` wrapper
+    boilerplate each section-selector router repeated. Couplings are declared
+    per router (keep each group's rationale comment on its constant at the call
+    site):
+
+    * ``union_groups`` — symmetric: selecting any member auto-includes the whole
+      group (e.g. ``top_urls``/``top_asns`` share one temp materialization).
+    * ``implies`` — asymmetric ``(trigger_set, member)``: selecting any member of
+      ``trigger_set`` adds ``member`` (e.g. any fingerprint card pulls in
+      ``fingerprint_coverage``).
+
+    Each coupling targets a disjoint set, so the application order is immaterial.
+    Returns the ``_expand_sections`` callable; ``None`` selector → full response.
+    """
+    valid = frozenset(get_args(section_literal))
+
+    couple: Callable[[set[str]], set[str]] | None
+    if not union_groups and not implies:
+        couple = None
+    else:
+
+        def couple(expanded: set[str]) -> set[str]:
+            for group in union_groups:
+                if expanded & group:
+                    expanded |= group
+            for trigger, member in implies:
+                if expanded & trigger:
+                    expanded.add(member)
+            return expanded
+
+    def _expand(sections: Collection[str] | None) -> set[str] | None:
+        return expand_sections(sections, valid, couple=couple)
+
+    return _expand
 
 
 # ── Debug request formatting ──────────────────────────────────────────────────

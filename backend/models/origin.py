@@ -54,6 +54,15 @@ class OriginShieldingAnalysisResponse(HasDataMixin, BaseResponse):
     requires_fields: list[str] = []
     edge_only: bool = False
     rows: list[dict[str, Any]] = []
+    # M1 (shielding audit 2026-06-30): full distinct-pair count + a flag
+    # set when the returned rows are a (volume ∪ overhead) subset of all
+    # routes. Declared so FastAPI doesn't strip them on the
+    # /api/origin/shielding-analysis success path.
+    total_routes: int | None = None
+    truncated: bool | None = None
+    # M2: handler-level failure sentinel so a broken analysis is
+    # distinguishable from "no shield data" (the network router sets this).
+    error: bool = False
 
 
 class OriginAggregatesResponse(HasDataMixin, BaseResponse):

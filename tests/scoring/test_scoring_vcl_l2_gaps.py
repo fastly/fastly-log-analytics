@@ -59,7 +59,7 @@ def test_deliver_captures_matrix_version_before_stripping_it():
     a logged edge score can be correlated to the matrix version that produced it.
     Pin that BOTH the capture and the anti-leak unset are present, and that the
     capture comes first (capturing after the unset would log an empty value)."""
-    body = deliver_snippet(_SECRET)
+    body = deliver_snippet()
     capture = "set req.http.x-edge-score:matrix = resp.http.X-Edge-Matrix-Version;"
     unset = "unset resp.http.X-Edge-Matrix-Version;"
     assert capture in body, "deliver must capture matrix-version into a log subfield"

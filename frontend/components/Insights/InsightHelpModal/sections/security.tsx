@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   Clock,
   Lock,
+  Bot,
 } from 'lucide-react'
 import type { InsightContent } from '../types'
 
@@ -209,6 +210,62 @@ export function getSecurityContent(id: string): InsightContent | null {
                 <span><strong>Evasion Tactics:</strong> Flags traffic that generates a small but steady stream of errors over hours or days, bypassing standard WAF velocity rules.</span>
               </li>
             </ul>
+          </div>
+        )
+      }
+
+    case 'repeated_patterns':
+      return {
+        title: 'Scripted Traffic Patterns',
+        icon: <Bot className="h-5 w-5 text-primary" />,
+        fields: ['ip', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>Flags IPs sending requests on a near-constant cadence — automated scrapers, pollers, or cron-scheduled scripts that evade volumetric rate limits by staying slow.</p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Clock className="h-5 w-5 shrink-0 text-blue-500" />
+                <span><strong>Cadence, not volume:</strong> We measure the time between consecutive requests from each IP. Human traffic is bursty and irregular; scripts fire on a metronome.</span>
+              </li>
+              <li className="flex gap-3">
+                <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span><strong>Two robust signals:</strong> a Sheppard-corrected coefficient of variation (how much the gaps jitter) plus modal dominance (the share of gaps that are <em>exactly</em> identical). Low jitter and a high identical-gap share together score as machine-driven.</span>
+              </li>
+              <li className="flex gap-3">
+                <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
+                <span><strong>Below the radar:</strong> these clients deliberately stay under volumetric rate limits (we exclude bursts of ≥2 req/s), so velocity rules never trip — the classic signature of scrapers, pollers, and cron jobs.</span>
+              </li>
+              <li className="flex gap-3">
+                <Search className="h-5 w-5 shrink-0 text-emerald-500" />
+                <span><strong>Per-IP evidence:</strong> click the magnifier on any flagged row to see exactly why it was flagged — the regularity score, mean interval, jitter, modal gap, and request volume.</span>
+              </li>
+            </ul>
+          </div>
+        ),
+        diagram: (
+          <div className="bg-muted/30 p-6 rounded-xl border space-y-5">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold flex items-center gap-1.5"><Bot className="h-3.5 w-3.5 text-red-500" /> Automated script</span>
+                <span className="text-[10px] text-muted-foreground font-mono">even gaps · ~0 jitter</span>
+              </div>
+              <div className="relative h-6 rounded-md bg-background border overflow-hidden" aria-hidden="true">
+                {[6, 19, 32, 45, 58, 71, 84, 94].map((l) => (
+                  <span key={l} className="absolute top-1 bottom-1 w-0.5 bg-red-500" style={{ left: `${l}%` }} />
+                ))}
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold flex items-center gap-1.5"><User className="h-3.5 w-3.5 text-blue-500" /> Human browsing</span>
+                <span className="text-[10px] text-muted-foreground font-mono">bursty · irregular</span>
+              </div>
+              <div className="relative h-6 rounded-md bg-background border overflow-hidden" aria-hidden="true">
+                {[4, 9, 12, 28, 33, 57, 79, 84, 92].map((l) => (
+                  <span key={l} className="absolute top-1 bottom-1 w-0.5 bg-blue-500/70" style={{ left: `${l}%` }} />
+                ))}
+              </div>
+            </div>
           </div>
         )
       }

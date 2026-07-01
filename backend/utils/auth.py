@@ -60,3 +60,18 @@ def require_service_in_scope(request: Request, service_id: str | None) -> set[st
             detail={"error": "service_not_authorized", "service": service_id},
         )
     return allowed
+
+
+def mask_ips_for(analyst_session: object | None) -> bool:
+    """Return ``True`` iff the analyst's invite carries ``mask_ips``.
+
+    ``None`` / missing / non-dict ``pii_policy`` → ``False``. Centralizes the
+    ``getattr(session, "pii_policy", None)`` + ``isinstance(policy, dict)``
+    guard that was hand-written across insights / query / dashboard /
+    bootstrap, so the security-relevant predicate — and its safety against a
+    ``pii_policy`` revoked to ``None`` mid-session — lives in one place.
+    """
+    if analyst_session is None:
+        return False
+    policy = getattr(analyst_session, "pii_policy", None)
+    return bool(policy.get("mask_ips")) if isinstance(policy, dict) else False

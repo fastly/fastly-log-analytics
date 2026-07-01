@@ -876,12 +876,14 @@ def test_security_aggregates_drops_ipv6_ptype_from_temp_when_rollups_will_serve(
     )
 
     # The catalog temp materialization should have dropped both cols.
-    # Other CREATE TEMP TABLEs may run for sub-queries (NGWAF join etc.)
-    # — find the security-catalog one by looking for `tls_ciphers_sha`
-    # in the projection.
+    # Other CREATE TEMP TABLEs run for sub-queries — notably the
+    # fingerprint rollup's active-hour merge, which is now hoisted ahead
+    # of the catalog temp and ALSO projects tls_ciphers_sha (just that one
+    # column). Disambiguate by picking the WIDEST projection among the
+    # tls_ciphers_sha creates — that's the multi-column catalog temp.
     catalog_creates = [s for s in create_sqls if "tls_ciphers_sha" in s]
     assert catalog_creates, "didn't capture any catalog temp create — test fixture issue"
-    catalog_sql = catalog_creates[0]
+    catalog_sql = max(catalog_creates, key=lambda s: s.count('"'))
     assert "is_ipv6" not in catalog_sql, (
         f"is_ipv6 still in temp projection despite rollup pre-check passing — Tier-2 regression. "
         f"SQL: {catalog_sql[:300]}"
@@ -1138,9 +1140,12 @@ def test_security_aggregates_window_gate_keeps_ipv6_ptype_in_temp_on_small_windo
         filters={},
     )
 
+    # Pick the WIDEST tls_ciphers_sha projection: the hoisted fingerprint
+    # rollup also creates a single-column active-hour temp, so [0] is no
+    # longer reliably the multi-column catalog temp.
     catalog_creates = [s for s in create_sqls if "tls_ciphers_sha" in s]
     assert catalog_creates, "didn't capture any catalog temp create — fixture issue"
-    catalog_sql = catalog_creates[0]
+    catalog_sql = max(catalog_creates, key=lambda s: s.count('"'))
     assert "is_ipv6" in catalog_sql, (
         "is_ipv6 missing from temp on small-window — gate didn't keep it "
         "in the projection; live SQL would BinderException"
@@ -1271,3 +1276,262 @@ def test_security_aggregates_multi_section_respects_fingerprint_coupling(in_memo
     # ipv6_adoption was NOT requested, so it must NOT appear in the result —
     # proves the selector skipped its live SQL branch.
     assert "ipv6_adoption" not in result
+
+
+# ── Section-aware temp narrowing / skip (P0 security/aggregates) ──────────────
+
+
+def test_security_aggregates_skips_temp_entirely_when_every_section_rollup_served(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """When every requested section serves from a parquet rollup, the
+    catalog temp must not be built at all: ``temp_table_create`` is absent
+    from section_timings and a ``security:temp_skipped`` marker is present.
+    Pinned because this is the whole point of the P0 fix — the shared
+    materialize the perf audit flagged at p95 3.8s / max 17.3s @30d.
+    """
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=10)
+    for log in logs:
+        log["is_ipv6"] = False
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    from datetime import UTC, datetime, timedelta
+
+    closed_hour_str = _seed_count_rollup(cache_root, "is_ipv6", hours_back=2, value_counts={"true": 23, "false": 77})
+    closed_hour_dt = datetime.strptime(closed_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+
+    # No CREATE TEMP TABLE may run against the base catalog table — the
+    # only section requested (ipv6_adoption) serves entirely from the
+    # is_ipv6 count rollup.
+    catalog_creates: list[str] = []
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "CREATE TEMP TABLE" in sql and table_name in sql:
+            catalog_creates.append(sql)
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    start = (closed_hour_dt - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (closed_hour_dt + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start,
+        end_time=end,
+        filters={},
+        sections={"ipv6_adoption"},
+    )
+
+    markers = {e["section"] for e in result["section_timings"]}
+    assert "temp_table_create" not in markers, (
+        f"catalog temp was built even though ipv6_adoption is rollup-served; timings={markers}"
+    )
+    assert "security:temp_skipped" in markers, f"missing temp-skip marker; timings={markers}"
+    assert catalog_creates == [], f"a catalog temp was materialized: {catalog_creates}"
+    # And the section still came back from the rollup.
+    assert result["ipv6_adoption"], "ipv6_adoption empty despite seeded rollup"
+    assert "ipv6_adoption" == (result.keys() & {"req_size_dist", "ipv6_adoption", "proxy_dist"}).pop()
+
+
+def test_security_aggregates_drops_wide_string_cols_from_default_temp(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+):
+    """The realistic frontend default (all 10 cards, no verified_bots_ts)
+    on a wide window must NOT carry the wide ``ua`` / ``waf_sig`` string
+    columns in the catalog temp once wellknown + ipv6 + proxy serve from
+    rollups — ``ua`` is wellknown-only and ``waf_sig`` is verified_bots_ts
+    only, neither of which live-scans here. tls_ciphers_sha STAYS (coverage
+    still scans it). This is the column-narrowing half of the P0 win.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=10)
+    for log in logs:
+        log["is_ipv6"] = False
+        log["p_type"] = "hosting"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    # Seed is_ipv6 + p_type rollups so those sections serve without the temp.
+    closed = _seed_count_rollup(cache_root, "is_ipv6", hours_back=2, value_counts={"false": 50})
+    _seed_count_rollup(cache_root, "p_type", hours_back=2, value_counts={"hosting": 50})
+    closed_dt = datetime.strptime(closed, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+
+    # Force the wellknown rollup to "serve" (return rows) so its live
+    # ua/ip temp scan is skipped — that's what drops `ua` from the temp.
+    monkeypatch.setattr(
+        "backend.core.rollups.read_wellknown_bots_rollup",
+        lambda *a, **k: [("Googlebot/2.1", "66.249.66.1", 5)],
+    )
+
+    create_sqls: list[str] = []
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "CREATE TEMP TABLE" in sql and table_name in sql:
+            create_sqls.append(sql)
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    # The 10 sections the /security page actually requests (no verified_bots_ts).
+    frontend_sections = {
+        "ngwaf_verified_bots",
+        "ngwaf_verified_bots_ts",
+        "wellknown_bots",
+        "tls_fingerprints",
+        "fingerprint_coverage",
+        "req_size_dist",
+        "top_ips_header",
+        "ipv6_adoption",
+        "proxy_dist",
+        "conn_reuse_dist",
+    }
+    start = (closed_dt - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (closed_dt + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start,
+        end_time=end,
+        filters={},
+        sections=frontend_sections,
+    )
+
+    # The widest projection is the catalog temp.
+    assert create_sqls, "no catalog temp captured — fixture issue"
+    catalog_sql = max(create_sqls, key=lambda s: s.count('"'))
+    assert '"ua"' not in catalog_sql, f"ua still in temp despite wellknown rollup-served: {catalog_sql}"
+    assert '"waf_sig"' not in catalog_sql, (
+        f"waf_sig still in temp despite verified_bots_ts not requested: {catalog_sql}"
+    )
+    assert '"is_ipv6"' not in catalog_sql, f"is_ipv6 should serve from rollup: {catalog_sql}"
+    assert '"p_type"' not in catalog_sql, f"p_type should serve from rollup: {catalog_sql}"
+
+
+def test_security_aggregates_histogram_rollups_skip_temp(in_memory_duckdb, test_service_source, monkeypatch):
+    """When req_size_dist / conn_reuse_dist / top_ips_header all serve from
+    the security_dims rollups, no catalog temp is built — proves the Part B
+    readers are wired into the pass-1 hoist (security_dims removes the last
+    all-rows histogram scans)."""
+    from backend.repositories._base import QueryRunner
+
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f'CREATE TABLE "{table_name}" (timestamp TIMESTAMPTZ, ip VARCHAR, req_header_bytes BIGINT, conn_requests BIGINT)'
+    )
+    in_memory_duckdb.execute(f"INSERT INTO {table_name} VALUES (now(), '1.2.3.4', 300, 2)")
+
+    monkeypatch.setattr(
+        QueryRunner,
+        "try_security_req_size_from_rollup",
+        lambda self, s, e, has_filters: [{"bucket": "0-256B", "count": 5}],
+    )
+    monkeypatch.setattr(
+        QueryRunner,
+        "try_security_conn_reuse_from_rollup",
+        lambda self, s, e, has_filters: [{"bucket": "1 (None)", "count": 3}],
+    )
+    monkeypatch.setattr(
+        QueryRunner,
+        "try_security_top_ips_from_rollup",
+        lambda self, s, e, has_filters: [{"ip": "9.9.9.9", "max_header": 900}],
+    )
+
+    catalog_creates: list[str] = []
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "CREATE TEMP TABLE" in sql and table_name in sql:
+            catalog_creates.append(sql)
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time="2026-01-01T00:00:00Z",
+        end_time="2026-01-08T00:00:00Z",  # 7d → rollup-eligible
+        filters={},
+        sections={"req_size_dist", "conn_reuse_dist", "top_ips_header"},
+    )
+
+    markers = {e["section"] for e in result["section_timings"]}
+    assert "temp_table_create" not in markers, f"temp built despite all histograms rollup-served; timings={markers}"
+    assert "security:temp_skipped" in markers, f"missing temp-skip marker; timings={markers}"
+    assert catalog_creates == [], f"a catalog temp was materialized: {catalog_creates}"
+    assert result["req_size_dist"] == [{"bucket": "0-256B", "count": 5}]
+    assert result["conn_reuse_dist"] == [{"bucket": "1 (None)", "count": 3}]
+    assert result["top_ips_header"] == [{"ip": "9.9.9.9", "max_header": 900}]
+
+
+def test_security_aggregates_coverage_rollup_drops_tls_and_skips_temp(
+    in_memory_duckdb, test_service_source, monkeypatch
+):
+    """When tls_fingerprints serves from its rollup AND the security_cov
+    rollup serves fingerprint_coverage, tls_ciphers_sha drops out of the
+    temp entirely — so a fingerprints+coverage request builds NO temp.
+    This is the lever that unblocks the NGWAF-only temp narrowing."""
+    from backend.repositories._base import QueryRunner
+
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f'CREATE TABLE "{table_name}" (timestamp TIMESTAMPTZ, ip VARCHAR, tls_ciphers_sha VARCHAR)'
+    )
+    in_memory_duckdb.execute(f"INSERT INTO {table_name} VALUES (now(), '1.2.3.4', 'abc123')")
+
+    # Fingerprints serve from the count + ip_spread rollups.
+    monkeypatch.setattr(
+        QueryRunner,
+        "execute_top_n_rollups",
+        lambda self, fields, s, e, limit=10, per_field_limits=None, **kw: ([("tls_ciphers_sha", "abc123", 10)], []),
+    )
+    monkeypatch.setattr(
+        QueryRunner,
+        "execute_ip_spread_rollups",
+        lambda self, fields, s, e, **kw: ({("tls_ciphers_sha", "abc123"): 4}, {}),
+    )
+    # Coverage serves from the security_cov counts: 600 / 1000 = 0.6.
+    monkeypatch.setattr(QueryRunner, "try_security_coverage_from_rollup", lambda self, s, e, has_filters: (1000, 600))
+
+    catalog_creates: list[str] = []
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "CREATE TEMP TABLE" in sql and table_name in sql:
+            catalog_creates.append(sql)
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy)
+
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time="2026-01-01T00:00:00Z",
+        end_time="2026-01-08T00:00:00Z",
+        filters={},
+        sections={"tls_fingerprints", "fingerprint_coverage"},
+    )
+
+    markers = {e["section"] for e in result["section_timings"]}
+    assert "temp_table_create" not in markers, f"temp built despite fingerprints+coverage rollup-served; {markers}"
+    assert "security:temp_skipped" in markers, f"missing temp-skip marker; {markers}"
+    assert catalog_creates == [], f"a catalog temp was materialized: {catalog_creates}"
+    assert result["tls_fingerprints"] == [{"fingerprint": "abc123", "ip_count": 4, "request_count": 10}]
+    assert result["fingerprint_coverage"] == {"tls_ciphers_sha": 0.6}

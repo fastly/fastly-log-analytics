@@ -9,15 +9,21 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, call, patch
 
+import pytest
+
 from backend.provision import session_scoring_setup as sss
 from backend.provision.session_scoring_setup import (
+    COMPUTE_MANAGE_URL,
     CONFIG_RESOURCE_LINK_NAME,
+    CONFIG_STORE_MANAGE_URL,
     CURRENT_KEY_HEX,
     DEBUG_LOG_DEFAULT,
     DEBUG_LOG_KEY,
     KEYS_RESOURCE_LINK_NAME,
+    KV_STORE_MANAGE_URL,
     MATRIX_RESOURCE_LINK_NAME,
     SCORING_ENABLED_AT_KEY,
+    EntitlementError,
     delete_scoring_service,
     ensure_scoring_service,
 )
@@ -80,7 +86,12 @@ def _fastly_mock_for_create():
 
 def test_ensure_creates_full_stack_when_nothing_exists():
     fastly_mock = _fastly_mock_for_create()
-    with patch("backend.provision.session_scoring_setup.fastly", fastly_mock):
+    # KV-Store entitlement probe uses fos_setup.product_enabled (a separate
+    # `fastly` binding), so patch it True or it leaks a real api.fastly.com call.
+    with (
+        patch("backend.provision.session_scoring_setup.fastly", fastly_mock),
+        patch("backend.provision.session_scoring_setup.product_enabled", return_value=True),
+    ):
         result = ensure_scoring_service(LOG_SVC, TOKEN)
 
     # Returned dict contains all the IDs the caller needs to stash.
@@ -132,6 +143,122 @@ def test_ensure_creates_full_stack_when_nothing_exists():
     assert len(link_calls) == 3
     link_names = {c.args[2]["name"] for c in link_calls}
     assert link_names == {KEYS_RESOURCE_LINK_NAME, CONFIG_RESOURCE_LINK_NAME, MATRIX_RESOURCE_LINK_NAME}
+
+
+# ── ensure_scoring_service: entitlement gating + rollback ────────────────────
+
+
+def _create_side_effect(*, fail_on=None, fail_exc=None):
+    """`fastly` mock for the create path that ALSO answers the rollback
+    (delete_scoring_service) calls, so a mid-build failure can be asserted to
+    tear everything down. Raises ``fail_exc`` whenever it sees the
+    ``(method, path)`` tuple ``fail_on``."""
+    config_store_responses = iter(
+        [
+            {"id": "KEYS_STORE_ID", "name": "scoring_keys_SCORING_SVC_ID"},
+            {"id": "CFG_STORE_ID", "name": "scoring_config_SCORING_SVC_ID"},
+        ]
+    )
+    base = {
+        ("GET", "/service"): [],  # idempotency probe: nothing exists
+        ("POST", "/service"): {"id": "SCORING_SVC_ID", "name": "x", "type": "wasm"},
+        ("GET", "/resources/stores/kv"): [],
+        ("POST", "/resources/stores/kv"): {"id": "MATRIX_STORE_ID", "name": "scoring_matrix_SCORING_SVC_ID"},
+        # rollback (delete_scoring_service): no active versions → straight to deletes.
+        ("GET", "/service/SCORING_SVC_ID/version"): [],
+    }
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if fail_on and (method, path) == fail_on:
+            raise fail_exc
+        if (method, path) == ("POST", "/resources/stores/config"):
+            return next(config_store_responses)
+        return base.get((method, path), {})
+
+    return MagicMock(side_effect=side_effect)
+
+
+def test_ensure_raises_when_kv_store_not_enabled():
+    """KV Store is the only required product with a status endpoint, so it's a
+    pre-flight check BEFORE any resource is created — a missing entitlement
+    must cost zero cleanup (no service ever gets made)."""
+    fastly_mock = _create_side_effect()
+    with (
+        patch("backend.provision.session_scoring_setup.fastly", fastly_mock),
+        patch("backend.provision.session_scoring_setup.product_enabled", return_value=False),
+    ):
+        with pytest.raises(EntitlementError) as ei:
+            ensure_scoring_service(LOG_SVC, TOKEN)
+
+    assert ei.value.code == "kv_store_not_enabled"
+    assert ei.value.link == KV_STORE_MANAGE_URL
+    # Nothing was created — the wasm service POST is never reached.
+    assert not any(c.args[:2] == ("POST", "/service") for c in fastly_mock.call_args_list)
+
+
+def test_ensure_maps_compute_create_4xx_to_compute_not_enabled():
+    """A 4xx on the wasm `POST /service` means Compute isn't enabled. It's the
+    first durable resource, so there's nothing to roll back."""
+    fastly_mock = _create_side_effect(
+        fail_on=("POST", "/service"),
+        fail_exc=RuntimeError("HTTP 403 Forbidden"),
+    )
+    with (
+        patch("backend.provision.session_scoring_setup.fastly", fastly_mock),
+        patch("backend.provision.session_scoring_setup.product_enabled", return_value=True),
+    ):
+        with pytest.raises(EntitlementError) as ei:
+            ensure_scoring_service(LOG_SVC, TOKEN)
+
+    assert ei.value.code == "compute_not_enabled"
+    assert ei.value.link == COMPUTE_MANAGE_URL
+    # Service create failed → no rollback delete attempted.
+    assert not any(c.args[:2] == ("DELETE", "/service/SCORING_SVC_ID") for c in fastly_mock.call_args_list)
+
+
+def test_ensure_maps_config_store_4xx_to_config_store_not_enabled_and_rolls_back():
+    """A 4xx on the Config Store create means it isn't enabled for Compute. By
+    then the wasm service exists, so it must be rolled back."""
+    fastly_mock = _create_side_effect(
+        fail_on=("POST", "/resources/stores/config"),
+        fail_exc=RuntimeError("HTTP 400 Bad Request"),
+    )
+    with (
+        patch("backend.provision.session_scoring_setup.fastly", fastly_mock),
+        patch("backend.provision.session_scoring_setup.product_enabled", return_value=True),
+    ):
+        with pytest.raises(EntitlementError) as ei:
+            ensure_scoring_service(LOG_SVC, TOKEN)
+
+    assert ei.value.code == "config_store_not_enabled"
+    assert ei.value.link == CONFIG_STORE_MANAGE_URL
+    # Rollback tore down the just-created wasm service.
+    assert any(c.args[:2] == ("DELETE", "/service/SCORING_SVC_ID") for c in fastly_mock.call_args_list)
+
+
+def test_ensure_rolls_back_everything_on_late_non_entitlement_failure():
+    """A failure AFTER the stores are created (here, the first resource-link
+    POST) must roll back the service AND all three stores, and re-raise the
+    original error unchanged (not mis-mapped to an entitlement error)."""
+    fastly_mock = _create_side_effect(
+        fail_on=("POST", "/service/SCORING_SVC_ID/version/1/resource"),
+        fail_exc=RuntimeError("HTTP 500 Internal Server Error"),
+    )
+    with (
+        patch("backend.provision.session_scoring_setup.fastly", fastly_mock),
+        patch("backend.provision.session_scoring_setup.product_enabled", return_value=True),
+    ):
+        with pytest.raises(RuntimeError) as ei:
+            ensure_scoring_service(LOG_SVC, TOKEN)
+
+    # Original error preserved — NOT converted to an EntitlementError.
+    assert not isinstance(ei.value, EntitlementError)
+    assert "HTTP 5" in str(ei.value)
+    deletes = {c.args[:2] for c in fastly_mock.call_args_list if c.args[0] == "DELETE"}
+    assert ("DELETE", "/service/SCORING_SVC_ID") in deletes
+    assert ("DELETE", "/resources/stores/config/KEYS_STORE_ID") in deletes
+    assert ("DELETE", "/resources/stores/config/CFG_STORE_ID") in deletes
+    assert ("DELETE", "/resources/stores/kv/MATRIX_STORE_ID") in deletes
 
 
 # ── ensure_scoring_service: idempotent reuse path ────────────────────────────
@@ -221,7 +348,10 @@ def test_ensure_reuse_heals_missing_warmup_anchor():
 def test_ensure_emits_status_callbacks_during_creation():
     fastly_mock = _fastly_mock_for_create()
     status_cb = MagicMock()
-    with patch("backend.provision.session_scoring_setup.fastly", fastly_mock):
+    with (
+        patch("backend.provision.session_scoring_setup.fastly", fastly_mock),
+        patch("backend.provision.session_scoring_setup.product_enabled", return_value=True),
+    ):
         ensure_scoring_service(LOG_SVC, TOKEN, status_cb=status_cb)
     # At least the "ensuring", "created service", "domain", "stores", "linked"
     # phases each emit a callback.
@@ -319,3 +449,54 @@ def test_delete_tolerates_404_on_store_delete():
             scoring_config_store_id="ALSO_MISSING",
             token=TOKEN,
         )
+
+
+def test_delete_surfaces_non_404_store_failure():
+    """A non-404 store-delete failure must NOT raise (one stuck store can't block
+    the rest of teardown) but MUST be returned + surfaced via status_cb so the
+    operator can hand-clean it — otherwise the id is silently dropped from cfg
+    and becomes an un-retryable orphan."""
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if (method, path) == ("GET", "/service/SVC/version"):
+            return []
+        if method == "DELETE" and path.startswith("/resources/stores/config/STUCK"):
+            raise RuntimeError("500 internal error")  # non-404 → genuine failure
+        return {}
+
+    fastly_mock = MagicMock(side_effect=side_effect)
+    msgs = []
+    with patch("backend.provision.session_scoring_setup.fastly", fastly_mock):
+        failed = delete_scoring_service(
+            "SVC",
+            scoring_keys_store_id="STUCK",
+            scoring_config_store_id="FINE",
+            token=TOKEN,
+            status_cb=msgs.append,
+        )
+
+    # The stuck store is reported (label, id); the healthy one is not.
+    assert ("scoring_keys", "STUCK") in failed
+    assert all(store_id != "FINE" for _, store_id in failed)
+    # And a manual-cleanup message reached the stream.
+    assert any("STUCK" in m and "manual" in m.lower() for m in msgs)
+
+
+def test_delete_returns_empty_list_on_clean_teardown():
+    """Full-success teardown returns an empty failed-id list."""
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if (method, path) == ("GET", "/service/SVC/version"):
+            return []
+        return {}
+
+    fastly_mock = MagicMock(side_effect=side_effect)
+    with patch("backend.provision.session_scoring_setup.fastly", fastly_mock):
+        failed = delete_scoring_service(
+            "SVC",
+            scoring_keys_store_id="K",
+            scoring_config_store_id="C",
+            scoring_matrix_store_id="M",
+            token=TOKEN,
+        )
+    assert failed == []

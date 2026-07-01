@@ -6,6 +6,7 @@ import { Activity, ExternalLink, Loader2, Lock, Wifi, WifiOff, X } from 'lucide-
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { useMounted } from '@/hooks/useMounted'
 import { client, extractApiError } from '@/lib/api'
 
 import { useShareMutation } from './useShareMutation'
@@ -30,6 +31,13 @@ function buildEndpoint(mode: SharingMode, raw: string): string {
 
 export function SharingControlPanel({ status, onRefresh, onError }: SharingControlPanelProps) {
   const { busy, run } = useShareMutation(onError, onRefresh)
+  // /admin/share's share_status is dehydrated into the SSR HTML, so any value
+  // that ticks down by the second drifts between the server render and the
+  // (slightly later) first client render → React #418. This gates the two
+  // live counters below — telemetry uptime and the rate-limit lockout
+  // countdown — so server HTML and first client render agree; the live values
+  // fill in right after mount. Sibling to formatStamp's fix in ./utils.ts.
+  const mounted = useMounted()
   const [mode, setMode] = React.useState<SharingMode>('hostname')
   const [hostnameValue, setHostnameValue] = React.useState('')
   const [ipValue, setIpValue] = React.useState('')
@@ -167,7 +175,11 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
         <div className="flex items-center gap-3 text-[11px] text-muted-foreground border-t pt-2 mt-2">
           <span className="flex items-center gap-1">
             <Activity className="h-3 w-3" />
-            Uptime: <span className="font-mono">{formatUptime(status.telemetry.current_uptime_s)}</span>
+            {/* Live seconds counter — placeholder until mounted (see #418 note above). */}
+            Uptime:{' '}
+            <span className="font-mono">
+              {mounted ? formatUptime(status.telemetry.current_uptime_s) : '—'}
+            </span>
           </span>
           <span>
             Heartbeat 401s since boot:{' '}
@@ -188,9 +200,11 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
             <Lock className="h-3 w-3" />
             Failed login activity
           </div>
+          {/* remaining_s ticks down 1/sec; gate it so SSR HTML == first client
+              render (see #418 note above), then show the live value post-mount. */}
           {status?.rate_limits?.lockouts?.map((l) => (
             <div key={`lo-${l.ip}`} className="font-mono">
-              {l.ip} — locked out for {l.remaining_s}s
+              {l.ip} — locked out for {mounted ? l.remaining_s : '—'}s
             </div>
           ))}
           {status?.rate_limits?.failures?.map((f) => (

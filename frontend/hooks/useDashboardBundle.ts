@@ -1,9 +1,10 @@
 'use client'
 
-import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query'
+import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { throwIfStaleAggregates, STALE_VIEW_RETRY_OPTIONS } from '@/lib/staleViewRetry'
+import { resolveRangeWire } from '@/lib/range-wire'
 import type { FiltersPayload } from '@/types/filters'
 
 /**
@@ -47,8 +48,18 @@ import type { FiltersPayload } from '@/types/filters'
 export type DashboardSection = 'core' | 'topten' | 'bots'
 
 export interface DashboardBundleArgs {
+  // startTime/endTime drive the stale-view extents heuristic + the chart's
+  // x-axis display range, AND (in custom-range mode) the scan window itself.
   startTime: string | null
   endTime: string | null
+  // Time-range wire inputs (lib/range-wire.ts). In token mode the bundle key +
+  // body key on the server-reproducible relative token + quantized anchor so the
+  // SSR seed key byte-matches the client first-paint key. In custom-absolute
+  // mode (relativeRange null + isAutoRange false) the key/body carry the explicit
+  // start/end bounds instead, so a custom range scans exactly what it displays.
+  relativeRange: string | null
+  isAutoRange: boolean
+  anchor: string
   filterPayload: FiltersPayload
   metric: string
   interval: string
@@ -60,6 +71,9 @@ export interface DashboardBundleArgs {
 export function useDashboardBundle({
   startTime,
   endTime,
+  relativeRange,
+  isAutoRange,
+  anchor,
   filterPayload,
   metric,
   interval,
@@ -68,11 +82,13 @@ export function useDashboardBundle({
   sections,
 }: DashboardBundleArgs) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const queryClient = useQueryClient()
 
-  const aggregatesKey = ['dashboard', 'aggregates', activeServiceId, startTime, endTime, filterPayload, metric, interval, fields]
-  const topBotsKey = ['dashboard', 'top-bots', activeServiceId, startTime, endTime, filterPayload]
-  const bundleKey = ['dashboard', 'bundle', activeServiceId, startTime, endTime, filterPayload, metric, interval, fields, sections]
+  // Token mode (preset pill / cold-load default) keys on the server-reproducible
+  // (rangeKey, anchor) so the SSR seed in app/dashboard/page.tsx byte-matches and
+  // paints from the dehydrated cache on first paint. Custom-absolute mode keys on
+  // an "abs:<start>|<end>" identity so distinct custom ranges don't collide.
+  const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
+  const bundleKey = ['dashboard', 'bundle', activeServiceId, rangeKey, anchor, filterPayload, metric, interval, fields, sections]
 
   return useQuery({
     queryKey: bundleKey,
@@ -80,29 +96,31 @@ export function useDashboardBundle({
       const { data } = await client.POST('/api/dashboard/bundle', {
         signal,
         body: {
-          start_time: startTime!,
-          end_time: endTime!,
+          // Token mode → {range_token, anchor} (server resolves the window,
+          // ignores absolute bounds). Custom mode → {start_time, end_time} (the
+          // backend falls back to these when range_token is absent).
           filters: filterPayload,
           chart_metric: metric as any,
           chart_interval: interval,
           fields: fields,
           sections: sections,
+          ...rangeBody,
         },
       })
       const body = data
       if (body?.aggregates) {
-        // Same stale-view check the dedicated hook applies. Throws if
-        // the response is the empty-schema placeholder from a mid-
-        // commit window — STALE_VIEW_RETRY_OPTIONS will retry once.
-        // Pass the queried window so an empty result for a range that
-        // sits outside the data's extents (e.g. the default 24h window
-        // on a fresh install whose logs are older) isn't misread as a
-        // stale view and retried-then-hard-failed.
-        const aggsChecked = throwIfStaleAggregates(body.aggregates, { startTime, endTime })
-        queryClient.setQueryData(aggregatesKey, aggsChecked)
-      }
-      if (body?.top_bots) {
-        queryClient.setQueryData(topBotsKey, body.top_bots)
+        // Stale-view guard: throws if the response is the empty-schema
+        // placeholder from a mid-commit window — STALE_VIEW_RETRY_OPTIONS retries
+        // once. The window passed here is the DISPLAY range (startTime/endTime);
+        // it only steers the "empty because outside data extents" heuristic, not
+        // the scan (which the server resolved from the token). Returned in-place
+        // on body.aggregates — the page reads aggregates + top_bots directly off
+        // bundleQuery.data (no separate cache keys), so no setQueryData fan-out.
+        throwIfStaleAggregates(
+          body.aggregates,
+          { startTime, endTime },
+          Object.keys(filterPayload).length > 0,
+        )
       }
       return body
     },

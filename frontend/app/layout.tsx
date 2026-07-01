@@ -20,7 +20,7 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Fastly Log Analytics",
-  description: "Modern log analytics for Fastly Object Storage",
+  description: "Modern log analytics, powered by Fastly Object Storage",
 };
 
 // force-dynamic is REQUIRED for the per-request SSR fetch of
@@ -117,21 +117,14 @@ export default async function RootLayout({
         client.setQueryData(["last-sync", sid], b.last_sync);
       }
     }
-    // Mirror useBootstrap.queryFn's share_status seed (hooks/useBootstrap.ts).
-    // That client-side seed is unreachable on SSR-hydrated loads — the
-    // pre-populated bootstrap cache short-circuits the queryFn (same reason
-    // the admin-token write is mirrored into a useEffect there) — so a direct
-    // load of /admin/share would refetch ['admin','share','status'] and flash
-    // the FormSkeleton. share_status is service-independent, so it's seeded
-    // outside the if(sid) block. SECURITY: the backend null-scopes
-    // share_status for analyst sessions (bootstrap.py:_resolve_share_status),
-    // and bootstrap itself is fetched without injectAdminToken, so an
-    // analyst-classified SSR bootstrap carries share_status=null — this seed
-    // inherits that scoping and cannot place admin data in an analyst's HTML.
-    const shareStatus = (bootstrap as { share_status?: unknown }).share_status;
-    if (shareStatus) {
-      client.setQueryData(["admin", "share", "status"], shareStatus);
-    }
+    // P1#5 (perf audit): the SSR share_status seed is removed. Bootstrap no
+    // longer carries share_status (build_share_status cost ~2.1s and sat on
+    // this admin SSR first-paint path). A direct load of /admin/share
+    // refetches GET /api/admin/share/status on mount (page.tsx's
+    // SHARE_STATUS_QUERY_KEY useQuery), so it self-populates with one
+    // round-trip — only the share page pays it, and only on direct load.
+    // The small global share_banner stays on the bootstrap response for the
+    // header.
     dehydratedState = dehydrate(client);
   }
 

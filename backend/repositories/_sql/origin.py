@@ -221,27 +221,39 @@ Output columns per row: ``(oip, requests, p50_ms, p95_ms, error_pct)``
 
 SHIELDING_ANALYSIS = """
         WITH edge_logs AS (
-            SELECT "rid", "pop", "ottfb"
+            SELECT "rid", "pop", "ottfb", "ttfb"
             FROM {table}
-            WHERE {where} AND "edge" = true AND "ottfb" IS NOT NULL
+            WHERE {where} AND "edge" = true
         ),
         shield_logs AS (
             SELECT "prid", "pop", "ottfb", "ttfb"
             FROM {table}
             WHERE {time_where} AND "edge" = false AND "prid" IS NOT NULL AND "prid" != ''
+        ),
+        pairs AS (
+          SELECT
+            e.pop                                                                    AS edge_pop,
+            s.pop                                                                    AS shield_pop,
+            COUNT(*)                                                                 AS requests,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY (COALESCE(e.ottfb, e.ttfb * 1000000) - COALESCE(s.ottfb, s.ttfb * 1000000))) / 1000.0 AS p50_ms,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY (COALESCE(e.ottfb, e.ttfb * 1000000) - COALESCE(s.ottfb, s.ttfb * 1000000))) / 1000.0 AS p95_ms,
+            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY (COALESCE(e.ottfb, e.ttfb * 1000000) - COALESCE(s.ottfb, s.ttfb * 1000000))) / 1000.0 AS p99_ms
+          FROM edge_logs e
+          INNER JOIN shield_logs s ON s.prid = e.rid
+          GROUP BY 1, 2
+        ),
+        ranked AS (
+          SELECT
+            *,
+            COUNT(*) OVER ()                                       AS total_routes,
+            ROW_NUMBER() OVER (ORDER BY requests DESC)            AS rn_requests,
+            ROW_NUMBER() OVER (ORDER BY p50_ms DESC NULLS LAST)  AS rn_overhead
+          FROM pairs
         )
-        SELECT
-          e.pop                                                                    AS edge_pop,
-          s.pop                                                                    AS shield_pop,
-          COUNT(*)                                                                 AS requests,
-          PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY (e.ottfb - COALESCE(s.ottfb, s.ttfb * 1000000))) / 1000.0 AS p50_ms,
-          PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY (e.ottfb - COALESCE(s.ottfb, s.ttfb * 1000000))) / 1000.0 AS p95_ms,
-          PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY (e.ottfb - COALESCE(s.ottfb, s.ttfb * 1000000))) / 1000.0 AS p99_ms
-        FROM edge_logs e
-        INNER JOIN shield_logs s ON s.prid = e.rid
-        GROUP BY 1, 2
+        SELECT edge_pop, shield_pop, requests, p50_ms, p95_ms, p99_ms, total_routes
+        FROM ranked
+        WHERE rn_requests <= ? OR rn_overhead <= ?
         ORDER BY requests DESC
-        LIMIT ?
     """
 """Edge<-shield POP pair latency analysis via self-join on ``rid``/``prid``.
 
@@ -249,15 +261,29 @@ The shield CTE intentionally drops user filters (only time bounds survive)
 so an edge filter like ``pop = DEN`` doesn't strip the shield hit at IAD
 before the join.
 
+Route selection (M1, shielding audit 2026-06-30): a plain
+``ORDER BY requests DESC LIMIT N`` structurally buried low-volume but
+high-overhead routes — the exact mis-peered routes this analysis exists
+to surface — and the ``anomaly_static`` flag was computed in Python AFTER
+truncation, so a flagged route could be dropped before the operator ever
+saw it. The ``ranked`` CTE now keeps the union of the top-N BY REQUESTS
+*and* the top-N BY TRANSIT OVERHEAD (``p50_ms`` is the best in-SQL proxy
+for "interesting"; the light-speed floor needs the Python POP map). The
+``COUNT(*) OVER ()`` exposes the full distinct-pair count so the caller
+can report "Top N of M" / set ``truncated`` instead of implying the table
+is complete.
+
 Inputs (trusted-identifier substitutions):
 - ``{table}`` — quoted base-table identifier
 - ``{where}`` — full WHERE clause (time + filters) applied to the edge CTE
 - ``{time_where}`` — time-only WHERE clause applied to the shield CTE
 
-Parameter binding order: ``edge_params + time_params + [limit]``.
+Parameter binding order: ``edge_params + time_params + [limit, limit]``
+(the two trailing ``?`` bind the by-requests and by-overhead rank cutoffs).
 
 Output columns per row:
-``(edge_pop, shield_pop, requests, p50_ms, p95_ms, p99_ms)``
+``(edge_pop, shield_pop, requests, p50_ms, p95_ms, p99_ms, total_routes)``.
+At most ``2 * limit`` rows (the two rank sets when fully disjoint).
 """
 
 

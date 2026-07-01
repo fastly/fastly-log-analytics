@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 from typing import Any
 
@@ -19,8 +17,14 @@ from backend.repositories._base import (
     safe_iso,
 )
 from backend.repositories._sql import origin as SQL
-from backend.repositories.utils.filters import build_where_clause, filter_spec_attr
-from backend.repositories.utils.response_cache import bucket_time_to_minute, cache_get, cache_put
+from backend.repositories.utils.filters import build_where_clause
+from backend.repositories.utils.response_cache import (
+    bucket_time_to_minute,
+    cache_get,
+    cache_put,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
 from backend.utils.bounded_cache import BoundedTTLCache
 
 # ── Response memo cache ───────────────────────────────────────────────────────
@@ -48,23 +52,16 @@ def _response_cache_key(
     filters: FiltersDict,
     **extra,
 ) -> str:
-    serialised_filters = {
-        k: (filter_spec_attr(v, "mode"), sorted(str(x) for x in (filter_spec_attr(v, "values") or [])))
-        for k, v in sorted((filters or {}).items())
+    # Key field order is load-bearing (serialized as-is): ep, s, e, f, then the
+    # extras sorted by name. digest_cache_key keeps the emitted bytes stable.
+    payload = {
+        "ep": endpoint,
+        "s": bucket_time_to_minute(start_time),
+        "e": bucket_time_to_minute(end_time),
+        "f": serialize_filters_for_key(filters),
+        **{k: extra[k] for k in sorted(extra)},
     }
-    payload = json.dumps(
-        {
-            "ep": endpoint,
-            "s": bucket_time_to_minute(start_time),
-            "e": bucket_time_to_minute(end_time),
-            "f": serialised_filters,
-            **{k: extra[k] for k in sorted(extra)},
-        },
-        separators=(",", ":"),
-        default=str,
-    )
-    svc = src.get("name") or src.get("service_id") or ""
-    return hashlib.sha256(f"{payload}:{svc}".encode()).hexdigest()
+    return digest_cache_key(payload, src)
 
 
 def _check_response_cache(
@@ -111,6 +108,19 @@ def _store_response_cache(cache_key: str, payload: dict, runner: QueryRunner) ->
 # ── POP location helpers ──────────────────────────────────────────────────────
 
 
+# Minimum edge→shield request count before a route's transit is trustworthy
+# enough to flag as anomalous. The transit metric keys off the *median*
+# (p50), but a "median" over a handful of requests is noise — a single cold
+# TLS handshake or an ottfb→ttfb fallback row can drag a 1-3 request route
+# past the ratio/overhead gates and paint a false "suboptimal peering" flag.
+# (Observed on prod 2026-06-30: 14 of 15 anomaly flags were on <30-request
+# routes; median requests/flagged-route was 2 vs 147 for non-flagged.)
+# Below this floor we still SHOW the route (operators want low-volume routes
+# visible — that's the M1 intent) but mark it ``low_sample`` and never flag it.
+# Mirrors the ``min_requests`` gate the slow-URLs analysis already applies.
+SHIELDING_ANOMALY_MIN_REQUESTS = 30
+
+
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
@@ -129,6 +139,9 @@ def _enrich_with_distance(row: dict) -> dict:
     s_pop = str(row.get("shield_pop", "")).upper()
     e_coords = pops.get(e_pop)
     s_coords = pops.get(s_pop)
+    # Too few samples to trust the percentiles — keep the route visible but never
+    # flag it (see SHIELDING_ANOMALY_MIN_REQUESTS). The FE mutes low_sample rows.
+    low_sample = (row.get("requests") or 0) < SHIELDING_ANOMALY_MIN_REQUESTS
     if e_coords and s_coords:
         dist = _haversine_km(e_coords[0], e_coords[1], s_coords[0], s_coords[1])
         # Fiber propagation: ~200,000 km/s; RTT = 2-way trip
@@ -138,15 +151,22 @@ def _enrich_with_distance(row: dict) -> dict:
             efficiency = round(p50 / light_rtt_ms, 2)
         else:
             efficiency = None
+        # The latency verdict, independent of sample size. High ratio alone
+        # isn't meaningful for short hops where TCP overhead dominates; require
+        # ≥20ms absolute overhead above the theoretical floor before flagging.
+        anomaly_eligible = (
+            efficiency is not None and efficiency > 3.0 and p50 is not None and p50 - light_rtt_ms >= 20.0
+        )
         row.update(
             distance_km=round(dist, 1),
             light_speed_rtt_ms=light_rtt_ms,
             efficiency_ratio=efficiency,
-            # High ratio alone isn't meaningful for short hops where TCP overhead dominates;
-            # require ≥20ms absolute overhead above the theoretical floor before flagging.
-            anomaly_static=(
-                efficiency is not None and efficiency > 3.0 and p50 is not None and p50 - light_rtt_ms >= 20.0
-            ),
+            low_sample=low_sample,
+            anomaly_eligible=anomaly_eligible,
+            # Never flag a route with too few requests for its median to mean
+            # anything. The FE can re-derive this against a user-chosen floor
+            # from (anomaly_eligible, requests) without the latency rule above.
+            anomaly_static=anomaly_eligible and not low_sample,
             edge_lat=e_coords[0],
             edge_lon=e_coords[1],
             shield_lat=s_coords[0],
@@ -157,6 +177,8 @@ def _enrich_with_distance(row: dict) -> dict:
             distance_km=None,
             light_speed_rtt_ms=None,
             efficiency_ratio=None,
+            low_sample=low_sample,
+            anomaly_eligible=False,
             anomaly_static=False,
             edge_lat=e_coords[0] if e_coords else None,
             edge_lon=e_coords[1] if e_coords else None,
@@ -629,8 +651,8 @@ def get_shielding_analysis(
     if not actual_cols:
         return empty_schema_response(has_data=False, rows=[], **runner.telemetry())
 
-    # We need rid, prid, edge, pop, ottfb for this analysis
-    required = {"rid", "prid", "edge", "pop", "ottfb"}
+    # We need rid, prid, edge, pop, ottfb, ttfb for this analysis
+    required = {"rid", "prid", "edge", "pop", "ottfb", "ttfb"}
     missing = required - set(actual_cols)
     if missing:
         return empty_schema_response(has_data=False, requires_fields=list(missing), rows=[], **runner.telemetry())
@@ -648,13 +670,21 @@ def get_shielding_analysis(
         time_where=time_where,
     )
 
-    rows = runner.execute(query, params + time_params + [limit]).fetchall()
+    # The query binds two trailing rank cutoffs (top-by-requests OR
+    # top-by-overhead) — see SHIELDING_ANALYSIS docstring (M1).
+    cur = runner.execute(query, params + time_params + [limit, limit])
+    # Consume rows via ``cursor.description`` (dict access) rather than
+    # positional ``r[0..5]``. A column reorder in SHIELDING_ANALYSIS would
+    # otherwise silently misalign every downstream key — the same b10
+    # offset-by-N footgun ``_shape_summary`` was already hardened against.
+    col_names = [d[0] for d in cur.description]
+    raw_rows = [dict(zip(col_names, r, strict=False)) for r in cur.fetchall()]
 
     # If the join returned zero rows, distinguish "no shield logs at all" (edge_only)
     # from "shield logs exist but didn't match any edge rid". Old code did a separate
     # shield-existence probe up-front; we fold that into a single cheap check on the
     # already-scanned data instead by re-checking the time window for any shield log.
-    if not rows:
+    if not raw_rows:
         shield_exists = runner.execute(
             f'SELECT 1 FROM {table_name} WHERE {time_where} AND "edge" = false AND "prid" IS NOT NULL AND "prid" != \'\' LIMIT 1',
             time_params,
@@ -665,26 +695,37 @@ def get_shielding_analysis(
             payload = {"has_data": False, "rows": []}
         return _store_response_cache(cache_key, payload, runner)
 
+    # ``total_routes`` is a window COUNT(*) OVER () — identical across rows.
+    total_routes = raw_rows[0].get("total_routes")
+    if total_routes is None:
+        total_routes = len(raw_rows)
+
     enriched_rows = [
         _enrich_with_distance(
             {
-                "edge_pop": r[0],
-                "shield_pop": r[1],
-                "requests": r[2],
-                "p50_ms": r[3],
-                "p95_ms": r[4],
-                "p99_ms": r[5],
+                "edge_pop": r["edge_pop"],
+                "shield_pop": r["shield_pop"],
+                "requests": r["requests"],
+                "p50_ms": r["p50_ms"],
+                "p95_ms": r["p95_ms"],
+                "p99_ms": r["p99_ms"],
             }
         )
-        for r in rows
+        for r in raw_rows
     ]
 
-    # Only claim has_data if we have at least one row with valid coordinates
-    has_valid_arcs = any(r.get("edge_lat") is not None and r.get("shield_lat") is not None for r in enriched_rows)
-
+    # has_data gates on ROW presence, not coordinate availability (L3). The
+    # table renders POP codes + latencies fine without coords; the MAP
+    # handles the no-coordinate case on its own ("POP coordinates
+    # unavailable"). Gating on coords previously hid the whole table + CSV
+    # export whenever a POP was absent from pop_locations.json.
     payload = {
-        "has_data": has_valid_arcs,
+        "has_data": len(enriched_rows) > 0,
         "rows": enriched_rows,
+        # M1: surface the full route count so the UI can show "Top N of M"
+        # and flag truncation instead of implying the table is complete.
+        "total_routes": total_routes,
+        "truncated": total_routes > len(enriched_rows),
     }
     return _store_response_cache(cache_key, payload, runner)
 
@@ -722,19 +763,12 @@ def _origin_summary_from_temp(
     ``TEMP_SUMMARY_ROLLUP`` / ``TEMP_SUMMARY_BY_EDGE`` were folded into
     ``SUMMARY_GROUPING_SETS`` per the b10 audit finding).
 
-    Dispatches to the per-hour origin_summary rollup for the unfiltered
-    wide-window case (≥48 h, ≥50% coverage) before falling through to
-    the TEMP-table SQL. Same posture as slow_urls.
+    PURE temp-path: the rollup-first attempt was hoisted into
+    :func:`get_aggregates`'s pre-temp phase (Part B skip-temp guard), so
+    this helper now only runs when the section MISSED the rollup and the
+    temp was built. ``start_time`` / ``end_time`` / ``has_filters`` are
+    retained for signature stability but no longer consulted here.
     """
-    rollup_result = runner.try_origin_summary_from_rollup(
-        start_time,
-        end_time,
-        has_filters=has_filters,
-        actual_cols=actual_cols,
-    )
-    if rollup_result is not None:
-        return rollup_result
-
     return _shape_summary(runner, temp_table, "1=1", [], "lat_us", actual_cols)
 
 
@@ -746,7 +780,21 @@ def _origin_timeseries_from_temp(
     split_by_leg: bool,
     metric: str,
     percentile: str,
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    has_filters: bool = True,
+    table_name: str | None = None,
+    where_clause: str | None = None,
+    params: list | None = None,
 ) -> dict:
+    # PURE temp-path: the origin_latency_ts rollup-first attempt was hoisted
+    # into get_aggregates's pre-temp phase (Part B skip-temp guard). This helper
+    # now only runs for the MISSED case (filtered / <48h / split_by_leg /
+    # sub-minute bucket / partial coverage) against the materialized temp table.
+    # The ``table_name`` / ``where_clause`` / ``params`` / ``start_time`` /
+    # ``end_time`` / ``has_filters`` kwargs are retained for signature stability
+    # but no longer consulted here.
     actual_cols_set = set(actual_cols)
     metric_col = "ottfb" if metric == "ttfb" else "ottlb"
     unit_conv = "/ 1000.0"
@@ -815,22 +863,11 @@ def _origin_slow_urls_from_temp(
     if "url" not in actual_cols_set:
         return {"has_data": False, "rows": []}
 
-    # Try the per-hour slow_urls rollup first for the wide-window
-    # unfiltered case (the slow_urls panel dominates /api/origin
-    # /aggregates wall time on 7d/30d — see the perf audit). Returns
-    # None when ineligible (filters present, window too short, or any
-    # closed hour missing its rollup file), and we fall through to the
-    # existing TEMP-table path.
-    rollup_result = runner.try_slow_urls_from_rollup(
-        start_time,
-        end_time,
-        has_filters=has_filters,
-        min_requests=min_requests,
-        limit=limit,
-    )
-    if rollup_result is not None:
-        return rollup_result
-
+    # PURE temp-path: the slow_urls rollup-first attempt was hoisted into
+    # get_aggregates's pre-temp phase (Part B skip-temp guard). This helper now
+    # only runs for the MISSED case. ``start_time`` / ``end_time`` /
+    # ``has_filters`` are retained for signature stability but unused here.
+    #
     # Use the pre-computed lat_us column so percentile sorts can leverage
     # column-store layout instead of paying COALESCE per row.
     rows = runner.execute(
@@ -843,9 +880,22 @@ def _origin_slow_urls_from_temp(
     }
 
 
-def _origin_status_codes_from_temp(runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str]) -> dict:
+def _origin_status_codes_from_temp(
+    runner: QueryRunner,
+    temp_table: str,
+    actual_cols: set[str] | list[str],
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    has_filters: bool = True,
+) -> dict:
     if "ost" not in set(actual_cols):
         return {"has_data": False, "rows": []}
+
+    # PURE temp-path: the status_codes rollup-first attempt was hoisted into
+    # get_aggregates's pre-temp phase (Part B skip-temp guard). This helper now
+    # only runs for the MISSED case. ``start_time`` / ``end_time`` /
+    # ``has_filters`` are retained for signature stability but unused here.
     rows = runner.execute(SQL.STATUS_CODES.format(table=temp_table, where="1=1")).fetchall()
     if not rows:
         return {"has_data": False, "rows": []}
@@ -855,10 +905,23 @@ def _origin_status_codes_from_temp(runner: QueryRunner, temp_table: str, actual_
     }
 
 
-def _origin_path_breakdown_from_temp(runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str]) -> dict:
+def _origin_path_breakdown_from_temp(
+    runner: QueryRunner,
+    temp_table: str,
+    actual_cols: set[str] | list[str],
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    has_filters: bool = True,
+) -> dict:
     actual_cols_set = set(actual_cols)
     if "edge" not in actual_cols_set:
         return {"has_data": False, "shielding_detected": False, "rows": []}
+
+    # PURE temp-path: the origin_path rollup-first attempt was hoisted into
+    # get_aggregates's pre-temp phase (Part B skip-temp guard). This helper now
+    # only runs for the MISSED case. ``start_time`` / ``end_time`` /
+    # ``has_filters`` are retained for signature stability but unused here.
     rows = runner.execute(SQL.PATH_BREAKDOWN.format(lat_val="lat_us", table=temp_table, where="1=1")).fetchall()
     if not rows:
         return {"has_data": False, "shielding_detected": False, "rows": []}
@@ -871,11 +934,23 @@ def _origin_path_breakdown_from_temp(runner: QueryRunner, temp_table: str, actua
 
 
 def _origin_pop_latency_from_temp(
-    runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str], limit: int
+    runner: QueryRunner,
+    temp_table: str,
+    actual_cols: set[str] | list[str],
+    limit: int,
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    has_filters: bool = True,
 ) -> dict:
     actual_cols_set = set(actual_cols)
     if "pop" not in actual_cols_set:
         return {"has_data": False, "requires_group_c": True, "rows": []}
+
+    # PURE temp-path: the origin_pop rollup-first attempt was hoisted into
+    # get_aggregates's pre-temp phase (Part B skip-temp guard). This helper now
+    # only runs for the MISSED case. ``start_time`` / ``end_time`` /
+    # ``has_filters`` are retained for signature stability but unused here.
     rows = runner.execute(
         SQL.POP_LATENCY.format(lat_val="lat_us", table=temp_table, where="1=1"),
         [limit],
@@ -902,11 +977,23 @@ def _origin_pop_latency_from_temp(
 
 
 def _origin_ip_health_from_temp(
-    runner: QueryRunner, temp_table: str, actual_cols: set[str] | list[str], limit: int
+    runner: QueryRunner,
+    temp_table: str,
+    actual_cols: set[str] | list[str],
+    limit: int,
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    has_filters: bool = True,
 ) -> dict:
     actual_cols_set = set(actual_cols)
     if "oip" not in actual_cols_set or "ost" not in actual_cols_set:
         return {"has_data": False, "rows": []}
+
+    # PURE temp-path: the origin_ip rollup-first attempt was hoisted into
+    # get_aggregates's pre-temp phase (Part B skip-temp guard). This helper now
+    # only runs for the MISSED case. ``start_time`` / ``end_time`` /
+    # ``has_filters`` are retained for signature stability but unused here.
     rows = runner.execute(
         SQL.IP_HEALTH.format(lat_val="lat_us", table=temp_table, where="1=1"),
         [limit],
@@ -981,6 +1068,7 @@ async def get_aggregates(
         return {**empty_payload, **runner.telemetry()}
 
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
+    has_filters = bool(filters)
 
     # Union of columns needed across the seven sub-queries. Filtered to
     # those the schema actually has before materialization so missing
@@ -1025,6 +1113,101 @@ async def get_aggregates(
     timer = SectionTimer()
     section_timings = timer.entries
 
+    # ── Part B: hoisted rollup phase (BEFORE the temp build) ──────────────
+    #
+    # For each REQUESTED section, attempt its try_*_from_rollup on the primary
+    # runner (cheap parquet reads, no temp). A non-None hit lands in ``merged``
+    # and is timed; a None means the section MISSED the rollup (filtered, <48h,
+    # split_by_leg, sub-minute bucket, or partial coverage) and must be served
+    # live from the temp. The temp_table_create — the dominant cost on the wide
+    # unfiltered path — is built ONLY when at least one section missed.
+    merged: dict[str, Any] = {}
+    missed: set[str] = set()
+
+    def _hoist(name: str, reader) -> None:
+        if not _want(name):
+            return
+        _ts = _time.perf_counter()
+        result = reader()
+        timer.mark(name, _ts)
+        if result is not None:
+            merged[name] = result
+        else:
+            missed.add(name)
+
+    _hoist(
+        "summary",
+        lambda: runner.try_origin_summary_from_rollup(
+            start_time, end_time, has_filters=has_filters, actual_cols=actual_set
+        ),
+    )
+    _hoist(
+        "slow_urls",
+        lambda: runner.try_slow_urls_from_rollup(
+            start_time,
+            end_time,
+            has_filters=has_filters,
+            min_requests=slow_urls_min_requests,
+            limit=slow_urls_limit,
+        ),
+    )
+    _hoist(
+        "status_codes",
+        lambda: runner.try_origin_status_from_rollup(start_time, end_time, has_filters=has_filters),
+    )
+    _hoist(
+        "path_breakdown",
+        lambda: runner.try_origin_path_breakdown_from_rollup(start_time, end_time, has_filters=has_filters),
+    )
+    _hoist(
+        "pop_latency",
+        lambda: runner.try_origin_pop_latency_from_rollup(
+            start_time, end_time, has_filters=has_filters, limit=pop_latency_limit
+        ),
+    )
+    _hoist(
+        "ip_health",
+        lambda: runner.try_origin_ip_health_from_rollup(
+            start_time, end_time, has_filters=has_filters, limit=ip_health_limit
+        ),
+    )
+    _hoist(
+        "timeseries",
+        lambda: runner.try_origin_latency_ts_from_rollup(
+            start_time,
+            end_time,
+            has_filters=has_filters,
+            bucket_minutes=bucket_minutes,
+            metric=timeseries_metric,
+            percentile=timeseries_percentile,
+            split_by_leg=split_by_leg,
+            # The reader's active-hour live merge reads the BASE view (not the
+            # temp); pass the base table + the (time-only, since unfiltered)
+            # inlined where_clause + params. Mirrors dashboard.py's
+            # try_time_series_from_rollup call shape.
+            table_name=table_name,
+            where_clause=where_clause,
+            params=params,
+        ),
+    )
+
+    # All requested sections hit the rollup → skip the temp build entirely.
+    # This is the wide-unfiltered + fully-backfilled win: temp_table_create is
+    # ABSENT from section_timings. ``origin:temp_skipped`` lets the harness
+    # confirm the guard fired. has_data still derives from the summary card.
+    if not missed:
+        section_timings.append({"section": "origin:temp_skipped", "time_ms": 0.0})
+        summary_card = merged.get("summary") or {}
+        # Same envelope as the temp-path return below: only requested sections
+        # appear (they're all in ``merged`` here), has_data from the summary
+        # card. No temp_table_create mark — that's the guard's signature.
+        return {
+            "has_data": summary_card.get("has_data", False),
+            "section_timings": section_timings,
+            **merged,
+            **runner.telemetry(),
+        }
+
     _t = _time.perf_counter()
     if not runner.create_temp_table(create_sql, params):
         return {**empty_payload, **runner.telemetry()}
@@ -1039,8 +1222,13 @@ async def get_aggregates(
     # those into the outer response. When the selector excludes a section,
     # both its read and its timer mark are suppressed — perf-harness
     # attribution would treat phantom zero-time marks as real reads.
+    # A section runs its live from_temp helper only when it was REQUESTED and
+    # MISSED the hoisted rollup phase. Rollup hits are already in ``merged``.
+    def _run(name: str) -> bool:
+        return _want(name) and name in missed
+
     def _branch_summary(r: QueryRunner) -> dict:
-        if not _want("summary"):
+        if not _run("summary"):
             return {}
         _ts = _time.perf_counter()
         result = _origin_summary_from_temp(
@@ -1054,10 +1242,8 @@ async def get_aggregates(
         timer.mark("summary", _ts)
         return {"summary": result}
 
-    has_filters = bool(filters)
-
     def _branch_slow_urls(r: QueryRunner) -> dict:
-        if not _want("slow_urls"):
+        if not _run("slow_urls"):
             return {}
         _ts = _time.perf_counter()
         result = _origin_slow_urls_from_temp(
@@ -1075,43 +1261,91 @@ async def get_aggregates(
 
     def _branch_ts_status_path(r: QueryRunner) -> dict:
         out: dict[str, Any] = {}
-        if _want("timeseries"):
+        if _run("timeseries"):
             _ts = _time.perf_counter()
             out["timeseries"] = _origin_timeseries_from_temp(
-                r, temp_table, actual_set, bucket_minutes, split_by_leg, timeseries_metric, timeseries_percentile
+                r,
+                temp_table,
+                actual_set,
+                bucket_minutes,
+                split_by_leg,
+                timeseries_metric,
+                timeseries_percentile,
+                start_time=start_time,
+                end_time=end_time,
+                has_filters=has_filters,
+                # The rollup reader's active-hour live merge reads the BASE
+                # view, not the temp. Pass the base table + the (time-only,
+                # since unfiltered) inlined where_clause + params (empty under
+                # inline_params=True). Mirrors dashboard.py's
+                # try_time_series_from_rollup call shape.
+                table_name=table_name,
+                where_clause=where_clause,
+                params=params,
             )
             timer.mark("timeseries", _ts)
-        if _want("status_codes"):
+        if _run("status_codes"):
             _ts = _time.perf_counter()
-            out["status_codes"] = _origin_status_codes_from_temp(r, temp_table, actual_set)
+            out["status_codes"] = _origin_status_codes_from_temp(
+                r,
+                temp_table,
+                actual_set,
+                start_time=start_time,
+                end_time=end_time,
+                has_filters=has_filters,
+            )
             timer.mark("status_codes", _ts)
-        if _want("path_breakdown"):
+        if _run("path_breakdown"):
             _ts = _time.perf_counter()
-            out["path_breakdown"] = _origin_path_breakdown_from_temp(r, temp_table, actual_set)
+            out["path_breakdown"] = _origin_path_breakdown_from_temp(
+                r,
+                temp_table,
+                actual_set,
+                start_time=start_time,
+                end_time=end_time,
+                has_filters=has_filters,
+            )
             timer.mark("path_breakdown", _ts)
         return out
 
     def _branch_pop_ip(r: QueryRunner) -> dict:
         out: dict[str, Any] = {}
-        if _want("pop_latency"):
+        if _run("pop_latency"):
             _ts = _time.perf_counter()
-            out["pop_latency"] = _origin_pop_latency_from_temp(r, temp_table, actual_set, pop_latency_limit)
+            out["pop_latency"] = _origin_pop_latency_from_temp(
+                r,
+                temp_table,
+                actual_set,
+                pop_latency_limit,
+                start_time=start_time,
+                end_time=end_time,
+                has_filters=has_filters,
+            )
             timer.mark("pop_latency", _ts)
-        if _want("ip_health"):
+        if _run("ip_health"):
             _ts = _time.perf_counter()
-            out["ip_health"] = _origin_ip_health_from_temp(r, temp_table, actual_set, ip_health_limit)
+            out["ip_health"] = _origin_ip_health_from_temp(
+                r,
+                temp_table,
+                actual_set,
+                ip_health_limit,
+                start_time=start_time,
+                end_time=end_time,
+                has_filters=has_filters,
+            )
             timer.mark("ip_health", _ts)
         return out
 
-    # Per-branch occupancy — when the selector excludes an entire branch,
-    # don't run its helper AND don't acquire an extra conn for it. Branch
-    # 1 (primary runner) always uses ``runner`` so we never need an extra
-    # conn for the summary branch. The remaining three are gated wholesale
-    # so a single-card request only pays for one pool checkout instead of
+    # Per-branch occupancy — a branch runs (and acquires an extra conn) only
+    # when it owns at least one MISSED requested section. Rollup-hit sections
+    # are already merged, so they neither run a helper nor cost a pool checkout.
+    # Branch 1 (primary runner) always uses ``runner`` so we never need an extra
+    # conn for the summary branch. The remaining three are gated wholesale so a
+    # single missed-card request only pays for one pool checkout instead of
     # three.
-    branch_slow_active = _want("slow_urls")
-    branch_ts_active = bool(_want("timeseries") or _want("status_codes") or _want("path_breakdown"))
-    branch_pop_active = bool(_want("pop_latency") or _want("ip_health"))
+    branch_slow_active = _run("slow_urls")
+    branch_ts_active = bool(_run("timeseries") or _run("status_codes") or _run("path_breakdown"))
+    branch_pop_active = bool(_run("pop_latency") or _run("ip_health"))
     extras_needed = sum(int(b) for b in (branch_slow_active, branch_ts_active, branch_pop_active))
 
     try:
@@ -1152,7 +1386,9 @@ async def get_aggregates(
             extra_cms = []
             extra_runners = []
 
-        merged: dict[str, Any] = {}
+        # ``merged`` already holds the hoisted rollup hits — the live branches
+        # below only ADD the missed sections (do NOT reinitialize it here, or
+        # the rollup hits for this same request would be dropped).
         if parallel:
             try:
                 # Build the gather list in the same order we consume

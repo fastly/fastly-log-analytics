@@ -26,12 +26,17 @@ cd "$REPO_ROOT/frontend"
 # scoped to the production source dirs below (generated types/, __tests__/,
 # e2e/, and build output are out of scope — build output is ignored in
 # eslint.config.mjs). Lower this number whenever a PR drives the count down.
-# Lineage (ratchet down as `as any` / violations are removed): 940 -> 936 -> 932 -> 901 -> 895.
+# Lineage (ratchet down as `as any` / violations are removed): 940 -> 936 -> 932 -> 901 -> 895 -> 889 -> 875 -> 873.
 # The big drops came from typing openapi-fetch responses instead of `any` — UX-17
 # (network/page.tsx), the SRE observability pass (health/scoring fields), and the
 # UX type-drift remediation (sections request bodies, usage/dashboard/alerts reads,
-# AdminPrefetchLinks). Drive toward zero.
-CEILING=895
+# AdminPrefetchLinks). 895 -> 889: LatencyHeatmap column dedup collapsed six
+# duplicated `(info: any)` cells into shared column constants. 889 -> 875: shielding
+# audit display fixes typed shielding_analysis (ShieldingAnalysis/ShieldingRow) end
+# to end, removing `as any` casts in network/page.tsx + ShieldingMap. 875 -> 873:
+# the typed adjustShieldingRows helper (min-requests threshold) replaced ad-hoc
+# row handling without new `any`. Drive toward zero.
+CEILING=873
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make

@@ -45,7 +45,7 @@ export function TerraformStep({ s }: { s: WizardState }) {
           </div>
         ) : (
           <Tabs
-            defaultValue="logging"
+            defaultValue="instructions"
             className="flex-1 flex flex-col min-h-0"
             onValueChange={(tab) => {
               if (tab === "logging") setSelectedTfFile("logging_service.tf");
@@ -54,6 +54,13 @@ export function TerraformStep({ s }: { s: WizardState }) {
             }}
           >
             <TabsList className="grid w-full grid-cols-4 shrink-0">
+              <TabsTrigger
+                value="instructions"
+                className="flex items-center gap-2"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                Instructions
+              </TabsTrigger>
               <TabsTrigger value="logging" className="flex items-center gap-2">
                 <Zap className="w-3.5 h-3.5" />
                 Logging Service
@@ -62,20 +69,13 @@ export function TerraformStep({ s }: { s: WizardState }) {
                 <Globe className="w-3.5 h-3.5" />
                 CDN & Storage
               </TabsTrigger>
-              <TabsTrigger
-                value="instructions"
-                className="flex items-center gap-2"
-              >
-                <FileText className="w-3.5 h-3.5" />
-                Instructions
-              </TabsTrigger>
               <TabsTrigger value="all" className="flex items-center gap-2">
                 <FileJson className="w-3.5 h-3.5" />
                 All Files
               </TabsTrigger>
             </TabsList>
 
-            {["logging", "cdn", "instructions", "all"].map((tab) => (
+            {["instructions", "logging", "cdn", "all"].map((tab) => (
               <TabsContent
                 key={tab}
                 value={tab}

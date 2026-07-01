@@ -21,6 +21,21 @@ vi.mock('@/lib/date', () => ({
   formatDate: (t: string) => t,
 }))
 
+// useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
+// which would need a QueryClientProvider. Mock it instead — NetworkSection's
+// contract here is "render the Requires hint when the field is inactive, a
+// neutral no-data state when it's active". Default to no active fields so the
+// "Requires Group X" assertions below exercise the not-enabled path; tests that
+// want the enabled path add ids to `activeFields`.
+const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
+vi.mock('@/hooks/useActiveLogFields', () => ({
+  useActiveLogFields: () => ({
+    ready: true,
+    isFieldActive: (id: string) => activeFields.has(id),
+    isGroupActive: () => false,
+  }),
+}))
+
 import { NetworkSection } from '@/app/security/_sections/NetworkSection'
 
 function baseProps(overrides: Partial<React.ComponentProps<typeof NetworkSection>> = {}) {
@@ -38,6 +53,7 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof NetworkSection
 describe('NetworkSection', () => {
   beforeEach(() => {
     plotlyMock.mockClear()
+    activeFields.clear()
   })
 
   it('shows loading skeleton overlay across all three cards when isLoading', () => {
@@ -59,6 +75,25 @@ describe('NetworkSection', () => {
     // (one per card) and proxy cites Group I once.
     expect(screen.getAllByText(/Infrastructure \(Group C\) fields/i).length).toBe(2)
     expect(screen.getByText(/Security: Proxy & Anonymization \(Group I\)/i)).toBeInTheDocument()
+    expect(plotlyMock).not.toHaveBeenCalled()
+  })
+
+  it('shows a neutral "no data yet" state (no Requires hint) when the field group IS enabled', () => {
+    // Enabled-but-empty: the fields driving each card are in the active log
+    // format, so an empty result means "no data in this window", NOT
+    // "misconfigured". ChartEmptyState should drop the "Requires …" subtext.
+    activeFields.add('is_ipv6')
+    activeFields.add('p_type')
+    activeFields.add('conn_requests')
+    render(
+      <NetworkSection
+        {...baseProps({
+          data: { ipv6_adoption: [], proxy_dist: [], conn_reuse_dist: [] } as any,
+        })}
+      />
+    )
+    expect(screen.getAllByText(/no data in this time range yet/i).length).toBe(3)
+    expect(screen.queryByText(/Requires/i)).not.toBeInTheDocument()
     expect(plotlyMock).not.toHaveBeenCalled()
   })
 

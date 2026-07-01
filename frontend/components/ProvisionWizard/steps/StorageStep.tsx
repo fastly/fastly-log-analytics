@@ -402,7 +402,7 @@ export function StorageStep({ s }: { s: WizardState }) {
             <div className="space-y-0.5">
               <LabelWithInfo
                 label="Daily Iceberg Optimization"
-                info="Every night at 03:00 UTC, rewrites many small Iceberg snapshot files into larger, optimized Parquet files. This keeps query speed fast and controls FOS storage costs. Strongly recommended when using frequent commit intervals."
+                info="Every night at 03:00 UTC, rewrites many small Iceberg snapshot files into larger, optimized Parquet files in FOS. This is storage-side housekeeping that keeps cloud storage costs down — dashboard query speed is handled separately by always-on local compaction. Strongly recommended when using frequent commit intervals."
               />
               <p className="text-[10px] text-muted-foreground">
                 Runs at 03:00 UTC — consolidates daily snapshots

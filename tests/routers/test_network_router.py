@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from backend.repositories._base import _safe_table
 from tests.conftest import MOCK_SERVICE_ID
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
@@ -93,3 +95,29 @@ def test_network_health_core_plus_shielding_selector(client, in_memory_duckdb, t
     data = response.json()
     assert "leaderboard" in data
     assert "shielding_analysis" in data
+
+
+def test_network_health_shielding_failure_returns_error_sentinel(client, in_memory_duckdb, test_service_source):
+    """M2 (shielding audit 2026-06-30): a handler-level failure in
+    get_shielding_analysis must NOT be swallowed into a null/empty payload
+    that's indistinguishable from "no data". The router logs it and returns
+    an explicit ``{error: true}`` sentinel so the UI can surface it."""
+    table = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=5)
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    with patch(
+        "backend.repositories.origin.get_shielding_analysis",
+        side_effect=RuntimeError("boom"),
+    ):
+        response = client.post(
+            "/api/network-health",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={"filters": {}, "sections": ["shielding_analysis"]},
+        )
+
+    assert response.status_code == 200
+    sa = response.json()["shielding_analysis"]
+    assert sa is not None
+    assert sa["error"] is True
+    assert sa["has_data"] is False

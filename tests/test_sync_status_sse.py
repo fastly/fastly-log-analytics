@@ -1,9 +1,12 @@
-"""Sync-status push channel: in-process publisher + SSE endpoint.
+"""Sync-status push channel: in-process publisher + analyst-safe stream.
 
 Covers the cross-thread bridge from APScheduler cron workers
 (``publish()``) to the asyncio SSE generator (``subscribe()``), the
-bounded-queue drop-oldest semantics, and the
-``/api/sync-status/stream`` endpoint's snapshot-on-connect contract.
+bounded-queue drop-oldest semantics, and the analyst-safe
+``/api/log-extents/stream`` projection. The admin sync-status SSE
+delivery that consumes this publisher now lives on the multiplexed
+``/api/admin/events/stream`` (sync-status channel) — see
+tests/routers/test_admin_events_stream.py.
 """
 
 from __future__ import annotations
@@ -213,79 +216,6 @@ def _parse_sse_data_events(text: str) -> list[dict]:
     return out
 
 
-def test_stream_requires_service_id():
-    """No x-service-id → 422 (request validation), not a hung connection.
-
-    Reclassified from 400 to 422 — missing/invalid request params land on
-    422 throughout the codebase to align with the FastAPI convention
-    (400 reserved for protocol-level malformedness).
-    """
-    with TestClient(app) as client:
-        resp = client.get("/api/sync-status/stream")
-        assert resp.status_code == 422
-
-
-def test_stream_yields_initial_snapshot_then_pushed_update():
-    """End-to-end wiring: connect → first event is the cached snapshot;
-    a publish during the stream lands as the next event."""
-
-    snapshot = {
-        "configured": True,
-        "latest_log_at": "2026-06-15T10:00:00Z",
-        "local_rows": 100,
-    }
-    pushed = {
-        "configured": True,
-        "latest_log_at": "2026-06-15T10:01:00Z",
-        "local_rows": 105,
-    }
-
-    # Drive the publisher used by the endpoint so we can ship one push
-    # event and then unblock the stream by ending the subscription.
-    from backend.routers.admin import sync_status as router_module
-
-    async def fake_subscribe(_svc_id):
-        # Wait briefly for the test thread to publish, then yield it.
-        # Limit to 2 s so a regression doesn't hang the suite.
-        for _ in range(20):
-            if pushed_event.is_set():
-                yield pushed
-                return
-            await asyncio.sleep(0.1)
-        return
-
-    pushed_event = asyncio.Event()
-
-    # Trigger the push from a background thread so the SSE generator
-    # (which is iterating fake_subscribe) sees the event flip.
-    def trigger_push():
-        # The endpoint runs in the TestClient's event loop; signal it
-        # via the loop the publisher was bound to.
-        loop = router_module.sync_status_publisher._loop
-        if loop:
-            loop.call_soon_threadsafe(pushed_event.set)
-
-    threading.Timer(0.3, trigger_push).start()
-
-    with (
-        patch.object(router_module, "compute_sync_status_cached", return_value=snapshot),
-        patch.object(router_module.sync_status_publisher, "subscribe", fake_subscribe),
-    ):
-        with TestClient(app) as client:
-            with client.stream(
-                "GET",
-                "/api/sync-status/stream",
-                headers={"x-service-id": "svc-123"},
-            ) as resp:
-                assert resp.status_code == 200
-                body = "".join(resp.iter_text())
-
-    events = _parse_sse_data_events(body)
-    # First event must be the cached snapshot, second the pushed update.
-    assert events[0] == snapshot
-    assert pushed in events
-
-
 # ── Analyst-safe projected stream ─────────────────────────────────────────
 
 
@@ -369,56 +299,4 @@ def test_log_extents_stream_projects_to_two_safe_fields_only():
     for ev in events:
         assert set(ev.keys()) == {"latest_log_at", "local_rows"}, (
             f"Analyst projection leaked extra keys: {sorted(ev.keys() - {'latest_log_at', 'local_rows'})}"
-        )
-
-
-def test_sse_initial_snapshot_runs_off_event_loop_thread():
-    """``compute_sync_status_cached`` performs synchronous disk I/O
-    (os.path.getsize + directory traversal); running it directly on the
-    SSE coroutine stalled the asyncio event loop for the I/O duration,
-    denying service to every other concurrent request on the same worker.
-
-    Regression for F008 (audit run 7ba15352): the endpoint must offload
-    the call via ``asyncio.to_thread`` so the helper executes on the
-    threadpool, not the event-loop thread. Verify by capturing the
-    thread the helper ran on and asserting it's not the main TestClient
-    loop thread.
-    """
-    from backend.routers.admin import sync_status as router_module
-
-    invoked_threads: list[str] = []
-
-    def fake_compute(_svc_id):
-        invoked_threads.append(threading.current_thread().name)
-        return {"configured": True, "latest_log_at": "2026-06-15T10:00:00Z", "local_rows": 1}
-
-    async def fake_subscribe(_svc_id):
-        # End immediately so the stream closes after the first event.
-        return
-        yield  # pragma: no cover (unreachable; keeps it an async generator)
-
-    with (
-        patch.object(router_module, "compute_sync_status_cached", side_effect=fake_compute),
-        patch.object(router_module.sync_status_publisher, "subscribe", fake_subscribe),
-    ):
-        with TestClient(app) as client:
-            with client.stream(
-                "GET",
-                "/api/sync-status/stream",
-                headers={"x-service-id": "svc-thread-check"},
-            ) as resp:
-                assert resp.status_code == 200
-                # Drain the stream so the snapshot path actually runs.
-                "".join(resp.iter_text())
-
-    assert invoked_threads, "compute_sync_status_cached was never called"
-    main = threading.main_thread().name
-    # Every invocation must be on a different thread than the main event loop.
-    # asyncio.to_thread runs on a default executor thread (typically named
-    # ``asyncio_*`` or ``ThreadPoolExecutor-*``); anything that's NOT
-    # MainThread proves the call left the event loop.
-    for tname in invoked_threads:
-        assert tname != main, (
-            f"compute_sync_status_cached ran on the main event loop thread ({tname}) — "
-            "SSE handler must wrap the call in asyncio.to_thread"
         )

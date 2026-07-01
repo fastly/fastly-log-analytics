@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Iterator
-from typing import Any, get_args
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
 from backend.models.dashboard import (
     AggregatesRequest,
@@ -22,15 +23,36 @@ from backend.models.dashboard import (
 )
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import dashboard as repo
-from backend.utils.router_utils import expand_sections, query_errors
+from backend.utils.auth import mask_ips_for
+from backend.utils.router_utils import make_section_expander, query_errors
+from backend.utils.time_window import is_valid_range_token, resolve_window
+
+
+def _clamp_window(req: AggregatesRequest, ctx: RequestContext) -> tuple[str | None, str | None]:
+    """Resolve the scan window once for the dashboard aggregates/bundle paths.
+
+    Keyed path: when ``range_token`` is recognized the SERVER resolves the
+    window from (token, anchor) — ignoring FE-supplied absolute start/end so a
+    crafted body can't widen the scan — then clamps to the invite ceiling. The
+    clamp runs AFTER resolve, so it is the single enforcement point (an analyst
+    can't widen past their invite by picking "30d"). Legacy path clamps the
+    FE-supplied bounds unchanged. Mirrors routers/origin.py.
+
+    Returning a single pair is load-bearing for /dashboard/bundle: BOTH the
+    aggregates branch and the top_bots branch close over the one clamped result,
+    so neither sub-query can ever scan unclamped bounds.
+    """
+    if is_valid_range_token(req.range_token):
+        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
+        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
+        return ctx.clamp(resolved_start, resolved_end)
+    return ctx.clamp(req.start_time, req.end_time)
+
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"], responses=DEFAULT_ERROR_RESPONSES)
-_ALL_DASHBOARD_SECTIONS: frozenset[str] = frozenset(get_args(DashboardSectionName))
 
-
-def _expand_sections(sections: list[DashboardSectionName] | None) -> set[str] | None:
-    """Validate the selector. None → no selector (full response)."""
-    return expand_sections(sections, _ALL_DASHBOARD_SECTIONS)
+# No coupling — every dashboard section is independent.
+_expand_sections = make_section_expander(DashboardSectionName)
 
 
 def _resolve_aggregate_flags(
@@ -67,7 +89,7 @@ def dashboard_aggregates(
     req: AggregatesRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
-    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    start_time, end_time = _clamp_window(req, ctx)
     sections = _expand_sections(req.sections)
     its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
     return repo.get_aggregates(
@@ -122,7 +144,10 @@ async def dashboard_bundle(
     from backend.repositories import security as security_repo
     from backend.repositories._base import SectionTimer
 
-    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    # Resolve+clamp ONCE here so BOTH sub-queries (_run_aggregates and
+    # _run_top_bots) close over the same clamped window — neither can scan
+    # unclamped bounds, and the keyed path's invite-ceiling clamp covers both.
+    start_time, end_time = _clamp_window(req, ctx)
 
     sections = _expand_sections(req.sections)
     its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
@@ -332,14 +357,12 @@ def dashboard_raw_csv(
     # PII pass (text/csv content-type). Apply mask_ips here so analyst
     # exports respect the per-invite policy. The same mask_ip helper the
     # JSON path uses is reused here for shape parity.
-    if ctx.analyst_session is not None:
-        policy = getattr(ctx.analyst_session, "pii_policy", None)
-        if isinstance(policy, dict) and policy.get("mask_ips"):
-            from backend.core.share_db.validation import mask_ip
+    if mask_ips_for(ctx.analyst_session):
+        from backend.core.share_db.validation import IP_FAMILY_KEYS, mask_ip
 
-            for col in ("ip", "ip_address", "client_ip", "remote_addr"):
-                if col in df.columns:
-                    df[col] = df[col].apply(lambda v: mask_ip(v) if isinstance(v, str) else v)
+        for col in IP_FAMILY_KEYS:
+            if col in df.columns:
+                df[col] = df[col].apply(lambda v: mask_ip(v) if isinstance(v, str) else v)
 
     # Chunked serialization — avoids the StringIO double-buffer (the
     # whole CSV string in memory in addition to the DataFrame). For

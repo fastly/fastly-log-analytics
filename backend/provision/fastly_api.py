@@ -12,6 +12,7 @@ from backend.core.fastly.service import (
     find_condition,
     find_service_by_name,
     get_active_version,
+    get_generated_vcl,
     list_s3_endpoints,
     list_vcl_snippets,
 )
@@ -26,7 +27,14 @@ from backend.utils import vcl_utils
 # Only headers present in this mapping will be captured at the edge.
 EDGE_DATA_MAPPING = {
     "host": "req.http.Host",
-    "ip": "client.ip",
+    # Prefer an operator-supplied Fastly-Client-IP over the raw socket IP.
+    # When the service sits behind another proxy/CDN, operator VCL higher in
+    # vcl_recv may rewrite req.http.Fastly-Client-IP to the true source IP
+    # (and set client.geo.ip_override accordingly); in that case client.ip is
+    # the intermediary, not the real client. Fall back to the socket IP when
+    # the header is unset/empty. Both if() branches must be STRING, so the
+    # fallback uses "" + client.ip to stringify the IP type.
+    "ip": 'if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, "" + client.ip)',
     "country": "client.geo.country_code",
     "city": "client.geo.city",
     "region": "client.geo.region",
@@ -66,35 +74,28 @@ EDGE_DATA_MAPPING = {
 }
 
 
-def resolve_shield_secret(cfg: dict | None) -> str | None:
-    """Return the single per-service secret baked into ``X-Edge-Shield-Auth``
-    to mark a request as an internal cluster fetch — the unspoofable
-    replacement for the old ``fastly.ff.visits_this_service == 0`` edge
-    check (finding 007).
-
-    There must be exactly ONE such value per service: the capture VCL and
-    the session-scoring VCL are installed on the *same* logging service and
-    both write + validate the single ``X-Edge-Shield-Auth`` header. Session
-    scoring already mints ``scoring.request_secret`` and stamps it on every
-    bereq (``session_scoring_vcl``), so the capture VCL rides that same
-    value when scoring is enabled; otherwise it uses the service-level
-    ``cluster_secret``. Two different secrets on one header would make the
-    shield honour only one snippet's skip check and re-run the other's
-    edge-only logic at the shield POP.
-
-    Returns ``None`` when neither secret exists, in which case the capture
-    VCL falls back to the legacy ``fastly.ff`` guard.
-    """
-    cfg = cfg or {}
-    scoring = cfg.get("scoring") or {}
-    if scoring.get("enabled") and scoring.get("request_secret"):
-        return scoring["request_secret"]
-    return cfg.get("cluster_secret") or None
+# Capture-snippet install plan — the single source of truth shared by the live
+# provisioning path (``install_capture_snippets``) and the Terraform generator
+# (``backend.utils.terraform_gen``): which generated snippet lands in which
+# subroutine, at what priority, and whether it is always present.
+#   (content_key, snippet_name, subroutine, priority, required)
+#   * content_key — key in the dict returned by ``generate_capture_vcl``
+#   * priority    — lower runs first (Fastly default 100). "Reset Client IP"
+#     uses -100 so it runs ahead of operator VCL and the priority-1 capture.
+#   * required    — core phases are always generated; optional phases are
+#     guarded by ``content_key in snippets``.
+CAPTURE_SNIPPET_PLAN: tuple[tuple[str, str, str, int, bool], ...] = (
+    ("recv_reset", "Fastly Log Analysis Reset Client IP", "recv", -100, False),
+    ("recv", "Fastly Log Analysis Capture", "recv", 1, True),
+    ("miss", "Fastly Log Analysis Miss", "miss", 100, True),
+    ("pass", "Fastly Log Analysis Pass", "pass", 100, True),
+    ("fetch", "Fastly Log Analysis Origin Fetch", "fetch", 100, False),
+    ("deliver", "Fastly Log Analysis Origin Deliver", "deliver", 100, False),
+    ("error", "Fastly Log Analysis Origin Error", "error", 100, False),
+)
 
 
-def generate_capture_vcl(
-    log_fields_config: dict | None, cluster_secret: str = None, scoring_enabled: bool = False
-) -> dict[str, str]:
+def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool = False) -> dict[str, str]:
     """Return dict of VCL snippets keyed by subroutine name.
 
     Always returns "recv", "miss", and "pass". When group L (Origin Metrics)
@@ -143,12 +144,14 @@ def generate_capture_vcl(
     # public docs) can pre-set ``x-fos-edge-data:<field>`` and have
     # the log line read the spoofed value instead of the edge-captured
     # one. Per-name scrubs close the gap.
-    # Edge-hop detection (restart-invariant): the shield-auth secret if we have
-    # one (unspoofable from outside), else the first-POP visits check.
-    if cluster_secret:
-        edge_detect = f'req.http.X-Edge-Shield-Auth != "{cluster_secret}"'
-    else:
-        edge_detect = "fastly.ff.visits_this_service == 0"
+    # Edge-hop detection (restart-invariant). ``fastly.ff.visits_this_service``
+    # is 0 only at the first Fastly POP to handle the request (the true edge);
+    # a client cannot forge it (each Fastly-FF entry is a salted hash only
+    # genuine Fastly hops can produce), so it can't fake having already transited
+    # our edge. Stays correct even when the nearest POP is a shield — that POP is
+    # simply the first hop, so visits_this_service is still 0 there. This mirrors
+    # the CDN fronting service (core/fastly/utils.py) and the scoring VCL.
+    edge_detect = "fastly.ff.visits_this_service == 0"
     # SCRUB runs only on the FIRST edge pass: it strips client-forged headers
     # before anything trusts them. It must stay req.restarts == 0 so it does not
     # re-run on the post-scoring-restart pass (where it would risk wiping the
@@ -167,9 +170,6 @@ def generate_capture_vcl(
         "# [security] strip client-supplied internal-routing headers",
         f"if ({scrub_guard}) {{",
     ]
-    if cluster_secret:
-        scrub_lines.append("  unset req.http.X-Edge-Shield-Auth;")
-
     scrub_lines.extend(
         [
             "  unset req.http.x-is-cluster-fetch;",
@@ -245,20 +245,6 @@ def generate_capture_vcl(
 
     # miss and pass: unset edge headers + optional group-L timing
     base_unset_lines = ["if (req.backend.is_origin) {", "  unset bereq.http.x-fos-edge-data;", "}"]
-    if cluster_secret:
-        # Shield-auth marker — stamp on EVERY outgoing bereq (edge→shield
-        # AND shield→origin), mirroring the CDN VCL (core/fastly/utils.py)
-        # and the session-scoring VCL. The next POP's vcl_recv reads it
-        # back via req.http.X-Edge-Shield-Auth and skips the edge-only
-        # capture/scrub — replicating the old "first POP only" semantics
-        # of fastly.ff.visits_this_service==0. Gating this on
-        # req.backend.is_origin would leave the edge→shield leg
-        # unauthenticated, so a shielded service would re-capture edge data
-        # at the shield with the wrong client IP. Unspoofable from outside
-        # because the secret is only ever set here (compiled into our VCL,
-        # never returned to clients) and stripped from inbound client reqs
-        # by the recv scrub above.
-        base_unset_lines.append(f'set bereq.http.X-Edge-Shield-Auth = "{cluster_secret}";')
     base_unset = "\n".join(base_unset_lines) + "\n"
 
     # Session-scoring services route the first-pass request to the scorer
@@ -304,6 +290,28 @@ def generate_capture_vcl(
         pass_vcl = base_unset
 
     snippets: dict[str, str] = {"recv": recv_vcl, "miss": miss_vcl, "pass": pass_vcl}
+
+    # Reset any client-supplied Fastly-Client-IP at the true edge so a spoofed
+    # inbound header cannot poison the captured client IP. This is its OWN
+    # snippet installed at priority -100 (see CAPTURE_SNIPPET_PLAN) — ahead of
+    # operator VCL and the priority-1 capture — so operator VCL may rewrite
+    # Fastly-Client-IP to the real source IP *after* this runs (e.g. a service
+    # behind a fronting proxy that carries the origin client in X-Source-Ip).
+    # The "ip" capture expression (EDGE_DATA_MAPPING) then trusts a present
+    # Fastly-Client-IP and falls back to client.ip otherwise. Gated on the same
+    # first-edge-pass guard as the header scrub so it neither runs at a shield
+    # POP (which must keep the forwarded value) nor re-wipes after a
+    # session-scoring restart. Only emitted when the client IP is edge-captured.
+    if "ip" in required:
+        snippets["recv_reset"] = (
+            "# [security] Drop a client-supplied Fastly-Client-IP at the true edge so a\n"
+            "# spoofed value cannot poison the captured client IP. Operator VCL running\n"
+            "# after this (priority above -100, before the priority-1 capture) may set\n"
+            "# the real source IP; the ip capture falls back to client.ip otherwise.\n"
+            f"if ({scrub_guard}) {{\n"
+            "  unset req.http.Fastly-Client-IP;\n"
+            "}"
+        )
 
     if group_l or custom_origin:
         fetch_lines = []
@@ -492,7 +500,6 @@ def install_capture_snippets(
     version: int,
     log_fields_config: dict | None,
     token: str,
-    cluster_secret: str = None,
     scoring_enabled: bool = False,
 ) -> None:
     """Install the auto-generated "Fastly Log Analysis *" capture VCL
@@ -511,26 +518,18 @@ def install_capture_snippets(
     silently lacked failed-origin TTFB capture. This helper closes that
     drift by installing all phases via one loop.
     """
-    snippets = generate_capture_vcl(log_fields_config, cluster_secret=cluster_secret, scoring_enabled=scoring_enabled)
-    # (snippet_name, subroutine_type, priority, required)
-    # 'required' phases ("recv", "miss", "pass") are always generated.
-    # Group-L phases ("fetch", "deliver", "error") only exist when
-    # group L is enabled — guarded by `in snippets`.
-    install_plan = (
-        ("Fastly Log Analysis Capture", "recv", 1, True),
-        ("Fastly Log Analysis Miss", "miss", 100, True),
-        ("Fastly Log Analysis Pass", "pass", 100, True),
-        ("Fastly Log Analysis Origin Fetch", "fetch", 100, False),
-        ("Fastly Log Analysis Origin Deliver", "deliver", 100, False),
-        ("Fastly Log Analysis Origin Error", "error", 100, False),
-    )
-    for snip_name, kind, priority, required in install_plan:
-        if not required and kind not in snippets:
+    snippets = generate_capture_vcl(log_fields_config, scoring_enabled=scoring_enabled)
+    # CAPTURE_SNIPPET_PLAN is the single source of truth: required phases
+    # ("recv", "miss", "pass") are always generated; optional phases
+    # ("recv_reset", "fetch", "deliver", "error") only exist for certain
+    # configs and are guarded by `content_key in snippets`.
+    for content_key, snip_name, subroutine, priority, required in CAPTURE_SNIPPET_PLAN:
+        if not required and content_key not in snippets:
             continue
         ensure_vcl_snippet(
             snip_name,
-            kind,
-            snippets[kind],
+            subroutine,
+            snippets[content_key],
             priority,
             service_id,
             version,
@@ -572,6 +571,50 @@ def _validate_log_format_regex(raw: str) -> list[str]:
                 break
 
     return errors
+
+
+# Account-level edge rate-limiting entitlement. Fastly stamps this pragma into
+# the COMPILED (generated) VCL of every VCL service on an entitled account —
+# independent of whether that service's source VCL declares any ratecounters.
+# Matched on the literal `true` value so a `ratelimit_opt_in false` line (or the
+# pragma being absent) reads as "not entitled".
+_RATELIMIT_OPT_IN_RE = re.compile(r"ratelimit_opt_in\s+true\b")
+
+
+def account_has_rate_limiting(token: str, *service_ids: str) -> bool | None:
+    """Proactively detect whether the Fastly account has edge rate limiting.
+
+    Edge rate limiting (``ratecounter`` / ``penaltybox``) is an ACCOUNT-level
+    entitlement; Fastly injects ``pragma optional_param ratelimit_opt_in true;``
+    into the generated VCL of every VCL service on an entitled account, so
+    probing any one VCL service the account owns is sufficient. Tries each id in
+    order and returns on the first that yields parseable generated VCL:
+
+    * ``True``  — the pragma is present (account is entitled).
+    * ``False`` — generated VCL was read but the pragma is absent/false.
+    * ``None``  — no probe was conclusive (every id was a Compute/wasm service
+      with no generated VCL, lacked an active version, or errored). Callers
+      treat ``None`` as "unknown — don't disable rate limiting; the reactive
+      :func:`_validate_with_ratelimit_fallback` remains the backstop".
+
+    Pass more than one id (e.g. the CDN service AND the customer's logging
+    service) so a wasm/no-active-version probe falls through to a VCL sibling.
+    Fully best-effort: any unexpected error on a probe drops to the next id.
+    """
+    for service_id in service_ids:
+        if not service_id:
+            continue
+        try:
+            active_ver = get_active_version(service_id, token)
+            if active_ver is None:
+                continue
+            content = get_generated_vcl(service_id, active_ver, token)
+        except Exception:  # noqa: BLE001 — detection is best-effort; never break a deploy
+            continue
+        if not content:
+            continue
+        return bool(_RATELIMIT_OPT_IN_RE.search(content))
+    return None
 
 
 def _validate_with_ratelimit_fallback(svc_id, ver, token, *, status_cb=None, ok_msg=None, ok_fallback_msg=None):
@@ -738,10 +781,20 @@ def ensure_cdn_service(
     )
     ok("CDN auth dictionary configured")
 
+    # Proactively detect whether the account has edge rate limiting so we upload
+    # the correct VCL on the first try, instead of relying on the reactive
+    # validate fallback (which still backstops a ``None``/unknown result). The
+    # ratecounter/penaltybox entitlement is account-level, so the customer's
+    # existing logging service is a valid probe.
+    detected_rl = account_has_rate_limiting(token, logging_service_id)
+    rate_limiting = True if detected_rl is None else detected_rl
+    if detected_rl is False and status_cb:
+        status_cb("ℹ️ Edge rate limiting unavailable on this account; deploying CDN without it...")
+
     info("Uploading custom VCL…")
     if status_cb:
         status_cb("⏳ Uploading custom VCL...")
-    vcl = load_vcl(rate_limiting=True)
+    vcl = load_vcl(rate_limiting=rate_limiting)
     fastly("POST", f"/service/{svc_id}/version/{v}/vcl", {"name": "main", "content": vcl, "main": True}, token=token)
     ok("VCL uploaded")
 
@@ -775,7 +828,10 @@ def ensure_cdn_service(
     if status_cb:
         status_cb("✅ CDN service active.")
 
-    return {"id": svc_id, "name": name}
+    # ``rate_limiting`` is the account entitlement (bool) or None when detection
+    # was inconclusive; the orchestrator persists it to provisioning.rate_limiting
+    # only when conclusive (None leaves the default-True read path intact).
+    return {"id": svc_id, "name": name, "rate_limiting": detected_rl}
 
 
 def redeploy_cdn_vcl(cdn_service_id: str, token: str, rate_limiting: bool = True, status_cb=None):
@@ -983,7 +1039,6 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
             new_ver,
             cfg.get("log_fields"),
             token,
-            cluster_secret=resolve_shield_secret(cfg),
             scoring_enabled=bool((cfg.get("scoring") or {}).get("enabled")),
         )
 
@@ -1118,6 +1173,32 @@ def update_logging_endpoint(cfg: dict, token: str):
     lf_config = (service_cfg or {}).get("log_fields") if service_cfg else None
     target_format = load_log_format(lf_config)
 
+    # Refresh the cached account-level rate-limiting flag. Edge rate limiting is
+    # an account entitlement that can be turned on AFTER provisioning; re-detecting
+    # whenever logging settings change means a later "Update CDN" deploys the
+    # ratecounter VCL without the operator having to rediscover it. This only
+    # updates the persisted flag — it does NOT redeploy the CDN service (that's the
+    # explicit Update-CDN action). Best-effort: never let it break a logging update.
+    if service_cfg is not None:
+        try:
+            detected_rl = account_has_rate_limiting(token, service_id)
+            prov = service_cfg.get("provisioning", {})
+            if detected_rl is not None and prov.get("rate_limiting") != detected_rl:
+                prov["rate_limiting"] = detected_rl
+                service_cfg["provisioning"] = prov
+                from backend import config as _svcconfig
+
+                _svcconfig.save_config(service_id, service_cfg)
+                if detected_rl:
+                    yield {
+                        "type": "status",
+                        "message": "ℹ️ Edge rate limiting is now available on this account — redeploy the CDN service to enable it.",
+                    }
+                else:
+                    yield {"type": "status", "message": "ℹ️ Edge rate limiting is not available on this account."}
+        except Exception:  # noqa: BLE001 — flag refresh is best-effort
+            pass
+
     info(f"Checking active version of service {_c(BOLD, service_id)}…")
     yield {"type": "status", "message": f"🔍 Checking active version of service {service_id}..."}
     active_ver = get_active_version(service_id, token)
@@ -1189,7 +1270,6 @@ def update_logging_endpoint(cfg: dict, token: str):
         }
         vcl_snippets = generate_capture_vcl(
             lf_config,
-            cluster_secret=resolve_shield_secret(service_cfg),
             scoring_enabled=bool(((service_cfg or {}).get("scoring") or {}).get("enabled")),
         )
         target_snippets = {
@@ -1197,6 +1277,8 @@ def update_logging_endpoint(cfg: dict, token: str):
             "Fastly Log Analysis Miss": vcl_snippets["miss"],
             "Fastly Log Analysis Pass": vcl_snippets["pass"],
         }
+        if "recv_reset" in vcl_snippets:
+            target_snippets["Fastly Log Analysis Reset Client IP"] = vcl_snippets["recv_reset"]
         if "fetch" in vcl_snippets:
             target_snippets.update(
                 {
@@ -1269,25 +1351,31 @@ def update_logging_endpoint(cfg: dict, token: str):
             new_ver,
             lf_config,
             token,
-            cluster_secret=resolve_shield_secret(service_cfg),
             scoring_enabled=bool(((service_cfg or {}).get("scoring") or {}).get("enabled")),
         )
-        if "fetch" not in generate_capture_vcl(lf_config):
-            for snip in [
+        regenerated = generate_capture_vcl(lf_config)
+        stale_snippets = []
+        if "fetch" not in regenerated:
+            stale_snippets += [
                 "Fastly Log Analysis Origin Fetch",
                 "Fastly Log Analysis Origin Error",
                 "Fastly Log Analysis Origin Deliver",
-            ]:
-                try:
-                    fastly(
-                        "DELETE",
-                        f"/service/{service_id}/version/{new_ver}/snippet/{urllib.parse.quote(snip, safe='')}",
-                        token=token,
-                        expect_empty=True,
-                    )
-                except RuntimeError as exc:
-                    if "404" not in str(exc):
-                        raise
+            ]
+        # The Reset Client IP snippet only exists while the client IP is
+        # edge-captured; drop it if ip was just disabled so it doesn't linger.
+        if "recv_reset" not in regenerated:
+            stale_snippets.append("Fastly Log Analysis Reset Client IP")
+        for snip in stale_snippets:
+            try:
+                fastly(
+                    "DELETE",
+                    f"/service/{service_id}/version/{new_ver}/snippet/{urllib.parse.quote(snip, safe='')}",
+                    token=token,
+                    expect_empty=True,
+                )
+            except RuntimeError as exc:
+                if "404" not in str(exc):
+                    raise
 
         yield {"type": "progress", "current": 4, "total": total_steps}
         result = fastly("GET", f"/service/{service_id}/version/{new_ver}/validate", token=token)

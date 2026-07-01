@@ -194,8 +194,32 @@ vcl-test:
 # connection close colliding with a live worker thread → segfault) only surface
 # at CI's worker density. A lower `-n` here was why `make ci` went green while
 # the ci.yml pull_request run segfaulted (2026-06-23).
+#
+# `nice -n 15` keeps all `-n auto` workers (so race density is unchanged) but
+# runs them at low scheduling priority — on a many-core dev Mac `-n auto` pins
+# every core and the machine goes unresponsive; niced workers yield to your
+# editor/browser so the UI stays smooth, and still get full CPU when you're
+# idle. Local ergonomics only: ci.yml runs the `uv run pytest` lines directly
+# (it does NOT call this target), and on a dedicated runner nice is a no-op, so
+# CI behaviour and worker-density parity are untouched.
+#
+# Two runs, not one. The `terraform_cli`-marked tests shell out to the real
+# `terraform` binary (init + test/validate). They're isolated subprocess work
+# that gains NOTHING from xdist, and under the niced `-n auto` pool one such
+# test's xdist worker HARD-CRASHED ("worker 'gwN' crashed", no traceback) —
+# the niced parent's low priority is inherited by the terraform subprocess,
+# starving it inside the already-saturated pool. So:
+#   Run 1 — the fast suite, parallel + niced, with `-m "not terraform_cli"`.
+#           Writes fresh coverage (NO --cov-append), no --cov-fail-under yet
+#           (premature gate), report suppressed (--cov-report=).
+#   Run 2 — the heavyweight terraform tests, SERIAL (`-n 0`) and un-niced
+#           (normal priority so the subprocess isn't starved), APPENDING
+#           coverage (--cov-append) so the single 86% gate evaluates the
+#           COMBINED data. This run owns the final --cov-report=term +
+#           --cov-fail-under=86.
 test-ci:
-	FALCO_REQUIRED=1 TERRAFORM_VALIDATE=1 uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=86
+	FALCO_REQUIRED=1 nice -n 15 uv run pytest -n auto -m "not terraform_cli" --cov=backend --cov-report=
+	FALCO_REQUIRED=1 TERRAFORM_VALIDATE=1 uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=86
 
 # Frontend tests AS CI RUNS THEM: vitest with the four coverage floors
 # (GATE-03). Bare `npm test` applies none of these.

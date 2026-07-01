@@ -59,7 +59,11 @@ export async function runFetchTerraformPreview(
     if (data) {
       const files = data as Record<string, string>;
       setTerraformFiles(files);
-      if (files["main.tf"]) {
+      // Instructions is the default (first) tab, so select its file on load
+      // — otherwise the Instructions tab would open showing a stale .tf file.
+      if (files["instructions"]) {
+        setSelectedTfFile("instructions");
+      } else if (files["main.tf"]) {
         setSelectedTfFile("main.tf");
       } else {
         const firstFile = Object.keys(files)[0];

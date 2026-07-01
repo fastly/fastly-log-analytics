@@ -1,23 +1,20 @@
-"""Cron-runs push channel: in-process publisher + SSE endpoint.
+"""Cron-runs push channel: in-process publisher.
 
 Covers the cross-thread bridge from cron lifecycle hooks
-(``start_cron_run`` / ``log_cron_run``) to the asyncio SSE generator,
-bounded-queue drop-oldest semantics, and the
-``/api/cron-runs/stream`` endpoint's tickle delivery.
+(``start_cron_run`` / ``log_cron_run``) to the asyncio SSE generator and
+the bounded-queue drop-oldest semantics. The SSE delivery that consumes
+this publisher now lives on the multiplexed ``/api/admin/events/stream``
+(cron-runs channel) — see tests/routers/test_admin_events_stream.py.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import threading
-from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
 
 from backend.cron_runs_publisher import CronRunsPublisher
-from backend.main import app
 from tests.utils.polling import await_until
 
 # ── Publisher unit tests ────────────────────────────────────────────────────
@@ -180,79 +177,3 @@ def test_publish_before_loop_bound_is_silent():
     through lifespan), publish must drop silently rather than raise."""
     pub = CronRunsPublisher()
     pub.publish("svc", {"event": "cron_run_changed", "run_id": 1, "task": "sync", "status": "running"})
-
-
-# ── Endpoint smoke test ─────────────────────────────────────────────────────
-
-
-def _parse_sse_data_events(text: str) -> list[dict]:
-    """Pull JSON payloads out of every ``data:`` event in an SSE body.
-
-    Tolerates both LF and CRLF separators — sse-starlette emits CRLF
-    (see useSSE.ts comment for the longer story behind that)."""
-    out: list[dict] = []
-    normalized = text.replace("\r\n", "\n")
-    for chunk in normalized.split("\n\n"):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        data_parts = [line[len("data:") :].strip() for line in chunk.split("\n") if line.startswith("data:")]
-        if not data_parts:
-            continue
-        try:
-            out.append(json.loads("".join(data_parts)))
-        except json.JSONDecodeError:
-            pass
-    return out
-
-
-def test_stream_requires_service_id():
-    """No x-service-id → 400, not a hung connection."""
-    with TestClient(app) as client:
-        resp = client.get("/api/cron-runs/stream")
-        assert resp.status_code == 400
-
-
-def test_stream_delivers_publisher_event():
-    """End-to-end wiring: connect → publish from a worker thread → the
-    JSON tickle arrives in the response body."""
-
-    pushed = {
-        "event": "cron_run_changed",
-        "run_id": 999,
-        "task": "sync",
-        "status": "success",
-        "ts": "2026-06-15T23:37:41Z",
-    }
-
-    from backend.routers.services import cron as router_module
-
-    pushed_event = asyncio.Event()
-
-    async def fake_subscribe(_svc_id):
-        # Wait briefly for the test thread to signal, then yield once.
-        for _ in range(20):
-            if pushed_event.is_set():
-                yield pushed
-                return
-            await asyncio.sleep(0.1)
-
-    def trigger_push():
-        loop = router_module.cron_runs_publisher._loop
-        if loop:
-            loop.call_soon_threadsafe(pushed_event.set)
-
-    threading.Timer(0.3, trigger_push).start()
-
-    with patch.object(router_module.cron_runs_publisher, "subscribe", fake_subscribe):
-        with TestClient(app) as client:
-            with client.stream(
-                "GET",
-                "/api/cron-runs/stream",
-                headers={"x-service-id": "svc-tickle"},
-            ) as resp:
-                assert resp.status_code == 200
-                body = "".join(resp.iter_text())
-
-    events = _parse_sse_data_events(body)
-    assert pushed in events

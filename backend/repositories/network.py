@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any
 
 import duckdb
@@ -12,8 +10,14 @@ from backend.core import duckdb as _db
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
 from backend.repositories._sql import network as SQL
-from backend.repositories.utils.filters import build_where_clause, filter_spec_attr
-from backend.repositories.utils.response_cache import bucket_time_to_minute, cache_get, cache_put
+from backend.repositories.utils.filters import build_where_clause
+from backend.repositories.utils.response_cache import (
+    bucket_time_to_minute,
+    cache_get,
+    cache_put,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.geo import format_city_label
 
@@ -38,26 +42,115 @@ def _response_cache_key(
     bucket_seconds: int,
     top_n: int,
     map_asn: str,
+    sections: set[str] | None,
+    mask_ips: bool,
+    range_token: str | None = None,
+    quantized_anchor: str | None = None,
+    invite_clamp_fingerprint: str | None = None,
 ) -> str:
-    serialised_filters = {
-        k: (filter_spec_attr(v, "mode"), sorted(str(x) for x in (filter_spec_attr(v, "values") or [])))
-        for k, v in sorted((filters or {}).items())
-    }
-    payload = json.dumps(
-        {
-            "s": bucket_time_to_minute(start_time),
-            "e": bucket_time_to_minute(end_time),
-            "f": serialised_filters,
+    # Key field order is load-bearing: it is serialized as-is, so changing it
+    # would invalidate every live key. digest_cache_key keeps the bytes stable.
+    #
+    # Two key shapes, selected by ``range_token``:
+    #
+    # (1) STABLE relative-range path (``range_token`` present) — the network 30d
+    #     analyst-cliff fix. The router has RESOLVED the scan window from
+    #     (range_token, quantized_anchor) server-side and clamped it to the
+    #     invite ceiling; the resolved+clamped bounds drive the SCAN, but the KEY
+    #     is built from the relative token + the quantized anchor instead of the
+    #     rolling resolved bounds. Because the token + quantized anchor are
+    #     server-reproducible and stable within the anchor quantum, an analyst
+    #     loading across rolling minutes now lands on the SAME key and HITS the
+    #     memo instead of recomputing the ~26s 30d pipeline.
+    #
+    #     SECURITY — the key MUST partition by every authorization axis so two
+    #     callers with different authorization never alias onto one entry:
+    #       * ``src`` (digest → src["name"]) — tenant isolation.
+    #       * ``mi`` (mask_ips) — masked vs unmasked analyst.
+    #       * ``icf`` (invite_clamp_fingerprint) — open vs date-restricted vs
+    #         admin (None) never share. The resolved bounds are clamped to the
+    #         invite ceiling before the scan, so two invites with DIFFERENT
+    #         ceilings scanning the SAME token would otherwise alias and one
+    #         could serve rows past the other's ceiling. Keying on the invite-
+    #         clamp shape keeps each ceiling's results in its own partition.
+    #       * ``rt`` (range_token) + ``qa`` (quantized_anchor) — two different
+    #         ranges (or two different anchor quanta) never alias onto one entry.
+    #     The server does NOT trust FE-supplied absolute bounds on this path
+    #     (the router resolves them), so a crafted body can't poison a
+    #     token+anchor entry with an arbitrary scanned window.
+    #
+    # (2) Legacy anchor-faithful path (no ``range_token``) — explicit user range
+    #     selection / deep-links, unchanged below.
+    #
+    # SECURITY — anchor-faithful + tenant/PII partitioned (security-rbac review):
+    #   * ``s``/``e`` are the minute-bucketed RESOLVED clamp bounds. We key on
+    #     the absolute anchor (NOT a span/window-param projection) on purpose:
+    #     the clamp window IS the analyst authorization boundary
+    #     (``TimeBounds.clamp`` honors caller-supplied start/end, so an
+    #     open-invite analyst's resolved window == the request's own bounds).
+    #     A window-param key (insights' ``analyst_clamp_cache_key``) would alias
+    #     two differently-ANCHORED windows of the same span onto one entry — for
+    #     the default OPEN invite that collapses to "||" and aliases EVERY
+    #     window the analyst views, serving a different window than was scanned
+    #     (incl. rows outside a date-restricted invite's ceiling). Keeping the
+    #     resolved bounds keeps a cache hit ≤TTL stale of the SAME window —
+    #     never a cross-window crossing. This is the explicit divergence from
+    #     the insights stable-key fix: insights never honors a caller absolute
+    #     window, network does, so network must stay anchor-faithful.
+    #   * ``src`` (via digest_cache_key → src["name"]) partitions by service so
+    #     a request can never read another tenant's entry.
+    #   * ``mi`` (mask_ips) partitions masked vs unmasked. network-health is
+    #     IP-free today, so this is belt-and-braces for uniformity + future-proof.
+    #   * ``sec`` (sorted sections tuple) makes the three live FE shapes
+    #     (core / map / shielding) each cache distinctly, instead of the cache
+    #     only being reachable for the dead ``sections is None`` shape.
+    if range_token is not None:
+        stable_payload = {
+            # ``k`` namespaces this as the stable shape so a stable key can
+            # never collide with a legacy (s/e-bearing) key for the same params.
+            "k": "rel",
+            "rt": range_token,
+            "qa": quantized_anchor,
+            "icf": invite_clamp_fingerprint,
+            "f": serialize_filters_for_key(filters),
             "metric": metric,
             "bs": bucket_seconds,
             "tn": top_n,
             "ma": map_asn,
-        },
-        separators=(",", ":"),
-        default=str,
-    )
-    svc = src.get("name") or src.get("service_id") or ""
-    return hashlib.sha256(f"{payload}:{svc}".encode()).hexdigest()
+            "sec": sorted(sections) if sections is not None else None,
+            "mi": int(mask_ips),
+        }
+        return digest_cache_key(stable_payload, src)
+    payload = {
+        "s": bucket_time_to_minute(start_time),
+        "e": bucket_time_to_minute(end_time),
+        "f": serialize_filters_for_key(filters),
+        "metric": metric,
+        "bs": bucket_seconds,
+        "tn": top_n,
+        "ma": map_asn,
+        "sec": sorted(sections) if sections is not None else None,
+        "mi": int(mask_ips),
+    }
+    return digest_cache_key(payload, src)
+
+
+def _has_signal(payload: dict[str, Any]) -> bool:
+    """True when a get_health payload carries real data worth caching.
+
+    SECURITY (stale-empty poison guard — the dashboard-cache poisoning bug
+    class, see backend/repositories/dashboard.py:43-56): a transient view-lag /
+    mid-commit empty must NOT be cached for the TTL and then served to every
+    request on the same key. The ``available: False`` early-returns already
+    precede the write, so this guards the ``available: True`` BUT zero-signal
+    case: no heatmap rows, no map buckets, no leaderboard, zero total. A
+    populated later request then recomputes + caches instead of reading the
+    cached blank. Checks only the keys that are present (a section-scoped
+    payload won't carry the others)."""
+    summary = payload.get("summary")
+    if isinstance(summary, dict) and summary.get("total_reqs"):
+        return True
+    return any(payload.get(k) for k in ("heatmap", "map_buckets", "leaderboard", "metro_leaderboard", "cities"))
 
 
 def _avg_hs(buckets_data: dict, keys: list[str]) -> float | None:
@@ -96,8 +189,30 @@ def get_health(
     top_n: int = 30,
     map_asn: str = "all",
     sections: set[str] | None = None,
+    mask_ips: bool = False,
+    force_refresh: bool = False,
+    range_token: str | None = None,
+    quantized_anchor: str | None = None,
+    invite_clamp_fingerprint: str | None = None,
 ) -> dict[str, Any]:
-    """Return ASN × time heatmap, world map buckets, metro leaderboard, and ASN leaderboard."""
+    """Return ASN × time heatmap, world map buckets, metro leaderboard, and ASN leaderboard.
+
+    ``mask_ips`` partitions the response cache (masked vs unmasked) — see
+    ``_response_cache_key``. network-health is IP-free today so it's
+    belt-and-braces, but it keeps the key shape uniform with insights and
+    future-proof. ``force_refresh`` skips the cache READ (the write still
+    happens) so the prewarmer rewrites the entry every tick and resets the TTL
+    (cachetools' TTL is insertion-based — a hit would not reset it).
+
+    ``range_token`` / ``quantized_anchor`` / ``invite_clamp_fingerprint`` select
+    the STABLE relative-range cache-key shape (the network 30d analyst-cliff
+    fix). The router resolves the scan window from (token, anchor) and clamps it
+    to the invite ceiling, then passes ``start_time``/``end_time`` (which still
+    drive the SCAN) PLUS these three so the KEY is stable across rolling
+    minutes. When ``range_token`` is None the legacy anchor-faithful key (on the
+    resolved bounds) is used — unchanged for explicit user ranges / deep-links.
+    SECURITY: the bounds drive the scan; the token/anchor only stabilize the key.
+    """
     import time as _time
 
     def _want(name: str) -> bool:
@@ -119,14 +234,31 @@ def get_health(
     section_timings = timer.entries
 
     # Short-TTL response memo (30 s). Cuts the mapAsn toggle / filter
-    # tweak / refetch tick cost from the full ~13 s 30d pipeline to
-    # ~50 µs. Cache key excludes section_timings + debug envelope so
-    # the per-request telemetry stays request-scoped. Skip the memo when
-    # a section selector is in play — the selector reduces work per call
-    # and cached payloads from prior full requests would over-deliver
-    # (harmless but defeats the parallel-paint signal the FE relies on).
-    cache_key = _response_cache_key(src, start_time, end_time, filters, metric, bucket_seconds, top_n, map_asn)
-    if sections is None:
+    # tweak / refetch tick cost from the full ~13 s 30d pipeline to ~50 µs.
+    # The key now folds the sorted ``sections`` tuple + ``mask_ips`` so each
+    # of the three live FE shapes (core / map / shielding) caches distinctly
+    # — previously the memo was reachable ONLY for ``sections is None``, which
+    # NO live request sends (the page always passes a section selector), so the
+    # cache was dead on the request path. Each section-scoped entry is keyed on
+    # its own (sections, resolved-bounds, mask_ips) so a smaller selection
+    # never reads a larger one's payload. Cache key excludes section_timings +
+    # debug envelope so per-request telemetry stays request-scoped.
+    cache_key = _response_cache_key(
+        src,
+        start_time,
+        end_time,
+        filters,
+        metric,
+        bucket_seconds,
+        top_n,
+        map_asn,
+        sections,
+        mask_ips,
+        range_token=range_token,
+        quantized_anchor=quantized_anchor,
+        invite_clamp_fingerprint=invite_clamp_fingerprint,
+    )
+    if not force_refresh:
         cached = cache_get(_response_cache, cache_key)
         if cached is not None:
             runner = QueryRunner(con, src)
@@ -728,7 +860,14 @@ def get_health(
                 "worst_asn": worst_asn,
                 "worst_country": worst_country,
             }
-        if sections is None:
+        # Write for EVERY section-set (the key is sections-partitioned), not
+        # only ``sections is None`` — that's what makes the live FE shapes
+        # cacheable. SECURITY: only cache a result that carries real signal so
+        # a transient view-lag / mid-commit empty is never frozen for the TTL
+        # and served to every request on this key (the dashboard-cache
+        # poisoning bug class). ``available: False`` results return earlier and
+        # never reach here; this guards the available-but-zero-rows case.
+        if _has_signal(payload):
             # network additionally strips section_timings (per-request paint
             # telemetry) from the stored copy.
             cache_put(_response_cache, cache_key, payload, strip=("section_timings",))

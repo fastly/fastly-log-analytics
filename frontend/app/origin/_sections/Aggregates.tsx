@@ -3,7 +3,7 @@
 import React from 'react'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { cn } from '@/lib/utils'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { ApproxBadge } from './ApproxBadge'
 
 export function Aggregates({ summary }: { summary: any }) {
   const error = summary.error as AnalyticsCardError | null
@@ -18,17 +18,7 @@ export function Aggregates({ summary }: { summary: any }) {
     <div className="mb-6">
       {isApprox && (
         <div className="flex justify-end mb-2">
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger render={<span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-muted text-muted-foreground text-[10px] font-bold uppercase tracking-wider cursor-help" />}>
-                <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60" />
-                Approximate
-              </TooltipTrigger>
-              <TooltipContent side="left" className="max-w-[260px] text-xs">
-                Origin TTFB percentiles on this window are request-weighted averages of per-hour percentiles (sub-second accuracy on most services). Error rate and fetch volume are exact.
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <ApproxBadge message="Origin TTFB percentiles on this window are request-weighted averages of per-hour percentiles (sub-second accuracy on most services). Error rate and fetch volume are exact." />
         </div>
       )}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

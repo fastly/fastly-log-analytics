@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ExternalLink, Info, Power, PowerOff, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
@@ -10,6 +10,7 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { StatusPanelHelp } from '@/components/SessionScoring/help-content'
 import { SSEModal } from '@/components/SSEModal'
 import { client } from '@/lib/api'
+import type { components } from '@/types/api.generated'
 
 interface StatusPanelProps {
   serviceId: string
@@ -38,23 +39,13 @@ interface ScoringStatus {
   drift_known?: boolean
 }
 
-interface ScoringEvaluation {
-  has_min_samples: boolean
-  min_per_class: number
-  n_good: number
-  n_bad: number
-  n_neutral: number
-  n_reconstructed?: number
-  n_labels_total?: number
-  auc?: number
-  passed?: boolean
-  threshold?: number
-  default_min_auc?: number
-  matrix_version?: string
-  error?: string
-}
+// Generated from the /scoring/evaluation response_model — single source of
+// truth. (ScoringStatus above stays local: /scoring/status returns an untyped
+// dict with no response_model to import.)
+type ScoringEvaluation = components['schemas']['ScoringEvaluationResponse']
 
 export function StatusPanel({ serviceId }: StatusPanelProps) {
+  const queryClient = useQueryClient()
   const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ['scoring-status', serviceId],
     queryFn: async () => {
@@ -72,6 +63,23 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
 
   const enabled = !!data?.enabled
 
+  // After an enable / disable / redeploy SSE stream closes, the scoring config
+  // and analytics have all changed (or the stores were just created), so the
+  // L2 card, latency chart, etc. would otherwise show stale pre-op data until a
+  // manual refresh. refetch() only covers scoring-status, so also invalidate
+  // every scoring-* query for THIS service. Predicate-match so the
+  // sinceHours-suffixed analytics keys (['scoring-health', id, hours], …) match.
+  const refreshScoring = React.useCallback(() => {
+    refetch()
+    queryClient.invalidateQueries({
+      predicate: (q) =>
+        Array.isArray(q.queryKey) &&
+        typeof q.queryKey[0] === 'string' &&
+        q.queryKey[0].startsWith('scoring-') &&
+        q.queryKey[1] === serviceId,
+    })
+  }, [queryClient, refetch, serviceId])
+
   // Matrix-quality (ROC-AUC) — only fire when scoring is actually on.
   // Cache invalidation handled server-side via _bust_analytics_cache on
   // label POST/PATCH/DELETE; client-side staleTime keeps the StatusPanel
@@ -84,7 +92,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
         { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as ScoringEvaluation
+      return data
     },
     enabled,
     staleTime: 30_000,
@@ -112,16 +120,16 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                   <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>:
                 </p>
                 <ul className="text-sm text-muted-foreground list-disc pl-5 space-y-1">
-                  <li>Re-uploads the latest Wasm package (new Compute version) + activates</li>
-                  <li>Regenerates + activates the logging VCL (6 scoring snippets)</li>
-                  <li>No scoring gap, unlike Disable then Enable</li>
+                  <li>Checks the live edge first: re-uploads the Wasm only if the build changed</li>
+                  <li>Re-activates the logging VCL only if the scoring snippets/backend changed</li>
+                  <li>Skips no-op version bumps when nothing changed — no scoring gap</li>
                 </ul>
                 <p className="text-xs text-muted-foreground italic">Click <strong>Start</strong> to proceed.</p>
               </div>
             }
             endpoint={`/api/services/${serviceId}/scoring/enable`}
             body={{}}
-            onClose={() => refetch()}
+            onClose={refreshScoring}
             trigger={
               <Button variant={data?.scorer_drift ? 'default' : 'outline'} size="sm">
                 <RefreshCw className="h-3.5 w-3.5 mr-1" /> Redeploy
@@ -144,7 +152,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
             }
             endpoint={`/api/services/${serviceId}/scoring/disable`}
             body={{}}
-            onClose={() => refetch()}
+            onClose={refreshScoring}
             trigger={
               <Button variant="outline" size="sm" className="text-rose-700 border-rose-300 hover:bg-rose-50">
                 <PowerOff className="h-3.5 w-3.5 mr-1" /> Disable
@@ -191,7 +199,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
             }
             endpoint={`/api/services/${serviceId}/scoring/enable`}
             body={{}}
-            onClose={() => refetch()}
+            onClose={refreshScoring}
             trigger={
               <Button variant="default" size="sm">
                 <Power className="h-3.5 w-3.5 mr-1" /> Enable

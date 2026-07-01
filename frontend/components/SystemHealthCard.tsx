@@ -105,13 +105,13 @@ export function SystemHealthCard() {
   // never seeded into the dehydrated SSR cache (the host metrics don't exist at
   // request time), so the server always renders the AnalyticsCard loading
   // overlay. If the client paints the resolved data on its first (hydration)
-  // render — which happens once useSystemMetricsStream / the cache has primed
+  // render — which happens once useAdminEventStream / the cache has primed
   // it — the markup diverges from the server's overlay and React throws a
   // hydration mismatch (#418, the /admin webkit failure). Force the first
   // client render to the server's loading state, then swap to data after mount.
   const mounted = useMounted()
 
-  // Freshness is driven by useSystemMetricsStream (mounted globally
+  // Freshness is driven by useAdminEventStream (mounted globally
   // in SyncStatusBadge, gated to /admin and /logs paths). The 5-min
   // refetchInterval is a pure safety net for silently-dropped streams
   // — same shape as useSyncStatus / useLastSync.
@@ -128,7 +128,7 @@ export function SystemHealthCard() {
 
   // Trend lines for the last hour. Backend sampler is 60s cadence,
   // so a 1h window gives ~60 points per series. SSE pushes via
-  // useSystemMetricsStream; 5-min poll is the safety net.
+  // useAdminEventStream; 5-min poll is the safety net.
   const { data: trends } = useQuery({
     queryKey: ['admin', 'metric-history-batch', '1h'],
     queryFn: async () => {

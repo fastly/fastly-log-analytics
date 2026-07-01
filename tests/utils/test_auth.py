@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from backend.utils.auth import analyst_allowed_services
+import pytest
+
+from backend.utils.auth import analyst_allowed_services, mask_ips_for
 
 
 def _req(analyst_session: object | None) -> SimpleNamespace:
@@ -46,3 +48,28 @@ def test_analyst_allowed_services_returns_empty_set_when_service_ids_is_empty():
     """Same defense as the None case for the [] variant."""
     sess = SimpleNamespace(service_ids=[])
     assert analyst_allowed_services(_req(sess)) == set()
+
+
+def test_mask_ips_for_admin_is_false():
+    """Admin (no analyst session) never masks."""
+    assert mask_ips_for(None) is False
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [
+        ({"mask_ips": True}, True),
+        ({"mask_ips": False}, False),
+        ({}, False),
+        (None, False),  # pii_policy revoked to None mid-session (F014 re-sync)
+        ("not-a-dict", False),
+    ],
+)
+def test_mask_ips_for_policy_variants(policy, expected):
+    """The mask_ips predicate is True only for a dict policy carrying a truthy
+    mask_ips. A None / non-dict policy returns False rather than raising — the
+    /api/bootstrap path relied on the unguarded form and 500'd when an invite's
+    pii_policy was revoked to None mid-session.
+    """
+    sess = SimpleNamespace(pii_policy=policy)
+    assert mask_ips_for(sess) is expected

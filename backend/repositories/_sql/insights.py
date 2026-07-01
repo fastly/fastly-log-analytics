@@ -616,6 +616,101 @@ SHIELD_PATH_DEGRADATION = """
     """
 
 
+# ── 30. Scripted Traffic Patterns (repeated_patterns) ─────────────────────────
+# Beaconing / periodic-cadence detection (RITA/Zeek-style) applied to web logs:
+# flag client IPs whose inter-arrival gaps are highly regular (scrapers, pollers,
+# cron jobs). See local-docs/repeated_pattern_detection_FINAL_plan.md.
+#
+# Curated, ``?``-FREE crawler/monitor allowlist (mirrors NEW_PROBE_REGEX above).
+# ``re.escape`` of plain tokens contains no ``?``, so it can't corrupt the
+# repository's ``sql.count("?")`` placeholder-counting heuristic — verified bots
+# (Googlebot/UptimeRobot/Pingdom) are perfectly periodic and would dominate the
+# card, so they're dropped BEFORE scoring. Do NOT inject
+# ``bot_sources.get_bot_regex_pattern()`` here: it begins ``(?i)`` and the ``?``
+# would mis-count the single window-start bind. Case-insensitivity comes from the
+# ``regexp_matches`` 'i' arg, not an inline ``(?i)`` flag.
+_BOT_UA_TOKENS = [
+    "googlebot",
+    "bingbot",
+    "slurp",
+    "duckduckbot",
+    "baiduspider",
+    "yandexbot",
+    "applebot",
+    "uptimerobot",
+    "pingdom",
+    "statuscake",
+    "datadoghq",
+    "newrelic",
+    "ahrefsbot",
+    "semrushbot",
+    "gptbot",
+    "claudebot",
+    "ccbot",
+    "facebookexternalhit",
+    "bot",
+    "crawler",
+    "spider",
+    "monitor",
+]
+REPEATED_BOT_UA_REGEX = "|".join(re.escape(t) for t in _BOT_UA_TOKENS)
+
+# Timestamps are 1-SECOND granularity (verified: 0/1105 rows carry a sub-second
+# component), so we work in integer seconds. The CV is Sheppard-corrected
+# (rounding to whole seconds adds ≈ 1/12 s² of variance) and gated only above a
+# 5 s mean where it's trustworthy; below 5 s a modal-dominance fast path carries
+# the verdict. ``MODE()`` MUST be aliased (bare ``mode`` is reserved). med/q1/q3
+# are computed for the deferred Bowley confirmation term (plan §2) but not yet
+# surfaced. Exactly ONE ``?`` (the window start) — keep {bot_ua_regex} ?-free.
+REPEATED_PATTERNS = """
+    WITH kept AS (
+        SELECT "ip" AS ip, epoch("timestamp")::BIGINT AS sec, {ua_col} AS ua
+        FROM {table_name}
+        WHERE "timestamp" >= CAST(? AS TIMESTAMPTZ)
+          AND "ip" IS NOT NULL AND "ip" <> ''
+          AND ({ua_col} IS NULL OR NOT regexp_matches({ua_col}, '{bot_ua_regex}', 'i'))
+    ),
+    secs AS (  -- distinct active seconds (collapses same-second parallel bursts)
+        SELECT ip, sec FROM kept GROUP BY ip, sec
+    ),
+    meta AS (  -- informational only (NOT gated): UA diversity, event count, span
+        SELECT ip, COUNT(DISTINCT ua) AS distinct_ua, COUNT(*) AS n_events,
+               (MAX(sec) - MIN(sec)) AS span_s
+        FROM kept GROUP BY ip
+    ),
+    gaps AS (
+        SELECT ip, sec - LAG(sec) OVER (PARTITION BY ip ORDER BY sec) AS gap FROM secs
+    ),
+    g AS (SELECT ip, gap FROM gaps WHERE gap IS NOT NULL),
+    agg AS (
+        SELECT ip, COUNT(*) AS n_gaps, AVG(gap) AS mean_gap, VAR_SAMP(gap) AS var_gap,
+               STDDEV_SAMP(gap) AS sd_gap, MEDIAN(gap) AS med, MODE(gap) AS mode_gap,
+               QUANTILE_CONT(gap,0.25) AS q1, QUANTILE_CONT(gap,0.75) AS q3
+        FROM g GROUP BY ip          -- NOTE: alias MODE() as mode_gap; bare `mode` is reserved
+    ),
+    modal AS (
+        SELECT g.ip, AVG(CASE WHEN abs(g.gap - a.mode_gap) <= 1 THEN 1.0 ELSE 0.0 END) AS modal_frac
+        FROM g JOIN agg a USING(ip) GROUP BY g.ip
+    )
+    SELECT a.ip, a.n_gaps, d.n_events,
+           ROUND(a.mean_gap, 2)  AS avg_interval,
+           ROUND(a.sd_gap, 2)    AS stddev_interval,
+           ROUND(sqrt(GREATEST(a.var_gap - 1.0/12.0, 0)) / NULLIF(a.mean_gap, 0), 3) AS cv_corr,
+           ROUND(m.modal_frac, 3) AS modal_frac,
+           d.distinct_ua, d.span_s, a.mode_gap
+    FROM agg a JOIN modal m USING(ip) JOIN meta d USING(ip)
+    WHERE a.n_gaps >= 12
+      AND (d.n_events * 1.0 / NULLIF(d.span_s, 0)) < 2.0          -- rps gate (no UA hard-gate, D4)
+      AND (
+            (a.mean_gap >= 5  AND sqrt(GREATEST(a.var_gap - 1.0/12.0,0))/NULLIF(a.mean_gap,0) < 0.3
+                              AND m.modal_frac >= 0.6)               -- slow path: CV + modal
+         OR (a.mean_gap >= 1  AND a.mean_gap < 5 AND m.modal_frac >= 0.85)   -- fast path: modal only
+          )
+    ORDER BY m.modal_frac DESC, a.n_gaps DESC
+    LIMIT 15
+"""
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Templates from ``repository.py`` — multi-insight coalesced pre-aggregations
 # ════════════════════════════════════════════════════════════════════════════
@@ -745,6 +840,8 @@ __all__ = [
     "ORIGIN_RETRIES",
     "ORIGIN_IP_FAILURE",
     "SHIELD_PATH_DEGRADATION",
+    "REPEATED_BOT_UA_REGEX",
+    "REPEATED_PATTERNS",
     # repository.py templates
     "COALESCED_CITY_AGGREGATES",
     "COALESCED_URL_AGGREGATES",

@@ -23,6 +23,9 @@ def _isolated_cache_dir(tmp_path, monkeypatch):
     # Also clear the in-process matcher cache between tests.
     with bot_sources._matcher_lock:
         bot_sources._matcher_cache.clear()
+    # Reset the content-hash version cache so it doesn't leak across tests.
+    bot_sources._version_cache["mtime"] = None
+    bot_sources._version_cache["version"] = None
     yield
 
 
@@ -624,3 +627,46 @@ def test_enrich_bot_metadata_ngwaf_path_returns_none_when_db_missing():
 
     assert "_ngwaf_bot_name" in df.columns
     assert df["_ngwaf_bot_name"].isnull().all()
+
+
+# ── get_pattern_set_version: content-hash, not fetch-mtime ────────────────────
+
+
+def test_pattern_set_version_empty_when_no_cache():
+    """No source files cached → empty string (rollup writer skips)."""
+    assert bot_sources.get_pattern_set_version() == ""
+
+
+def test_pattern_set_version_stable_across_mtime_bump_with_same_content():
+    """A daily re-fetch of IDENTICAL content must NOT churn the version — the
+    wellknown rollup reader requires one version across the window, so an
+    mtime-keyed version made every multi-day window mixed-version. The version
+    is a content hash, so a touch (new mtime, same bytes) keeps it stable."""
+    import os
+
+    path = _seed_cache("well-known-bots", [{"id": "googlebot", "pattern": "Googlebot"}])
+    v1 = bot_sources.get_pattern_set_version()
+    assert v1.startswith("v") and len(v1) > 1
+
+    # Bump mtime well past the first (whole-second granularity) WITHOUT
+    # changing the bytes — simulates the daily no-op re-fetch.
+    st = path.stat()
+    os.utime(path, (st.st_atime + 100, st.st_mtime + 100))
+    v2 = bot_sources.get_pattern_set_version()
+
+    assert v2 == v1, "identical content under a new mtime must hash to the same version"
+
+
+def test_pattern_set_version_changes_when_content_changes():
+    """A real pattern-set change must bump the version so stale rollups still
+    fall back to live (the 'correctness over speed' invariant preserved)."""
+    _seed_cache("well-known-bots", [{"id": "googlebot", "pattern": "Googlebot"}])
+    v1 = bot_sources.get_pattern_set_version()
+
+    # Reset the cache to force a re-hash, then change the content.
+    bot_sources._version_cache["mtime"] = None
+    bot_sources._version_cache["version"] = None
+    _seed_cache("well-known-bots", [{"id": "bingbot", "pattern": "bingbot"}])
+    v2 = bot_sources.get_pattern_set_version()
+
+    assert v1 != v2, "changed source content must produce a different version"

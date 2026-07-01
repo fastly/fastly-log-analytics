@@ -29,7 +29,12 @@ import typer
 from backend.core.fastly.client import fastly
 from backend.core.fastly.service import find_service_by_name
 from backend.core.fastly.utils import SHIELD_MAP, parse_period
-from backend.provision.fastly_api import redeploy_cdn_vcl, update_logging_endpoint, validate_log_format
+from backend.provision.fastly_api import (
+    account_has_rate_limiting,
+    redeploy_cdn_vcl,
+    update_logging_endpoint,
+    validate_log_format,
+)
 from backend.provision.orchestrator import (
     _build_log_fields_config,
     cleanup_local_data,
@@ -187,6 +192,9 @@ def handle_teardown(args):
                 "cdn_url": prov_cfg.get("cdn_url", ""),
                 "cdn_secret": svc_cfg.get("cdn_secret", ""),
                 "admin_token": svc_cfg.get("fastly_api_key", ""),
+                # Carry the scoring block so perform_teardown can tear down the
+                # Compute scorer service + its stores (mirrors the HTTP route).
+                "scoring": svc_cfg.get("scoring") or {},
             }
 
     if not state:
@@ -214,6 +222,9 @@ def handle_teardown(args):
         print(f"  {_c(YLW + BOLD, 'The following will be permanently deleted:')}")
         print(f"  {_c(DIM, 'Logging endpoint:'):<30} {state.get('endpoint_name', '?')}")
         print(f"  {_c(DIM, 'FOS bucket + all data:'):<30} {_c(YLW + BOLD, state.get('fos_bucket_name', '?'))}")
+        if (state.get("scoring") or {}).get("enabled") and not getattr(args, "no_remove_scoring", False):
+            _scoring_svc = (state.get("scoring") or {}).get("scoring_service_id", "?")
+            print(f"  {_c(DIM, 'Session scoring service:'):<30} {_c(YLW + BOLD, _scoring_svc)}")
         blank()
         if not ask_yes(_c(YLW + BOLD, "This cannot be undone. Continue?"), default=False):
             sys.exit(0)
@@ -222,6 +233,7 @@ def handle_teardown(args):
         "remove_logging": not getattr(args, "no_remove_logging", False),
         "remove_cdn": not getattr(args, "no_remove_cdn", False),
         "remove_bucket": not getattr(args, "no_remove_bucket", False),
+        "remove_scoring": not getattr(args, "no_remove_scoring", False),
     }
 
     try:
@@ -377,7 +389,24 @@ def handle_update_cdn(args):
         sys.exit(1)
 
     try:
-        rate_limiting = cfg.get("provisioning", {}).get("rate_limiting", True)
+        # Re-probe the account's edge rate-limiting entitlement so a customer who
+        # enabled it after provisioning gets the ratecounter VCL on this redeploy
+        # (and one who lost it gets a clean deploy). Probe the CDN service itself
+        # and the logging service — either reflects the account-level pragma. Fall
+        # back to the persisted flag (default True) when detection is inconclusive;
+        # the reactive validate fallback still backstops a wrong guess.
+        persisted = cfg.get("provisioning", {}).get("rate_limiting", True)
+        detected = account_has_rate_limiting(token, cdn_service_id, service_id)
+        rate_limiting = detected if detected is not None else persisted
+        if detected is not None and detected != persisted:
+            prov = cfg.get("provisioning", {})
+            prov["rate_limiting"] = detected
+            cfg["provisioning"] = prov
+            svcconfig.save_config(service_id, cfg)
+            if detected:
+                ok("Edge rate limiting detected on this account — enabling it on the CDN service")
+            else:
+                warn("Edge rate limiting unavailable on this account — deploying CDN without it")
         new_ver = redeploy_cdn_vcl(cdn_service_id, token, rate_limiting=rate_limiting)
         ok(f"CDN service updated (version {new_ver})")
     except Exception as e:
@@ -570,6 +599,7 @@ def cmd_teardown(
     no_remove_logging: bool = typer.Option(False, "--no-remove-logging"),
     no_remove_cdn: bool = typer.Option(False, "--no-remove-cdn"),
     no_remove_bucket: bool = typer.Option(False, "--no-remove-bucket"),
+    no_remove_scoring: bool = typer.Option(False, "--no-remove-scoring"),
 ):
     args = SimpleNamespace(
         yes=yes,
@@ -582,6 +612,7 @@ def cmd_teardown(
         no_remove_logging=no_remove_logging,
         no_remove_cdn=no_remove_cdn,
         no_remove_bucket=no_remove_bucket,
+        no_remove_scoring=no_remove_scoring,
     )
     handle_teardown(args)
 

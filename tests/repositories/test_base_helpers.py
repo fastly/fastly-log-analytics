@@ -21,6 +21,7 @@ from backend.repositories._base import (
     QueryRunner,
     _attach_sqlite,
     _is_stale_view_error,
+    _latest_log_in_window,
     _safe_table,
     attach_metadata_db,
     attach_ngwaf_cache,
@@ -31,6 +32,7 @@ from backend.repositories._base import (
     percentile_ms_expr,
     safe_interval,
     safe_iso,
+    should_self_heal_stale_view,
     time_bucket_select,
 )
 
@@ -613,3 +615,117 @@ def test_get_source_extent_falls_back_to_zero_on_total_failure(monkeypatch):
         assert (total, earliest, latest) == (0, None, None)
     finally:
         con.close()
+
+
+# ── view-lag self-heal trigger logic ────────────────────────────────────────
+#
+# ``should_self_heal_stale_view`` decides whether a zero-row window means
+# "the cached Iceberg view is stale" (force a rebuild) vs "this window is
+# legitimately empty" (do nothing). The trigger is the only thing keeping a
+# rebuild from firing on every low-traffic gap window in prod, so its
+# boundaries are pinned here.
+
+
+def test_latest_log_in_window_open_bounds_returns_true():
+    """No start/end (default-range dashboard request) → any non-null
+    latest log is "inside" the open window."""
+    assert _latest_log_in_window("2026-06-26T12:00:00Z", None, None) is True
+
+
+def test_latest_log_in_window_none_latest_returns_false():
+    """No latest log (genuinely empty service) → never "inside" → never
+    self-heals."""
+    assert _latest_log_in_window(None, "2026-06-26T00:00:00Z", "2026-06-26T23:59:59Z") is False
+
+
+def test_latest_log_in_window_inside_returns_true():
+    assert _latest_log_in_window("2026-06-26T12:00:00Z", "2026-06-26T00:00:00Z", "2026-06-26T23:59:59Z") is True
+
+
+def test_latest_log_in_window_after_end_returns_false():
+    """Latest log NEWER than end_time → outside the window (a low-traffic
+    historical gap, not a stale view)."""
+    assert _latest_log_in_window("2026-06-27T00:00:00Z", "2026-06-26T00:00:00Z", "2026-06-26T23:59:59Z") is False
+
+
+def test_latest_log_in_window_before_start_returns_false():
+    assert _latest_log_in_window("2026-06-25T00:00:00Z", "2026-06-26T00:00:00Z", "2026-06-26T23:59:59Z") is False
+
+
+def test_latest_log_in_window_tolerates_z_vs_offset_suffixes():
+    """A trailing-Z latest vs +00:00 bounds must still compare correctly
+    (parse_iso_utc normalises both)."""
+    assert _latest_log_in_window("2026-06-26T12:00:00Z", "2026-06-26T00:00:00+00:00", "2026-06-26T23:59:59+00:00")
+
+
+def test_should_self_heal_requires_empty_window():
+    """A non-empty window is never a stale-view symptom."""
+    assert (
+        should_self_heal_stale_view(
+            windowed_count=5,
+            filters={},
+            latest_log_at="2026-06-26T12:00:00Z",
+            start_time=None,
+            end_time=None,
+        )
+        is False
+    )
+
+
+def test_should_self_heal_requires_no_filters():
+    """Filtered empty result → expected (the filter excluded everything),
+    not stale."""
+    assert (
+        should_self_heal_stale_view(
+            windowed_count=0,
+            filters={"country": object()},  # any truthy filter mapping
+            latest_log_at="2026-06-26T12:00:00Z",
+            start_time=None,
+            end_time=None,
+        )
+        is False
+    )
+
+
+def test_should_self_heal_fires_on_empty_window_with_latest_inside():
+    """Empty window + no filters + latest log inside the range → stale view,
+    fire the rebuild."""
+    assert (
+        should_self_heal_stale_view(
+            windowed_count=0,
+            filters={},
+            latest_log_at="2026-06-26T12:00:00Z",
+            start_time="2026-06-26T00:00:00Z",
+            end_time="2026-06-26T23:59:59Z",
+        )
+        is True
+    )
+
+
+def test_should_self_heal_skips_empty_window_with_latest_outside():
+    """Empty window whose range does NOT contain the latest log → genuinely
+    empty, do not rebuild."""
+    assert (
+        should_self_heal_stale_view(
+            windowed_count=0,
+            filters={},
+            latest_log_at="2026-06-27T00:00:00Z",
+            start_time="2026-06-26T00:00:00Z",
+            end_time="2026-06-26T23:59:59Z",
+        )
+        is False
+    )
+
+
+def test_should_self_heal_skips_when_no_data_at_all():
+    """No latest log (null) → never fires even on an empty window."""
+    assert (
+        should_self_heal_stale_view(
+            windowed_count=0,
+            filters={},
+            latest_log_at=None,
+            start_time=None,
+            end_time=None,
+        )
+        is False
+    )

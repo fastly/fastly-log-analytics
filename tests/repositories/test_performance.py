@@ -1,6 +1,15 @@
+from unittest.mock import patch
+
 from backend.repositories._base import _safe_table
 from backend.repositories.performance import get_performance_aggregates
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
+
+
+def _perf_latency_hit(*_a, **kw):
+    """Canned try_perf_latency_from_rollup hit for url/asn."""
+    dim = kw.get("dimension")
+    value = "/rolled" if dim == "url" else 7922
+    return {"rows": [{"value": value, "requests": 100, "avg_ms": 1.0, "p50_ms": 1.0, "p95_ms": 2.0, "p99_ms": 3.0}]}
 
 
 def test_performance_aggregates(in_memory_duckdb, test_service_source):
@@ -280,3 +289,79 @@ def test_performance_aggregates_waterfall_emits_when_requested_alone(in_memory_d
     assert "scatter_waterfall_query" in timer_names
     for blocked in ("top_urls_query", "top_asns_query", "ttl_dist_query"):
         assert blocked not in timer_names, f"selector did not suppress {blocked}; got {timer_names}"
+
+
+# ── Two-pass hoist: rollup-served → temp skipped / narrowed ──────────────────
+
+
+def test_performance_aggregates_temp_skipped_when_all_rolled_no_scatter(in_memory_duckdb, test_service_source):
+    """When top_urls + top_asns + ttl_dist all serve from rollups AND
+    scatter/waterfall aren't requested, NO temp is built — the per-column
+    materialize collapses to nothing (`perf:temp_skipped`)."""
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    for log in logs:
+        log["ttl"] = 60
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    with (
+        patch("backend.repositories._base.QueryRunner.try_perf_latency_from_rollup", side_effect=_perf_latency_hit),
+        patch(
+            "backend.repositories._base.QueryRunner.try_perf_ttl_dist_from_rollup",
+            return_value=[{"bucket": "<1m", "count": 5}],
+        ),
+    ):
+        result = get_performance_aggregates(
+            con=in_memory_duckdb,
+            src=test_service_source,
+            start_time="2026-01-01T00:00:00Z",
+            end_time="2026-01-08T00:00:00Z",
+            filters={},
+            sections={"top_urls", "top_asns", "ttl_dist"},
+        )
+
+    names = {t["section"] for t in result["section_timings"]}
+    assert "perf:temp_skipped" in names
+    assert "temp_table_create" not in names, "temp must not materialize when every section is rollup-served"
+    assert result["ttl_dist"] == [{"bucket": "<1m", "count": 5}]
+    assert result["top_urls"][0]["url"] == "/rolled"
+    assert result.get("approx") is True
+
+
+def test_performance_aggregates_temp_narrowed_when_scatter_forces_temp(in_memory_duckdb, test_service_source):
+    """All-sections request: top_urls/top_asns/ttl_dist serve from rollups, but
+    scatter+waterfall keep a temp — narrowed to their latency columns
+    (`perf:temp_narrowed`), and ttl is served from the rollup not the live
+    histogram."""
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    for log in logs:
+        log["elapsed"] = 200_000
+        log["ttfb"] = f"{0.1:.6f}"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    with (
+        patch("backend.repositories._base.QueryRunner.try_perf_latency_from_rollup", side_effect=_perf_latency_hit),
+        patch(
+            "backend.repositories._base.QueryRunner.try_perf_ttl_dist_from_rollup",
+            return_value=[{"bucket": "<1m", "count": 5}],
+        ),
+    ):
+        result = get_performance_aggregates(
+            con=in_memory_duckdb,
+            src=test_service_source,
+            start_time="2026-01-01T00:00:00Z",
+            end_time="2026-01-08T00:00:00Z",
+            filters={},
+            sections=None,
+        )
+
+    names = {t["section"] for t in result["section_timings"]}
+    assert "perf:temp_narrowed" in names
+    assert "temp_table_create" in names, "scatter still needs a (narrowed) temp"
+    # ttl served from rollup, NOT the live histogram.
+    assert "ttl_dist_rollup" in names
+    assert "ttl_dist_query" not in names
+    assert result["ttl_dist"] == [{"bucket": "<1m", "count": 5}]
+    # scatter/waterfall still produced from the narrowed temp.
+    assert "scatter" in result and "waterfall" in result

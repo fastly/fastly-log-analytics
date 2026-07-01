@@ -48,6 +48,13 @@ class PasscodePayload(BaseModel):
     passcode: str
 
 
+class PiiPolicyPayload(BaseModel):
+    """Body for ``PATCH /api/share-admin/invites/{id}/pii`` — toggle the
+    invite's PII policy (currently just ``mask_ips``) after creation."""
+
+    mask_ips: bool
+
+
 class BackupExportPayload(BaseModel):
     """Body for ``POST /api/share-admin/backup/export`` — passphrase used
     to encrypt the share-db backup blob (minimum 12 characters)."""

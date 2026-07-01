@@ -14,7 +14,6 @@ import { SharingControlPanel } from '@/components/share-dashboard/SharingControl
 import type { ShareStatus } from '@/components/share-dashboard/utils'
 import { FormSkeleton } from '@/components/skeletons/PageSkeleton'
 import { client, extractApiError } from '@/lib/api'
-import { useShareStream } from '@/hooks/useShareStream'
 
 // InvitationsPanel is the default tab on cold load — static-importing it
 // keeps the initial paint off the dynamic-chunk fetch path.
@@ -68,9 +67,9 @@ export default function ShareDashboardPage() {
 
   // /live carries only the fields that actually change in real time
   // (sharing_active, public_url, active_session_count, rate_limits,
-  // telemetry). ~1.5 KB instead of ~11 KB. Freshness via
-  // useShareStream below; this query is a one-shot snapshot on mount
-  // plus a 5-min safety net for silently-dropped streams.
+  // telemetry). ~1.5 KB instead of ~11 KB. Freshness via the admin event
+  // stream's `share` channel (see note below); this query is a one-shot
+  // snapshot on mount plus a 5-min safety net for silently-dropped streams.
   const { data: live } = useQuery({
     queryKey: SHARE_LIVE_QUERY_KEY,
     queryFn: async ({ signal }) => {
@@ -82,10 +81,11 @@ export default function ShareDashboardPage() {
     refetchInterval: 5 * 60_000,
   })
 
-  // SSE push of /live changes — replaces the 10s poll, drops wire
-  // traffic to one frame per actual change.
-  useShareStream(true)
-
+  // SSE push of /live changes rides the multiplexed admin event stream's
+  // `share` channel (SyncStatusBadge adds it on /admin/share), which writes
+  // this same ['admin','share','live'] cache key — one shared connection
+  // instead of a second dedicated stream over the H1 admin tunnel. The
+  // useQuery above keeps the one-shot mount snapshot + 5-min safety net.
   const refresh = React.useCallback(async () => {
     await refetch()
     // Also invalidate /live so the operator sees their just-revoked

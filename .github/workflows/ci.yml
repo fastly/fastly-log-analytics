@@ -167,7 +167,19 @@ jobs:
         # tmp_path give file isolation; autouse `_reset_module_caches` resets
         # the 8 module-level caches between tests; moto fixtures are per-test.
         # Local run: 2268 passed in 58s under `-n auto` vs ~3min serial.
-        run: uv run pytest -n auto --cov=backend --cov-report=term --cov-fail-under=86
+        #
+        # Two runs (mirrors Makefile `test-ci`; the only divergence is `nice`,
+        # which is local-only ergonomics). The `terraform_cli`-marked tests
+        # shell out to the real `terraform` binary — isolated subprocess work
+        # that gains nothing from xdist and whose worker HARD-CRASHED under the
+        # `-n auto` pool. Run them SERIALLY (`-n 0`) in a second step.
+        #   Run 1: fast suite, parallel, `-m "not terraform_cli"`, fresh
+        #          coverage (no --cov-append), report suppressed, no gate yet.
+        #   Run 2: terraform tests serial, --cov-append so the single
+        #          --cov-fail-under=86 gate sees the COMBINED coverage.
+        run: |
+          uv run pytest -n auto -m "not terraform_cli" --cov=backend --cov-report=
+          uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=86
 
       - name: Observability guard (no OTEL_EXPORTER=console in deploy files)
         # SRE-10 / ADR-08 §5: the console exporter floods prod stdout with

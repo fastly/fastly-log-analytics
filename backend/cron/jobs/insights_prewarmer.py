@@ -7,36 +7,116 @@ hit the warm cache — but the cache is process-local and the first user
 after any backend restart, cache eviction, or 5-min idle window pays
 the full cost.
 
-Running ``get_insights`` every 240 s per service (slightly under the
-300 s TTL so the cache never expires) keeps that user-facing p50 at
-the warm hit (~100 ms). Implementation mirrors :mod:`backend.cron.jobs.compaction`
-exactly: ``@cron_task`` decorator + per-service start_cron_run + sync
-DuckDB connection acquisition.
+Running ``get_insights`` every 240 s per service keeps that user-facing
+p50 at the warm hit (~100 ms). Implementation mirrors
+:mod:`backend.cron.jobs.compaction`: ``@cron_task`` decorator + per-service
+start_cron_run + sync DuckDB connection acquisition.
+
+ANALYST coverage: the admin entry alone never warmed the analyst path —
+an analyst request keys on its invite's clamp shape + mask_ips, which the
+admin warm (unclamped, mask_ips=0) never writes (the perf-audit "insights
+broken for analysts" finding). So while sharing is active we also warm one
+entry per distinct active-invite clamp shape, using the SAME stable cache
+key (``analyst_clamp_cache_key``) a live analyst request looks up.
+
+``force_refresh=True``: every tick RECOMPUTES (and rewrites) the entry
+instead of short-circuiting on a hit. cachetools' TTL is measured from
+insertion, so a hit would NOT reset it — the entry would still expire at
+its 300 s mark, leaving a ~(TTL - interval) window each cycle where a user
+pays cold. Forcing the recompute at 240 s < 300 s TTL keeps the entry
+continuously warm with margin.
 
 Active-request gate (#84) intentionally NOT applied here — the
 prewarmer's whole point is to win during quiet moments; it doesn't
 contend with user traffic the way sync/optimize do (no FOS calls,
-just a single read-only DuckDB query against the local Iceberg view).
+just read-only DuckDB queries against the local Iceberg view).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time
+from datetime import UTC, datetime
 
 from backend.cron.decorators import cron_task
 from backend.cron.scheduler import _display_label
 
 logger = logging.getLogger("backend.scheduler")
 
+# The dashboard's default insights selection (InsightsRequest field defaults).
+_PREWARM_WINDOW_HOURS = 1.0
+_PREWARM_BASELINE_HOURS = 168.0
+
+# Cap on distinct analyst clamp-shapes warmed per tick — bounds background
+# compute (each shape is a full recompute). Prod typically has 1. Truncation
+# is logged, never silent.
+_MAX_ANALYST_SHAPES = 8
+
+
+def _analyst_prewarm_enabled() -> bool:
+    """Analyst-shape prewarm is on by default; ``INSIGHTS_PREWARM_ANALYST=0``
+    is a belt-and-braces kill switch (re-read each call so tests can flip it)."""
+    return os.environ.get("INSIGHTS_PREWARM_ANALYST", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _active_analyst_shapes(service_id: str) -> list[tuple[str | None, str | None, int | None, bool]]:
+    """Distinct ``(query_start_time, query_end_time, query_window_hours,
+    mask_ips)`` tuples across the service's active (non-revoked, non-expired)
+    analyst invites.
+
+    Each tuple is one clamp shape a live ``/api/insights`` request will look
+    up; warming it keeps the analyst cache hot the same way the admin entry is.
+    Deduped so N invites sharing a window+masking config cost one warm. Capped
+    at ``_MAX_ANALYST_SHAPES`` (logged when it bites).
+    """
+    from backend.core import share_db
+    from backend.utils.date_utils import parse_iso_utc
+
+    now = datetime.now(UTC)
+    shapes: set[tuple[str | None, str | None, int | None, bool]] = set()
+    for inv in share_db.get_remote_invites():
+        if inv.get("revoked"):
+            continue
+        exp = inv.get("expires_at")
+        if exp:
+            pe = parse_iso_utc(exp)
+            if pe is not None and pe < now:
+                continue
+        if service_id not in (inv.get("service_ids") or []):
+            continue
+        policy = inv.get("pii_policy")
+        mask = bool(policy.get("mask_ips")) if isinstance(policy, dict) else False
+        shapes.add(
+            (
+                inv.get("query_start_time"),
+                inv.get("query_end_time"),
+                inv.get("query_window_hours"),
+                mask,
+            )
+        )
+
+    ordered = sorted(shapes, key=lambda s: (s[0] or "", s[1] or "", s[2] or 0, s[3]))
+    if len(ordered) > _MAX_ANALYST_SHAPES:
+        logger.warning(
+            "[insights-prewarmer] %s: %d analyst shapes, warming first %d",
+            service_id,
+            len(ordered),
+            _MAX_ANALYST_SHAPES,
+        )
+        ordered = ordered[:_MAX_ANALYST_SHAPES]
+    return ordered
+
 
 @cron_task("insights_prewarmer")
 def _run_insights_prewarmer(service_id: str) -> None:
-    """Warm the insights cache for the default (window=1h, baseline=168h)
-    selection so the first user lands on a cache hit instead of paying
-    the ~3.5 s cold-path cost."""
+    """Warm the default (window=1h, baseline=168h) insights selection — the
+    admin/unclamped entry plus each active analyst clamp shape — so the first
+    user (admin OR analyst) lands on a cache hit instead of the cold path."""
     from backend.core.duckdb import get_connection, get_source_for_service, log_cron_run, start_cron_run
     from backend.repositories.insights import get_insights
+    from backend.utils.remote_access import resolve_analyst_insights_clamp
+    from backend.utils.tunnel import get_tunnel_manager
 
     src = get_source_for_service(service_id)
     if src is None:
@@ -58,22 +138,61 @@ def _run_insights_prewarmer(service_id: str) -> None:
         # boundaries is fine here (the next prewarmer tick will resolve
         # newly-bound view tables anyway).
         con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
-        result = get_insights(con, src, window_hours=1.0, baseline_hours=168.0)
+
+        # 1) Admin / unclamped default selection.
+        get_insights(
+            con,
+            src,
+            window_hours=_PREWARM_WINDOW_HOURS,
+            baseline_hours=_PREWARM_BASELINE_HOURS,
+            force_refresh=True,
+        )
+
+        # 2) Analyst clamp shapes — only meaningful while sharing is live (no
+        #    analyst can reach /api/insights otherwise). Warm each active
+        #    invite's (window-params, mask_ips) shape under the SAME stable key
+        #    a live analyst request derives.
+        analyst_warmed = 0
+        if _analyst_prewarm_enabled() and get_tunnel_manager().is_sharing_active():
+            for qs, qe, qwh, mask in _active_analyst_shapes(service_id):
+                try:
+                    cs, ce, ck = resolve_analyst_insights_clamp(
+                        qs,
+                        qe,
+                        qwh,
+                        baseline_hours=_PREWARM_BASELINE_HOURS,
+                        window_hours=_PREWARM_WINDOW_HOURS,
+                    )
+                except ValueError:
+                    continue  # empty window for this shape — nothing to warm
+                get_insights(
+                    con,
+                    src,
+                    window_hours=_PREWARM_WINDOW_HOURS,
+                    baseline_hours=_PREWARM_BASELINE_HOURS,
+                    clamp_start=cs,
+                    clamp_end=ce,
+                    mask_ips=mask,
+                    clamp_cache_key=ck,
+                    force_refresh=True,
+                )
+                analyst_warmed += 1
+
         duration = time.time() - started
-        was_cache_hit = bool(result.get("_is_cached"))
+        summary = f"Prewarmed default insights selection (admin + {analyst_warmed} analyst shape{'' if analyst_warmed == 1 else 's'})"
         log_cron_run(
             src,
             "insights_prewarmer",
             duration,
             "success",
-            summary=f"Prewarmed default insights selection ({'cache-hit' if was_cache_hit else 'cache-miss'})",
+            summary=summary,
             run_id=run_id,
         )
         logger.info(
-            "✅ [insights-prewarmer] %s: prewarmed in %.2fs (%s)",
+            "✅ [insights-prewarmer] %s: prewarmed in %.2fs (admin + %d analyst)",
             _display,
             duration,
-            "cache-hit" if was_cache_hit else "cache-miss",
+            analyst_warmed,
         )
     except Exception as e:
         duration = time.time() - started

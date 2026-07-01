@@ -41,6 +41,7 @@ from . import (  # noqa: F401
     bot_sources,
     compaction,
     downloads,
+    events,
     health,
     iceberg,
     ingest,
@@ -48,7 +49,6 @@ from . import (  # noqa: F401
     metric_history,
     pop_locations,
     sync_status,
-    system_metrics,
     trees,
 )
 

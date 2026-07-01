@@ -31,6 +31,40 @@ _logger = logging.getLogger(__name__)
 # its projection on the small-window path).
 _ROLLUP_MIN_WINDOW_SECONDS = 3 * 86400
 
+# Canonical projection order for the catalog temp. The temp materializes
+# ONLY the columns the live (rollup-missed) sections actually touch — see
+# the per-section column-needs in _build_security_response. asn / req_bytes
+# / ja3 / ja4 are never consumed by any section so they never appear.
+_TEMP_COL_ORDER = (
+    "timestamp",
+    "ip",
+    "tls_ciphers_sha",
+    "req_header_bytes",
+    "is_ipv6",
+    "p_type",
+    "conn_requests",
+    "waf_sig",
+    "ua",
+    "waf_req_id",
+)
+
+# (section name, is_list) — the empty default each section carries when it
+# was requested but produced no value (e.g. the temp build failed). Lists
+# for table/series sections; dict for fingerprint_coverage.
+_SECTION_DEFAULTS = (
+    ("verified_bots_ts", True),
+    ("ngwaf_verified_bots", True),
+    ("ngwaf_verified_bots_ts", True),
+    ("wellknown_bots", True),
+    ("tls_fingerprints", True),
+    ("fingerprint_coverage", False),
+    ("req_size_dist", True),
+    ("top_ips_header", True),
+    ("ipv6_adoption", True),
+    ("proxy_dist", True),
+    ("conn_reuse_dist", True),
+)
+
 
 def _window_eligible_for_rollup(start_time: str | None, end_time: str | None) -> bool:
     """Return True when the request window is wide enough to make the
@@ -539,16 +573,62 @@ def get_security_aggregates(
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
     timer.mark("build_where_clause", _t)
 
-    # Pre-check rollup availability so the catalog temp can DROP the
-    # corresponding column when the aggregate it feeds will serve from
-    # the count rollup instead of scanning the temp. Pre-checking is a
-    # cheap directory-stat (no parquet reads) so it's safe to run before
-    # materialization. The invariant the live-fallback in
-    # _build_security_response relies on: "rollup pre-check passed → col
-    # dropped from temp AND rollup serves the aggregate; pre-check failed
-    # → col present in temp AND live SQL serves". The two conditions are
-    # gated on the SAME pre-check so the fallback never references a
-    # column the temp doesn't have.
+    # The catalog temp is built section-aware inside _build_security_response:
+    # every section that can serve from a parquet rollup is served WITHOUT
+    # the temp, and the temp is then materialized for ONLY the columns the
+    # remaining live sections touch (or skipped entirely). This is the
+    # per-column form of the all-or-nothing materialize the origin/aggregates
+    # fix removed — so a 30d unfiltered request collapses the shared
+    # ``temp_table_create`` to the tiny NGWAF-flagged subset (or nothing).
+    return _build_security_response(
+        runner,
+        src,
+        con,
+        actual_cols,
+        table_name,
+        where_clause,
+        params,
+        bucket_seconds,
+        section_timings,
+        start_time=start_time,
+        end_time=end_time,
+        filters=filters,
+        sections=sections,
+    )
+
+
+def _build_security_response(
+    runner: QueryRunner,
+    src: dict,
+    con: duckdb.DuckDBPyConnection,
+    actual_cols: list[str],
+    table_name: str,
+    where_clause: str,
+    params: list | None,
+    bucket_seconds: int,
+    section_timings: list[dict] | None = None,
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    filters: FiltersDict | None = None,
+    sections: set[str] | None = None,
+) -> dict:
+    import time as _time
+
+    timer = SectionTimer(section_timings)
+    section_timings = timer.entries
+
+    def _want(name: str) -> bool:
+        return sections is None or name in sections
+
+    results = {**runner.telemetry()}
+
+    # ── Rollup eligibility (cheap directory-stat pre-checks; no parquet
+    # reads). is_ipv6 / p_type serve from their count rollups when their
+    # in-window closed-hour data exists, the request is unfiltered, and the
+    # window clears the 3-day break-even. Same invariant as before: a column
+    # is dropped from the temp ONLY when its rollup serve is virtually
+    # guaranteed, so the live fallback never references a missing column. ──
     rollup_eligible = (
         not filters
         and start_time is not None
@@ -562,83 +642,21 @@ def get_security_aggregates(
         rollup_eligible and "p_type" in actual_cols and _has_rollup_coverage(src, "p_type", start_time, end_time)
     )
 
-    # Projection narrowed: asn / req_bytes / ja3 / ja4 are not consumed
-    # by _build_security_response (audited 2026-06-05) so they're dropped
-    # from the TEMP TABLE materialization. Each saves a column scan +
-    # cast per parquet read. is_ipv6 / p_type also drop conditionally
-    # when their rollup-served paths fire (#94 closure, 2026-06-15).
-    cols = [
-        "timestamp",
-        "ip",
-        "tls_ciphers_sha",
-        "req_header_bytes",
-        *(["is_ipv6"] if not use_ipv6_rollup else []),
-        *(["p_type"] if not use_proxy_rollup else []),
-        "conn_requests",
-        "waf_sig",
-        "ua",
-        "waf_req_id",
-    ]
-    _t = _time.perf_counter()
-    temp_table = runner.create_filtered_temp_table(cols, actual_cols, table_name, where_clause, params)
-    timer.mark("temp_table_create", _t)
-    if temp_table is None:
-        return {"section_timings": section_timings, **runner.telemetry()}
+    # ── Pass 1: serve everything that can come from a parquet rollup WITHOUT
+    # the catalog temp, and record which sections still need a live scan plus
+    # the exact temp columns they touch. The temp is then built for ONLY that
+    # column set (or skipped). This is the per-column form of the
+    # all-or-nothing materialize the origin/aggregates fix removed. ──
+    needed_cols: set[str] = set()
+    live_sections: set[str] = set()
 
-    try:
-        return _build_security_response(
-            runner,
-            src,
-            con,
-            actual_cols,
-            temp_table,
-            bucket_seconds,
-            section_timings,
-            start_time=start_time,
-            end_time=end_time,
-            filters=filters,
-            use_ipv6_rollup=use_ipv6_rollup,
-            use_proxy_rollup=use_proxy_rollup,
-            sections=sections,
-        )
-    finally:
-        try:
-            runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
-        except Exception:
-            pass
-
-
-def _build_security_response(
-    runner: QueryRunner,
-    src: dict,
-    con: duckdb.DuckDBPyConnection,
-    actual_cols: list[str],
-    temp_table: str,
-    bucket_seconds: int,
-    section_timings: list[dict] | None = None,
-    *,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    filters: FiltersDict | None = None,
-    use_ipv6_rollup: bool = False,
-    use_proxy_rollup: bool = False,
-    sections: set[str] | None = None,
-) -> dict:
-    import time as _time
-
-    timer = SectionTimer(section_timings)
-    section_timings = timer.entries
-
-    def _want(name: str) -> bool:
-        return sections is None or name in sections
-
-    results = {**runner.telemetry()}
+    def _need(section: str, cols: set[str]) -> None:
+        live_sections.add(section)
+        needed_cols.update(cols)
 
     # Surface whether NGWAF is configured so the frontend can distinguish
     # "not configured" from "configured but no detections yet". Bundled
-    # with the NGWAF bot section gate — selector callers that want either
-    # bot view also want the badge; pure non-bot requests skip the
-    # config lookup.
+    # with the NGWAF bot section gate.
     _want_ngwaf_bots = _want("ngwaf_verified_bots") or _want("ngwaf_verified_bots_ts")
     if _want_ngwaf_bots:
         try:
@@ -648,14 +666,12 @@ def _build_security_response(
         except Exception:
             results["ngwaf_configured"] = False
 
-    # Attach the NGWAF bot cache once per connection if it exists and waf_req_id is in schema.
-    # The attach costs ~22ms; check DuckDB's own duckdb_databases() catalog
-    # (~90us) first and skip the ATTACH if this connection already has the
-    # cache bound to the exact same path. The catalog query reflects live
-    # state, so we don't need Python-side memoization (DuckDBPyConnection
-    # has no __dict__ for arbitrary attrs anyway) and a config switch that
-    # changes the path triggers a DETACH + re-ATTACH instead of silently
-    # serving from a stale binding.
+    # Attach the NGWAF bot cache once per connection if it exists and
+    # waf_req_id is in schema. The attach (~22ms) is independent of the
+    # temp; skip it if this connection already has the cache bound to the
+    # exact same path (a config switch triggers DETACH + re-ATTACH). The
+    # bot JOIN needs raw waf_req_id (high-cardinality UUID, never rolled
+    # up), so the NGWAF pair always live-scans a (tiny) temp when attached.
     _ngwaf_attached = False
     if _want_ngwaf_bots and "waf_req_id" in actual_cols:
         try:
@@ -680,69 +696,22 @@ def _build_security_response(
                     _ngwaf_attached = True
         except Exception:
             pass  # ATTACH failed (e.g. DuckDB SQLite extension not loaded) — fall back gracefully
-
-    # 0. Verified Bots Time Series (waf_sig fallback — category-level, no bot names)
-    if _want("verified_bots_ts"):
-        if "waf_sig" in actual_cols:
-            _t = _time.perf_counter()
-            # Try the minute-granular verified_bots_ts rollup first
-            # (unfiltered, >= 48 h, bucket a multiple of 60). The reader
-            # fills the in-progress active hour live from the temp table, so
-            # the result is exact and complete to "now". Falls through to the
-            # live SQL on any eligibility miss.
-            rolled_vbts = runner.try_verified_bots_ts_from_rollup(
-                start_time,
-                end_time,
-                temp_table=temp_table,
-                bucket_seconds=bucket_seconds,
-                has_filters=bool(filters),
-            )
-            if rolled_vbts is not None:
-                timer.mark("verified_bots_ts_rollup", _t)
-                results["verified_bots_ts"] = [
-                    {"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in rolled_vbts
-                ]
-            else:
-                q = SQL.VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
-                res = runner.execute(q).fetchall()
-                timer.mark("verified_bots_ts", _t)
-                results["verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in res]
-        else:
-            results["verified_bots_ts"] = []
-
-    # 0b. NGWAF Verified Bots (name-resolved, requires ngwaf_bot_cache.db + waf_req_id column)
     if _ngwaf_attached:
-        try:
-            # Table: group by bot_name + wellknown_bot_name + category
-            q = SQL.NGWAF_VERIFIED_BOTS.format(temp_table=temp_table)
-            _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark("ngwaf_verified_bots", _t)
-            results["ngwaf_verified_bots"] = [
-                {
-                    "bot_name": r[0],
-                    "wellknown_bot_name": r[1],
-                    "category": r[2],
-                    "request_count": r[3],
-                }
-                for r in res
-            ]
-
-            # Time series: bucketed counts by bot_name
-            q = SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
-            _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark("ngwaf_verified_bots_ts", _t)
-            results["ngwaf_verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]} for r in res]
-        except Exception as e:
-            import logging
-
-            logging.getLogger(__name__).error("[security] NGWAF bot join failed: %s", e)
-            results["ngwaf_verified_bots"] = []
-            results["ngwaf_verified_bots_ts"] = []
+        # The pair runs together (shared ATTACH); both need the temp.
+        _need("ngwaf_verified_bots", {"waf_req_id"})
+        _need("ngwaf_verified_bots_ts", {"timestamp", "waf_req_id"})
     elif _want_ngwaf_bots:
         results["ngwaf_verified_bots"] = []
         results["ngwaf_verified_bots_ts"] = []
+
+    # Verified bots TS: the rollup reader fills the active hour FROM the temp,
+    # so requesting this section always needs {timestamp, waf_sig} in the
+    # temp (whether the rollup hits or not).
+    if _want("verified_bots_ts"):
+        if "waf_sig" in actual_cols:
+            _need("verified_bots_ts", {"timestamp", "waf_sig"})
+        else:
+            results["verified_bots_ts"] = []
 
     # Fingerprint cards: TLS only. Each card returns top-20 + a coverage
     # fraction (populated rows / total rows) so the FE can render a low-
@@ -763,14 +732,12 @@ def _build_security_response(
         c for c, rk in _FP_RESULT_KEYS if c in actual_cols and "ip" in actual_cols and rk in _wanted_fp_keys
     ]
 
-    # Rollup fast-path: when no per-request filters apply, the top-N
-    # fingerprints + their cross-window distinct-IP counts can be served
-    # from the per-(field, hour) count rollup + the HLL ip_spread rollup
-    # instead of the live FINGERPRINT_TOP_N scan over the catalog temp.
-    # On 30-day windows this trades a 3 × count(DISTINCT ip) full-temp
-    # scan (the dominant cost in security/admin-30d) for two parquet
-    # reads + an in-Python HLL merge — the gain the audit's #58-full
-    # leg predicted.
+    # Rollup fast-path (no temp): when no per-request filters apply, the
+    # top-N fingerprints + their cross-window distinct-IP counts can be
+    # served from the per-(field, hour) count rollup + the HLL ip_spread
+    # rollup instead of the live FINGERPRINT_TOP_N scan over the catalog
+    # temp. On 30-day windows this trades a count(DISTINCT ip) full-temp
+    # scan for two parquet reads + an in-Python HLL merge.
     #
     # Falls back to the live SQL loop below when:
     #   * filters are non-empty (rollups don't carry per-request filter
@@ -863,90 +830,90 @@ def _build_security_response(
                 exc_info=True,
             )
 
-    # Live FINGERPRINT_TOP_N path: runs for any fingerprint col that
-    # the rollup path didn't already serve (either because rollup was
-    # bypassed entirely, or because that specific field had no rollup
-    # coverage in the window).
+    # Fingerprint cols the rollup didn't serve need the live FINGERPRINT_TOP_N
+    # over the temp ({col, ip}). Coverage scans the temp for EVERY fingerprint
+    # col that ran (served OR live), so it pins those cols into the temp even
+    # on a rollup hit.
     for col, result_key in _FP_RESULT_KEYS:
         if result_key not in _wanted_fp_keys:
             continue
         if col in rollup_served_fp_cols:
             continue
         if col in actual_cols and "ip" in actual_cols:
-            q = SQL.FINGERPRINT_TOP_N.format(col=col, temp_table=temp_table)
-            _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark(result_key, _t)
-            results[result_key] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
+            _need("tls_fingerprints", {col, "ip"})
             coverage_cols.append(col)
         else:
             results[result_key] = []
-
-    # One scan of the temp table populates coverage for every fingerprint
-    # card that ran above — replaces three separate full-temp scans (each
-    # ~200-400 ms on 30d). Column names come from the _FP_RESULT_KEYS
-    # safelist; no untrusted input reaches the inline aggregate list.
-    fingerprint_coverage: dict[str, float] = {}
     if coverage_cols and _want("fingerprint_coverage"):
-        agg_cols = ", ".join(
-            f'count(*) FILTER (WHERE "{c}" IS NOT NULL AND "{c}" != \'\') AS pop_{i}'
-            for i, c in enumerate(coverage_cols)
-        )
-        try:
+        # Coverage scans the temp for every fingerprint col that ran. When a
+        # fingerprint col is ALREADY in the temp for the live FINGERPRINT_TOP_N
+        # (rollup missed), reuse that temp scan. But when every fingerprint
+        # card served from a rollup (no fp col in the temp), serve coverage
+        # from the per-hour security_cov counts so tls_ciphers_sha can drop —
+        # the last column blocking the NGWAF-only temp narrowing. The cov
+        # rollup carries tls_ciphers_sha's populated count specifically, so it
+        # only applies to the single-col tls case.
+        fp_cols_in_temp = any(c in needed_cols for c in coverage_cols)
+        if not fp_cols_in_temp and coverage_cols == ["tls_ciphers_sha"]:
             _t = _time.perf_counter()
-            row = runner.execute(
-                SQL.FINGERPRINT_COVERAGE_BULK.format(agg_cols=agg_cols, temp_table=temp_table)
-            ).fetchone()
-            timer.mark("fingerprint_coverage", _t)
-            if row:
-                total = float(row[0]) if row[0] else 0.0
-                for i, c in enumerate(coverage_cols):
-                    populated = float(row[i + 1]) if row[i + 1] is not None else 0.0
-                    fingerprint_coverage[c] = populated / total if total > 0 else 0.0
-        except Exception:
-            # FE treats 0.0 as "no signal, show the existing emptyMessage"
-            # rather than the coverage hint — mirrors the prior fail-soft
-            # behaviour of the now-removed _coverage_for helper.
-            for c in coverage_cols:
-                fingerprint_coverage[c] = 0.0
+            cov = runner.try_security_coverage_from_rollup(start_time, end_time, has_filters=bool(filters))
+            if cov is not None:
+                timer.mark("fingerprint_coverage_rollup", _t)
+                total_rows, tls_populated = cov
+                results["fingerprint_coverage"] = {
+                    "tls_ciphers_sha": (tls_populated / total_rows if total_rows > 0 else 0.0)
+                }
+            else:
+                _need("fingerprint_coverage", set(coverage_cols))
+        else:
+            _need("fingerprint_coverage", set(coverage_cols))
 
-    if _want("fingerprint_coverage"):
-        results["fingerprint_coverage"] = fingerprint_coverage
-
-    # 3. Request Header Size Distribution
+    # Request Header Size Distribution: per-hour req_header_bytes histogram
+    # rollup (exact SUM of bucket counts); live fallback scans the temp.
     if _want("req_size_dist"):
         if "req_header_bytes" in actual_cols:
-            q = SQL.REQ_HEADER_SIZE_DIST.format(temp_table=temp_table)
             _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark("req_size_dist", _t)
-            results["req_size_dist"] = [{"bucket": r[0], "count": r[1]} for r in res]
+            rolled = runner.try_security_req_size_from_rollup(start_time, end_time, has_filters=bool(filters))
+            if rolled is not None:
+                timer.mark("req_size_dist_rollup", _t)
+                results["req_size_dist"] = rolled
+            else:
+                _need("req_size_dist", {"req_header_bytes"})
         else:
             results["req_size_dist"] = []
 
-    # Top IPs by Max Header Size
+    # Top IPs by Max Header Size: per-hour top-K (ip, MAX) rollup (exact
+    # MAX-of-MAX merge); live fallback scans the temp.
     if _want("top_ips_header"):
         if "req_header_bytes" in actual_cols:
-            q = SQL.TOP_IPS_BY_MAX_HEADER.format(temp_table=temp_table)
             _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark("top_ips_by_header", _t)
-            results["top_ips_header"] = [{"ip": r[0], "max_header": r[1]} for r in res]
+            rolled = runner.try_security_top_ips_from_rollup(start_time, end_time, has_filters=bool(filters))
+            if rolled is not None:
+                timer.mark("top_ips_by_header_rollup", _t)
+                results["top_ips_header"] = rolled
+            else:
+                _need("top_ips_header", {"ip", "req_header_bytes"})
         else:
             results["top_ips_header"] = []
 
-    # 4. IPv6 Adoption over Time
+    # Connection Reuse Distribution: per-hour conn_requests histogram rollup
+    # (exact SUM of bucket counts); live fallback scans the temp.
+    if _want("conn_reuse_dist"):
+        if "conn_requests" in actual_cols:
+            _t = _time.perf_counter()
+            rolled = runner.try_security_conn_reuse_from_rollup(start_time, end_time, has_filters=bool(filters))
+            if rolled is not None:
+                timer.mark("conn_reuse_dist_rollup", _t)
+                results["conn_reuse_dist"] = rolled
+            else:
+                _need("conn_reuse_dist", {"conn_requests"})
+        else:
+            results["conn_reuse_dist"] = []
+
+    # IPv6 Adoption: rollup-served (no temp) when the pre-check passed; else
+    # live, which needs {timestamp, is_ipv6}.
     if _want("ipv6_adoption") and "is_ipv6" in actual_cols:
         if use_ipv6_rollup:
-            # Rollup-served path: closed hours from the count rollup +
-            # active hour from a focused base-table query. The temp does
-            # NOT carry is_ipv6 when this branch runs (get_security_
-            # aggregates dropped it), so the live SQL fallback below is
-            # NOT available — pre-check passing must mean rollup will
-            # serve. _ipv6_per_hour_from_rollups returning None here is
-            # a degenerate "files vanished between pre-check and read"
-            # race; emit an empty card + warn rather than 500 the
-            # request.
             _t = _time.perf_counter()
             rolled = _ipv6_per_hour_from_rollups(runner, src, start_time, end_time)
             timer.mark("ipv6_adoption_rollup", _t)
@@ -958,24 +925,14 @@ def _build_security_response(
             else:
                 results["ipv6_adoption"] = rolled
         else:
-            q = SQL.IPV6_ADOPTION_TS.format(
-                time_bucket_select=time_bucket_select("1 hour"),
-                temp_table=temp_table,
-            )
-            _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark("ipv6_adoption", _t)
-            results["ipv6_adoption"] = [{"time": safe_iso(r[0]), "pct": r[1]} for r in res]
+            _need("ipv6_adoption", {"timestamp", "is_ipv6"})
     elif _want("ipv6_adoption"):
         results["ipv6_adoption"] = []
 
-    # 5. Proxy/Anonymizer Breakdown
+    # Proxy/Anonymizer Breakdown: rollup-served (no temp) when the pre-check
+    # passed; else live, which needs {p_type}.
     if _want("proxy_dist") and "p_type" in actual_cols:
         if use_proxy_rollup:
-            # Same invariant as ipv6_adoption above: p_type is dropped
-            # from the temp when this branch runs, so the live SQL
-            # fallback isn't available — None from the helper renders
-            # an empty card and logs rather than 500ing.
             _t = _time.perf_counter()
             rolled = _proxy_dist_from_rollups(runner, start_time, end_time)
             timer.mark("proxy_dist_rollup", _t)
@@ -987,124 +944,292 @@ def _build_security_response(
             else:
                 results["proxy_dist"] = rolled
         else:
-            q = SQL.PROXY_TYPE_DIST.format(temp_table=temp_table)
-            _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark("proxy_dist", _t)
-            results["proxy_dist"] = [{"type": r[0], "count": r[1]} for r in res]
+            _need("proxy_dist", {"p_type"})
     elif _want("proxy_dist"):
         results["proxy_dist"] = []
 
-    # 6. Connection Reuse Distribution
-    if _want("conn_reuse_dist"):
-        if "conn_requests" in actual_cols:
+    # Well-Known Bots: pre-materialised (ua, ip, count) rollup (no temp);
+    # falls back to a live regex prefilter over the temp ({ua, ip}) on a
+    # rollup miss (active hour, missing file, stale pattern_set_version).
+    _wk_active = False
+    _wk_rows: list | None = None
+    if _want("wellknown_bots") and "ua" in actual_cols and "ip" in actual_cols:
+        _wk_active = True
+        if start_time and end_time:
+            _t = _time.perf_counter()
+            try:
+                from backend.core.rollups import read_wellknown_bots_rollup
+
+                _wk_rows = read_wellknown_bots_rollup(src, start_time, end_time)
+            except Exception:
+                _wk_rows = None
+            if _wk_rows is not None:
+                timer.mark("wellknown_bots_rollup_read", _t)
+        if _wk_rows is None:
+            _need("wellknown_bots", {"ua", "ip"})
+    elif _want("wellknown_bots"):
+        results["wellknown_bots"] = []
+
+    # ── Build the (narrowed / NGWAF-only / skipped) catalog temp ──
+    temp_table: str | None = None
+    if needed_cols:
+        # When the ONLY live sections are the NGWAF bot pair, restrict the
+        # temp to NGWAF-flagged rows — both bot templates INNER JOIN on a
+        # non-null waf_req_id anyway, so this is semantically identical and
+        # collapses a full-window scan to the tiny flagged subset. Safe to
+        # append a literal predicate: inline_params means ``params`` is
+        # empty, so it can't desync bind parameters.
+        ngwaf_pair = {"ngwaf_verified_bots", "ngwaf_verified_bots_ts"}
+        ngwaf_only = bool(live_sections) and live_sections <= ngwaf_pair and "waf_req_id" in actual_cols
+        wc = where_clause
+        if ngwaf_only and where_clause.strip():
+            wc = f"{where_clause} AND waf_req_id IS NOT NULL"
+        cols = [c for c in _TEMP_COL_ORDER if c in needed_cols]
+        _t = _time.perf_counter()
+        temp_table = runner.create_filtered_temp_table(cols, actual_cols, table_name, wc, params)
+        timer.mark("temp_table_create", _t)
+        if ngwaf_only:
+            timer.mark("security:temp_ngwaf_narrowed", _time.perf_counter())
+    else:
+        # Every requested section served from a rollup — no temp at all.
+        timer.mark("security:temp_skipped", _time.perf_counter())
+
+    # ── Pass 2: live SQL for the missed sections, against the narrowed temp ──
+    try:
+        if "verified_bots_ts" in live_sections and temp_table:
+            _t = _time.perf_counter()
+            rolled_vbts = runner.try_verified_bots_ts_from_rollup(
+                start_time,
+                end_time,
+                temp_table=temp_table,
+                bucket_seconds=bucket_seconds,
+                has_filters=bool(filters),
+            )
+            if rolled_vbts is not None:
+                timer.mark("verified_bots_ts_rollup", _t)
+                results["verified_bots_ts"] = [
+                    {"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in rolled_vbts
+                ]
+            else:
+                q = SQL.VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
+                res = runner.execute(q).fetchall()
+                timer.mark("verified_bots_ts", _t)
+                results["verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in res]
+
+        if _ngwaf_attached and temp_table:
+            try:
+                # Table: group by bot_name + wellknown_bot_name + category
+                q = SQL.NGWAF_VERIFIED_BOTS.format(temp_table=temp_table)
+                _t = _time.perf_counter()
+                res = runner.execute(q).fetchall()
+                timer.mark("ngwaf_verified_bots", _t)
+                results["ngwaf_verified_bots"] = [
+                    {
+                        "bot_name": r[0],
+                        "wellknown_bot_name": r[1],
+                        "category": r[2],
+                        "request_count": r[3],
+                    }
+                    for r in res
+                ]
+
+                # Time series: bucketed counts by bot_name
+                q = SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
+                _t = _time.perf_counter()
+                res = runner.execute(q).fetchall()
+                timer.mark("ngwaf_verified_bots_ts", _t)
+                results["ngwaf_verified_bots_ts"] = [
+                    {"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]} for r in res
+                ]
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).error("[security] NGWAF bot join failed: %s", e)
+                results["ngwaf_verified_bots"] = []
+                results["ngwaf_verified_bots_ts"] = []
+
+        # Live FINGERPRINT_TOP_N for any fingerprint col the rollup didn't
+        # serve (cols absent from the schema were already defaulted above).
+        for col, result_key in _FP_RESULT_KEYS:
+            if result_key not in _wanted_fp_keys:
+                continue
+            if col in rollup_served_fp_cols:
+                continue
+            if temp_table and col in actual_cols and "ip" in actual_cols:
+                q = SQL.FINGERPRINT_TOP_N.format(col=col, temp_table=temp_table)
+                _t = _time.perf_counter()
+                res = runner.execute(q).fetchall()
+                timer.mark(result_key, _t)
+                results[result_key] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
+
+        # One scan of the temp populates coverage for every fingerprint card
+        # that ran live (rollup-served coverage was already set from the
+        # security_cov counts in pass 1, so it's not in live_sections here).
+        # Column names come from the _FP_RESULT_KEYS safelist; no untrusted
+        # input reaches the aggregate.
+        if "fingerprint_coverage" in live_sections and temp_table:
+            fingerprint_coverage: dict[str, float] = {}
+            agg_cols = ", ".join(
+                f'count(*) FILTER (WHERE "{c}" IS NOT NULL AND "{c}" != \'\') AS pop_{i}'
+                for i, c in enumerate(coverage_cols)
+            )
+            try:
+                _t = _time.perf_counter()
+                row = runner.execute(
+                    SQL.FINGERPRINT_COVERAGE_BULK.format(agg_cols=agg_cols, temp_table=temp_table)
+                ).fetchone()
+                timer.mark("fingerprint_coverage", _t)
+                if row:
+                    total = float(row[0]) if row[0] else 0.0
+                    for i, c in enumerate(coverage_cols):
+                        populated = float(row[i + 1]) if row[i + 1] is not None else 0.0
+                        fingerprint_coverage[c] = populated / total if total > 0 else 0.0
+            except Exception:
+                # FE treats 0.0 as "no signal, show the existing emptyMessage".
+                for c in coverage_cols:
+                    fingerprint_coverage[c] = 0.0
+            results["fingerprint_coverage"] = fingerprint_coverage
+        elif _want("fingerprint_coverage") and "fingerprint_coverage" not in results:
+            results["fingerprint_coverage"] = {}
+
+        if "req_size_dist" in live_sections and temp_table:
+            q = SQL.REQ_HEADER_SIZE_DIST.format(temp_table=temp_table)
+            _t = _time.perf_counter()
+            res = runner.execute(q).fetchall()
+            timer.mark("req_size_dist", _t)
+            results["req_size_dist"] = [{"bucket": r[0], "count": r[1]} for r in res]
+
+        if "top_ips_header" in live_sections and temp_table:
+            q = SQL.TOP_IPS_BY_MAX_HEADER.format(temp_table=temp_table)
+            _t = _time.perf_counter()
+            res = runner.execute(q).fetchall()
+            timer.mark("top_ips_by_header", _t)
+            results["top_ips_header"] = [{"ip": r[0], "max_header": r[1]} for r in res]
+
+        if "conn_reuse_dist" in live_sections and temp_table:
             q = SQL.CONN_REUSE_DIST.format(temp_table=temp_table)
             _t = _time.perf_counter()
             res = runner.execute(q).fetchall()
             timer.mark("conn_reuse_dist", _t)
             results["conn_reuse_dist"] = [{"bucket": r[0], "count": r[1]} for r in res]
-        else:
-            results["conn_reuse_dist"] = []
 
-    # 7. Well-Known Bots (UA matching + FCrDNS verification)
-    if _want("wellknown_bots") and "ua" in actual_cols and "ip" in actual_cols:
-        try:
-            from backend.core.rollups import read_wellknown_bots_rollup
-            from backend.utils.bot_sources import build_matcher, get_bot_regex_pattern
-            from backend.utils.rdns_cache import classify, enqueue, get_hostnames
-
-            # Fast path: try to pull (ua, ip, count) tuples from the
-            # pre-materialised wellknown_bots rollup. Returns None when
-            # any hour in the window lacks a fresh partition (active
-            # hour, missing file, or stale pattern_set_version after a
-            # bot-source refresh) — the live SQL path below handles
-            # those cases correctly. The rollup tuples are the SAME
-            # shape the SQL prefilter would have produced, so the
-            # Python loop downstream is unchanged.
+        if "ipv6_adoption" in live_sections and temp_table:
+            q = SQL.IPV6_ADOPTION_TS.format(
+                time_bucket_select=time_bucket_select("1 hour"),
+                temp_table=temp_table,
+            )
             _t = _time.perf_counter()
-            ua_ip_rows = read_wellknown_bots_rollup(src, start_time, end_time) if (start_time and end_time) else None
-            if ua_ip_rows is not None:
-                timer.mark("wellknown_bots_rollup_read", _t)
-            else:
-                # Slow path: regex prefilter against the request-scoped
-                # temp_table. Identical to the pre-rollup behaviour;
-                # kept as a correctness fallback for hour-mix windows
-                # and pattern-set transitions.
-                pattern = get_bot_regex_pattern(500)
-                if pattern:
-                    pattern_sql = pattern.replace("'", "''")
-                    prefilter = f"WHERE ua IS NOT NULL AND ip IS NOT NULL AND regexp_matches(ua, '{pattern_sql}')"
-                else:
-                    prefilter = "WHERE ua IS NOT NULL AND ip IS NOT NULL"
+            res = runner.execute(q).fetchall()
+            timer.mark("ipv6_adoption", _t)
+            results["ipv6_adoption"] = [{"time": safe_iso(r[0]), "pct": r[1]} for r in res]
 
-                q = SQL.WELLKNOWN_BOTS_UA_IP.format(temp_table=temp_table, prefilter=prefilter)
-                ua_ip_rows = runner.execute(q).fetchall()
-                timer.mark("wellknown_bots_query", _t)
+        if "proxy_dist" in live_sections and temp_table:
+            q = SQL.PROXY_TYPE_DIST.format(temp_table=temp_table)
+            _t = _time.perf_counter()
+            res = runner.execute(q).fetchall()
+            timer.mark("proxy_dist", _t)
+            results["proxy_dist"] = [{"type": r[0], "count": r[1]} for r in res]
 
-            match_ua = build_matcher()
-            bot_agg: dict[str, dict] = {}
-            new_ips: list[str] = []
+        # Well-Known Bots (UA matching + FCrDNS verification). Rows come from
+        # the rollup (hit) or a live temp scan (miss); the Python enrichment
+        # below is identical either way.
+        if _wk_active:
+            try:
+                if _wk_rows is None and temp_table:
+                    from backend.utils.bot_sources import get_bot_regex_pattern
 
-            # Batch-resolve every distinct IP in one SELECT instead of opening a
-            # fresh SQLite connection per (ua, ip) row inside the loop.
-            hostnames = get_hostnames([ip for _, ip, _ in ua_ip_rows if ip])
-
-            for ua_val, ip_val, cnt in ua_ip_rows:
-                matches = match_ua(ua_val)
-                for entry in matches:
-                    bot_id = entry.get("id", "unknown")
-                    hostname, status, fcrdns_verified = hostnames.get(ip_val, (None, "pending", False))
-                    if status == "pending":
-                        new_ips.append(ip_val)
-                    verification = entry.get("verification", {})
-                    verification_domains = verification.get("domains", [])
-                    verification_cidrs = verification.get("cidrs", [])
-                    state = classify(
-                        ip_val, hostname, status, fcrdns_verified, verification_domains, verification_cidrs
-                    )
-
-                    if bot_id not in bot_agg:
-                        cats = entry.get("categories", [])
-                        bot_agg[bot_id] = {
-                            "id": bot_id,
-                            "name": bot_id.replace("-", " ").title(),
-                            "category": cats[0] if cats else "unknown",
-                            "request_count": 0,
-                            "verified_count": 0,
-                            "impersonator_count": 0,
-                            "unverified_count": 0,
-                            "pending_count": 0,
-                        }
-                    agg = bot_agg[bot_id]
-                    agg["request_count"] += cnt
-                    if state == "verified":
-                        agg["verified_count"] += cnt
-                    elif state == "impersonator":
-                        agg["impersonator_count"] += cnt
-                    elif state == "unverified_pending":
-                        agg["pending_count"] += cnt
+                    _t = _time.perf_counter()
+                    pattern = get_bot_regex_pattern(500)
+                    if pattern:
+                        pattern_sql = pattern.replace("'", "''")
+                        prefilter = f"WHERE ua IS NOT NULL AND ip IS NOT NULL AND regexp_matches(ua, '{pattern_sql}')"
                     else:
-                        agg["unverified_count"] += cnt
+                        prefilter = "WHERE ua IS NOT NULL AND ip IS NOT NULL"
+                    q = SQL.WELLKNOWN_BOTS_UA_IP.format(temp_table=temp_table, prefilter=prefilter)
+                    _wk_rows = runner.execute(q).fetchall()
+                    timer.mark("wellknown_bots_query", _t)
 
-            # Enqueue any pending IPs we encountered for future enrichment
-            if new_ips:
-                enqueue(list(set(new_ips)))
+                if _wk_rows is None:
+                    results["wellknown_bots"] = []
+                else:
+                    from backend.utils.bot_sources import build_matcher
+                    from backend.utils.rdns_cache import classify, enqueue, get_hostnames
 
-            # Sort by request count, return top 50, annotate coverage
-            sorted_bots = sorted(bot_agg.values(), key=lambda x: x["request_count"], reverse=True)[:50]
-            for b in sorted_bots:
-                total = b["request_count"]
-                covered = b["verified_count"] + b["impersonator_count"]
-                b["verification_coverage"] = round(covered / total, 3) if total else 0.0
+                    match_ua = build_matcher()
+                    bot_agg: dict[str, dict] = {}
+                    new_ips: list[str] = []
 
-            results["wellknown_bots"] = sorted_bots
-        except Exception as e:
-            import logging
+                    # Batch-resolve every distinct IP in one SELECT instead of
+                    # opening a fresh SQLite connection per (ua, ip) row.
+                    hostnames = get_hostnames([ip for _, ip, _ in _wk_rows if ip])
 
-            logging.getLogger(__name__).error("[security] well-known bots query failed: %s", e)
-            results["wellknown_bots"] = []
-    elif _want("wellknown_bots"):
-        results["wellknown_bots"] = []
+                    for ua_val, ip_val, cnt in _wk_rows:
+                        matches = match_ua(ua_val)
+                        for entry in matches:
+                            bot_id = entry.get("id", "unknown")
+                            hostname, status, fcrdns_verified = hostnames.get(ip_val, (None, "pending", False))
+                            if status == "pending":
+                                new_ips.append(ip_val)
+                            verification = entry.get("verification", {})
+                            verification_domains = verification.get("domains", [])
+                            verification_cidrs = verification.get("cidrs", [])
+                            state = classify(
+                                ip_val, hostname, status, fcrdns_verified, verification_domains, verification_cidrs
+                            )
+
+                            if bot_id not in bot_agg:
+                                cats = entry.get("categories", [])
+                                bot_agg[bot_id] = {
+                                    "id": bot_id,
+                                    "name": bot_id.replace("-", " ").title(),
+                                    "category": cats[0] if cats else "unknown",
+                                    "request_count": 0,
+                                    "verified_count": 0,
+                                    "impersonator_count": 0,
+                                    "unverified_count": 0,
+                                    "pending_count": 0,
+                                }
+                            agg = bot_agg[bot_id]
+                            agg["request_count"] += cnt
+                            if state == "verified":
+                                agg["verified_count"] += cnt
+                            elif state == "impersonator":
+                                agg["impersonator_count"] += cnt
+                            elif state == "unverified_pending":
+                                agg["pending_count"] += cnt
+                            else:
+                                agg["unverified_count"] += cnt
+
+                    # Enqueue any pending IPs we encountered for future enrichment
+                    if new_ips:
+                        enqueue(list(set(new_ips)))
+
+                    # Sort by request count, return top 50, annotate coverage
+                    sorted_bots = sorted(bot_agg.values(), key=lambda x: x["request_count"], reverse=True)[:50]
+                    for b in sorted_bots:
+                        total = b["request_count"]
+                        covered = b["verified_count"] + b["impersonator_count"]
+                        b["verification_coverage"] = round(covered / total, 3) if total else 0.0
+
+                    results["wellknown_bots"] = sorted_bots
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).error("[security] well-known bots query failed: %s", e)
+                results["wellknown_bots"] = []
+    finally:
+        if temp_table:
+            try:
+                runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
+            except Exception:
+                pass
+
+    # Any requested section left unset (e.g. the temp build failed) falls
+    # back to its empty default so the response stays well-formed. Only
+    # wanted sections get a key — the selector contract.
+    for name, is_list in _SECTION_DEFAULTS:
+        if _want(name) and name not in results:
+            results[name] = [] if is_list else {}
 
     results["section_timings"] = section_timings
     return results

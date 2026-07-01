@@ -5,15 +5,30 @@ import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { PopLabel } from '@/components/PopLabel'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
+import { ApproxBadge } from './ApproxBadge'
 import { cn } from '@/lib/utils';
 import { formatBytes } from '@/lib/format'
 import { Server, MapPin, Globe } from 'lucide-react'
+import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+
+// Shared column scaffolding — every column header is the same dense
+// uppercase span, and requests/p50/p95 are byte-identical across the
+// url/pop/ip variants. Factor them out so the three column sets compose
+// from one definition each (rendered output is unchanged).
+const metricHeader = (label: string) => () => (
+  <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">{label}</span>
+)
+const msCell = (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span>
+
+const requestsCol = { accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: metricHeader('Reqs'), cell: (info: any) => info.getValue().toLocaleString() }
+const p50Col = { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: metricHeader('P50'), cell: msCell }
+const p95Col = { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: metricHeader('P95'), cell: msCell }
 
 const COLUMNS = {
   url: [
     {
       accessorKey: 'url',
-      id: 'url', meta: { label: 'URL' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">URL</span>,
+      id: 'url', meta: { label: 'URL' }, header: metricHeader('URL'),
       cell: (info: any) => (
         <FilterValueCell
           filters={[{ column: 'url', value: info.getValue() }]}
@@ -22,15 +37,15 @@ const COLUMNS = {
         />
       )
     },
-    { accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Reqs</span>, cell: (info: any) => info.getValue().toLocaleString() },
-    { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P50</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-    { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P95</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-    { accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P99</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
+    requestsCol,
+    p50Col,
+    p95Col,
+    { accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: metricHeader('P99'), cell: msCell },
   ],
   pop: [
     {
       accessorKey: 'pop',
-      id: 'pop', meta: { label: 'POP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">POP</span>,
+      id: 'pop', meta: { label: 'POP' }, header: metricHeader('POP'),
       cell: (info: any) => (
         <FilterValueCell
           filters={[{ column: 'pop', value: info.getValue() }]}
@@ -39,9 +54,9 @@ const COLUMNS = {
         />
       )
     },
-    { accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Reqs</span>, cell: (info: any) => info.getValue().toLocaleString() },
-    { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P50</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-    { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P95</span>, cell: (info: any) => (
+    requestsCol,
+    p50Col,
+    { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: metricHeader('P95'), cell: (info: any) => (
       <span className={cn(info.row.original.elevated ? "text-destructive font-bold" : "")}>
         {info.getValue()?.toFixed(1)}ms
       </span>
@@ -50,7 +65,7 @@ const COLUMNS = {
   ip: [
     {
       accessorKey: 'oip',
-      id: 'oip', meta: { label: 'Origin IP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Origin IP</span>,
+      id: 'oip', meta: { label: 'Origin IP' }, header: metricHeader('Origin IP'),
       cell: (info: any) => (
         <FilterValueCell
           filters={[{ column: 'oip', value: info.getValue() }]}
@@ -58,10 +73,10 @@ const COLUMNS = {
         />
       )
     },
-    { accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Reqs</span>, cell: (info: any) => info.getValue().toLocaleString() },
-    { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P50</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-    { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P95</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-    { accessorKey: 'error_pct', id: 'error_pct', meta: { label: '5xx Errors %' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">5xx %</span>, cell: (info: any) => (
+    requestsCol,
+    p50Col,
+    p95Col,
+    { accessorKey: 'error_pct', id: 'error_pct', meta: { label: '5xx Errors %' }, header: metricHeader('5xx %'), cell: (info: any) => (
       <span className={cn(info.getValue() > 1 ? "text-destructive font-bold" : "")}>
         {info.getValue()}%
       </span>
@@ -97,6 +112,9 @@ export function LatencyHeatmap({
   setIpVisibility,
   onIpVisChange,
 }: any) {
+  // Distinguish "field group not enabled" from "enabled but no data in this
+  // window yet" so the empty tables don't falsely read as misconfigured.
+  const { isFieldActive } = useActiveLogFields()
   return (
     <>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
@@ -109,17 +127,22 @@ export function LatencyHeatmap({
           contentClassName="p-0"
           helpContent={<p>A list of specific URLs that take the longest time to fetch from the origin.</p>}
           headerAction={
-            <ColumnVisibilityDropdown
-              columns={getLabels(['url', 'requests', 'p50_ms', 'p95_ms', 'p99_ms'])}
-              visibility={urlVisibility}
-              onChange={onUrlVisChange}
-            />
+            <div className="flex items-center gap-2">
+              {slowUrls.data?._approx === true && (
+                <ApproxBadge message="P50/P95/P99 latency on this window are request-weighted averages of per-hour percentiles. Request counts are exact." />
+              )}
+              <ColumnVisibilityDropdown
+                columns={getLabels(['url', 'requests', 'p50_ms', 'p95_ms', 'p99_ms'])}
+                visibility={urlVisibility}
+                onChange={onUrlVisChange}
+              />
+            </div>
           }
         >
           <DataTable
             columns={COLUMNS.url}
             data={slowUrls.data?.rows || []}
-            emptyMessage={slowUrls.isLoading ? "" : "Requires Origin Metrics (Group L) fields to be enabled."}
+            emptyMessage={slowUrls.isLoading ? "" : (isFieldActive('ottfb') ? "No slow URLs in this time range." : "Requires Origin Metrics (Group L) fields to be enabled.")}
             hideToolbar
             columnVisibility={urlVisibility}
             onColumnVisibilityChange={setUrlVisibility}
@@ -135,17 +158,22 @@ export function LatencyHeatmap({
           contentClassName="p-0"
           helpContent={<p>Backend latency aggregated by Fastly POP location.</p>}
           headerAction={
-            <ColumnVisibilityDropdown
-              columns={getLabels(['pop', 'requests', 'p50_ms', 'p95_ms'])}
-              visibility={popVisibility}
-              onChange={onPopVisChange}
-            />
+            <div className="flex items-center gap-2">
+              {popLatency.data?._approx === true && (
+                <ApproxBadge message="P50/P95 latency on this window are request-weighted averages of per-hour percentiles. Request counts are exact." />
+              )}
+              <ColumnVisibilityDropdown
+                columns={getLabels(['pop', 'requests', 'p50_ms', 'p95_ms'])}
+                visibility={popVisibility}
+                onChange={onPopVisChange}
+              />
+            </div>
           }
         >
           <DataTable
             columns={COLUMNS.pop}
             data={popLatency.data?.rows || []}
-            emptyMessage={popLatency.isLoading ? "" : "Requires Origin Metrics (Group L) and Infrastructure (Group C) fields to be enabled."}
+            emptyMessage={popLatency.isLoading ? "" : ((isFieldActive('ottfb') && isFieldActive('pop')) ? "No POP latency data in this time range." : "Requires Origin Metrics (Group L) and Infrastructure (Group C) fields to be enabled.")}
             hideToolbar
             columnVisibility={popVisibility}
             onColumnVisibilityChange={setPopVisibility}
@@ -163,17 +191,22 @@ export function LatencyHeatmap({
           contentClassName="p-0"
           helpContent={<p>Latency and error rates for individual backend IP addresses.</p>}
           headerAction={
-            <ColumnVisibilityDropdown
-              columns={getLabels(['oip', 'requests', 'p50_ms', 'p95_ms', 'error_pct'])}
-              visibility={ipVisibility}
-              onChange={onIpVisChange}
-            />
+            <div className="flex items-center gap-2">
+              {ipHealth.data?._approx === true && (
+                <ApproxBadge message="P50/P95 latency on this window are request-weighted averages of per-hour percentiles. Request counts and the 5xx error rate are exact." />
+              )}
+              <ColumnVisibilityDropdown
+                columns={getLabels(['oip', 'requests', 'p50_ms', 'p95_ms', 'error_pct'])}
+                visibility={ipVisibility}
+                onChange={onIpVisChange}
+              />
+            </div>
           }
         >
           <DataTable
             columns={COLUMNS.ip}
             data={ipHealth.data?.rows || []}
-            emptyMessage={ipHealth.isLoading ? "" : "Requires Origin Metrics (Group L) fields to be enabled."}
+            emptyMessage={ipHealth.isLoading ? "" : (isFieldActive('oip') ? "No origin IP data in this time range." : "Requires Origin Metrics (Group L) fields to be enabled.")}
             hideToolbar
             columnVisibility={ipVisibility}
             onColumnVisibilityChange={setIpVisibility}

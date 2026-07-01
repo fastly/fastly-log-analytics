@@ -79,6 +79,18 @@ vi.mock('@/stores/debugStore', () => {
   return { useDebugStore }
 })
 
+// sessionRoleStore: the response interceptor's /share-login redirect reads
+// isRemoteAnalyst to decide whether the dead-session bounce applies (analyst)
+// or must be skipped (admin). Mutable so each test sets the role.
+const sessionRoleState = { isRemoteAnalyst: false }
+vi.mock('@/stores/sessionRoleStore', () => {
+  const useSessionRoleStore: any = vi.fn((selector?: (s: any) => any) =>
+    selector ? selector(sessionRoleState) : sessionRoleState,
+  )
+  useSessionRoleStore.getState = () => sessionRoleState
+  return { useSessionRoleStore }
+})
+
 // Import AFTER mocks so client middleware picks them up.
 import { client } from '@/lib/api'
 import { useAdminTokenStore } from '@/stores/adminTokenStore'
@@ -91,6 +103,7 @@ function wrapper() {
 beforeEach(() => {
   adminState.token = null
   adminState.setToken.mockClear()
+  sessionRoleState.isRemoteAnalyst = false
 })
 
 describe('X-Admin-Token request injection', () => {
@@ -246,5 +259,76 @@ describe('admin_token_invalid 401 response handling', () => {
     await waitFor(() => expect(result.current.isError).toBe(true))
     // setToken was NOT called — the admin-token-clear branch didn't fire.
     expect(useAdminTokenStore.getState().setToken).not.toHaveBeenCalled()
+  })
+})
+
+describe('non-admin-token 401 → /share-login redirect is analyst-only', () => {
+  // The dead-session bounce must fire for a remote analyst but NEVER for an
+  // admin — an admin-only 401 (e.g. a provision call missing its Fastly
+  // token, post-deploy) was bouncing the operator to the analyst sign-in.
+  // jsdom's window.location is configurable, so swap in a replace() spy.
+  let originalLocation: Location
+
+  beforeEach(() => {
+    originalLocation = window.location
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { pathname: '/admin', search: '?service=svc-test', replace: vi.fn() },
+    })
+  })
+
+  afterEach(() => {
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: originalLocation,
+    })
+  })
+
+  function fire401(detailError: string) {
+    server.use(
+      http.post(`${API_BASE}/api/dashboard/aggregates`, () =>
+        HttpResponse.json({ detail: { error: detailError } }, { status: 401 }),
+      ),
+    )
+    return renderHook(
+      () =>
+        useMutation({
+          mutationFn: async () => {
+            const { data } = await client.POST('/api/dashboard/aggregates' as any, {
+              body: { start_time: 't', end_time: 't', filters: [] } as any,
+            } as any)
+            return data
+          },
+        }),
+      { wrapper: wrapper() },
+    )
+  }
+
+  it('redirects a remote analyst to /share-login on a session-dead 401', async () => {
+    sessionRoleState.isRemoteAnalyst = true
+    const { result } = fire401('unauthenticated')
+    result.current.mutate()
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(window.location.replace).toHaveBeenCalledWith(
+      expect.stringContaining('/share-login?return='),
+    )
+  })
+
+  it('does NOT redirect an admin (isRemoteAnalyst=false) on the same 401', async () => {
+    sessionRoleState.isRemoteAnalyst = false
+    const { result } = fire401('unauthenticated')
+    result.current.mutate()
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(window.location.replace).not.toHaveBeenCalled()
+  })
+
+  it('does NOT redirect an admin on a provision token_required 401', async () => {
+    // The concrete bug: the wizard's post-deploy ngwaf-workspace PATCH
+    // returned token_required, which bounced the admin to /share-login.
+    sessionRoleState.isRemoteAnalyst = false
+    const { result } = fire401('token_required')
+    result.current.mutate()
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(window.location.replace).not.toHaveBeenCalled()
   })
 })

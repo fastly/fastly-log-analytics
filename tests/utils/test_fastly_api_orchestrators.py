@@ -570,6 +570,54 @@ def test_update_logging_endpoint_raises_when_no_active_version():
     assert "no active version" in str(exc).lower()
 
 
+def test_update_logging_endpoint_refreshes_rate_limiting_flag():
+    """A logging-settings update re-probes the account entitlement and persists
+    the refreshed flag (so a later Update-CDN deploys correctly), emitting an
+    informational status event. It does NOT redeploy the CDN itself."""
+    saved = []
+    service_cfg = {"provisioning": {"rate_limiting": True}, "log_fields": {"groups": ["A"]}}
+    with (
+        patch("backend.config.load_config", return_value=service_cfg),
+        patch("backend.config.save_config", side_effect=lambda sid, c: saved.append((sid, c))),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=False),
+        # Short-circuit the rest of the generator right after the probe block.
+        patch("backend.provision.fastly_api.get_active_version", return_value=None),
+    ):
+        gen = fastly_api.update_logging_endpoint(
+            {"logging_service_id": "svc", "endpoint_name": "ep", "log_period": 60},
+            "tok",
+        )
+        events, exc = _drain(gen)
+
+    # Flag refreshed + persisted under provisioning.rate_limiting.
+    assert saved and saved[0][0] == "svc"
+    assert saved[0][1]["provisioning"]["rate_limiting"] is False
+    # An informational status event was surfaced...
+    assert any(e.get("type") == "status" and "rate limiting" in e.get("message", "").lower() for e in events)
+    # ...and the rest of the update still ran (and raised on no active version).
+    assert isinstance(exc, RuntimeError)
+
+
+def test_update_logging_endpoint_skips_flag_refresh_when_no_service_cfg():
+    """No on-disk service config (load_config → None) → the probe block is
+    skipped entirely (no save_config, no probe call)."""
+    with (
+        patch("backend.config.load_config", return_value=None),
+        patch("backend.config.save_config", side_effect=AssertionError("must not save")),
+        patch(
+            "backend.provision.fastly_api.account_has_rate_limiting",
+            side_effect=AssertionError("must not probe"),
+        ),
+        patch("backend.provision.fastly_api.get_active_version", return_value=None),
+    ):
+        gen = fastly_api.update_logging_endpoint(
+            {"logging_service_id": "svc", "endpoint_name": "ep", "log_period": 60},
+            "tok",
+        )
+        _events, exc = _drain(gen)
+    assert isinstance(exc, RuntimeError)  # still raises on no active version
+
+
 # ── ensure_cdn_service: happy-path orchestration ──────────────────────────
 
 
@@ -591,6 +639,7 @@ def test_ensure_cdn_service_emits_status_callbacks_for_each_step():
 
     with (
         patch("backend.provision.fastly_api.find_service_by_name", return_value=None),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
         patch("backend.provision.fastly_api.load_vcl", return_value="vcl content"),
         patch("backend.provision.fastly_api.ensure_vcl_snippet"),
         patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
@@ -610,7 +659,9 @@ def test_ensure_cdn_service_emits_status_callbacks_for_each_step():
             status_cb=statuses.append,
         )
 
-    assert result == {"id": "new-svc-id", "name": "MyCDN"}
+    # rate_limiting is None here: the probe hits the fake fastly() which returns
+    # {} for the logging service's /version, so detection is inconclusive.
+    assert result == {"id": "new-svc-id", "name": "MyCDN", "rate_limiting": None}
     # Each of these phases must emit a status update
     joined = " ".join(statuses)
     assert "Creating CDN service" in joined
@@ -851,6 +902,208 @@ def test_ensure_cdn_service_raises_on_non_ratelimit_validation_failure():
                 "SK",
                 "tok",
             )
+
+
+# ── account_has_rate_limiting: proactive account-entitlement probe ───────
+
+
+def _vcl_with(pragma_line: str) -> str:
+    return f"sub vcl_recv {{\n  {pragma_line}\n}}\n"
+
+
+def test_account_has_rate_limiting_true_when_pragma_present():
+    """The account-level ``ratelimit_opt_in true`` pragma in the generated VCL
+    means edge rate limiting is entitled → True."""
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=7),
+        patch(
+            "backend.provision.fastly_api.get_generated_vcl",
+            return_value=_vcl_with("pragma optional_param ratelimit_opt_in true;"),
+        ),
+    ):
+        assert fastly_api.account_has_rate_limiting("tok", "svc-1") is True
+
+
+def test_account_has_rate_limiting_false_when_pragma_false():
+    """``ratelimit_opt_in false`` must read as NOT entitled — the check matches
+    the literal ``true`` value, not a loose ``ratelimit_opt_in`` substring."""
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=7),
+        patch(
+            "backend.provision.fastly_api.get_generated_vcl",
+            return_value=_vcl_with("pragma optional_param ratelimit_opt_in false;"),
+        ),
+    ):
+        assert fastly_api.account_has_rate_limiting("tok", "svc-1") is False
+
+
+def test_account_has_rate_limiting_false_when_pragma_absent():
+    """Generated VCL read but no pragma at all → False (definitive)."""
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=7),
+        patch("backend.provision.fastly_api.get_generated_vcl", return_value="sub vcl_recv {}\n"),
+    ):
+        assert fastly_api.account_has_rate_limiting("tok", "svc-1") is False
+
+
+def test_account_has_rate_limiting_none_when_no_active_version():
+    """No active version (Compute service mid-deploy / never activated) →
+    inconclusive None, not False — so we don't wrongly strip rate limiting."""
+    with patch("backend.provision.fastly_api.get_active_version", return_value=None):
+        assert fastly_api.account_has_rate_limiting("tok", "svc-1") is None
+
+
+def test_account_has_rate_limiting_none_when_no_generated_vcl():
+    """A wasm/Compute service has an active version but no generated VCL
+    (get_generated_vcl → None) → inconclusive None."""
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=25),
+        patch("backend.provision.fastly_api.get_generated_vcl", return_value=None),
+    ):
+        assert fastly_api.account_has_rate_limiting("tok", "wasm-svc") is None
+
+
+def test_account_has_rate_limiting_skips_falsy_ids_and_returns_none_with_no_ids():
+    """Empty/None ids are skipped; with nothing conclusive → None."""
+    with patch("backend.provision.fastly_api.get_active_version") as m_ver:
+        assert fastly_api.account_has_rate_limiting("tok") is None
+        assert fastly_api.account_has_rate_limiting("tok", "", None) is None
+        m_ver.assert_not_called()
+
+
+def test_account_has_rate_limiting_falls_through_to_next_vcl_sibling():
+    """First id is a wasm service (no generated VCL); detection falls through to
+    the second id, which has the pragma → True. This is why callers pass the CDN
+    service AND the logging service."""
+    gens = {"wasm-svc": None, "vcl-svc": _vcl_with("pragma optional_param ratelimit_opt_in true;")}
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=3),
+        patch("backend.provision.fastly_api.get_generated_vcl", side_effect=lambda sid, ver, tok: gens[sid]),
+    ):
+        assert fastly_api.account_has_rate_limiting("tok", "wasm-svc", "vcl-svc") is True
+
+
+def test_account_has_rate_limiting_first_conclusive_wins():
+    """The first id that yields parseable generated VCL decides — a definitive
+    False short-circuits before probing later ids."""
+    seen = []
+
+    def fake_gen(sid, ver, tok):
+        seen.append(sid)
+        return "sub vcl_recv {}\n"  # no pragma → False, conclusive
+
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=3),
+        patch("backend.provision.fastly_api.get_generated_vcl", side_effect=fake_gen),
+    ):
+        assert fastly_api.account_has_rate_limiting("tok", "first", "second") is False
+    assert seen == ["first"]
+
+
+def test_account_has_rate_limiting_swallows_unexpected_probe_errors():
+    """Detection is best-effort: an unexpected (non-RuntimeError) exception on a
+    probe drops to the next id rather than breaking a deploy."""
+    with (
+        patch("backend.provision.fastly_api.get_active_version", side_effect=ValueError("boom")),
+    ):
+        assert fastly_api.account_has_rate_limiting("tok", "svc-1") is None
+
+
+# ── ensure_cdn_service: proactive rate-limit detection drives the upload ──
+
+
+def _cdn_cfg() -> dict:
+    return {
+        "cdn_service_name": "X",
+        "cdn_url": "https://x.example",
+        "fos_region": "us-east-1",
+        "fos_bucket_name": "b",
+        "cdn_secret": "s",
+        "logging_service_id": "log-svc",
+    }
+
+
+def _cdn_fake_fastly_factory(uploads):
+    def fake_fastly(method, path, body=None, **kwargs):
+        if path == "/service":
+            return {"id": "s"}
+        if path.endswith("/vcl") and method == "POST":
+            uploads.append(("POST", body))
+            return {}
+        if path.endswith("/vcl/main") and method == "PUT":
+            uploads.append(("PUT", body))
+            return {}
+        if "dictionary" in path and "/item" in path and method == "POST":
+            return {}
+        if "dictionary" in path and method == "POST":
+            return {"id": "d"}
+        if "/validate" in path:
+            return {"status": "ok"}
+        return {}
+
+    return fake_fastly
+
+
+def test_ensure_cdn_service_deploys_without_ratelimit_when_account_lacks_it():
+    """Proactive detection False → upload the no-rate-limit VCL on the FIRST try
+    (no reactive validate round-trip) and report rate_limiting=False so the
+    orchestrator can persist it."""
+    uploads = []
+    with (
+        patch("backend.provision.fastly_api.find_service_by_name", return_value=None),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=False),
+        patch(
+            "backend.provision.fastly_api.load_vcl",
+            side_effect=lambda rate_limiting=True: f"vcl_rl={rate_limiting}",
+        ),
+        patch("backend.provision.fastly_api.ensure_vcl_snippet"),
+        patch("backend.provision.fastly_api.fastly", side_effect=_cdn_fake_fastly_factory(uploads)),
+    ):
+        result = fastly_api.ensure_cdn_service(_cdn_cfg(), "AK", "SK", "tok")
+
+    assert result["rate_limiting"] is False
+    # Single POST upload, no rate limiting, and NO fallback PUT round-trip.
+    assert uploads == [("POST", {"name": "main", "content": "vcl_rl=False", "main": True})]
+
+
+def test_ensure_cdn_service_deploys_with_ratelimit_when_account_has_it():
+    """Proactive detection True → upload the rate-limit VCL; report True."""
+    uploads = []
+    with (
+        patch("backend.provision.fastly_api.find_service_by_name", return_value=None),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=True),
+        patch(
+            "backend.provision.fastly_api.load_vcl",
+            side_effect=lambda rate_limiting=True: f"vcl_rl={rate_limiting}",
+        ),
+        patch("backend.provision.fastly_api.ensure_vcl_snippet"),
+        patch("backend.provision.fastly_api.fastly", side_effect=_cdn_fake_fastly_factory(uploads)),
+    ):
+        result = fastly_api.ensure_cdn_service(_cdn_cfg(), "AK", "SK", "tok")
+
+    assert result["rate_limiting"] is True
+    assert uploads == [("POST", {"name": "main", "content": "vcl_rl=True", "main": True})]
+
+
+def test_ensure_cdn_service_defaults_to_ratelimit_when_detection_inconclusive():
+    """Detection None (unknown) → optimistically upload WITH rate limiting and
+    report None so the orchestrator leaves the default-True read path intact;
+    the reactive validate fallback remains the backstop."""
+    uploads = []
+    with (
+        patch("backend.provision.fastly_api.find_service_by_name", return_value=None),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
+        patch(
+            "backend.provision.fastly_api.load_vcl",
+            side_effect=lambda rate_limiting=True: f"vcl_rl={rate_limiting}",
+        ),
+        patch("backend.provision.fastly_api.ensure_vcl_snippet"),
+        patch("backend.provision.fastly_api.fastly", side_effect=_cdn_fake_fastly_factory(uploads)),
+    ):
+        result = fastly_api.ensure_cdn_service(_cdn_cfg(), "AK", "SK", "tok")
+
+    assert result["rate_limiting"] is None
+    assert uploads == [("POST", {"name": "main", "content": "vcl_rl=True", "main": True})]
 
 
 # ── ensure_logging_endpoint: clone+VCL+activate orchestration ────────────
@@ -1199,7 +1452,6 @@ def test_ensure_logging_endpoint_tolerates_none_custom_condition(custom_conditio
         patch("backend.provision.fastly_api.ensure_condition", side_effect=fake_ensure_condition),
         patch("backend.provision.fastly_api.load_log_format", return_value="fmt"),
         patch("backend.provision.fastly_api.install_capture_snippets"),
-        patch("backend.provision.fastly_api.resolve_shield_secret", return_value="secret"),
         patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
     ):
         new_ver = fastly_api.ensure_logging_endpoint(cfg, "ak", "sk", "tok")
@@ -1241,6 +1493,7 @@ def test_ensure_cdn_service_reports_created_id_before_later_failure():
         patch("backend.provision.fastly_api.find_service_by_name", return_value=None),
         patch("backend.provision.fastly_api.load_vcl", return_value="vcl"),
         patch("backend.provision.fastly_api.ensure_vcl_snippet"),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
         patch(
             "backend.provision.fastly_api._validate_with_ratelimit_fallback",
             return_value={"status": "error", "msg": "boom"},
@@ -1301,7 +1554,6 @@ def test_ensure_logging_endpoint_drops_restart_gate_when_scoring_enabled():
         patch("backend.provision.fastly_api.ensure_condition", side_effect=fake_ensure_condition),
         patch("backend.provision.fastly_api.load_log_format", return_value="fmt"),
         patch("backend.provision.fastly_api.install_capture_snippets"),
-        patch("backend.provision.fastly_api.resolve_shield_secret", return_value="s"),
         patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
     ):
         fastly_api.ensure_logging_endpoint(cfg, "ak", "sk", "tok")
@@ -1325,20 +1577,20 @@ def test_generate_capture_vcl_splits_scrub_and_capture_guards_when_scoring_enabl
         ],
     }
 
-    recv = generate_capture_vcl(cfg, cluster_secret="SEKRET", scoring_enabled=True)["recv"]
+    recv = generate_capture_vcl(cfg, scoring_enabled=True)["recv"]
     lines = recv.splitlines()
     cap_idx = next(i for i, ln in enumerate(lines) if "Capture edge data for logging" in ln)
     capture_guard_line = lines[cap_idx - 1].strip()
-    # capture is restart-tolerant (shield-auth alone)
-    assert capture_guard_line == 'if (req.http.X-Edge-Shield-Auth != "SEKRET") {', capture_guard_line
+    # capture is restart-tolerant (the unforgeable edge check alone, no restarts==0)
+    assert capture_guard_line == "if (fastly.ff.visits_this_service == 0) {", capture_guard_line
     # scrub stays first-pass-only
-    assert any('if (req.restarts == 0 && req.http.X-Edge-Shield-Auth != "SEKRET") {' in ln for ln in lines)
+    assert any("if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {" in ln for ln in lines)
 
     # Without scoring: capture keeps the req.restarts==0 gate (unchanged).
-    recv2 = generate_capture_vcl(cfg, cluster_secret="SEKRET", scoring_enabled=False)["recv"]
+    recv2 = generate_capture_vcl(cfg, scoring_enabled=False)["recv"]
     lines2 = recv2.splitlines()
     cap_idx2 = next(i for i, ln in enumerate(lines2) if "Capture edge data for logging" in ln)
-    assert lines2[cap_idx2 - 1].strip() == 'if (req.restarts == 0 && req.http.X-Edge-Shield-Auth != "SEKRET") {'
+    assert lines2[cap_idx2 - 1].strip() == "if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {"
 
 
 def test_load_log_format_keeps_standard_fields_when_only_custom_fields_present():

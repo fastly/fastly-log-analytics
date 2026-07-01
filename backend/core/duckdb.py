@@ -316,7 +316,7 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
         con.execute("SET http_keep_alive = false;")
 
 
-_fos_client_cache: dict[str, Any] = {}
+_fos_client_cache: dict[tuple[str, str], Any] = {}
 _fos_client_lock = threading.Lock()
 
 
@@ -383,7 +383,13 @@ def _get_fos_client(source: dict):
     logs every request, so callers must not wrap this client with anything
     that records its own usage rows.
     """
-    source_key = source.get("name", "default")
+    # Key on (name, access_key_id) so a credential rotation — teardown then
+    # re-provision of the same service mints a NEW FOS key — naturally MISSES
+    # the cache and rebuilds with the fresh creds, instead of serving the
+    # deleted key and 401ing every GET/HEAD. ``clear_fos_client`` handles
+    # explicit invalidation on the provision seams; this keying is the
+    # defense-in-depth that auto-heals any rotation a caller forgets to clear.
+    source_key = (source.get("name", "default"), source.get("access_key_id", ""))
     with _fos_client_lock:
         if source_key in _fos_client_cache:
             return _fos_client_cache[source_key]
@@ -413,6 +419,23 @@ def _get_fos_client(source: dict):
         client = _ProxyClientShim(raw_client)
         _fos_client_cache[source_key] = client
         return client
+
+
+def clear_fos_client(source_or_name) -> None:
+    """Drop cached boto3 FOS client(s) for a service so the next call rebuilds
+    with freshly-resolved credentials.
+
+    Call on any credential change (re-provision / analyst re-ingest / teardown).
+    The cache is keyed on ``(name, access_key_id)``; this clears EVERY entry for
+    the service name regardless of key, so a stale entry left by a rotated key
+    can't linger. Accepts a source dict or a bare service name. Idempotent —
+    a no-op when nothing is cached.
+    """
+    name = source_or_name.get("name", "default") if isinstance(source_or_name, dict) else source_or_name
+    with _fos_client_lock:
+        stale = [k for k in _fos_client_cache if (k[0] if isinstance(k, tuple) else k) == name]
+        for k in stale:
+            _fos_client_cache.pop(k, None)
 
 
 def fos_reachable(source: dict) -> dict:

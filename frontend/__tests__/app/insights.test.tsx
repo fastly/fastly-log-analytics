@@ -1,6 +1,9 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import { expect, test, vi, beforeEach } from 'vitest'
-import InsightsPage from '@/app/insights/page'
+// app/insights/page.tsx is now an async RSC shell that SSR-prefetches and
+// dehydrates into <InsightsClient />; RTL can't render an async component, so
+// the unit tests target the client component that owns the title + fetch logic.
+import InsightsClient from '@/app/insights/_sections/InsightsClient'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -54,7 +57,7 @@ test('renders insights page and displays insight cards', async () => {
 
   render(
     <QueryClientProvider client={queryClient}>
-      <InsightsPage />
+      <InsightsClient />
     </QueryClientProvider>
   )
 
@@ -65,4 +68,41 @@ test('renders insights page and displays insight cards', async () => {
     expect(screen.getByTestId('insight-card')).toBeInTheDocument()
     expect(screen.getByText('Global Latency Spike')).toBeInTheDocument()
   })
+})
+
+test('adapts the default window/baseline to a service with ~2h of history', async () => {
+  // /api/log-extents drives the adaptive default; everything else returns empty.
+  vi.mocked(client.GET).mockImplementation(((url: string) =>
+    url === '/api/log-extents'
+      ? Promise.resolve({
+          data: {
+            earliest_log_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+            latest_log_at: new Date().toISOString(),
+          },
+        })
+      : Promise.resolve({ data: { unavailable: [] } })) as any)
+  vi.mocked(client.POST).mockResolvedValue({
+    data: { insights: [], computed_at: new Date().toISOString() },
+  } as any)
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <InsightsClient />
+    </QueryClientProvider>
+  )
+
+  // ~2h history → window 1h / baseline 1h reaches the /api/insights request
+  // (instead of the static 7-day baseline that would just say "not enough data").
+  await waitFor(
+    () => {
+      const sawAdaptive = vi
+        .mocked(client.POST)
+        .mock.calls.some(
+          ([, opts]: any) =>
+            opts?.body?.window_size_hrs === 1 && opts?.body?.baseline_hours === 1
+        )
+      expect(sawAdaptive).toBe(true)
+    },
+    { timeout: 3000 }
+  )
 })

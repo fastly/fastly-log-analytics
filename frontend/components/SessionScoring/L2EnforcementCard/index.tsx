@@ -104,7 +104,12 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
     // failure, just a precondition. Map it to friendly copy; surface anything
     // else as a real error.
     const raw = String(error?.message || 'Unknown error')
-    const friendly = /status 400/.test(raw)
+    // A 400 here means scoring isn't enabled yet / the config store isn't
+    // resolvable. The openapi client may surface either "status 400" or the raw
+    // backend detail ("Scoring not enabled or config store missing"), so match
+    // both rather than leaking the raw string. A freshly-enabled service that
+    // still shows this is just a pre-enable fetch the StatusPanel re-invalidates.
+    const friendly = /status 400|config store missing|scoring not enabled/i.test(raw)
       ? 'Enable session scoring for this service to manage L2 enforcement.'
       : raw
     return (

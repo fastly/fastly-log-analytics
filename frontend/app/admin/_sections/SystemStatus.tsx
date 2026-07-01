@@ -81,7 +81,7 @@ export function SystemJobsStrip() {
   // then swap to data after mount — same pattern as SystemHealthCard.
   const mounted = useMounted()
 
-  // Freshness via useSystemMetricsStream. Safety-net poll only.
+  // Freshness via useAdminEventStream. Safety-net poll only.
   const { data: systemJobsData } = useQuery({
     queryKey: ['system-jobs'],
     queryFn: async ({ signal }) => {

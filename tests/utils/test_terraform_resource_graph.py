@@ -76,6 +76,17 @@ def _write_files(out: dict[str, str], dest: Path) -> None:
         full.write_text(content)
 
 
+# `terraform init` + `terraform test` (plan mode) is ~46s solo; under `make
+# ci`'s `-n auto` it also serializes behind the sibling `terraform validate`
+# test on the shared `tf_provider_cache.lock`, so the lock-wait eats into the
+# default 60s pytest-timeout. The thread-method timeout `os._exit()`s the xdist
+# worker — failing this test *and* discarding the worker's coverage data. Give
+# it generous headroom (the suite-wide 10-min CI timeout is the real backstop).
+# Heavyweight real-terraform subprocess: run in the dedicated serial (`-n 0`,
+# un-niced) test-ci step, excluded from the niced `-n auto` pool where its
+# xdist worker hard-crashed (see Makefile/ci.yml split).
+@pytest.mark.terraform_cli
+@pytest.mark.timeout(300)
 @pytest.mark.skipif(
     not (TERRAFORM_INSTALLED and RUN_VALIDATE),
     reason="set TERRAFORM_VALIDATE=1 + install terraform to run resource-graph assertions",

@@ -412,18 +412,40 @@ def test_update_recv_exclusion_regex_requires_scoring_enabled():
             sso.update_recv_exclusion_regex(LOG_SVC, TOKEN, new_regex="^/healthz$")
 
 
-def test_update_recv_exclusion_regex_requires_request_secret():
-    """Re-publishing the recv snippet without the request_secret would
-    emit invalid VCL (the snippet bakes the secret into its header
-    check). Fail loudly here instead of letting Fastly's validate trip
-    on a confusing error."""
+def test_update_recv_exclusion_regex_works_without_request_secret():
+    """The recv snippet no longer embeds request_secret — edge detection is
+    the unforgeable ``fastly.ff.visits_this_service == 0`` check — so
+    re-publishing the exclusion regex succeeds even when scoring.request_secret
+    is absent (it is only needed for the X-Edge-Scorer-Auth in pass_snippet)."""
     cfg = {
         "service_id": LOG_SVC,
         "scoring": {"enabled": True},  # no request_secret
     }
-    with patch.object(sso.svcconfig, "load_config", return_value=cfg):
-        with pytest.raises(RuntimeError, match="request_secret"):
-            sso.update_recv_exclusion_regex(LOG_SVC, TOKEN, new_regex="^/healthz$")
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if (method, path) == ("GET", f"/service/{LOG_SVC}/version"):
+            return [{"number": 300, "active": True}]
+        if (method, path) == ("PUT", f"/service/{LOG_SVC}/version/300/clone"):
+            return {"number": 301}
+        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/301/snippet"):
+            return []
+        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/301/validate"):
+            return {"status": "ok"}
+        return {}
+
+    fastly_mock = MagicMock(side_effect=side_effect)
+    with (
+        patch.object(sso.svcconfig, "load_config", return_value=cfg),
+        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso, "fastly", fastly_mock),
+        patch("backend.core.fastly.service.fastly", fastly_mock),
+    ):
+        result = sso.update_recv_exclusion_regex(LOG_SVC, TOKEN, new_regex="^/healthz$")
+
+    assert result["logging_service_active_version"] == 301
+    assert ("PUT", f"/service/{LOG_SVC}/version/301/activate") in [
+        (c.args[0], c.args[1]) for c in fastly_mock.call_args_list
+    ]
 
 
 def test_update_recv_exclusion_regex_happy_path_persists_and_activates():
@@ -563,21 +585,40 @@ def test_update_enforce_status_code_requires_scoring_enabled():
             sso.update_enforce_status_code(LOG_SVC, TOKEN, new_status_code=418)
 
 
-def test_update_enforce_status_code_requires_request_secret():
-    """The enforce snippet bakes the request_secret into its shield-auth
-    boundary check — re-publishing without it would emit invalid VCL.
-    Pinned because the previous version of this function only required
-    the secret for the recv path."""
+def test_update_enforce_status_code_works_without_request_secret():
+    """The enforce snippet no longer embeds request_secret — edge detection is
+    the unforgeable ``fastly.ff.visits_this_service == 0`` check — so updating
+    the enforce status code succeeds even when scoring.request_secret is absent."""
     cfg = {
         "service_id": LOG_SVC,
         "scoring": {"enabled": True},  # no request_secret
     }
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if (method, path) == ("GET", f"/service/{LOG_SVC}/version"):
+            return [{"number": 400, "active": True}]
+        if (method, path) == ("PUT", f"/service/{LOG_SVC}/version/400/clone"):
+            return {"number": 401}
+        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/401/snippet"):
+            return []
+        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/401/validate"):
+            return {"status": "ok"}
+        return {}
+
+    fastly_mock = MagicMock(side_effect=side_effect)
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
         patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso, "fastly", fastly_mock),
+        patch("backend.core.fastly.service.fastly", fastly_mock),
     ):
-        with pytest.raises(RuntimeError, match="request_secret"):
-            sso.update_enforce_status_code(LOG_SVC, TOKEN, new_status_code=418)
+        result = sso.update_enforce_status_code(LOG_SVC, TOKEN, new_status_code=418)
+
+    assert result["effective_status_code"] == 418
+    assert result["logging_service_active_version"] == 401
+    assert ("PUT", f"/service/{LOG_SVC}/version/401/activate") in [
+        (c.args[0], c.args[1]) for c in fastly_mock.call_args_list
+    ]
 
 
 def test_update_enforce_status_code_happy_path():

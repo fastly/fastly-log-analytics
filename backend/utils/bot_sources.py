@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import logging
 import re
@@ -53,26 +54,52 @@ def _cache_mtime() -> float:
     return ts
 
 
+# Content-hash version cache, revalidated against the source files' mtime.
+# The mtime stat is cheap (hot path); the SHA is recomputed only when a file
+# is rewritten (a refresh) and re-hashes IDENTICAL content to the SAME value.
+_version_cache: dict = {"mtime": None, "version": None}
+_version_cache_lock = threading.Lock()
+
+
 def get_pattern_set_version() -> str:
-    """Return a stable version string for the currently-loaded bot pattern
-    set. Bumps whenever any source JSON file is refreshed via
-    :func:`fetch_and_cache_source`.
+    """Return a version string keyed to the bot pattern set CONTENT.
 
-    Used by the wellknown_bots rollup (backend/core/rollups.py) to stamp
-    each materialised row so the reader can detect a pattern-set update
-    and fall back to the live regex scan for hours that were rolled up
-    under the previous set.
+    A SHA of the source JSON bytes — NOT the file mtime. The wellknown_bots
+    rollup reader requires a single version across the request window; an
+    mtime-based version bumped on every (typically no-op) daily re-fetch made
+    every multi-day window mixed-version → the rollup never served and the
+    request path stayed on the live regex + its all-rows temp. Hashing the
+    content keeps the version stable across identical re-fetches while still
+    changing when the patterns ACTUALLY change (so a real pattern update still
+    invalidates stale rollups → reader falls back to live for those hours).
 
-    Empty string means no source files exist yet — the rollup writer
-    should skip in that case.
+    Used by the wellknown_bots rollup to stamp each materialised row.
+    Empty string means no source files exist yet (writer should skip).
+
+    Cached against the latest source mtime so the hot path is a stat, not a
+    multi-MB re-hash; identical content re-hashes to the same value on refresh.
     """
     ts = _cache_mtime()
     if ts == 0.0:
         return ""
-    # Truncate to whole seconds — the float precision is more than
-    # enough granularity to detect a refresh and avoids spurious version
-    # mismatches from filesystem mtime jitter at sub-second resolution.
-    return f"v{int(ts)}"
+    if _version_cache.get("mtime") == ts and _version_cache.get("version"):
+        return _version_cache["version"]
+    with _version_cache_lock:
+        if _version_cache.get("mtime") == ts and _version_cache.get("version"):
+            return _version_cache["version"]
+        h = hashlib.sha256()
+        for src in sorted(BOT_SOURCES, key=lambda s: s["id"]):
+            p = _cache_path(src["id"])
+            try:
+                h.update(src["id"].encode())
+                h.update(b"\0")
+                h.update(p.read_bytes())
+            except OSError:
+                continue
+        version = f"v{h.hexdigest()[:16]}"
+        _version_cache["mtime"] = ts
+        _version_cache["version"] = version
+        return version
 
 
 # ── Source I/O ────────────────────────────────────────────────────────────────

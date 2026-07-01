@@ -30,7 +30,15 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   fullyParallel: false,
   forbidOnly: isCI,
-  retries: isCI ? 1 : 0,
+  // Retry once locally too (not just CI). The e2e suite has rare, genuine
+  // flakes — e.g. a transient Turbopack-dev module-load hiccup on firefox that
+  // surfaces as a one-off hydration error on an already-SSR-hardened route.
+  // CI (retries:1) absorbs those and stays green; local `make ci` previously
+  // ran retries:0, so a single flake reddened the whole run even though the
+  // code was fine — breaking the "green `make ci` == green CI" parity goal.
+  // Matching CI here restores that parity. Retries only mask flakes, never a
+  // deterministic failure (which fails both attempts).
+  retries: 1,
   workers: 1,
   reporter: isCI ? [['list'], ['html', { open: 'never' }]] : 'list',
   use: {

@@ -40,7 +40,7 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Average bytes per log line' tooltip="The average uncompressed bytes per request based on your selected fields. Used to calculate storage sizes.">
           <NumInput value={s.bytesPerLine} onChange={set('bytesPerLine')} min={1} />
         </Row>
-        <Row label='Parquet target size (MB)' tooltip="Target file size for compacted Parquet files. Larger files optimize query performance.">
+        <Row label='Parquet target size (MB)' tooltip="Target file size for the nightly FOS Iceberg optimize. Larger targets mean fewer rewritten objects and lower FOS storage cost.">
           <NumInput value={s.parquetMB} onChange={set('parquetMB')} min={1} />
         </Row>              <Row label='Log nodes / fan-out' tooltip="Estimated number of Fastly aggregators/cache nodes flushing per period. Higher traffic = more nodes.">
           <NumInput value={s.logNodes} onChange={set('logNodes')} min={1} max={72} />

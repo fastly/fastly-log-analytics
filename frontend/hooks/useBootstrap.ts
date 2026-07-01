@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { useAdminTokenStore } from '@/stores/adminTokenStore'
+import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { usePopGeoStore } from '@/stores/popGeoStore'
 import type { PopGeo } from '@/lib/pop'
@@ -22,6 +23,12 @@ export function useBootstrap() {
       const nextToken = typeof adminToken === 'string' && adminToken ? adminToken : null
       const prevToken = useAdminTokenStore.getState().token
       useAdminTokenStore.getState().setToken(nextToken)
+      // Mirror the caller's role so lib/api.ts's 401 handler can tell an
+      // admin (must NOT be bounced to the analyst /share-login) from a remote
+      // analyst whose session died (should be). See sessionRoleStore.
+      useSessionRoleStore.getState().setIsRemoteAnalyst(
+        data?.settings?.is_remote_analyst === true,
+      )
       // Restart-warmup recovery. When the SSR bootstrap fetch failed (backend
       // still booting → the helper returns null), no token is seeded at render
       // time, so the admin cards/tables fire their first queries with no
@@ -75,12 +82,11 @@ export function useBootstrap() {
         if (Array.isArray(seededSchemaList) && seededSchemaList.length > 0 && typeof seededTableName === 'string') {
           queryClient.setQueryData(['admin', 'schema', sid], { schema: seededSchemaList, table_name: seededTableName })
         }
-        // Admin-only: /logs cron tab schedule tiles + tab-independent
-        // recent-runs delta. Keys mirror useLogsPageState exactly.
-        const seededCronSchedule = (data as any).cron_schedule
-        if (seededCronSchedule) {
-          queryClient.setQueryData(['admin', 'cron-schedule', sid], seededCronSchedule)
-        }
+        // P1#5 (perf audit): cron_schedule is no longer seeded from
+        // bootstrap (its ~3s build sat on admin first-paint). The /logs
+        // cron tab refetches GET /api/cron-schedule on mount, so the tab
+        // self-populates with one round-trip. The tab-independent recent-
+        // runs delta below stays seeded (cheap, with_total=False).
         const seededCronRunsFirstPage = (data as any).cron_runs_first_page
         if (seededCronRunsFirstPage) {
           queryClient.setQueryData(['admin', 'cron-logs-recent', sid], seededCronRunsFirstPage)
@@ -100,14 +106,12 @@ export function useBootstrap() {
           queryClient.setQueryData(['scoring-labels', sid], seededScoringLabels)
         }
       }
-      // /admin/share page mounts a useQuery on ['admin','share','status']
-      // that pays 187 ms p95 on cold load. Bootstrap now carries the
-      // same payload — seed it so InvitationsPanel renders without
-      // round-trip. ADMIN ONLY (analyst sessions get null from backend).
-      const seededShareStatus = (data as any).share_status
-      if (seededShareStatus) {
-        queryClient.setQueryData(['admin', 'share', 'status'], seededShareStatus)
-      }
+      // P1#5 (perf audit): share_status is no longer seeded from bootstrap
+      // (build_share_status cost ~2.1s on admin first-paint). The
+      // /admin/share page refetches GET /api/admin/share/status on mount,
+      // so InvitationsPanel self-populates with one round-trip. The small
+      // global share_banner ({sharing_active, public_url}) is still carried
+      // on the bootstrap response and read directly for the header.
       // /api/services returns {services, _section_timings} — bootstrap
       // exposes the same enriched list. Seed ServicesTable's queryKey
       // so /admin's cold-load round-trip evaporates.
@@ -171,6 +175,12 @@ export function useBootstrap() {
     useAdminTokenStore.getState().setToken(
       typeof adminToken === 'string' && adminToken ? adminToken : null,
     )
+    // Same SSR-hydrated-cache reasoning as the token above: the queryFn copy
+    // is skipped when the cache is pre-seeded, so mirror the role flag here
+    // too. See sessionRoleStore.
+    useSessionRoleStore.getState().setIsRemoteAnalyst(
+      query.data?.settings?.is_remote_analyst === true,
+    )
 
     // Note: views + log-fields-catalog cache seeding now happens
     // inside the queryFn (synchronously after the fetch resolves) so
@@ -178,6 +188,13 @@ export function useBootstrap() {
     // their target cache. Moving it here would re-introduce the race
     // where dependent hooks re-render before useEffect runs.
   }, [query.data, setServices, setInitialized, queryClient])
+
+  // `isStale` gates the revert branch below. When true, query.data is a cached
+  // snapshot that may predate the live service set (a refetch hasn't yet
+  // replaced it — e.g. the 5-min staleTime window after a service was just
+  // added). Reverting a just-selected activeServiceId against a stale snapshot
+  // is the "Switch To a freshly-added service bounces back" bug.
+  const bootstrapIsStale = query.isStale
 
   useEffect(() => {
     if (!query.data) return
@@ -190,6 +207,15 @@ export function useBootstrap() {
         : services[0]?.id
       if (defaultId) setActiveServiceId(defaultId)
     } else if (activeServiceId && !currentServiceExists) {
+      // HARDENING: only evict a selected service when the bootstrap snapshot is
+      // fresh (just fetched, not a stale cached copy). A stale snapshot can be
+      // missing a brand-new service the user just switched to — reverting off
+      // it bounces them back to the previous service (and AppLayout then to
+      // /admin). When stale, defer: the pending refetch lands a fresh list
+      // (this effect re-runs on query.data change) and reconciles correctly
+      // against real data. Switch-to call sites also invalidate bootstrap to
+      // trigger that refetch promptly.
+      if (bootstrapIsStale) return
       const defaultId = services.length > 0 ? (
         (query.data.active_service_id && services.some(s => s.id === query.data!.active_service_id))
           ? query.data.active_service_id
@@ -197,7 +223,7 @@ export function useBootstrap() {
       ) : null
       if (activeServiceId !== defaultId) setActiveServiceId(defaultId)
     }
-  }, [query.data, activeServiceId, setActiveServiceId])
+  }, [query.data, bootstrapIsStale, activeServiceId, setActiveServiceId])
 
   return query
 }

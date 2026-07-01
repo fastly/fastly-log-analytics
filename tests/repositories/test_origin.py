@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from backend.models.common import FilterSpec
 from backend.repositories._base import _safe_table
 from backend.repositories.origin import (
     _enrich_with_distance,
@@ -347,15 +348,80 @@ def test_enrich_anomaly_only_flags_when_overhead_above_20ms():
     # Two POPs ~250km apart → light_speed_rtt ≈ 2.5ms (>0.5 floor)
     # so the efficiency math runs. p50=15ms gives ratio 6x but absolute
     # overhead = 15 - 2.5 = 12.5ms, below the 20ms anomaly threshold.
+    # requests well above the sample floor so the *only* reason it isn't
+    # flagged is the absolute-overhead gate (low-sample gating isolated out).
     fake_pops = {"SJC": (37.3639, -121.9289), "LAX": (33.9425, -118.4081)}
-    row = {"edge_pop": "SJC", "shield_pop": "LAX", "p50_ms": 15.0}
+    row = {"edge_pop": "SJC", "shield_pop": "LAX", "p50_ms": 15.0, "requests": 500}
 
     with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
         out = _enrich_with_distance(row)
 
     assert out["efficiency_ratio"] is not None
     assert out["efficiency_ratio"] > 3.0  # high ratio
+    assert out["low_sample"] is False  # enough samples — not the reason
     assert out["anomaly_static"] is False  # but still below absolute floor
+
+
+def test_enrich_suppresses_anomaly_below_min_request_floor():
+    """A genuinely high-overhead route (efficiency >> 3x AND overhead >> 20ms)
+    is still NOT flagged when it has too few requests for the median to be
+    trustworthy — it's marked ``low_sample`` instead. The same profile WITH
+    enough requests does flag. Pinned because low-traffic routes were
+    producing false "suboptimal peering" flags (prod 2026-06-30): the median
+    over a handful of requests is noise. (low-sample gating)"""
+    # LAX→SJC ~490km → light floor ≈ 4.9ms; p50=100ms → efficiency ≈ 20x and
+    # overhead ≈ 95ms, comfortably past both anomaly gates.
+    fake_pops = {"LAX": (33.9425, -118.4081), "SJC": (37.3639, -121.9289)}
+
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
+        thin = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0, "requests": 5})
+        thick = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0, "requests": 200})
+
+    # Same latency profile, only the volume differs.
+    assert thin["efficiency_ratio"] == thick["efficiency_ratio"]
+    assert thin["efficiency_ratio"] > 3.0
+
+    # Thin route: shown (fields populated) but low_sample and never flagged.
+    assert thin["low_sample"] is True
+    assert thin["anomaly_static"] is False
+
+    # Well-trafficked route with the same profile: flagged.
+    assert thick["low_sample"] is False
+    assert thick["anomaly_static"] is True
+
+
+def test_enrich_sets_anomaly_eligible_independent_of_sample():
+    """``anomaly_eligible`` is the latency verdict ALONE (efficiency > 3x AND
+    >= 20ms overhead) — it must be True for a high-overhead route whether or
+    not it clears the sample floor. The FE re-derives the flag against a
+    user-chosen min-requests threshold from this field, so it must not bake in
+    the sample gate. ``anomaly_static`` stays = ``eligible and not low_sample``.
+    (user-adjustable min-requests threshold)"""
+    fake_pops = {"LAX": (33.9425, -118.4081), "SJC": (37.3639, -121.9289)}
+
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
+        thin = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0, "requests": 5})
+        thick = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0, "requests": 200})
+
+    # Latency verdict identical regardless of volume…
+    assert thin["anomaly_eligible"] is True
+    assert thick["anomaly_eligible"] is True
+    # …but the realized flag is still sample-gated at the server default.
+    assert thin["anomaly_static"] is False
+    assert thick["anomaly_static"] is True
+
+
+def test_enrich_anomaly_eligible_false_below_overhead_floor():
+    """A short hop under the 20ms absolute-overhead gate isn't eligible at all,
+    so no min-requests threshold the FE picks could ever flag it."""
+    fake_pops = {"SJC": (37.3639, -121.9289), "LAX": (33.9425, -118.4081)}
+    row = {"edge_pop": "SJC", "shield_pop": "LAX", "p50_ms": 15.0, "requests": 500}
+
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
+        out = _enrich_with_distance(row)
+
+    assert out["anomaly_eligible"] is False
+    assert out["anomaly_static"] is False
 
 
 def test_enrich_with_none_p50_returns_none_efficiency():
@@ -836,3 +902,176 @@ def test_get_shielding_analysis_happy_path_returns_edge_to_shield_rows(
     # `_enrich_with_distance` added lat/lon for both pops
     assert row.get("edge_lat") is not None
     assert row.get("shield_lat") is not None
+
+
+# ── get_shielding_analysis: shielding-audit-2026-06-30 fixes (M1/L3/T10/T11) ──
+
+
+def _shield_pair_logs(src, *, edge_pop, shield_pop, n, edge_us, shield_us, rid_prefix, ttfb=None):
+    """Build ``n`` edge logs at ``edge_pop`` + ``n`` matching shield logs at
+    ``shield_pop`` (joined via prid=rid). ``edge_us``/``shield_us`` are ottfb
+    microseconds (pass ``None`` to leave ottfb NULL and exercise the ttfb
+    fallback)."""
+    edge_logs = generate_mock_logs(src, num_logs=n, hours_ago=1)
+    shield_logs = generate_mock_logs(src, num_logs=n, hours_ago=1)
+    for i in range(n):
+        rid = f"{rid_prefix}{i}"
+        e = edge_logs[i]
+        e["edge"] = True
+        e["rid"] = rid
+        e["prid"] = ""
+        e["pop"] = edge_pop
+        e["ottfb"] = edge_us
+        e["ttfb"] = ttfb
+        s = shield_logs[i]
+        s["edge"] = False
+        s["rid"] = f"s{rid_prefix}{i}"
+        s["prid"] = rid
+        s["pop"] = shield_pop
+        s["ottfb"] = shield_us
+        s["ttfb"] = None
+    return edge_logs + shield_logs
+
+
+def test_shielding_analysis_edge_filter_does_not_strip_shield_leg(
+    in_memory_duckdb,
+    test_service_source,
+):
+    """T10: a filter on the EDGE leg (``pop = DEN``) must not strip the
+    shield-side rows before the join. The shield CTE only carries time
+    bounds — otherwise filtering by edge POP would drop the IAD shield hit
+    and zero the DEN→IAD route. This invariant was previously untested."""
+    table = _safe_table(test_service_source["name"])
+    logs = _shield_pair_logs(
+        test_service_source, edge_pop="DEN", shield_pop="IAD", n=8, edge_us=100000, shield_us=30000, rid_prefix="den"
+    )
+    # A second, unrelated edge POP that the filter should exclude.
+    logs += _shield_pair_logs(
+        test_service_source, edge_pop="ORD", shield_pop="IAD", n=8, edge_us=90000, shield_us=30000, rid_prefix="ord"
+    )
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    fake_pops = {"DEN": (39.86, -104.67), "IAD": (38.94, -77.46), "ORD": (41.97, -87.90)}
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
+        out = get_shielding_analysis(
+            in_memory_duckdb,
+            test_service_source,
+            None,
+            None,
+            {"pop": FilterSpec(mode="include", values=["DEN"])},
+        )
+
+    pairs = {(r["edge_pop"], r["shield_pop"]) for r in out["rows"]}
+    # DEN→IAD survives the edge filter (the shield IAD rows weren't stripped).
+    assert ("DEN", "IAD") in pairs
+    # ORD edge rows were filtered out, so no ORD→IAD route.
+    assert ("ORD", "IAD") not in pairs
+    den = next(r for r in out["rows"] if r["edge_pop"] == "DEN")
+    assert den["requests"] == 8
+
+
+def test_shielding_analysis_uses_ttfb_fallback_when_ottfb_null(
+    in_memory_duckdb,
+    test_service_source,
+):
+    """T11 (b198b04): when ``ottfb`` is NULL the transit delta falls back to
+    ``ttfb`` (seconds → µs). Edge ttfb 0.1s, shield ottfb 30ms → ~70ms p50."""
+    table = _safe_table(test_service_source["name"])
+    # Edge ottfb NULL but ttfb = 0.1s (100ms); shield ottfb = 30ms.
+    logs = _shield_pair_logs(
+        test_service_source,
+        edge_pop="LAX",
+        shield_pop="IAD",
+        n=10,
+        edge_us=None,
+        shield_us=30000,
+        rid_prefix="fb",
+        ttfb=0.1,
+    )
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    fake_pops = {"LAX": (33.94, -118.41), "IAD": (38.94, -77.46)}
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
+        out = get_shielding_analysis(in_memory_duckdb, test_service_source, None, None, {})
+
+    row = next(r for r in out["rows"] if r["edge_pop"] == "LAX" and r["shield_pop"] == "IAD")
+    # (100ms via ttfb fallback) - (30ms via ottfb) = ~70ms, NOT a negative or
+    # NULL value (which is what a missing fallback would produce).
+    assert row["p50_ms"] == pytest.approx(70.0, abs=1.0)
+
+
+def test_shielding_analysis_has_data_true_without_coords(
+    in_memory_duckdb,
+    test_service_source,
+):
+    """L3: rows present but POP codes absent from the location map → the
+    table still has data (``has_data`` gates on ROW presence, not arc
+    coordinates). Previously this returned ``has_data=False`` and hid the
+    whole table + CSV export whenever a POP was missing from
+    pop_locations.json."""
+    table = _safe_table(test_service_source["name"])
+    logs = _shield_pair_logs(
+        test_service_source, edge_pop="ZZZ", shield_pop="QQQ", n=5, edge_us=100000, shield_us=20000, rid_prefix="nc"
+    )
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    # Empty POP map → no coords resolve for either POP.
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value={}):
+        out = get_shielding_analysis(in_memory_duckdb, test_service_source, None, None, {})
+
+    assert out["has_data"] is True
+    assert len(out["rows"]) == 1
+    row = out["rows"][0]
+    assert row["edge_lat"] is None and row["shield_lat"] is None
+
+
+def test_shielding_analysis_keeps_low_volume_high_overhead_route(
+    in_memory_duckdb,
+    test_service_source,
+):
+    """M1/T12: a low-volume but high-overhead route must NOT be buried by a
+    request-volume LIMIT — it's exactly the mis-peered route this analysis
+    exists to surface. With a small limit, the high-overhead route still
+    appears (via the top-by-overhead rank), and ``total_routes`` /
+    ``truncated`` report the full picture."""
+    table = _safe_table(test_service_source["name"])
+    logs = []
+    # Six high-volume, low-overhead routes (50 reqs each, ~10ms transit). With
+    # limit=2 the union of (top-2 by requests) and (top-2 by overhead) covers at
+    # most 4 distinct routes, so at least two of these seven are always dropped
+    # → ``truncated`` is deterministically True regardless of tie-breaking.
+    high_vol_pops = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]
+    for k, ep in enumerate(high_vol_pops):
+        logs += _shield_pair_logs(
+            test_service_source,
+            edge_pop=ep,
+            shield_pop="IAD",
+            n=50,
+            edge_us=40000,
+            shield_us=30000,
+            rid_prefix=f"hi{k}",
+        )
+    # One LOW-volume, FAR-HIGHEST-overhead route (3 reqs, ~150ms transit) — it
+    # is rank-1 by overhead (so always selected) but rank-7 by request volume
+    # (so a plain ``ORDER BY requests DESC LIMIT 2`` would bury it).
+    logs += _shield_pair_logs(
+        test_service_source, edge_pop="ZED", shield_pop="IAD", n=3, edge_us=180000, shield_us=30000, rid_prefix="lo"
+    )
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    fake_pops = {ep: (float(i * 10), float(i * 10)) for i, ep in enumerate(high_vol_pops)}
+    fake_pops.update({"ZED": (40.0, 40.0), "IAD": (38.94, -77.46)})
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
+        out = get_shielding_analysis(in_memory_duckdb, test_service_source, None, None, {}, limit=2)
+
+    pairs = {(r["edge_pop"], r["shield_pop"]): r for r in out["rows"]}
+    # The high-overhead ZED→IAD route survives despite being well outside the
+    # top-2 by request volume.
+    assert ("ZED", "IAD") in pairs
+    assert pairs[("ZED", "IAD")]["requests"] == 3
+    # Returned set is bounded by the two rank cutoffs (≤ 2*limit), strictly
+    # fewer than the 7 total routes.
+    assert len(out["rows"]) <= 4
+    # Full route count + truncation flag are surfaced for "Top N of M".
+    assert out["total_routes"] == 7
+    assert out["truncated"] is True

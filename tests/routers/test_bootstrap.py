@@ -65,6 +65,8 @@ def test_bootstrap_endpoint_success(client, tmp_path, monkeypatch):
     assert data["active_service_id"] == MOCK_SERVICE_ID
     assert "pops" in data
     assert "services" in data
+    # Admin / loopback path has no analyst session → masking is off.
+    assert data["settings"]["mask_ips"] is False
 
 
 def test_bootstrap_omits_admin_token_when_env_unset(client, tmp_path, monkeypatch):
@@ -159,6 +161,83 @@ def test_bootstrap_omits_admin_token_for_authenticated_analyst(client, tmp_path,
         # Sanity check we're actually on the analyst branch — not the loopback
         # one (which would also yield admin_token=None when env unset).
         assert body["settings"]["is_remote_analyst"] is True
+    finally:
+        share_db.close_all_connections()
+        tunnel.reset_for_tests()
+
+
+def _login_analyst_and_bootstrap(client, tmp_path, monkeypatch, *, pii_policy):
+    """Seed a masking/non-masking analyst invite, log in, and return the
+    /api/bootstrap response body for assertions about ``settings``."""
+    from backend import config
+    from backend.core import share_db
+    from backend.utils import tunnel
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "system"))
+    share_db.reset_for_tests()
+    tunnel.reset_for_tests()
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+    invite = share_db.create_remote_invite(
+        name="Test Analyst",
+        email="analyst@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=[MOCK_SERVICE_ID],
+        pii_policy=pii_policy,
+    )
+    tos = share_db.get_latest_tos()
+    if tos:
+        share_db.mark_tos_accepted(invite["id"], tos["version"])
+    tunnel.get_tunnel_manager().start_sharing(public_endpoint="https://testserver")
+
+    login = client.post(
+        "/api/share/login",
+        json={"email": invite["email"], "passcode": "ocean-breeze-cabin-42"},
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    assert login.status_code == 200, login.text
+    client.cookies.set("analyst_session_id", login.cookies.get("analyst_session_id"))
+
+    response = client.get(
+        "/api/bootstrap",
+        headers={
+            "X-Remote-Analyst": "1",
+            "Host": "testserver",
+            "x-fastly-service-id": MOCK_SERVICE_ID,
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["settings"]["is_remote_analyst"] is True  # confirm analyst branch
+    return body
+
+
+def test_bootstrap_mask_ips_true_for_masking_analyst(client, tmp_path, monkeypatch):
+    """An invite with pii_policy.mask_ips=true surfaces ``settings.mask_ips``
+    true so the frontend hides IP drill-down affordances. The server-side
+    filter lock is the real guarantee; this flag drives the UX."""
+    from backend.core import share_db
+    from backend.utils import tunnel
+
+    try:
+        body = _login_analyst_and_bootstrap(client, tmp_path, monkeypatch, pii_policy={"mask_ips": True})
+        assert body["settings"]["mask_ips"] is True
+    finally:
+        share_db.close_all_connections()
+        tunnel.reset_for_tests()
+
+
+def test_bootstrap_mask_ips_false_for_non_masking_analyst(client, tmp_path, monkeypatch):
+    """A non-masking analyst (no pii_policy) gets ``settings.mask_ips`` false."""
+    from backend.core import share_db
+    from backend.utils import tunnel
+
+    try:
+        body = _login_analyst_and_bootstrap(client, tmp_path, monkeypatch, pii_policy=None)
+        assert body["settings"]["mask_ips"] is False
     finally:
         share_db.close_all_connections()
         tunnel.reset_for_tests()
@@ -401,6 +480,93 @@ def test_bootstrap_views_survives_repo_error(client, tmp_path, monkeypatch):
     )
     data = response.json()
     assert data["views"] == [], "views must degrade to [] on repo error, not propagate"
+
+
+# ── /api/bootstrap: P1#5 lazy-load (cron_schedule + share_status dropped) ──
+
+
+def test_bootstrap_drops_cron_schedule_and_share_status_seeds(client, tmp_path, monkeypatch):
+    """P1#5 (perf audit): ``cron_schedule`` (~3s build) and ``share_status``
+    (~2.1s build) are no longer folded into the admin bootstrap payload —
+    they sat on the SSR first-paint critical path. Both fields STAY on the
+    response model (wire/OpenAPI back-compat) but must now serialize as
+    ``null``: the /logs cron tab and /admin/share page each refetch their
+    own standalone endpoint on mount.
+
+    Pinned with an EXPLODING build helper for each: if a future change
+    re-wires the seed, the helper would be called and this test catches the
+    regression even before the field assertion (the bootstrap-resilient
+    try/except would otherwise swallow it into a silent None)."""
+    from backend import config
+    from backend.cron import schedule as _sched
+    from backend.routers import share_admin
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+    def _explode_cron(*a, **k):
+        raise AssertionError("build_cron_schedule_payload must NOT run on the bootstrap path (P1#5)")
+
+    def _explode_share(*a, **k):
+        raise AssertionError("build_share_status must NOT run on the bootstrap path (P1#5)")
+
+    monkeypatch.setattr(_sched, "build_cron_schedule_payload", _explode_cron)
+    monkeypatch.setattr(share_admin, "build_share_status", _explode_share)
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    data = response.json()
+    # Fields present (model back-compat) but null (no longer seeded).
+    assert "cron_schedule" in data and data["cron_schedule"] is None
+    assert "share_status" in data and data["share_status"] is None
+
+
+def test_bootstrap_keeps_last_sync_share_banner_ops_overview_seeds(client, tmp_path, monkeypatch):
+    """The cheap admin seeds KEPT on the bootstrap hot path still populate:
+    ``last_sync`` (header SyncStatusBadge — refetching on every page would
+    flicker), ``share_banner`` (small global header state), and
+    ``ops_overview`` (~73ms, left alone by P1#5). Dropping cron_schedule /
+    share_status must NOT regress these."""
+    from backend import config
+    from backend.core.metadata import cron_log as _cron_log
+    from backend.utils import tunnel as _tunnel
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+    # last_sync: derived from latest_cron_per_task("sync").
+    monkeypatch.setattr(
+        _cron_log,
+        "latest_cron_per_task",
+        lambda sid: {"sync": {"started_at": "2026-06-29T00:00:00Z", "status": "success", "duration_s": 1.5}},
+    )
+
+    # share_banner: projected from the tunnel manager's lean state.
+    class _FakeMgr:
+        def is_sharing_active(self):
+            return True
+
+        def public_url(self):
+            return "https://example.test/share-login"
+
+    monkeypatch.setattr(_tunnel, "get_tunnel_manager", lambda: _FakeMgr())
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["last_sync"] == {
+        "started_at": "2026-06-29T00:00:00Z",
+        "status": "success",
+        "duration_s": 1.5,
+    }
+    assert data["share_banner"] == {
+        "sharing_active": True,
+        "public_url": "https://example.test/share-login",
+    }
+    # ops_overview is admin-only and cheap; at minimum the queries_summary
+    # sub-key is always derivable (no DB needed), so the seed is non-null.
+    assert data["ops_overview"] is not None
 
 
 # ── /api/schema ────────────────────────────────────────────────────────────

@@ -86,8 +86,20 @@ function parseExtentMs(value: unknown, edge: 'earliest' | 'latest'): number | nu
  *      historical backfill, or any range with no data), an empty result
  *      is legitimate, so don't flag it.
  */
-function isStaleDashboardAggregates(d: unknown, window?: AggregatesWindow): boolean {
+function isStaleDashboardAggregates(
+  d: unknown,
+  window?: AggregatesWindow,
+  hasFilters = false,
+): boolean {
   if (!d || typeof d !== 'object') return false
+  // An empty result with an ACTIVE FILTER is a legitimate "no rows match",
+  // not the stale-view symptom — the metadata-vs-aggregates contradiction this
+  // heuristic detects only holds for an UNfiltered window. Without this guard,
+  // any filter that matches zero rows (a masking analyst's masked-IP click, or
+  // an admin filtering on a zero-traffic value) trips the stale detector into
+  // an infinite 5s poll of the expensive live-SQL path. (RC: the original
+  // masked-IP slowness + stuck "Preparing your data" banner.)
+  if (hasFilters) return false
   const r = d as Record<string, unknown>
   if (!r.latest_log_at) return false
 
@@ -119,10 +131,17 @@ function isStaleDashboardAggregates(d: unknown, window?: AggregatesWindow): bool
  * Wrap an aggregates fetch so it throws on the stale-view symptom. Use
  * together with React Query's `retry` / `retryDelay` / `refetchInterval`
  * options — see `STALE_VIEW_RETRY_OPTIONS` below. Pass the queried
- * `window` so out-of-window empty results aren't misclassified as stale.
+ * `window` so out-of-window empty results aren't misclassified as stale,
+ * and `hasFilters` (true when the request carries any filter) so an empty
+ * *filtered* result is treated as a legitimate "no rows match" rather than
+ * the stale-view symptom.
  */
-export function throwIfStaleAggregates<T>(data: T, window?: AggregatesWindow): T {
-  if (isStaleDashboardAggregates(data, window)) throw new StaleDashboardViewError()
+export function throwIfStaleAggregates<T>(
+  data: T,
+  window?: AggregatesWindow,
+  hasFilters = false,
+): T {
+  if (isStaleDashboardAggregates(data, window, hasFilters)) throw new StaleDashboardViewError()
   return data
 }
 

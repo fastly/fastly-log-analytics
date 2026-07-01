@@ -8,6 +8,7 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { ChartEmptyState } from './ChartEmptyState'
 import { SECURITY_INFO, TOP_IP_COLUMN_IDS } from './securityInfo'
+import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import type { components } from '@/types/api.generated'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']
@@ -33,6 +34,9 @@ export function HeaderAnomaliesSection({
   setTopIpVisibility,
   onTopIpVisChange,
 }: Props) {
+  // Distinguish "field group not enabled" from "enabled but no data yet" so a
+  // low-traffic/fresh service doesn't read as misconfigured.
+  const { isFieldActive } = useActiveLogFields()
   const headerSizeData = React.useMemo(() => {
     const req_size_dist = data?.req_size_dist
     if (!req_size_dist?.length) return []
@@ -72,7 +76,7 @@ export function HeaderAnomaliesSection({
         helpContent={SECURITY_INFO.req_size.body}
       >
         {headerSizeData.length === 0 && !isLoading ? (
-          <ChartEmptyState requires="Request Identity (Group A) fields to be enabled in Fastly logging." />
+          <ChartEmptyState requires={isFieldActive('req_header_bytes') ? undefined : "Request Identity (Group A) fields to be enabled in Fastly logging."} />
         ) : (
           <PlotlyChart
             data={headerSizeData as any[]}
@@ -103,7 +107,7 @@ export function HeaderAnomaliesSection({
         <DataTable
           columns={topIpHeaderColumns}
           data={data?.top_ips_header || []}
-          emptyMessage={isLoading ? "" : "Requires Request Identity (Group A) log fields to be enabled in Fastly logging."}
+          emptyMessage={isLoading ? "" : (isFieldActive('req_header_bytes') ? "No data in this time range yet." : "Requires Request Identity (Group A) log fields to be enabled in Fastly logging.")}
           hideToolbar
           columnVisibility={topIpVisibility}
           onColumnVisibilityChange={setTopIpVisibility}

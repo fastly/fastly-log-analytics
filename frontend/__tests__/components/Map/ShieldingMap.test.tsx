@@ -6,7 +6,7 @@
  *
  * @vitest-environment jsdom
  */
-import { render, act } from '@testing-library/react'
+import { render, act, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 
@@ -79,10 +79,11 @@ vi.mock('maplibre-gl', () => {
     }
   }
   return {
-    default: { Map: MockMap, LngLatBounds: class {}, NavigationControl: class {} },
+    default: { Map: MockMap, LngLatBounds: class {}, NavigationControl: class {}, GlobeControl: class {} },
     Map: MockMap,
     LngLatBounds: class {},
     NavigationControl: class {},
+    GlobeControl: class {},
   }
 })
 
@@ -142,6 +143,14 @@ describe('ShieldingMap helpers', () => {
       const { efficiencyColor } = await import('@/components/Map/ShieldingMap')
       expect(efficiencyColor(3.0)).toBe('#ef4444')
       expect(efficiencyColor(10)).toBe('#ef4444')
+    })
+
+    it('returns neutral indigo (not green) for a negative ratio (L5)', async () => {
+      // A negative transit delta → negative efficiency is meaningless, not
+      // "excellent". Regression guard: `ratio < 1.5` must NOT paint it green.
+      const { efficiencyColor } = await import('@/components/Map/ShieldingMap')
+      expect(efficiencyColor(-0.5)).toBe('#6366f1')
+      expect(efficiencyColor(-10)).toBe('#6366f1')
     })
   })
 
@@ -244,6 +253,43 @@ describe('ShieldingMap helpers', () => {
       expect(fc.features[0].properties?.edge_pop).toBe('JFK')
       expect(fc.features[0].properties?.color).toBeDefined()
       expect(fc.features[0].properties?.line_width).toBeGreaterThan(1.5)
+    })
+
+    it('carries anomaly_static through to feature properties (L7 map paint)', async () => {
+      const { buildArcFeatures } = await import('@/components/Map/ShieldingMap')
+      const rows = [
+        {
+          edge_lat: 40, edge_lon: -74,
+          shield_lat: 51, shield_lon: 0,
+          edge_pop: 'JFK', shield_pop: 'LON',
+          requests: 100, p50_ms: 80, p95_ms: 120, p99_ms: 200,
+          distance_km: 5000, light_speed_rtt_ms: 33, efficiency_ratio: 4.5,
+          anomaly_static: true,
+        },
+      ]
+      const fc = buildArcFeatures(rows)
+      // The anomaly map layer filters on this property; if buildArcFeatures
+      // drops it the dashed-red anomaly casing never renders.
+      expect(fc.features[0].properties?.anomaly_static).toBe(true)
+    })
+
+    it('paints low_sample routes a neutral grey, not an efficiency colour (low-sample gating)', async () => {
+      const { buildArcFeatures } = await import('@/components/Map/ShieldingMap')
+      const rows = [
+        {
+          edge_lat: 40, edge_lon: -74,
+          shield_lat: 51, shield_lon: 0,
+          edge_pop: 'JFK', shield_pop: 'LON',
+          // efficiency 12x would normally paint red (#ef4444) — but with too
+          // few requests it must read as grey + carry low_sample for the tooltip.
+          requests: 3, p50_ms: 400, p95_ms: 800, p99_ms: 1200,
+          distance_km: 5000, light_speed_rtt_ms: 33, efficiency_ratio: 12,
+          anomaly_static: false, low_sample: true,
+        },
+      ]
+      const fc = buildArcFeatures(rows)
+      expect(fc.features[0].properties?.color).toBe('#94a3b8')
+      expect(fc.features[0].properties?.low_sample).toBe(true)
     })
 
     it('skips rows with missing coords or zero-length arcs', async () => {
@@ -364,6 +410,15 @@ describe('ShieldingMap component', () => {
     expect(getByText(/no shielding path data/i)).toBeInTheDocument()
   })
 
+  it('renders the error state when errored is true (M2 sentinel)', async () => {
+    // A backend handler failure returns 200 with {error: true}; the map must
+    // show an explicit "unavailable" state, not the misleading empty state.
+    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
+    const { getByText, queryByText } = render(<ShieldingMap rows={[]} isLoading={false} errored />)
+    expect(getByText(/shielding analysis unavailable/i)).toBeInTheDocument()
+    expect(queryByText(/no shielding path data/i)).not.toBeInTheDocument()
+  })
+
   it('does not crash transitioning from loading to the empty state (Rules-of-Hooks regression)', async () => {
     // Repro of the production crash on /network. The shielding card first
     // mounts in the loading state (no early return fires → all hooks run,
@@ -390,6 +445,57 @@ describe('ShieldingMap component', () => {
     ]
     const { getByText } = render(<ShieldingMap rows={rows} isLoading={false} />)
     expect(getByText(/POP coordinates unavailable/i)).toBeInTheDocument()
+  })
+
+  it('shows no expand button by default', async () => {
+    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
+    const rows = [
+      {
+        edge_lat: 40, edge_lon: -74,
+        shield_lat: 51, shield_lon: 0,
+        edge_pop: 'JFK', shield_pop: 'LON',
+        requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
+      },
+    ]
+    const { queryByLabelText } = render(<ShieldingMap rows={rows} />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(queryByLabelText(/expand map to fullscreen/i)).not.toBeInTheDocument()
+  })
+
+  it('opens a fullscreen dialog with a second map when Expand is clicked', async () => {
+    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
+    const rows = [
+      {
+        edge_lat: 40, edge_lon: -74,
+        shield_lat: 51, shield_lon: 0,
+        edge_pop: 'JFK', shield_pop: 'LON',
+        requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
+      },
+    ]
+    const { getByLabelText, findByRole } = render(<ShieldingMap rows={rows} expandable />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    // Only the inline map is mounted before expanding.
+    expect(mapInstances.length).toBe(1)
+
+    await act(async () => {
+      fireEvent.click(getByLabelText(/expand map to fullscreen/i))
+    })
+
+    // Dialog title is rendered (proves the modal opened) and the modal mounts
+    // a second ShieldingMap (its own WebGL/MapLibre instance).
+    const dialog = await findByRole('dialog')
+    expect(dialog).toHaveTextContent(/Edge → Shield Transit Map/)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(mapInstances.length).toBe(2)
   })
 
   it('calls map.remove() on unmount to release WebGL resources', async () => {

@@ -61,11 +61,8 @@ const ALLOWED_GAPS = new Set<string>([
   // SSE streams — MSW's HTTP intercept does not model SSE well; tests
   // that exercise these set up their own custom EventSource shims.
   'GET /api/cron-runs/:run_id/stream',
-  'GET /api/cron-runs/stream',
   'GET /api/log-extents/stream',
-  'GET /api/sync-status/stream',
-  'GET /api/admin/system-metrics/stream',
-  'GET /api/admin/share/stream',
+  'GET /api/admin/events/stream',
 
   // Usage / admin GETs — admin pages have per-test override handlers.
   'GET /api/usage/operations',

@@ -3,6 +3,7 @@
 import React from 'react'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
+import { ApproxBadge } from './ApproxBadge'
 import { cn } from '@/lib/utils'
 import { Activity } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -39,6 +40,9 @@ export function Timeseries({
         helpContent={<p>Time to First Byte (TTFB) measures the time to receive the first byte of the response headers from the origin. Time to Last Byte (TTLB) measures the time to receive the full response body.</p>}
         headerAction={
           <div className="flex items-center gap-2">
+            {originTs.data?._approx === true && (
+              <ApproxBadge message="Latency percentiles on wide windows are request-weighted averages of per-minute percentiles. Request volume is exact." />
+            )}
             <ButtonGroup>
               {(['ttfb', 'ttlb'] as const).map(m => (
                 <Button

@@ -16,7 +16,12 @@ from __future__ import annotations
 import time  # noqa: F401  — re-exported for monkeypatch compat
 
 from .fingerprint import compute_fingerprint
-from .manager import TunnelManager, get_tunnel_manager, reset_for_tests
+from .manager import (
+    TunnelManager,
+    build_share_live_payload,
+    get_tunnel_manager,
+    reset_for_tests,
+)
 from .rate_limiter import (
     LOGIN_FAILURE_THRESHOLD,
     LOGIN_FAILURE_WINDOW_S,
@@ -40,6 +45,7 @@ __all__ = [
     "TunnelManager",
     "TunnelState",
     "_LoginRateLimiter",
+    "build_share_live_payload",
     "compute_fingerprint",
     "get_tunnel_manager",
     "reset_for_tests",

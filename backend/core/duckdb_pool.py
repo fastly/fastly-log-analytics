@@ -602,6 +602,36 @@ class _Pool:
             self._draining = False
             self._cond.notify_all()
 
+    def discard_idle(self) -> int:
+        """Close every idle connection so the next checkout builds fresh.
+
+        Used on a credential change for this service (see
+        ``reset_pool_for_service``): pool connections bake the S3 ``fos_proxy``
+        SECRET at build time and the checkout rebind path only refreshes the
+        iceberg VIEW, never the SECRET — so an idle conn built with now-stale
+        creds would 401 every read until the process restarts. Unlike
+        ``begin_drain`` this does NOT enter draining mode: concurrent acquires
+        proceed and simply build fresh conns. In-flight checked-out conns are
+        left alone (rare during an admin re-provision; they self-heal on
+        error-discard or next restart). Returns the count closed.
+        """
+        closed = 0
+        with self._cond:
+            while True:
+                try:
+                    con = self._idle.get_nowait()
+                except queue.Empty:
+                    break
+                _forget_conn(con)
+                try:
+                    con.close()
+                except Exception:
+                    pass
+                self._in_use -= 1
+                closed += 1
+            self._cond.notify_all()
+        return closed
+
     def _prepare_checkout(self, con: duckdb.DuckDBPyConnection, src: dict) -> duckdb.DuckDBPyConnection:
         """Re-validate the view binding before handing the connection out.
 
@@ -998,6 +1028,21 @@ def end_drain_pools(service_keys) -> None:
     """Take every existing pool for ``service_keys`` out of draining mode."""
     for pool in _existing_pools(service_keys):
         pool.end_drain()
+
+
+def reset_pool_for_service(service_key: str) -> int:
+    """Close all idle pooled connections for one service so the next checkout
+    rebuilds with freshly-resolved FOS/CDN credentials.
+
+    Call when a service's credentials change (re-provision / analyst re-ingest /
+    teardown). Returns the count of connections closed; ``0`` (no-op) if the
+    service has no pool yet (no reader has queried it). See ``_Pool.discard_idle``.
+    """
+    with _pools_lock:
+        pool = _pools.get(service_key)
+    if pool is None:
+        return 0
+    return pool.discard_idle()
 
 
 def shutdown_all() -> None:

@@ -6,7 +6,7 @@ import { useServiceStream } from '@/hooks/useServiceStream'
 import { queryKeys } from '@/lib/query-keys'
 
 /**
- * Analyst-safe sibling of ``useSyncStatusStream``.
+ * Analyst-safe sibling of ``useAdminEventStream``.
  *
  * Subscribes to ``/api/log-extents/stream`` — the projected, analyst-
  * safe header-badge channel (only ``latest_log_at`` + ``local_rows``,
@@ -19,7 +19,7 @@ import { queryKeys } from '@/lib/query-keys'
  *
  * Closes Gap 3 from the badge SSE work: admins already get real-time
  * "Latest Log: Xs ago" / "Total Logs" updates via
- * ``useSyncStatusStream``; this hook brings analysts to parity.
+ * ``useAdminEventStream``; this hook brings analysts to parity.
  */
 interface BootstrapHeaderBadge {
   latest_log_at?: string | null

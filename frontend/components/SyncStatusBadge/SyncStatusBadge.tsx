@@ -1,14 +1,12 @@
 'use client'
 
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useSyncStatus, useIsAnalyst } from '@/hooks/useSyncStatus'
-import { useSyncStatusStream } from '@/hooks/useSyncStatusStream'
 import { useHeaderBadgeStream } from '@/hooks/useHeaderBadgeStream'
-import { useCronRunsStream } from '@/hooks/useCronRunsStream'
-import { useSystemMetricsStream } from '@/hooks/useSystemMetricsStream'
+import { useAdminEventStream, type AdminEventChannel } from '@/hooks/useAdminEventStream'
 import { useLastSync } from '@/hooks/useLastSync'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useDateFormat } from '@/hooks/useDateFormat'
@@ -87,32 +85,43 @@ export function SyncStatusBadge() {
   // burst of failing connections.
   const streamsEnabled = !pathname.startsWith('/share-login')
 
-  // Three SSE channels feed the header, each with its own gate:
-  //  - useSyncStatusStream (admin): full snapshot → ['sync-status', svc]
-  //  - useHeaderBadgeStream (analyst): projected snapshot →
-  //      ['bootstrap'].header_badge (closes the gap that left analyst
-  //      badges stale at the 5-min bootstrap staleTime)
-  //  - useCronRunsStream (admin): cron-run state changes → invalidates
-  //      ['admin','cron-logs'], ['admin','cron-logs-recent'], and
-  //      ['last-sync', svc] when event.task === 'sync'. Mounted here so
-  //      the channel stays open across navigation (header is mounted
-  //      on every page); /logs reads from the warm cache for free.
-  const adminStreamState = useSyncStatusStream(streamsEnabled && !isAnalyst)
+  // ONE multiplexed admin SSE connection feeds the header (collapsed from
+  // three separate streams that each held an HTTP/1.1 connection open and
+  // starved the tunnel). Channels:
+  //  - sync-status: full snapshot → ['sync-status', svc]
+  //  - cron-runs: cron-run state changes → invalidates ['admin','cron-logs'],
+  //      ['admin','cron-logs-recent'], ['last-sync', svc] (on task === 'sync'),
+  //      and the iceberg/audit/ingested/schema keys.
+  //  - system-metrics: bundled snapshot → the seven admin-overview slice keys.
+  //  - share: lean tunnel-live snapshot → ['admin','share','live'] (only on
+  //      /admin/share; replaces the page's separate useShareStream connection).
+  // Mounted in the always-present header so the channels stay open across
+  // navigation; /logs + /admin read from the warm cache for free.
+  // The analyst path keeps its own single projected stream (log-extents).
   const analystStreamState = useHeaderBadgeStream(streamsEnabled && isAnalyst)
-  useCronRunsStream(streamsEnabled && !isAnalyst)
+
+  // system-metrics only feeds the admin-overview cards (SystemHealthCard,
+  // OperationsOverview teasers, MetadataStorageCard, SystemStatus) — add it
+  // to the channel set only on the pages that mount those components so we
+  // don't run a server-side sampler loop just because the header is on screen.
+  // share likewise only feeds the /admin/share dashboard's live tile; gating
+  // it here (instead of a second useShareStream connection on that page) keeps
+  // /admin/share at ONE SSE connection over the H1 admin tunnel.
+  const adminPageMounted =
+    pathname.startsWith('/admin') || pathname.startsWith('/logs')
+  const sharePageMounted = pathname.startsWith('/admin/share')
+  const adminChannels = useMemo<AdminEventChannel[]>(() => {
+    const ch: AdminEventChannel[] = ['sync-status', 'cron-runs']
+    if (adminPageMounted) ch.push('system-metrics')
+    if (sharePageMounted) ch.push('share')
+    return ch
+  }, [adminPageMounted, sharePageMounted])
+  const adminStreamState = useAdminEventStream(streamsEnabled && !isAnalyst, adminChannels)
+
   // The active stream's connection state — picks whichever side is gated on
   // for the current session (admin OR analyst), defaults to idle when both
   // are off (e.g. /share-login).
   const liveStreamState = isAnalyst ? analystStreamState.state : adminStreamState.state
-
-  // System-metrics stream feeds the seven admin-overview cards
-  // (SystemHealthCard, OperationsOverview's three teasers,
-  // MetadataStorageCard, SystemStatus). Gate on the pages that
-  // actually mount those components so we don't open a sampler
-  // loop server-side just because the header is on screen.
-  const adminPageMounted =
-    pathname.startsWith('/admin') || pathname.startsWith('/logs')
-  useSystemMetricsStream(streamsEnabled && !isAnalyst && adminPageMounted)
 
   // Bootstrap fallback for analyst sessions — /api/sync-status is
   // admin-only (RemoteAccessMiddleware blocks analysts → 403), so

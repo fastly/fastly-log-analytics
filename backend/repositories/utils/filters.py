@@ -28,6 +28,30 @@ def filter_spec_attr(spec: Any, attr: str) -> Any:
     return spec.get(attr) if isinstance(spec, dict) else getattr(spec, attr, None)
 
 
+def normalize_filter_key(filter_key: str) -> str:
+    """Reduce a raw filter key to its underlying column name.
+
+    Strips the ``filter_`` / ``xfilter_`` prefixes and the ``_<n>`` dedup
+    suffix that the frontend ``buildFiltersPayload`` appends when the same
+    column needs both include + exclude buckets. This MUST stay in lockstep
+    with the key handling in :func:`build_where_clause` (which calls this) and
+    with the analyst IP-filter lock in ``backend.utils.remote_access`` — both
+    compare the normalized key against a forbidden-column set, so any drift
+    would open a bypass.
+
+    The frontend ``filterStore.addFilter`` guard rejects column names matching
+    ``/_\\d+$/`` at entry, so a real field whose name ends in ``_<digit>``
+    cannot reach this strip and be corrupted — any future field naming
+    convention must preserve that constraint or this regex needs to change.
+    """
+    col = filter_key
+    for prefix in ("xfilter_", "filter_"):
+        if col.startswith(prefix):
+            col = col[len(prefix) :]
+            break
+    return re.sub(r"_\d+$", "", col)
+
+
 def _get_utc_date_str(iso_str: str) -> str:
     d = parse_iso_utc(iso_str)
     return d.strftime("%Y-%m-%d") if d else str(iso_str)[:10]
@@ -96,19 +120,7 @@ def build_where_clause(
                 conditions.append(f"timestamp_hour <= {_add_param(end_hour)}")
 
     for filter_key, spec in filters.items():
-        # Strip filter_ / xfilter_ prefixes and the `_<n>` dedup suffix that
-        # frontend buildFiltersPayload appends when the same column needs
-        # both include + exclude buckets. The frontend filterStore.addFilter
-        # guard rejects column names matching /_\d+$/ at entry, so a real
-        # field whose name ends in `_<digit>` cannot reach this strip and
-        # be corrupted — any future field naming convention must preserve
-        # that constraint or this regex needs to change.
-        col = filter_key
-        for prefix in ("xfilter_", "filter_"):
-            if col.startswith(prefix):
-                col = col[len(prefix) :]
-                break
-        col = re.sub(r"_\d+$", "", col)
+        col = normalize_filter_key(filter_key)
 
         clean_col = _SAFE_COL_RE.sub("", col)  # strip anything non-word
         is_signals_individual = col == "waf_sig_ind"

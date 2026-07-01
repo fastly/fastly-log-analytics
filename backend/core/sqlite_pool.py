@@ -83,6 +83,7 @@ import sqlite3
 import threading
 import weakref
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,34 @@ SMALL_CACHE_PRAGMAS: tuple[str, ...] = (
     "PRAGMA synchronous=NORMAL",
     "PRAGMA cache_size=-16000",  # 16MB
 )
+
+
+def open_small_cache_db(
+    path: str | Path,
+    *,
+    ddl: str,
+    check_same_thread: bool = True,
+    timeout: float = 10.0,
+) -> sqlite3.Connection:
+    """Open a raw (non-pooled) SQLite connection for one of the small
+    singleton caches (rdns_cache, ngwaf_bot_cache), applying
+    :data:`SMALL_CACHE_PRAGMAS` and running ``ddl``.
+
+    Creates the parent directory if needed, then connects, applies the WAL
+    preamble in order, and runs ``ddl`` via ``executescript`` so both the
+    multi-statement (ngwaf) and single-statement (rdns) schemas work. This is
+    the connect+mkdir+pragma-loop+DDL boilerplate the two cache modules
+    previously inlined; the per-caller ``check_same_thread`` keyword is the
+    only difference between them and is preserved here.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(p), timeout=timeout, check_same_thread=check_same_thread)
+    for pragma in SMALL_CACHE_PRAGMAS:
+        con.execute(pragma)
+    con.executescript(ddl)
+    con.commit()
+    return con
 
 
 def remove_sqlite_db_files(path: str, *, name: str = "sqlite_pool") -> None:

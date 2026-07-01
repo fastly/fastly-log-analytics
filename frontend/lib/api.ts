@@ -3,6 +3,7 @@ import type { paths } from "@/types/api.generated";
 import { useAdminTokenStore } from "@/stores/adminTokenStore";
 import { useDebugStore } from "@/stores/debugStore";
 import { useServiceStore } from "@/stores/serviceStore";
+import { useSessionRoleStore } from "@/stores/sessionRoleStore";
 import { showReadOnlyToast, showBusyToast, showToast } from "@/lib/toast";
 import { isUserActive } from "@/lib/userActivity";
 
@@ -90,6 +91,20 @@ export function adminFetch(
       headers.set("X-Admin-Token", token)
     }
   } catch { /* SSR pre-hydration — fall through without the header */ }
+  // Service-scoped admin endpoints resolve the service from the x-service-id
+  // header (same as the openapi-fetch `client` middleware below). adminFetch
+  // historically only stamped the admin token, so service-scoped admin calls
+  // (log-accounting, slow-queries/count) silently resolved to the backend's
+  // DEFAULT service — which is why the ingest-gap card never changed when you
+  // switched services. Mirror the client middleware and stamp the active
+  // service. Global admin endpoints (live-query registry, host metrics) ignore
+  // it; path-scoped /api/services/{id}/* calls already carry the id.
+  try {
+    const sid = useServiceStore.getState().activeServiceId
+    if (sid && !headers.has("x-service-id")) {
+      headers.set("x-service-id", sid)
+    }
+  } catch { /* SSR pre-hydration — fall through without the header */ }
   return fetch(input, { ...init, headers })
 }
 
@@ -162,6 +177,18 @@ function redirectToShareLoginIfSessionDead(): void {
   const path = window.location.pathname;
   // Already on (or transitioning to) the auth screen — don't loop.
   if (path.startsWith("/share-login")) return;
+  // /share-login is the ANALYST recovery flow. An admin (loopback / SSH
+  // tunnel) has no analyst credentials and can't use it — bouncing them
+  // there on an admin-only 401 (e.g. a provision call missing its Fastly
+  // token) ejects the operator mid-task to a useless sign-in screen. Only
+  // remote analysts get redirected; for admins the 401 surfaces as a normal
+  // error instead. is_remote_analyst is mirrored from bootstrap and stays
+  // true for an analyst's whole session, so genuine mid-session expiry still
+  // redirects. (Defaults false before bootstrap resolves — safe: an
+  // anonymous remote visitor's needs_login redirect is handled in AppLayout.)
+  try {
+    if (!useSessionRoleStore.getState().isRemoteAnalyst) return;
+  } catch { /* store unavailable (SSR/test) — fall through to legacy behavior */ }
   // Preserve the path + query so share-login can bounce them back.
   const returnTo = `${window.location.pathname}${window.location.search}`;
   const target = `/share-login?return=${encodeURIComponent(returnTo)}`;

@@ -32,6 +32,14 @@ vi.mock('@/hooks/useLogFieldsCatalog', () => ({
   useLogFieldsCatalog: () => useLogFieldsCatalogMock(),
 }))
 
+// useMaskIps reads the bootstrap query cache via useQueryClient; mock it so
+// these tests stay free of a QueryClientProvider. Default off; the masking
+// tests re-program it.
+const useMaskIpsMock = vi.fn(() => false)
+vi.mock('@/hooks/useMaskIps', () => ({
+  useMaskIps: () => useMaskIpsMock(),
+}))
+
 import { TopTenTable } from '@/components/Dashboard/TopTenTable'
 
 const SAMPLE_CATALOG = {
@@ -49,6 +57,7 @@ describe('TopTenTable', () => {
   beforeEach(() => {
     useLogFieldsCatalogMock.mockReset()
     useLogFieldsCatalogMock.mockReturnValue({ data: undefined })
+    useMaskIpsMock.mockReturnValue(false)
   })
 
   it('renders the bare "No data available" empty state when no field is supplied', () => {
@@ -131,6 +140,41 @@ describe('TopTenTable', () => {
     expect(alphaRow.tagName).toBe('BUTTON')
     await user.click(alphaRow)
     expect(onRowClick).toHaveBeenCalledWith('status', 'a')
+  })
+
+  it('renders the `ip` card rows as non-interactive (no drill-down) when masking', () => {
+    useMaskIpsMock.mockReturnValue(true)
+    const onRowClick = vi.fn()
+    render(
+      <TopTenTable
+        title="Top IPs"
+        field="ip"
+        data={{ total: 2, top: [{ value: '73.217.41.xxx', count: 9 }] }}
+        onRowClick={onRowClick}
+      />,
+    )
+    // Value still renders …
+    expect(screen.getByText('73.217.41.xxx')).toBeInTheDocument()
+    // … but the row isn't a filter button, and the field-search dialog is gone.
+    expect(screen.queryByRole('button', { name: /filter to/i })).toBeNull()
+    expect(screen.queryByTestId('field-search-dialog')).toBeNull()
+  })
+
+  it('keeps the `oip` card clickable when masking (origin IP is not PII)', () => {
+    useMaskIpsMock.mockReturnValue(true)
+    const onRowClick = vi.fn()
+    render(
+      <TopTenTable
+        title="Top Origin IPs"
+        field="oip"
+        data={{ total: 1, top: [{ value: '151.101.1.51', count: 9 }] }}
+        onRowClick={onRowClick}
+      />,
+    )
+    const row = screen.getByRole('button', { name: /filter to 151.101.1.51/i })
+    fireEvent.click(row)
+    expect(onRowClick).toHaveBeenCalledWith('oip', '151.101.1.51')
+    expect(screen.getByTestId('field-search-dialog')).toBeInTheDocument()
   })
 
   it('activates a row via the Enter key (keyboard reachability)', async () => {

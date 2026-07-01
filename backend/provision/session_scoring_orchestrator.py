@@ -308,11 +308,63 @@ def shipped_scorer_identity(logging_service_id: str) -> dict[str, str | None]:
     }
 
 
+def _live_package_files_hash(scoring_service_id: str, version: int, token: str) -> str:
+    """The edge's OWN integrity hash for a Compute version's package
+    (``files_hash``, falling back to the deprecated ``hashsum``). Empty string
+    when unavailable. Lets a redeploy detect a package that changed at the edge
+    out from under us (e.g. a manual deploy) without trusting only the cfg
+    stamp — we compare the live value against the one we stamped at our last
+    deploy. Fastly's hash format is undocumented/deprecated and is NOT the
+    sha256 of the tarball bytes, so we never compute it locally; we only ever
+    compare edge-stamped value to edge-live value."""
+    try:
+        pkg = fastly("GET", f"/service/{scoring_service_id}/version/{version}/package", token=token) or {}
+    except RuntimeError:
+        return ""
+    meta = (pkg.get("metadata") if isinstance(pkg, dict) else None) or {}
+    return meta.get("files_hash") or meta.get("hashsum") or ""
+
+
+def _scoring_vcl_matches_edge(
+    logging_service_id: str,
+    version: int,
+    vcl_snippets: dict[str, str],
+    scoring_domain: str,
+    token: str,
+) -> bool:
+    """True when the 6 scoring snippets AND the ``session_scorer`` backend LIVE
+    on ``version`` already match byte-for-byte what we would deploy now — i.e. a
+    redeploy would be a pure no-op version bump. Reads the ACTUAL edge state
+    (snippet bodies + backend override_host) instead of trusting the cfg drift
+    stamp, so a manual edge change is treated as drift. Any read error or
+    mismatch returns False (deploy, don't skip)."""
+    try:
+        live = fastly("GET", f"/service/{logging_service_id}/version/{version}/snippet", token=token) or []
+    except RuntimeError:
+        return False
+    live_by_name = {s.get("name"): (s.get("content") or "") for s in live if isinstance(s, dict)}
+    for name in scoring_snippet_names():
+        if live_by_name.get(name) != vcl_snippets.get(name):
+            return False
+    # The scoring backend must exist and still point at the current scorer.
+    try:
+        encoded = urllib.parse.quote(SCORING_BACKEND_API_NAME, safe="")
+        backend = fastly("GET", f"/service/{logging_service_id}/version/{version}/backend/{encoded}", token=token)
+    except RuntimeError:
+        return False
+    if not backend or backend.get("override_host") != scoring_domain:
+        return False
+    return True
+
+
 def _deploy_wasm_package(
     scoring_service_id: str,
     matrix_store_id: str,
     token: str,
     status_cb=None,
+    *,
+    prior_package_sha: str = "",
+    prior_files_hash: str = "",
 ) -> dict[str, Any]:
     """Deploy the prebuilt, matrix-less Wasm package to the scoring service
     via the Fastly API — no Rust/Fastly-CLI toolchain required (the backend
@@ -325,8 +377,6 @@ def _deploy_wasm_package(
     ``_write_matrix_to_kv``; this package reads it at runtime.
     """
     info("Deploying prebuilt Wasm package to the scoring Compute service")
-    if status_cb:
-        status_cb("⏳ [Compute] Uploading scorer Wasm package (no build)…")
 
     if not _SCORER_PACKAGE.exists():
         raise RuntimeError(
@@ -334,6 +384,27 @@ def _deploy_wasm_package(
             "run `make scorer-package` (or scripts/scoring/deploy_wasm.sh build) "
             "off-VM and commit compute/scorer/pkg/session-scorer.tar.gz"
         )
+
+    # Smart-redeploy skip: if the committed build is unchanged since our last
+    # deploy AND the live edge package still matches what we last stamped from
+    # the edge, there is nothing to upload — reuse the active version instead of
+    # bumping a no-op Compute version. ``get_active_version`` is None for a fresh
+    # v1-draft service, so a first enable always deploys.
+    # Pass _SCORER_PACKAGE explicitly (not _package_sha's def-time default) so
+    # this reads the same module global the upload below uses — keeps the skip
+    # sha equal to the sha we'd stamp, and honours a patched package path.
+    committed_sha = _package_sha(_SCORER_PACKAGE)
+    active = get_active_version(scoring_service_id, token)
+    if active is not None and committed_sha and committed_sha == prior_package_sha:
+        live_files_hash = _live_package_files_hash(scoring_service_id, active, token)
+        if live_files_hash and live_files_hash == prior_files_hash:
+            ok(f"Scorer package unchanged at the edge (v{active}) — skipping Wasm upload")
+            if status_cb:
+                status_cb(f"✅ [Compute] Package already current (v{active}) — skipped upload")
+            return {"version": active, "sha": committed_sha, "files_hash": live_files_hash, "skipped": True}
+
+    if status_cb:
+        status_cb("⏳ [Compute] Uploading scorer Wasm package (no build)…")
 
     # Clone the highest existing version → editable draft (uniform for both a
     # fresh v1-draft service and an existing active one; the clone inherits
@@ -381,13 +452,19 @@ def _deploy_wasm_package(
     ok(f"Deployed scorer package + activated v{new_ver}")
     if status_cb:
         status_cb(f"✅ [Compute] Activated scorer service v{new_ver}")
-    # Return the new Compute version + the sha of the bytes we just uploaded.
-    # The sha becomes enable_scoring's deployed_package_sha drift stamp (the
-    # /scoring/status check compares it to the currently-committed package to
-    # tell the operator when the edge is stale); the version is surfaced in the
-    # two-phase SSE log so the operator can see exactly which Compute version
-    # went live alongside the logging VCL version.
-    return {"version": new_ver, "sha": hashlib.sha256(pkg_bytes).hexdigest()}
+    # Return the new Compute version + the sha of the bytes we just uploaded +
+    # the edge's own files_hash for the freshly-activated version. The sha is
+    # enable_scoring's deployed_package_sha drift stamp (the /scoring/status
+    # check compares it to the currently-committed package); files_hash is
+    # stamped so a later redeploy can ask the edge "did the live package change
+    # since we deployed?" and skip a no-op upload. The version is surfaced in the
+    # two-phase SSE log so the operator sees which Compute version went live.
+    return {
+        "version": new_ver,
+        "sha": hashlib.sha256(pkg_bytes).hexdigest(),
+        "files_hash": _live_package_files_hash(scoring_service_id, new_ver, token),
+        "skipped": False,
+    }
 
 
 def _write_matrix_to_kv(
@@ -589,6 +666,73 @@ def _remove_scoring_custom_fields(cfg: dict) -> dict:
     return cfg
 
 
+def _publish_scoring_fos_side_effects(logging_service_id: str) -> None:
+    """Best-effort republish of the custom_fields list (admin_state.json) + the
+    trained matrix to FOS so read-only analyst hosts converge on the next
+    import tick. Never fatal — both legs swallow their own errors. Called on
+    both the deploy and the redeploy-no-op paths so a skipped redeploy still
+    keeps FOS consistent."""
+    try:
+        from backend.state_sync import export_admin_state
+
+        export_admin_state(logging_service_id)
+        ok("Published custom_fields to FOS admin_state.json")
+    except Exception as exc:
+        warn(f"Could not export admin_state to FOS (non-fatal): {exc}")
+
+    try:
+        from backend.state_sync import publish_matrix_to_fos
+
+        tenant_matrix_path = _tenant_matrix_path(logging_service_id)
+        if tenant_matrix_path.exists():
+            import json as _json
+
+            with tenant_matrix_path.open() as f:
+                matrix = _json.load(f)
+            publish_matrix_to_fos(logging_service_id, matrix)
+            ok(f"Published scoring matrix to FOS (version={matrix.get('version', '?')})")
+    except Exception as exc:
+        warn(f"Could not publish scoring matrix to FOS (non-fatal): {exc}")
+
+
+def _delete_scoring_matrix_from_fos(logging_service_id: str) -> None:
+    """Inverse of publish_matrix_to_fos: remove the scoring-matrix artifacts a
+    disable would otherwise leave behind — the FOS-published current matrix +
+    its version history, and the local tenant matrix file. Best-effort; never
+    fatal. Without this a future re-enable silently re-adopts the stale matrix
+    via fetch_matrix_from_fos / _resolve_tenant_matrix_for_deploy."""
+    # Local tenant matrix file (compute/scorer/matrix_{sid}.json).
+    try:
+        _tenant_matrix_path(logging_service_id).unlink(missing_ok=True)
+    except OSError as exc:
+        warn(f"Could not remove local tenant matrix file (non-fatal): {exc}")
+
+    # FOS objects: the current matrix + everything under the history prefix.
+    try:
+        from backend.core.duckdb import _get_fos_client, get_source_for_service
+        from backend.core.ingest import _delete_objects_robust
+        from backend.state_sync import get_scoring_matrix_key
+
+        source = get_source_for_service(logging_service_id)
+        if not source or source.get("access_level") == "read_only":
+            return
+        s3 = _get_fos_client(source)
+        bucket = source["bucket"]
+        current_key = get_scoring_matrix_key(source)  # {prefix}/iceberg/meta/scoring_matrix.json
+        keys = [current_key]
+        history_prefix = f"{current_key.rsplit('/', 1)[0]}/scoring_matrix_history/"
+        try:
+            paginator = s3.get_paginator("list_objects_v2", caller_hint="scoring_matrix_cleanup")
+            for page in paginator.paginate(Bucket=bucket, Prefix=history_prefix):
+                keys.extend(obj["Key"] for obj in page.get("Contents", []))
+        except Exception as exc:  # noqa: BLE001 — history listing is best-effort
+            warn(f"Could not list scoring matrix history for cleanup (non-fatal): {exc}")
+        deleted = _delete_objects_robust(s3, bucket, keys)
+        ok(f"Removed {deleted} scoring matrix object(s) from FOS")
+    except Exception as exc:  # noqa: BLE001 — FOS cleanup must never break disable
+        warn(f"Could not delete scoring matrix from FOS (non-fatal): {exc}")
+
+
 def enable_scoring(
     logging_service_id: str,
     token: str,
@@ -686,8 +830,18 @@ def enable_scoring(
     matrix_store_id = (
         scoring_meta.get("scoring_matrix_store_id") or (cfg.get("scoring") or {}).get("scoring_matrix_store_id") or ""
     )
-    deployed = _deploy_wasm_package(scoring_service_id, matrix_store_id, token, status_cb=status_cb)
+    deployed = _deploy_wasm_package(
+        scoring_service_id,
+        matrix_store_id,
+        token,
+        status_cb=status_cb,
+        # Smart-redeploy: skip the upload when the committed build AND the live
+        # edge package are both unchanged since our last deploy.
+        prior_package_sha=prior_scoring.get("deployed_package_sha", ""),
+        prior_files_hash=prior_scoring.get("deployed_package_files_hash", ""),
+    )
     deployed_package_sha = deployed["sha"]
+    deployed_files_hash = deployed.get("files_hash", "")
     compute_ver = deployed["version"]
     _write_matrix_to_kv(matrix_store_id, logging_service_id, token, status_cb=status_cb)
 
@@ -716,6 +870,10 @@ def enable_scoring(
         # recomputes these from the committed package + VCL generator and flags
         # drift when they differ, so the operator knows a redeploy is needed.
         "deployed_package_sha": deployed_package_sha,
+        # The edge's own integrity hash for the live Compute package, stamped so
+        # a later redeploy can ask the edge "did the live package change since
+        # we deployed?" (manual-deploy drift) and skip a no-op upload.
+        "deployed_package_files_hash": deployed_files_hash,
         "deployed_vcl_sha": scorer_vcl_fingerprint(logging_service_id),
         # First-enable defaults: persist the actual values so the admin UI
         # shows what's actually in use (no empty-as-sentinel cleverness)
@@ -735,11 +893,35 @@ def enable_scoring(
     n_scoring = len(_SCORING_FIELD_NAMES)
     ok(f"Stashed scoring metadata + {n_scoring} custom_fields into service config")
 
-    # ── Stage 4: clone the LOGGING service's active VCL version. ────────────
+    # ── Stage 4: decide whether the logging VCL needs a redeploy. ───────────
     active_ver = get_active_version(logging_service_id, token)
     if active_ver is None:
         raise RuntimeError(f"Logging service {logging_service_id} has no active version")
     info(f"Logging service active version: {active_ver}")
+
+    # Generate the scoring VCL we WOULD deploy now (real request_secret + any
+    # operator overrides). On a redeploy, compare it against what's actually
+    # live at the edge — if every scoring snippet + the backend already match,
+    # skip the whole clone/activate so a no-op redeploy never bumps a version.
+    scoring_cfg = cfg.get("scoring") or {}
+    exclude_url_regex = scoring_cfg.get("exclude_url_regex")
+    enforce_status_code = scoring_cfg.get("enforce_status_code")
+    vcl_snippets = generate_scoring_vcl(
+        logging_service_id,
+        request_secret,
+        exclude_url_regex=exclude_url_regex,
+        enforce_status_code=enforce_status_code,
+    )
+    if _scoring_vcl_matches_edge(logging_service_id, active_ver, vcl_snippets, scoring_domain, token):
+        ok(f"Logging VCL already current at the edge (v{active_ver}) — skipping redeploy")
+        if status_cb:
+            status_cb(f"✅ [Logging] VCL already current (v{active_ver}) — no version bump needed")
+        scoring_meta["logging_service_active_version"] = active_ver
+        _publish_scoring_fos_side_effects(logging_service_id)
+        if status_cb:
+            status_cb(f"✅ Done — Compute scorer v{compute_ver} + logging VCL v{active_ver} already current.")
+        return scoring_meta
+
     if status_cb:
         status_cb("▸ Phase 2/2 — Logging service (VCL + log fields)")
         status_cb(f"⏳ [Logging] Cloning active version {active_ver}…")
@@ -763,21 +945,12 @@ def enable_scoring(
         _add_scoring_backend(logging_service_id, new_ver, scoring_domain, token)
 
         # ── Stage 6: install the six scoring VCL snippets. ──────────────────
+        # vcl_snippets was generated in Stage 4 (carrying the operator's
+        # exclusion-regex / enforce-status-code overrides) and reused here so
+        # the edge-match skip check and the actual install can never diverge.
         info("Installing 6 scoring VCL snippets (recv / pass / fetch / deliver / miss / enforce)")
         if status_cb:
             status_cb("⏳ [Logging] Installing scoring VCL snippets…")
-        # Pick up the operator's overrides (if any) so a re-enable carries
-        # the customised exclusion regex AND enforce-status-code forward.
-        # None / "" / out-of-range → defaults.
-        scoring_cfg = cfg.get("scoring") or {}
-        exclude_url_regex = scoring_cfg.get("exclude_url_regex")
-        enforce_status_code = scoring_cfg.get("enforce_status_code")
-        vcl_snippets = generate_scoring_vcl(
-            logging_service_id,
-            request_secret,
-            exclude_url_regex=exclude_url_regex,
-            enforce_status_code=enforce_status_code,
-        )
         for snip_name, vcl_type, prio in (
             (SCORING_RECV_NAME, "recv", SCORING_SNIPPET_PRIORITY),
             (SCORING_PASS_NAME, "pass", SCORING_SNIPPET_PRIORITY),
@@ -820,14 +993,13 @@ def enable_scoring(
         # the capture snippets on the draft here via the shared helper
         # (which also installs the Origin Error snippet that an earlier
         # inline copy of this logic was silently missing).
-        from backend.provision.fastly_api import install_capture_snippets, resolve_shield_secret
+        from backend.provision.fastly_api import install_capture_snippets
 
         install_capture_snippets(
             logging_service_id,
             new_ver,
             cfg.get("log_fields"),
             token,
-            cluster_secret=resolve_shield_secret(cfg),
             # Scoring is being enabled here, so the capture must be restart-tolerant
             # (the scorer restarts the request; gating on req.restarts == 0 would
             # leave scored rows with no url/ua/geo and edge != true → Fire Rate 0%).
@@ -912,48 +1084,9 @@ def enable_scoring(
             status_cb(f"✅ Done — Compute scorer v{compute_ver} + logging VCL v{new_ver} are now live.")
 
         scoring_meta["logging_service_active_version"] = new_ver
-
-        # Publish the new custom_fields list to FOS's admin_state.json so
-        # read_only analyst hosts (and the prod VM backend) pick them up
-        # on their next import_admin_state tick. Without this, a stale
-        # admin_state.json from before scoring was enabled would silently
-        # strip our 6 custom_fields on every metadata_sync — exactly the
-        # 2026-06-02 incident that motivated the import_admin_state merge
-        # fix in backend/state_sync.py.
-        try:
-            from backend.state_sync import export_admin_state
-
-            export_admin_state(logging_service_id)
-            ok("Published custom_fields to FOS admin_state.json")
-        except Exception as exc:
-            warn(f"Could not export admin_state to FOS (non-fatal): {exc}")
-
-        # Also publish the trained scoring matrix to FOS so analyst hosts
-        # (and any fresh backend container) see the exact same matrix
-        # that's currently embedded in the deployed Wasm. Without this,
-        # the /scoring/evaluation endpoint falls back to the default-empty
-        # matrix on read_only hosts and reports AUC ≈ 0.5 even though the
-        # live scorer is using a real trained one.
-        #
-        # Reads from the tenant-scoped path (audit finding #005); the
-        # legacy shared ``matrix.json`` would have either been empty
-        # (post-#005 retrains all write tenant-scoped) or held another
-        # tenant's matrix (pre-#005 leftovers from a prior retrain on
-        # this host).
-        try:
-            from backend.state_sync import publish_matrix_to_fos
-
-            tenant_matrix_path = _tenant_matrix_path(logging_service_id)
-            if tenant_matrix_path.exists():
-                import json as _json
-
-                with tenant_matrix_path.open() as f:
-                    matrix = _json.load(f)
-                publish_matrix_to_fos(logging_service_id, matrix)
-                ok(f"Published scoring matrix to FOS (version={matrix.get('version', '?')})")
-        except Exception as exc:
-            warn(f"Could not publish scoring matrix to FOS (non-fatal): {exc}")
-
+        # Republish custom_fields (admin_state.json) + the trained matrix to FOS
+        # so read_only analyst hosts converge on their next import tick.
+        _publish_scoring_fos_side_effects(logging_service_id)
         return scoring_meta
 
     except Exception as exc:
@@ -1049,9 +1182,9 @@ def disable_scoring(
         svcconfig.save_config(logging_service_id, cfg)
 
         from backend.core.fastly.service import list_s3_endpoints
-        from backend.provision.fastly_api import generate_capture_vcl, load_log_format, resolve_shield_secret
+        from backend.provision.fastly_api import generate_capture_vcl, load_log_format
 
-        capture = generate_capture_vcl(cfg.get("log_fields"), cluster_secret=resolve_shield_secret(cfg))
+        capture = generate_capture_vcl(cfg.get("log_fields"))
         # Re-install (or remove if no fields left) the capture VCL.
         ensure_vcl_snippet(
             "Fastly Log Analysis Capture",
@@ -1062,6 +1195,18 @@ def disable_scoring(
             new_ver,
             token,
         )
+        # Re-install the low-priority Reset Client IP snippet alongside it so the
+        # edge-only Fastly-Client-IP reset stays in place after scoring teardown.
+        if "recv_reset" in capture:
+            ensure_vcl_snippet(
+                "Fastly Log Analysis Reset Client IP",
+                "recv",
+                capture["recv_reset"],
+                -100,
+                logging_service_id,
+                new_ver,
+                token,
+            )
 
         endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
         existing_endpoints = list_s3_endpoints(logging_service_id, new_ver, token)
@@ -1102,7 +1247,7 @@ def disable_scoring(
         raise
 
     # ── Stage 5: tear down the Compute service + stores. ───────────────────
-    delete_scoring_service(
+    failed_stores = delete_scoring_service(
         scoring_service_id,
         scoring_keys_store_id=scoring_keys_store_id,
         scoring_config_store_id=scoring_config_store_id,
@@ -1110,6 +1255,11 @@ def disable_scoring(
         token=token,
         status_cb=status_cb,
     )
+
+    # ── Stage 5.5: remove the FOS-published matrix + local tenant file. ─────
+    # The config still exists here (unlike the full-teardown path), so the FOS
+    # credentials resolve normally. Best-effort — never aborts the disable.
+    _delete_scoring_matrix_from_fos(logging_service_id)
 
     # ── Stage 6: clear the scoring block from config. ──────────────────────
     # DEFENSE-IN-DEPTH: re-load cfg right before the final save. The
@@ -1134,9 +1284,104 @@ def disable_scoring(
     except Exception as exc:
         warn(f"Could not export admin_state to FOS after disable (non-fatal): {exc}")
 
+    # Surface any store that genuinely failed to delete (its id is now gone from
+    # cfg, so it can't be auto-retried — the operator must hand-clean it).
+    for label, store_id in failed_stores:
+        warn(f"Scoring {label} store {store_id} was NOT deleted — remove it manually in Fastly.")
+        if status_cb:
+            status_cb(f"⚠️ Scoring {label} store {store_id} not deleted — remove it manually.")
+
     if status_cb:
         status_cb("✅ Session scoring disabled.")
     ok("Session scoring disabled")
+
+
+def teardown_scoring_resources(
+    logging_service_id: str,
+    scoring_meta: dict,
+    token: str,
+    *,
+    status_cb=None,
+) -> list[tuple[str, str]]:
+    """Tear down scoring for a service that is being FULLY DESTROYED.
+
+    Unlike ``disable_scoring`` this NEVER touches the service config (the
+    teardown path deletes ``configs/{sid}.json`` before this runs, so there's
+    nothing to load/pop/save) and never re-exports admin_state (the whole
+    service is going away). It only does the two irreducible Fastly-side jobs:
+
+      1. Strip the scoring VCL (the 6 scoring snippets + the ``session_scorer``
+         backend) from the customer's still-live logging service on a fresh
+         cloned+activated version, so no dangling backend/snippets reference a
+         deleted Compute service. Skipped cleanly if the logging service has no
+         active version (already gone).
+      2. Delete the owned resources via ``delete_scoring_service`` (Compute
+         service first, then both ConfigStores, then the matrix KV key+store) —
+         AFTER the scoring-stripped version is active, so the live edge never
+         references a backend whose host is already deleted.
+
+    ``scoring_meta`` is the ``cfg['scoring']`` block carried in the teardown
+    ``state`` dict. Idempotent / 404-tolerant throughout. Returns the list of
+    ``(label, store_id)`` pairs that genuinely failed to delete (non-404) so the
+    caller can surface them for manual cleanup; empty on full success.
+    """
+    info(f"Tearing down session scoring for {_c(BOLD, logging_service_id)}")
+    if status_cb:
+        status_cb(f"⏳ Tearing down session scoring for {logging_service_id}...")
+
+    # ── Stage 1: strip the scoring VCL from the still-live logging service. ──
+    # Best-effort: a VCL-strip failure must not block the resource deletion
+    # below (the operator cares most about not paying for an orphaned Compute
+    # service). get_active_version returns None if the service is already gone.
+    try:
+        active_ver = get_active_version(logging_service_id, token)
+        if active_ver is None:
+            if status_cb:
+                status_cb("Logging service has no active version — skipping VCL strip.")
+        else:
+            clone = fastly(
+                "PUT",
+                f"/service/{logging_service_id}/version/{active_ver}/clone",
+                token=token,
+            )
+            new_ver = int(clone["number"])
+            ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+            fastly(
+                "PUT",
+                f"/service/{logging_service_id}/version/{new_ver}",
+                {"comment": f"Teardown: strip session scoring {ts}"},
+                token=token,
+            )
+            _remove_scoring_snippets(logging_service_id, new_ver, token)
+            _remove_scoring_backend(logging_service_id, new_ver, token)
+            result = fastly(
+                "GET",
+                f"/service/{logging_service_id}/version/{new_ver}/validate",
+                token=token,
+            )
+            if result.get("status") != "ok":
+                raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
+            fastly(
+                "PUT",
+                f"/service/{logging_service_id}/version/{new_ver}/activate",
+                token=token,
+            )
+            ok(f"Logging service version {new_ver} active (scoring VCL stripped)")
+    except Exception as exc:  # noqa: BLE001 — best-effort; resource delete still must run
+        warn(f"Could not strip scoring VCL during teardown (continuing to resource delete): {exc}")
+        if status_cb:
+            status_cb(f"⚠️ Could not strip scoring VCL (continuing): {exc}")
+
+    # ── Stage 2: delete the owned Compute service + stores. ─────────────────
+    failed = delete_scoring_service(
+        scoring_meta.get("scoring_service_id", ""),
+        scoring_keys_store_id=scoring_meta.get("scoring_keys_store_id", ""),
+        scoring_config_store_id=scoring_meta.get("scoring_config_store_id", ""),
+        scoring_matrix_store_id=scoring_meta.get("scoring_matrix_store_id", ""),
+        token=token,
+        status_cb=status_cb,
+    )
+    return failed or []
 
 
 def _clone_swap_snippet(
@@ -1227,13 +1472,6 @@ def update_recv_exclusion_regex(
             f"Session scoring is not enabled for {logging_service_id}; "
             "run enable_scoring first before customising the recv exclusion regex."
         )
-    request_secret = scoring.get("request_secret")
-    if not request_secret:
-        raise RuntimeError(
-            "Cannot re-publish recv snippet without request_secret in cfg; "
-            "the snippet bodies for peer snippets depend on it. Re-run enable_scoring."
-        )
-
     # Persist the override first — that way even if the Fastly activation
     # below fails, a future enable_scoring run picks up the new value.
     # None is the canonical "use default" representation so the JSON cfg
@@ -1252,7 +1490,7 @@ def update_recv_exclusion_regex(
 
     effective_regex = resolve_exclude_url_regex(cleaned or None)
     is_default = effective_regex == DEFAULT_ASSET_EXT_REGEX
-    new_recv_body = recv_snippet(logging_service_id, request_secret, exclude_url_regex=cleaned or None)
+    new_recv_body = recv_snippet(logging_service_id, exclude_url_regex=cleaned or None)
 
     # Clone → swap → activate.
     active_ver = get_active_version(logging_service_id, token)
@@ -1347,16 +1585,7 @@ def update_enforce_status_code(
     cfg["scoring"] = scoring
     svcconfig.save_config(logging_service_id, cfg)
 
-    # 034: enforce_snippet now bakes the request_secret into its shield-auth
-    # boundary check. Re-publishing without the secret would emit invalid
-    # VCL — fail loudly here rather than letting the activation fail later.
-    request_secret = scoring.get("request_secret")
-    if not request_secret:
-        raise RuntimeError(
-            "Cannot re-publish enforce snippet without request_secret in cfg; "
-            "run enable_scoring first or restore scoring.request_secret."
-        )
-    new_enforce_body = enforce_snippet(request_secret, effective_code)
+    new_enforce_body = enforce_snippet(effective_code)
 
     # Clone → swap → activate.
     active_ver = get_active_version(logging_service_id, token)

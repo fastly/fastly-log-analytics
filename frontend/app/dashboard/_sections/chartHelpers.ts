@@ -1,6 +1,11 @@
 import { formatDate } from '@/lib/date'
 import { INTERVAL_SECONDS } from '@/lib/constants'
-import { makeTimeXAxis, TIME_HOVER_LAYOUT } from '@/lib/chart-helpers'
+import { makeTimeXAxis, TIME_HOVER_LAYOUT, densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
+
+// densifyBarSeries now lives in lib/chart-helpers (shared with the scoring
+// charts). Re-exported so existing importers (and chartHelpers.test.ts) keep
+// resolving it from here.
+export { densifyBarSeries } from '@/lib/chart-helpers'
 
 export interface BuildTrafficDataParams {
   aggregates: any
@@ -54,11 +59,21 @@ export function buildTrafficData({
   // Pydantic serializes optional fields as null, so null and undefined both mean "no category".
   const hasCategories = time_series.some((d: any) => d.category != null)
 
+  // For bar metrics, zero-fill empty buckets so a sparse (filtered) series
+  // renders full-width bars instead of Plotly hairlines. Scatter series
+  // (latency/throughput/hit_rate trend) are left untouched — a missing bucket
+  // there is undefined, not zero. barSeries === time_series when !isBar.
+  const actualInterval = aggregates?.interval || effectiveInterval
+  const intervalSeconds = INTERVAL_SECONDS[actualInterval as keyof typeof INTERVAL_SECONDS]
+  const barSeries: BarSeriesPoint[] = isBar
+    ? densifyBarSeries(time_series, intervalSeconds, hasCategories)
+    : time_series
+
   let traces: any[] = []
 
   if (hasCategories) {
     const catMap: Record<string, { x: string[], y: number[] }> = {}
-    time_series.forEach((d: any) => {
+    barSeries.forEach((d) => {
       const cat = d.category || 'Other'
       if (!catMap[cat]) catMap[cat] = { x: [], y: [] }
       // Use a standard format that Plotly recognizes as a date but is in the target timezone
@@ -83,8 +98,8 @@ export function buildTrafficData({
       marker: { color: colorMap[cat] || `hsl(${(i * 50) % 360}, 70%, 50%)` }
     }))
   } else {
-    const xValues = time_series.map((d: any) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
-    const yValues = time_series.map((d: any) => d.value)
+    const xValues = barSeries.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
+    const yValues = barSeries.map((d) => d.value)
 
     traces = [{
       x: xValues,

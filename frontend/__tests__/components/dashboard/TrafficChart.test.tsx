@@ -32,6 +32,21 @@ vi.mock('@/components/PlotlyChart/PlotlyChart', () => ({
   PlotlyChart: () => <div data-testid="plotly-chart" />,
 }))
 
+// useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
+// which would need a QueryClientProvider. Mock it instead — TrafficChart's
+// contract here is "show the neutral 'No logs found for this period.' empty copy
+// when the metric's backing field IS active, and the 'Requires Group …' hint when
+// it is NOT". Default to no active fields so the not-enabled-hint test exercises
+// the hint path; tests that want the neutral path add the field to `activeFields`.
+const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
+vi.mock('@/hooks/useActiveLogFields', () => ({
+  useActiveLogFields: () => ({
+    ready: true,
+    isFieldActive: (id: string) => activeFields.has(id),
+    isGroupActive: () => false,
+  }),
+}))
+
 import { TrafficChart } from '@/app/dashboard/_sections/TrafficChart'
 import type { ReportConfiguration } from '@/hooks/useReportConfig'
 
@@ -80,7 +95,10 @@ function renderChart(overrides: Partial<React.ComponentProps<typeof TrafficChart
 }
 
 describe('TrafficChart', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    activeFields.clear()
+  })
 
   it('renders the loading skeleton when aggregates are undefined', () => {
     renderChart({ isReady: false, aggregates: undefined })
@@ -89,9 +107,29 @@ describe('TrafficChart', () => {
   })
 
   it('renders the empty state when trafficData is empty but aggregates are ready', () => {
+    // metric 'requests' has no field-gated branch → the neutral "no logs"
+    // copy shows regardless of active-field state.
     renderChart({ aggregates: { time_series: [] }, trafficData: [] })
     expect(screen.getByText('No data available')).toBeInTheDocument()
+    expect(screen.getByText('No logs found for this period.')).toBeInTheDocument()
     expect(screen.queryByTestId('timeseries-chart')).toBeNull()
+  })
+
+  it('shows the "Requires Infrastructure (Group C)" hint when ttfb is NOT active', () => {
+    // metric 'ttfb_client' depends on the `ttfb` field; with it inactive an
+    // empty result means the group is not enabled, not just "no data".
+    renderChart({ metric: 'ttfb_client', aggregates: { time_series: [] }, trafficData: [] })
+    expect(screen.getByText('No data available')).toBeInTheDocument()
+    expect(
+      screen.getByText('Requires Infrastructure (Group C) fields to be enabled in Fastly logging.'),
+    ).toBeInTheDocument()
+  })
+
+  it('shows the neutral "no logs" copy for ttfb when the ttfb field IS active', () => {
+    activeFields.add('ttfb')
+    renderChart({ metric: 'ttfb_client', aggregates: { time_series: [] }, trafficData: [] })
+    expect(screen.getByText('No logs found for this period.')).toBeInTheDocument()
+    expect(screen.queryByText(/Requires Infrastructure/)).toBeNull()
   })
 
   // Pins the fix for the "No data available" flash: when the bundle has

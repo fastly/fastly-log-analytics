@@ -5,15 +5,31 @@ import { createPortal } from 'react-dom'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useTheme } from 'next-themes'
-import { Shield } from 'lucide-react'
+import { Shield, Maximize2 } from 'lucide-react'
 import { addCountryBaseLayer, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
 import { PopLabel } from '@/components/PopLabel'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui/dialog'
 
 interface ShieldingMapProps {
   rows: any[]
   isLoading?: boolean
   edgeOnly?: boolean
+  /** Backend computed the analysis but the handler errored (M2 sentinel). */
+  errored?: boolean
   className?: string
+  /** Show an "Expand" button that opens the map full-size in a modal. The
+      modal renders a second ShieldingMap with `fillHeight` (and WITHOUT
+      `expandable`) so there's no recursive expand button. */
+  expandable?: boolean
+  /** Fill the parent's height instead of the fixed 420px card height. Used by
+      the fullscreen modal so the globe gets the whole dialog body. */
+  fillHeight?: boolean
 }
 
 interface TooltipInfo {
@@ -88,7 +104,10 @@ export function greatCirclePoints(
 }
 
 export function efficiencyColor(ratio: number | null): string {
-  if (ratio == null) return '#6366f1'
+  // A negative ratio (transit delta < 0 — possible on sparse routes or with
+  // clock skew) is "no meaningful efficiency", NOT "excellent": treat it like
+  // null/indigo rather than letting `ratio < 1.5` paint it green. (L5)
+  if (ratio == null || ratio < 0) return '#6366f1'
   if (ratio < 1.5) return '#22c55e'
   if (ratio < 3.0) return '#eab308'
   return '#ef4444'
@@ -103,6 +122,8 @@ export function lineWidth(requests: number): number {
 function ShieldingTooltip({ info }: { info: TooltipInfo }) {
   const { props, clientX, clientY } = info
   const flipLeft = clientX > window.innerWidth * 0.7
+  // MapLibre can stringify boolean feature-properties, so accept both forms.
+  const lowSample = props.low_sample === true || props.low_sample === 'true'
 
   return (
     <div
@@ -121,20 +142,23 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
         <PopLabel code={props.shield_pop} className="text-purple-500" />
       </div>
       <div className="mt-2 space-y-1">
+        {/* These percentiles are the edge→shield transit delta (E→S), NOT a
+            TCP round-trip time — label them the same way the data table does
+            so the two surfaces don't disagree. (L4) */}
         <div className="flex justify-between gap-4">
           <span className="text-[11px] text-muted-foreground">Requests</span>
           <span className="text-[11px] font-semibold tabular-nums">{Number(props.requests).toLocaleString()}</span>
         </div>
         <div className="flex justify-between gap-4">
-          <span className="text-[11px] text-muted-foreground">P50 RTT</span>
+          <span className="text-[11px] text-muted-foreground">P50 (E→S)</span>
           <span className="text-[11px] font-semibold tabular-nums">{Number(props.p50_ms).toFixed(1)}ms</span>
         </div>
         <div className="flex justify-between gap-4">
-          <span className="text-[11px] text-muted-foreground">P95 RTT</span>
+          <span className="text-[11px] text-muted-foreground">P95 (E→S)</span>
           <span className="text-[11px] font-semibold tabular-nums">{Number(props.p95_ms).toFixed(1)}ms</span>
         </div>
         <div className="flex justify-between gap-4">
-          <span className="text-[11px] text-muted-foreground">P99 RTT</span>
+          <span className="text-[11px] text-muted-foreground">P99 (E→S)</span>
           <span className="text-[11px] font-semibold tabular-nums">{Number(props.p99_ms).toFixed(1)}ms</span>
         </div>
         {props.distance_km != null && (
@@ -154,10 +178,31 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
             <span className="text-[11px] text-muted-foreground">Efficiency</span>
             <span
               className="text-[11px] font-semibold tabular-nums"
-              style={{ color: efficiencyColor(Number(props.efficiency_ratio)) }}
+              // Low-sample routes don't get an efficiency colour — the ratio is
+              // noise below the flag floor, so render it neutral. (low-sample gating)
+              style={{ color: lowSample ? '#94a3b8' : efficiencyColor(Number(props.efficiency_ratio)) }}
             >
               {Number(props.efficiency_ratio).toFixed(1)}× light speed
             </span>
+          </div>
+        )}
+        {/* anomaly_static is computed server-side (efficiency > 3× AND ≥20ms
+            absolute overhead, AND enough requests to trust the median).
+            Surface it on the map too — previously it only appeared as the red
+            edge-POP cell in the table. (L7) */}
+        {(props.anomaly_static === true || props.anomaly_static === 'true') && (
+          <div className="mt-1 flex items-center gap-1 text-[11px] font-semibold text-destructive">
+            <span aria-hidden="true">⚠</span>
+            <span>Suboptimal peering</span>
+          </div>
+        )}
+        {/* Below the anomaly-flag floor: too few requests for the percentiles
+            to mean anything. Say so instead of leaving a scary-looking ratio
+            unqualified. (low-sample gating) */}
+        {lowSample && (
+          <div className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground">
+            <span aria-hidden="true">ⓘ</span>
+            <span>Low sample (&lt;30 reqs) — not flagged</span>
           </div>
         )}
       </div>
@@ -195,7 +240,12 @@ export function buildArcFeatures(rows: any[]): GeoJSON.FeatureCollection {
         light_speed_rtt_ms: row.light_speed_rtt_ms,
         efficiency_ratio: row.efficiency_ratio,
         anomaly_static: row.anomaly_static,
-        color: efficiencyColor(row.efficiency_ratio),
+        low_sample: row.low_sample,
+        // Too few requests for the median to be trustworthy → paint a neutral
+        // grey arc instead of an efficiency colour so a quiet route can't read
+        // as a red "problem". The route stays on the map for visibility; it
+        // just isn't colour-graded or anomaly-flagged. (low-sample gating)
+        color: row.low_sample ? '#94a3b8' : efficiencyColor(row.efficiency_ratio),
         line_width: lineWidth(row.requests),
       },
     })
@@ -237,7 +287,7 @@ export function buildDotFeatures(rows: any[]): GeoJSON.FeatureCollection {
 
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] }
 
-export function ShieldingMap({ rows, isLoading, edgeOnly, className }: ShieldingMapProps) {
+export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, expandable, fillHeight }: ShieldingMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
   const isDarkRef = useRef(false)
@@ -247,6 +297,8 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
 
   const [mapReady, setMapReady] = useState(false)
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null)
+  // Fullscreen "expand" dialog — a bigger interactive globe of the same arcs.
+  const [isExpanded, setIsExpanded] = useState(false)
   // WebGL-unavailable fallback (headless / locked-down browser). MapLibre's
   // constructor throws `webglcontextcreationerror` with no GL context; left
   // unguarded that propagates out of the mount effect into the route error
@@ -276,6 +328,12 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
         renderWorldCopies: true,
         style: {
           version: 8,
+          // Default to a 3D globe: edge→shield arcs are great-circle paths
+          // that wrap the planet, and on a flat Mercator map a long route
+          // reads as a misleading straight slash across the world. On a globe
+          // the same arc curves naturally over the surface. The GlobeControl
+          // below lets the operator flip back to flat Mercator at will.
+          projection: { type: 'globe' },
           sources: {},
           layers: [
             {
@@ -287,10 +345,20 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
         },
         center: [0, 20],
         zoom: 1,
-        interactive: true
+        interactive: true,
+        // The inline card sits mid-page, so a bare mousewheel would zoom the
+        // map and swallow the page scroll. Cooperative gestures make a plain
+        // wheel scroll the PAGE (with a brief "use ⌘/Ctrl + scroll to zoom"
+        // hint); zoom still works via modifier+wheel, pinch, or the +/-
+        // buttons. In the fullscreen dialog there's nothing to scroll behind
+        // it, so let a bare wheel zoom the globe directly.
+        cooperativeGestures: !fillHeight,
       })
 
       map.current.addControl(new maplibregl.NavigationControl(), 'top-right')
+      // Globe ⇄ Mercator toggle button (MapLibre v5 built-in), stacked under
+      // the zoom/compass control in the same corner.
+      map.current.addControl(new maplibregl.GlobeControl(), 'top-right')
 
       map.current.on('load', () => {
         if (!map.current) return
@@ -324,6 +392,24 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
             'line-color': ['get', 'color'],
             'line-width': ['get', 'line_width'],
             'line-opacity': 0.85,
+          }
+        })
+
+        // Anomalous routes (anomaly_static) get a dashed red casing on top so
+        // a flagged route reads as anomalous on the MAP, not just in the
+        // table's red edge-POP cell. A route can be red-by-efficiency without
+        // being anomaly_static (short hops where TCP overhead dominates), so
+        // this is a distinct signal from the efficiency color. (L7)
+        map.current.addLayer({
+          id: 'arc-anomaly',
+          type: 'line',
+          source: 'arcs',
+          filter: ['==', ['get', 'anomaly_static'], true],
+          paint: {
+            'line-color': '#ef4444',
+            'line-width': ['+', ['get', 'line_width'], 1.5],
+            'line-opacity': 0.95,
+            'line-dasharray': [2, 2],
           }
         })
 
@@ -398,7 +484,10 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
       map.current = null
       setMapReady(false)
     }
-  }, [])
+    // fillHeight is fixed per instance (the inline card vs. the modal), so this
+    // still constructs the map exactly once — it's only a dep because the
+    // constructor reads it for cooperativeGestures.
+  }, [fillHeight])
 
   // Update sources when rows change or map becomes ready
   useEffect(() => {
@@ -429,21 +518,25 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
         const minLat = Math.min(...shieldLats)
         const maxLat = Math.max(...shieldLats)
 
+        // The fullscreen modal has far more room than the 420px inline card, so
+        // open it one zoom level closer for a bigger, more readable globe.
+        const zoomBias = fillHeight ? 1 : 0
+
         // If there's only one point or they are very close, fly to it instead of fitBounds to avoid zooming in too far
         if (Math.abs(maxLon - minLon) < 1 && Math.abs(maxLat - minLat) < 1) {
-           map.current.flyTo({ center: [minLon, minLat], zoom: 1, duration: 1000 })
+           map.current.flyTo({ center: [minLon, minLat], zoom: 1 + zoomBias, duration: 1000 })
         } else {
            const camera = map.current.cameraForBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 50 });
            if (camera && camera.zoom !== undefined) {
              map.current.flyTo({
                ...camera,
-               zoom: Math.max(0, camera.zoom - 2),
+               zoom: Math.max(0, camera.zoom - 2 + zoomBias),
                duration: 1000
              });
            } else {
              map.current.fitBounds(
                [[minLon, minLat], [maxLon, maxLat]],
-               { padding: 50, duration: 1000, maxZoom: 3 }
+               { padding: 50, duration: 1000, maxZoom: 3 + zoomBias }
              )
            }
         }
@@ -460,7 +553,9 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
     }
 
     updateData()
-  }, [rows, mapReady])
+    // fillHeight is fixed per instance; it's only a dep because the modal opens
+    // one zoom level closer (zoomBias above).
+  }, [rows, mapReady, fillHeight])
 
   // a11y mirror of ChoroplethMap's pattern: <canvas> exposes nothing to
   // assistive tech, so we surface an aria-label summary + sr-only table of
@@ -491,6 +586,18 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
 
   const arcFeatures = React.useMemo(() => buildArcFeatures(rows), [rows])
   const arcCount = arcFeatures.features.length
+
+  if (errored) {
+    // M2: the backend handler failed (and logged a stack trace). Show an
+    // explicit error state rather than the misleading "no data" empty state.
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-center px-4 border rounded-xl border-dashed border-destructive/40 space-y-1">
+        <Shield className="h-8 w-8 text-destructive mb-2 opacity-30" />
+        <p className="text-sm text-destructive font-medium">Shielding analysis unavailable</p>
+        <p className="text-xs text-muted-foreground max-w-sm">The edge-to-shield transit analysis failed to compute for this window. This is a server-side error, not an absence of data — try again or narrow the time range.</p>
+      </div>
+    )
+  }
 
   if (edgeOnly) {
     return (
@@ -525,7 +632,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
 
   return (
     <div
-      className={`relative flex flex-col border rounded-xl overflow-hidden bg-muted/10 ${className ?? ''} min-h-[420px]`}
+      className={`relative flex flex-col border rounded-xl overflow-hidden bg-muted/10 ${className ?? ''} ${fillHeight ? 'h-full' : 'min-h-[420px]'}`}
       // role="group" (not "img"): the wrapper holds the interactive MapLibre
       // controls + the sr-only data table below, so it can't be an "img"
       // (axe: nested-interactive). group legitimately groups interactive
@@ -534,11 +641,25 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
       aria-label={a11yLabel}
     >
       {mapError ? (
-        <div className="w-full h-[420px] flex items-center justify-center px-4 text-center text-xs text-muted-foreground" aria-hidden="true">
+        <div className={`w-full flex items-center justify-center px-4 text-center text-xs text-muted-foreground ${fillHeight ? 'flex-1' : 'h-[420px]'}`} aria-hidden="true">
           Interactive map unavailable in this browser. See the shielding-paths table below.
         </div>
       ) : (
-        <div ref={mapContainer} className="w-full h-[420px]" aria-hidden="true" />
+        <div ref={mapContainer} className={`w-full ${fillHeight ? 'flex-1 min-h-0' : 'h-[420px]'}`} aria-hidden="true" />
+      )}
+
+      {/* Expand to a full-size globe in a modal. Only on the inline card
+          (not the modal's own map, and not the WebGL-unavailable placeholder). */}
+      {expandable && !fillHeight && !mapError && (
+        <button
+          type="button"
+          onClick={() => setIsExpanded(true)}
+          className="absolute top-2 left-2 z-10 inline-flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-[11px] font-medium text-muted-foreground shadow-sm backdrop-blur-sm transition-colors hover:bg-background hover:text-foreground"
+          aria-label="Expand map to fullscreen"
+        >
+          <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+          <span className="hidden sm:inline">Expand</span>
+        </button>
       )}
 
       <table className="sr-only">
@@ -548,12 +669,20 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
             : 'Shielding paths — none available.'}
         </caption>
         <thead>
+          {/* Column parity with the visual tooltip + the Shielding Analysis
+              data table so assistive-tech users get the same numbers, not a
+              subset. (L9) */}
           <tr>
             <th scope="col">Edge POP</th>
             <th scope="col">Shield POP</th>
             <th scope="col">Requests</th>
-            <th scope="col">p95 latency (ms)</th>
+            <th scope="col">p50 transit (ms)</th>
+            <th scope="col">p95 transit (ms)</th>
+            <th scope="col">p99 transit (ms)</th>
+            <th scope="col">Distance (km)</th>
+            <th scope="col">Light-speed floor (ms)</th>
             <th scope="col">Efficiency ratio</th>
+            <th scope="col">Anomalous</th>
           </tr>
         </thead>
         <tbody>
@@ -561,9 +690,14 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
             <tr key={`${r.edge_pop}-${r.shield_pop}-${i}`}>
               <td><PopLabel code={r.edge_pop} /></td>
               <td><PopLabel code={r.shield_pop} /></td>
-              <td>{(r.requests ?? 0).toLocaleString()}</td>
+              <td>{(r.requests ?? 0).toLocaleString()}{r.low_sample ? ' (low sample)' : ''}</td>
+              <td>{r.p50_ms != null ? r.p50_ms.toFixed(0) : 'n/a'}</td>
               <td>{r.p95_ms != null ? r.p95_ms.toFixed(0) : 'n/a'}</td>
+              <td>{r.p99_ms != null ? r.p99_ms.toFixed(0) : 'n/a'}</td>
+              <td>{r.distance_km != null ? r.distance_km.toLocaleString() : 'n/a'}</td>
+              <td>{r.light_speed_rtt_ms != null ? r.light_speed_rtt_ms.toFixed(1) : 'n/a'}</td>
               <td>{r.efficiency_ratio != null ? r.efficiency_ratio.toFixed(2) : 'n/a'}</td>
+              <td>{r.anomaly_static ? 'yes' : 'no'}</td>
             </tr>
           ))}
         </tbody>
@@ -576,6 +710,29 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, className }: Shielding
       )}
 
       {tooltip && createPortal(<ShieldingTooltip info={tooltip} />, document.body)}
+
+      {expandable && (
+        <Dialog open={isExpanded} onOpenChange={setIsExpanded}>
+          <DialogContent className="max-w-5xl w-[calc(100%-2rem)] gap-3 p-4">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Shield className="h-4 w-4 text-purple-500" aria-hidden="true" />
+                Edge → Shield Transit Map
+              </DialogTitle>
+              <DialogDescription>
+                A larger, interactive globe of the same edge-POP → shield-POP transit
+                paths. Drag to rotate, scroll to zoom; the globe ⇄ flat-map toggle sits
+                top-right.
+              </DialogDescription>
+            </DialogHeader>
+            {/* Mount the big map only while open so a second WebGL context isn't
+                built in the background; fillHeight lets it take the whole body. */}
+            <div className="h-[70vh] w-full">
+              {isExpanded && <ShieldingMap rows={rows} fillHeight />}
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   )
 }

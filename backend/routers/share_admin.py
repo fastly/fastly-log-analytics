@@ -9,14 +9,10 @@ list.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
-from sse_starlette.sse import EventSourceResponse
 
 from backend import config as svcconfig
 from backend.core import share_db
@@ -26,13 +22,14 @@ from backend.models.share_admin import (
     GdprErasePayload,
     InvitePayload,
     PasscodePayload,
+    PiiPolicyPayload,
     ServiceScopePayload,
     SettingsPayload,
     ShareStartPayload,
 )
 from backend.utils.remote_access import client_ip
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
-from backend.utils.tunnel import get_tunnel_manager
+from backend.utils.router_utils import make_error
+from backend.utils.tunnel import build_share_live_payload, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
 
@@ -105,19 +102,6 @@ def share_status():
     return build_share_status()
 
 
-def _live_payload() -> dict:
-    """Compose the /live payload shape — extracted so the polling
-    endpoint and the SSE stream share one source of truth."""
-    mgr = get_tunnel_manager()
-    return {
-        "sharing_active": mgr.is_sharing_active(),
-        "public_url": mgr.public_url(),
-        "active_session_count": mgr.active_session_count(),
-        "rate_limits": mgr.get_rate_limit_snapshot(),
-        "telemetry": mgr.get_telemetry(),
-    }
-
-
 @router.get("/live")
 def share_live():
     """Lean 10-s poll payload for the share dashboard. Returns only the
@@ -128,49 +112,14 @@ def share_live():
     mount and refreshed on mutations — no need to re-ship it every
     10 seconds.
 
-    Kept as a polling endpoint alongside the /stream channel so the
-    page can fetch a one-shot snapshot on mutations (refresh button,
-    session revoke) without waiting for the next stream tick.
+    Kept as a polling endpoint (one-shot snapshot on mutations — refresh
+    button, session revoke — plus the page's 5-min safety-net refetch).
+    Live freshness now rides the multiplexed admin event stream's ``share``
+    channel (see ``backend/routers/admin/events.py``) instead of a second
+    dedicated SSE connection — collapsing the /admin/share page from two
+    concurrent streams over the HTTP/1.1 admin tunnel down to one.
     """
-    return _live_payload()
-
-
-_SHARE_STREAM_SAMPLE_SECONDS = 10.0
-
-
-@router.get("/stream")
-async def share_stream(request: Request) -> EventSourceResponse:
-    """Push the lean /live payload only when it changes.
-
-    Replaces the 10-s poll the /admin/share page used to drive. Per-
-    subscriber sampler (same pattern as
-    /api/admin/system-metrics/stream): payload is dominated by
-    in-memory tunnel-manager getters, so per-connection sampling is
-    fine and lets us skip the publisher-binding lifecycle.
-
-    Admin-only via the ``/api/admin/share`` prefix gate.
-    """
-
-    async def stream() -> AsyncIterator[str]:
-        last_payload: dict | None = None
-        initial = _live_payload()
-        yield json.dumps(initial)
-        last_payload = initial
-
-        while True:
-            if await request.is_disconnected():
-                break
-            await asyncio.sleep(_SHARE_STREAM_SAMPLE_SECONDS)
-            try:
-                payload = _live_payload()
-            except Exception:
-                logger.exception("share-stream sample failed; will retry next tick")
-                continue
-            if payload != last_payload:
-                yield json.dumps(payload)
-                last_payload = payload
-
-    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
+    return build_share_live_payload()
 
 
 # ── Audit log (filterable) ─────────────────────────────────────────────────
@@ -232,6 +181,15 @@ def share_panic():
 def create_invite(payload: InvitePayload, request: Request):
     from datetime import UTC, datetime, timedelta
 
+    # An invite with no services strands the analyst on "No service found"
+    # (bootstrap returns an empty services list). Reject it here so an empty
+    # scope can't be created even if a client bypasses the dialog guard.
+    if not payload.service_ids:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_request", "message": "Select at least one service for the invite."},
+        )
+
     expires_at = None
     if payload.duration_hours is not None and payload.duration_hours > 0:
         expires_at = share_db.iso_z(datetime.now(UTC) + timedelta(hours=int(payload.duration_hours)))
@@ -268,7 +226,33 @@ def create_invite(payload: InvitePayload, request: Request):
 def update_invite_services(invite_id: str, payload: ServiceScopePayload):
     if share_db.get_remote_invite(invite_id) is None:
         raise HTTPException(status_code=404, detail={"error": "not_found"})
+    if not payload.service_ids:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_request", "message": "An invite must keep at least one service."},
+        )
     share_db.update_remote_invite_services(invite_id, payload.service_ids)
+    return share_db.get_remote_invite(invite_id)
+
+
+@router.patch("/invites/{invite_id}/pii")
+def update_invite_pii(invite_id: str, payload: PiiPolicyPayload, request: Request):
+    """Toggle IP masking on an existing invite (no way to do this at create
+    time only). The live analyst session re-syncs its policy from the invite
+    on its next validate, so masking takes effect without a re-login."""
+    invite = share_db.get_remote_invite(invite_id)
+    if invite is None:
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+    try:
+        share_db.update_remote_invite_pii(invite_id, {"mask_ips": payload.mask_ips})
+    except (share_db.InvalidPiiPolicyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail={"error": "invalid_request", "message": str(exc)}) from exc
+    share_db.log_share_audit_event(
+        event_type="INVITE_UPDATE_PII",
+        email=invite["email"],
+        ip_address=client_ip(request, default="127.0.0.1"),
+        details=f"invite_id={invite_id} mask_ips={payload.mask_ips}",
+    )
     return share_db.get_remote_invite(invite_id)
 
 

@@ -29,7 +29,7 @@ export type SyncStatus = components['schemas']['SyncStatusResponse']
  *   60 s is fresh enough for a header badge.
  * - `refetchInterval: 5 * 60_000`: pure safety net. The primary
  *   update path is the `/api/sync-status/stream` SSE channel
- *   (wired via `useSyncStatusStream` in SyncStatusBadge), which
+ *   (wired via `useAdminEventStream` in SyncStatusBadge), which
  *   pushes a fresh snapshot within seconds of every cron tick. The
  *   5-minute poll only covers cases where the stream dropped
  *   silently (proxy timeout missed by keepalive, OS network blip)

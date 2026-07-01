@@ -201,6 +201,62 @@ def test_ngwaf_fields_empty_when_waf_req_id_column_absent(tmp_path):
     assert result["ngwaf_verified_bots_ts"] == []
 
 
+def test_ngwaf_only_request_narrows_temp_to_waf_req_id(con_with_waf_logs, tmp_path):
+    """When the ONLY live sections are the NGWAF bot pair, the catalog temp
+    must collapse to {timestamp, waf_req_id} filtered to ``waf_req_id IS NOT
+    NULL`` — the tiny NGWAF-flagged subset rather than a full-window scan.
+    Both bot templates INNER JOIN on a non-null waf_req_id, so this is
+    semantically identical and is the residual-temp half of the P0 win.
+    """
+    from datetime import timedelta
+
+    from backend.repositories._base import QueryRunner
+
+    db_path = str(tmp_path / "ngwaf_bot_cache.db")
+    _create_cache_db(db_path)
+
+    table_name = _safe_table("ngwaf_narrow_svc")
+    _create_log_table_with_waf(con_with_waf_logs, table_name)
+    src = {"name": "ngwaf_narrow_svc", "service_id": "ngwaf-narrow"}
+
+    create_sqls: list[str] = []
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "CREATE TEMP TABLE" in sql and table_name in sql:
+            create_sqls.append(sql)
+        return orig_execute(self, sql, *args, **kwargs)
+
+    now = datetime.now(UTC)
+    start = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (now + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    with patch("backend.config.ngwaf_db_path", return_value=db_path), patch.object(QueryRunner, "execute", _spy):
+        result = get_security_aggregates(
+            con=con_with_waf_logs,
+            src=src,
+            start_time=start,
+            end_time=end,
+            filters={},
+            sections={"ngwaf_verified_bots", "ngwaf_verified_bots_ts"},
+        )
+
+    # The narrowing marker fired and the temp carries ONLY the two needed
+    # columns + the NGWAF row filter.
+    markers = {e["section"] for e in result["section_timings"]}
+    assert "security:temp_ngwaf_narrowed" in markers, f"narrowing marker missing; timings={markers}"
+    assert create_sqls, "no catalog temp captured"
+    catalog_sql = create_sqls[-1]
+    assert "waf_req_id IS NOT NULL" in catalog_sql, f"NGWAF row filter not applied: {catalog_sql}"
+    assert '"waf_req_id"' in catalog_sql and '"timestamp"' in catalog_sql
+    for absent in ('"ua"', '"ip"', '"tls_ciphers_sha"', '"req_header_bytes"', '"conn_requests"', '"waf_sig"'):
+        assert absent not in catalog_sql, f"{absent} leaked into NGWAF-only temp: {catalog_sql}"
+
+    # Result still correct: the one cache-matched waf_req_id resolves.
+    assert len(result["ngwaf_verified_bots"]) == 1
+    assert result["ngwaf_verified_bots"][0]["bot_name"] == _BOT_NAME
+
+
 def test_ngwaf_unmatched_waf_req_ids_not_in_result(con_with_waf_logs, tmp_path):
     """Rows whose waf_req_id is not in the cache produce no bot entries (INNER JOIN)."""
     db_path = str(tmp_path / "ngwaf_bot_cache.db")

@@ -1187,6 +1187,88 @@ class TestInsightsAnalystClamp:
         # Different mask_ips → different cache key → fresh compute, not a cache hit.
         assert masked.get("_is_cached") is not True
 
+    def test_stable_clamp_cache_key_hits_across_rolling_bounds(self, in_memory_duckdb, test_service_source):
+        """THE core fix: an analyst's clamp_start/clamp_end roll with ``now`` on
+        every request, but ``clamp_cache_key`` is keyed on the invite's stable
+        window params. Two calls with the SAME cache key but DIFFERENT resolved
+        bounds must share one entry — so analysts stop recomputing every call."""
+        _insights_cache.clear()
+        self._empty_schema(in_memory_duckdb, test_service_source)
+        now = datetime.now(UTC)
+        ck = "||24"  # stable invite shape (qs='', qe='', qwh=24)
+        first = get_insights(
+            in_memory_duckdb,
+            test_service_source,
+            window_hours=1,
+            baseline_hours=24,
+            clamp_start=(now - timedelta(hours=24)).isoformat(),
+            clamp_end=now.isoformat(),
+            clamp_cache_key=ck,
+        )
+        assert first.get("is_cached") is not True
+        # A moment later the bounds rolled forward, but the stable key is unchanged.
+        later = now + timedelta(seconds=30)
+        second = get_insights(
+            in_memory_duckdb,
+            test_service_source,
+            window_hours=1,
+            baseline_hours=24,
+            clamp_start=(later - timedelta(hours=24)).isoformat(),
+            clamp_end=later.isoformat(),
+            clamp_cache_key=ck,
+        )
+        assert second.get("is_cached") is True
+
+    def test_distinct_clamp_cache_keys_do_not_share(self, in_memory_duckdb, test_service_source):
+        """Different invite shapes (different cache keys) never collide; neither
+        reads the admin (no-key) entry."""
+        _insights_cache.clear()
+        self._empty_schema(in_memory_duckdb, test_service_source)
+        now = datetime.now(UTC)
+        cs, ce = (now - timedelta(hours=24)).isoformat(), now.isoformat()
+        a = get_insights(
+            in_memory_duckdb,
+            test_service_source,
+            window_hours=1,
+            baseline_hours=24,
+            clamp_start=cs,
+            clamp_end=ce,
+            clamp_cache_key="||24",
+        )
+        b = get_insights(
+            in_memory_duckdb,
+            test_service_source,
+            window_hours=1,
+            baseline_hours=24,
+            clamp_start=cs,
+            clamp_end=ce,
+            clamp_cache_key="||72",
+        )
+        assert a.get("is_cached") is not True
+        assert b.get("is_cached") is not True  # distinct key → fresh, not a's entry
+
+    def test_force_refresh_recomputes_warm_entry(self, in_memory_duckdb, test_service_source):
+        """The prewarmer passes force_refresh=True so every tick rewrites the
+        entry (resets TTL). A warm entry must NOT be served back on that path."""
+        _insights_cache.clear()
+        self._empty_schema(in_memory_duckdb, test_service_source)
+        ck = "||24"
+        warm = get_insights(
+            in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24, clamp_cache_key=ck
+        )
+        assert warm.get("is_cached") is not True
+        hit = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24, clamp_cache_key=ck)
+        assert hit.get("is_cached") is True  # confirms the entry WAS warm
+        forced = get_insights(
+            in_memory_duckdb,
+            test_service_source,
+            window_hours=1,
+            baseline_hours=24,
+            clamp_cache_key=ck,
+            force_refresh=True,
+        )
+        assert forced.get("is_cached") is not True  # recomputed despite the warm entry
+
 
 def test_insights_request_bounds_window_fields():
     """M2: InsightsRequest caps both windows (were unbounded floats → a

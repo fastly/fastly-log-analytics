@@ -18,6 +18,7 @@ from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _saf
 from backend.repositories._sql.insights import (
     COALESCED_CITY_AGGREGATES,
     COALESCED_URL_AGGREGATES,
+    REPEATED_BOT_UA_REGEX,
 )
 
 from .registry import registry
@@ -330,15 +331,28 @@ def get_insights(
     clamp_start: str | None = None,
     clamp_end: str | None = None,
     mask_ips: bool = False,
+    clamp_cache_key: str | None = None,
+    force_refresh: bool = False,
 ) -> dict:
     """Compute the insight cards for ``src`` over the window/baseline ranges.
 
     M2: ``clamp_start`` / ``clamp_end`` (ISO-8601) bound the scanned range to
     the analyst's allowed window — the router derives them via
     ``get_analyst_time_bounds`` + ``clamp_or_400``. ``None`` for both is the
-    admin / prewarmer path (full range). They're folded into the cache key so
-    a clamped analyst result can never read (or overwrite) the unclamped
-    admin-prewarmed entry for the same source/window/baseline.
+    admin / prewarmer path (full range).
+
+    ``clamp_cache_key``: the STABLE cache-key fragment for an analyst clamp
+    shape (``backend.utils.remote_access.analyst_clamp_cache_key`` — keyed on
+    the invite's window params, not the rolling resolved bounds). The router
+    passes it so repeated analyst requests reuse one cache entry instead of
+    recomputing every call. ``None`` keeps the admin key shape (and, for any
+    caller that passes a clamp but no key, falls back to the rolling bounds so
+    the clamped/unclamped isolation guarantee is preserved).
+
+    ``force_refresh``: skip the cache READ and always recompute (the write
+    still happens). The prewarmer uses this so every tick rewrites the entry
+    and resets its TTL — a cache *hit* would not (cachetools' TTL is from
+    insertion), leaving a window each cycle where the entry has expired.
 
     M3: ``mask_ips`` is passed to the row processors via ``context`` so the
     IP-keyed insights (request_size_anomaly, connection_abuse) mask the client
@@ -375,23 +389,36 @@ def get_insights(
     window_start_s = window_start.isoformat()
     baseline_start_s = baseline_start.isoformat()
 
-    # Stable cache key — the previous shape included a
-    # ``cache_bucket = int(time.time() / TTL)`` so the key itself rolled
-    # every TTL seconds. That created a deterministic race window: a
-    # request landing 1 ms after the bucket boundary saw the cache key
-    # change and re-computed even though the previous bucket's payload
-    # was still in the BoundedTTLCache. Removing the bucket lets the
-    # cache's own auto-expiry handle freshness, and the prewarmer
-    # cron (every 240 s, INSIGHTS_CACHE_TTL=300 s) re-writes the entry
-    # well before it would expire — so under normal operation a user
-    # request never pays the cold compute.
-    # Fold the analyst clamp into the key so a scoped result can never read
-    # (or overwrite) the unclamped admin / prewarmer entry for the same
-    # source/window/baseline. Admin path (None,None) keeps the original key
-    # shape the prewarmer writes; a relative-window analyst's clamp_start
-    # rolls with ``now`` so they recompute (the BoundedTTLCache caps growth).
-    cache_key = f"{source_name}:{window_hours}:{baseline_hours}:{clamp_start or ''}:{clamp_end or ''}:{int(mask_ips)}"
-    if INSIGHTS_CACHE_TTL > 0:
+    # Stable, time-independent cache key. The previous shape folded the raw
+    # ``clamp_start``/``clamp_end`` into the key; the admin path (None,None)
+    # was stable, but every analyst request stamped a fresh ``now`` into those
+    # bounds, so the analyst key never repeated → they recomputed on EVERY
+    # call (the "broken for analysts" perf-audit finding). Now the analyst key
+    # uses ``clamp_cache_key`` (keyed on the invite's WINDOW PARAMETERS, not
+    # the rolling resolved bounds), so repeated analyst requests reuse one
+    # entry — mirroring the admin time-independent key + the BoundedTTLCache's
+    # own auto-expiry for freshness. The resolved bounds still drive the scan;
+    # only the KEY is stabilized, so a cache hit is ≤TTL stale, identical to
+    # the admin contract. The prewarmer (every 240 s, TTL 300 s,
+    # force_refresh) re-writes the entry under the TTL so a user never pays
+    # cold compute.
+    #
+    # ``key_clamp`` resolution:
+    #   - clamp_cache_key set  → stable analyst key (router / prewarmer).
+    #   - no key but a clamp   → legacy rolling-bounds key, so any non-router
+    #                            caller keeps the clamped/unclamped isolation
+    #                            guarantee (a scoped result never reads or
+    #                            overwrites the admin entry).
+    #   - neither              → "" (the admin / prewarmer unclamped shape).
+    # ``mask_ips`` stays in the key so masked and unmasked never share.
+    if clamp_cache_key is not None:
+        key_clamp = clamp_cache_key
+    elif clamp_start or clamp_end:
+        key_clamp = f"{clamp_start or ''}:{clamp_end or ''}"
+    else:
+        key_clamp = ""
+    cache_key = f"{source_name}:{window_hours}:{baseline_hours}:{key_clamp}:{int(mask_ips)}"
+    if INSIGHTS_CACHE_TTL > 0 and not force_refresh:
         with _insights_cache_lock:
             entry = _insights_cache.get(cache_key)
         if entry is not None:
@@ -634,6 +661,12 @@ def get_insights(
             ua_mobile_sel = "SUM(CASE WHEN \"ua\" ILIKE '%Mobi%' OR \"ua\" ILIKE '%Android%' OR \"ua\" ILIKE '%iPhone%' THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)"
         url_col = '"url"' if "url" in actual_cols else "NULL"
         q_col = '"url"' if "url" in actual_cols else ('"digest"' if "digest" in actual_cols else "'(unknown)'")
+        # repeated_patterns: conditional UA projection (mirrors url_col/q_col) +
+        # the static, ``?``-free bot/monitor allowlist regex. The regex is a
+        # fixed constant, so inlining it leaves the template's single ``?`` (the
+        # window start) intact for the engine's sql.count("?") binder heuristic.
+        ua_col = '"ua"' if "ua" in actual_cols else "NULL"
+        bot_ua_regex = REPEATED_BOT_UA_REGEX
 
         # ── Coalesced city aggregates (O2 bypass) ─────────────────────────────────
         # The 4 city-based insights (city_surges, city_error_spikes,
@@ -766,6 +799,8 @@ def get_insights(
                                 ua_mobile_sel=ua_mobile_sel,
                                 url_col=url_col,
                                 q_col=q_col,
+                                ua_col=ua_col,
+                                bot_ua_regex=bot_ua_regex,
                                 **extra_args,
                             )
                         except KeyError:

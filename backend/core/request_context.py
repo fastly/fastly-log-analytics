@@ -19,8 +19,10 @@ Design constraints (ADR-02):
 
 Backward compat (Phase 2.7):
 
-- ``AnalyticsDeps = RequestContext`` aliased in :mod:`backend.deps` through
-  Phase 8. Any caller importing ``AnalyticsDeps`` keeps working.
+- ``AnalyticsDeps`` (the transitional ``RequestContext`` alias in
+  :mod:`backend.deps`) was removed at the v2.0 cut — use the
+  ``RequestContext`` dependency directly. See
+  ``tests/test_deps.py::test_analytics_deps_symbol_removed``.
 - Existing ``get_source`` / ``get_con`` deps still exist; routes can keep
   using them. New routes prefer the ``RequestContext`` dependency.
 

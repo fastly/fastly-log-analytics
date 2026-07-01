@@ -31,6 +31,12 @@ const selectedSession = {
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 beforeEach(() => queryClient.clear())
 
+// `retry: false` (createTestQueryClient) makes the error immediate, so solo this
+// settles in ~255ms. Under the full `make ci` vitest run (155 files in parallel
+// saturating the box) the base-ui Dialog mount alone took ~2.7s, blowing
+// waitFor's default 1s budget before the post-error render flushed — a CPU-
+// starvation flake, not a logic bug. Generous waitFor + test timeouts absorb the
+// load without masking a real regression (the alert still must appear).
 test('UX-5: shows an inline error + Retry (not a bare empty table) when the detail query 5xxs', async () => {
   render(
     <QueryClientProvider client={queryClient}>
@@ -45,8 +51,11 @@ test('UX-5: shows an inline error + Retry (not a bare empty table) when the deta
       />
     </QueryClientProvider>,
   )
-  await waitFor(() => {
-    expect(screen.getByRole('alert')).toHaveTextContent(/failed to load session detail/i)
-  })
+  await waitFor(
+    () => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/failed to load session detail/i)
+    },
+    { timeout: 10000 },
+  )
   expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
-})
+}, 15000)

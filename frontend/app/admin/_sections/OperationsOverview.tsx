@@ -40,9 +40,19 @@ type OpsOverviewSeed = {
   slow_queries_count?: { count: number; since_hours: number; threshold_ms: number }
 }
 
-function useOpsOverviewSeed(): OpsOverviewSeed {
+function useOpsOverviewSeed(): { seed: OpsOverviewSeed; seedServiceId: string | null } {
   const { data } = useBootstrap()
-  return (data as { ops_overview?: OpsOverviewSeed } | undefined)?.ops_overview ?? {}
+  // The seeds in ``ops_overview`` are computed for the bootstrap's active
+  // service (``active_service_id``). Hand that id back alongside the seed so
+  // the service-scoped cards (ingest gap, slow queries) only apply it as
+  // ``initialData`` when the *currently* active service matches — otherwise
+  // switching services would flash the previous service's numbers before the
+  // re-keyed refetch lands.
+  return {
+    seed: (data as { ops_overview?: OpsOverviewSeed } | undefined)?.ops_overview ?? {},
+    seedServiceId:
+      (data as { active_service_id?: string | null } | undefined)?.active_service_id ?? null,
+  }
 }
 
 export function OperationsOverview() {
@@ -58,8 +68,11 @@ export function OperationsOverview() {
 // ── Card 1: live query activity ───────────────────────────────────────────
 
 function LiveQueriesCard() {
-  const seed = useOpsOverviewSeed().queries_summary
-  // Freshness via useSystemMetricsStream (mounted in SyncStatusBadge).
+  // /queries/summary is the GLOBAL live-query registry (process-wide, not
+  // service-scoped), so the key intentionally omits the service id — the
+  // number is the same regardless of which service is active.
+  const seed = useOpsOverviewSeed().seed.queries_summary
+  // Freshness via useAdminEventStream (mounted in SyncStatusBadge).
   // 5-min refetchInterval is a pure safety net.
   const { data, isError } = useQuery<SummaryResponse>({
     queryKey: ['admin', 'overview', 'queries-summary'],
@@ -102,9 +115,14 @@ function IngestHealthCard() {
   // the fetch off — firing it just spams the console with 400s and the gap
   // is meaningless with nothing ingested.
   const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const seed = useOpsOverviewSeed().log_accounting
+  const { seed: opsSeed, seedServiceId } = useOpsOverviewSeed()
+  // Only honour the seed when it belongs to the active service (it's
+  // currently never seeded — see bootstrap.py — but stay correct if that
+  // changes). The gap is per-service, so the key MUST include the service id;
+  // without it, switching services serves the previous service's cached gap.
+  const seed = activeServiceId === seedServiceId ? opsSeed.log_accounting : undefined
   const { data, isError } = useQuery<LogAccountingResponse>({
-    queryKey: ['admin', 'overview', 'log-accounting'],
+    queryKey: ['admin', 'overview', 'log-accounting', activeServiceId],
     queryFn: async ({ signal }) => {
       const r = await adminFetch('/api/admin/log-accounting?hours=24', { signal })
       if (!r.ok) throw new Error(`status ${r.status}`)
@@ -112,7 +130,7 @@ function IngestHealthCard() {
     },
     initialData: seed,
     enabled: !!activeServiceId,
-    // Freshness via useSystemMetricsStream. 5-min poll is the safety
+    // Freshness via useAdminEventStream. 5-min poll is the safety
     // net; the DuckDB COUNT(*) only runs on the safety tick now.
     staleTime: 30_000,
     refetchInterval: 5 * 60_000,
@@ -132,9 +150,11 @@ function IngestHealthCard() {
   }
   const gapPct = data?.totals?.gap_pct ?? 0
   const sustained = data?.sustained_loss
-  // gap_pct can be negative (we have more rows than Fastly — usually
-  // in-flight bucket noise). Only POSITIVE gaps mean real loss; that's
-  // what the tone should reflect.
+  // Gap = Fastly requests − our ingested rows. `requests` sits 1:1 with our
+  // rows on every service, so the gap is directly comparable (no endpoint
+  // caveat). gap_pct can be negative (we have more rows than Fastly — usually
+  // in-flight bucket noise); only POSITIVE gaps mean real loss, which is what
+  // the tone reflects.
   const tone: CardTone = sustained
     ? 'critical'
     : gapPct >= 0.1
@@ -148,7 +168,7 @@ function IngestHealthCard() {
   const secondary = sustained
     ? `sustained: ${sustained.n_buckets} bucket(s), ${sustained.total_lost_lines.toLocaleString()} lost`
     : gapPct >= 0.02
-      ? 'recent loss — check log accounting'
+      ? 'recent loss — check ingest accounting'
       : 'healthy · 24h'
   return (
     <OverviewCard
@@ -182,9 +202,13 @@ function SlowQueriesTeaser() {
   // without one). Gate it off on a fresh install so we don't spam 422s before
   // any service — and any query exists — to count.
   const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const seed = useOpsOverviewSeed().slow_queries_count
+  const { seed: opsSeed, seedServiceId } = useOpsOverviewSeed()
+  // slow-queries/count is service-scoped, so the key must include the service
+  // id; gate the seed to the matching service to avoid flashing the previous
+  // service's count on switch.
+  const seed = activeServiceId === seedServiceId ? opsSeed.slow_queries_count : undefined
   const { data, isError } = useQuery<{ count: number }>({
-    queryKey: ['admin', 'overview', 'slow-queries-count'],
+    queryKey: ['admin', 'overview', 'slow-queries-count', activeServiceId],
     queryFn: async ({ signal }) => {
       const r = await adminFetch(
         '/api/admin/slow-queries/count?since_hours=24&threshold_ms=1000',
@@ -195,7 +219,7 @@ function SlowQueriesTeaser() {
     },
     initialData: seed,
     enabled: !!activeServiceId,
-    // Freshness via useSystemMetricsStream. Safety-net poll only.
+    // Freshness via useAdminEventStream. Safety-net poll only.
     staleTime: POLL_MS,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
