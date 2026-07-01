@@ -849,7 +849,7 @@ def _mark_gap_heal_triggered(service_id: str) -> None:
 @cron_task("gap_heal")
 def _run_gap_heal(service_id: str) -> None:
     """Periodic gap detector that triggers a full_sweep when sustained loss
-    is observed between Fastly's authoritative log-line emission counts and
+    is observed between Fastly's authoritative ``requests`` counts and
     our ingested rows.
 
     Sustained loss = ≥LOG_ACCOUNTING_MIN_RUN consecutive completed hourly

@@ -16,6 +16,14 @@ from typing import Any
 _NAME_RE = re.compile(r"^[\w .,'\-]{1,80}$", re.UNICODE)
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
+# Single source of truth for the IP-family field names. Used here as the
+# response-side ``masked_keys`` and imported by
+# ``backend.utils.remote_access`` as the analyst filter-lock set, so the two
+# PII boundaries (mask-in-response and forbid-as-filter) can never drift.
+# This module is dependency-free (stdlib only) precisely so security-critical
+# callers can import it without dragging in the connection pool.
+IP_FAMILY_KEYS = frozenset({"ip", "client_ip", "ip_address", "remote_addr"})
+
 
 class InvalidNameError(ValueError):
     pass
@@ -187,22 +195,43 @@ def apply_pii_policy(obj, policy: dict):
     """
     if not policy or not policy.get("mask_ips"):
         return obj
-    masked_keys = {"ip", "ip_address", "client_ip", "remote_addr"}
+    masked_keys = IP_FAMILY_KEYS
 
-    def _walk(node, parent_key=None):
+    def _walk(node, parent_key=None, field_ctx=None):
         if isinstance(node, dict):
-            return {
-                k: (mask_ip(v) if isinstance(v, str) and k in masked_keys else _walk(v, parent_key=k))
-                for k, v in node.items()
-            }
+            out = {}
+            for k, v in node.items():
+                if isinstance(v, str) and k in masked_keys:
+                    out[k] = mask_ip(v)
+                    continue
+                # Dashboard top-N panels carry the dimension value under the
+                # generic key ``value`` (``data["ip"]["top"][i]["value"]`` —
+                # backend/repositories/dashboard.py:608/655), NOT under ``ip``,
+                # so key-name masking misses them. When the nearest owning
+                # field IS an IP field, value-shape mask the cell so the Top
+                # IPs card doesn't leak raw client IPs to a mask_ips analyst —
+                # while url/ua panels (field_ctx not an IP field) stay verbatim.
+                if k == "value" and isinstance(v, str) and field_ctx in masked_keys:
+                    out[k] = _mask_ip_scalar(v)
+                    continue
+                # Carry the IP-field context down through intermediate keys
+                # (e.g. "top") so the nested ``value`` cell still sees it.
+                next_ctx = k if k in masked_keys else field_ctx
+                out[k] = _walk(v, parent_key=k, field_ctx=next_ctx)
+            return out
         if isinstance(node, list):
             # Array fields inherit the parent dict key for masking — e.g.
             # ``{"client_ip": ["1.2.3.4", "5.6.7.8"]}`` must mask each string
             # the same way the scalar form would. Without threading the
             # parent key through, list-of-string IP fields slipped past the
-            # masker entirely.
+            # masker entirely. ``field_ctx`` is carried so top-N rows nested in
+            # a list under an IP field still mask their ``value`` cell.
             return [
-                (mask_ip(x) if isinstance(x, str) and parent_key in masked_keys else _walk(x, parent_key=parent_key))
+                (
+                    mask_ip(x)
+                    if isinstance(x, str) and parent_key in masked_keys
+                    else _walk(x, parent_key=parent_key, field_ctx=field_ctx)
+                )
                 for x in node
             ]
         return node

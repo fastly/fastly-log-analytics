@@ -85,6 +85,187 @@ def test_get_aggregates_with_data(in_memory_duckdb, test_service_source):
         assert "count" in entry
 
 
+# ── View-lag self-heal ──────────────────────────────────────────────────────
+#
+# When a fresh log is buffered, the per-service status cache (latest_log_at /
+# local_rows, from a direct parquet+buffer read at ingest) updates immediately,
+# but the live Iceberg VIEW the aggregate queries read from is built from CACHED
+# view SQL that lags until a sync/commit cron tick rebuilds it. With a freshly-
+# buffered single log the status cache shows data while the view returns 0 rows
+# for every window — the frontend then loops on "Preparing your data" (and on
+# dev, which runs no crons, it never resolves). The self-heal forces ONE view
+# rebuild + re-query under a tight, false-positive-resistant trigger.
+
+
+def _empty_logs_table(con, src):
+    """Create the logs table with the full mock schema but no rows.
+
+    Mirrors what ``insert_mock_logs`` builds (so ``get_schema_cols`` returns a
+    real column set) without seeding any data — the starting state for the
+    stale-view simulation where the cache reports data but the view is empty.
+    """
+    from backend.core.log_fields import LOG_FIELD_CATALOG
+
+    # Production connections run in UTC (backend/core/duckdb.py SET
+    # TimeZone='UTC'); match it so naive-TIMESTAMP vs TIMESTAMPTZ window
+    # comparisons behave as they do in prod.
+    con.execute("SET TimeZone='UTC';")
+    table_name = _safe_table(src["name"])
+    raw_fields = [f for f in LOG_FIELD_CATALOG if f.get("vcl") is not None]
+    schema_def = ", ".join([f'"{f["id"]}" {f["duckdb_type"]}' for f in raw_fields])
+    con.execute(f"CREATE TABLE {table_name} ({schema_def})")
+    return table_name
+
+
+def test_self_heal_fires_once_and_returns_data_when_view_is_stale(in_memory_duckdb, test_service_source, monkeypatch):
+    """Trigger case (a): empty windowed result + no filters + the all-time
+    latest_log_at falls inside [start, end] → force exactly ONE view rebuild
+    and return the now-visible data.
+
+    Simulated by starting with an empty table (schema only) and having the
+    patched ``force_rebuild_view`` spy insert the rows — i.e. the rebuild is
+    what makes the previously-stale view return data. The status cache is
+    patched to report ``latest_log_at`` inside the queried window so the
+    tight trigger fires."""
+    from datetime import UTC, datetime, timedelta
+
+    from backend.repositories import dashboard as dash
+
+    table_name = _empty_logs_table(in_memory_duckdb, test_service_source)
+    logs = generate_mock_logs(test_service_source, num_logs=30, hours_ago=1)
+
+    now = datetime.now(UTC)
+    start_time = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    latest = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")  # inside [start, end]
+
+    # Status cache reports data exists (the fresh-ingest snapshot).
+    monkeypatch.setattr(
+        "backend.config.get_status",
+        lambda _name: {"local_rows": 30, "earliest_log_at": start_time, "latest_log_at": latest},
+    )
+
+    rebuild_calls = {"n": 0}
+
+    def fake_rebuild(con, src):
+        # The rebuild is what makes the stale view return data: seed the rows.
+        rebuild_calls["n"] += 1
+        insert_mock_logs(con, table_name, logs)
+
+    monkeypatch.setattr(dash, "force_rebuild_view", fake_rebuild)
+
+    result = dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start_time,
+        end_time=end_time,
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+    )
+
+    assert rebuild_calls["n"] == 1, f"self-heal must rebuild EXACTLY once; got {rebuild_calls['n']}"
+    # After the rebuild + re-query, the data is visible.
+    assert result["total_rows"] == 30
+    assert result["data"]["url"]["total"] > 0
+
+
+def test_self_heal_does_not_fire_when_latest_log_outside_window(in_memory_duckdb, test_service_source, monkeypatch):
+    """Trigger case (b): a legitimately-empty window whose range does NOT
+    contain the all-time latest log → NO rebuild, returns empty.
+
+    This is the false-positive guard: a low-traffic gap window returns 0 rows
+    but the all-time latest log is NEWER than end_time, so the window simply
+    has no data — rebuilding the view wouldn't help and must not fire."""
+    from datetime import UTC, datetime, timedelta
+
+    from backend.repositories import dashboard as dash
+
+    table_name = _empty_logs_table(in_memory_duckdb, test_service_source)
+    # Seed rows that are NOW (so the table genuinely has data), but query a
+    # historical window that contains none of them.
+    insert_mock_logs(in_memory_duckdb, table_name, generate_mock_logs(test_service_source, num_logs=10, hours_ago=0))
+
+    now = datetime.now(UTC)
+    # Window is 2 days ago; latest log is ~now → latest is AFTER end_time.
+    start_time = (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_time = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    latest = now.strftime("%Y-%m-%dT%H:%M:%SZ")  # OUTSIDE [start, end]
+
+    monkeypatch.setattr(
+        "backend.config.get_status",
+        lambda _name: {"local_rows": 10, "earliest_log_at": start_time, "latest_log_at": latest},
+    )
+
+    rebuild_calls = {"n": 0}
+
+    def fake_rebuild(con, src):
+        rebuild_calls["n"] += 1
+
+    monkeypatch.setattr(dash, "force_rebuild_view", fake_rebuild)
+
+    result = dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start_time,
+        end_time=end_time,
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+    )
+
+    assert rebuild_calls["n"] == 0, "self-heal must NOT fire when latest_log_at is outside the window"
+    assert result["total_rows"] == 0
+
+
+def test_self_heal_does_not_fire_when_filters_applied(in_memory_duckdb, test_service_source, monkeypatch):
+    """Trigger case (c): a filtered empty result → NO rebuild.
+
+    With user filters active, an empty window is expected (the filter just
+    excludes everything) — not a stale-view symptom. The trigger requires
+    ``not filters``, so the rebuild must not fire even when latest_log_at is
+    nominally inside the window."""
+    from datetime import UTC, datetime, timedelta
+
+    from backend.models.common import FilterSpec
+    from backend.repositories import dashboard as dash
+
+    table_name = _empty_logs_table(in_memory_duckdb, test_service_source)
+    # Real rows present, but the filter below matches none of them.
+    insert_mock_logs(in_memory_duckdb, table_name, generate_mock_logs(test_service_source, num_logs=10, hours_ago=1))
+
+    now = datetime.now(UTC)
+    start_time = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    latest = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")  # inside window
+
+    monkeypatch.setattr(
+        "backend.config.get_status",
+        lambda _name: {"local_rows": 10, "earliest_log_at": start_time, "latest_log_at": latest},
+    )
+
+    rebuild_calls = {"n": 0}
+
+    def fake_rebuild(con, src):
+        rebuild_calls["n"] += 1
+
+    monkeypatch.setattr(dash, "force_rebuild_view", fake_rebuild)
+
+    result = dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=start_time,
+        end_time=end_time,
+        # A country that doesn't exist in the seeded data → 0 matching rows.
+        filters={"country": FilterSpec(mode="include", values=["ZZ"])},
+        chart_interval="1 minute",
+        chart_metric="requests",
+    )
+
+    assert rebuild_calls["n"] == 0, "self-heal must NOT fire when user filters are applied"
+    assert result["total_rows"] == 0
+
+
 def test_get_aggregates_rollup_path_map_data_uses_per_field_limits(in_memory_duckdb, test_service_source, monkeypatch):
     """Rollup fast-path: map_data must come from the ALREADY-RUNNING batch
     execute_top_n_rollups call via per_field_limits={"country": 500},

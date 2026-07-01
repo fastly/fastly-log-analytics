@@ -16,7 +16,7 @@
  *
  * This helper enumerates only the keys whose data actually changes when a
  * cron task lands new logs / commits the buffer / refreshes sync state.
- * The list mirrors what ``useCronRunsStream`` already targets (cron-logs,
+ * The list mirrors what ``useAdminEventStream (cron-runs channel)`` already targets (cron-logs,
  * cron-logs-recent, last-sync, iceberg) plus the dashboard/filter-bar
  * surfaces that depend on the new data (dashboard aggregates, log-extents,
  * sync-status, schema).
@@ -31,7 +31,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import { queryKeys } from '@/lib/query-keys'
 
 export function cronCacheBust(queryClient: QueryClient, serviceId?: string | null): void {
-  // Cron history surfaces that ``useCronRunsStream`` already targets.
+  // Cron history surfaces that ``useAdminEventStream (cron-runs channel)`` already targets.
   // These are the canonical destinations for "a cron run just changed".
   queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs'] })
   queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs-recent'] })

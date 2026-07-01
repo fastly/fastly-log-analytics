@@ -1,13 +1,15 @@
 /**
  * useDashboardBundle is the cold-load round-trip saver: one POST to
- * /api/dashboard/bundle that returns aggregates + top_bots together
- * and seeds both sub-queries' cache keys so the dedicated hooks read
- * cache instead of re-fetching.
+ * /api/dashboard/bundle that returns aggregates + top_bots together in
+ * a single response. The dashboard page reads BOTH directly off
+ * bundleQuery.data (no separate cache keys), and the bundle is keyed on
+ * the server-reproducible (rangeToken, anchor) pair so the SSR seed
+ * (lib/ssr/dashboard.ts) byte-matches the first-paint key.
  *
- * Tests assert (1) the bundle's own queryKey shape, (2) the enabled
- * flag wires through, (3) the seed-on-success behaviour for both
- * sub-queries, (4) the bundle is gated off when activeServiceId is
- * null, (5) the stale-view retry path triggers on a stale response.
+ * Tests assert (1) the bundle's queryKey shape (keyed on rangeToken/
+ * anchor), (2) the enabled flag wires through, (3) it does NOT fan out
+ * into separate aggregates/top-bots cache entries, (4) the sections
+ * selector forwards to body + key, (5) the stale-view retry path.
  *
  * @vitest-environment jsdom
  */
@@ -36,10 +38,9 @@ vi.mock('@/stores/serviceStore', () => {
 const API_BASE = 'http://127.0.0.1:8000'
 
 function makeClient() {
-  // gcTime cannot be 0 here — the bundle's queryFn calls
-  // ``setQueryData(aggregatesKey, …)`` to seed an entry with no
-  // observers, and gcTime=0 garbage-collects it on the next tick
-  // before the assertion can read it back. 5s is plenty for tests.
+  // Keep a small non-zero gcTime so cache entries survive between the
+  // fetch and the assertion that reads them back (gcTime=0 collects
+  // observer-less entries on the next tick). 5s is plenty for tests.
   return createTestQueryClient({ queries: { gcTime: 5_000, staleTime: 0 } })
 }
 
@@ -50,7 +51,16 @@ function wrapperFor(qc: QueryClient) {
 const baseArgs = {
   startTime: '2026-06-15T00:00:00Z',
   endTime: '2026-06-15T01:00:00Z',
-  filterPayload: { conditions: [] } as any,
+  // Cold-load / auto default: relativeRange null + isAutoRange true →
+  // resolveRangeWire yields the server-reproducible '24h' token (the SSR-seed
+  // contract). startTime/endTime stay as the stale-view extents context.
+  relativeRange: null as string | null,
+  isAutoRange: true,
+  anchor: '2026-06-15T00:00:00Z',
+  // Realistic empty payload: buildFiltersPayload returns {} (column-keyed)
+  // when no filters are active. The stale-view discriminator keys off
+  // Object.keys(filterPayload).length, so an empty {} means "no filter".
+  filterPayload: {} as any,
   metric: 'requests',
   interval: '1m',
   fields: ['status'],
@@ -100,7 +110,7 @@ describe('useDashboardBundle', () => {
     expect((result.current.data as any).top_bots).toEqual([{ name: 'b', count: 1 }])
   })
 
-  it('seeds the aggregates + top-bots cache keys on success', async () => {
+  it('does NOT fan out into separate aggregates/top-bots cache entries', async () => {
     server.use(
       http.post(`${API_BASE}/api/dashboard/bundle`, () =>
         HttpResponse.json({
@@ -116,22 +126,22 @@ describe('useDashboardBundle', () => {
     })
     await waitFor(() => expect(result.current.data).toBeDefined())
 
-    const cached = qc
+    // The page reads aggregates + top_bots straight off bundleQuery.data, so the
+    // hook seeds NO dedicated 'aggregates'/'top-bots' keys (that setQueryData
+    // fan-out was removed with the SSR re-key). Only the 'bundle' entry exists.
+    const dashboardEntries = qc
       .getQueryCache()
       .getAll()
-      .reduce<Record<string, unknown>>((acc, q) => {
-        const k = q.queryKey as unknown[]
-        if (k[0] === 'dashboard' && (k[1] === 'aggregates' || k[1] === 'top-bots')) {
-          acc[k[1] as string] = q.state.data
-        }
-        return acc
-      }, {})
+      .filter(q => Array.isArray(q.queryKey) && q.queryKey[0] === 'dashboard')
+      .map(q => (q.queryKey as unknown[])[1])
+    expect(dashboardEntries).toEqual(['bundle'])
 
-    expect(cached.aggregates).toEqual({ data: { status: { total: 2, top: [] } } })
-    expect(cached['top-bots']).toEqual([{ name: 'curl', count: 7 }])
+    // …and the merged payload is fully readable off the bundle result.
+    expect((result.current.data as any).aggregates).toEqual({ data: { status: { total: 2, top: [] } } })
+    expect((result.current.data as any).top_bots).toEqual([{ name: 'curl', count: 7 }])
   })
 
-  it('queryKey for the bundle includes activeServiceId + chart_metric + interval + fields + sections', async () => {
+  it('queryKey for the bundle is keyed on rangeKey + anchor (+ metric/interval/fields/sections)', async () => {
     server.use(
       http.post(`${API_BASE}/api/dashboard/bundle`, () =>
         HttpResponse.json({ aggregates: { data: {} }, top_bots: [] }),
@@ -153,14 +163,44 @@ describe('useDashboardBundle', () => {
       'dashboard',
       'bundle',
       'svc-test',
-      baseArgs.startTime,
-      baseArgs.endTime,
+      '24h', // resolveRangeWire token for the cold-load default (relativeRange null + auto)
+      baseArgs.anchor,
       baseArgs.filterPayload,
       baseArgs.metric,
       baseArgs.interval,
       baseArgs.fields,
       undefined,
     ])
+  })
+
+  it('custom absolute range → body carries start/end (no range_token), keyed on abs:<start>|<end>', async () => {
+    let capturedBody: any = null
+    server.use(
+      http.post(`${API_BASE}/api/dashboard/bundle`, async ({ request }) => {
+        capturedBody = await request.json()
+        return HttpResponse.json({ aggregates: { data: {} }, top_bots: [] })
+      }),
+    )
+    const qc = makeClient()
+    const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
+    // relativeRange null + isAutoRange false = the user picked an explicit
+    // absolute range (date picker / chart zoom / saved view).
+    const { result } = renderHook(
+      () => useDashboardBundle({ ...baseArgs, isAutoRange: false, enabled: true }),
+      { wrapper: wrapperFor(qc) },
+    )
+    await waitFor(() => expect(result.current.data).toBeDefined())
+
+    // The scan window comes from the explicit bounds, not a token.
+    expect(capturedBody.start_time).toBe(baseArgs.startTime)
+    expect(capturedBody.end_time).toBe(baseArgs.endTime)
+    expect(capturedBody.range_token).toBeUndefined()
+
+    const bundleEntry = qc
+      .getQueryCache()
+      .getAll()
+      .find(q => Array.isArray(q.queryKey) && q.queryKey[0] === 'dashboard' && q.queryKey[1] === 'bundle')
+    expect(bundleEntry!.queryKey[3]).toBe(`abs:${baseArgs.startTime}|${baseArgs.endTime}`)
   })
 
   it('forwards the sections selector through to the POST body and queryKey', async () => {

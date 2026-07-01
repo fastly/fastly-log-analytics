@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Literal, get_args
+from typing import Literal
 
 from fastapi import APIRouter, Depends
 
+from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
 from backend.models.common import FilteredRequest, Limit100, Limit200, Limit1440
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
@@ -21,7 +22,8 @@ from backend.models.origin import (
     OriginTimeseriesResponse,
 )
 from backend.repositories import origin as repo
-from backend.utils.router_utils import expand_sections, query_errors
+from backend.utils.router_utils import make_section_expander, query_errors
+from backend.utils.time_window import is_valid_range_token, resolve_window
 
 router = APIRouter(prefix="/api/origin", tags=["origin"], responses=DEFAULT_ERROR_RESPONSES)
 # Section selector — names mirror OriginAggregatesResponse fields one-to-one so
@@ -38,8 +40,6 @@ SectionName = Literal[
     "ip_health",
 ]
 
-_ALL_SECTIONS: frozenset[str] = frozenset(get_args(SectionName))
-
 # Branch 3 of get_aggregates' gather — timeseries + status_codes + path_breakdown
 # all run sequentially on extra_runners[1]. Splitting them across requests would
 # either need an extra pool conn or serialize work that already shares one — so
@@ -50,18 +50,7 @@ _TS_STATUS_PATH_TRIPLE: frozenset[str] = frozenset({"timeseries", "status_codes"
 # extra_runners[2]. Same reasoning as the triple above.
 _POP_IP_PAIR: frozenset[str] = frozenset({"pop_latency", "ip_health"})
 
-
-def _couple(expanded: set[str]) -> set[str]:
-    if expanded & _TS_STATUS_PATH_TRIPLE:
-        expanded |= _TS_STATUS_PATH_TRIPLE
-    if expanded & _POP_IP_PAIR:
-        expanded |= _POP_IP_PAIR
-    return expanded
-
-
-def _expand_sections(sections: list[SectionName] | None) -> set[str] | None:
-    """Apply coupling rules + validate. None → no selector (full response)."""
-    return expand_sections(sections, _ALL_SECTIONS, couple=_couple)
+_expand_sections = make_section_expander(SectionName, union_groups=(_TS_STATUS_PATH_TRIPLE, _POP_IP_PAIR))
 
 
 class OriginRequest(FilteredRequest):
@@ -102,6 +91,20 @@ class OriginAggregatesRequest(FilteredRequest):
     ip_health_limit: Limit100 = 30
     pop_latency_limit: Limit100 = 30
     sections: list[SectionName] | None = None
+    # Relative-range wire contract (additive, optional). When ``range_token`` is
+    # a recognized token, the SERVER resolves the scan window itself from
+    # (token, anchor) and ignores FE-supplied ``start_time``/``end_time`` on this
+    # path — so a crafted body can't widen the scan. The resolved bounds are
+    # still passed through ``ctx.clamp`` so the invite ceiling is enforced
+    # regardless of token (an analyst can't widen past their invite by picking
+    # "30d"). Unlike network-health this endpoint has no response memo to
+    # stabilize — the token exists purely so the FE first-paint React Query key
+    # is server-reproducible (it keys on the token + a quantized anchor instead
+    # of a client-now()-anchored absolute window), which is what makes the
+    # origin page SSR-seedable. Absent/unknown token → legacy absolute-bounds
+    # path unchanged. See backend/utils/time_window.py + the spec.
+    range_token: str | None = None
+    anchor: str | None = None
 
 
 @router.post("/aggregates", response_model=OriginAggregatesResponse)
@@ -121,7 +124,26 @@ async def origin_aggregates(
     to the per-card pattern by flipping a feature flag without a backend
     redeploy.
     """
-    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    # ── Relative-range keyed path ───────────────────────────────────────────
+    # When the caller sends a recognized ``range_token``, the SERVER resolves
+    # the scan window from (token, anchor) — we do NOT trust the FE-supplied
+    # absolute start/end here, so a crafted body can't widen the scan. The
+    # resolved bounds are STILL passed through ctx.clamp so the invite ceiling
+    # is enforced regardless of token (an analyst can't widen past their invite
+    # by picking "30d"). resolve_window only sizes the window; ctx.clamp is the
+    # enforcement point and runs AFTER it (mirrors routers/network.py). Unlike
+    # network-health, get_aggregates has no response memo to stabilize, so the
+    # token is NOT threaded into the repo — it exists purely to make the FE's
+    # first-paint key server-reproducible (the origin SSR-seed contract).
+    if is_valid_range_token(req.range_token):
+        # earliest_log_at drives the "auto" adaptive default; sourced from the
+        # persisted status snapshot (same field the bootstrap + /api/log-extents
+        # read — no DuckDB connection, no cron contention).
+        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
+        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
+        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
+    else:
+        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     sections = _expand_sections(req.sections)
     res = await repo.get_aggregates(
         con=ctx.con,

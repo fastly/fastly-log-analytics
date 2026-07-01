@@ -345,6 +345,39 @@ def delete_fos_bucket(
             s3.flush()
 
 
+def product_enabled(token: str, product_id: str) -> bool:
+    """Return True if the Fastly account behind ``token`` has ``product_id``
+    enabled, per Fastly's product-enablement endpoint
+    (``GET /enabled-products/v1/{product_id}``).
+
+    Only a subset of Fastly products expose this status endpoint (Object
+    Storage and KV Store are two; Compute and Config Store are NOT — those have
+    to be detected by attempting the create). For the ones that do, we treat:
+
+      * 200            -> True  (enabled)
+      * 4xx            -> False (not enabled for this account)
+      * 5xx / network  -> True  (inconclusive — don't block; the reactive
+                                 create/access failure downstream still guards)
+
+    Callers should validate the token first (e.g. list services) so a 401/403
+    here is only seen for a known-good token and reads as "not enabled".
+    """
+    try:
+        fastly("GET", f"/enabled-products/v1/{product_id}", token=token)
+        return True
+    except RuntimeError as exc:
+        # backend.core.fastly.client.fastly raises "HTTP <code> ..." on HTTP
+        # errors; a 4xx means the product isn't enabled for this account.
+        return "HTTP 4" not in str(exc)
+
+
+def object_storage_enabled(token: str) -> bool:
+    """Return True if the account has Object Storage enabled. Object Storage is
+    REQUIRED for log storage; see ``product_enabled`` for the 200/4xx/5xx
+    semantics."""
+    return product_enabled(token, "object_storage")
+
+
 def find_fos_key(description: str, token: str) -> dict | None:
     try:
         resp = fastly("GET", "/resources/object-storage/access-keys", token=token)

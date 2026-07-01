@@ -75,8 +75,33 @@ export function useUrlServiceSync() {
   // strip the query param entirely (matches prior behaviour).
   useEffect(() => {
     if (!isInitialized) return
-    const target = services.length > 0 ? activeServiceId : null
+    const hasServices = services.length > 0
+    const target = hasServices ? activeServiceId : null
     if (target === urlService) return
+    // Don't overwrite a URL that ALREADY names a valid, known service: that
+    // `?service=` is a deep-link / back-forward / paste navigation which the
+    // URL→store effect above adopts into the store. Writing activeServiceId
+    // back into the URL here would push the OLD value while that effect pushes
+    // the NEW one — the two effects swap values every render and blow React's
+    // update-depth limit (#185 "Maximum update depth exceeded"). This fires
+    // when switching to a freshly-added service whose id differs from the
+    // persisted / bootstrap-default one. Only STAMP the URL when it lacks a
+    // valid service (cold load / default selection) or carries a stale id.
+    if (urlService && services.some((s) => s.id === urlService)) return
+    // Mid-switch race guard (#185): during a service switch the store's
+    // `activeServiceId` updates one render BEFORE `services` does (the
+    // switcher writes the active id, then the bootstrap reconcile lands the
+    // membership-validated list). In that window `activeServiceId` names a
+    // service that is not YET in `services`. Stamping it here would push a
+    // value the URL→store effect cannot validate (so it can't adopt back),
+    // and once the list lands the two effects swap stale/new every render —
+    // the exact `Set.forEach → setActiveServiceId` depth blow-up the audit
+    // captured. DEFER: only stamp once `activeServiceId` itself is an
+    // established member of the current list. The clear-to-null path
+    // (hasServices === false) is exempt — there's no id to validate and the
+    // orphan ?service= must be stripped. Once the list lands carrying the
+    // active id, this effect re-runs and converges in a single stamp.
+    if (hasServices && activeServiceId && !services.some((s) => s.id === activeServiceId)) return
     startTransition(() => {
       setUrlService(target)
     })

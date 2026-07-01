@@ -36,8 +36,12 @@ from ._common import (
 from .hour_bundles import bundle_hours, bundle_hours_ip_spread
 from .network_rtt import build_network_rtt_bundles
 from .network_speed import build_network_speed_bundles
+from .origin_dims import build_origin_dims_bundles
+from .origin_latency_ts import build_origin_latency_ts_bundles
 from .origin_summary import build_origin_summary_bundles
+from .perf_dims import build_perf_dims_bundles
 from .perf_latency import build_perf_latency_bundles
+from .security_dims import build_security_dims_bundles
 from .sessions import build_session_bundles
 from .slow_urls import build_slow_urls_bundles
 from .time_series import build_time_series_bundles
@@ -222,6 +226,65 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
     except Exception as e:
         logger.warning(
             "[rollups] %s: perf_latency bundle failed (raw scan will serve): %s",
+            service_id,
+            e,
+        )
+
+    # Per-hour origin-dimension percentile rollups (pop / oip / edge) for
+    # /api/origin/aggregates' pop_latency + ip_health + path_breakdown panels.
+    # Same per-dimension percentile-over-window shape as slow_urls; reader
+    # request-weight-averages (error_pct stays exact via carried counts).
+    # Same best-effort contract — a failure leaves those panels on the raw
+    # TEMP-table path for the affected hours.
+    try:
+        build_origin_dims_bundles(service_id, source, touched_hours)
+    except Exception as e:
+        logger.warning(
+            "[rollups] %s: origin_dims bundle failed (raw scan will serve): %s",
+            service_id,
+            e,
+        )
+
+    # Per-hour MINUTE-granular origin-latency-percentile time-series rollup for
+    # /api/origin/aggregates' timeseries panel (the temp_table_create driver —
+    # this is the last section to roll up, enabling the skip-temp guard). Hybrid
+    # shape: time-series re-bucket (like verified_bots_ts) + request-weighted
+    # percentile merge (like slow_urls); counts exact, percentiles _approx.
+    # Same best-effort contract — a failure leaves the panel on the raw
+    # TEMP-table path for the affected hours.
+    try:
+        build_origin_latency_ts_bundles(service_id, source, touched_hours)
+    except Exception as e:
+        logger.warning(
+            "[rollups] %s: origin_latency_ts bundle failed (raw scan will serve): %s",
+            service_id,
+            e,
+        )
+
+    # Per-hour security-dimension rollups (req_size / conn_reuse / topips / cov)
+    # for /api/security/aggregates' equivalent panels (each an all-rows live
+    # scan today). EXACT counts/MAX SUM/merge across hours — no _approx flag.
+    # Same best-effort contract — a failure leaves those panels on the raw
+    # TEMP-table path for the affected hours.
+    try:
+        build_security_dims_bundles(service_id, source, touched_hours)
+    except Exception as e:
+        logger.warning(
+            "[rollups] %s: security_dims bundle failed (raw scan will serve): %s",
+            service_id,
+            e,
+        )
+
+    # Per-hour performance-dimension rollup (ttl_dist) for
+    # /api/performance/aggregates' ttl_dist histogram panel (an all-rows live
+    # scan today). EXACT counts SUM + MIN-of-MIN across hours — no _approx flag.
+    # Same best-effort contract — a failure leaves that panel on the raw
+    # TEMP-table path for the affected hours.
+    try:
+        build_perf_dims_bundles(service_id, source, touched_hours)
+    except Exception as e:
+        logger.warning(
+            "[rollups] %s: perf_dims bundle failed (raw scan will serve): %s",
             service_id,
             e,
         )

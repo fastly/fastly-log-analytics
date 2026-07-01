@@ -1125,7 +1125,7 @@ wheels = [
 
 [[package]]
 name = "fastly-log-analytics"
-version = "2.0.0b1"
+version = "2.0.0b2"
 source = { editable = "." }
 dependencies = [
     { name = "aiodns" },

@@ -139,8 +139,11 @@ def _run_rollup_compact_daily(service_id: str) -> None:
         compact_closed_days_to_daily,
         compact_network_rtt_closed_days_to_daily,
         compact_network_speed_closed_days_to_daily,
+        compact_origin_dims_closed_days_to_daily,
+        compact_origin_latency_ts_closed_days_to_daily,
         compact_origin_summary_closed_days_to_daily,
         compact_perf_latency_closed_days_to_daily,
+        compact_security_dims_closed_days_to_daily,
         compact_verified_bots_ts_closed_days_to_daily,
     )
 
@@ -287,6 +290,48 @@ def _run_rollup_compact_daily(service_id: str) -> None:
                 e,
             )
             perf_compacted = 0
+
+        # origin_dims per-day compaction: pop / oip / edge latency dimensions
+        # (request-weighted percentile merge; oip SUMs exact 5xx/total counts;
+        # pop/oip re-cap top-K). Same mtime-gated idempotent pattern; failure
+        # leaves those panels on per-hour.
+        try:
+            origin_dims_compacted = compact_origin_dims_closed_days_to_daily(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: origin_dims day-compact failed (per-hour still serves): %s",
+                _display,
+                e,
+            )
+            origin_dims_compacted = 0
+
+        # origin_latency_ts per-day compaction: minute-granular origin-latency
+        # percentile time series. Same shape as verified_bots_ts — PRESERVES
+        # the minute (bucket_ts) dimension because the panel is a time series.
+        # Same mtime-gated idempotent pattern; failure leaves it on per-hour.
+        try:
+            origin_latency_ts_compacted = compact_origin_latency_ts_closed_days_to_daily(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: origin_latency_ts day-compact failed (per-hour still serves): %s",
+                _display,
+                e,
+            )
+            origin_latency_ts_compacted = 0
+
+        # security_dims per-day compaction: req_size / conn_reuse (bucket SUM +
+        # MIN-of-MIN), topips (MAX-of-MAX re-cap), cov (one-row SUM). EXACT
+        # merges — no _approx. Same mtime-gated idempotent pattern; failure
+        # leaves those panels on per-hour.
+        try:
+            security_dims_compacted = compact_security_dims_closed_days_to_daily(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: security_dims day-compact failed (per-hour still serves): %s",
+                _display,
+                e,
+            )
+            security_dims_compacted = 0
         duration = time.time() - start_time
         # Pass run_id so log_cron_run UPDATEs the 'running' row that
         # start_cron_run inserted (instead of orphaning it and inserting
@@ -301,12 +346,17 @@ def _run_rollup_compact_daily(service_id: str) -> None:
         ns_summary = f"; compacted {network_speed_compacted} network_speed day(s)" if network_speed_compacted else ""
         vbts_summary = f"; compacted {vbts_compacted} verified_bots_ts day(s)" if vbts_compacted else ""
         perf_summary = f"; compacted {perf_compacted} perf_latency day(s)" if perf_compacted else ""
+        od_summary = f"; compacted {origin_dims_compacted} origin_dims day(s)" if origin_dims_compacted else ""
+        olts_summary = (
+            f"; compacted {origin_latency_ts_compacted} origin_latency_ts day(s)" if origin_latency_ts_compacted else ""
+        )
+        sd_summary = f"; compacted {security_dims_compacted} security_dims day(s)" if security_dims_compacted else ""
         log_cron_run(
             src,
             "rollup_compact_daily",
             duration,
             "success",
-            summary=f"Rebuilt {rebuilt} (field, day) file(s); bundled {bundled} day(s){os_summary}{nr_summary}{ns_summary}{vbts_summary}{perf_summary}{heal_summary}.",
+            summary=f"Rebuilt {rebuilt} (field, day) file(s); bundled {bundled} day(s){os_summary}{nr_summary}{ns_summary}{vbts_summary}{perf_summary}{od_summary}{olts_summary}{sd_summary}{heal_summary}.",
             run_id=run_id,
         )
         logger.info(

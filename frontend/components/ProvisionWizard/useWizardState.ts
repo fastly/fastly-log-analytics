@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { client } from "@/lib/api";
+import { client, extractApiError } from "@/lib/api";
 import { useServiceStore } from "@/stores/serviceStore";
 import { useTimezoneStore } from "@/stores/timezoneStore";
 import { useSSE } from "@/hooks/useSSE";
@@ -165,9 +165,19 @@ export function useWizardState(
   } = useQuery({
     queryKey: ["provision-services"],
     queryFn: async () => {
-      const { data } = await client.GET("/api/provision/services", {
+      const { data, error } = await client.GET("/api/provision/services", {
         params: { query: { token } },
       });
+      // Surface backend errors (e.g. object_storage_not_enabled, invalid token)
+      // as the query error so TokenStep renders the actionable message instead
+      // of silently returning undefined and stalling on "Fetch Services".
+      // Preserve the machine-readable code so the UI can render a richer message
+      // (e.g. an "Enable Object Storage" link) for specific cases.
+      if (error) {
+        const err = new Error(extractApiError(error)) as Error & { code?: string };
+        err.code = (error as { detail?: { error?: string } })?.detail?.error;
+        throw err;
+      }
       return data as any;
     },
     enabled: false,

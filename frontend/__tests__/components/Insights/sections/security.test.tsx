@@ -13,7 +13,12 @@ const KNOWN_IDS = [
   'proxy_surge',
   'botnet_grouping',
   'low_and_slow',
+  'repeated_patterns',
 ] as const
+
+// Arms that intentionally ship an explanatory diagram. Every other arm
+// must leave `diagram` undefined (asserted below).
+const ARMS_WITH_DIAGRAM = new Set<string>(['impossible_distance', 'repeated_patterns'])
 
 describe('getSecurityContent', () => {
   test('returns null for an unknown id', () => {
@@ -57,13 +62,27 @@ describe('getSecurityContent', () => {
     unmount()
   })
 
-  test('non-impossible_distance arms do not require a diagram', () => {
+  test('repeated_patterns includes a cadence diagram contrasting script vs human', () => {
+    const content = getSecurityContent('repeated_patterns')
+    expect(content?.diagram).toBeTruthy()
+    expect(content?.fields).toEqual(['ip', 'timestamp'])
+    const { container, unmount } = render(<>{content!.diagram}</>)
+    expect(container.textContent).toMatch(/Automated script/i)
+    expect(container.textContent).toMatch(/Human browsing/i)
+    unmount()
+  })
+
+  test('only documented arms ship a diagram', () => {
     // The diagram is documented as optional on InsightContent — make
-    // sure the other branches don't accidentally start setting it
-    // without an accompanying test update.
+    // sure no branch accidentally starts (or stops) setting it without
+    // an accompanying test update.
     for (const id of KNOWN_IDS) {
-      if (id === 'impossible_distance') continue
-      expect(getSecurityContent(id)?.diagram).toBeUndefined()
+      const diagram = getSecurityContent(id)?.diagram
+      if (ARMS_WITH_DIAGRAM.has(id)) {
+        expect(diagram).toBeTruthy()
+      } else {
+        expect(diagram).toBeUndefined()
+      }
     }
   })
 

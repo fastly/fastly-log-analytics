@@ -36,6 +36,7 @@ from backend.models.session_scoring import (
     ScoringEvaluationResponse,
     ScoringHealthResponse,
     ScoringLabelCreate,
+    ScoringLabelsListResponse,
     ScoringLabelUpdate,
     ScoringLatencyTimeseriesResponse,
     ScoringScoreDistributionResponse,
@@ -493,7 +494,18 @@ def scoring_enable(
             )
         except Exception as e:
             logger.exception("scoring_enable failed for %s", service_id)
-            yield json.dumps({"type": "error", "message": str(e)})
+            from backend.provision.session_scoring_setup import EntitlementError
+
+            err_event = {"type": "error", "message": str(e)}
+            # A required Fastly product (Compute / Config Store / KV Store) isn't
+            # enabled — surface the machine code + manage.fastly.com deep link so
+            # the SSE modal renders a clickable "enable it" message instead of a
+            # raw HTTP 4xx string.
+            if isinstance(e, EntitlementError):
+                err_event["code"] = e.code
+                if e.link:
+                    err_event["link"] = e.link
+            yield json.dumps(err_event)
 
     return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
 
@@ -758,7 +770,11 @@ def _scoring_time_window(request: Request, since_hours: int) -> tuple[str, str |
     return pred, f"{start_iso}|{end_iso}"
 
 
-@router.get("/{service_id}/scoring/labels")
+@router.get(
+    "/{service_id}/scoring/labels",
+    response_model=ScoringLabelsListResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_labels_list(
     request: Request,
     service_id: str = Path(..., description="Logging service ID"),
@@ -1046,6 +1062,7 @@ def scoring_latency_timeseries(
         f"date_trunc('{bucket}', timestamp) AS hour",
         "COUNT(*) FILTER (WHERE edge_score IS NOT NULL) AS scored_count",
         "COUNT(*) FILTER (WHERE edge_score_reason ILIKE '%compute-unavailable%') AS fail_open_count",
+        "COUNT(*) AS total_count",
     ]
     if has_rtt:
         select_parts += [

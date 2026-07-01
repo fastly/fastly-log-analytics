@@ -40,6 +40,25 @@ def get_active_version_info(service_id: str, token: str, *, timeout: int = 8, ma
     return None
 
 
+def get_generated_vcl(service_id: str, version: int, token: str) -> str | None:
+    """Return the fully-compiled (generated) VCL for a service version, or None.
+
+    Fastly's ``GET /service/{id}/version/{n}/generated_vcl`` returns JSON
+    ``{"content": "<vcl>", ...}`` — the COMPILED VCL, which carries the
+    account-level pragmas Fastly injects (e.g.
+    ``pragma optional_param ratelimit_opt_in true;``) that never appear in the
+    source VCL we upload. Returns ``None`` for Compute/wasm services (which have
+    no generated VCL) and on any API error, mirroring the RuntimeError→None
+    sentinel style of :func:`get_active_version`.
+    """
+    try:
+        result = fastly("GET", f"/service/{service_id}/version/{version}/generated_vcl", token=token)
+    except RuntimeError:
+        return None
+    content = result.get("content") if isinstance(result, dict) else None
+    return content or None
+
+
 def find_service_by_name(name: str, token: str) -> dict | None:
     try:
         services = fastly("GET", "/service", token=token)

@@ -14,6 +14,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
+import { useMaskIps } from '@/hooks/useMaskIps'
+import { isIpFamilyField } from '@/lib/pii'
 
 interface TopTenTableProps {
   title: string
@@ -54,6 +56,11 @@ function NotLoggedIndicator() {
 export const TopTenTable = React.memo(function TopTenTable({ title, icon, field, data, compareData, onRowClick, inActiveFormat = true }: TopTenTableProps) {
   const [copied, setCopied] = useState(false)
   const { data: catalog } = useLogFieldsCatalog()
+  // PII: a masking analyst can't drill down by client IP (value is masked,
+  // backend 403s the filter). Make the `ip` card's rows non-interactive and
+  // hide its value-search dialog. Other cards (incl. `oip`) are unaffected.
+  const maskIps = useMaskIps()
+  const filterBlocked = maskIps && isIpFamilyField(field ?? '')
 
   if (!data || !data.top || data.top.length === 0) {
     let requiredGroupMessage = ''
@@ -89,7 +96,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
             {icon} {title}
             {!inActiveFormat && <NotLoggedIndicator />}
           </h3>
-          {field && <FieldSearchDialog field={field} title={title} />}
+          {field && !filterBlocked && <FieldSearchDialog field={field} title={title} />}
         </div>
         <div data-empty-placeholder="true" className="flex flex-col flex-1 items-center justify-center text-muted-foreground text-sm border-t border-dashed mt-1 pt-4 text-center">
           <span className="mb-1">No data available</span>
@@ -154,7 +161,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
             <TooltipContent>
               <p className="text-[10px]">{copied ? 'Copied!' : 'Copy as CSV'}</p>
             </TooltipContent>
-          </Tooltip>          {field && <FieldSearchDialog field={field} title={title} />}
+          </Tooltip>          {field && !filterBlocked && <FieldSearchDialog field={field} title={title} />}
         </div>
       </div>
       <div className="flex flex-col gap-[2px] flex-1">
@@ -179,27 +186,22 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
               ? TrendingDown
               : null
 
-          return (
-            // A-4: native <button> for keyboard reachability + Enter/Space
-            // activation + focus ring for free (WCAG 2.1.1 / 4.1.2). The
-            // visual row layout is preserved via the reset classes.
-            <button
-              key={i}
-              type="button"
-              className="group flex items-center justify-between py-1.5 px-2 -mx-2 rounded-sm cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-sm text-left relative overflow-hidden w-full bg-transparent border-0"
-              onClick={() => onRowClick?.(field ?? '', item.value as string | number)}
-              title={String(displayVal)}
-              aria-label={`Filter to ${displayVal}`}
-            >
+          const rowInner = (
+            <>
               <div
                 className="absolute inset-y-0 left-0 bg-primary/10 transition-all duration-300"
                 style={{ width: `${(item.count / maxCount) * 100}%` }}
                 aria-hidden="true"
               />
-              <span className="relative z-10 truncate pr-4 max-w-[65%]">
+              {/* Let the value use all space the count/delta badge doesn't
+                  need (flex-1 + min-w-0 for in-flex truncation) rather than a
+                  fixed 65% cap — short values like IPs then fit fully while
+                  long URLs/UAs still truncate. The badge is shrink-0 so it
+                  always keeps its room. */}
+              <span className="relative z-10 truncate pr-4 min-w-0 flex-1">
                 {field === 'pop' ? <PopLabel code={String(item.value)} /> : displayVal}
               </span>
-              <div className="relative z-10 flex items-center gap-2">
+              <div className="relative z-10 flex items-center gap-2 shrink-0">
                 {delta !== null && (
                   <span
                     className={cn(
@@ -218,6 +220,36 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
                   {item.count.toLocaleString()}
                 </span>
               </div>
+            </>
+          )
+
+          // PII: for a masking analyst the `ip` card is read-only — render a
+          // static row (no filter drill-down) instead of the clickable button.
+          if (filterBlocked) {
+            return (
+              <div
+                key={String(item.value)}
+                className="group flex items-center justify-between py-1.5 px-2 -mx-2 rounded-sm text-sm text-left relative overflow-hidden w-full"
+                title={String(displayVal)}
+              >
+                {rowInner}
+              </div>
+            )
+          }
+
+          return (
+            // A-4: native <button> for keyboard reachability + Enter/Space
+            // activation + focus ring for free (WCAG 2.1.1 / 4.1.2). The
+            // visual row layout is preserved via the reset classes.
+            <button
+              key={i}
+              type="button"
+              className="group flex items-center justify-between py-1.5 px-2 -mx-2 rounded-sm cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-sm text-left relative overflow-hidden w-full bg-transparent border-0"
+              onClick={() => onRowClick?.(field ?? '', item.value as string | number)}
+              title={String(displayVal)}
+              aria-label={`Filter to ${displayVal}`}
+            >
+              {rowInner}
             </button>
           )
         })}

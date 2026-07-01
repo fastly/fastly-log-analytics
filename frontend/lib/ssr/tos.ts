@@ -4,9 +4,11 @@
 // the caller should bounce to /share-login — preserved here by mapping
 // status 401 to the literal 'unauthenticated' return value.
 
+import type { components } from '@/types/api.generated'
+
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
-export type TosPayload = { version: string; text: string }
+export type TosPayload = components['schemas']['TosDocument']
 export type TosResult = TosPayload | 'unauthenticated' | null
 
 export async function fetchTosServerSide(): Promise<TosResult> {

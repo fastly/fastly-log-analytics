@@ -55,6 +55,21 @@ vi.mock('@/lib/date', () => ({
   formatDate: (t: string) => t,
 }))
 
+// useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
+// which would need a QueryClientProvider. Mock it instead — for BotsSection only
+// the Top TLS Fingerprints table's empty copy is field-gated (ja3/ja4): inactive
+// → "Requires Security: TLS Fingerprinting (Group H) …", active → "No TLS
+// fingerprints in this time range." Default to no active fields so the
+// not-enabled path is exercised; the neutral-branch test adds 'ja3'.
+const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
+vi.mock('@/hooks/useActiveLogFields', () => ({
+  useActiveLogFields: () => ({
+    ready: true,
+    isFieldActive: (id: string) => activeFields.has(id),
+    isGroupActive: () => false,
+  }),
+}))
+
 import { BotsSection } from '@/app/security/_sections/BotsSection'
 
 function baseProps(overrides: Partial<React.ComponentProps<typeof BotsSection>> = {}) {
@@ -86,6 +101,7 @@ describe('BotsSection', () => {
     plotlyMock.mockClear()
     dataTableMock.mockClear()
     columnVisibilityMock.mockClear()
+    activeFields.clear()
   })
 
   it('shows loading skeleton (AnalyticsCard overlay) when data is undefined and isLoading=true', () => {
@@ -133,6 +149,34 @@ describe('BotsSection', () => {
     )
     // Same chart-vs-table duplication as the ngwaf_configured=true branch.
     expect(screen.getAllByText(/ngwaf_workspace_id/i).length).toBe(2)
+  })
+
+  it('routes the TLS-fingerprint empty copy on field-active state', () => {
+    const emptyData = {
+      ngwaf_configured: true,
+      ngwaf_verified_bots_ts: [],
+      ngwaf_verified_bots: [],
+      wellknown_bots: [],
+      tls_fingerprints: [],
+    } as any
+
+    // Not enabled (no ja3/ja4 in the active format) → "Requires …" hint.
+    const { unmount } = render(<BotsSection {...baseProps({ data: emptyData })} />)
+    expect(
+      screen.getByText(
+        'Requires Security: TLS Fingerprinting (Group H) fields to be enabled in Fastly logging.',
+      ),
+    ).toBeInTheDocument()
+    unmount()
+    dataTableMock.mockClear()
+
+    // Enabled-but-empty (ja3 active) → neutral "no data in this range" copy.
+    activeFields.add('ja3')
+    render(<BotsSection {...baseProps({ data: emptyData })} />)
+    expect(screen.getByText('No TLS fingerprints in this time range.')).toBeInTheDocument()
+    expect(
+      screen.queryByText(/Requires Security: TLS Fingerprinting/),
+    ).not.toBeInTheDocument()
   })
 
   it('passes populated rows through to DataTable for each section', () => {

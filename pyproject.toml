@@ -1,6 +1,6 @@
 [project]
 name = "fastly-log-analytics"
-version = "2.0.0b1"
+version = "2.0.0b2"
 description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB"
 requires-python = ">=3.10"
 dependencies = [
@@ -245,6 +245,7 @@ markers = [
     # Phase 0 floor: 24 marked tests (derives from the 24 verified findings).
     "security_regression: tests covering a verified security fix; CI gates on count",
     "slow: tests intentionally excluded from the fast default suite — run with `pytest -m slow`",
+    "terraform_cli: tests that shell out to the real terraform binary (heavyweight subprocess; run serially in their own step, excluded from the -n auto pool)",
 ]
 # Test-only suppression: FastAPI's TestClient runs requests in worker
 # threads that open metadata_db SQLite connections. Most of them are
@@ -472,11 +473,6 @@ ignore_imports = [
     # submodule import.
     "backend.cron.jobs.sync -> backend.routers.admin",
     "backend.cron.jobs.sync -> backend.routers.admin.sync_status",
-    # bootstrap's optional share-status panel reuses the share_admin
-    # router's build_share_status() helper (bootstrap.py:441, lazy import
-    # inside the bootstrap route). Read-only status assembly for the
-    # admin landing page, not new business coupling.
-    "backend.routers.bootstrap -> backend.routers.share_admin",
     # The system-metrics sampler reuses admin_queries' _ensure_enabled()
     # feature gate (system_metrics_sampler.py:71,81, lazy imports). The
     # sampler is a backend-only collector reached via the admin router;

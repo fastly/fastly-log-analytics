@@ -139,6 +139,10 @@ export const ShieldingHelp = () => (
           <span className="w-3 h-1 rounded-full bg-[#ef4444]" />
           <span><strong>&gt; 3&times; (Investigate):</strong> Significant latency overhead; check for suboptimal peering.</span>
         </li>
+        <li className="flex items-center gap-2">
+          <span className="w-3 h-1 rounded-full bg-[#94a3b8]" />
+          <span><strong>Grey (Low sample):</strong> Fewer than 30 requests — too few samples for the median/percentiles to be reliable. Shown for visibility but never colour-graded or flagged.</span>
+        </li>
       </ul>
     </div>
 
@@ -157,6 +161,14 @@ export const ShieldingHelp = () => (
           <div className="flex flex-col gap-0.5">
             <span><strong>Arc Width:</strong> Proportional to request volume.</span>
           </div>
+        </li>
+        <li className="flex items-center gap-2">
+          <span className="w-4 border-t-2 border-dashed border-[#ef4444]" />
+          <span><strong>Dashed Red Arc:</strong> Flagged route — efficiency &gt; 3&times; <em>and</em> &ge; 20ms overhead above the light-speed floor, <em>and</em> at least 30 requests. Worth investigating for suboptimal peering.</span>
+        </li>
+        <li className="flex items-center gap-2">
+          <span className="w-4 border-t-2 border-solid border-[#94a3b8]" />
+          <span><strong>Grey Arc:</strong> Low-sample route (&lt; 30 requests) — drawn for visibility but not colour-graded or flagged.</span>
         </li>
       </ul>
     </div>
@@ -219,7 +231,22 @@ export const SHIELDING_COLUMNS = [
       />
     )
   },
-  { accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Reqs</span>, cell: (info: any) => info.getValue().toLocaleString() },
+  {
+    accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Reqs</span>,
+    cell: (info: any) => {
+      // Mute the count on low-sample routes so the eye connects "few requests"
+      // with the un-graded (grey) efficiency pill. (low-sample gating)
+      const lowSample = info.row.original.low_sample
+      return (
+        <span
+          className={cn('tabular-nums', lowSample ? 'text-muted-foreground' : '')}
+          title={lowSample ? 'Fewer than 30 requests — percentiles unreliable, route not flagged' : undefined}
+        >
+          {info.getValue().toLocaleString()}
+        </span>
+      )
+    }
+  },
   { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P50 (E→S)</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
   { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P95 (E→S)</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
   { accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P99 (E→S)</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
@@ -228,8 +255,14 @@ export const SHIELDING_COLUMNS = [
     accessorKey: 'efficiency_ratio', id: 'efficiency_ratio', meta: { label: 'Efficiency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Efficiency</span>, cell: (info: any) => {
       const ratio = info.getValue()
       if (ratio == null) return <span className="text-muted-foreground">—</span>
-      const cls = ratio < 1.5 ? 'bg-green-500/10 text-green-600 dark:text-green-400' : ratio < 3 ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400' : 'bg-destructive/10 text-destructive'
-      return <span className={cn("inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums", cls)}>{ratio.toFixed(1)}×</span>
+      const lowSample = info.row.original.low_sample
+      // A negative ratio (transit delta < 0) is meaningless, not "excellent":
+      // render it neutral instead of letting `ratio < 1.5` paint it green. (L5)
+      // Same for low-sample routes: below ~30 requests the median is noise, so
+      // don't colour-grade it red/green — render neutral + explain on hover so
+      // a quiet route can't masquerade as a peering problem. (low-sample gating)
+      const cls = lowSample || ratio < 0 ? 'bg-muted text-muted-foreground' : ratio < 1.5 ? 'bg-green-500/10 text-green-600 dark:text-green-400' : ratio < 3 ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400' : 'bg-destructive/10 text-destructive'
+      return <span title={lowSample ? 'Fewer than 30 requests — too few samples to grade; not flagged' : undefined} className={cn("inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums", cls)}>{ratio.toFixed(1)}×</span>
     }
   },
 ]

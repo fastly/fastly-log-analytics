@@ -166,8 +166,43 @@ def test_handle_teardown_loads_state_from_service_config():
     assert state["endpoint_name"] == "MyEndpoint"
     assert state["cdn_service_id"] == "cdn1"
     assert token == "tok"
-    # All three remove_* flags default to True
-    assert opts == {"remove_logging": True, "remove_cdn": True, "remove_bucket": True}
+    # All remove_* flags default to True
+    assert opts == {"remove_logging": True, "remove_cdn": True, "remove_bucket": True, "remove_scoring": True}
+
+
+def test_handle_teardown_carries_scoring_block_into_state():
+    """The teardown state must carry cfg['scoring'] so perform_teardown can tear
+    down the Compute scorer + its stores. Pinned because the root cause of the
+    orphaned-scoring bug was the CLI state builder omitting the scoring block."""
+    fake_cfg = {
+        "fos_bucket": "my-bucket",
+        "fastly_api_key": "tok",
+        "provisioning": {"endpoint_name": "E", "cdn_service_id": "cdn1"},
+        "scoring": {
+            "enabled": True,
+            "scoring_service_id": "SCORESVC",
+            "scoring_keys_store_id": "KEYS",
+            "scoring_config_store_id": "CFG",
+            "scoring_matrix_store_id": "MTX",
+        },
+    }
+    perform_calls = []
+
+    def _record(state, token, opts=None):
+        perform_calls.append(state)
+        return iter([])
+
+    with (
+        patch("backend.config.list_service_ids", return_value=["svc-1"]),
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.provision.cli.perform_teardown", side_effect=_record),
+        patch("backend.provision.cli.cleanup_local_data"),
+    ):
+        cli.handle_teardown(_args(service_id="svc-1", token="tok"))
+
+    assert len(perform_calls) == 1
+    assert perform_calls[0]["scoring"]["enabled"] is True
+    assert perform_calls[0]["scoring"]["scoring_service_id"] == "SCORESVC"
 
 
 def test_handle_teardown_respects_no_remove_flags():
@@ -196,7 +231,9 @@ def test_handle_teardown_respects_no_remove_flags():
                 no_remove_bucket=False,
             )
         )
-    assert perform_calls == [{"remove_logging": False, "remove_cdn": False, "remove_bucket": True}]
+    assert perform_calls == [
+        {"remove_logging": False, "remove_cdn": False, "remove_bucket": True, "remove_scoring": True}
+    ]
 
 
 def test_handle_teardown_exits_1_on_orchestrator_exception(capsys):
@@ -464,12 +501,14 @@ def test_handle_update_cdn_uses_cdn_service_id_from_provisioning():
                 "provisioning": {"cdn_service_id": "cdn-target", "rate_limiting": True},
             },
         ),
+        patch("backend.provision.cli.account_has_rate_limiting", return_value=None),
         patch(
             "backend.provision.cli.redeploy_cdn_vcl",
             side_effect=lambda sid, token, rate_limiting=True: redeploy_calls.append((sid, token, rate_limiting)) or 5,
         ),
     ):
         cli.handle_update_cdn(_args(service_id="svc"))
+    # Detection inconclusive (None) → fall back to the persisted flag (True).
     assert redeploy_calls == [("cdn-target", "tok", True)]
 
 
@@ -489,6 +528,7 @@ def test_handle_update_cdn_falls_back_to_find_by_name():
             },
         ),
         patch("backend.provision.cli.find_service_by_name", return_value={"id": "found-cdn-id"}),
+        patch("backend.provision.cli.account_has_rate_limiting", return_value=None),
         patch("backend.provision.cli.redeploy_cdn_vcl", return_value=7) as mock_redeploy,
     ):
         cli.handle_update_cdn(_args(service_id="svc"))
@@ -520,11 +560,63 @@ def test_handle_update_cdn_exits_1_on_redeploy_exception():
             "backend.config.load_config",
             return_value={"fastly_api_key": "tok", "provisioning": {"cdn_service_id": "cdn"}},
         ),
+        patch("backend.provision.cli.account_has_rate_limiting", return_value=None),
         patch("backend.provision.cli.redeploy_cdn_vcl", side_effect=RuntimeError("vcl rejected")),
     ):
         with pytest.raises(SystemExit) as exc:
             cli.handle_update_cdn(_args(service_id="svc"))
     assert exc.value.code == 1
+
+
+def test_handle_update_cdn_reprobes_persists_and_applies_new_entitlement():
+    """A customer who LOST edge rate limiting (or never had it) is detected on
+    redeploy: the refreshed flag is persisted via save_config AND passed to
+    redeploy_cdn_vcl so the CDN deploys without ratecounters."""
+    saved = []
+    redeploy_calls = []
+    cfg = {
+        "service_id": "svc",
+        "fastly_api_key": "tok",
+        # persisted flag says True, but the account no longer has the feature.
+        "provisioning": {"cdn_service_id": "cdn", "rate_limiting": True},
+    }
+    with (
+        patch("backend.config.list_service_ids", return_value=["svc"]),
+        patch("backend.config.load_config", return_value=cfg),
+        patch("backend.config.save_config", side_effect=lambda sid, c: saved.append((sid, c))),
+        patch("backend.provision.cli.account_has_rate_limiting", return_value=False),
+        patch(
+            "backend.provision.cli.redeploy_cdn_vcl",
+            side_effect=lambda sid, token, rate_limiting=True: redeploy_calls.append(rate_limiting) or 9,
+        ),
+    ):
+        cli.handle_update_cdn(_args(service_id="svc"))
+
+    # Refreshed flag persisted under provisioning.rate_limiting...
+    assert saved and saved[0][0] == "svc"
+    assert saved[0][1]["provisioning"]["rate_limiting"] is False
+    # ...and the deploy uses the freshly-detected value, not the stale True.
+    assert redeploy_calls == [False]
+
+
+def test_handle_update_cdn_does_not_persist_when_flag_unchanged():
+    """Detection matches the persisted flag → no redundant save_config write."""
+    saved = []
+    cfg = {
+        "service_id": "svc",
+        "fastly_api_key": "tok",
+        "provisioning": {"cdn_service_id": "cdn", "rate_limiting": True},
+    }
+    with (
+        patch("backend.config.list_service_ids", return_value=["svc"]),
+        patch("backend.config.load_config", return_value=cfg),
+        patch("backend.config.save_config", side_effect=lambda sid, c: saved.append((sid, c))),
+        patch("backend.provision.cli.account_has_rate_limiting", return_value=True),
+        patch("backend.provision.cli.redeploy_cdn_vcl", return_value=9),
+    ):
+        cli.handle_update_cdn(_args(service_id="svc"))
+
+    assert saved == []
 
 
 # ── wizard ───────────────────────────────────────────────────────────────────

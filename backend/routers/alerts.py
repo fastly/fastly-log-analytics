@@ -23,6 +23,26 @@ def _alert_list(alerts):
     return AlertListResponse.with_telemetry(data=alerts, evaluated_at=datetime.now(UTC).isoformat())
 
 
+def _status_cache_has_data(src: dict) -> bool:
+    """True when the per-service status cache reports ingested log data.
+
+    Reads the same status cache the dashboard self-heal consults (the
+    direct parquet+buffer min/max+count snapshot written at ingest, which
+    updates immediately — unlike the cached Iceberg view SQL). Used by the
+    alerts-preview self-heal to distinguish "view is stale" from "service
+    genuinely has no data" without an extra DuckDB scan.
+    """
+    try:
+        from backend import config as svcconfig
+
+        cached = svcconfig.get_status(src["name"])
+    except Exception:
+        return False
+    if not cached:
+        return False
+    return bool(cached.get("local_rows", 0)) or cached.get("latest_log_at") is not None
+
+
 @router.get("/", response_model=AlertListResponse)
 def list_all_alerts(
     request: Request,
@@ -142,6 +162,22 @@ def preview_alert(
 
         with track_query(con, q, [], "alerts_preview") as cursor:
             rows = cursor.fetchall()
+
+        # View-lag self-heal: the window is anchored to ``(SELECT
+        # max(timestamp) FROM table)``, which is NULL when the cached
+        # Iceberg view SQL lags a fresh ingest (e.g. a single buffered log
+        # before the next sync/commit cron rebuild; dev runs no crons).
+        # That yields 0 preview rows even though the data exists. If the
+        # preview is empty BUT the per-service status cache reports data,
+        # the view MUST be stale — force ONE rebuild (local boolean, no
+        # retry storm) and re-run. A genuinely empty service won't have a
+        # status-cache row count, so this won't fire there.
+        if not rows and _status_cache_has_data(src):
+            from backend.repositories._base import force_rebuild_view
+
+            force_rebuild_view(con, src)
+            with track_query(con, q, [], "alerts_preview") as cursor:
+                rows = cursor.fetchall()
 
         times = [safe_iso(r[0]) for r in rows]
         values = [float(r[1] or 0) for r in rows]

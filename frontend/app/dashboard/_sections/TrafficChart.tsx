@@ -13,6 +13,7 @@ import {
 import { ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { TRENDS } from '@/lib/constants'
+import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import type { ReportConfiguration } from './types'
 
 export interface TrafficChartProps {
@@ -63,6 +64,9 @@ export function TrafficChart({
   endTime,
   timezone,
 }: TrafficChartProps) {
+  // Distinguish "field group not enabled" from "enabled but no data in this
+  // window yet" so a low-traffic/fresh service doesn't read as misconfigured.
+  const { isFieldActive } = useActiveLogFields()
   return (
     <div className="border rounded-lg p-4 flex flex-col relative overflow-hidden">
       <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 mb-4 relative z-10">
@@ -200,10 +204,10 @@ export function TrafficChart({
               <span className="text-sm font-medium">No data available</span>
               <span className="text-xs mt-1">
                 {(() => {
-                  if (metric === 'ttfb_client') {
+                  if (metric === 'ttfb_client' && !isFieldActive('ttfb')) {
                     return "Requires Infrastructure (Group C) fields to be enabled in Fastly logging."
                   }
-                  if (metric === 'req_size') {
+                  if (metric === 'req_size' && !isFieldActive('req_bytes')) {
                     return "Requires Request Identity (Group A) fields to be enabled in Fastly logging."
                   }
                   return "No logs found for this period."

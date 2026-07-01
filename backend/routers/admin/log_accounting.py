@@ -12,7 +12,6 @@ from datetime import datetime
 
 from fastapi import Depends, HTTPException, Query, Response
 
-from backend.core.fastly.utils import FASTLY_LOG_FIELDS as _FASTLY_LOG_FIELDS
 from backend.deps import get_source
 from backend.models.admin import (
     LogAccountingBucket,
@@ -33,7 +32,7 @@ logger = logging.getLogger(__name__)
 # 30 s, so a 30 s server-side TTL is well inside any user-visible
 # staleness budget and removes the spinner feel.
 _FASTLY_COUNTS_TTL = 45.0
-_FASTLY_COUNTS_CACHE: dict[tuple[str, int, int, str], tuple[float, tuple[dict[str, int], str | None]]] = {}
+_FASTLY_COUNTS_CACHE: dict[tuple[str, int, int, str], tuple[float, dict[str, int]]] = {}
 
 # Same TTL on the per-bucket DuckDB COUNT(*) since the function arguments
 # are functions of (service name, window, by) and the answer is stable
@@ -60,10 +59,17 @@ def backfill_window(
     return _ice.sync_data(source, start_time=start_time, end_time=end_time)
 
 
-def _fetch_fastly_log_counts(
+def _fetch_fastly_request_counts(
     logging_svc_id: str, api_key: str, from_ts: int, to_ts: int, by: str
-) -> tuple[dict[str, int], str | None]:
-    """Return (bucket_iso → log_count, field_name_used or None).
+) -> dict[str, int]:
+    """Return bucket_iso → Fastly ``requests`` count.
+
+    ``requests`` is the loss denominator: it sits 1:1 with our ingested rows
+    (one S3 log line per real client request), so ``requests − our_rows`` is
+    the honest gap. We deliberately do NOT use Fastly's ``log`` stat — it
+    counts ``vcl_log`` RE-EXECUTIONS (bot-challenge / restart paths re-run
+    ``vcl_recv``), so it reads 2.7–3.8× ``requests`` on some services and
+    produces a permanent phantom gap that is not data loss.
 
     Bucket key is the UTC ISO string at the same width the local SQL bucket
     uses (`YYYY-MM-DDTHH` for hour, `YYYY-MM-DD` for day) so the outer-join
@@ -73,7 +79,6 @@ def _fetch_fastly_log_counts(
     ``(logging_svc_id, from_ts, to_ts, by)``. Inputs are hour-aligned, so
     repeats from the admin poll loop (every 30-60 s) hit cache.
     """
-    import logging
     from datetime import UTC, datetime
 
     from backend.core.fastly.client import fastly
@@ -93,35 +98,14 @@ def _fetch_fastly_log_counts(
     width = 13 if by == "hour" else 10
     records = payload.get("data", []) or []
     out: dict[str, int] = {}
-    field_used: str | None = None
-    missing_logged = False
     for r in records:
         ts = r.get("start_time")
         if ts is None:
             continue
         bucket = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")[:width]
-        # Match on field PRESENCE, not truthiness: a quiet hour legitimately
-        # reports ``log: 0``. The old ``if v:`` treated that zero as "field
-        # absent" and logged a scary "no log-count field" warning whose own
-        # keys list visibly contained ``log``. Only warn when the response
-        # genuinely lacks every known log-count field name.
-        chosen = 0
-        present = [fname for fname in _FASTLY_LOG_FIELDS if fname in r]
-        if present:
-            fname = present[0]
-            chosen = int(r.get(fname) or 0)
-            if field_used is None:
-                field_used = fname
-        elif not missing_logged:
-            logging.getLogger("admin.log_accounting").warning(
-                "Fastly /stats/service response has no log-count field; keys present=%s",
-                sorted(r.keys()),
-            )
-            missing_logged = True
-        out[bucket] = out.get(bucket, 0) + chosen
-    result = (out, field_used)
-    _FASTLY_COUNTS_CACHE[cache_key] = (now_mono, result)
-    return result
+        out[bucket] = out.get(bucket, 0) + int(r.get("requests") or 0)
+    _FASTLY_COUNTS_CACHE[cache_key] = (now_mono, out)
+    return out
 
 
 # Sustained-loss thresholds — referenced by both api_log_accounting (so the
@@ -162,7 +146,7 @@ def _duckdb_row_counts_per_bucket(source: dict, start: datetime, end: datetime, 
     # uses ``YYYY-MM-DDTHH`` (T separator, from the .log.gz basename's
     # ISO prefix); daily uses ``YYYY-MM-DD``. Mismatch here makes the
     # union-by-key loop in compute_log_accounting produce ghost buckets
-    # with our_rows but zero fastly_logs.
+    # with our_rows but zero fastly_requests.
     fmt = "%Y-%m-%dT%H" if by == "hour" else "%Y-%m-%d"
     start_iso = start.strftime("%Y-%m-%d %H:%M:%S")
     end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
@@ -190,14 +174,18 @@ def _duckdb_row_counts_per_bucket(source: dict, start: datetime, end: datetime, 
 
 
 def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> dict:
-    """Pure compute path for log-line accounting.
+    """Pure compute path for ingest accounting (Fastly ``requests`` vs our rows).
 
     Returns a dict with all the fields api_log_accounting surfaces:
-    ``buckets``, ``totals``, ``sustained_loss``, ``fastly_field_used``,
-    ``from_ts``, ``to_ts``, plus a ``section_timings`` list mirroring the
-    SectionTimer pattern used elsewhere (the perf harness reads this via
-    the BaseResponse envelope to attribute the ~800-1700 ms tail this
-    endpoint shows on cold loads).
+    ``buckets``, ``totals``, ``sustained_loss``, ``from_ts``, ``to_ts``, plus a
+    ``section_timings`` list mirroring the SectionTimer pattern used elsewhere
+    (the perf harness reads this via the BaseResponse envelope to attribute the
+    ~800-1700 ms tail this endpoint shows on cold loads).
+
+    The gap is measured against Fastly's ``requests`` counter, which sits 1:1
+    with our ingested rows on every service — NOT the ``log`` counter, which
+    counts ``vcl_log`` re-executions and reads a permanent multiple of
+    ``requests`` on restart/bot-challenge paths (a phantom gap, not loss).
 
     Raises HTTPException on configuration error (no logging_service_id /
     no api_key) or on Fastly Stats API failure.
@@ -235,9 +223,9 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     to_ts = int((now + timedelta(hours=1 if by == "hour" else 24)).timestamp())
 
     try:
-        fastly_counts, field_used = timer.call(
+        fastly_counts = timer.call(
             "fastly_fetch",
-            lambda: _fetch_fastly_log_counts(logging_svc_id, api_key, from_ts, to_ts, by),
+            lambda: _fetch_fastly_request_counts(logging_svc_id, api_key, from_ts, to_ts, by),
         )
     except Exception as e:
         raise_internal(logger, e, code="fastly_stats_failed", status=502)
@@ -292,32 +280,32 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     worst_ts: str | None = None
     worst_gap_pct: float | None = None
     for b in all_buckets:
-        fastly = int(fastly_counts.get(b, 0))
+        req_count = int(fastly_counts.get(b, 0))
         _meta_rows, fcount = local_counts.get(b, (0, 0))
         # Prefer DuckDB's authoritative live count; fall back to metadata
         # only when DuckDB has no entry (very old buckets that aged out of
         # the local cache but still have an ingested_files row).
         ours = int(duckdb_counts.get(b, _meta_rows))
-        gap = fastly - ours
-        denom = fastly if fastly > 0 else ours
+        gap = req_count - ours
+        denom = req_count if req_count > 0 else ours
         gap_pct = (gap / denom) if denom > 0 else 0.0
         ts_iso = f"{b}:00:00Z" if by == "hour" else f"{b}T00:00:00Z"
         buckets.append(
             LogAccountingBucket(
                 ts=ts_iso,
-                fastly_logs=fastly,
+                fastly_requests=req_count,
                 our_rows=ours,
                 file_count=fcount,
                 gap=gap,
                 gap_pct=round(gap_pct, 6),
             )
         )
-        total_fastly += fastly
+        total_fastly += req_count
         total_ours += ours
         # Rank by positive gap only — negative gaps are bucket-edge drift
-        # where one side's emission/ingest straddled the boundary. The user
-        # cares about "Fastly emitted more than we ingested" (real loss),
-        # not "we ingested more than Fastly reports yet" (timing artifact).
+        # where a request/ingest straddled the boundary. The user cares about
+        # "Fastly served more requests than we ingested rows" (real loss), not
+        # "we ingested more than Fastly reports yet" (timing artifact).
         if gap_pct > (worst_gap_pct or 0.0):
             worst_ts = ts_iso
             worst_gap_pct = gap_pct
@@ -326,7 +314,7 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     total_denom = total_fastly if total_fastly > 0 else total_ours
     total_pct = round((total_gap / total_denom), 6) if total_denom > 0 else 0.0
     totals = LogAccountingTotals(
-        fastly_logs=total_fastly,
+        fastly_requests=total_fastly,
         our_rows=total_ours,
         gap=total_gap,
         gap_pct=total_pct,
@@ -335,10 +323,10 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     )
 
     # Sustained-loss detection: only flag runs of ≥MIN_RUN consecutive completed
-    # buckets with one-sided positive gap ≥LOSS_THRESHOLD (Fastly emitted more
-    # than we ingested). Bucket-edge drift is bidirectional and stays under
-    # 2.5%; the in-flight bucket is noisy because Fastly Stats lags our ingest,
-    # so we exclude it from the scan. Returns the longest qualifying run.
+    # buckets with one-sided positive gap ≥LOSS_THRESHOLD (Fastly served more
+    # requests than we ingested rows). Bucket-edge drift is bidirectional and
+    # stays under 2.5%; the in-flight bucket is noisy because Fastly Stats lags
+    # our ingest, so we exclude it from the scan. Returns the longest qualifying run.
     in_flight_bucket = now.strftime("%Y-%m-%dT%H") if by == "hour" else now.strftime("%Y-%m-%d")
     in_flight_ts = f"{in_flight_bucket}:00:00Z" if by == "hour" else f"{in_flight_bucket}T00:00:00Z"
     completed = [b for b in buckets if b.ts != in_flight_ts]
@@ -390,11 +378,15 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     else:
         catchup = {"latest_ingest_ts": None, "lag_seconds": None, "status": "no_data"}
 
+    # No multi-endpoint guard needed: the gap is measured against ``requests``,
+    # which is endpoint-independent (it's the count of real client requests,
+    # 1:1 with our ingested rows) — unlike the old ``log`` denominator, which
+    # summed emissions across every logging endpoint. ``sustained_loss`` here is
+    # the single source of truth; the gap-heal cron reads it too.
     return {
         "by": by,
         "from_ts": start_iso + "Z",
         "to_ts": end_iso + "Z",
-        "fastly_field_used": field_used,
         "buckets": buckets,
         "totals": totals,
         "sustained_loss": sustained,
@@ -410,8 +402,9 @@ def api_log_accounting(
     hours: int = Query(24, ge=1, le=720),
     by: str = Query("hour", pattern="^(hour|day)$"),
 ) -> LogAccountingResponse:
-    """Reconcile Fastly's authoritative log-line emission count against our
-    locally-ingested row counts to surface any gap between emission and ingest.
+    """Reconcile Fastly's authoritative ``requests`` count against our
+    locally-ingested row counts to surface any gap between what Fastly served
+    and what we ingested.
 
     Per-bucket gap is the actionable signal — totals smooth over burst losses.
     """
@@ -422,6 +415,13 @@ def api_log_accounting(
     # poll round-trip on each paint after the first within the window.
     # Manual refresh / refetch bypasses HTTP cache via key bumps.
     response.headers["Cache-Control"] = "private, max-age=30"
+    # The service is selected via the ``x-service-id`` REQUEST HEADER, not the
+    # URL — so without varying on it the browser would serve one service's
+    # cached body for another within the 30 s window (every service hits the
+    # identical URL). Vary on the header so the cache keys per service; this is
+    # what makes the gap card actually change when you switch services. The
+    # gzip middleware appends ``Accept-Encoding`` to this on the way out.
+    response.headers["Vary"] = "x-service-id"
     return payload
 
 

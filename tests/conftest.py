@@ -76,6 +76,37 @@ _warnings.filterwarnings("ignore", message="unclosed database", category=Resourc
 import backend.scheduler  # noqa: E402, F401
 
 
+def pytest_configure(config):
+    """Stop pytest 9's ``unraisableexception`` plugin from FORCE-running
+    ``gc.collect()`` at session end (per xdist worker).
+
+    That forced collection is the *only* thing that surfaces the benign
+    "unclosed database" ResourceWarning from pyiceberg's cached ``SqlCatalog``:
+    a catalog evicted from ``_catalog_cache`` becomes cyclic garbage, and the
+    plugin's ``gc_collect_harder`` reaps it from inside a
+    ``catch_warnings(record=True)`` context whose ``simplefilter("always")``
+    overrides Python's *default* ``ignore::ResourceWarning`` — at a point where
+    the pyproject / line-53 "unclosed database" filters are no longer applied.
+    Every surfaced warning is sourced to ``unraisableexception.py:33
+    gc.collect()`` precisely because of this forced pass.
+
+    Left to natural collection (a later auto-gc inside a test's filter context,
+    or interpreter shutdown), those connections are reaped under filters where
+    ResourceWarning is ignored — silent. ``sys.unraisablehook`` stays installed,
+    so genuine unraisable exceptions are still caught when they occur; we only
+    skip the *extra forced* gc passes. ``gc_collect_iterations`` is a documented,
+    overridable stash key (pytest marks it "not a simple constant ... to allow
+    pytester to override it"). Guarded so a future pytest that renames/removes
+    the key degrades to the line-53 filter rather than failing collection.
+    """
+    try:
+        from _pytest.unraisableexception import gc_collect_iterations_key
+
+        config.stash[gc_collect_iterations_key] = 0
+    except Exception:
+        pass
+
+
 def _cassette_recorded_at(path) -> float | None:
     """Parse an optional ``recorded_at: <ISO8601>`` line from a VCR cassette.
 
@@ -404,11 +435,16 @@ def in_memory_duckdb():
     con.close()
 
 
-def override_request_context(*, source, con, session=None, path="/test"):
+def override_request_context(*, source, con, session=None, path="/test", time_bounds=None):
     """Return a ``build_request_context`` override that yields a RequestContext
     wired to ``source``/``con`` (read-only). Mirrors what the ``client`` fixture
     installs; router tests use it to inject a custom source or an analyst
     session without re-declaring the generator inline.
+
+    ``time_bounds`` is the analyst clamp window that production resolves via
+    ``get_analyst_time_bounds(request)`` inside ``build_request_context``;
+    handlers read it through ``ctx.clamp``. Pass it here to exercise the
+    analyst-clamp path (defaults to an open window when omitted).
     """
     from backend.core.request_context import RequestContext
     from backend.core.request_telemetry import RequestTelemetry
@@ -421,6 +457,7 @@ def override_request_context(*, source, con, session=None, path="/test"):
             telemetry=RequestTelemetry(request_method="POST", request_path=path),
             analyst_session=session,
             read_only=True,
+            time_bounds=time_bounds,
         )
 
     return _override

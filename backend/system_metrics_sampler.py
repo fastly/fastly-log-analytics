@@ -16,6 +16,7 @@ ones cleanly.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -23,6 +24,70 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ── Process-wide dedup of the per-connection sampler ───────────────────────────
+#
+# The multiplexed admin event stream runs one ``system-metrics`` feeder loop
+# *per connection*. Without sharing, N admin tabs each recompute the full
+# snapshot every 10 s — and each snapshot does real SQLite/disk work (a
+# ``dbstat`` page scan, a fresh SQLite connection, ``/proc/meminfo`` +
+# disk-usage). ``sample_system_metrics_cached`` collapses the N concurrent
+# recomputes within one sample window down to ONE.
+#
+# TTL is deliberately == the feeder's sample interval and per-``service_id``:
+# this dedupes identical *concurrent* work, it never serves stale data across a
+# single connection's own ticks (the snapshot legitimately changes every tick
+# during an active cron — keeping the TTL short is what avoids lagging the
+# health/storage cards).
+_CACHE_TTL_SECONDS = 10.0
+_cache: dict[str | None, tuple[float, dict[str, Any]]] = {}
+# One lock per key so an aligned burst (e.g. all connections reconnecting after
+# a deploy) computes once: the first holder samples + caches, the rest block,
+# then the double-check below finds the fresh entry and returns it.
+_locks: dict[str | None, asyncio.Lock] = {}
+
+
+async def sample_system_metrics_cached(service_id: str | None) -> dict[str, Any]:
+    """Short-TTL, deduped wrapper around :func:`sample_system_metrics`.
+
+    Returns a cached snapshot when one was taken within the last
+    ``_CACHE_TTL_SECONDS`` for ``service_id`` (incl. ``None`` for the
+    serviceless/global snapshot); otherwise samples once (off the event loop)
+    under a per-key lock and caches the result.
+
+    Cancellation-safe: a cancelled lock holder simply releases the lock and the
+    next waiter recomputes — no orphaned futures, no cross-connection coupling.
+    Exceptions are never cached (the next caller retries cleanly).
+
+    The cached payloads are never mutated, so sharing one dict across
+    connections is safe even though each feeder compares it by value against
+    its own last-sent snapshot.
+    """
+    now = time.monotonic()
+    cached = _cache.get(service_id)
+    if cached is not None and now - cached[0] < _CACHE_TTL_SECONDS:
+        return cached[1]
+
+    lock = _locks.setdefault(service_id, asyncio.Lock())
+    async with lock:
+        # Another waiter may have refreshed the entry while we blocked.
+        cached = _cache.get(service_id)
+        if cached is not None and time.monotonic() - cached[0] < _CACHE_TTL_SECONDS:
+            return cached[1]
+        payload = await asyncio.to_thread(sample_system_metrics, service_id)
+        _cache[service_id] = (time.monotonic(), payload)
+        return payload
+
+
+def reset_metrics_cache() -> None:
+    """Clear the dedup cache + per-key locks.
+
+    For test determinism only: a module-level cache (and ``asyncio.Lock``\\ s
+    bound to a now-closed loop) would otherwise bleed across tests under
+    ``pytest -n auto``. Call from an autouse fixture in the sampler/event-stream
+    tests."""
+    _cache.clear()
+    _locks.clear()
 
 
 def sample_system_metrics(service_id: str | None) -> dict[str, Any]:

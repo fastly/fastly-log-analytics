@@ -1,19 +1,20 @@
 import React from 'react'
 import Link from 'next/link'
-import { ArrowUpRight, MapIcon, LineChart } from 'lucide-react'
+import { ArrowUpRight, MapIcon, LineChart, ScanSearch } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DeltaIndicator } from '@/components/DeltaIndicator'
 import { InsightItem } from '@/types/api'
-import { ImpossibleDistanceData } from './types'
+import { ImpossibleDistanceData, ScriptedTrafficData } from './types'
 
 interface InsightItemRowProps {
   item: InsightItem
   insightId: string
   onMapClick?: (data: ImpossibleDistanceData) => void
   onCacheCollapseClick?: (url: string) => void
+  onScriptedTrafficClick?: (data: ScriptedTrafficData) => void
 }
 
-export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseClick }: InsightItemRowProps) {
+export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseClick, onScriptedTrafficClick }: InsightItemRowProps) {
   return (
     <div className="flex items-center justify-between text-xs p-2 rounded-md bg-muted/50 gap-2">
       <div className="flex flex-col min-w-0 flex-1">
@@ -62,6 +63,35 @@ export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseCli
               title="View Cache Analysis"
             >
               <LineChart className="h-3 w-3" aria-hidden="true" />
+            </Button>
+          )}
+          {insightId === 'repeated_patterns' && item.meta && onScriptedTrafficClick && (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={`Why ${item.label} was flagged`}
+              className="h-6 w-6 text-primary hover:text-primary/80 shrink-0"
+              onClick={() => {
+                const m = item.meta
+                if (!m) return
+                onScriptedTrafficClick({
+                  label: item.label,
+                  score: m.score ?? 0,
+                  cv: m.cv ?? 0,
+                  modal_frac: m.modal_frac ?? 0,
+                  mean_interval_s: m.mean_interval_s ?? item.current_val ?? 0,
+                  stddev_s: m.stddev_s ?? item.baseline_val ?? 0,
+                  mode_gap_s: m.mode_gap_s ?? null,
+                  n_gaps: m.n_gaps ?? 0,
+                  n_events: m.n_events ?? 0,
+                  span_s: m.span_s ?? 0,
+                  rps: m.rps ?? 0,
+                  distinct_ua: m.distinct_ua ?? 0,
+                })
+              }}
+              title="Why we flagged this"
+            >
+              <ScanSearch className="h-3 w-3" aria-hidden="true" />
             </Button>
           )}
         </div>

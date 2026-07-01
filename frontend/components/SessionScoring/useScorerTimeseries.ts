@@ -15,6 +15,29 @@ export type LatencyResponse = components['schemas']['ScoringLatencyTimeseriesRes
 
 export const usToMs = (us: number | null | undefined) => (us == null ? null : us / 1000)
 
+/** Shared derivation for the two scorer charts: the row list, the hour axis,
+ *  and the per-minute granularity flag (both charts read these identically). */
+export function deriveScorerSeries(data: LatencyResponse | undefined) {
+  const rows = data?.rows ?? []
+  return {
+    rows,
+    hours: rows.map((r) => r.hour),
+    perMinute: data?.granularity === 'minute',
+  }
+}
+
+/** Shared Plotly layout for the scorer charts — hour-bucketed time axis +
+ *  zero-based y. Only the y-axis title and legend visibility differ between
+ *  the latency lines and the fail-open bars. */
+export function scorerHourlyLayout(perMinute: boolean, yTitle: string, showlegend: boolean) {
+  return {
+    showlegend,
+    margin: { l: 50, r: 20, t: 10, b: 40 },
+    xaxis: { title: '', type: 'date', ...(perMinute ? { tickformat: '%H:%M' } : {}) },
+    yaxis: { title: yTitle, rangemode: 'tozero' },
+  }
+}
+
 /**
  * Shared loader for the scorer latency time-series endpoint. Powers both
  * ScorerLatencyChart (the percentile lines) and ScorerErrorsChart (the

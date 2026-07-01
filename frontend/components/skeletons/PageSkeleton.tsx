@@ -20,8 +20,11 @@
  * page, since the skeleton only shows for ~200ms in practice).
  */
 
-import { Skeleton } from '@/components/ui/skeleton'
+import { Loader2 } from 'lucide-react'
+
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { PageHeader } from '@/components/ui/page-header'
+import { Skeleton } from '@/components/ui/skeleton'
 
 /**
  * When a route's loading.tsx passes its (static, build-time-known) title,
@@ -135,6 +138,43 @@ export function EditorSplitSkeleton() {
         <Skeleton className="w-full h-full min-h-72" />
         <Skeleton className="w-full h-full min-h-72" />
       </div>
+    </div>
+  )
+}
+
+/**
+ * Centered Card spinner for the unauthenticated share-login flow — the only
+ * loading.tsx files that sit outside AppLayout (no header row / sidebar).
+ * Flags reproduce the exact container/card classes of the two share-login
+ * loading.tsx files so the skeleton→page swap doesn't shift:
+ *   - share-login:           topPad (pt-20), top-aligned, max-w-md
+ *   - share-login/acknowledge: verticalCenter (items-center), max-w-xl
+ */
+export function AuthCardSkeleton({
+  maxWidth = 'md',
+  verticalCenter = false,
+  topPad = false,
+}: {
+  maxWidth?: 'md' | 'xl'
+  verticalCenter?: boolean
+  topPad?: boolean
+}) {
+  const container = ['min-h-screen flex', verticalCenter ? 'items-center' : null, 'justify-center bg-muted/40 p-6', topPad ? 'pt-20' : null]
+    .filter(Boolean)
+    .join(' ')
+  return (
+    <div className={container}>
+      <Card className={`w-full ${maxWidth === 'xl' ? 'max-w-xl' : 'max-w-md'}`}>
+        <CardHeader className="space-y-2">
+          <div className="flex items-center gap-2">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden="true" />
+            <span className="text-sm text-muted-foreground" role="status">Loading…</span>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="h-32" aria-hidden="true" />
+        </CardContent>
+      </Card>
     </div>
   )
 }

@@ -13,7 +13,7 @@ from backend.deps import get_con, get_service_id, get_source
 from backend.models.common import BootstrapResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories._base import SectionTimer
-from backend.utils.auth import require_service_in_scope
+from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.router_utils import query_errors
 
 router = APIRouter(prefix="/api", tags=["bootstrap"], responses=DEFAULT_ERROR_RESPONSES)
@@ -419,29 +419,15 @@ def _bootstrap_sync(
 
     timer.call("ops_overview", _resolve_ops_overview)
 
-    # Seed for the /logs cron tab. Admin-only — the analyst middleware
-    # blocks both endpoints, and analysts can't reach /logs anyway. Both
-    # try/except for resilience: the cron tab is non-essential and we
-    # never want a cron infrastructure hiccup to break /api/bootstrap.
+    # P1#5 (perf audit): cron_schedule is NO LONGER folded into bootstrap.
+    # build_cron_schedule_payload cost ~2.6s p50 / 3.2s p95 and sat on the
+    # admin SSR first-paint critical path. The field is now a lazy-load: the
+    # /logs cron tab refetches GET /api/cron-schedule on mount (see
+    # frontend/app/logs/_state.ts — enabled on activeTab==='cron'), so
+    # dropping the seed degrades to ONE round-trip on the only page that
+    # needs it, with no feature loss. The model field stays (emits None) for
+    # wire/OpenAPI back-compat.
     cron_schedule_payload: dict | None = None
-
-    def _resolve_cron_schedule() -> None:
-        nonlocal cron_schedule_payload
-        if analyst_session is not None:
-            return
-        if not valid_active_id:
-            return
-        active_src = _db.get_source_for_service(valid_active_id)
-        if not active_src:
-            return
-        try:
-            from backend.cron.schedule import build_cron_schedule_payload
-
-            cron_schedule_payload = build_cron_schedule_payload(active_src)
-        except Exception:
-            pass
-
-    timer.call("cron_schedule", _resolve_cron_schedule)
 
     cron_runs_first_page_payload: dict | None = None
 
@@ -511,21 +497,17 @@ def _bootstrap_sync(
 
     timer.call("scoring_labels", _resolve_scoring_labels)
 
+    # P1#5 (perf audit): share_status is NO LONGER folded into bootstrap.
+    # build_share_status cost ~2.1s and sat on the admin SSR first-paint
+    # critical path. The field is now a lazy-load: the /admin/share page
+    # refetches GET /api/admin/share/status on mount (see
+    # frontend/app/admin/share/page.tsx — unconditional mount-time useQuery
+    # on SHARE_STATUS_QUERY_KEY), so dropping the seed degrades to ONE
+    # round-trip on the only page that needs it, with no feature loss. The
+    # small global share_banner ({sharing_active, public_url}) is KEPT above
+    # for the header. The model field stays (emits None) for wire/OpenAPI
+    # back-compat.
     share_status_payload: dict | None = None
-
-    def _resolve_share_status() -> None:
-        nonlocal share_status_payload
-        if analyst_session is not None:
-            return
-        try:
-            from backend.routers.share_admin import build_share_status
-
-            share_status_payload = build_share_status()
-        except Exception:
-            # Share dashboard is a nicety — never break bootstrap.
-            pass
-
-    timer.call("share_status", _resolve_share_status)
 
     views: list[dict] = []
 
@@ -581,6 +563,11 @@ def _bootstrap_sync(
             "is_remote_analyst": analyst_session is not None,
             "analyst_email": analyst_session.email if analyst_session else None,
             "analyst_name": analyst_session.name if analyst_session else None,
+            # Per-invite PII masking flag, surfaced so the frontend can hide
+            # IP drill-down affordances for masking analysts. The server-side
+            # filter lock (RemoteAccessMiddleware) is the real guarantee; this
+            # is the UX signal. False for admins / non-masking analysts.
+            "mask_ips": mask_ips_for(analyst_session),
             "admin_token": admin_token,
             # Mirror the WEB_VITALS_COLLECT env flag so WebVitalsReporter
             # only POSTs when collection is enabled (default off).

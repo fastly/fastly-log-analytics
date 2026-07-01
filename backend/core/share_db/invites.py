@@ -252,6 +252,26 @@ def update_remote_invite_passcode(invite_id: str, passcode: str, *, con: sqlite3
     return cur.rowcount > 0
 
 
+def update_remote_invite_pii(invite_id: str, pii_policy: dict | None, *, con: sqlite3.Connection | None = None) -> bool:
+    """Update the PII policy (e.g. ``mask_ips``) on an existing invite.
+
+    Lets an admin toggle IP masking after the invite was created. Validates
+    via the same rules as create. Returns True on success, False if no invite
+    with that id exists. Raises ``InvalidPiiPolicyError`` for an invalid policy
+    (caller maps to HTTP 400). The next session validate re-syncs the live
+    analyst session's policy from the invite, so an active analyst picks up the
+    change without re-login.
+    """
+    policy = validate_pii_policy(pii_policy)
+    con = con or get_global_share_con()
+    cur = con.execute(
+        "UPDATE remote_invites SET pii_policy=? WHERE id=?",
+        (json.dumps(policy, separators=(",", ":")), invite_id),
+    )
+    con.commit()
+    return cur.rowcount > 0
+
+
 def revoke_remote_invite(invite_id: str, *, con: sqlite3.Connection | None = None) -> bool:
     con = con or get_global_share_con()
     cur = con.execute("UPDATE remote_invites SET revoked=1 WHERE id=?", (invite_id,))

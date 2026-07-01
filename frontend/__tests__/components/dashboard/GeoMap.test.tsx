@@ -43,6 +43,21 @@ vi.mock('next/dynamic', () => ({
   },
 }))
 
+// useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
+// which would need a QueryClientProvider. Mock it instead — GeoMap's contract
+// here is "show the catalog/'Requires Geolocation' hint when `country` is NOT in
+// the active log format, and a neutral 'No country data in this time range.' when
+// it IS". Default to no active fields so the existing not-enabled assertions
+// exercise the hint path; the neutral-branch test adds 'country' to `activeFields`.
+const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
+vi.mock('@/hooks/useActiveLogFields', () => ({
+  useActiveLogFields: () => ({
+    ready: true,
+    isFieldActive: (id: string) => activeFields.has(id),
+    isGroupActive: () => false,
+  }),
+}))
+
 vi.mock('@/components/Map/ChoroplethMap', () => ({
   ChoroplethMap: ({ data, onCountryClick }: { data: any[]; onCountryClick: (c: string) => void }) => (
     <div data-testid="choropleth-map">
@@ -69,7 +84,10 @@ const catalog = {
 }
 
 describe('GeoMap', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    activeFields.clear()
+  })
 
   it('renders the loading skeleton when aggregates are undefined', () => {
     render(
@@ -104,6 +122,26 @@ describe('GeoMap', () => {
     expect(
       screen.getByText(/Requires Geolocation fields to be enabled in Fastly logging\./),
     ).toBeInTheDocument()
+    expect(screen.queryByTestId('choropleth-map')).toBeNull()
+  })
+
+  it('shows a neutral "no data in this range" state when the country field IS active', () => {
+    // Enabled-but-empty: `country` is in the active log format, so an empty
+    // map_data means "no data in this window", NOT "Geolocation misconfigured".
+    activeFields.add('country')
+    render(
+      <GeoMap
+        isReady={true}
+        isLoadingAggs={false}
+        isFetchingAggs={false}
+        aggregates={{ map_data: [] }}
+        catalog={catalog}
+        onCountryClick={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('No data available')).toBeInTheDocument()
+    expect(screen.getByText('No country data in this time range.')).toBeInTheDocument()
+    expect(screen.queryByText(/Requires Geolocation/)).toBeNull()
     expect(screen.queryByTestId('choropleth-map')).toBeNull()
   })
 

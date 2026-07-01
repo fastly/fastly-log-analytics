@@ -432,6 +432,102 @@ def test_strip_envelope_combines_strip_and_mask_in_one_pass():
     assert parsed["section_timings"][0]["section"] == "summary"
 
 
+@pytest.mark.security_regression
+def test_strip_envelope_masks_dashboard_top_n_ip_panel():
+    """PII LEAK REGRESSION (Top IPs card): the /api/dashboard/aggregates +
+    /bundle top-N panels emit the dimension value under the GENERIC key
+    ``value`` keyed by field name (``data["ip"]["top"][i]["value"]`` =
+    backend/repositories/dashboard.py:608/655), NOT under ``ip``. The
+    field-name masker in apply_pii_policy only masks keys in
+    {ip, ip_address, client_ip, remote_addr}, so with mask_ips=True the
+    analyst's Top IPs card leaked every raw client IP while the Sessions
+    list (which emits ``ip``) was correctly masked.
+
+    Invariant: with mask_ips=True the IP top-N panel's ``value`` strings
+    are masked, while non-IP panels (url, ua) and map_data country values
+    stay verbatim. ua/url are NEVER masked for analysts (analyst-needs-ua-url).
+    """
+    payload = {
+        "data": {
+            "ip": {
+                "top": [
+                    {"value": "203.0.113.45", "count": 12},
+                    {"value": "198.51.100.7", "count": 5},
+                ],
+                "total": 17,
+            },
+            "url": {"top": [{"value": "/login", "count": 9}], "total": 9},
+            "ua": {"top": [{"value": "curl/8.4.0", "count": 4}], "total": 4},
+            "country": {"top": [{"value": "US", "count": 17}], "total": 17},
+        },
+        "map_data": [{"country": "US", "count": 17}],
+        "total_rows": 17,
+    }
+    resp = _make_streaming(json.dumps(payload).encode(), content_type="application/json")
+
+    class _Session:
+        pii_policy = {"mask_ips": True}
+
+    out = asyncio.run(_strip_analyst_envelope(resp, analyst_session=_Session()))
+    parsed = json.loads(out.body)
+
+    ip_values = [r["value"] for r in parsed["data"]["ip"]["top"]]
+    assert ip_values == ["203.0.113.xxx", "198.51.100.xxx"], (
+        f"Top IPs card leaked raw client IPs to a mask_ips analyst: {ip_values}"
+    )
+    # ua + url stay visible for analysts (only ip is masked).
+    assert parsed["data"]["url"]["top"][0]["value"] == "/login"
+    assert parsed["data"]["ua"]["top"][0]["value"] == "curl/8.4.0"
+    # country panel + map_data are not IPs and must be untouched.
+    assert parsed["data"]["country"]["top"][0]["value"] == "US"
+    assert parsed["map_data"][0]["country"] == "US"
+    assert out.headers["content-length"] == str(len(out.body))
+
+
+@pytest.mark.security_regression
+def test_strip_envelope_admin_top_n_ip_panel_not_masked():
+    """Admin path (no analyst session) must NOT mask the Top IPs panel —
+    operators see real IPs by design (ADMIN = network-trusted)."""
+    payload = {"data": {"ip": {"top": [{"value": "203.0.113.45", "count": 1}], "total": 1}}}
+    resp = _make_streaming(json.dumps(payload).encode(), content_type="application/json")
+    out = asyncio.run(_strip_analyst_envelope(resp, analyst_session=None))
+    parsed = json.loads(out.body)
+    assert parsed["data"]["ip"]["top"][0]["value"] == "203.0.113.45"
+
+
+@pytest.mark.security_regression
+def test_strip_envelope_leaves_oip_panel_visible_for_analyst():
+    """ACCEPTED-INTENT pin (2026-06-24 PII audit): the origin IP (``oip``)
+    top-N panel is INTENTIONALLY left visible to a mask_ips analyst.
+
+    ``oip`` values are the operator's origin / Fastly anycast shield IPs
+    (151.101.x / 199.232.x / 146.75.x) — CDN/operator infrastructure, already
+    public, NOT end-user PII — and the Origin IP-Health card exists to show
+    them. ``oip`` is deliberately absent from apply_pii_policy's masked_keys,
+    so its top-N ``value`` cell passes through unmasked even while the client
+    ``ip`` panel is masked. Pinned both ways: a future audit shouldn't re-flag
+    this as a leak, and nobody should "fix" it by masking ``oip`` (which would
+    gut the card for analysts). Contrast
+    test_strip_envelope_masks_dashboard_top_n_ip_panel (client ip IS masked)."""
+    payload = {
+        "data": {
+            "ip": {"top": [{"value": "203.0.113.45", "count": 9}], "total": 9},
+            "oip": {"top": [{"value": "151.101.1.51", "count": 9}], "total": 9},
+        },
+    }
+    resp = _make_streaming(json.dumps(payload).encode(), content_type="application/json")
+
+    class _Session:
+        pii_policy = {"mask_ips": True}
+
+    out = asyncio.run(_strip_analyst_envelope(resp, analyst_session=_Session()))
+    parsed = json.loads(out.body)
+    # client ip masked …
+    assert parsed["data"]["ip"]["top"][0]["value"] == "203.0.113.xxx"
+    # … origin/CDN ip intentionally NOT masked.
+    assert parsed["data"]["oip"]["top"][0]["value"] == "151.101.1.51"
+
+
 # ── apply_response_hardening ───────────────────────────────────────────────
 
 
@@ -731,10 +827,14 @@ def test_get_analyst_time_bounds_window_hours_overrides_old_start():
         state = _State()
 
     out = get_analyst_time_bounds(_Req())
-    assert out.end is None
+    # A rolling-window invite ceilings end to the anchor (now), so the upper
+    # bound is non-None and a future req_end can't widen the window forward.
+    assert out.end is not None
     # The relative window starts ~24h ago, far more recent than 2020-01-01.
     assert out.start is not None
     assert out.start > datetime(2026, 1, 1, tzinfo=UTC)
+    # end ≈ now and the span is exactly the 24h window.
+    assert (out.end - out.start) == timedelta(hours=24)
 
 
 # ── Middleware integration: branches that need a logged-in analyst ─────────
@@ -1415,3 +1515,136 @@ def test_is_blocked_path_blocks_openapi_surface():
     for p in ("/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"):
         assert _is_blocked_path(p) is True, p
     assert _is_blocked_path("/") is False
+
+
+# ── PII boundary: the IP-family set is one source of truth across the stack ───
+
+
+@pytest.mark.security_regression
+def test_ip_family_set_single_source_of_truth_across_stack():
+    """The analyst filter-lock, the response masker, and the frontend
+    drill-down hide list MUST all reference the same IP-family field set.
+
+    If they drift, an analyst could be denied filtering on one alias while
+    another alias still leaks raw IPs (mask-in-response but filter-allowed,
+    or vice-versa). The two backend uses are the same object; the frontend
+    copy crosses the Python/TS boundary so it is pinned by parsing the real
+    ``lib/pii.ts`` literal (not a hand-copied list, which would itself drift).
+    """
+    import re
+    from pathlib import Path
+
+    from backend.core.share_db import validation
+    from backend.utils.remote_access import _PII_FORBIDDEN_FILTER_COLS
+
+    # Backend: filter-lock and response masker reference the same constant.
+    assert _PII_FORBIDDEN_FILTER_COLS is validation.IP_FAMILY_KEYS
+
+    # Frontend: parse the actual IP_FAMILY_FIELDS literal from lib/pii.ts.
+    repo_root = Path(__file__).resolve().parents[2]
+    pii_ts = (repo_root / "frontend" / "lib" / "pii.ts").read_text(encoding="utf-8")
+    m = re.search(r"IP_FAMILY_FIELDS\s*=\s*\[([^\]]*)\]", pii_ts)
+    assert m is not None, "IP_FAMILY_FIELDS literal not found in frontend/lib/pii.ts"
+    fe_fields = set(re.findall(r"""['"]([^'"]+)['"]""", m.group(1)))
+
+    assert fe_fields == set(validation.IP_FAMILY_KEYS)
+
+
+# ── insights clamp helpers: stable cache key + request-free resolver ──────────
+
+
+def test_analyst_clamp_cache_key_is_param_based():
+    from backend.utils.remote_access import analyst_clamp_cache_key
+
+    assert analyst_clamp_cache_key(None, None, 24) == "||24"
+    assert (
+        analyst_clamp_cache_key("2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00", None)
+        == "2026-01-01T00:00:00+00:00|2026-01-02T00:00:00+00:00|"
+    )
+
+
+def test_resolve_analyst_insights_clamp_stable_key_rolling_bounds():
+    """The cache key is identical across two anchors (keyed on invite params)
+    while the resolved clamp bounds roll forward with the anchor — the crux of
+    the analyst-prewarm fix."""
+    from backend.utils.date_utils import parse_iso_utc
+    from backend.utils.remote_access import resolve_analyst_insights_clamp
+
+    t0 = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(minutes=5)
+    cs0, ce0, k0 = resolve_analyst_insights_clamp(None, None, 24, baseline_hours=168.0, window_hours=1.0, now=t0)
+    cs1, ce1, k1 = resolve_analyst_insights_clamp(None, None, 24, baseline_hours=168.0, window_hours=1.0, now=t1)
+    assert k0 == k1 == "||24"  # stable key
+    assert ce0 != ce1  # end rolled with the anchor
+    assert parse_iso_utc(ce0) == t0 and parse_iso_utc(ce1) == t1
+    # relative 24h window floors the start at anchor-24h
+    assert parse_iso_utc(cs0) == t0 - timedelta(hours=24)
+
+
+def test_resolve_analyst_insights_clamp_empty_window_raises():
+    """A start floor after the end ceiling → empty clamp → ValueError so the
+    prewarmer skips that shape."""
+    from backend.utils.remote_access import resolve_analyst_insights_clamp
+
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    qs = (now + timedelta(hours=1)).isoformat()  # start in the future
+    qe = (now - timedelta(hours=1)).isoformat()  # end in the past
+    with pytest.raises(ValueError):
+        resolve_analyst_insights_clamp(qs, qe, None, baseline_hours=168.0, window_hours=1.0, now=now)
+
+
+def test_time_bounds_from_params_matches_request_dep():
+    """``get_analyst_time_bounds`` delegates to ``_time_bounds_from_params``.
+
+    A rolling-window invite ceilings its upper bound to the anchor (``now``),
+    so the helper and the request dependency agree on a non-``None`` end.
+    """
+    from types import SimpleNamespace
+
+    from backend.utils.remote_access import _time_bounds_from_params, get_analyst_time_bounds
+
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    tb_helper = _time_bounds_from_params(None, None, 48, now=now)
+    assert tb_helper.start == now - timedelta(hours=48)
+    assert tb_helper.end == now  # rolling invite ceilings end to the anchor
+
+    session = SimpleNamespace(query_start_time=None, query_end_time=None, query_window_hours=48)
+    req = SimpleNamespace(state=SimpleNamespace(analyst_session=session))
+    tb_req = get_analyst_time_bounds(req)
+    assert tb_req.start is not None and tb_req.end is not None
+
+
+@pytest.mark.security_regression
+def test_rolling_invite_ceilings_future_req_end_to_anchor():
+    """A rolling-window invite must not let a caller-supplied *future* ``req_end``
+    widen the effective window forward.
+
+    The wire-token path resolves ``req_end`` from a 60s-quantized anchor that can
+    round up past ``now``; a skewed legacy client can also send a future end. The
+    invite's upper bound is ceilinged to the anchor, so ``clamp`` returns at most
+    the anchor no matter how far ahead the request reaches. (Past-only data means
+    no rows actually leak, but the window must not silently widen.)
+    """
+    from backend.utils.remote_access import _time_bounds_from_params
+
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    tb = _time_bounds_from_params(None, None, 24, now=now)  # rolling 24h invite
+
+    # Caller reaches an hour into the future (skewed / round-up-quantized anchor).
+    eff_start, eff_end = tb.clamp(now - timedelta(hours=24), now + timedelta(hours=1))
+    assert eff_end == now  # ceilinged to the anchor, NOT now+1h
+    assert eff_start == now - timedelta(hours=24)
+
+    # Legacy in-range case (req_end at/under the anchor) is unchanged.
+    _, e2 = tb.clamp(now - timedelta(hours=24), now - timedelta(minutes=5))
+    assert e2 == now - timedelta(minutes=5)
+
+    # Combo invite (explicit end cap + window): keep the more-restrictive end.
+    tb_cap = _time_bounds_from_params(None, (now - timedelta(hours=2)).isoformat(), 24, now=now)
+    _, e3 = tb_cap.clamp(now - timedelta(hours=24), now + timedelta(hours=1))
+    assert e3 == now - timedelta(hours=2)  # past absolute cap beats the anchor
+
+    # ...but a FUTURE explicit cap collapses to the anchor (never widens past now).
+    tb_future = _time_bounds_from_params(None, (now + timedelta(days=365)).isoformat(), 24, now=now)
+    _, e4 = tb_future.clamp(now - timedelta(hours=24), now + timedelta(hours=1))
+    assert e4 == now

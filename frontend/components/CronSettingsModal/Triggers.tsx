@@ -105,7 +105,7 @@ export function IcebergOptimizationSection({
     <div className="space-y-3">
       <div>
         <h3 className="text-sm font-bold uppercase tracking-widest text-foreground/80">Iceberg Optimization</h3>
-        <p className="text-[10px] text-muted-foreground">Daily table maintenance to keep query performance fast.</p>
+        <p className="text-[10px] text-muted-foreground">Nightly FOS-side housekeeping to keep cloud storage costs down. (Dashboard query speed is handled separately by always-on local compaction.)</p>
       </div>
 
       <div className="flex items-center justify-between p-3 border rounded-md bg-muted/10">

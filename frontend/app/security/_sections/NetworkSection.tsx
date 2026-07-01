@@ -5,6 +5,7 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { useTimeseriesToTraces, type TimeseriesDataPoint } from '@/hooks/useTimeseriesToTraces'
 import { ChartEmptyState } from './ChartEmptyState'
 import { SECURITY_INFO } from './securityInfo'
+import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import type { components } from '@/types/api.generated'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']
@@ -26,6 +27,9 @@ export function NetworkSection({
   timezone,
   commonTimeLayout,
 }: Props) {
+  // Distinguish "field group not enabled" from "enabled but no data yet" so a
+  // low-traffic/fresh service doesn't read as misconfigured.
+  const { isFieldActive } = useActiveLogFields()
   // Re-narrow: schema types these dict-of-unknown rows opaquely; the
   // backend invariant is `{ time, ...metric_keys }`.
   const ipv6Data = useTimeseriesToTraces(
@@ -72,7 +76,7 @@ export function NetworkSection({
           helpContent={SECURITY_INFO.ipv6.body}
         >
           {ipv6Data.length === 0 && !isLoading ? (
-            <ChartEmptyState requires="Infrastructure (Group C) fields to be enabled in Fastly logging." />
+            <ChartEmptyState requires={isFieldActive('is_ipv6') ? undefined : "Infrastructure (Group C) fields to be enabled in Fastly logging."} />
           ) : (
             <PlotlyChart
               data={ipv6Data as any[]}
@@ -97,7 +101,7 @@ export function NetworkSection({
           helpContent={SECURITY_INFO.proxy.body}
         >
           {proxyData.length === 0 && !isLoading ? (
-            <ChartEmptyState requires="Security: Proxy & Anonymization (Group I) fields to be enabled in Fastly logging." />
+            <ChartEmptyState requires={isFieldActive('p_type') ? undefined : "Security: Proxy & Anonymization (Group I) fields to be enabled in Fastly logging."} />
           ) : (
             <PlotlyChart
               data={proxyData as any[]}
@@ -120,7 +124,7 @@ export function NetworkSection({
           helpContent={SECURITY_INFO.conn_reuse.body}
         >
           {connReuseData.length === 0 && !isLoading ? (
-            <ChartEmptyState requires="Infrastructure (Group C) fields to be enabled in Fastly logging." />
+            <ChartEmptyState requires={isFieldActive('conn_requests') ? undefined : "Infrastructure (Group C) fields to be enabled in Fastly logging."} />
           ) : (
             <PlotlyChart
               data={connReuseData as any[]}

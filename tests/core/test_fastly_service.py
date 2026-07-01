@@ -58,6 +58,49 @@ def test_get_active_version_returns_first_active_when_multiple():
         assert service.get_active_version("svc-1", "tkn") == 5
 
 
+# ── get_generated_vcl ──────────────────────────────────────────────────────
+
+
+def test_get_generated_vcl_returns_content():
+    """generated_vcl returns JSON {"content": "<vcl>"} — the wrapper unwraps
+    the content string. Pinned because the proactive rate-limit detector reads
+    the account-level ``ratelimit_opt_in`` pragma out of this body."""
+    vcl = "sub vcl_recv {\n  pragma optional_param ratelimit_opt_in true;\n}\n"
+    with patch("backend.core.fastly.service.fastly", return_value={"content": vcl, "version": 5}):
+        assert service.get_generated_vcl("svc-1", 5, "tkn") == vcl
+
+
+def test_get_generated_vcl_pins_endpoint_path():
+    """The GET path must be exactly /service/{id}/version/{ver}/generated_vcl —
+    a typo (generated-vcl) would silently return None forever."""
+    calls = []
+
+    def fake(method, path, **kwargs):
+        calls.append((method, path))
+        return {"content": "x"}
+
+    with patch("backend.core.fastly.service.fastly", side_effect=fake):
+        service.get_generated_vcl("svc-9", 42, "tkn")
+    assert calls == [("GET", "/service/svc-9/version/42/generated_vcl")]
+
+
+def test_get_generated_vcl_returns_none_on_api_error():
+    """RuntimeError (Compute/wasm services 404 here, plus 401/network) → None.
+    The detector treats None as 'undetermined' and falls through."""
+    with patch("backend.core.fastly.service.fastly", side_effect=RuntimeError("404")):
+        assert service.get_generated_vcl("svc-1", 1, "tkn") is None
+
+
+def test_get_generated_vcl_returns_none_on_empty_or_nondict():
+    """Empty content or a non-dict response → None (no crash)."""
+    with patch("backend.core.fastly.service.fastly", return_value={"content": ""}):
+        assert service.get_generated_vcl("svc-1", 1, "tkn") is None
+    with patch("backend.core.fastly.service.fastly", return_value={}):
+        assert service.get_generated_vcl("svc-1", 1, "tkn") is None
+    with patch("backend.core.fastly.service.fastly", return_value="not-a-dict"):
+        assert service.get_generated_vcl("svc-1", 1, "tkn") is None
+
+
 # ── find_service_by_name ───────────────────────────────────────────────────
 
 

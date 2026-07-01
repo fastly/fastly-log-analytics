@@ -29,6 +29,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/provision", tags=["provision"], responses=DEFAULT_ERROR_RESPONSES)
 
 
+def _invalidate_service_credentials(service_id: str) -> None:
+    """Drop the process-local caches that bake a service's FOS/CDN credentials so
+    a same-process re-provision (which mints new keys) stops serving the old
+    ones: the boto3 FOS client cache and pooled DuckDB connections' baked S3
+    SECRET.
+
+    Without this, a teardown→re-provision of the same service keeps the deleted
+    access key alive in-process and every ingest GET/HEAD + parquet read 401s
+    until the backend restarts. The iceberg table/view/catalog caches are
+    cleared separately (the teardown path does so with the full runtime source).
+    Keyed on ``service_id`` (== source ``name``). Best-effort — never raises into
+    the provision flow; a no-op for a service with nothing cached yet.
+    """
+    try:
+        from backend.core import duckdb as _ddb
+        from backend.core import duckdb_pool as _ddb_pool
+
+        _ddb.clear_fos_client(service_id)
+        _ddb_pool.reset_pool_for_service(service_id)
+    except Exception:
+        logger.warning("[provision] credential cache invalidation failed for %s", service_id, exc_info=True)
+
+
 def _check_domain_available(domain: str, timeout: int = 10) -> tuple[bool, str | None]:
     from backend.utils.telemetry import tracked_call
 
@@ -56,17 +79,36 @@ from backend.models.admin import ProvisionService
 def provision_list_services(token: str = Query(...)):
     from backend import config as svcconfig
     from backend.core.fastly.client import fastly
+    from backend.provision.fos_setup import object_storage_enabled
 
     try:
         services = fastly("GET", "/service", token=token)
-        existing_ids = set(svcconfig.list_service_ids())
-        return [
-            {"id": s["id"], "name": s["name"], "provisioned": s["id"] in existing_ids}
-            for s in services
-            if s.get("type", "vcl") == "vcl"
-        ]
     except Exception as e:
         raise_internal(logger, e, code="list_services_failed", status=400)
+
+    # Object Storage is REQUIRED for log storage and is an account-level product
+    # that must be enabled. The token is valid here (services listed above), so a
+    # failed product check means the account simply hasn't enabled Object Storage.
+    # Surface a clear, actionable message now instead of letting provisioning die
+    # with a cryptic 403 at the FOS access-key step (Step 2/8) and roll back.
+    if not object_storage_enabled(token):
+        raise HTTPException(
+            status_code=400,
+            detail=make_error(
+                "object_storage_not_enabled",
+                "Object Storage isn't enabled on this Fastly account, and it's "
+                "required to store logs. Enable the Object Storage product for your "
+                "account (in the Fastly control panel, or ask your Fastly account "
+                "team), then click Fetch Services again.",
+            ),
+        )
+
+    existing_ids = set(svcconfig.list_service_ids())
+    return [
+        {"id": s["id"], "name": s["name"], "provisioned": s["id"] in existing_ids}
+        for s in services
+        if s.get("type", "vcl") == "vcl"
+    ]
 
 
 @router.post("/validate")
@@ -223,6 +265,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
     remove_logging: bool = body.remove_logging
     remove_cdn: bool = body.remove_cdn
     remove_bucket: bool = body.remove_bucket
+    remove_scoring: bool = body.remove_scoring
     remove_cache: bool = body.remove_cache
     remove_cron: bool = body.remove_cron
     from backend import config as svcconfig
@@ -252,6 +295,12 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                 "cdn_service_name": svc_cfg.get("name", service_id),
                 "cdn_url": prov.get("cdn_url", ""),
                 "cdn_secret": svc_cfg.get("cdn_secret", ""),
+                # Carry the scoring block so perform_teardown can tear down the
+                # Compute scorer service + its stores. Read while svc_cfg is
+                # still in memory — the config file is removed below before
+                # perform_teardown runs, so disable_scoring (which reloads
+                # config) can't be used; the ids must travel via state.
+                "scoring": svc_cfg.get("scoring") or {},
             }
 
     if not state:
@@ -265,6 +314,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
         "remove_logging": remove_logging,
         "remove_cdn": remove_cdn,
         "remove_bucket": remove_bucket,
+        "remove_scoring": remove_scoring,
     }
 
     def stream():
@@ -318,12 +368,19 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                 except Exception:
                     pass
 
+                # Also drop the credential-bearing caches (boto3 FOS client +
+                # pooled DuckDB S3 SECRET) so a same-process re-provision of this
+                # service id can't keep serving the now-deleted access key.
+                if sid:
+                    _invalidate_service_credentials(sid)
+
             yield json.dumps({"type": "status", "message": "Starting teardown of Fastly resources..."})
             for event in perform_teardown(state, token, opts=opts):
                 yield json.dumps(event)
 
             if remove_cache:
                 import shutil
+                import time
 
                 # Remove the DuckDB file and WAL independently from the cache dir —
                 # if one fails, the other still runs.
@@ -344,10 +401,31 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                 if src_mock["bucket"]:
                     svc_cache_dir = _db._cache_dir(src_mock)
                     if os.path.exists(svc_cache_dir):
-                        try:
-                            shutil.rmtree(svc_cache_dir)
-                        except Exception as e:
-                            yield json.dumps({"type": "status", "message": f"Warning: could not remove cache dir: {e}"})
+                        # reload() above unscheduled this service's jobs, but
+                        # APScheduler does NOT cancel a run that's already
+                        # executing. An in-flight sync/compaction tick calls
+                        # os.makedirs(cache_dir, exist_ok=True) and writes a
+                        # parquet file back into the tree between rmtree's
+                        # scandir and unlink — surfacing as ENOTEMPTY (errno 39)
+                        # and leaving an orphaned partial cache dir. The job is
+                        # gone now, so that last run drains within a second or
+                        # two; retry briefly to let it finish, then sweep.
+                        rmtree_err = None
+                        for _attempt in range(6):
+                            try:
+                                shutil.rmtree(svc_cache_dir)
+                                rmtree_err = None
+                                break
+                            except FileNotFoundError:
+                                rmtree_err = None
+                                break
+                            except OSError as e:
+                                rmtree_err = e
+                                time.sleep(0.5)
+                        if rmtree_err is not None:
+                            yield json.dumps(
+                                {"type": "status", "message": f"Warning: could not remove cache dir: {rmtree_err}"}
+                            )
 
                 # The per-service metadata SQLite (ingested_files, cron_runs,
                 # rollups) lives in the system data dir, NOT the cache dir, so
@@ -551,6 +629,12 @@ def provision_execute(req: ProvisionExecuteRequest):
                     from backend.utils.cache_registry import CacheRegistry
 
                     CacheRegistry.clear("routers.bootstrap._bootstrap_cache")
+
+                    # A re-provision of an existing service id mints fresh FOS
+                    # keys; drop any in-process caches still holding the old key
+                    # so the next sync/read uses the new creds (not a 401 until
+                    # restart). No-op for a brand-new service.
+                    _invalidate_service_credentials(cfg.get("logging_service_id") or cfg.get("service_id") or "")
 
                     try:
                         from backend.core import metadata as metadata_db
@@ -761,6 +845,11 @@ def provision_ingest(payload: ProvisionConfigRequest):
     # top of the handler (validate_destructive_token above); the prior second
     # pass here re-imported and re-validated the identical token+service_id.
     write_service_config(state)
+
+    # Re-ingest can carry refreshed FOS creds; drop the credential-bearing
+    # caches so the next sync/read picks them up rather than 401ing on a stale
+    # in-process key.
+    _invalidate_service_credentials(state.get("logging_service_id") or "")
 
     try:
         from backend.provision import _sync_crontab

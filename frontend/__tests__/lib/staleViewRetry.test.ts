@@ -110,6 +110,22 @@ describe('throwIfStaleAggregates discriminator', () => {
     expect(isFlaggedStale(data)).toBe(true)
   })
 
+  it('does NOT flag an empty result when a filter is active (filtered → legitimate empty)', () => {
+    // Exact shape that DOES flag stale when unfiltered: latest_log_at inside
+    // the window, every field empty. With hasFilters=true it's a legitimate
+    // "no rows match the filter", not the stale-view symptom — so it must NOT
+    // throw (the fix for the masked-IP-filter infinite-retry / "Preparing your
+    // data" banner).
+    const data = aggregates({
+      earliest_log_at: '2026-06-21T06:00:00.000Z',
+      latest_log_at: '2026-06-22T12:00:00.000Z',
+    })
+    // sanity: unfiltered, this same response IS flagged as stale.
+    expect(isFlaggedStale(data, WIDE_WINDOW)).toBe(true)
+    // filtered: not flagged, returns the data object unchanged.
+    expect(throwIfStaleAggregates(data, WIDE_WINDOW, true)).toBe(data)
+  })
+
   it('returns the original data object unchanged when not stale', () => {
     const data = aggregates({ latest_log_at: '2026-06-22T12:00:00.000Z', data: NONEMPTY_FIELDS })
     expect(throwIfStaleAggregates(data, WIDE_WINDOW)).toBe(data)

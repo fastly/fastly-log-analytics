@@ -1,9 +1,15 @@
 'use client'
 
+import { useState } from 'react'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
+import { denseTimeGrid } from '@/lib/chart-helpers'
 import { ScorerLatencyHelp } from '@/components/SessionScoring/help-content'
+import { Switch } from '@/components/ui/switch'
+import { Label } from '@/components/ui/label'
 import {
+  deriveScorerSeries,
+  scorerHourlyLayout,
   useScorerTimeseries,
   usToMs,
   type LatencyRow,
@@ -43,16 +49,35 @@ const LATENCY_SERIES: {
  */
 export function ScorerLatencyChart({ serviceId, sinceHours = 24 }: ScorerLatencyChartProps) {
   const { data, isLoading, isFetching, isError, error } = useScorerTimeseries(serviceId, sinceHours)
+  const [showVolume, setShowVolume] = useState(true)
 
-  const rows = data?.rows ?? []
-  const hours = rows.map((r) => r.hour)
-  const perMinute = data?.granularity === 'minute'
+  const { rows, hours, perMinute } = deriveScorerSeries(data)
   // Only draw the latency lines when the columns exist AND at least one bucket
   // has a value — avoids an empty axis on freshly-provisioned services that
   // haven't taken traffic yet.
   const hasLatency = (data?.has_latency ?? false) && rows.some((r) => r.rtt_p95_us != null)
 
-  const traces = LATENCY_SERIES.map((s) => ({
+  // Fill empty buckets with 0 so the volume bars stay even-width on a sparse
+  // window and a quiet bucket reads as "0 inspected" rather than a gap. The
+  // latency lines below stay on the sparse `hours` axis with connectgaps — a
+  // missing bucket has no defined percentile, so it must not become a 0 dip.
+  const cleanHours = hours.filter((h): h is string => h != null)
+  const volGrid = denseTimeGrid(cleanHours, perMinute ? 60 : 3600) ?? cleanHours
+  const volByMs = new Map<number, number>()
+  for (const r of rows) {
+    if (r.hour != null) volByMs.set(Date.parse(r.hour), r.total_count ?? 0)
+  }
+  const volumeTrace = {
+    type: 'bar' as const,
+    name: 'Inspected requests',
+    x: volGrid,
+    y: volGrid.map((h) => volByMs.get(Date.parse(h)) ?? 0),
+    yaxis: 'y2' as const,
+    marker: { color: 'rgba(148, 163, 184, 0.12)' },
+    showlegend: true,
+  }
+
+  const latencyTraces = LATENCY_SERIES.map((s) => ({
     type: 'scatter' as const,
     mode: 'lines' as const,
     name: s.name,
@@ -61,6 +86,28 @@ export function ScorerLatencyChart({ serviceId, sinceHours = 24 }: ScorerLatency
     line: { color: s.color, width: 2, dash: s.dash },
     connectgaps: true,
   }))
+
+  const traces = [
+    ...(showVolume ? [volumeTrace] : []),
+    ...latencyTraces,
+  ]
+
+  const baseLayout = scorerHourlyLayout(perMinute, 'Round-trip / exec (ms)', true)
+  const layout = {
+    ...baseLayout,
+    ...(showVolume
+      ? {
+          yaxis2: {
+            title: 'Inspected requests',
+            overlaying: 'y' as const,
+            side: 'right' as const,
+            showgrid: false,
+            rangemode: 'tozero' as const,
+          },
+          margin: { ...baseLayout.margin, r: 50 },
+        }
+      : {}),
+  }
 
   return (
     <AnalyticsCard
@@ -73,6 +120,20 @@ export function ScorerLatencyChart({ serviceId, sinceHours = 24 }: ScorerLatency
       isEmpty={rows.length === 0}
       error={isError ? (error as AnalyticsCardError) : null}
       className="min-h-[320px]"
+      headerAction={
+        rows.length > 0 && hasLatency ? (
+          <div className="flex items-center gap-2 mr-1">
+            <Switch
+              id="show-volume"
+              checked={showVolume}
+              onCheckedChange={setShowVolume}
+            />
+            <Label htmlFor="show-volume" className="text-xs font-normal cursor-pointer select-none text-muted-foreground hover:text-foreground">
+              Show volume
+            </Label>
+          </div>
+        ) : undefined
+      }
     >
       {rows.length > 0 && !hasLatency ? (
         // Rows exist (the service is enabled and taking traffic) but the
@@ -81,22 +142,15 @@ export function ScorerLatencyChart({ serviceId, sinceHours = 24 }: ScorerLatency
         // fail-open chart next door still renders — so explain the real fix.
         <div className="flex h-full items-center justify-center p-4 text-center">
           <p className="max-w-xs text-xs text-muted-foreground">
-            Latency columns not present. Re-provision this service to record{' '}
-            <code>edge_score_rtt_us</code> / <code>edge_score_exec_us</code>.
+            Waiting for traffic logged with the scorer latency fields (
+            <code>edge_score_rtt_us</code> / <code>edge_score_exec_us</code>). These are added to the
+            log format on enable and fill in once scored requests flow through and are ingested.
           </p>
         </div>
       ) : (
         <PlotlyChart
           data={traces}
-          layout={{
-            showlegend: true,
-            margin: { l: 50, r: 20, t: 10, b: 40 },
-            xaxis: { title: '', type: 'date', ...(perMinute ? { tickformat: '%H:%M' } : {}) },
-            yaxis: {
-              title: 'Round-trip / exec (ms)',
-              rangemode: 'tozero',
-            },
-          }}
+          layout={layout}
           height="100%"
           a11yTitle={`Scorer latency percentiles over the last ${sinceHours} hours`}
         />

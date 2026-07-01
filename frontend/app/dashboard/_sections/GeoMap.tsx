@@ -3,6 +3,7 @@
 import React from 'react'
 import dynamic from 'next/dynamic'
 import { cn } from '@/lib/utils'
+import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 
 // ChoroplethMap pulls in d3-geo and the world-110m topojson. Static-import
 // blocked the dashboard's initial JS parse/eval; dynamic-import slices it
@@ -42,6 +43,9 @@ export function GeoMap({
   catalog,
   onCountryClick,
 }: GeoMapProps) {
+  // Distinguish "field group not enabled" from "enabled but no data in this
+  // window yet" so a low-traffic/fresh service doesn't read as misconfigured.
+  const { isFieldActive } = useActiveLogFields()
   return (
     <div className={cn("border rounded-lg p-4 flex flex-col transition-opacity duration-100", isFetchingAggs && "opacity-40 pointer-events-none")}>
       {/* text-foreground anchors the card title to the high-contrast
@@ -63,6 +67,9 @@ export function GeoMap({
             <span className="text-sm font-medium mb-1">No data available</span>
             <span className="text-[10px] text-muted-foreground">
               {(() => {
+                if (isFieldActive('country')) {
+                  return "No country data in this time range."
+                }
                 const countryField = (catalog?.fields as any[])?.find(f => f.id === 'country')
                 const groupId = countryField?.group
                 if (groupId) {

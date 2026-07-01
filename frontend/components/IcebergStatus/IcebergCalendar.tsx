@@ -24,7 +24,7 @@ import {
 export function IcebergCalendar() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
 
-  // Freshness via useCronRunsStream invalidation (prefix-matches
+  // Freshness via useAdminEventStream invalidation (prefix-matches
   // ['admin', 'iceberg']). 5-min interval is a pure safety net.
   const { data: calendar, isLoading } = useQuery({
     queryKey: ['admin', 'iceberg', 'calendar', activeServiceId],

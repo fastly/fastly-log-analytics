@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from backend.models.common import BaseResponse
 
@@ -147,3 +147,38 @@ class ServiceCredentialsBody(BaseModel):
     api_token: str = ""
     access_key: str = ""
     secret_key: str = ""
+
+
+class CronRunEntry(BaseModel):
+    """One row of GET /api/cron-runs.
+
+    ``extra="allow"`` passes any future cron_runs column through verbatim, and
+    the field order mirrors ``metadata.cron_log.get_cron_runs`` so the
+    serialized key order is byte-identical. Types match the producer exactly to
+    avoid any coercion of the wire bytes: ``duration_s`` is a float (writers
+    store ``0.0``), the count columns are ints, ``parquet_keys`` is the
+    json.loads'd list."""
+
+    model_config = ConfigDict(extra="allow")
+    id: int | None = None
+    task: str | None = None
+    started_at: str | None = None
+    duration_s: float | None = None
+    status: str | None = None
+    error_message: str | None = None
+    files_downloaded: int | None = None
+    files_deleted_fos: int | None = None
+    rows_ingested: int | None = None
+    corrupt_rows: int | None = None
+    parquet_files_created: int | None = None
+    parquet_files_optimized: int | None = None
+    parquet_keys: list[str] = []
+    summary: str | None = None
+
+
+class CronRunsResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    total: int | None = None
+    page: int | None = None
+    per_page: int | None = None
+    entries: list[CronRunEntry] = []

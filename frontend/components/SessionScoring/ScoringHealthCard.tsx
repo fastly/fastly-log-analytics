@@ -6,6 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
 import { ScoringHealthHelp } from '@/components/SessionScoring/help-content'
+import type { components } from '@/types/api.generated'
 
 import { useScoringQuery } from './useScoringQuery'
 
@@ -14,36 +15,11 @@ interface ScoringHealthCardProps {
   sinceHours?: number
 }
 
-interface HealthResponse {
-  since_hours: number
-  total_edge_rows: number
-  scored_rows: number
-  fire_rate_pct: number
-  distinct_sids: number
-  avg_score: number
-  p50_score: number
-  p95_score: number
-  max_score: number
-  scorer_errors: number
-  fail_open_rate_pct?: number | null
-  top_reasons: { reason: string; count: number }[]
-  latency?: {
-    available: boolean
-    rtt_p50_us: number | null
-    rtt_p95_us: number | null
-    rtt_p99_us: number | null
-    rtt_max_us: number | null
-    exec_p50_us: number | null
-    exec_p95_us: number | null
-  }
-  matrix_staleness?: {
-    l2_evaluated: number
-    l2_high_count: number
-    l2_high_pct: number
-    is_stale: boolean
-    threshold_pct: number
-  }
-}
+// Generated from the /scoring/health response_model — single source of truth.
+// Every field is nullable on the wire, so the render reads below coalesce with
+// `?? 0` (the values are non-null in practice; this just satisfies the types
+// and keeps runtime output identical).
+type HealthResponse = components['schemas']['ScoringHealthResponse']
 
 function Metric({
   icon: Icon,
@@ -129,7 +105,7 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
     )
   }
 
-  const fireRateTone: 'default' | 'warn' = data.fire_rate_pct < 20 ? 'warn' : 'default'
+  const fireRateTone: 'default' | 'warn' = (data.fire_rate_pct ?? 0) < 20 ? 'warn' : 'default'
   // SRE-15: tone on the traffic-normalized fail-open RATE, not the absolute
   // count. The count scales with request volume (scorer is instance-per-
   // request → fail-opens track traffic), so a fixed count threshold cries
@@ -137,12 +113,13 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
   // ~1.6% (scorer-instance-per-request-coldstart); warn above 2.5%. Fall back
   // to the legacy count tone if the rate field is absent (older backend).
   const failRate = data.fail_open_rate_pct ?? null
+  const scorerErrors = data.scorer_errors ?? 0
   const errorsTone: 'default' | 'warn' | 'good' =
-    data.scorer_errors === 0
+    scorerErrors === 0
       ? 'good'
       : failRate != null
         ? failRate > 2.5 ? 'warn' : 'default'
-        : data.scorer_errors > 10 ? 'warn' : 'default'
+        : scorerErrors > 10 ? 'warn' : 'default'
 
   // Scorer latency tile. rtt is the edge round-trip (compared against the
   // ~100ms backend timeout); exec is the scorer's own Wasm time (~µs).
@@ -157,6 +134,8 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
   const latencyTone: 'default' | 'warn' =
     rttP95Us != null && rttP95Us / 1000 > 80 ? 'warn' : 'default'
 
+  const topReasons = data.top_reasons ?? []
+
   return (
     <AnalyticsCard
       title="Scoring Health"
@@ -167,26 +146,26 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
         <Metric
           icon={Activity}
           label="Fire Rate"
-          value={`${data.fire_rate_pct.toFixed(1)}%`}
-          sub={`${data.scored_rows.toLocaleString()} of ${data.total_edge_rows.toLocaleString()} edge rows`}
+          value={`${(data.fire_rate_pct ?? 0).toFixed(1)}%`}
+          sub={`${(data.scored_rows ?? 0).toLocaleString()} of ${(data.total_edge_rows ?? 0).toLocaleString()} edge rows`}
           tone={fireRateTone}
         />
         <Metric
           icon={Gauge}
           label="Avg Score"
-          value={data.avg_score.toFixed(1)}
-          sub={`p50 ${data.p50_score.toFixed(0)} · p95 ${data.p95_score.toFixed(0)} · max ${data.max_score}`}
+          value={(data.avg_score ?? 0).toFixed(1)}
+          sub={`p50 ${(data.p50_score ?? 0).toFixed(0)} · p95 ${(data.p95_score ?? 0).toFixed(0)} · max ${data.max_score ?? 0}`}
         />
         <Metric
           icon={Users}
           label="Sessions"
-          value={data.distinct_sids.toLocaleString()}
+          value={(data.distinct_sids ?? 0).toLocaleString()}
           sub="distinct sids seen"
         />
         <Metric
           icon={XCircle}
           label="Scorer Errors"
-          value={data.scorer_errors.toLocaleString()}
+          value={scorerErrors.toLocaleString()}
           sub={failRate != null ? `${failRate.toFixed(2)}% of edge rows` : 'fail-open + auth fail rows'}
           tone={errorsTone}
         />
@@ -204,27 +183,27 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
         <Metric
           icon={AlertTriangle}
           label="Top Reason"
-          value={data.top_reasons[0]?.reason ?? '—'}
+          value={topReasons[0]?.reason ?? '—'}
           sub={
-            data.top_reasons[0]
-              ? `${data.top_reasons[0].count.toLocaleString()} hits`
+            topReasons[0]
+              ? `${(topReasons[0].count ?? 0).toLocaleString()} hits`
               : 'no scored rows yet'
           }
         />
       </div>
-      {data.top_reasons.length > 0 && (
+      {topReasons.length > 0 && (
         <div className="mt-4 space-y-1">
           <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
             Score Reason Breakdown
           </div>
           <div className="flex flex-wrap gap-2">
-            {data.top_reasons.map((r) => (
+            {topReasons.map((r) => (
               <div
-                key={r.reason}
+                key={r.reason ?? ''}
                 className="flex items-center gap-1.5 px-2 py-1 rounded-md border bg-muted/40 text-xs"
               >
                 <span className="font-mono">{r.reason}</span>
-                <span className="text-muted-foreground tabular-nums">{r.count.toLocaleString()}</span>
+                <span className="text-muted-foreground tabular-nums">{(r.count ?? 0).toLocaleString()}</span>
               </div>
             ))}
           </div>
@@ -237,10 +216,10 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
           <div className="space-y-0.5">
             <div className="font-semibold text-amber-900">Matrix may be stale</div>
             <div className="text-amber-800">
-              {data.matrix_staleness.l2_high_pct.toFixed(1)}% of L2-evaluated sessions
-              {' '}({data.matrix_staleness.l2_high_count.toLocaleString()} of{' '}
-              {data.matrix_staleness.l2_evaluated.toLocaleString()}) are scoring
-              ≥50 — above the {data.matrix_staleness.threshold_pct}% threshold.
+              {(data.matrix_staleness.l2_high_pct ?? 0).toFixed(1)}% of L2-evaluated sessions
+              {' '}({(data.matrix_staleness.l2_high_count ?? 0).toLocaleString()} of{' '}
+              {(data.matrix_staleness.l2_evaluated ?? 0).toLocaleString()}) are scoring
+              ≥50 — above the {data.matrix_staleness.threshold_pct ?? 0}% threshold.
               The matrix is treating too much real traffic as rare. Click
               <strong className="px-0.5">Retrain matrix</strong> in the header
               to refresh it.

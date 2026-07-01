@@ -34,6 +34,13 @@ export function SSEProgressView({
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [lines, status])
 
+  // Surface an actionable link the backend may attach to a terminal error
+  // event (e.g. a manage.fastly.com deep link when a required product isn't
+  // enabled). The error event is captured in `lines` even though it's filtered
+  // out of the main feed below, so read its `link` here.
+  const errorLine = [...lines].reverse().find(l => l.type === 'error')
+  const errorLink = typeof errorLine?.link === 'string' ? errorLine.link : null
+
   const lastProgressLine = [...lines].reverse().find(l => l.type === 'progress')
   const lastStepStatusLine = [...lines].reverse().find(l =>
     l.type === 'status' && typeof l.message === 'string' && l.message.trim() !== ''
@@ -117,7 +124,22 @@ export function SSEProgressView({
             </div>
           )}
           {error && (
-            <div className="text-destructive mt-4 border-t border-destructive/20 pt-4 font-sans font-medium text-sm">Error: {error}</div>
+            <div className="text-destructive mt-4 border-t border-destructive/20 pt-4 font-sans font-medium text-sm">
+              Error: {error}
+              {errorLink && (
+                <>
+                  {' '}
+                  <a
+                    href={errorLink}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline underline-offset-2 hover:opacity-80"
+                  >
+                    Open Fastly to enable it
+                  </a>
+                </>
+              )}
+            </div>
           )}
           {status === 'done' && (
             <div className="text-emerald-600 dark:text-emerald-400 mt-4 border-t border-emerald-500/20 pt-4 font-sans font-medium text-sm">{doneMessage}</div>

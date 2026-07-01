@@ -120,17 +120,23 @@ def _make_state(**overrides):
     return base
 
 
-def test_write_service_config_clamps_sync_interval_to_min_30s(tmp_path):
-    """``sync_interval_seconds`` = max(30, log_period_secs). Pinned
-    because a sub-30s interval would hit Fastly's rate limit."""
+def test_write_service_config_honors_sub_30s_sync_interval(tmp_path):
+    """``sync_interval_seconds`` = max(5, log_period_secs). An explicit
+    sub-30s log_period is honored (no longer silently rounded up to a 30s
+    floor) — matching the settings-PATCH writer and the scheduler's own
+    ``max(5, …)`` clamp. A period below 5s clamps to the 5s floor; the
+    default (120s) is unchanged."""
     saved_cfgs = []
     with (
         patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
         patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
     ):
-        orchestrator.write_service_config(_make_state(log_period=10))  # below 30
-    sid, cfg = saved_cfgs[0]
-    assert cfg["provisioning"]["cron_sync"]["interval_seconds"] == 30
+        orchestrator.write_service_config(_make_state(log_period=10))
+        orchestrator.write_service_config(_make_state(log_period=120))
+        orchestrator.write_service_config(_make_state(log_period=2))  # below the 5s floor
+    assert saved_cfgs[0][1]["provisioning"]["cron_sync"]["interval_seconds"] == 10
+    assert saved_cfgs[1][1]["provisioning"]["cron_sync"]["interval_seconds"] == 120
+    assert saved_cfgs[2][1]["provisioning"]["cron_sync"]["interval_seconds"] == 5
 
 
 def test_write_service_config_commit_interval_respects_state_override(tmp_path):
@@ -245,6 +251,48 @@ def test_write_service_config_log_retention_days_propagates(tmp_path):
     assert cfg["log_retention_days"] == 90
     assert cfg["provisioning"]["cron_sync"]["log_retention_days"] == 90
     assert cfg["provisioning"]["cron_compact"]["log_retention_days"] == 90
+
+
+def test_write_service_config_persists_detected_rate_limiting_false(tmp_path):
+    """A conclusive ``rate_limiting=False`` (account lacks edge rate limiting,
+    set by ensure_cdn_service's probe) is persisted into the provisioning block
+    so cli handle_update_cdn reads a real value instead of the True default."""
+    saved_cfgs = []
+    with (
+        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
+    ):
+        orchestrator.write_service_config(_make_state(rate_limiting=False))
+    _, cfg = saved_cfgs[0]
+    assert cfg["provisioning"]["rate_limiting"] is False
+
+
+def test_write_service_config_rate_limiting_defaults_true_when_never_detected(tmp_path):
+    """No detected/persisted value anywhere → default True (unchanged behaviour
+    for the cli.py reader + reactive fallback)."""
+    saved_cfgs = []
+    with (
+        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
+    ):
+        orchestrator.write_service_config(_make_state())
+    _, cfg = saved_cfgs[0]
+    assert cfg["provisioning"]["rate_limiting"] is True
+
+
+def test_write_service_config_rate_limiting_carries_from_provisioning_block(tmp_path):
+    """On a wizard re-run where the request body omits the top-level flag, the
+    value carried in state['provisioning'] survives the rebuild."""
+    saved_cfgs = []
+    state = _make_state()
+    state["provisioning"] = {"rate_limiting": False}
+    with (
+        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
+    ):
+        orchestrator.write_service_config(state)
+    _, cfg = saved_cfgs[0]
+    assert cfg["provisioning"]["rate_limiting"] is False
 
 
 # ── run_with_events ─────────────────────────────────────────────────────────
@@ -794,10 +842,11 @@ def _teardown_state(**overrides):
     return base
 
 
-def test_perform_teardown_calls_all_4_steps_with_default_opts():
-    """Default opts → remove logging + bucket + CDN. Pinned because
-    losing any step would leave orphaned Fastly resources that
-    accumulate billing charges.
+def test_perform_teardown_calls_all_5_steps_with_default_opts():
+    """Default opts → scoring (no-op when state has no scoring block) + logging
+    + bucket + CDN. Pinned because losing any step would leave orphaned Fastly
+    resources that accumulate billing charges. The scoring step is step 1 of 5;
+    with no scoring in state it's skipped but still emits its progress event.
 
     Note: ``remove_logging_endpoint`` and friends are *regular*
     functions (not generators) — the orchestrator wraps them via
@@ -830,16 +879,122 @@ def test_perform_teardown_calls_all_4_steps_with_default_opts():
         patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=fake_ensure_key),
         patch("backend.provision.orchestrator.delete_fos_access_key", side_effect=fake_delete_fos_key),
         patch("backend.provision.orchestrator.fastly", return_value={"data": []}),
+        # No scoring in _teardown_state → teardown_scoring_resources must not be
+        # called; patch it so an accidental call would be visible.
+        patch("backend.provision.session_scoring_orchestrator.teardown_scoring_resources") as mock_scoring,
     ):
         events, exc = _consume(orchestrator.perform_teardown(_teardown_state(), "tok"))
 
     assert exc is None
+    mock_scoring.assert_not_called()
     assert remove_logging_called == [True]
     assert delete_bucket_called == [True]
     assert delete_cdn_called == [True]
-    # 4 progress events (1, 2, 3, 4)
+    # 5 progress events (scoring, logging, FOS keys, FOS bucket, CDN)
     progress = [e for e in events if e["type"] == "progress"]
-    assert len(progress) == 4
+    assert len(progress) == 5
+
+
+def test_perform_teardown_deletes_scoring_when_enabled():
+    """When state carries an enabled scoring block, perform_teardown delegates
+    to teardown_scoring_resources (which strips the scoring VCL + deletes the
+    Compute service + stores). Pinned because tearing down a scoring-enabled
+    service without this orphans the Compute service + KV + ConfigStores —
+    perpetual Fastly billing."""
+    scoring_block = {
+        "enabled": True,
+        "scoring_service_id": "SCORESVC",
+        "scoring_keys_store_id": "KEYS",
+        "scoring_config_store_id": "CFG",
+        "scoring_matrix_store_id": "MTX",
+    }
+    state = _teardown_state(scoring=scoring_block)
+
+    with (
+        patch("backend.provision.orchestrator.remove_logging_endpoint"),
+        patch("backend.provision.orchestrator.delete_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_cdn_service"),
+        patch(
+            "backend.provision.orchestrator.ensure_fos_access_key",
+            return_value={"access_key": "A", "secret_key": "S", "id": "I"},
+        ),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.fastly", return_value={"data": []}),
+        patch(
+            "backend.provision.session_scoring_orchestrator.teardown_scoring_resources",
+            return_value=[],
+        ) as mock_scoring,
+    ):
+        events, exc = _consume(orchestrator.perform_teardown(state, "tok"))
+
+    assert exc is None
+    mock_scoring.assert_called_once()
+    # Called with the logging service id + the scoring block + token.
+    args = mock_scoring.call_args.args
+    assert args[0] == state["logging_service_id"]
+    assert args[1] == scoring_block
+    assert args[2] == "tok"
+
+
+def test_perform_teardown_skips_scoring_when_remove_scoring_opt_false():
+    """``opts['remove_scoring'] = False`` → keep the Compute scorer even on an
+    otherwise-full teardown (e.g. an operator dropping only the bucket)."""
+    state = _teardown_state(scoring={"enabled": True, "scoring_service_id": "SCORESVC"})
+    with (
+        patch("backend.provision.orchestrator.remove_logging_endpoint"),
+        patch("backend.provision.orchestrator.delete_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_cdn_service"),
+        patch(
+            "backend.provision.orchestrator.ensure_fos_access_key",
+            return_value={"access_key": "A", "secret_key": "S", "id": "I"},
+        ),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.fastly", return_value={"data": []}),
+        patch("backend.provision.session_scoring_orchestrator.teardown_scoring_resources") as mock_scoring,
+    ):
+        events, exc = _consume(
+            orchestrator.perform_teardown(
+                state,
+                "tok",
+                opts={"remove_logging": True, "remove_cdn": True, "remove_bucket": True, "remove_scoring": False},
+            )
+        )
+    assert exc is None
+    mock_scoring.assert_not_called()
+
+
+def test_perform_teardown_swallows_scoring_exception_with_warning():
+    """If scoring teardown raises (Fastly 503), emit a warning and continue with
+    the rest of teardown — a scoring-cleanup failure must not orphan the
+    FOS/CDN cleanup. Mirrors the remove_logging swallow contract."""
+    state = _teardown_state(scoring={"enabled": True, "scoring_service_id": "SCORESVC"})
+    delete_cdn_called = []
+
+    with (
+        patch("backend.provision.orchestrator.remove_logging_endpoint"),
+        patch("backend.provision.orchestrator.delete_fos_bucket"),
+        patch(
+            "backend.provision.orchestrator.delete_cdn_service",
+            side_effect=lambda *a, **k: delete_cdn_called.append(True),
+        ),
+        patch(
+            "backend.provision.orchestrator.ensure_fos_access_key",
+            return_value={"access_key": "A", "secret_key": "S", "id": "I"},
+        ),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.fastly", return_value={"data": []}),
+        patch(
+            "backend.provision.session_scoring_orchestrator.teardown_scoring_resources",
+            side_effect=RuntimeError("scoring upstream 503"),
+        ),
+    ):
+        events, exc = _consume(orchestrator.perform_teardown(state, "tok"))
+
+    assert exc is None
+    # A warning was surfaced...
+    assert any(e["type"] == "status" and "scoring teardown failed" in e["message"].lower() for e in events)
+    # ...and the rest of teardown still ran.
+    assert delete_cdn_called == [True]
 
 
 def test_perform_teardown_skips_logging_when_remove_logging_opt_false():

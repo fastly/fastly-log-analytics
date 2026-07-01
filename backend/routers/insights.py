@@ -15,10 +15,44 @@ from backend.models.dashboard import (
 )
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import insights as repo
-from backend.utils.remote_access import TimeBounds, clamp_or_400, get_analyst_time_bounds
+from backend.utils.auth import mask_ips_for
+from backend.utils.remote_access import analyst_clamp_cache_key
 from backend.utils.router_utils import query_errors
 
 router = APIRouter(prefix="/api", tags=["insights"], responses=DEFAULT_ERROR_RESPONSES)
+
+
+def _analyst_lookback_clamp(
+    ctx: RequestContext, baseline_hours: float, window_size_hrs: float
+) -> tuple[str | None, str | None, bool, str | None]:
+    """Resolve the analyst clamp window + mask_ips + stable cache key for the
+    insights endpoints. Admin (no analyst session) → ``(None, None, False,
+    None)`` so the scan runs the full range and hits the shared prewarmer cache.
+
+    M2: clamp the scanned range [now-(baseline+window), now] to the analyst's
+    allowed window via ``ctx.clamp``. The model already bounds the two windows
+    so the unclamped lookback is itself capped (≤ ~97d).
+    M3: IP-keyed insights mask the client IP they surface in the label /
+    investigate_url when the invite carries mask_ips.
+
+    The 4th value is the STABLE insights cache key fragment
+    (``analyst_clamp_cache_key`` — keyed on the invite's window params, NOT the
+    rolling resolved bounds) so repeated analyst requests reuse one cache entry
+    and the prewarmer can warm the exact same key. ``get_cache_collapse_detail``
+    is uncached and discards it.
+    """
+    s = ctx.analyst_session
+    if s is None:
+        return None, None, False, None
+    now = datetime.now(UTC)
+    earliest = now - timedelta(hours=baseline_hours + window_size_hrs)
+    clamp_start, clamp_end = ctx.clamp(earliest.isoformat(), now.isoformat())
+    cache_key = analyst_clamp_cache_key(
+        getattr(s, "query_start_time", None),
+        getattr(s, "query_end_time", None),
+        getattr(s, "query_window_hours", None),
+    )
+    return clamp_start, clamp_end, mask_ips_for(s), cache_key
 
 
 @router.post("/insights", response_model=InsightsResponse)
@@ -26,25 +60,10 @@ router = APIRouter(prefix="/api", tags=["insights"], responses=DEFAULT_ERROR_RES
 def insights_endpoint(
     req: InsightsRequest,
     ctx: RequestContext = Depends(build_request_context),
-    tb: TimeBounds = Depends(get_analyst_time_bounds),
 ):
-    # M2: clamp the scanned range [now-(baseline+window), now] to the analyst's
-    # allowed window. Admin (no analyst session) passes None/None → full range
-    # and the shared prewarmer cache. The model already bounds the two windows
-    # so the unclamped lookback is itself capped (≤ ~97d).
-    clamp_start: str | None = None
-    clamp_end: str | None = None
-    mask_ips = False
-    if ctx.analyst_session is not None:
-        now = datetime.now(UTC)
-        earliest = now - timedelta(hours=req.baseline_hours + req.window_size_hrs)
-        clamp_start, clamp_end = clamp_or_400(
-            tb, earliest.isoformat(), now.isoformat(), analyst_session=ctx.analyst_session
-        )
-        # M3: IP-keyed insights mask the client IP they surface in the label /
-        # investigate_url when the invite carries mask_ips.
-        policy = getattr(ctx.analyst_session, "pii_policy", None)
-        mask_ips = bool(policy.get("mask_ips")) if isinstance(policy, dict) else False
+    clamp_start, clamp_end, mask_ips, clamp_cache_key = _analyst_lookback_clamp(
+        ctx, req.baseline_hours, req.window_size_hrs
+    )
     return repo.get_insights(
         con=ctx.con,
         src=ctx.source,
@@ -53,6 +72,7 @@ def insights_endpoint(
         clamp_start=clamp_start,
         clamp_end=clamp_end,
         mask_ips=mask_ips,
+        clamp_cache_key=clamp_cache_key,
     )
 
 
@@ -61,19 +81,8 @@ def insights_endpoint(
 def cache_collapse_detail_endpoint(
     req: CacheCollapseDetailRequest,
     ctx: RequestContext = Depends(build_request_context),
-    tb: TimeBounds = Depends(get_analyst_time_bounds),
 ):
-    clamp_start: str | None = None
-    clamp_end: str | None = None
-    mask_ips = False
-    if ctx.analyst_session is not None:
-        now = datetime.now(UTC)
-        earliest = now - timedelta(hours=req.baseline_hours + req.window_size_hrs)
-        clamp_start, clamp_end = clamp_or_400(
-            tb, earliest.isoformat(), now.isoformat(), analyst_session=ctx.analyst_session
-        )
-        policy = getattr(ctx.analyst_session, "pii_policy", None)
-        mask_ips = bool(policy.get("mask_ips")) if isinstance(policy, dict) else False
+    clamp_start, clamp_end, mask_ips, _ = _analyst_lookback_clamp(ctx, req.baseline_hours, req.window_size_hrs)
     return repo.get_cache_collapse_detail(
         con=ctx.con,
         src=ctx.source,

@@ -9,6 +9,12 @@ vi.mock('next/navigation', () => ({
   usePathname: () => '/origin',
 }))
 
+// FilterValueCell (rendered by makeLatencyColumns) now reads useMaskIps,
+// which needs a QueryClient. Stub it off so the cells render in isolation.
+vi.mock('@/hooks/useMaskIps', () => ({
+  useMaskIps: () => false,
+}))
+
 import { makeLatencyColumns } from '@/lib/table-utils'
 
 afterEach(() => cleanup())

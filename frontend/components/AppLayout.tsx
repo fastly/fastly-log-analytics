@@ -82,6 +82,7 @@ import { MapPrewarm } from '@/components/Map/MapPrewarm'
 import { useUrlServiceSync } from '@/hooks/useUrlServiceSync'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
+import { useEnforceMaskedFilters } from '@/hooks/useEnforceMaskedFilters'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useRouter } from 'next/navigation'
 import packageJson from '../package.json'
@@ -350,6 +351,9 @@ export function AppLayout({
   const debugEnabled = useDebugStore(state => state.enabled)
   const bootstrapSettings = bootstrapData?.settings as Record<string, unknown> | undefined
   const isAnalyst = useIsAnalyst()
+  // Strip any IP-family filter for masking analysts (e.g. a bookmarked
+  // ?filters={ip:...} URL) so it never reaches the backend's IP-filter lock.
+  useEnforceMaskedFilters()
   // Distinguish share-invited analysts (public URL, share-login flow)
   // from FOS-sharing analysts (running their own copy locally). The
   // former see a more restricted nav (no Data Management, no ops info).

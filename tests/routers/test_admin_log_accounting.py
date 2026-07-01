@@ -1,8 +1,10 @@
 """Tests for ``GET /api/admin/log-accounting``.
 
-The endpoint reconciles Fastly's authoritative `/stats/service/{id}` log-line
+The endpoint reconciles Fastly's authoritative `/stats/service/{id}` ``requests``
 counts against locally-ingested `sum(row_count) FROM ingested_files` over the
-same window, surfacing any gap as a per-bucket signal.
+same window, surfacing any gap as a per-bucket signal. ``requests`` (not the
+``log`` counter, which counts ``vcl_log`` re-executions) is the loss denominator
+because it sits 1:1 with our ingested rows on every service.
 
 Why these tests matter: a silent regression in the bucket-alignment math
 (timezone, SUBSTR width, or outer-join key shape) would make the panel
@@ -120,9 +122,9 @@ def test_log_accounting_aligns_buckets(log_accounting_client, log_accounting_sou
     )
     fastly_payload = {
         "data": [
-            {"start_time": int(b0.timestamp()), "log": 1000},
-            {"start_time": int(b1.timestamp()), "log": 1000},
-            {"start_time": int(b2.timestamp()), "log": 1000},
+            {"start_time": int(b0.timestamp()), "requests": 1000},
+            {"start_time": int(b1.timestamp()), "requests": 1000},
+            {"start_time": int(b2.timestamp()), "requests": 1000},
         ]
     }
     with (
@@ -131,30 +133,31 @@ def test_log_accounting_aligns_buckets(log_accounting_client, log_accounting_sou
     ):
         resp = log_accounting_client.get("/api/admin/log-accounting?hours=4&by=hour")
     assert resp.status_code == 200, resp.text
+    # The service is chosen via the x-service-id header on an otherwise-identical
+    # URL, so the cached response MUST Vary on it — else the browser serves one
+    # service's body for another within the 30s window (the bug that made the
+    # gap card not change on service switch).
+    assert "x-service-id" in resp.headers.get("vary", "").lower()
     body = resp.json()
     gaps = {b["ts"]: b["gap"] for b in body["buckets"]}
     assert gaps[f"{b0.strftime('%Y-%m-%dT%H')}:00:00Z"] == 2
     assert gaps[f"{b1.strftime('%Y-%m-%dT%H')}:00:00Z"] == 0
     assert gaps[f"{b2.strftime('%Y-%m-%dT%H')}:00:00Z"] == 5
-    assert body["totals"]["fastly_logs"] == 3000
+    assert body["totals"]["fastly_requests"] == 3000
     assert body["totals"]["our_rows"] == 2993
     assert body["totals"]["gap"] == 7
-    assert body["fastly_field_used"] == "log"
 
 
-def test_log_accounting_handles_missing_fastly_field(log_accounting_client, log_accounting_source):
-    """If Fastly's response carries none of our candidate log-count fields,
-    the endpoint must not crash — it should treat each bucket as 0 and
-    return ``fastly_field_used=None`` so the frontend can flag it."""
+def test_log_accounting_zero_requests_bucket(log_accounting_client, log_accounting_source):
+    """A quiet hour legitimately reports ``requests: 0``. The endpoint must
+    surface it as a zero-request bucket without crashing, and our ingested rows
+    for that bucket still appear (yielding a negative gap — in-flight noise, not
+    a loss signal)."""
     svc_id = log_accounting_source["name"]
     now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     b0 = now - timedelta(hours=1)
     _seed_ingested(svc_id, [(b0.strftime("%Y-%m-%dT%H:%M:%S"), 500)])
-    fastly_payload = {
-        "data": [
-            {"start_time": int(b0.timestamp()), "requests": 999, "edge_requests": 888},
-        ]
-    }
+    fastly_payload = {"data": [{"start_time": int(b0.timestamp()), "requests": 0}]}
     with (
         patch("backend.config.get_fastly_api_key", return_value="fake-api-key"),
         patch("urllib.request.urlopen", side_effect=_fake_urlopen(fastly_payload)),
@@ -162,43 +165,10 @@ def test_log_accounting_handles_missing_fastly_field(log_accounting_client, log_
         resp = log_accounting_client.get("/api/admin/log-accounting?hours=2&by=hour")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["fastly_field_used"] is None
-    # Our 500 ingested rows still surface even when Fastly side is 0.
     by_ts = {b["ts"]: b for b in body["buckets"]}
     target_ts = f"{b0.strftime('%Y-%m-%dT%H')}:00:00Z"
-    assert by_ts[target_ts]["fastly_logs"] == 0
+    assert by_ts[target_ts]["fastly_requests"] == 0
     assert by_ts[target_ts]["our_rows"] == 500
-
-
-def test_log_accounting_zero_log_field_not_flagged_missing(log_accounting_client, log_accounting_source, caplog):
-    """A quiet hour legitimately reports ``log: 0``. The endpoint must treat
-    that as the log-count field present with value 0 — NOT as a missing field.
-
-    Regression: the old truthiness check (``if v:``) treated a zero count as
-    "field absent", logging a bogus "no log-count field" warning whose own
-    keys list visibly contained ``log`` and returning ``fastly_field_used=None``
-    for any all-zero window (exactly what a brand-new service shows)."""
-    import logging as _logging
-
-    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-    b0 = now - timedelta(hours=1)
-    # ``log`` present but 0, plus unrelated keys — a genuinely empty hour.
-    fastly_payload = {"data": [{"start_time": int(b0.timestamp()), "log": 0, "requests": 5}]}
-    with (
-        patch("backend.config.get_fastly_api_key", return_value="fake-api-key"),
-        patch("urllib.request.urlopen", side_effect=_fake_urlopen(fastly_payload)),
-        caplog.at_level(_logging.WARNING, logger="admin.log_accounting"),
-    ):
-        resp = log_accounting_client.get("/api/admin/log-accounting?hours=2&by=hour")
-    assert resp.status_code == 200
-    body = resp.json()
-    # Field IS present (value 0) — detected, not flagged as missing.
-    assert body["fastly_field_used"] == "log"
-    by_ts = {b["ts"]: b for b in body["buckets"]}
-    target_ts = f"{b0.strftime('%Y-%m-%dT%H')}:00:00Z"
-    assert by_ts[target_ts]["fastly_logs"] == 0
-    # No bogus "no log-count field" warning for a quiet hour.
-    assert not any("no log-count field" in r.message for r in caplog.records)
 
 
 def test_log_accounting_outer_join_handles_orphan_buckets(log_accounting_client, log_accounting_source):
@@ -211,7 +181,7 @@ def test_log_accounting_outer_join_handles_orphan_buckets(log_accounting_client,
     fastly_only = now - timedelta(hours=1)
     local_only = now - timedelta(hours=2)
     _seed_ingested(svc_id, [(local_only.strftime("%Y-%m-%dT%H:%M:%S"), 300)])
-    fastly_payload = {"data": [{"start_time": int(fastly_only.timestamp()), "log": 700}]}
+    fastly_payload = {"data": [{"start_time": int(fastly_only.timestamp()), "requests": 700}]}
     with (
         patch("backend.config.get_fastly_api_key", return_value="fake-api-key"),
         patch("urllib.request.urlopen", side_effect=_fake_urlopen(fastly_payload)),
@@ -222,9 +192,9 @@ def test_log_accounting_outer_join_handles_orphan_buckets(log_accounting_client,
     by_ts = {b["ts"]: b for b in body["buckets"]}
     fastly_ts = f"{fastly_only.strftime('%Y-%m-%dT%H')}:00:00Z"
     local_ts = f"{local_only.strftime('%Y-%m-%dT%H')}:00:00Z"
-    assert by_ts[fastly_ts]["fastly_logs"] == 700
+    assert by_ts[fastly_ts]["fastly_requests"] == 700
     assert by_ts[fastly_ts]["our_rows"] == 0
-    assert by_ts[local_ts]["fastly_logs"] == 0
+    assert by_ts[local_ts]["fastly_requests"] == 0
     assert by_ts[local_ts]["our_rows"] == 300
 
 
@@ -249,9 +219,9 @@ def test_log_accounting_flags_sustained_loss_over_threshold(log_accounting_clien
     )
     fastly_payload = {
         "data": [
-            {"start_time": int(b0.timestamp()), "log": 1000},
-            {"start_time": int(b1.timestamp()), "log": 1000},
-            {"start_time": int(b2.timestamp()), "log": 1000},
+            {"start_time": int(b0.timestamp()), "requests": 1000},
+            {"start_time": int(b1.timestamp()), "requests": 1000},
+            {"start_time": int(b2.timestamp()), "requests": 1000},
         ]
     }
     with (
@@ -267,6 +237,50 @@ def test_log_accounting_flags_sustained_loss_over_threshold(log_accounting_clien
     assert sl["n_buckets"] == 3
     assert abs(sl["max_gap_pct"] - 0.1) < 1e-6
     assert sl["total_lost_lines"] == 300
+
+
+def test_log_accounting_multi_endpoint_still_flags_loss(log_accounting_client, log_accounting_source):
+    """The gap is measured against Fastly ``requests``, which is endpoint-
+    independent — so a real sustained loss must STILL be flagged regardless of
+    how many logging endpoints the service has. Regression guard against the
+    retired ``log``-based band-aid that suppressed ``sustained_loss`` on any
+    multi-endpoint service (which would have hidden real loss + starved the
+    gap-heal cron)."""
+    svc_id = log_accounting_source["name"]
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    b0 = now - timedelta(hours=3)
+    b1 = now - timedelta(hours=2)
+    b2 = now - timedelta(hours=1)
+    # 10% one-sided gap on requests across three completed buckets.
+    _seed_ingested(
+        svc_id,
+        [
+            (b0.strftime("%Y-%m-%dT%H:%M:%S"), 900),
+            (b1.strftime("%Y-%m-%dT%H:%M:%S"), 900),
+            (b2.strftime("%Y-%m-%dT%H:%M:%S"), 900),
+        ],
+    )
+    fastly_payload = {
+        "data": [
+            {"start_time": int(b0.timestamp()), "requests": 1000},
+            {"start_time": int(b1.timestamp()), "requests": 1000},
+            {"start_time": int(b2.timestamp()), "requests": 1000},
+        ]
+    }
+    with (
+        patch("backend.config.get_fastly_api_key", return_value="fake-api-key"),
+        patch("urllib.request.urlopen", side_effect=_fake_urlopen(fastly_payload)),
+    ):
+        resp = log_accounting_client.get("/api/admin/log-accounting?hours=4&by=hour")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Loss is flagged; no endpoint-count suppression exists anymore.
+    assert body["sustained_loss"] is not None
+    assert body["sustained_loss"]["n_buckets"] == 3
+    assert body["totals"]["gap"] == 300
+    # The retired fields are gone from the response.
+    assert "gap_comparable" not in body
+    assert "logging_endpoints" not in body
 
 
 def test_log_accounting_no_alert_on_normal_drift(log_accounting_client, log_accounting_source):
@@ -288,9 +302,9 @@ def test_log_accounting_no_alert_on_normal_drift(log_accounting_client, log_acco
     )
     fastly_payload = {
         "data": [
-            {"start_time": int(b0.timestamp()), "log": 1000},
-            {"start_time": int(b1.timestamp()), "log": 1000},
-            {"start_time": int(b2.timestamp()), "log": 1000},
+            {"start_time": int(b0.timestamp()), "requests": 1000},
+            {"start_time": int(b1.timestamp()), "requests": 1000},
+            {"start_time": int(b2.timestamp()), "requests": 1000},
         ]
     }
     with (
@@ -311,7 +325,7 @@ def test_log_accounting_in_flight_bucket_does_not_trigger_alert(log_accounting_c
     now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     # No prior completed buckets; only the in-flight bucket has data.
     fastly_payload = {
-        "data": [{"start_time": int(now.timestamp()), "log": 1000}],
+        "data": [{"start_time": int(now.timestamp()), "requests": 1000}],
     }
     _seed_ingested(svc_id, [(now.strftime("%Y-%m-%dT%H:%M:%S"), 700)])  # 30% gap
     with (

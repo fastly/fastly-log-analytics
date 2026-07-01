@@ -20,7 +20,12 @@ per-endpoint tests in ``test_origin.py`` don't reach:
 from __future__ import annotations
 
 import contextlib
+import os
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
+import duckdb
 import pytest
 
 from backend.core.duckdb import _clear_schema_cache
@@ -541,3 +546,344 @@ def test_parallel_gather_uses_return_exceptions_true():
         "gather(return_exceptions=True) must be paired with an explicit "
         "BaseException re-raise so failures still propagate to the caller."
     )
+
+
+# ── Part B: skip-temp guard ──────────────────────────────────────────────────
+#
+# get_aggregates now hoists every requested section's try_*_from_rollup BEFORE
+# the temp build. When all requested sections hit, the CREATE TABLE
+# (temp_table_create) is skipped and an ``origin:temp_skipped`` marker is
+# emitted. Partial-miss / filtered / <48h / split_by_leg / sub-minute keep the
+# temp path, byte-identical to pre-B behavior.
+
+
+@contextmanager
+def _noop_lock(_key):
+    yield
+
+
+def _rollup_base_table() -> str:
+    return "logs_partb_base"
+
+
+def _seed_partb_base(con: duckdb.DuckDBPyConnection, rows: list[dict]) -> None:
+    """Materialize the base view the rollup writers read from. Columns cover
+    every dimension the seven origin rollups touch."""
+    con.execute(
+        f"CREATE TABLE {_rollup_base_table()} ("
+        f"  timestamp TIMESTAMPTZ, cache VARCHAR, edge BOOLEAN, url VARCHAR, "
+        f"  oip VARCHAR, ost INTEGER, pop VARCHAR, ottfb DOUBLE, ottlb DOUBLE, "
+        f"  ttfb DOUBLE, elapsed DOUBLE, obytes DOUBLE"
+        f")"
+    )
+    cols = [
+        "timestamp",
+        "cache",
+        "edge",
+        "url",
+        "oip",
+        "ost",
+        "pop",
+        "ottfb",
+        "ottlb",
+        "ttfb",
+        "elapsed",
+        "obytes",
+    ]
+    placeholders = ", ".join("?" for _ in cols)
+    for r in rows:
+        con.execute(f"INSERT INTO {_rollup_base_table()} VALUES ({placeholders})", [r.get(c) for c in cols])
+
+
+def _write_all_fields_for_status(cache_root: str, hour: str, status_counts: dict[int, int]) -> None:
+    """Write a closed-hour all_fields.parquet (schema: field, value, count)
+    carrying field='ost' rows so try_origin_status_from_rollup is served."""
+    d = os.path.join(cache_root, "rollups", "hour_bundled", f"hour={hour}")
+    os.makedirs(d, exist_ok=True)
+    wcon = duckdb.connect()
+    try:
+        tuples = ", ".join(f"('ost', '{code}', CAST({n} AS BIGINT))" for code, n in status_counts.items())
+        wcon.execute(
+            f"COPY (SELECT * FROM (VALUES {tuples}) AS t(field, value, count)) "
+            f"TO '{d}/all_fields.parquet' (FORMAT PARQUET)"
+        )
+    finally:
+        wcon.close()
+
+
+def _seed_full_rollup_coverage(cache_root: str, base_rows: list[dict], hour_tokens: list[str]):
+    """Drive all seven origin rollup writers against ``base_rows`` to lay down
+    the six dedicated bundles (origin_summary / slow_urls / origin_pop /
+    origin_ip / origin_path / origin_latency_ts) plus a per-hour
+    all_fields.parquet for the status reader, under ``cache_root``.
+
+    Returns nothing — writes files. Each writer opens its own fresh in-memory
+    connection seeded with the same base rows (the shared driver closes the
+    connection in its finally, so a reusable connection would be closed after
+    the first writer). ``_safe_table_for`` is patched to the SAME table name
+    ``_fresh_con`` seeds so DESCRIBE resolves."""
+    from backend.core import rollups
+
+    def _fresh_con():
+        c = duckdb.connect(":memory:")
+        _seed_partb_base(c, base_rows)
+        return c
+
+    patches = (
+        patch("backend.core.duckdb._cache_dir", return_value=cache_root),
+        patch("backend.core.rollups._common._safe_table_for", return_value=_rollup_base_table()),
+        patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: _fresh_con()),
+        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _src, fn: fn(c)),
+    )
+    sid = "partb-svc"
+    src = {"name": "partb-svc", "service_id": "partb-svc"}
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        rollups.build_origin_summary_bundles(sid, src, hour_tokens)
+        rollups.build_slow_urls_bundles(sid, src, hour_tokens)
+        rollups.build_origin_dims_bundles(sid, src, hour_tokens)
+        rollups.build_origin_latency_ts_bundles(sid, src, hour_tokens)
+
+    # status_codes reads the existing all_fields.parquet bundle — synthesize one
+    # per closed hour with field='ost' rows.
+    for h in hour_tokens:
+        _write_all_fields_for_status(cache_root, h, {200: 80, 404: 10, 500: 10})
+
+
+def _closed_hours(n: int, *, end_hours_ago: int = 3) -> list[datetime]:
+    """``n`` consecutive closed UTC hours ending ``end_hours_ago`` before now."""
+    base = (datetime.now(UTC) - timedelta(hours=end_hours_ago + n)).replace(minute=0, second=0, microsecond=0)
+    return [base + timedelta(hours=i) for i in range(n)]
+
+
+def _partb_base_rows(hours: list[datetime]) -> list[dict]:
+    """Origin-shaped rows spread across the given closed hours — every
+    dimension populated so all six dedicated rollups produce data."""
+    rows: list[dict] = []
+    for hi, hour_dt in enumerate(hours):
+        for i in range(20):
+            rows.append(
+                {
+                    "timestamp": hour_dt + timedelta(minutes=i % 10, seconds=i),
+                    "cache": "MISS" if i % 3 else "HIT",
+                    "edge": i % 2 == 0,
+                    "url": "/api/data" if i % 2 == 0 else "/img/logo.png",
+                    "oip": "203.0.113.1" if i < 12 else "203.0.113.2",
+                    "ost": 200 if i % 5 else 500,
+                    "pop": "LAX" if i < 10 else "JFK",
+                    "ottfb": 50_000.0 + hi * 500 + i * 100,
+                    "ottlb": 80_000.0 + hi * 500 + i * 100,
+                    "ttfb": None,
+                    "elapsed": 120_000.0 + i * 100,
+                    "obytes": 1024.0 + i,
+                }
+            )
+    return rows
+
+
+@pytest.mark.asyncio
+async def test_get_aggregates_all_rollups_hit_skips_temp(in_memory_duckdb, test_service_source):
+    """Wide (>=48h) unfiltered request with full closed-hour rollup coverage:
+    every section is served from a rollup, the temp build is skipped, and
+    ``origin:temp_skipped`` is present while ``temp_table_create`` is ABSENT."""
+    hours = _closed_hours(50)
+    base_rows = _partb_base_rows(hours)
+    hour_tokens = [h.strftime("%Y-%m-%d-%H") for h in hours]
+
+    # Seed the base view in the request's in-memory con too (so the no-schema /
+    # no-cols guards pass and, if anything missed, the live path would work).
+    _seed_partb_base_into(in_memory_duckdb, test_service_source, base_rows)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as cache_root:
+        _seed_full_rollup_coverage(cache_root, base_rows, hour_tokens)
+
+        st = hours[0].isoformat()
+        et = (hours[-1] + timedelta(hours=1)).isoformat()
+        with patch("backend.core.duckdb._cache_dir", return_value=cache_root):
+            result = await get_aggregates(
+                in_memory_duckdb,
+                test_service_source,
+                st,
+                et,
+                {},
+            )
+
+    sections_present = _ALL_ORIGIN_SECTIONS & result.keys()
+    assert sections_present == _ALL_ORIGIN_SECTIONS, f"missing sections: {_ALL_ORIGIN_SECTIONS - sections_present}"
+
+    timer_names = {t["section"] for t in result["section_timings"]}
+    assert "temp_table_create" not in timer_names, f"guard did not fire — temp built. timings: {timer_names}"
+    assert "origin:temp_skipped" in timer_names
+
+    # has_data from the summary rollup card.
+    assert result["has_data"] is True
+    assert result["summary"]["has_data"] is True
+    # Approximate sections carry the _approx hint; status_codes is exact.
+    assert result["summary"].get("_approx") is True
+    assert result["timeseries"].get("_approx") is True
+    assert result["slow_urls"].get("_approx") is True
+    assert result["pop_latency"].get("_approx") is True
+    assert result["ip_health"].get("_approx") is True
+    assert result["path_breakdown"].get("_approx") is True
+    assert "_approx" not in result["status_codes"]  # exact SUM of counts
+
+
+def _seed_partb_base_into(con: duckdb.DuckDBPyConnection, src: dict, rows: list[dict]) -> None:
+    """Create the request's base view table (named after the service) and
+    insert the same rows the rollups were built from, so the live fallback is
+    valid if any section misses."""
+    table = _safe_table(src["name"])
+    con.execute(
+        f"CREATE TABLE {table} ("
+        f"  timestamp TIMESTAMPTZ, cache VARCHAR, edge BOOLEAN, url VARCHAR, "
+        f"  oip VARCHAR, ost INTEGER, pop VARCHAR, ottfb DOUBLE, ottlb DOUBLE, "
+        f"  ttfb DOUBLE, elapsed DOUBLE, obytes DOUBLE"
+        f")"
+    )
+    cols = [
+        "timestamp",
+        "cache",
+        "edge",
+        "url",
+        "oip",
+        "ost",
+        "pop",
+        "ottfb",
+        "ottlb",
+        "ttfb",
+        "elapsed",
+        "obytes",
+    ]
+    placeholders = ", ".join("?" for _ in cols)
+    for r in rows:
+        con.execute(f"INSERT INTO {table} VALUES ({placeholders})", [r.get(c) for c in cols])
+
+
+@pytest.mark.asyncio
+async def test_get_aggregates_partial_miss_builds_temp_for_missed_only(in_memory_duckdb, test_service_source):
+    """Remove ONE section's rollup coverage (origin_latency_ts) → that section
+    misses, the temp is built, and only the missed section runs live; the other
+    six are still served from their rollups."""
+    hours = _closed_hours(50)
+    base_rows = _partb_base_rows(hours)
+    hour_tokens = [h.strftime("%Y-%m-%d-%H") for h in hours]
+    _seed_partb_base_into(in_memory_duckdb, test_service_source, base_rows)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as cache_root:
+        _seed_full_rollup_coverage(cache_root, base_rows, hour_tokens)
+        # Drop every origin_latency_ts.parquet so the timeseries reader fails
+        # closed (it requires ALL closed hours present). Leave a per-field
+        # marker so collect_hourly_bundle_paths treats the hours as "had data,
+        # missing bundle" → None → missed.
+        for h in hour_tokens:
+            ts_file = os.path.join(cache_root, "rollups", "hour_bundled", f"hour={h}", "origin_latency_ts.parquet")
+            if os.path.exists(ts_file):
+                os.remove(ts_file)
+            field_dir = os.path.join(cache_root, "rollups", "hour", "field=ottfb", f"hour={h}")
+            os.makedirs(field_dir, exist_ok=True)
+            with open(os.path.join(field_dir, "data.parquet"), "wb") as f:
+                f.write(b"x")
+
+        st = hours[0].isoformat()
+        et = (hours[-1] + timedelta(hours=1)).isoformat()
+        with patch("backend.core.duckdb._cache_dir", return_value=cache_root):
+            result = await get_aggregates(
+                in_memory_duckdb,
+                test_service_source,
+                st,
+                et,
+                {},
+            )
+
+    timer_names = {t["section"] for t in result["section_timings"]}
+    # Temp WAS built (timeseries missed).
+    assert "temp_table_create" in timer_names
+    assert "origin:temp_skipped" not in timer_names
+    # Only the missed section ran live (its branch helper marked it AFTER the
+    # hoist already marked it — both marks share the name; the live branch ran).
+    assert "timeseries" in timer_names
+    # The other six are still served (present in the response).
+    assert _ALL_ORIGIN_SECTIONS.issubset(result.keys())
+    assert result["timeseries"]["has_data"] is True
+    # The rollup-served sections still carry _approx.
+    assert result["summary"].get("_approx") is True
+    assert result["slow_urls"].get("_approx") is True
+
+
+@pytest.mark.asyncio
+async def test_get_aggregates_filtered_request_builds_temp_all_live(in_memory_duckdb, test_service_source):
+    """A filtered request (has_filters=True) makes every rollup reader return
+    None → all sections land in ``missed`` → temp built and all sections live,
+    byte-identical to pre-B behavior (no _approx anywhere, temp_table_create
+    present, origin:temp_skipped absent)."""
+    from backend.models.common import FilterSpec
+
+    hours = _closed_hours(50)
+    base_rows = _partb_base_rows(hours)
+    hour_tokens = [h.strftime("%Y-%m-%d-%H") for h in hours]
+    _seed_partb_base_into(in_memory_duckdb, test_service_source, base_rows)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as cache_root:
+        # Full coverage exists, but the filter disqualifies every reader.
+        _seed_full_rollup_coverage(cache_root, base_rows, hour_tokens)
+        st = hours[0].isoformat()
+        et = (hours[-1] + timedelta(hours=1)).isoformat()
+        with patch("backend.core.duckdb._cache_dir", return_value=cache_root):
+            result = await get_aggregates(
+                in_memory_duckdb,
+                test_service_source,
+                st,
+                et,
+                {"pop": FilterSpec(mode="include", values=["LAX"])},  # a filter → has_filters True
+            )
+
+    timer_names = {t["section"] for t in result["section_timings"]}
+    assert "temp_table_create" in timer_names
+    assert "origin:temp_skipped" not in timer_names
+    # Live temp path → no _approx markers anywhere.
+    for section in ("summary", "slow_urls", "timeseries", "pop_latency", "ip_health", "path_breakdown"):
+        assert "_approx" not in result[section], f"{section} carried _approx on the filtered live path"
+
+
+@pytest.mark.asyncio
+async def test_get_aggregates_selector_subset_all_hit_skips_temp(in_memory_duckdb, test_service_source):
+    """sections={'summary','status_codes'} with full coverage → only those two
+    are attempted, both hit, temp is skipped, and the other five sections are
+    absent from the response (selector contract preserved)."""
+    hours = _closed_hours(50)
+    base_rows = _partb_base_rows(hours)
+    hour_tokens = [h.strftime("%Y-%m-%d-%H") for h in hours]
+    _seed_partb_base_into(in_memory_duckdb, test_service_source, base_rows)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as cache_root:
+        _seed_full_rollup_coverage(cache_root, base_rows, hour_tokens)
+        st = hours[0].isoformat()
+        et = (hours[-1] + timedelta(hours=1)).isoformat()
+        with patch("backend.core.duckdb._cache_dir", return_value=cache_root):
+            result = await get_aggregates(
+                in_memory_duckdb,
+                test_service_source,
+                st,
+                et,
+                {},
+                sections={"summary", "status_codes"},
+            )
+
+    present = _ALL_ORIGIN_SECTIONS & result.keys()
+    assert present == {"summary", "status_codes"}, f"selector leaked sections: {present}"
+    timer_names = {t["section"] for t in result["section_timings"]}
+    assert "temp_table_create" not in timer_names
+    assert "origin:temp_skipped" in timer_names
+    # Only the two requested sections were attempted/timed.
+    assert "summary" in timer_names
+    assert "status_codes" in timer_names
+    for blocked in ("slow_urls", "timeseries", "path_breakdown", "pop_latency", "ip_health"):
+        assert blocked not in timer_names

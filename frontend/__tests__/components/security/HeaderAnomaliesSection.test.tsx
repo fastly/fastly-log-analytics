@@ -45,6 +45,20 @@ vi.mock('@/components/FilterValueCell', () => ({
   FilterValueCell: (props: any) => <span>{props.display ?? props.filters?.[0]?.value}</span>,
 }))
 
+// useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
+// which would need a QueryClientProvider. Mock it instead — both cards here gate
+// their empty copy on `req_header_bytes`: inactive → "Requires Request Identity
+// (Group A) …", active → neutral "No data in this time range yet." Default to no
+// active fields so the not-enabled path is exercised; the neutral test adds the id.
+const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
+vi.mock('@/hooks/useActiveLogFields', () => ({
+  useActiveLogFields: () => ({
+    ready: true,
+    isFieldActive: (id: string) => activeFields.has(id),
+    isGroupActive: () => false,
+  }),
+}))
+
 import { HeaderAnomaliesSection } from '@/app/security/_sections/HeaderAnomaliesSection'
 
 function baseProps(overrides: Partial<React.ComponentProps<typeof HeaderAnomaliesSection>> = {}) {
@@ -65,6 +79,7 @@ describe('HeaderAnomaliesSection', () => {
   beforeEach(() => {
     plotlyMock.mockClear()
     dataTableMock.mockClear()
+    activeFields.clear()
   })
 
   it('shows loading skeleton overlay across both cards when isLoading', () => {
@@ -72,7 +87,7 @@ describe('HeaderAnomaliesSection', () => {
     expect(screen.getAllByText(/loading data/i).length).toBe(2)
   })
 
-  it('renders empty-state copy when req_size_dist + top_ips_header are empty', () => {
+  it('renders the not-enabled "Requires Group A" copy when req_header_bytes is inactive', () => {
     render(
       <HeaderAnomaliesSection
         {...baseProps({
@@ -80,12 +95,34 @@ describe('HeaderAnomaliesSection', () => {
         })}
       />
     )
-    // Chart empty card => "No data available"
+    // Chart empty card => "No data available" (ChartEmptyState with `requires`).
     expect(screen.getByText(/no data available/i)).toBeInTheDocument()
     // PlotlyChart should NOT be rendered in this branch.
     expect(plotlyMock).not.toHaveBeenCalled()
-    // DataTable receives data=[] and our mock emits the empty message.
+    // DataTable receives data=[] and our mock emits the gated empty message.
     expect(screen.getByTestId('empty')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Requires Request Identity (Group A) log fields to be enabled in Fastly logging.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('renders the neutral "no data yet" copy when req_header_bytes IS active', () => {
+    // Enabled-but-empty: the field is in the active log format, so empty means
+    // "no data in this window", NOT misconfigured — both cards drop "Requires".
+    activeFields.add('req_header_bytes')
+    render(
+      <HeaderAnomaliesSection
+        {...baseProps({
+          data: { req_size_dist: [], top_ips_header: [] } as any,
+        })}
+      />
+    )
+    // Chart card (ChartEmptyState, `requires` omitted) AND the DataTable empty
+    // message both render the neutral copy → two occurrences.
+    expect(screen.getAllByText(/no data in this time range yet/i).length).toBe(2)
+    expect(screen.queryByText(/Requires/i)).not.toBeInTheDocument()
   })
 
   it('passes populated rows to Plotly and DataTable', () => {

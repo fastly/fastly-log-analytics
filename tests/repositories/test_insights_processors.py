@@ -54,6 +54,7 @@ _EXPECTED_INSIGHT_IDS = {
     "origin_retries",
     "origin_ip_failure",
     "shield_path_degradation",
+    "repeated_patterns",
 }
 
 

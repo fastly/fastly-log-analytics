@@ -345,7 +345,7 @@ class ProvisionServicesResponse(RootModel[list[ProvisionService]]):
 
 class LogAccountingBucket(BaseModel):
     ts: str
-    fastly_logs: int
+    fastly_requests: int
     our_rows: int
     file_count: int
     gap: int
@@ -353,7 +353,7 @@ class LogAccountingBucket(BaseModel):
 
 
 class LogAccountingTotals(BaseModel):
-    fastly_logs: int
+    fastly_requests: int
     our_rows: int
     gap: int
     gap_pct: float
@@ -384,7 +384,6 @@ class LogAccountingResponse(BaseResponse):
     by: Literal["hour", "day"]
     from_ts: str
     to_ts: str
-    fastly_field_used: str | None = None
     buckets: list[LogAccountingBucket]
     totals: LogAccountingTotals
     sustained_loss: SustainedLossAlert | None = None

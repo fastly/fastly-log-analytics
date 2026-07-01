@@ -5,9 +5,10 @@ import { useRouter } from 'next/navigation'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { AlertTriangle, Loader2 } from 'lucide-react'
 import { analystFetch } from '@/lib/analystFetch'
+import type { components } from '@/types/api.generated'
 import { AcknowledgeButton } from './AcknowledgeButton'
 
-type TosPayload = { version: string; text: string }
+type TosPayload = components['schemas']['TosDocument']
 
 // Fallback for when the SSR TOS fetch failed (backend hiccup, missing
 // API_PROXY_URL). Reproduces the original useEffect-based behavior so the

@@ -54,6 +54,7 @@ from backend.core.share_db.invites import (
     mark_tos_accepted,
     revoke_remote_invite,
     update_remote_invite_passcode,
+    update_remote_invite_pii,
     update_remote_invite_services,
 )
 from backend.core.share_db.passcode import (
@@ -148,6 +149,7 @@ __all__ = [
     "get_remote_invite_by_email_passcode",
     "update_remote_invite_services",
     "update_remote_invite_passcode",
+    "update_remote_invite_pii",
     "revoke_remote_invite",
     "delete_remote_invite",
     "mark_tos_accepted",

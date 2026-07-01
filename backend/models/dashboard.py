@@ -60,6 +60,16 @@ class AggregatesRequest(FilteredRequest):
     # knobs stay for backwards compat with the /charts callers that already
     # pass them).
     sections: list[DashboardSectionName] | None = None
+    # Relative-range wire contract (additive, optional) — see
+    # backend/routers/origin.py / backend/utils/time_window.py. When
+    # ``range_token`` is recognized the SERVER resolves the scan window from
+    # (token, anchor), ignoring FE-supplied start/end, then clamps to the invite
+    # ceiling. Consumed by /dashboard/bundle + /dashboard/aggregates so the FE
+    # first-paint key is server-reproducible (origin SSR-seed contract). The
+    # dashboard response memo is hard-disabled (DASHBOARD_CACHE_TTL=0) so the
+    # token does not interact with it. Absent/unknown token → legacy path.
+    range_token: str | None = None
+    anchor: str | None = None
 
 
 class FieldTopEntry(BaseModel):
@@ -283,6 +293,13 @@ class Session(BaseModel):
     median_rtt_ms: float | None = None
     edge_sid: str | None = None
     flagged: bool
+    # Opaque AES-GCM token sealing the real (ip, ja4, session_start,
+    # session_end) tuple, minted server-side per row. The detail endpoint
+    # unseals it to run the exact-match lookup, so a PII-masking analyst can
+    # drill into a session without the real IP ever leaving the server or the
+    # masked `ip` being round-tripped as a never-matching lookup key. Opaque
+    # ciphertext, so it is NOT an IP-family field and passes masking untouched.
+    session_token: str | None = None
 
 
 class SessionsResponse(BaseResponse):
@@ -305,10 +322,18 @@ class SessionsResponse(BaseResponse):
 
 
 class SessionDetailRequest(BaseModel):
-    ip: str
+    # ``session_token`` is the preferred lookup key — an opaque, server-minted
+    # seal of the real session tuple (see Session.session_token). When present
+    # the server derives ip/ja4/window from it and ignores the fields below. A
+    # raw ``ip`` is still accepted for admin / non-masking analysts (legacy
+    # path); a masking analyst supplying a raw ``ip`` is rejected (the masked
+    # value can never match, and accepting raw IPs here would be a presence
+    # oracle the PII filter-lock otherwise closes).
+    session_token: str | None = None
+    ip: str | None = None
     ja4: str | None = None
-    start_time: str
-    end_time: str
+    start_time: str | None = None
+    end_time: str | None = None
 
 
 class SessionDetailResponse(BaseResponse):

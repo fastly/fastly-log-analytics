@@ -20,6 +20,7 @@ from backend.provision.session_scoring_vcl import (
     SCORING_MISS_NAME,
     SCORING_PASS_NAME,
     SCORING_RECV_NAME,
+    scoring_snippet_names,
 )
 
 LOG_SVC = "TestLogSvc123"
@@ -181,7 +182,9 @@ def test_enable_scoring_happy_path_runs_all_stages(monkeypatch, tmp_path):
     # with the matrix KV store id so the link is ensured on the activated
     # version, and the tenant matrix seeded into KV (tenant-scoped — never the
     # legacy shared matrix.json, see audit finding #005).
-    wasm_mock.assert_called_once_with(SCORE_SVC, "MATRIX_STORE", TOKEN, status_cb=None)
+    wasm_mock.assert_called_once_with(
+        SCORE_SVC, "MATRIX_STORE", TOKEN, status_cb=None, prior_package_sha="", prior_files_hash=""
+    )
     kv_mock.assert_called_once_with("MATRIX_STORE", LOG_SVC, TOKEN, status_cb=None)
 
     # Config was saved with the scoring block + custom fields.
@@ -261,15 +264,22 @@ def test_deploy_wasm_package_returns_uploaded_bytes_sha(monkeypatch, tmp_path):
             return {"number": 6}
         return {}
 
+    shared = MagicMock(side_effect=side_effect)
     with (
         patch.object(sso, "_SCORER_PACKAGE", pkg),
-        patch.object(sso, "fastly", MagicMock(side_effect=side_effect)),
+        patch.object(sso, "fastly", shared),
+        # get_active_version (smart-redeploy skip probe) resolves via the
+        # service module's own fastly binding — patch it too or it hits the real
+        # api.fastly.com. prior_package_sha defaults to "" so no skip happens.
+        patch("backend.core.fastly.service.fastly", shared),
         patch.object(sso, "fastly_raw", MagicMock(return_value={})),
     ):
         result = sso._deploy_wasm_package("SCORESVC", "MATRIX_STORE", TOKEN)
     assert result["sha"] == expected
     # The cloned draft (base v5 → clone "number": 6) is the version activated.
     assert result["version"] == 6
+    # New: an empty package GET → no edge files_hash, and not a skip.
+    assert result["skipped"] is False
 
 
 def test_enable_scoring_populates_default_exclude_url_regex_on_first_enable(monkeypatch):
@@ -558,7 +568,8 @@ def test_disable_scoring_full_teardown_when_enabled(monkeypatch):
         patch.object(sso.svcconfig, "save_config", side_effect=fake_save),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
-        patch.object(sso, "delete_scoring_service") as delete_mock,
+        patch.object(sso, "delete_scoring_service", return_value=[]) as delete_mock,
+        patch.object(sso, "_delete_scoring_matrix_from_fos") as fos_cleanup_mock,
     ):
         sso.disable_scoring(LOG_SVC, TOKEN)
 
@@ -580,6 +591,8 @@ def test_disable_scoring_full_teardown_when_enabled(monkeypatch):
     assert ("PUT", f"/service/{LOG_SVC}/version/201/activate") in calls
     # Compute teardown ran
     delete_mock.assert_called_once()
+    # FOS matrix cleanup ran (inverse of publish_matrix_to_fos)
+    fos_cleanup_mock.assert_called_once_with(LOG_SVC)
     # Scoring block cleared from config
     assert "scoring" not in saved[-1]
     # Custom fields stripped (only user_id remains)
@@ -762,3 +775,201 @@ def test_write_matrix_to_kv_skips_when_no_tenant_matrix(tmp_path, monkeypatch):
         sso._write_matrix_to_kv("MATRIX_STORE", LOG_SVC, TOKEN)
 
     assert raw_calls == [], "must not upload the legacy shared matrix.json (audit #005)"
+
+
+# ── Smart redeploy: edge-checked skip of no-op legs (Part D) ──────────────────
+
+
+def _scoring_meta_full() -> dict:
+    return {
+        "enabled": True,
+        "scoring_service_id": SCORE_SVC,
+        "scoring_keys_store_id": "KEYS",
+        "scoring_config_store_id": "CFG",
+        "scoring_matrix_store_id": "MTX",
+        "scoring_domain": "scorer.edgecompute.app",
+    }
+
+
+def test_scoring_vcl_matches_edge_true_when_snippets_and_backend_match():
+    """_scoring_vcl_matches_edge returns True only when every live scoring
+    snippet body + the backend override_host match what we'd deploy now."""
+    names = scoring_snippet_names()
+    want = {n: f"body::{n}" for n in names}
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if method == "GET" and path.endswith("/version/7/snippet"):
+            return [{"name": n, "content": f"body::{n}"} for n in names]
+        if method == "GET" and "/backend/" in path:
+            return {"override_host": "scorer.edgecompute.app"}
+        return {}
+
+    with patch.object(sso, "fastly", MagicMock(side_effect=side_effect)):
+        assert sso._scoring_vcl_matches_edge(LOG_SVC, 7, want, "scorer.edgecompute.app", TOKEN) is True
+
+
+def test_scoring_vcl_matches_edge_false_when_a_snippet_differs():
+    names = scoring_snippet_names()
+    want = {n: f"body::{n}" for n in names}
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if method == "GET" and path.endswith("/version/7/snippet"):
+            live = [{"name": n, "content": f"body::{n}"} for n in names]
+            live[0]["content"] = "DRIFTED"  # one snippet changed at the edge
+            return live
+        if method == "GET" and "/backend/" in path:
+            return {"override_host": "scorer.edgecompute.app"}
+        return {}
+
+    with patch.object(sso, "fastly", MagicMock(side_effect=side_effect)):
+        assert sso._scoring_vcl_matches_edge(LOG_SVC, 7, want, "scorer.edgecompute.app", TOKEN) is False
+
+
+def test_deploy_wasm_package_skips_when_package_and_edge_unchanged(tmp_path):
+    """_deploy_wasm_package skips the upload (no clone/activate) when the
+    committed sha matches the prior stamp AND the live edge files_hash matches —
+    returns skipped=True with the live active version."""
+    import hashlib
+
+    pkg = tmp_path / "session-scorer.tar.gz"
+    pkg.write_bytes(b"unchanged-bytes")
+    sha = hashlib.sha256(b"unchanged-bytes").hexdigest()
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if (method, path) == ("GET", "/service/SCORESVC/version"):
+            return [{"number": 9, "active": True}]
+        if (method, path) == ("GET", "/service/SCORESVC/version/9/package"):
+            return {"metadata": {"files_hash": "EDGEHASH"}}
+        return {}
+
+    shared = MagicMock(side_effect=side_effect)
+    raw = MagicMock()
+    with (
+        patch.object(sso, "_SCORER_PACKAGE", pkg),
+        patch.object(sso, "fastly", shared),
+        patch("backend.core.fastly.service.fastly", shared),
+        patch.object(sso, "fastly_raw", raw),
+    ):
+        result = sso._deploy_wasm_package("SCORESVC", "MTX", TOKEN, prior_package_sha=sha, prior_files_hash="EDGEHASH")
+
+    assert result["skipped"] is True
+    assert result["version"] == 9
+    assert result["sha"] == sha
+    # No upload happened.
+    raw.assert_not_called()
+    # No clone / activate (only the GET probes ran).
+    methods_paths = [(c.args[0], c.args[1]) for c in shared.call_args_list]
+    assert not any(m == "PUT" and "/clone" in p for m, p in methods_paths)
+    assert not any(m == "PUT" and p.endswith("/activate") for m, p in methods_paths)
+
+
+def test_enable_skips_logging_redeploy_when_vcl_matches_edge():
+    """On a redeploy where the live VCL already matches, enable_scoring skips the
+    logging-service clone/activate entirely (no version bump)."""
+    cfg = {
+        "service_id": LOG_SVC,
+        "log_fields": {"custom_fields": []},
+        "provisioning": {"endpoint_name": "Fastly Object Storage Logs"},
+        "scoring": {**_scoring_meta_full(), "request_secret": "sek", "deployed_package_sha": "PKG"},
+    }
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if (method, path) == ("GET", f"/service/{LOG_SVC}/version"):
+            return [{"number": 8, "active": True}]
+        return {}
+
+    shared = MagicMock(side_effect=side_effect)
+    meta = _ensure_scoring_meta()
+    with (
+        patch.object(sso.svcconfig, "load_config", return_value=cfg),
+        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso, "ensure_scoring_service", return_value=meta),
+        patch.object(
+            sso, "_deploy_wasm_package", return_value={"version": 2, "sha": "PKG", "files_hash": "F", "skipped": True}
+        ),
+        patch.object(sso, "_write_matrix_to_kv"),
+        patch.object(sso, "_scoring_vcl_matches_edge", return_value=True),
+        patch.object(sso, "_publish_scoring_fos_side_effects"),
+        patch.object(sso, "fastly", shared),
+        patch("backend.core.fastly.service.fastly", shared),
+    ):
+        result = sso.enable_scoring(LOG_SVC, TOKEN)
+
+    # No new logging version — we reused the active one.
+    assert result["logging_service_active_version"] == 8
+    methods_paths = [(c.args[0], c.args[1]) for c in shared.call_args_list]
+    assert not any(m == "PUT" and "/clone" in p for m, p in methods_paths), "should not clone on a no-op redeploy"
+    assert not any(m == "PUT" and p.endswith("/activate") for m, p in methods_paths), (
+        "should not activate on a no-op redeploy"
+    )
+
+
+# ── teardown_scoring_resources (full-teardown scoring step, Part A) ───────────
+
+
+def test_teardown_scoring_resources_strips_vcl_then_deletes():
+    """teardown_scoring_resources strips the scoring VCL on a fresh clone
+    (validate→activate) and THEN deletes the Compute service + stores — order
+    matters so the live edge never references a deleted backend."""
+    order = []
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if (method, path) == ("GET", f"/service/{LOG_SVC}/version"):
+            return [{"number": 50, "active": True}]
+        if (method, path) == ("PUT", f"/service/{LOG_SVC}/version/50/clone"):
+            return {"number": 51}
+        if method == "GET" and path.endswith("/version/51/snippet"):
+            return [{"name": n} for n in scoring_snippet_names()]
+        if method == "GET" and path.endswith("/version/51/validate"):
+            return {"status": "ok"}
+        if method == "PUT" and path.endswith("/version/51/activate"):
+            order.append("activate")
+        return {}
+
+    shared = MagicMock(side_effect=side_effect)
+
+    def fake_delete(*args, **kwargs):
+        order.append("delete_scoring_service")
+        return []
+
+    with (
+        patch.object(sso, "fastly", shared),
+        patch("backend.core.fastly.service.fastly", shared),
+        patch.object(sso, "delete_scoring_service", side_effect=fake_delete) as delete_mock,
+    ):
+        failed = sso.teardown_scoring_resources(LOG_SVC, _scoring_meta_full(), TOKEN)
+
+    assert failed == []
+    methods_paths = [(c.args[0], c.args[1]) for c in shared.call_args_list]
+    # VCL stripped on the cloned draft + activated.
+    assert ("PUT", f"/service/{LOG_SVC}/version/50/clone") in methods_paths
+    assert any(m == "DELETE" and "/version/51/snippet/" in p for m, p in methods_paths)
+    assert any(m == "DELETE" and "/version/51/backend/" in p for m, p in methods_paths)
+    assert ("PUT", f"/service/{LOG_SVC}/version/51/activate") in methods_paths
+    # Resources deleted with the right ids — AFTER the activate.
+    delete_mock.assert_called_once()
+    assert delete_mock.call_args.kwargs["scoring_keys_store_id"] == "KEYS"
+    assert delete_mock.call_args.kwargs["scoring_config_store_id"] == "CFG"
+    assert delete_mock.call_args.kwargs["scoring_matrix_store_id"] == "MTX"
+    assert order == ["activate", "delete_scoring_service"]
+
+
+def test_teardown_scoring_resources_deletes_even_if_vcl_strip_fails():
+    """A VCL-strip failure must not block the owned-resource deletion (the
+    operator cares most about not paying for an orphaned Compute service)."""
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        if (method, path) == ("GET", f"/service/{LOG_SVC}/version"):
+            raise RuntimeError("Fastly 503 on version probe")
+        return {}
+
+    shared = MagicMock(side_effect=side_effect)
+    with (
+        patch.object(sso, "fastly", shared),
+        patch("backend.core.fastly.service.fastly", shared),
+        patch.object(sso, "delete_scoring_service", return_value=[]) as delete_mock,
+    ):
+        failed = sso.teardown_scoring_resources(LOG_SVC, _scoring_meta_full(), TOKEN)
+
+    assert failed == []
+    delete_mock.assert_called_once()  # resources still torn down

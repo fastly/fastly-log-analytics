@@ -1275,6 +1275,18 @@ INSIGHT_DEFINITIONS = [
         "required_fields": ["server_region", "elapsed", "ttfb", "asn", "ottfb"],
         "required_groups": ["C", "F", "L"],
     },
+    {
+        "id": "repeated_patterns",
+        "title": "Scripted Traffic Patterns",
+        "description": "IPs demonstrating highly regular request intervals — automated scrapers, pollers, or cron-scheduled scripts that evade volumetric rate limits",
+        # Only hard-requires the always-on core fields (ip, timestamp), so the
+        # card runs on every service. ``required_groups`` is empty to match: the
+        # UA-allowlist bot-suppression (Group A's ``ua``) is a SOFT enhancement
+        # with a NULL fallback, not a gate — declaring ["A"] would gray the card
+        # out in the LogSettings/ProvisionWizard previews even though it runs.
+        "required_fields": ["ip"],
+        "required_groups": [],
+    },
 ]
 
 # ---------------------------------------------------------------------------

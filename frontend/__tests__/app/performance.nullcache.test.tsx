@@ -19,7 +19,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 import { QueryClientProvider } from '@tanstack/react-query'
 
-import PerformancePage from '@/app/performance/page'
+// app/performance/page.tsx is now an async RSC shell; RTL can't render an async
+// component, so this regression guard targets the client component that owns the
+// scatter useMemo (the UX-2 crash path under test).
+import PerformanceClient from '@/app/performance/_sections/PerformanceClient'
 import { createTestQueryClient } from '../helpers/query'
 
 vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
@@ -102,7 +105,7 @@ describe('/performance survives a dirty scatter row (UX-2)', () => {
     render(
       <QueryClientProvider client={queryClient}>
         <Boundary>
-          <PerformancePage />
+          <PerformanceClient />
         </Boundary>
       </QueryClientProvider>,
     )

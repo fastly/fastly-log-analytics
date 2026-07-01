@@ -19,10 +19,12 @@ from backend.repositories._base import (
     SectionTimer,
     _get_schema,
     _safe_table,
+    force_rebuild_view,
     get_source_extent,
     percentile_ms_expr,
     safe_interval,
     safe_iso,
+    should_self_heal_stale_view,
     time_bucket_select,
 )
 from backend.repositories._sql import dashboard as SQL
@@ -295,120 +297,140 @@ def get_aggregates(
     orig_table_name = _safe_table(source_name)
     orig_where_clause = where_clause
     orig_params = list(params) if params is not None else []
-    # Skip the live_temp build on the rollup path when no consumer of
-    # the temp would actually fire. /charts already passes all three
-    # include_X flags false, so its rollup-path requests pay the
-    # 300-1000 ms live_temp_create for nothing — total_rows can be
-    # served by a single count against the base table directly.
-    _live_temp_has_consumer = (
-        include_conn_requests  # CONN_REQUESTS_BUCKET reads the temp
-        or include_time_series  # time_series raw fallback reads the temp
-    )
-    if use_rollups and not _live_temp_has_consumer:
-        # No-temp path: keep table_name/where_clause/params pointed at
-        # the base table. ``total_rows`` below runs as a single count
-        # against the base table — same row count, no narrow-projection
-        # materialisation cost.
-        table_name = _safe_table(source_name)
-    elif use_rollups:
-        table_name = _safe_table(source_name)
-        # Plan item 14 — live-hour TEMP TABLE on the rollup path.
-        # Without this, the rollup branch fires FOUR separate parquet
-        # scans for the window-scan sub-queries that the rollups don't
-        # cover: total_rows COUNT, the two signal-unnest queries
-        # (waf_sig + edge_score_reason), conn_requests bucket, and the
-        # time_series chart. Each is independent on the base table.
-        # Materializing the filtered window once amortizes the parquet
-        # scan + manifest read across all of them. `execute_top_n_rollups`
-        # below reads from disk directly and is unaffected.
-        #
-        # NARROW projection: only the columns the temp consumers
-        # actually use. The unconditional base set covers:
-        #   - conn_requests       → conn_requests bucket
-        #   - timestamp           → time_series raw fallback
-        #
-        # Previously the set also included country (for the map_data
-        # fallback), waf_sig (for waf_sig_ind_explode), and
-        # edge_score_reason (for edge_score_reason_ind_explode). The
-        # use_rollups path no longer needs ANY of them: map_data is
-        # derived from all_top_res (per_field_limits country=500), and
-        # the virtual-field rollup serves waf_sig_ind /
-        # edge_score_reason_ind on the hot path. Misses fall back to
-        # base-table scans inside _exploded_top_n.
-        #
-        # The time_series chart usually serves from the per-hour rollup
-        # (F1 — try_time_series_from_rollup), so the chart-metric
-        # helper columns (cache/elapsed/status/resp_bytes/...) are
-        # almost never needed in the temp. We add ONLY the helper(s)
-        # for the SPECIFIC chart_metric being requested — that way the
-        # rare rollup-returns-None fallback still runs against the
-        # temp, but the typical (chart_metric=requests) case keeps the
-        # temp at 2 columns instead of 13.
-        narrow_col_set: list[str] = [
-            "conn_requests",
-            "timestamp",
-        ]
-        # chart_metric → columns the raw time_series fallback would
-        # touch if the rollup returns None. Default ('requests') only
-        # needs timestamp which is already included above.
-        if chart_metric in ("5xx", "4xx"):
-            narrow_col_set.append("status")
-        elif chart_metric == "hit_rate":
-            # `cache` is primary; `resp_state` is the fallback when cache
-            # is missing from the service schema.
-            narrow_col_set.extend(["cache", "resp_state"])
-        elif chart_metric.endswith("_latency"):
-            narrow_col_set.append("elapsed")
-        elif chart_metric == "throughput":
-            narrow_col_set.extend(["cache", "elapsed", "resp_bytes"])
-        elif chart_metric == "req_size":
-            narrow_col_set.extend(["req_header_bytes", "req_bytes"])
-        elif chart_metric == "ttfb":
-            narrow_col_set.append("ttfb")
-        # Dedupe while preserving order; filter to columns the service
-        # actually has.
-        seen: set[str] = set()
-        narrow: list[str] = []
-        for c in narrow_col_set:
-            if c in seen or c not in actual_cols:
-                continue
-            seen.add(c)
-            narrow.append(f'"{c}"')
-        narrow_cols_str = ", ".join(narrow) if narrow else "*"
-        live_temp = f"t_live_hour_{uuid.uuid4().hex}"
-        sql = f"CREATE TEMP TABLE {live_temp} AS SELECT {narrow_cols_str} FROM {table_name} WHERE {where_clause}"
-        if timer.call("live_temp_create", lambda: runner.create_temp_table(sql, params)):
-            table_name = live_temp
-            where_clause = "1=1"
-            params = []
-            temp_table = live_temp
-        # If the live-hour TEMP TABLE creation fails (e.g. stale view),
-        # fall back transparently to per-query base-table scans. Slower
-        # but functionally correct.
-    else:
-        # Use TEMP TABLE instead of TEMP VIEW to materialize the filtered results in memory.
-        # This prevents DuckDB from re-scanning the underlying files for every branch of the UNION ALL.
-        temp_table = f"t_{uuid.uuid4().hex}"
-        sql = f"CREATE TEMP TABLE {temp_table} AS SELECT {cols_str} FROM {table_name} WHERE {where_clause}"
-        if not timer.call("wide_temp_create", lambda: runner.create_temp_table(sql, params)):
-            empty = {f: {"top": [], "total": 0} for f in fields}
-            return {
-                "data": empty,
-                "time_series": [],
-                "map_data": [],
-                "where_clause": "1=1",
-                "interval": interval,
-                "metric": "requests",
-                "total_rows": 0,
-                "total_rows_total": 0,
-                **runner.telemetry(),
-            }
-        # All subsequent queries use the temp table
-        table_name = temp_table
-        where_clause = "1=1"
-        params = []
+
+    # The per-request materialization (live-hour temp on the rollup path,
+    # or the wide filtered temp on the non-rollup path) is factored into a
+    # closure so the view-lag self-heal can rebuild it a second time after
+    # forcing a fresh view. It returns the (table_name, where_clause,
+    # params, temp_table) the downstream queries read from, or None when
+    # the wide temp build fails (the caller returns the empty shape).
+    def _build_query_target() -> tuple[str, str, list, str | None] | None:
+        _table_name = _safe_table(source_name)
+        _where = orig_where_clause
+        _params = list(orig_params)
+        _temp: str | None = None
+        # Skip the live_temp build on the rollup path when no consumer of
+        # the temp would actually fire. /charts already passes all three
+        # include_X flags false, so its rollup-path requests pay the
+        # 300-1000 ms live_temp_create for nothing — total_rows can be
+        # served by a single count against the base table directly.
+        _live_temp_has_consumer = (
+            include_conn_requests  # CONN_REQUESTS_BUCKET reads the temp
+            or include_time_series  # time_series raw fallback reads the temp
+        )
+        if use_rollups and not _live_temp_has_consumer:
+            # No-temp path: keep table_name/where_clause/params pointed at
+            # the base table. ``total_rows`` below runs as a single count
+            # against the base table — same row count, no narrow-projection
+            # materialisation cost.
+            return _table_name, _where, _params, _temp
+        if use_rollups:
+            # Plan item 14 — live-hour TEMP TABLE on the rollup path.
+            # Without this, the rollup branch fires FOUR separate parquet
+            # scans for the window-scan sub-queries that the rollups don't
+            # cover: total_rows COUNT, the two signal-unnest queries
+            # (waf_sig + edge_score_reason), conn_requests bucket, and the
+            # time_series chart. Each is independent on the base table.
+            # Materializing the filtered window once amortizes the parquet
+            # scan + manifest read across all of them. `execute_top_n_rollups`
+            # below reads from disk directly and is unaffected.
+            #
+            # NARROW projection: only the columns the temp consumers
+            # actually use. The unconditional base set covers:
+            #   - conn_requests       → conn_requests bucket
+            #   - timestamp           → time_series raw fallback
+            #
+            # Previously the set also included country (for the map_data
+            # fallback), waf_sig (for waf_sig_ind_explode), and
+            # edge_score_reason (for edge_score_reason_ind_explode). The
+            # use_rollups path no longer needs ANY of them: map_data is
+            # derived from all_top_res (per_field_limits country=500), and
+            # the virtual-field rollup serves waf_sig_ind /
+            # edge_score_reason_ind on the hot path. Misses fall back to
+            # base-table scans inside _exploded_top_n.
+            #
+            # The time_series chart usually serves from the per-hour rollup
+            # (F1 — try_time_series_from_rollup), so the chart-metric
+            # helper columns (cache/elapsed/status/resp_bytes/...) are
+            # almost never needed in the temp. We add ONLY the helper(s)
+            # for the SPECIFIC chart_metric being requested — that way the
+            # rare rollup-returns-None fallback still runs against the
+            # temp, but the typical (chart_metric=requests) case keeps the
+            # temp at 2 columns instead of 13.
+            narrow_col_set: list[str] = [
+                "conn_requests",
+                "timestamp",
+            ]
+            # chart_metric → columns the raw time_series fallback would
+            # touch if the rollup returns None. Default ('requests') only
+            # needs timestamp which is already included above.
+            if chart_metric in ("5xx", "4xx"):
+                narrow_col_set.append("status")
+            elif chart_metric == "hit_rate":
+                # `cache` is primary; `resp_state` is the fallback when cache
+                # is missing from the service schema.
+                narrow_col_set.extend(["cache", "resp_state"])
+            elif chart_metric.endswith("_latency"):
+                narrow_col_set.append("elapsed")
+            elif chart_metric == "throughput":
+                narrow_col_set.extend(["cache", "elapsed", "resp_bytes"])
+            elif chart_metric == "req_size":
+                narrow_col_set.extend(["req_header_bytes", "req_bytes"])
+            elif chart_metric == "ttfb":
+                narrow_col_set.append("ttfb")
+            # Dedupe while preserving order; filter to columns the service
+            # actually has.
+            seen: set[str] = set()
+            narrow: list[str] = []
+            for c in narrow_col_set:
+                if c in seen or c not in actual_cols:
+                    continue
+                seen.add(c)
+                narrow.append(f'"{c}"')
+            narrow_cols_str = ", ".join(narrow) if narrow else "*"
+            live_temp = f"t_live_hour_{uuid.uuid4().hex}"
+            sql = (
+                f"CREATE TEMP TABLE {live_temp} AS "
+                f"SELECT {narrow_cols_str} FROM {_table_name} WHERE {orig_where_clause}"
+            )
+            if timer.call("live_temp_create", lambda: runner.create_temp_table(sql, _params)):
+                return live_temp, "1=1", [], live_temp
+            # If the live-hour TEMP TABLE creation fails (e.g. stale view),
+            # fall back transparently to per-query base-table scans. Slower
+            # but functionally correct.
+            return _table_name, _where, _params, _temp
+        # Non-rollup path. Use TEMP TABLE instead of TEMP VIEW to
+        # materialize the filtered results in memory. This prevents DuckDB
+        # from re-scanning the underlying files for every branch of the
+        # UNION ALL.
+        wide_temp = f"t_{uuid.uuid4().hex}"
+        sql = f"CREATE TEMP TABLE {wide_temp} AS SELECT {cols_str} FROM {_table_name} WHERE {orig_where_clause}"
+        if not timer.call("wide_temp_create", lambda: runner.create_temp_table(sql, _params)):
+            return None
+        # All subsequent queries use the temp table.
+        return wide_temp, "1=1", [], wide_temp
+
+    built = _build_query_target()
+    if built is None:
+        empty = {f: {"top": [], "total": 0} for f in fields}
+        return {
+            "data": empty,
+            "time_series": [],
+            "map_data": [],
+            "where_clause": "1=1",
+            "interval": interval,
+            "metric": "requests",
+            "total_rows": 0,
+            "total_rows_total": 0,
+            **runner.telemetry(),
+        }
+    table_name, where_clause, params, temp_table = built
 
     results: dict[str, Any] = {f: {"top": [], "total": 0} for f in fields}
+
+    # View-lag self-heal fires AT MOST once per call (no retry storm). See
+    # the guarded block after get_source_extent below.
+    _self_heal_attempted = False
 
     try:
         field_totals: dict[str, int] = {}
@@ -416,34 +438,38 @@ def get_aggregates(
         earliest_log_at = None
         latest_log_at = None
 
-        if use_rollups:
-            # When the rollup fast-path is active, skip the wide per-column
-            # COUNT entirely. Two reasons it dominated wall time before:
-            #   1. 72 count(col) calls in one statement force DuckDB to
-            #      touch every column for every row in the window — ~1s on
-            #      prod's 24h × 3M-row view (witnessed 2026-06-04: Q2 was
-            #      1063ms of a 3194ms dashboard).
-            #   2. The output of all 72 counts is reconstructible from the
-            #      rollup query's (field, value, count) rows: SUM by field
-            #      across the result IS field_totals[field] for any field
-            #      the user displays. We pay for it once via the rollup
-            #      read instead of twice.
-            #
-            # Caveat: TOP_K per (field, hour) caps the rollup to the 500
-            # most-frequent values per hour. For high-cardinality fields
-            # (timestamp at per-second granularity, or unique-per-request
-            # ids) the SUM under-counts vs the true non-null count. In
-            # practice the dashboard shows top-10 with their percentages;
-            # mild under-counting of the denominator is acceptable for
-            # the perf win. If we ever need exact per-field totals here,
-            # add a `__total__` aggregate row to each rollup parquet.
-            try:
-                total_rows = runner.execute(
-                    f"SELECT {CANONICAL_METRICS['requests']} FROM {table_name} WHERE {where_clause}", params
-                ).fetchone()[0]
-            except Exception:
-                total_rows = 0
-        else:
+        # The window COUNT (+ per-field totals on the non-rollup path) is
+        # factored into a closure so the view-lag self-heal can re-issue it
+        # against the rebuilt view + temp table. ``field_totals`` is mutated
+        # in place; the closure returns ``total_rows``.
+        def _compute_count(_table_name: str, _where: str, _params: list) -> int:
+            if use_rollups:
+                # When the rollup fast-path is active, skip the wide per-column
+                # COUNT entirely. Two reasons it dominated wall time before:
+                #   1. 72 count(col) calls in one statement force DuckDB to
+                #      touch every column for every row in the window — ~1s on
+                #      prod's 24h × 3M-row view (witnessed 2026-06-04: Q2 was
+                #      1063ms of a 3194ms dashboard).
+                #   2. The output of all 72 counts is reconstructible from the
+                #      rollup query's (field, value, count) rows: SUM by field
+                #      across the result IS field_totals[field] for any field
+                #      the user displays. We pay for it once via the rollup
+                #      read instead of twice.
+                #
+                # Caveat: TOP_K per (field, hour) caps the rollup to the 500
+                # most-frequent values per hour. For high-cardinality fields
+                # (timestamp at per-second granularity, or unique-per-request
+                # ids) the SUM under-counts vs the true non-null count. In
+                # practice the dashboard shows top-10 with their percentages;
+                # mild under-counting of the denominator is acceptable for
+                # the perf win. If we ever need exact per-field totals here,
+                # add a `__total__` aggregate row to each rollup parquet.
+                try:
+                    return runner.execute(
+                        f"SELECT {CANONICAL_METRICS['requests']} FROM {_table_name} WHERE {_where}", _params
+                    ).fetchone()[0]
+                except Exception:
+                    return 0
             # Non-rollups path keeps the wide COUNT — we have the
             # filtered temp table loaded; one combined scan is cheaper
             # than re-counting per field downstream. Skip the per-field
@@ -459,17 +485,62 @@ def get_aggregates(
                     if field in actual_cols:
                         count_cols.append(f"count({field})")
                         valid_fields.append(field)
+            field_totals.clear()
             if count_cols:
                 count_res = runner.execute(
-                    f"SELECT {', '.join(count_cols)} FROM {table_name} WHERE {where_clause}", params
+                    f"SELECT {', '.join(count_cols)} FROM {_table_name} WHERE {_where}", _params
                 ).fetchone()
-                total_rows = count_res[0]
                 for i, field in enumerate(valid_fields):
                     field_totals[field] = count_res[i + 1]
+                return count_res[0]
+            return 0
+
+        total_rows = _compute_count(table_name, where_clause, params)
 
         total_rows_total, earliest_log_at, latest_log_at = timer.call(
             "source_extent", lambda: get_source_extent(runner, src, orig_table_name)
         )
+
+        # ── View-lag self-heal ────────────────────────────────────────────
+        # The status cache (latest_log_at, from a direct parquet+buffer
+        # read at ingest) updates immediately, but the live Iceberg VIEW
+        # the queries above read from is built from CACHED view SQL that
+        # lags until a metadata_sync/commit cron tick rebuilds it. With a
+        # freshly-buffered log the status cache shows data while the view
+        # returns 0 rows for every window — the frontend then loops on
+        # "Preparing your data" (and on dev, which runs no crons, it never
+        # resolves).
+        #
+        # Tight trigger (see should_self_heal_stale_view): empty window +
+        # no filters + the all-time-latest log is inside [start, end]. If
+        # the window contains the latest log but the view is empty, the
+        # view MUST be stale. A legitimately-empty low-traffic window won't
+        # contain the all-time latest log, so this won't fire there.
+        # Rebuild the view ONCE (local boolean — no retry storm), drop the
+        # stale temp table, re-materialize from the fresh view, and re-run
+        # the count so the downstream per-field / time-series / map queries
+        # below read live data.
+        if not _self_heal_attempted and should_self_heal_stale_view(
+            windowed_count=total_rows,
+            filters=filters,
+            latest_log_at=latest_log_at,
+            start_time=start_time,
+            end_time=end_time,
+        ):
+            _self_heal_attempted = True
+            timer.call("view_self_heal_rebuild", lambda: force_rebuild_view(con, src))
+            # The temp table (if any) was built from the stale view — drop
+            # it and rebuild from the now-fresh view.
+            if temp_table is not None:
+                try:
+                    con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
+                except Exception:
+                    pass
+                temp_table = None
+            rebuilt = _build_query_target()
+            if rebuilt is not None:
+                table_name, where_clause, params, temp_table = rebuilt
+                total_rows = _compute_count(table_name, where_clause, params)
 
         schema_types = timer.call("schema_types", lambda: {col["name"]: col["type"] for col in _get_schema(con, src)})
 

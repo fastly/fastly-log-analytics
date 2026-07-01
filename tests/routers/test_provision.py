@@ -283,6 +283,9 @@ def test_provision_list_services_returns_provisioned_flag(tmp_path, monkeypatch)
     with (
         TestClient(app) as c,
         patch("backend.core.fastly.client.fastly", return_value=fake_services),
+        # Object Storage gate (added with the enablement pre-check) — assume
+        # enabled here so this test stays focused on the provisioned-flag logic.
+        patch("backend.provision.fos_setup.object_storage_enabled", return_value=True),
     ):
         resp = c.get("/api/provision/services?token=tok")
 
@@ -1685,3 +1688,109 @@ def test_teardown_announces_cron_update_when_remove_cron_true():
     assert sync_calls == [True]
     fake_scheduler.reload.assert_called_once()
     assert "Cron jobs updated" in body
+
+
+# ── /api/provision/services: Object Storage enablement gate ──────────────────
+
+
+def _svc_list():
+    return [{"id": "svc-1", "name": "My Service", "type": "vcl"}]
+
+
+def test_list_services_blocks_when_object_storage_not_enabled():
+    """A valid token whose account lacks the Object Storage product → 400
+    object_storage_not_enabled with an actionable message, surfaced right after
+    the token is entered instead of dying with a 403 + rollback at the FOS-key
+    step. Object Storage is required, so there is no local fallback."""
+    with (
+        patch("backend.core.fastly.client.fastly", return_value=_svc_list()),
+        patch("backend.provision.fos_setup.object_storage_enabled", return_value=False),
+        patch("backend.config.list_service_ids", return_value=[]),
+    ):
+        resp = TestClient(app).get("/api/provision/services", params={"token": "tok"})
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["error"] == "object_storage_not_enabled"
+    assert "Object Storage" in detail["message"]
+
+
+def test_list_services_returns_list_when_object_storage_enabled():
+    with (
+        patch("backend.core.fastly.client.fastly", return_value=_svc_list()),
+        patch("backend.provision.fos_setup.object_storage_enabled", return_value=True),
+        patch("backend.config.list_service_ids", return_value=set()),
+    ):
+        resp = TestClient(app).get("/api/provision/services", params={"token": "tok"})
+    assert resp.status_code == 200
+    assert resp.json() == [{"id": "svc-1", "name": "My Service", "provisioned": False}]
+
+
+def test_list_services_invalid_token_not_mislabeled_as_object_storage():
+    """A bad token fails the /service list first → generic list_services_failed,
+    NOT the object_storage message (the OS probe is never reached)."""
+    probe_called = []
+    with (
+        patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("HTTP 401 GET /service")),
+        patch(
+            "backend.provision.fos_setup.object_storage_enabled",
+            side_effect=lambda *a, **k: probe_called.append(True) or False,
+        ),
+    ):
+        resp = TestClient(app).get("/api/provision/services", params={"token": "bad"})
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "list_services_failed"
+    assert probe_called == []
+
+
+def test_object_storage_enabled_true_on_200():
+    from backend.provision.fos_setup import object_storage_enabled
+
+    with patch(
+        "backend.provision.fos_setup.fastly",
+        return_value={"product": {"id": "object_storage"}, "customer": {"id": "c"}},
+    ):
+        assert object_storage_enabled("tok") is True
+
+
+def test_object_storage_enabled_false_on_4xx():
+    from backend.provision.fos_setup import object_storage_enabled
+
+    with patch(
+        "backend.provision.fos_setup.fastly",
+        side_effect=RuntimeError("HTTP 404 GET /enabled-products/v1/object_storage\n    not found"),
+    ):
+        assert object_storage_enabled("tok") is False
+
+
+def test_object_storage_enabled_inconclusive_on_5xx_or_network():
+    """5xx / network → don't block (True); the reactive FOS-key 403 still guards."""
+    from backend.provision.fos_setup import object_storage_enabled
+
+    with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("HTTP 503 GET x")):
+        assert object_storage_enabled("tok") is True
+    with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("Network error on GET x")):
+        assert object_storage_enabled("tok") is True
+
+
+def test_product_enabled_hits_the_right_endpoint_and_maps_status():
+    """product_enabled generalizes the object_storage probe to any product id
+    (e.g. kv_store): 200 -> True, 4xx -> False, 5xx -> inconclusive True."""
+    from backend.provision.fos_setup import product_enabled
+
+    with patch("backend.provision.fos_setup.fastly", return_value={"product": {"id": "kv_store"}}) as m:
+        assert product_enabled("tok", "kv_store") is True
+        # Calls the {product_id}-templated enablement endpoint.
+        assert m.call_args.args[:2] == ("GET", "/enabled-products/v1/kv_store")
+    with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("HTTP 404 not found")):
+        assert product_enabled("tok", "kv_store") is False
+    with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("HTTP 502 bad gateway")):
+        assert product_enabled("tok", "kv_store") is True
+
+
+def test_object_storage_enabled_delegates_to_product_enabled():
+    """object_storage_enabled is now a thin wrapper over product_enabled."""
+    from backend.provision import fos_setup
+
+    with patch("backend.provision.fos_setup.product_enabled", return_value=True) as m:
+        assert fos_setup.object_storage_enabled("tok") is True
+    assert m.call_args.args == ("tok", "object_storage")

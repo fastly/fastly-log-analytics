@@ -15,6 +15,13 @@ import userEvent from '@testing-library/user-event'
 
 import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
 import { useServiceStore } from '@/stores/serviceStore'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+
+// ServiceSwitcher calls useQueryClient() (it invalidates the bootstrap query
+// on switch), so every render needs a QueryClientProvider. One fresh client
+// for the suite, cleared in beforeEach for isolation.
+const queryClient = createTestQueryClient()
+const renderSwitcher = () => render(<ServiceSwitcher />, { wrapper: makeQueryWrapper(queryClient) })
 
 // cmdk requires ResizeObserver; jsdom doesn't ship one.
 beforeAll(() => {
@@ -34,6 +41,7 @@ const PREFS_KEY = 'fla-service-switcher-prefs'
 
 beforeEach(() => {
   window.localStorage.clear()
+  queryClient.clear()
   useServiceStore.setState({
     services: [
       { id: 'svc-alpha', name: 'Alpha Service' } as any,
@@ -48,7 +56,7 @@ beforeEach(() => {
 describe('ServiceSwitcher MRU + pinning', () => {
   it('opens to show every service when no prefs exist', async () => {
     const user = userEvent.setup()
-    render(<ServiceSwitcher />)
+    renderSwitcher()
     await user.click(screen.getByRole('combobox'))
 
     // Each service has a pin button in the dropdown — that's a unique
@@ -61,7 +69,7 @@ describe('ServiceSwitcher MRU + pinning', () => {
 
   it('touching the active service writes it to MRU + localStorage', async () => {
     // First render — mount effect should record activeServiceId 'svc-alpha' in MRU.
-    render(<ServiceSwitcher />)
+    renderSwitcher()
     // Effect runs synchronously after mount.
     const persisted = JSON.parse(window.localStorage.getItem(PREFS_KEY) || '{}')
     expect(persisted.mru[0]).toBe('svc-alpha')
@@ -69,7 +77,7 @@ describe('ServiceSwitcher MRU + pinning', () => {
 
   it('clicking the pin button toggles persisted prefs without changing the active service', async () => {
     const user = userEvent.setup()
-    render(<ServiceSwitcher />)
+    renderSwitcher()
     await user.click(screen.getByRole('combobox'))
 
     // The pin button for an UNPINNED service is visually opacity-0 until
@@ -94,7 +102,7 @@ describe('ServiceSwitcher MRU + pinning', () => {
       JSON.stringify({ pinned: ['svc-gamma'], mru: ['svc-beta', 'svc-delta'] }),
     )
     const user = userEvent.setup()
-    render(<ServiceSwitcher />)
+    renderSwitcher()
     await user.click(screen.getByRole('combobox'))
 
     // Pinned: svc-gamma — should render with the "Unpin" affordance.

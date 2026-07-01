@@ -13,6 +13,10 @@ vi.mock('@/stores/filterStore', () => ({
     return selector ? selector(state) : state
   }),
 }))
+// FilterValueCell now reads useMaskIps (needs a QueryClient). Stub it off.
+vi.mock('@/hooks/useMaskIps', () => ({
+  useMaskIps: () => false,
+}))
 
 import {
   GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp,

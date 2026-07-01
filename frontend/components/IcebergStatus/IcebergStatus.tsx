@@ -35,7 +35,7 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const { full, abbr } = useDateFormat()
 
-  // Freshness is driven by useCronRunsStream invalidating
+  // Freshness is driven by useAdminEventStream invalidating
   // ['admin', 'iceberg'] when an iceberg-mutating cron task finishes.
   // The 5-min interval is a pure safety net (silently-dropped stream,
   // missed wakeup) — same shape as useSyncStatus/useLastSync.

@@ -538,6 +538,10 @@ def test_recompute_touched_hours_malformed_hour_skipped(tmp_path):
         patch("backend.core.rollups.recompute.build_network_speed_bundles", return_value=0),
         patch("backend.core.rollups.recompute.build_verified_bots_ts_bundles", return_value=0),
         patch("backend.core.rollups.recompute.build_perf_latency_bundles", return_value=0),
+        patch("backend.core.rollups.recompute.build_origin_dims_bundles", return_value=0),
+        patch("backend.core.rollups.recompute.build_origin_latency_ts_bundles", return_value=0),
+        patch("backend.core.rollups.recompute.build_security_dims_bundles", return_value=0),
+        patch("backend.core.rollups.recompute.build_perf_dims_bundles", return_value=0),
     ):
         recompute.recompute_touched_hours("svc", {"name": "svc"}, {h_good, "not-an-hour"})
 
@@ -621,6 +625,22 @@ def test_recompute_touched_hours_swallows_downstream_bundle_errors():
         patch(
             "backend.core.rollups.recompute.build_perf_latency_bundles",
             side_effect=RuntimeError("pl-boom"),
+        ),
+        patch(
+            "backend.core.rollups.recompute.build_origin_dims_bundles",
+            side_effect=RuntimeError("od-boom"),
+        ),
+        patch(
+            "backend.core.rollups.recompute.build_origin_latency_ts_bundles",
+            side_effect=RuntimeError("olts-boom"),
+        ),
+        patch(
+            "backend.core.rollups.recompute.build_security_dims_bundles",
+            side_effect=RuntimeError("sd-boom"),
+        ),
+        patch(
+            "backend.core.rollups.recompute.build_perf_dims_bundles",
+            side_effect=RuntimeError("pd-boom"),
         ),
     ):
         # Must not raise.

@@ -552,6 +552,25 @@ def get_tunnel_manager() -> TunnelManager:
     return _singleton
 
 
+def build_share_live_payload() -> dict:
+    """Compose the lean share-dashboard "live" payload — one source of truth
+    shared by the ``/api/admin/share/live`` poll endpoint and the multiplexed
+    admin event stream's ``share`` channel (``backend/routers/admin/events.py``).
+
+    Lives here (not in the share router) so the admin-events router can import
+    it without an import-linter ``routers.admin -> routers.share_admin`` edge.
+    Pure in-memory tunnel-manager getters — no SQLite / DuckDB / FOS — so it's
+    cheap enough to sample per connection."""
+    mgr = get_tunnel_manager()
+    return {
+        "sharing_active": mgr.is_sharing_active(),
+        "public_url": mgr.public_url(),
+        "active_session_count": mgr.active_session_count(),
+        "rate_limits": mgr.get_rate_limit_snapshot(),
+        "telemetry": mgr.get_telemetry(),
+    }
+
+
 def reset_for_tests() -> None:
     """Drop the singleton so each test starts fresh.
 

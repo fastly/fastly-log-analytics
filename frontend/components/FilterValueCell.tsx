@@ -6,6 +6,8 @@ import { ChevronDown, ExternalLink, Filter, Copy } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useFilterStore } from '@/stores/filterStore'
+import { useMaskIps } from '@/hooks/useMaskIps'
+import { isIpFamilyField } from '@/lib/pii'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -65,6 +67,11 @@ export function FilterValueCell({
 }: FilterValueCellProps) {
   const pathname = usePathname()
   const addFilter = useFilterStore(state => state.addFilter)
+  // PII: a masking analyst can't filter by client IP (the value shown is
+  // already masked and the backend 403s the filter). Render those cells as
+  // plain text — no drill-down menu. `oip` and other columns are unaffected.
+  const maskIps = useMaskIps()
+  const ipFilterBlocked = maskIps && filters.some(f => isIpFamilyField(f.column))
   const onDashboard = pathname === '/dashboard'
   const pageLabel = pageLabelFor(pathname)
   const shownValue = display ?? filters[0]?.value ?? ''
@@ -109,7 +116,7 @@ export function FilterValueCell({
     setOpen(next)
   }, [])
 
-  if (filters.length === 0 || shownValue === '' || shownValue == null) {
+  if (filters.length === 0 || shownValue === '' || shownValue == null || ipFilterBlocked) {
     return (
       <div className={cn('flex items-center gap-2', containerClassName)}>
         <span className={cn('truncate block', className)}>{shownValue}</span>

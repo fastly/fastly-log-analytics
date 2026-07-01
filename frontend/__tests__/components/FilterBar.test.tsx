@@ -35,13 +35,18 @@ vi.mock('next/navigation', () => ({
 // synthetic Query keys, no full render needed.
 let __capturedPredicate: ((q: { queryKey?: readonly unknown[] }) => boolean) | null = null
 
+// Drives FilterBar's single useQuery (the /api/log-extents poll). Default
+// undefined preserves the no-snap behavior the chip-rendering tests assume;
+// the auto-range-snap tests set this to exercise the extents → range effect.
+let __logExtentsData: unknown = undefined
+
 vi.mock('@tanstack/react-query', async () => {
   const actual = await vi.importActual<typeof import('@tanstack/react-query')>(
     '@tanstack/react-query',
   )
   return {
     ...actual,
-    useQuery: () => ({ data: undefined, isLoading: false, error: null }),
+    useQuery: () => ({ data: __logExtentsData, isLoading: false, error: null }),
     // FilterBar uses queryClient.getQueryState(['bootstrap']) to gate
     // its log-extents query on bootstrap pending. The test doesn't
     // mount a QueryClientProvider; return a stub whose getQueryState
@@ -76,6 +81,7 @@ beforeAll(() => {
 afterEach(() => cleanup())
 
 beforeEach(() => {
+  __logExtentsData = undefined
   act(() => {
     useFilterStore.setState({
       filters: [],
@@ -238,6 +244,44 @@ describe('FilterBar — filter chip rendering', () => {
     })
     render(<FilterBar />)
     expect(screen.getAllByText('country:')).toHaveLength(20)
+  })
+})
+
+describe('FilterBar — auto-range snap from log extents', () => {
+  // Regression: a service with a single log (or all logs at one instant) has
+  // earliest_log_at === latest_log_at. The extents → range snap effect must
+  // NOT produce a zero-width window — the backend clamp rejects [t, t) with
+  // "clamped time range is empty" (half-open `timestamp >= start AND < end`),
+  // which surfaced as "Failed to load dashboard data." on the dashboard.
+  it('widens a single-log (earliest === latest) extent to a non-empty window', () => {
+    // >15 min old so the snap takes the stale-data branch (autoSetRange to the
+    // discovered extents) rather than keeping the default "last 24h" window.
+    const ts = '2020-01-01T00:00:00Z'
+    __logExtentsData = { configured: true, earliest_log_at: ts, latest_log_at: ts }
+
+    render(<FilterBar />)
+
+    const { startTime, endTime } = useFilterStore.getState()
+    // Non-empty window — the bug produced startTime === endTime.
+    expect(new Date(endTime).getTime()).toBeGreaterThan(new Date(startTime).getTime())
+    // The lone log must fall inside the half-open [start, end) window so the
+    // dashboard query actually returns it (end strictly after the log).
+    const logMs = new Date(ts).getTime()
+    expect(new Date(startTime).getTime()).toBeLessThanOrEqual(logMs)
+    expect(new Date(endTime).getTime()).toBeGreaterThan(logMs)
+  })
+
+  it('keeps a multi-day extent non-empty (sanity)', () => {
+    __logExtentsData = {
+      configured: true,
+      earliest_log_at: '2020-01-01T00:00:00Z',
+      latest_log_at: '2020-01-05T00:00:00Z',
+    }
+
+    render(<FilterBar />)
+
+    const { startTime, endTime } = useFilterStore.getState()
+    expect(new Date(endTime).getTime()).toBeGreaterThan(new Date(startTime).getTime())
   })
 })
 

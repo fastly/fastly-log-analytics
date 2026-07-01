@@ -90,7 +90,11 @@ export default function ChartsPage() {
           include_map_data: false,
         }
       })
-      return throwIfStaleAggregates(data, { startTime, endTime })
+      return throwIfStaleAggregates(
+        data,
+        { startTime, endTime },
+        Object.keys(filterPayload).length > 0,
+      )
     },
     STALE_VIEW_RETRY_OPTIONS,
   )
@@ -207,28 +211,39 @@ export default function ChartsPage() {
             >
               {cardData.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full text-muted-foreground text-center px-4">
-                  <span className="text-sm font-medium mb-1">No data available</span>
-                  {(() => {
-                    const fieldId = card.id
-                    const fieldMeta = catalog?.fields?.find(f => f.id === fieldId)
-                    const groupId = fieldMeta?.group
+                  {/* `card.inActiveFormat` is the authoritative "is this field
+                      actually being logged?" signal (same one driving the EyeOff
+                      tooltip). When the field IS in the active format there's
+                      simply no data in this window yet — show a neutral message
+                      instead of a misleading "Requires …" hint. */}
+                  {card.inActiveFormat === false ? (
+                    <>
+                      <span className="text-sm font-medium mb-1">No data available</span>
+                      {(() => {
+                        const fieldId = card.id
+                        const fieldMeta = catalog?.fields?.find(f => f.id === fieldId)
+                        const groupId = fieldMeta?.group
 
-                    if (groupId) {
-                      const groupMeta = catalog?.groups?.find(g => g.id === groupId)
-                      if (groupMeta) {
-                        return (
-                          <span className="text-[10px] opacity-70">
-                            Requires {groupMeta.label} fields to be enabled in Fastly logging.
-                          </span>
-                        )
-                      }
-                    } else if (fieldId === 'ua' || fieldId === '_bot_name') {
-                      return <span className="text-[10px] opacity-70">Requires User-Agent field to be enabled in Fastly logging.</span>
-                    } else if (fieldId === 'ja3' || fieldId === 'ja4') {
-                      return <span className="text-[10px] opacity-70">Requires TLS Fingerprinting (JA3/JA4) fields to be enabled in Fastly logging.</span>
-                    }
-                    return null
-                  })()}
+                        if (groupId) {
+                          const groupMeta = catalog?.groups?.find(g => g.id === groupId)
+                          if (groupMeta) {
+                            return (
+                              <span className="text-[10px] opacity-70">
+                                Requires {groupMeta.label} fields to be enabled in Fastly logging.
+                              </span>
+                            )
+                          }
+                        } else if (fieldId === 'ua' || fieldId === '_bot_name') {
+                          return <span className="text-[10px] opacity-70">Requires User-Agent field to be enabled in Fastly logging.</span>
+                        } else if (fieldId === 'ja3' || fieldId === 'ja4') {
+                          return <span className="text-[10px] opacity-70">Requires TLS Fingerprinting (JA3/JA4) fields to be enabled in Fastly logging.</span>
+                        }
+                        return null
+                      })()}
+                    </>
+                  ) : (
+                    <span className="text-sm font-medium mb-1">No data in this time range yet.</span>
+                  )}
                 </div>
               ) : (
                 <PlotlyChart

@@ -180,7 +180,17 @@ def test_shielding_analysis_renders():
     assert "shield_logs AS" in rendered
     assert "INNER JOIN shield_logs s ON s.prid = e.rid" in rendered
     assert "PERCENTILE_CONT(0.50)" in rendered
-    assert rendered.rstrip().endswith("LIMIT ?")
+    # M1 (shielding audit 2026-06-30): the flat ``LIMIT ?`` was replaced by a
+    # ranked CTE that keeps BOTH the top-by-requests and the top-by-overhead
+    # routes (so low-volume anomalies aren't buried) and exposes the full
+    # distinct-pair count for "Top N of M" truncation reporting.
+    assert "COUNT(*) OVER () " in rendered  # total_routes
+    assert "ROW_NUMBER() OVER (ORDER BY requests DESC)" in rendered
+    assert "ROW_NUMBER() OVER (ORDER BY p50_ms DESC NULLS LAST)" in rendered
+    assert "WHERE rn_requests <= ? OR rn_overhead <= ?" in rendered
+    assert "AS total_routes" in rendered
+    assert rendered.rstrip().endswith("ORDER BY requests DESC")
+    assert "LIMIT ?" not in rendered
 
 
 def test_shielding_analysis_placeholders_pinned():

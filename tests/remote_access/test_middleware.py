@@ -40,6 +40,12 @@ def _build_test_app() -> FastAPI:
     def _create_view():
         return {"ok": True}
 
+    # Analyst-allowed read-shaped POST (filters live in the JSON body). Used by
+    # the IP-filter PII-lock tests below.
+    @app.post("/api/dashboard/aggregates")
+    def _aggregates():
+        return {"ok": True}
+
     @app.post("/api/web-vitals")
     def _web_vitals():
         return {"ok": True}
@@ -158,7 +164,7 @@ def client(app):
         yield c
 
 
-def _seed_invite(service_ids=None, ip_whitelist=None) -> dict:
+def _seed_invite(service_ids=None, ip_whitelist=None, pii_policy=None) -> dict:
     invite = share_db.create_remote_invite(
         name="Drew",
         email="drew@example.com",
@@ -166,6 +172,7 @@ def _seed_invite(service_ids=None, ip_whitelist=None) -> dict:
         expires_at_utc=None,
         ip_whitelist=ip_whitelist,
         service_ids=service_ids or ["svcA", "svcB"],
+        pii_policy=pii_policy,
     )
     tos = share_db.get_latest_tos()
     if tos:
@@ -371,6 +378,23 @@ def test_analyst_blocked_from_sse_route(client):
     assert r2.json()["error"] == "sse_blocked"
 
 
+def test_analyst_blocked_from_admin_events_stream(client):
+    """The multiplexed admin event stream carries admin-only channels
+    (sync-status, cron-runs, system-metrics). It lives under ``/api/admin/``
+    so the prefix block 403s analysts before the SSE allowlist is even
+    consulted — pins that the consolidation didn't open an analyst hole."""
+    _start_share()
+    invite = _seed_invite()
+    _login_analyst(client, invite)
+    r2 = client.get(
+        "/api/admin/events/stream",
+        params={"channels": "sync-status,cron-runs,system-metrics"},
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r2.status_code == 403
+    assert r2.json()["error"] == "admin_only"
+
+
 def test_analyst_read_only_blocks_writes(client):
     _start_share()
     invite = _seed_invite()
@@ -430,6 +454,71 @@ def test_analyst_service_scope_allows_authorized(client):
         headers={"X-Remote-Analyst": "1", "Host": "testserver"},
     )
     assert r2.status_code == 200
+
+
+# ── PII lock: masking analysts cannot filter by an IP-family column ─────────
+
+
+def _post_filter(client, *, filters):
+    """POST an analytics body carrying ``filters`` as an authenticated analyst."""
+    return client.post(
+        "/api/dashboard/aggregates",
+        json={"service_id": "svcA", "filters": filters},
+        headers={
+            "X-Remote-Analyst": "1",
+            "Host": "testserver",
+            "Origin": "https://testserver",
+        },
+    )
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize("key", ["ip", "filter_ip", "xfilter_ip", "ip_2", "client_ip"])
+def test_analyst_masking_blocks_ip_filter(client, key):
+    """A masking analyst filtering by ANY IP-family column (incl. prefixed /
+    dedup-suffixed variants the SQL builder normalizes) is rejected with 403
+    pii_policy_violation. Display masking is response-side only, so an
+    un-blocked ip filter would be a presence oracle for a guessed real IP."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"], pii_policy={"mask_ips": True})
+    _login_analyst(client, invite)
+    r = _post_filter(client, filters={key: {"mode": "include", "values": ["1.2.3.4"]}})
+    assert r.status_code == 403, (key, r.text)
+    assert r.json()["error"] == "pii_policy_violation"
+    # field is the NORMALIZED column (prefixes + dedup suffix stripped).
+    assert r.json()["field"] == ("client_ip" if key == "client_ip" else "ip")
+
+
+@pytest.mark.security_regression
+def test_analyst_masking_allows_non_ip_filter(client):
+    """A masking analyst can still use non-IP filters (e.g. country)."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"], pii_policy={"mask_ips": True})
+    _login_analyst(client, invite)
+    r = _post_filter(client, filters={"country": {"mode": "include", "values": ["US"]}})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.security_regression
+def test_analyst_masking_allows_oip_filter(client):
+    """``oip`` (origin/CDN IP) is operator infra, not end-user PII, and stays
+    filterable even for a masking analyst — the Origin IP-Health drill-down
+    depends on it. Pinned alongside the ip-block so the two never converge."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"], pii_policy={"mask_ips": True})
+    _login_analyst(client, invite)
+    r = _post_filter(client, filters={"oip": {"mode": "include", "values": ["151.101.1.51"]}})
+    assert r.status_code == 200, r.text
+
+
+def test_analyst_without_masking_allows_ip_filter(client):
+    """A NON-masking analyst sees real IPs, so filtering by ip is allowed —
+    the lock is gated on pii_policy.mask_ips, not on analyst-hood."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"], pii_policy={"mask_ips": False})
+    _login_analyst(client, invite)
+    r = _post_filter(client, filters={"ip": {"mode": "include", "values": ["1.2.3.4"]}})
+    assert r.status_code == 200, r.text
 
 
 def test_analyst_service_scope_blocks_omitted(client):

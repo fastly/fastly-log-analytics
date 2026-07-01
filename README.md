@@ -6,6 +6,12 @@ A self-hosted dashboard for searching, filtering, and visualizing request-level 
 
 Fastly's [historical stats](https://www.fastly.com/documentation/reference/api/metrics-stats/historical-stats/) give you aggregates. When you need to drill into individual requests — by IP, URL, status, WAF signal, or any field you log — Fastly's [real-time log streaming](https://www.fastly.com/documentation/guides/integrations/streaming-logs/about-fastlys-realtime-log-streaming-features/) makes the raw data available, but you still need somewhere to put it and something to query it with. This project fills that gap using only Fastly products. Costs are limited to Fastly Object Storage [class operations](https://www.fastly.com/documentation/guides/platform/object-storage/working-with-object-storage/#using-the-s3-compatible-api) and [storage](https://docs.fastly.com/products/object-storage#billing) — no third-party logging vendor required.
 
+### 📺 Watch the install walkthrough
+
+A short video walks through installation and provisioning end to end:
+
+[![Watch the Fastly Log Analytics install walkthrough](https://img.youtube.com/vi/7-3XWzesuAY/maxresdefault.jpg)](https://youtu.be/7-3XWzesuAY)
+
 ---
 
 ## Before You Start
@@ -23,6 +29,8 @@ You'll need:
 ---
 
 ## Quick Start
+
+> 📺 Prefer to watch? See the [video walkthrough](https://youtu.be/7-3XWzesuAY).
 
 ```bash
 docker compose up --build
@@ -92,11 +100,11 @@ You run the application as a central web-accessible server on a dedicated VM (or
 - **Log sampling** — optionally log a random percentage of requests to manage cost on high-traffic services
 - **Multi-source support** — analyze logs from multiple services side by side
 - **Interactive dashboards** — traffic over time, global request map, top-N aggregations, raw log viewer with click-to-filter
-- **Insights** — automated anomaly detection (error spikes, regional surges, new-region traffic, botnet IP-spread, WAF signal changes, cache regressions, latency)
+- **Insights** — automated anomaly detection (error spikes, regional surges, new-region traffic, botnet IP-spread, scripted-traffic cadence, WAF signal changes, cache regressions, latency)
 - **Usage & Cost** — live storage breakdown, FOS operation counts, period totals, interactive cost estimator
 - **Log field configuration** — built-in field groups (HTTP, network, geo, TLS, NGWAF) plus custom VCL expressions
 - **Alerts** — threshold-based, webhook-delivered
-- **Live dashboard sharing** — direct-mode via your own hostname or IP, with per-analyst passcode invites, IP allowlisting, and instant revoke
+- **Live dashboard sharing** — direct-mode via your own hostname or IP, with per-analyst passcode invites, IP allowlisting, optional client-IP anonymization, and instant revoke
 - **Session scoring** — edge-computed 0-100 risk score per request combining cookie/timing signals with a PageRank transition matrix, with live threshold enforcement, audit logging, key rotation, and matrix version history. See the [runbook](docs/session_scoring_runbook.md) and [feature reference](docs/features.md)
 
 See [docs/features.md](docs/features.md) for the full feature reference.
@@ -128,7 +136,7 @@ Then open **http://localhost:3000**.
 
 ### CLI provisioning (alternative to the wizard)
 
-If you have a [Fastly API token](https://www.fastly.com/documentation/guides/account-info/user-and-account-management/using-api-tokens/) with **Engineer** or **Superuser** permissions, you can provision from the command line:
+If you have a [Fastly API token](https://www.fastly.com/documentation/guides/account-info/user-and-account-management/using-api-tokens/) with **Superuser** permissions (provisioning creates new services, which an Engineer token can't do), you can provision from the command line:
 
 ```bash
 # Guided

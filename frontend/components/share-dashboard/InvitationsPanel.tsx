@@ -68,6 +68,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
   const [qrInviteId, setQrInviteId] = React.useState<string | null>(null)
   const [editingServicesFor, setEditingServicesFor] = React.useState<string | null>(null)
   const [editingServicesDraft, setEditingServicesDraft] = React.useState<string[]>([])
+  const [editingMaskIps, setEditingMaskIps] = React.useState(false)
   const [savingServices, setSavingServices] = React.useState(false)
   const [editingPasscodeFor, setEditingPasscodeFor] = React.useState<string | null>(null)
   const [passcodeDraft, setPasscodeDraft] = React.useState('')
@@ -95,6 +96,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
   const openEditServices = (invite: any) => {
     setEditingServicesFor(invite.id)
     setEditingServicesDraft(invite.service_ids || [])
+    setEditingMaskIps(!!invite.pii_policy?.mask_ips)
   }
 
   const handleSaveServices = async (inviteId: string) => {
@@ -105,6 +107,10 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
         params: { path: { invite_id: inviteId } },
         body: { service_ids: editingServicesDraft },
       } as any)
+      await client.PATCH('/api/admin/share/invites/{invite_id}/pii', {
+        params: { path: { invite_id: inviteId } },
+        body: { mask_ips: editingMaskIps },
+      })
       setEditingServicesFor(null)
       await onRefresh()
     } catch (e: any) {
@@ -261,7 +267,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                         {...props}
                         size="sm"
                         variant="ghost"
-                        title="Edit authorized services"
+                        title="Edit invite (services + privacy)"
                       >
                         <Pencil className="h-3 w-3" />
                       </Button>
@@ -295,6 +301,13 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                         <p className="text-xs text-muted-foreground">No services available.</p>
                       )}
                     </div>
+                    <label className="flex items-center gap-2 text-sm cursor-pointer pt-2 mt-2 border-t">
+                      <Checkbox
+                        checked={editingMaskIps}
+                        onCheckedChange={(v) => setEditingMaskIps(!!v)}
+                      />
+                      <span>Anonymize client IPs (mask PII)</span>
+                    </label>
                     <div className="flex justify-end gap-1 pt-2 border-t">
                       <Button
                         size="sm"

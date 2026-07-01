@@ -43,9 +43,18 @@
       if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
         # Capture edge data for logging before shielding or backend fetch
         set req.http.x-fos-edge-data:host = req.http.Host;
-        set req.http.x-fos-edge-data:ip = client.ip;
+        set req.http.x-fos-edge-data:ip = if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, "" + client.ip);
         set req.http.x-fos-edge-data:referer = substr(req.http.Referer, 0, 1000);
         set req.http.x-fos-edge-data:ua = substr(req.http.User-Agent, 0, 1000);
+      }
+    ''',
+    'capture_snippets/recv_reset.vcl': '''
+      # [security] Drop a client-supplied Fastly-Client-IP at the true edge so a
+      # spoofed value cannot poison the captured client IP. Operator VCL running
+      # after this (priority above -100, before the priority-1 capture) may set
+      # the real source IP; the ip capture falls back to client.ip otherwise.
+      if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+        unset req.http.Fastly-Client-IP;
       }
     ''',
     'cdn_proxy.tf.json': '''
@@ -569,6 +578,12 @@
                   "name": "Fastly Log Analysis Pass",
                   "priority": 100,
                   "type": "pass"
+                },
+                {
+                  "content": "${file(\"${path.module}/capture_snippets/recv_reset.vcl\")}",
+                  "name": "Fastly Log Analysis Reset Client IP",
+                  "priority": -100,
+                  "type": "recv"
                 }
               ]
             }

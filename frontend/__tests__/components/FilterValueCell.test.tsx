@@ -8,6 +8,14 @@ vi.mock('next/navigation', () => ({
   usePathname: vi.fn(() => '/origin'),
 }))
 
+// useMaskIps reads the bootstrap query cache via useQueryClient; mock it so
+// these tests don't need a QueryClientProvider. Default off (admin / no
+// masking); the masking case below re-programs it.
+const useMaskIpsMock = vi.fn(() => false)
+vi.mock('@/hooks/useMaskIps', () => ({
+  useMaskIps: () => useMaskIpsMock(),
+}))
+
 import { usePathname } from 'next/navigation'
 
 describe('buildDashboardFilterUrl', () => {
@@ -34,6 +42,7 @@ describe('FilterValueCell', () => {
   beforeEach(() => {
     useFilterStore.getState().clearFilters()
     vi.mocked(usePathname).mockReturnValue('/origin')
+    useMaskIpsMock.mockReturnValue(false)
   })
 
   afterEach(() => {
@@ -133,5 +142,25 @@ describe('FilterValueCell', () => {
     // path until the popover library's pointer pipeline is jsdom-friendly.
     fireEvent.click(trigger)
     expect(screen.getByText(/Filter origin page/i)).toBeInTheDocument()
+  })
+
+  it('renders an IP-family value as plain text (no filter menu) when masking', () => {
+    useMaskIpsMock.mockReturnValue(true)
+    const { container } = render(
+      <FilterValueCell filters={[{ column: 'client_ip', value: '73.217.41.xxx' }]} />,
+    )
+    // value still shown …
+    expect(screen.getByText('73.217.41.xxx')).toBeInTheDocument()
+    // … but no drill-down trigger.
+    expect(container.querySelector('button')).toBeNull()
+  })
+
+  it('still allows filtering by oip (origin IP) when masking', () => {
+    useMaskIpsMock.mockReturnValue(true)
+    render(<FilterValueCell filters={[{ column: 'oip', value: '151.101.1.51' }]} />)
+    // oip is not IP-family PII — drill-down stays available.
+    expect(
+      screen.getByRole('button', { name: /Filter actions for 151.101.1.51/i }),
+    ).toBeInTheDocument()
   })
 })

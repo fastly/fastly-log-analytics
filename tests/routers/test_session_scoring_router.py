@@ -899,6 +899,7 @@ def test_latency_timeseries_returns_rows_with_latency(client, monkeypatch):
             "hour": "2026-06-17 10:00:00",
             "scored_count": 500,
             "fail_open_count": 30,
+            "total_count": 530,
             "rtt_p50_us": 8000,
             "rtt_p95_us": 45000,
             "rtt_p99_us": 95000,
@@ -912,6 +913,7 @@ def test_latency_timeseries_returns_rows_with_latency(client, monkeypatch):
     body = r.json()
     assert body["has_latency"] is True
     assert body["rows"][0]["fail_open_count"] == 30
+    assert body["rows"][0]["total_count"] == 530
     assert body["rows"][0]["rtt_p95_us"] == 45000
 
 
@@ -921,13 +923,14 @@ def test_latency_timeseries_errors_only_when_columns_absent(client, monkeypatch)
     from backend.routers import session_scoring as _ss
 
     monkeypatch.setattr(_ss, "_table_columns", lambda sid: {"edge_score", "edge_score_reason"})
-    canned = [{"hour": "2026-06-17 10:00:00", "scored_count": 500, "fail_open_count": 30}]
+    canned = [{"hour": "2026-06-17 10:00:00", "scored_count": 500, "fail_open_count": 30, "total_count": 530}]
     with _patch_query_logs(canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/latency-timeseries?since_hours=6")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["has_latency"] is False
     assert body["rows"][0]["fail_open_count"] == 30
+    assert body["rows"][0]["total_count"] == 530
 
 
 def test_latency_timeseries_buckets_by_minute_for_1h_window(client, monkeypatch):

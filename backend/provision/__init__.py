@@ -11,6 +11,8 @@ from .cli import (
     wizard,
 )
 from .fastly_api import (
+    CAPTURE_SNIPPET_PLAN,
+    account_has_rate_limiting,
     delete_cdn_service,
     ensure_cdn_service,
     ensure_logging_endpoint,
@@ -18,7 +20,6 @@ from .fastly_api import (
     load_log_format,
     redeploy_cdn_vcl,
     remove_logging_endpoint,
-    resolve_shield_secret,
     update_logging_endpoint,
     validate_log_format,
 )
@@ -47,6 +48,8 @@ __all__ = [
     "handle_update_logs",
     "wizard",
     # fastly_api
+    "CAPTURE_SNIPPET_PLAN",
+    "account_has_rate_limiting",
     "delete_cdn_service",
     "ensure_cdn_service",
     "ensure_logging_endpoint",
@@ -54,7 +57,6 @@ __all__ = [
     "load_log_format",
     "redeploy_cdn_vcl",
     "remove_logging_endpoint",
-    "resolve_shield_secret",
     "update_logging_endpoint",
     "validate_log_format",
     # fos_setup

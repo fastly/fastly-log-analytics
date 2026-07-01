@@ -39,7 +39,7 @@ export function WizardFooter({ s }: { s: WizardState }) {
 
   return (
     <DialogFooter className={panelDialogFooter}>
-      {!isDeploying && step !== "mode" && (
+      {!isDeploying && step !== "mode" && step !== "terraform" && (
         <Button
           variant="ghost"
           className="mr-auto h-9 text-xs"
@@ -56,6 +56,7 @@ export function WizardFooter({ s }: { s: WizardState }) {
                     "ngwaf",
                     "fields",
                     "execute",
+                    "terraform",
                   ];
             const idx = order.indexOf(step);
             if (idx > 0) setStep(order[idx - 1] as Step);
@@ -167,12 +168,16 @@ export function WizardFooter({ s }: { s: WizardState }) {
           )}
 
           {step === "terraform" && (
+            // The Terraform & VCL preview is a read-only side-trip: export the
+            // files (button lives in the step body) and return. Deploy to
+            // Fastly / Complete Setup stay on the Review (execute) step so
+            // there's a single, unambiguous place to commit.
             <Button
               size="lg"
               className="h-9 px-6 font-bold"
-              onClick={handleAdminIngest}
+              onClick={() => setStep("execute")}
             >
-              Complete Setup
+              Back to Review
             </Button>
           )}
 

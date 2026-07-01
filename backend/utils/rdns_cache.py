@@ -83,27 +83,22 @@ def _is_ip_in_cidrs(ip: str, cidrs: list[str]) -> bool:
 # ── Init ──────────────────────────────────────────────────────────────────────
 
 
+_RDNS_DDL = """
+CREATE TABLE IF NOT EXISTS rdns (
+    ip              TEXT PRIMARY KEY,
+    hostname        TEXT,
+    status          TEXT,
+    fcrdns_verified INTEGER DEFAULT 0,
+    looked_up_at    TEXT
+)
+"""
+
+
 def _write_con() -> sqlite3.Connection:
     """Open a write connection (creates DB + schema on first call)."""
-    from backend.core.sqlite_pool import SMALL_CACHE_PRAGMAS
+    from backend.core.sqlite_pool import open_small_cache_db
 
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(_DB_PATH), check_same_thread=False, timeout=10)
-    for pragma in SMALL_CACHE_PRAGMAS:
-        con.execute(pragma)
-    con.execute(
-        """
-        CREATE TABLE IF NOT EXISTS rdns (
-            ip              TEXT PRIMARY KEY,
-            hostname        TEXT,
-            status          TEXT,
-            fcrdns_verified INTEGER DEFAULT 0,
-            looked_up_at    TEXT
-        )
-        """
-    )
-    con.commit()
-    return con
+    return open_small_cache_db(_DB_PATH, ddl=_RDNS_DDL, check_same_thread=False)
 
 
 def _read_con() -> sqlite3.Connection:

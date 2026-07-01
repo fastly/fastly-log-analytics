@@ -101,6 +101,23 @@ interface SSRGetOpts {
    * after these and win on conflict.
    */
   extraHeaders?: Record<string, string>
+  /**
+   * HTTP method. Defaults to ``GET`` so every existing GET caller is
+   * unchanged. ``POST`` is the only other supported verb — it exists solely
+   * so the analytics endpoints that take a request body (e.g. ``/api/insights``)
+   * can be SSR-prefetched. The method does NOT influence the trust gate:
+   * the Caddy-marker classification + X-Remote-Analyst / Host promotion run
+   * identically before the request is dispatched, so a POST carries the exact
+   * same analyst-clamp the GET path applies — it can never widen trust.
+   */
+  method?: 'GET' | 'POST'
+  /**
+   * JSON-serialisable request body for ``POST``. Ignored on ``GET``. When
+   * present, the transport serialises it and sets Content-Type/Content-Length;
+   * it is sent as the request payload AFTER the trust gate has already
+   * classified the request, so the body cannot affect audience scoping.
+   */
+  body?: unknown
 }
 
 export async function ssrUpstreamGet({
@@ -108,6 +125,8 @@ export async function ssrUpstreamGet({
   logPrefix,
   injectAdminToken = false,
   extraHeaders,
+  method = 'GET',
+  body,
 }: SSRGetOpts): Promise<SSRUpstreamResponse | null> {
   const base = process.env.API_PROXY_URL
   if (!base) {
@@ -173,7 +192,18 @@ export async function ssrUpstreamGet({
       }
     }
 
-    return await rawRequest(`${base}${path}`, upstreamHeaders, TIMEOUT_MS)
+    // Serialise the POST body (if any) and stamp its content headers. This
+    // runs AFTER the trust gate + analyst/admin promotion above, so the
+    // request is already audience-classified; the payload cannot alter scope.
+    // GET requests carry no body (serialisedBody stays undefined).
+    let serialisedBody: string | undefined
+    if (method === 'POST' && body !== undefined) {
+      serialisedBody = JSON.stringify(body)
+      upstreamHeaders['Content-Type'] = 'application/json'
+      upstreamHeaders['Content-Length'] = String(Buffer.byteLength(serialisedBody))
+    }
+
+    return await rawRequest(`${base}${path}`, upstreamHeaders, TIMEOUT_MS, method, serialisedBody)
   } catch (err) {
     console.warn(`[${logPrefix}] fetch failed; falling back to client fetch:`, err)
     return null
@@ -184,6 +214,8 @@ function rawRequest(
   urlStr: string,
   reqHeaders: Record<string, string>,
   timeoutMs: number,
+  method: 'GET' | 'POST' = 'GET',
+  body?: string,
 ): Promise<SSRUpstreamResponse> {
   return new Promise((resolve, reject) => {
     const url = new URL(urlStr)
@@ -193,7 +225,7 @@ function rawRequest(
         hostname: url.hostname,
         port: url.port || (url.protocol === 'https:' ? 443 : 80),
         path: `${url.pathname}${url.search}`,
-        method: 'GET',
+        method,
         headers: reqHeaders,
         timeout: timeoutMs,
       },
@@ -212,6 +244,7 @@ function rawRequest(
     req.on('timeout', () => {
       req.destroy(new Error(`SSR upstream timeout after ${timeoutMs}ms`))
     })
+    if (method === 'POST' && body !== undefined) req.write(body)
     req.end()
   })
 }

@@ -83,6 +83,7 @@ class ProvisionTeardownRequest(BaseModel):
     remove_logging: bool = True
     remove_cdn: bool = True
     remove_bucket: bool = True
+    remove_scoring: bool = True
     remove_cache: bool = True
     remove_cron: bool = False
 

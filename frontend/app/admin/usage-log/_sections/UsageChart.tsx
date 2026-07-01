@@ -47,6 +47,8 @@ export function LogAccountingPanel() {
   const buckets = data?.buckets ?? []
   const gapPct = totals?.gap_pct ?? 0
   const gapAbsPct = Math.abs(gapPct) * 100
+  // Gap = Fastly requests − our ingested rows. `requests` sits 1:1 with our
+  // rows on every service, so any sustained positive gap is real loss.
   const gapColor =
     // WCAG AA: green-600/yellow-600 on the light card fail 4.5:1; deepen to -700
     // in light mode (dark mode keeps the brighter -400 shade on its dark card).
@@ -82,10 +84,10 @@ export function LogAccountingPanel() {
   const chartData = useMemo(() => ([
     {
       x: buckets.map((b: any) => b.ts),
-      y: buckets.map((b: any) => b.fastly_logs),
+      y: buckets.map((b: any) => b.fastly_requests),
       type: 'scatter',
       mode: 'lines',
-      name: 'Fastly emitted (lines)',
+      name: 'Fastly requests',
       line: { color: '#3b82f6', width: 2 },
     },
     {
@@ -93,7 +95,7 @@ export function LogAccountingPanel() {
       y: buckets.map((b: any) => b.our_rows),
       type: 'scatter',
       mode: 'lines',
-      name: 'We ingested (lines)',
+      name: 'We ingested (rows)',
       line: { color: '#10b981', width: 2, dash: 'dot' },
     },
     {
@@ -108,14 +110,14 @@ export function LogAccountingPanel() {
   ]), [buckets])
 
   const chartLayout = useMemo(() => ({
-    yaxis: { title: { text: 'log lines' } },
+    yaxis: { title: { text: 'requests / rows' } },
     yaxis2: { title: { text: 'files' }, overlaying: 'y', side: 'right', showgrid: false },
   }), [])
 
   return (
     <AnalyticsCard
-      title="Log Line Accounting"
-      description="Fastly's authoritative log-line emission counter (Stats API) vs our locally-ingested row_count, per bucket. A non-zero gap means lines were emitted by Fastly but never landed in our table."
+      title="Ingest Accounting"
+      description="Fastly's authoritative request counter (Stats API) vs our locally-ingested rows, per bucket. Requests sit 1:1 with our rows, so a positive gap means requests Fastly served that never landed in our table."
       icon={<Database className="h-4 w-4" />}
       error={error as AnalyticsCardError | null}
       headerAction={
@@ -141,15 +143,15 @@ export function LogAccountingPanel() {
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
             <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
-              <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Fastly emitted</div>
-              <div className="font-mono text-base">{(totals?.fastly_logs ?? 0).toLocaleString()}</div>
+              <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Fastly requests</div>
+              <div className="font-mono text-base">{(totals?.fastly_requests ?? 0).toLocaleString()}</div>
             </div>
             <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
               <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">We ingested</div>
               <div className="font-mono text-base">{(totals?.our_rows ?? 0).toLocaleString()}</div>
             </div>
             <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
-              <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Gap (lines)</div>
+              <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Gap (rows)</div>
               <div className={`font-mono text-base ${gapColor}`}>{(totals?.gap ?? 0).toLocaleString()}</div>
             </div>
             <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
@@ -160,7 +162,7 @@ export function LogAccountingPanel() {
           {data?.sustained_loss && (
             <div className="mb-3 text-xs px-3 py-2 rounded-md border border-destructive/40 bg-destructive/10 text-destructive">
               <AlertTriangle className="h-3 w-3 inline mr-1.5" />
-              Sustained loss: {data.sustained_loss.n_buckets} consecutive {preset.by === 'hour' ? 'hours' : 'days'} ≥5% gap since {data.sustained_loss.started_at} — peak {(data.sustained_loss.max_gap_pct * 100).toFixed(1)}%, {data.sustained_loss.total_lost_lines.toLocaleString()} lines missing
+              Sustained loss: {data.sustained_loss.n_buckets} consecutive {preset.by === 'hour' ? 'hours' : 'days'} ≥5% gap since {data.sustained_loss.started_at} — peak {(data.sustained_loss.max_gap_pct * 100).toFixed(1)}%, {data.sustained_loss.total_lost_lines.toLocaleString()} rows missing
             </div>
           )}
           {totals?.worst_bucket_ts && (totals.worst_bucket_gap_pct ?? 0) > 0.01 && (
@@ -173,11 +175,6 @@ export function LogAccountingPanel() {
             <TimeSeriesChart data={chartData} layout={chartLayout} timezone="UTC" height={240} />
           ) : (
             <div className="text-xs text-muted-foreground italic px-1 py-4">No data in this window yet.</div>
-          )}
-          {data?.fastly_field_used === null && (
-            <div className="mt-2 text-[10px] text-muted-foreground italic">
-              Note: Fastly Stats response did not contain a recognized log-count field; treating Fastly counts as 0.
-            </div>
           )}
         </>
       )}

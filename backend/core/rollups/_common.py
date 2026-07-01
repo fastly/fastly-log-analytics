@@ -514,6 +514,88 @@ PERF_LATENCY_BUNDLE_TOP_K = 100
 PERF_URLS_MIN_REQUESTS_PER_HOUR = 5
 PERF_ASNS_MIN_REQUESTS_PER_HOUR = 10
 
+# Filenames for the three per-hour origin-dimension percentile rollups
+# feeding /api/origin/aggregates' pop_latency / ip_health / path_breakdown
+# panels. All three are the same per-dimension-percentiles-over-window shape
+# as slow_urls (no time bucket): per-(key, hour) requests + lat_us sum/count +
+# exact within-hour p50/p95. The reader request-weight-averages the
+# percentiles across hours (biased → _approx).
+#
+#  - origin_pop.parquet   key=pop  — top-K by requests (pop cardinality is
+#    small; top-100 keeps every pop).
+#  - origin_ip.parquet    key=oip  — carries ost_5xx_count + ost_total_count
+#    so error_pct is EXACT across hours (SUM(5xx)/SUM(total)); per-hour floor
+#    HAVING COUNT(*) >= 5, top-K by requests. The reader re-applies the
+#    window-level HAVING SUM(requests) >= 10 + final ORDER BY error_pct DESC.
+#  - origin_path.parquet  key=edge (bool) — NO top-K, NO HAVING (only 2 rows
+#    per hour).
+ORIGIN_POP_BUNDLE_FILENAME = "origin_pop.parquet"
+ORIGIN_IP_BUNDLE_FILENAME = "origin_ip.parquet"
+ORIGIN_PATH_BUNDLE_FILENAME = "origin_path.parquet"
+ORIGIN_DIMS_BUNDLE_TOP_K = 100
+# Per-hour minimum-request floor for the oip bundle (mirrors the slow_urls
+# noise cut; the live IP_HEALTH panel applies a window-level HAVING >= 10
+# which the reader re-applies, this is the per-hour pre-cut).
+ORIGIN_IP_MIN_REQUESTS_PER_HOUR = 5
+
+# Filename for the per-hour MINUTE-granular origin-latency-percentile
+# time-series rollup feeding /api/origin/aggregates' ``timeseries`` panel.
+# A NEW hybrid shape: time-series (like verified_bots_ts) + percentiles (like
+# slow_urls). Each closed hour pre-aggregates to per-minute rows carrying BOTH
+# latency bases (ttfb + ttlb) so the reader can serve either metric:
+#
+#   bucket_ts    TIMESTAMPTZ  -- minute-truncated UTC instant
+#   ttfb_count   BIGINT       -- COUNT(*) FILTER (ttfb_lat IS NOT NULL)
+#   ttfb_p50_us  DOUBLE       -- MEDIAN(ttfb_lat) within (minute)
+#   ttfb_p95_us  DOUBLE       -- APPROX_QUANTILE(ttfb_lat, 0.95)
+#   ttfb_p99_us  DOUBLE       -- APPROX_QUANTILE(ttfb_lat, 0.99)
+#   ttlb_count   BIGINT       -- COUNT(*) FILTER (ttlb_lat IS NOT NULL)
+#   ttlb_p50_us / ttlb_p95_us / ttlb_p99_us  DOUBLE
+#
+# The reader re-buckets the minute grain to any whole-minute width and
+# request-weight-averages the percentiles across minutes (biased → _approx);
+# counts SUM exact. The day compactor PRESERVES the minute dimension (it is a
+# time series, not a leaderboard) — same posture as verified_bots_ts.
+ORIGIN_LATENCY_TS_BUNDLE_FILENAME = "origin_latency_ts.parquet"
+
+# Filenames for the four per-hour security-dimension rollups feeding
+# /api/security/aggregates' req_size / conn_reuse / topips / coverage panels
+# (each an all-rows live scan today). ALL FOUR are EXACT (counts / MAX) — no
+# percentile approximation, so none of the readers carry an ``_approx`` flag.
+# Each is a closed-hours-only reader (NO active-hour merge, matching slow_urls).
+#
+#  - security_req_size.parquet  — req_header_bytes histogram bucket (matching
+#    REQ_HEADER_SIZE_DIST's CASE) + count + MIN(req_header_bytes). Schema:
+#    (bucket VARCHAR, count BIGINT, min_val BIGINT).
+#  - security_conn_reuse.parquet — conn_requests reuse bucket (matching
+#    CONN_REUSE_DIST's CASE) + count + MIN(conn_requests). Schema:
+#    (bucket VARCHAR, count BIGINT, min_val BIGINT).
+#  - security_topips.parquet     — top-500 client IPs by MAX(req_header_bytes)
+#    per hour (matching TOP_IPS_BY_MAX_HEADER, capped wider than the panel's
+#    top-10 so cross-hour re-ranking by MAX-of-MAX stays correct). Schema:
+#    (ip VARCHAR, max_header BIGINT).
+#  - security_cov.parquet        — one row per hour with the TLS-fingerprint
+#    coverage counts (matching FINGERPRINT_COVERAGE_BULK over tls_ciphers_sha).
+#    Schema: (total_rows BIGINT, tls_populated BIGINT).
+SECURITY_REQ_SIZE_BUNDLE_FILENAME = "security_req_size.parquet"
+SECURITY_CONN_REUSE_BUNDLE_FILENAME = "security_conn_reuse.parquet"
+SECURITY_TOPIPS_BUNDLE_FILENAME = "security_topips.parquet"
+SECURITY_COV_BUNDLE_FILENAME = "security_cov.parquet"
+# Per-hour cap on the topips bundle. The panel renders top-10, but the
+# cross-hour reader re-ranks by MAX-of-MAX so a wider per-hour keep avoids
+# dropping an IP whose window-max lands outside any single hour's top-10.
+SECURITY_TOPIPS_BUNDLE_TOP_K = 500
+
+# Filename for the per-hour performance-dimension TTL-distribution rollup
+# feeding /api/performance/aggregates' ``ttl_dist`` histogram panel (an
+# all-rows live scan today). One row per closed hour PER ttl bucket, matching
+# the live histogram CASE (``ttl <= 0 / <= 10 / ... / > 1y``). Schema:
+# (bucket VARCHAR, count BIGINT, min_ttl BIGINT). The math is EXACT across
+# hours — ``count`` SUMs and ``min_ttl`` is MIN-of-MIN (composing the live
+# query's ``ORDER BY min_ttl``), so the reader carries NO ``_approx`` flag.
+# Closed-hours-only reader (NO active-hour merge, matching slow_urls).
+PERF_TTL_DIST_BUNDLE_FILENAME = "perf_ttl_dist.parquet"
+
 
 def _time_series_bundle_path(source: dict, hour: str) -> str:
     return os.path.join(_hour_bundled_root(source), f"hour={hour}", TIME_SERIES_BUNDLE_FILENAME)
@@ -541,6 +623,42 @@ def _perf_top_urls_bundle_path(source: dict, hour: str) -> str:
 
 def _perf_top_asns_bundle_path(source: dict, hour: str) -> str:
     return os.path.join(_hour_bundled_root(source), f"hour={hour}", PERF_TOP_ASNS_BUNDLE_FILENAME)
+
+
+def _origin_pop_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", ORIGIN_POP_BUNDLE_FILENAME)
+
+
+def _origin_ip_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", ORIGIN_IP_BUNDLE_FILENAME)
+
+
+def _origin_path_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", ORIGIN_PATH_BUNDLE_FILENAME)
+
+
+def _origin_latency_ts_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", ORIGIN_LATENCY_TS_BUNDLE_FILENAME)
+
+
+def _security_req_size_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", SECURITY_REQ_SIZE_BUNDLE_FILENAME)
+
+
+def _security_conn_reuse_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", SECURITY_CONN_REUSE_BUNDLE_FILENAME)
+
+
+def _security_topips_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", SECURITY_TOPIPS_BUNDLE_FILENAME)
+
+
+def _security_cov_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", SECURITY_COV_BUNDLE_FILENAME)
+
+
+def _perf_ttl_dist_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", PERF_TTL_DIST_BUNDLE_FILENAME)
 
 
 def quote_path_list(paths: Iterable[str]) -> str:

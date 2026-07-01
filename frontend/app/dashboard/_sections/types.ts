@@ -25,6 +25,14 @@ export interface DashboardBodyProps {
   intervalButtons: React.ReactNode
   allCards: any[]
   visibleCards: Set<string>
+  // Time-range wire inputs (lib/range-wire.ts; resolved in useDashboardBundle).
+  // relativeRange + isAutoRange decide token-vs-absolute: a preset / the
+  // cold-load default → a server-reproducible token (SSR-seed contract, see
+  // lib/ssr/dashboard.ts); a custom absolute range → the explicit start/end
+  // bounds. anchor is the quantized mount instant (token mode only).
+  relativeRange: string | null
+  isAutoRange: boolean
+  anchor: string
 }
 
 export type { ReportConfiguration }

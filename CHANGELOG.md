@@ -5,6 +5,310 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0-beta.2] - 2026-07-01
+
+### Added
+
+- **Scripted Traffic Patterns insight.** A new Insights card flags client IPs
+  sending requests on a highly regular cadence — scrapers, pollers, cron jobs,
+  and beacons that slip under volumetric rate limits — by measuring
+  inter-arrival-time regularity over the live window. Verified crawlers and
+  monitors (Googlebot, Pingdom, UptimeRobot) are suppressed so they don't
+  dominate the card, and a 0–100 regularity score drives severity. It runs on
+  every service (it needs only client IP and timestamp).
+- **"Why we flagged this" evidence modal for Scripted Traffic Patterns.** Each
+  flagged IP opens a click-through modal showing the per-IP evidence (regularity
+  score, cadence variability, modal fraction, mean interval, jitter, volume/span,
+  distinct user-agents), mirroring the Impossible Distance and Cache Collapse
+  affordances. It reads pre-embedded evidence, so there's no extra request.
+- **Scripted Traffic Patterns help content.** The insight's "How this works"
+  dialog explains the cadence-regularity detection and sub-rate-limit evasion,
+  with a script-vs-human cadence diagram.
+- **Fullscreen Edge → Shield Transit Map.** The inline shielding map gains an
+  Expand button that opens the same map full-size in a dialog, making the
+  great-circle transit arcs easier to read as a 3D globe at scale. A bare
+  mousewheel zooms the big globe directly in the modal, and it opens one zoom
+  level closer than the inline card for a bigger initial view.
+- **User-adjustable shielding minimum-requests floor.** The Edge → Shield card's
+  low-sample floor is now a "Min requests" dropdown (No minimum / 10 / 30 / 50 /
+  100) with a help tooltip, so an operator can scrutinize quiet routes or tighten
+  the gate on a busy service. Adjusting it recomputes client-side with no
+  refetch.
+- **3D-globe transit map by default.** The Edge → Shield transit map now defaults
+  to a 3D globe (toggle back to flat Mercator via the map's globe control),
+  because edge→shield arcs are great-circle paths that read as misleading
+  straight slashes on a flat projection.
+- **Volume overlay on scoring charts.** The Scorer Latency chart gains a
+  toggleable request-volume overlay and the Scorer Errors chart gains a
+  toggleable error-rate percentage line, both on a secondary axis, so latency and
+  error counts can be read against traffic volume.
+- **Approximate-latency badges on origin panels.** The slow-URLs, PoP-latency,
+  and IP-health tables and the origin latency chart show a shared "approximate"
+  badge when a section is served from precomputed rollups (percentiles are
+  request-weighted averages of per-hour values on wide windows). Request counts,
+  the 5xx error rate, and the status-code distribution stay exact and are not
+  badged.
+- **Honor an operator-supplied client IP.** When a logging service sits behind a
+  fronting proxy or CDN, operator VCL that rewrites `Fastly-Client-IP` to the
+  true source IP is now respected for the captured client IP, with a true-edge
+  scrub so a spoofed header can't poison the log.
+- **Toggle IP masking on an existing invite.** The analyst-invite editor now
+  exposes the "Anonymize client IPs" control, so masking can be turned on or
+  off after an invite is created (previously settable only at creation). It
+  applies to a live analyst session without requiring a re-login.
+- **Adaptive Insights default range.** When a service has less history than the
+  7-day baseline needs, the Insights page now defaults to the best
+  window/baseline for the data that exists (e.g. ~2 hours of data compares the
+  last hour against the previous hour) instead of showing "not enough data".
+- **Session-scoring enablement pre-checks.** Enabling session scoring now
+  verifies the Fastly products the scorer needs (Compute, KV Store, Config Store)
+  before standing anything up. If a product isn't enabled the enable modal
+  surfaces a clickable manage.fastly.com link for the missing product, and any
+  failure during setup rolls back every resource created, so a botched enable
+  leaves nothing behind.
+- **Object Storage enablement pre-check in provisioning.** After the API token is
+  entered, the wizard probes whether the account has enabled Object Storage
+  (required for log storage) and surfaces a clear "Enable Object Storage"
+  message — with a clickable link to the Fastly product page — instead of failing
+  later at the storage-access step.
+- **Edge rate-limiting detection before deploying.** Provisioning now probes the
+  account's edge rate-limiting entitlement up front and persists the result, so
+  the CDN-fronting service deploys the correct VCL on the first try. It re-checks
+  on logging-settings updates and manual CDN redeploys, so an account that
+  enables rate limiting later is picked up automatically.
+- **Instructions-first provisioning preview.** In the Terraform & VCL preview,
+  the Instructions tab now leads and is selected by default, so the step opens
+  showing setup guidance rather than a raw `.tf` file.
+
+### Changed
+
+- **Analyst invites require at least one service.** Creating or editing an
+  invite with no authorized services is now rejected, preventing an analyst
+  from landing on an empty "no service found" dashboard.
+- **Provisioning requires a superuser token.** The wizard and CLI now state that
+  creating Fastly resources needs a superuser token; an engineer token cannot
+  create services.
+- **Full teardown now removes session scoring.** Tearing down a service now also
+  tears down its session scoring instead of orphaning it — stripping the scoring
+  VCL and backend and deleting the Compute service, both Config Stores, and the
+  matrix KV store. Disabling scoring also removes the published matrix and its
+  history.
+- **Smarter scorer redeploy.** Redeploy now reads the live edge and skips each
+  no-op leg independently: the Wasm upload is skipped when the committed build
+  matches the live package, and the logging-VCL clone/activate is skipped when
+  the live snippets and backend already match — so a redeploy no longer forces
+  pointless version bumps.
+- **Cooperative scroll-zoom on maps.** The network, ASN, shielding, and dashboard
+  maps no longer capture the page scroll — a plain mousewheel scrolls the page,
+  and you zoom with Ctrl/⌘ + wheel, pinch, or the on-map +/- buttons.
+- **Sub-minute sync intervals are honored.** A service configured for a log-sync
+  period below 30 seconds now actually syncs at that interval instead of being
+  silently rounded up to a 30-second floor (the 5-second minimum still applies;
+  the 120-second default is unchanged).
+- **Terraform preview is a preview-only step.** The Terraform & VCL preview no
+  longer offers a confusing duplicate deploy button; Deploy to Fastly / Complete
+  Setup live on the Review step, and the preview offers a single Back-to-Review
+  control.
+- **Clearer storage-maintenance wording.** Cron, cost-calculator, and
+  provisioning storage copy now distinguishes always-on local cache compaction
+  (keeps dashboard queries fast) from the nightly Object Storage optimize
+  (storage-side housekeeping that controls cloud storage cost).
+- **Newly typed API responses.** `GET /scoring/labels` and `GET /api/cron-runs`
+  now return typed responses (previously untyped in the generated client); the
+  wire shape is unchanged for both admin and analyst.
+- **Internal maintenance.** Sundry non-user-facing refactors and test/CI
+  improvements landed alongside the above — shared helpers for router
+  section-selectors, PII field sets, and SQLite caches; deduplicated frontend
+  chart/column/skeleton scaffolding and generated-type adoption; simplified
+  edge-hop detection in generated VCL; and quieter, more reliable test runs. No
+  behavior change.
+
+### Breaking
+
+- **Admin live-update streams consolidated into one endpoint.** The three
+  always-on admin Server-Sent Events streams — `GET /api/sync-status/stream`,
+  `GET /api/cron-runs/stream`, and `GET /api/admin/system-metrics/stream` — are
+  replaced by a single multiplexed `GET /api/admin/events/stream?channels=…`.
+  An admin browser tab now holds one persistent connection instead of three,
+  fixing HTTP/1.1 connection-pool starvation (slow / "pending" requests) when
+  several admins use the app at once. The analyst `GET /api/log-extents/stream`
+  is unchanged.
+- **Share-dashboard live stream folded into the multiplexed admin stream.** The
+  dedicated `GET /api/admin/share/stream` SSE endpoint is removed; its live
+  updates now ride the `share` channel of `GET /api/admin/events/stream`, so the
+  `/admin/share` page holds one connection instead of two over the admin tunnel.
+  The `GET /api/admin/share/live` polling snapshot endpoint is unchanged.
+
+### Fixed
+
+- **PII masking now covers the dashboard Top-IPs card.** Analysts whose invite
+  has IP masking enabled previously still saw raw client IPs on the dashboard's
+  top-IPs panel (the Sessions list was already masked). IPs are now masked
+  wherever they appear; user-agent and URL stay visible and admin views are
+  unaffected.
+- **IP filtering is blocked end-to-end for masking analysts.** When an analyst
+  has client-IP masking on, filtering by client IP is now rejected server-side
+  and every IP drill-down affordance is hidden in the UI (the dashboard IP card
+  rows, IP-family filter menus, and the IP entry in Add Filter). Origin IP stays
+  visible and filterable since it's infrastructure, not end-user data.
+- **Session detail resolves for masked analysts.** When PII masking is on, the
+  session-detail modal previously showed "No results" for every session because
+  the masked IP was round-tripped back as the lookup key. Detail lookups now key
+  on an opaque per-row token that seals the real session identity
+  (service-bound), so the modal resolves correctly while the response stays
+  masked; a tampered or expired token returns a clear error instead of a silent
+  empty result.
+- **Single-request sessions resolve detail.** A session whose start and end
+  timestamp are identical (a single-request, sub-second session — a large share
+  of real sessions) previously failed the time-range clamp and showed "No
+  results" on click for every role. The window is now widened slightly before
+  clamping so the session's request is matched.
+- **Single-log and fresh services load.** A service with a single log (or all
+  logs sharing one timestamp) previously failed the entire dashboard load because
+  the auto-range collapsed to a zero-width window; a degenerate range now widens
+  to a 1-hour window around the log so the dashboard renders.
+- **Analytics pages distinguish "disabled" from "no data".** Origin, security,
+  network, dashboard, and charts panels previously showed "Requires Group X to be
+  enabled in Fastly logging" whenever a query returned zero rows, so on a fresh
+  or low-traffic service every empty panel read as misconfigured. Panels now show
+  the enablement hint only when the field group is genuinely off, otherwise a
+  neutral "no data in this range".
+- **Cold-load charts scan and scale to what's on screen.** On a service with 30+
+  days of history, a cold load previously scanned 30 days while the chart x-axis
+  showed only 24 hours, squashing every visible bar; custom absolute ranges (date
+  picker, chart zoom, saved views) were also ignored. Charts now scan exactly the
+  displayed window and honor explicit custom ranges.
+- **Sparse bar charts render honest, even-width bars.** A low-traffic or filtered
+  COUNT series (a quiet dashboard route, a quiet scoring hour) previously
+  collapsed bars to hairlines and turned empty buckets into ambiguous gaps. Empty
+  time buckets are now zero-filled so the series reads as an even-width bar chart
+  with honest zeros. Latency/throughput scatter series stay sparse, since a
+  missing percentile is undefined rather than zero.
+- **Top-N values fill available width.** Short top-N values like IPv4 addresses
+  were being truncated even with empty space beside them; short values now fit
+  fully while long URLs and user-agents still truncate.
+- **New logs appear immediately on the dashboard.** A freshly-buffered log could
+  show in the status cache while every windowed aggregate returned zero, leaving
+  the dashboard looping on "Preparing your data" (and never resolving on setups
+  that run no background jobs). When the newest log falls in the window but the
+  query returns nothing, the underlying view is now rebuilt once and re-queried
+  so the log appears right away.
+- **Dashboard no longer hangs on an empty filtered result.** An empty result for
+  an active filter is now treated as a legitimate "no rows match" instead of a
+  stale-view symptom, ending an expensive retry loop that could leave the
+  dashboard stuck on "Preparing your data".
+- **Ingest-gap detector uses the correct request baseline.** The ingest-loss
+  detector and gap-heal job now measure loss against Fastly's `requests` count
+  rather than the `log` counter, which can read a permanent multiple of real
+  traffic on services with restart or bot-challenge paths — a phantom gap that
+  isn't data loss. The Ingest Accounting / Ingest Gap panels compare ingested
+  rows against requests.
+- **Service-scoped admin cards follow the active service.** The Ingest Gap and
+  Notable Slow Queries admin cards previously kept showing the previous service's
+  value (or the backend's default service) after a service switch, because admin
+  requests didn't carry the active service id and their caches weren't keyed on
+  it. They now re-key on the active service and update immediately on switch,
+  including over the live update stream.
+- **Shielding anomaly flags gated on sample size.** On a quiet site, the Edge →
+  Shield analysis was flagging routes with only a handful of requests as
+  suboptimal peering and painting extreme percentiles. Low-sample routes stay
+  visible on the map and in the table (painted a neutral grey with an explanatory
+  note) but are no longer flagged, so low-traffic routes stop crying wolf.
+- **Anomalous low-volume routes are no longer truncated away.** The shielding
+  analysis previously ranked and truncated routes by volume before scoring for
+  anomalies, so a mis-peered low-traffic route could be dropped before it was ever
+  evaluated. The query now keeps the union of top-by-volume and
+  top-by-transit-overhead routes, and the table shows a "Showing N of M routes"
+  caption.
+- **Shielding analysis tolerates missing edge timing.** Routes with a NULL edge
+  origin-time-to-first-byte now fall back to time-to-first-byte instead of
+  dropping out of the transit-overhead calculation.
+- **Edge-only overlay agrees between the shielding map and table.** The transit
+  map's "Edge-only logging detected" overlay is now gated the same way as the
+  table's empty-state copy, so the map and table no longer disagree on a service
+  that has origin/shield fields enabled but no shield traffic in the window.
+- **Rolling-window invites no longer widen forward.** A rolling-window analyst
+  invite could adopt a future upper bound from the request, widening the
+  effective window past the invite's anchor; the upper bound is now capped to the
+  anchor.
+- **Bootstrap no longer errors when masking is revoked mid-session.** Re-syncing
+  an analyst's policy to disable masking previously could cause the next page load
+  to fail with a server error; masking state is now read safely.
+- **Live share widgets no longer break server-side rendering.** The share page's
+  live uptime and lockout countdown are now mounted client-side only, fixing a
+  hydration error on `/admin/share`.
+- **Provisioning keeps the admin on the admin app after deploy.** A missing token
+  on the post-deploy workspace update caused the app to treat a successful
+  provision as a dead analyst session and bounce the operator to the analyst
+  sign-in; the operator now stays on the admin app.
+- **Provisioning wizard: return to Review from the Terraform preview.** The Back
+  button now returns to Review from the Terraform & VCL preview, and provision
+  mode can deploy correctly from that flow instead of running the ingest-only
+  path.
+- **Re-provisioning refreshes storage credentials in-process.** A same-process
+  teardown-then-re-provision of a service used to keep presenting the deleted
+  storage key until the backend was restarted, causing every ingest and read to
+  fail auth. The storage client and read connections now invalidate on
+  re-provision, teardown, and ingest so the new key is picked up without a
+  restart.
+- **Provisioning retries transient storage errors.** Occasional Object Storage
+  5xx blips during teardown cleanup and table initialization are now retried
+  instead of surfacing as a hard error.
+- **Keep the admin on a freshly-added service when switching.** Switching to a
+  newly-added second service no longer crashes the app shell with a URL↔state
+  feedback loop, and the admin stays on the selected service.
+- **Service switching no longer crashes the shell.** Two live crashes on service
+  switch (a max-update-depth loop from the URL↔state sync, and a hook-count
+  change on the security and sessions pages) are fixed, so switching services no
+  longer drops the app to its error fallback.
+- **Choropleth map no longer repeats on wide screens.** The dashboard map no
+  longer renders repeating world copies on wide viewports.
+- **Widened shielding-map visibility.** The Edge → Shield transit map now renders
+  in more low-signal cases where it was previously hidden.
+- **Accessibility: "Updating" badge stays legible.** The live-updating badge now
+  pulses only its dot rather than the whole pill, keeping the label text at full
+  contrast (WCAG AA) during the animation.
+
+### Performance
+
+- **Origin, security, and performance analytics serve wide windows from
+  precomputed rollups.** The origin, security, and performance analytics pages
+  now answer their heavy sections (status/PoP/origin-IP/edge and per-minute
+  latency time-series on origin; request size, connection reuse, top IPs,
+  coverage, and well-known bots on security; the time-to-live distribution on
+  performance) from parquet rollups on wide windows, and skip or narrow the
+  expensive temporary-table materialization when every requested section is
+  rollup-served. Wide-window loads that previously took many seconds now return in
+  ~1–4 seconds.
+- **Analytics pages paint from a server-rendered first paint.** The dashboard,
+  origin, security, and performance pages now prefetch their default selection on
+  the server and hydrate the first paint from that cache, so a cold load skips the
+  client round-trip and skeleton flash. Query keys are anchored on a reproducible
+  relative-range token so the server-seeded cache byte-matches the first client
+  key.
+- **Network Health page caches across rolling-minute reloads.** The network-health
+  response memo is now reachable for the section-scoped requests the live page
+  actually sends and is keyed on a quantized relative-range anchor, so a 30-day
+  network view serves from cache across minute-to-minute reloads (including on the
+  analyst path) instead of recomputing its multi-second pipeline every minute.
+- **Insights prewarms the analyst cache.** The Insights cache now warms a stable,
+  invite-keyed entry for analysts too, so an analyst opening Insights hits a warm
+  cache instead of paying the full computation.
+- **Lighter first paint.** The heaviest admin-only data is dropped from the
+  initial bootstrap payload, layout-shift on several admin and log pages is cut
+  with structure-matching skeletons, the filter bar defers its field-catalog
+  queries until opened, and the below-the-fold shielding map defers its
+  map-library initialization until it nears the viewport.
+
+### Documentation
+
+- **Install walkthrough video** added to the README, with a clickable thumbnail
+  after the intro and a pointer at the top of Quick Start.
+- **Custom-fields docs** clarify that enabling "Show in Dashboard" for a field
+  turns on automatic rollups for it.
+- **Site description** reworded to describe the app as powered by Fastly Object
+  Storage rather than analyzing it.
+
 ## [2.0.0-beta.1] - 2026-06-23
 
 ### Added
@@ -540,6 +844,7 @@ deleted.
   admin tunnel use case is no longer supported; production has always
   been direct-mode against the Fastly+Caddy public URL.
 
+[2.0.0-beta.2]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.0.0-beta.2
 [2.0.0-beta.1]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.0.0-beta.1
 
 ## [1.2.0] - 2026-06-09

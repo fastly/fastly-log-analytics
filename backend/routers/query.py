@@ -13,7 +13,7 @@ from backend.models.dashboard import QueryRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import query as repo
 from backend.repositories._presets_cache import get_cached_presets, set_cached_presets
-from backend.utils.remote_access import TimeBounds, clamp_or_400, get_analyst_time_bounds
+from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_error
 
 logger = logging.getLogger(__name__)
@@ -50,8 +50,6 @@ router = APIRouter(prefix="/api", tags=["query"], responses=DEFAULT_ERROR_RESPON
 def query_endpoint(
     req: QueryRequest,
     ctx: RequestContext = Depends(build_request_context),
-    service_id: str | None = Depends(get_service_id),
-    tb: TimeBounds = Depends(get_analyst_time_bounds),
 ):
     sql = req.sql.strip()
     if not sql:
@@ -59,7 +57,9 @@ def query_endpoint(
 
     # Stamp session + service onto the validator audit log line so a
     # rejection-rate spike from one analyst (attack-shaped probing) is
-    # observable without grepping correlated logs.
+    # observable without grepping correlated logs. ctx.service_id is the
+    # tenancy-enforced service (the one actually queried), so it attributes
+    # the audit line correctly even for an analyst that passed no ?service.
     analyst_session = ctx.analyst_session
     audit_session_id = getattr(analyst_session, "session_id", "admin") if analyst_session else "admin"
 
@@ -70,17 +70,13 @@ def query_endpoint(
     # their session window (or TimeBounds.clamp's now-1h..now default for an
     # open invite). The repo rebinds the log table to a window-filtered view —
     # see execute_query — so the clamp can't be aliased or aggregated away.
-    start_time, end_time = clamp_or_400(tb, None, None, analyst_session=analyst_session)
+    start_time, end_time = ctx.clamp(None, None)
     time_filter = (start_time, end_time) if start_time and end_time else None
 
     # H2: mask result IPs by value when the invite carries mask_ips. The
     # analyst names the output columns here, so key-name masking is bypassable
     # — the repo masks any cell that parses as an IP.
-    mask_ips = False
-    if analyst_session is not None:
-        policy = getattr(analyst_session, "pii_policy", None)
-        if isinstance(policy, dict) and policy.get("mask_ips"):
-            mask_ips = True
+    mask_ips = mask_ips_for(analyst_session)
 
     # Two-layer retry. The PermissionError → 403 path stays inline (it
     # short-circuits both retry classes — there's no point rebinding the
@@ -109,7 +105,7 @@ def query_endpoint(
             max_rows=req.max_rows,
             want_explain=req.explain,
             session_id=audit_session_id,
-            service_id=service_id,
+            service_id=ctx.service_id,
             time_filter=time_filter,
             mask_ips=mask_ips,
         )

@@ -78,6 +78,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
       try {
       map.current = new maplibregl.Map({
         container: mapContainer.current,
+        renderWorldCopies: false,
         style: {
           version: 8,
           sources: {},
@@ -92,7 +93,10 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
         center: [0, 20],
         zoom: 0.5,
         dragRotate: false,
-        touchZoomRotate: false
+        touchZoomRotate: false,
+        // Don't hijack page scroll: a plain mousewheel scrolls the PAGE; only
+        // ⌘/Ctrl + wheel (or the +/- buttons) zooms the map. (cooperative gestures)
+        cooperativeGestures: true,
       })
 
       map.current.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')

@@ -59,18 +59,22 @@ export function SessionDetail({
   const [detailEdgeOnly, setDetailEdgeOnly] = useState(false)
 
   const { data: detailData, isLoading: isLoadingDetail, isError: isErrorDetail, error: detailError, refetch: refetchDetail } = useQuery({
-    queryKey: ['sessions', 'detail', activeServiceId, selectedSession?.ip, selectedSession?.ja4, selectedSession?.session_start],
+    queryKey: ['sessions', 'detail', activeServiceId, selectedSession?.session_token ?? selectedSession?.ip, selectedSession?.ja4, selectedSession?.session_start],
     queryFn: async ({ signal }) => {
       if (!selectedSession) return undefined
-      const { data } = await client.POST("/api/sessions/detail", {
-        signal,
-        body: {
-          ip: selectedSession.ip,
-          ja4: selectedSession.ja4,
-          start_time: selectedSession.session_start,
-          end_time: selectedSession.session_end,
-        }
-      })
+      // Prefer the opaque server-minted token: it seals the real (ip, ja4,
+      // window), so the lookup works even when PII masking has rewritten the
+      // displayed `ip`. Fall back to the raw ip only if no token is present
+      // (e.g. a stale frontend build mid-deploy).
+      const body = selectedSession.session_token
+        ? { session_token: selectedSession.session_token }
+        : {
+            ip: selectedSession.ip,
+            ja4: selectedSession.ja4,
+            start_time: selectedSession.session_start,
+            end_time: selectedSession.session_end,
+          }
+      const { data } = await client.POST("/api/sessions/detail", { signal, body })
       return data
     },
     enabled: !!activeServiceId && !!selectedSession

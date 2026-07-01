@@ -3,7 +3,14 @@ import pytest
 
 from backend.models.network import NetworkHealthSummary, NetworkWorstEntry
 from backend.repositories._base import _safe_table
-from backend.repositories.network import _avg_hs, _health_score, get_health, get_quality
+from backend.repositories.network import (
+    _avg_hs,
+    _has_signal,
+    _health_score,
+    _response_cache_key,
+    get_health,
+    get_quality,
+)
 from backend.utils.geo import format_city_label
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
@@ -379,6 +386,401 @@ def test_get_health_selector_skips_response_cache_write(in_memory_duckdb, test_s
     full = get_health(in_memory_duckdb, test_service_source, None, None, {})
     for key in ("summary", "heatmap", "buckets", "leaderboard", "metro_leaderboard", "cities", "map_buckets"):
         assert key in full, f"selector poisoned the cache; full response missing {key}"
+
+
+# ── Response-cache key isolation + reachability (security_regression) ─────────
+#
+# These pin the security-rbac review's invariants for the now-REACHABLE
+# get_health response cache (it serves section-scoped FE requests, no longer
+# only the dead sections=None shape). The cache is analyst-reachable and the
+# dashboard cache was once hard-disabled after a poisoning incident, so these
+# isolation guarantees are load-bearing, not nice-to-have.
+
+
+def _net_logs(source, n=20):
+    logs = generate_mock_logs(source, num_logs=n)
+    for log in logs:
+        log["tcp_rtt"] = 25_000
+        log["asn"] = 7922
+        log["country"] = "US"
+        log["city"] = "Boston"
+    return logs
+
+
+@pytest.mark.security_regression
+def test_cache_key_partitions_by_service():
+    """Two services with identical params must produce DISTINCT cache keys —
+    a request can never read another tenant's network-health entry. The key
+    folds src['name'] via digest_cache_key."""
+    src_a = {"name": "svc_a", "service_id": "a"}
+    src_b = {"name": "svc_b", "service_id": "b"}
+    key_a = _response_cache_key(
+        src_a, "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", {}, "health_score", 5, 30, "all", None, False
+    )
+    key_b = _response_cache_key(
+        src_b, "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", {}, "health_score", 5, 30, "all", None, False
+    )
+    assert key_a != key_b
+
+
+@pytest.mark.security_regression
+def test_cache_key_partitions_by_mask_ips():
+    """mask_ips=True and mask_ips=False must key distinctly so a masking
+    analyst can never read an unmasked entry (belt-and-braces: network-health
+    is IP-free today, but the partition future-proofs the surface)."""
+    src = {"name": "svc", "service_id": "s"}
+    args = (src, "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", {}, "health_score", 5, 30, "all", None)
+    assert _response_cache_key(*args, False) != _response_cache_key(*args, True)
+
+
+@pytest.mark.security_regression
+def test_cache_key_partitions_by_sections():
+    """Each FE section-set keys distinctly so a smaller selection never reads a
+    larger selection's payload (and the now-reachable cache isn't a
+    one-entry-overwrites-all surface)."""
+    src = {"name": "svc", "service_id": "s"}
+    base = (src, "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", {}, "health_score", 5, 30, "all")
+    core = _response_cache_key(*base, {"summary", "leaderboard", "metro_leaderboard"}, False)
+    mp = _response_cache_key(*base, {"heatmap", "buckets", "cities", "map_buckets"}, False)
+    full = _response_cache_key(*base, None, False)
+    assert len({core, mp, full}) == 3
+    # Order within a set is irrelevant — the key sorts.
+    same = _response_cache_key(*base, {"leaderboard", "metro_leaderboard", "summary"}, False)
+    assert same == core
+
+
+@pytest.mark.security_regression
+def test_cache_key_is_anchor_faithful_not_span_quantized():
+    """SECURITY (anchor-collision): a now-anchored [now-24h, now] and an
+    extent-anchored [latest-24h, latest] window have the SAME span but DIFFERENT
+    data. The key MUST distinguish them (keys on resolved bounds, NOT a
+    span/window-param projection), or one analyst's window could alias another's
+    differently-anchored window and serve rows outside their invite clamp.
+    This test fails immediately if anyone reintroduces span-quantization."""
+    src = {"name": "svc", "service_id": "s"}
+    # Same 24h span, different anchors.
+    now_anchored = _response_cache_key(
+        src, "2026-06-29T00:00:00Z", "2026-06-30T00:00:00Z", {}, "health_score", 5, 30, "all", None, False
+    )
+    extent_anchored = _response_cache_key(
+        src, "2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", {}, "health_score", 5, 30, "all", None, False
+    )
+    assert now_anchored != extent_anchored
+
+
+@pytest.mark.security_regression
+def test_cache_key_minute_bucketed_seconds_collapse():
+    """Two timestamps in the SAME minute (differing only in seconds) yield the
+    SAME key (the ≤TTL-stale, intra-minute-reload contract) — but a DIFFERENT
+    minute yields a different key (still anchor-faithful)."""
+    src = {"name": "svc", "service_id": "s"}
+    k_10s = _response_cache_key(
+        src, "2026-06-29T00:00:10Z", "2026-06-30T00:00:20Z", {}, "health_score", 5, 30, "all", None, False
+    )
+    k_45s = _response_cache_key(
+        src, "2026-06-29T00:00:45Z", "2026-06-30T00:00:55Z", {}, "health_score", 5, 30, "all", None, False
+    )
+    k_next_min = _response_cache_key(
+        src, "2026-06-29T00:01:10Z", "2026-06-30T00:00:20Z", {}, "health_score", 5, 30, "all", None, False
+    )
+    assert k_10s == k_45s  # same minute → reuse
+    assert k_10s != k_next_min  # different minute → distinct (anchor-faithful)
+
+
+@pytest.mark.security_regression
+def test_cache_read_write_round_trip(in_memory_duckdb, test_service_source):
+    """A populated full-range request caches; the next identical request reads
+    is_cached=True without recomputing."""
+    table = _safe_table(test_service_source["name"])
+    insert_mock_logs(in_memory_duckdb, table, _net_logs(test_service_source))
+
+    first = get_health(in_memory_duckdb, test_service_source, None, None, {})
+    assert not first.get("is_cached")
+    second = get_health(in_memory_duckdb, test_service_source, None, None, {})
+    assert second.get("is_cached") is True
+
+
+@pytest.mark.security_regression
+def test_force_refresh_skips_read_but_writes(in_memory_duckdb, test_service_source):
+    """force_refresh=True (the prewarmer path) must recompute (no is_cached on
+    the returned payload) yet still WRITE the entry so a subsequent normal call
+    hits it."""
+    table = _safe_table(test_service_source["name"])
+    insert_mock_logs(in_memory_duckdb, table, _net_logs(test_service_source))
+
+    # Prime the cache.
+    get_health(in_memory_duckdb, test_service_source, None, None, {})
+    # force_refresh must NOT read the primed entry (recomputes fresh).
+    refreshed = get_health(in_memory_duckdb, test_service_source, None, None, {}, force_refresh=True)
+    assert not refreshed.get("is_cached")
+    # But it rewrote the entry → next normal call hits.
+    after = get_health(in_memory_duckdb, test_service_source, None, None, {})
+    assert after.get("is_cached") is True
+
+
+@pytest.mark.security_regression
+def test_stale_empty_result_is_not_cached(in_memory_duckdb, test_service_source):
+    """SECURITY (poison guard): an available-but-zero-signal window (no rows in
+    range) must NOT be cached, so a later populated request recomputes instead
+    of reading the cached blank. Mirrors why DASHBOARD_CACHE_TTL was disabled."""
+    table = _safe_table(test_service_source["name"])
+    # Seed rows only in June; query a window with NO data → zero signal.
+    insert_mock_logs(in_memory_duckdb, table, _net_logs(test_service_source))
+
+    empty_window = ("2020-01-01T00:00:00Z", "2020-01-02T00:00:00Z")
+    out = get_health(in_memory_duckdb, test_service_source, *empty_window, {})
+    # available True (schema present) but zero signal → not cached.
+    assert not _has_signal(out)
+    second = get_health(in_memory_duckdb, test_service_source, *empty_window, {})
+    assert not second.get("is_cached"), "a zero-signal window was cached (poison risk)"
+
+
+@pytest.mark.security_regression
+def test_has_signal_guard():
+    """_has_signal: a populated payload caches; a zero-signal one does not."""
+    assert _has_signal({"summary": {"total_reqs": 5}})
+    assert _has_signal({"heatmap": [{"asn": 1}]})
+    assert _has_signal({"leaderboard": [{"asn": 1}]})
+    assert not _has_signal({"summary": {"total_reqs": 0}, "heatmap": [], "leaderboard": []})
+    assert not _has_signal({"available": True})
+
+
+# ── Relative-range (range_token + anchor) stable-key path (security_regression) ─
+#
+# The network 30d analyst-cliff fix: when ``range_token`` is present the cache
+# key is built from (range_token, quantized_anchor, invite_clamp_fingerprint)
+# instead of the rolling resolved bounds, so a stable token+anchor HITS the memo
+# across rolling minutes. These pin the analyst-adversary invariants from the
+# spec: the resolved+clamped bounds drive the SCAN, the token/anchor only
+# stabilize the KEY, and the key partitions by every authorization axis.
+
+
+class _FakeAnalystSession:
+    """Minimal stand-in for an analyst session carrying invite-clamp params."""
+
+    def __init__(self, query_start_time=None, query_end_time=None, query_window_hours=None):
+        self.query_start_time = query_start_time
+        self.query_end_time = query_end_time
+        self.query_window_hours = query_window_hours
+
+
+def _stable_key(src, *, range_token="30d", quantized_anchor="2026-06-29T00:00:00Z", icf=None, mask_ips=False):
+    """Build a stable-shape (range_token-present) cache key with sane defaults."""
+    return _response_cache_key(
+        src,
+        # start/end are IGNORED on the stable path (they drive the scan, not the
+        # key) — pass distinct rolling values to prove they don't enter the key.
+        "2026-06-29T00:00:00Z",
+        "2026-06-29T12:34:56Z",
+        {},
+        "health_score",
+        5,
+        30,
+        "all",
+        None,
+        mask_ips,
+        range_token=range_token,
+        quantized_anchor=quantized_anchor,
+        invite_clamp_fingerprint=icf,
+    )
+
+
+@pytest.mark.security_regression
+def test_stable_key_partitions_by_service():
+    """(a) cross-tenant isolation on the stable path: two services with an
+    IDENTICAL (token, anchor, fingerprint) still key distinctly so one analyst
+    can never read another tenant's token+anchor entry."""
+    src_a = {"name": "svc_a", "service_id": "a"}
+    src_b = {"name": "svc_b", "service_id": "b"}
+    assert _stable_key(src_a) != _stable_key(src_b)
+
+
+@pytest.mark.security_regression
+def test_stable_key_partitions_by_mask_ips():
+    """(b) mask partition on the stable path: masked vs unmasked never share."""
+    src = {"name": "svc", "service_id": "s"}
+    assert _stable_key(src, mask_ips=False) != _stable_key(src, mask_ips=True)
+
+
+@pytest.mark.security_regression
+def test_stable_key_partitions_by_invite_clamp_fingerprint():
+    """(c) invite-clamp partition: open invite (None), a date-restricted invite,
+    and admin (None) vs analyst must produce DISTINCT keys so a clamped-down
+    invite can never read an entry scanned under a wider ceiling.
+
+    NOTE admin and open-invite BOTH carry icf=None at the key layer — that is
+    intentional and SAFE: an open invite has NO ceiling, so its scan window
+    equals the request's own (token-resolved) window, identical to admin's. The
+    partition that matters is open/admin (None) vs a RESTRICTED invite (a real
+    fingerprint), which this asserts."""
+    from backend.utils.time_window import invite_clamp_fingerprint
+
+    src = {"name": "svc", "service_id": "s"}
+    icf_open = invite_clamp_fingerprint(None)  # admin / open
+    icf_restricted = invite_clamp_fingerprint(
+        _FakeAnalystSession(query_start_time="2026-01-01T00:00:00Z", query_end_time="2026-02-01T00:00:00Z")
+    )
+    icf_windowed = invite_clamp_fingerprint(_FakeAnalystSession(query_window_hours=24))
+    assert icf_open is None
+    assert icf_restricted is not None and icf_windowed is not None
+    keys = {
+        _stable_key(src, icf=icf_open),
+        _stable_key(src, icf=icf_restricted),
+        _stable_key(src, icf=icf_windowed),
+    }
+    assert len(keys) == 3
+
+
+@pytest.mark.security_regression
+def test_stable_key_ignores_fe_supplied_bounds():
+    """(d, key layer) Same (token, quantized_anchor, fingerprint) → IDENTICAL key
+    regardless of the FE-supplied absolute start/end. This is the cliff fix: two
+    calls with DIFFERENT rolling FE bounds collapse to one key (and one memo
+    entry). The server resolves the scan window itself, so the FE bounds are not
+    in the key and cannot fragment it minute-over-minute."""
+    src = {"name": "svc", "service_id": "s"}
+    k1 = _response_cache_key(
+        src,
+        "2026-06-29T00:00:01Z",
+        "2026-06-29T11:11:11Z",
+        {},
+        "health_score",
+        5,
+        30,
+        "all",
+        None,
+        False,
+        range_token="30d",
+        quantized_anchor="2026-06-29T00:00:00Z",
+        invite_clamp_fingerprint=None,
+    )
+    k2 = _response_cache_key(
+        src,
+        "2026-06-29T00:43:59Z",
+        "2026-06-29T22:22:22Z",
+        {},
+        "health_score",
+        5,
+        30,
+        "all",
+        None,
+        False,
+        range_token="30d",
+        quantized_anchor="2026-06-29T00:00:00Z",
+        invite_clamp_fingerprint=None,
+    )
+    assert k1 == k2
+
+
+@pytest.mark.security_regression
+def test_stable_key_partitions_by_range_token_and_anchor():
+    """(e) no cross-range alias: a different range_token (or a different
+    quantized anchor) yields a DISTINCT key, so "24h" never reads "30d"'s
+    entry and yesterday's anchor never reads today's."""
+    src = {"name": "svc", "service_id": "s"}
+    k_30d = _stable_key(src, range_token="30d")
+    k_7d = _stable_key(src, range_token="7d")
+    k_24h = _stable_key(src, range_token="24h")
+    assert len({k_30d, k_7d, k_24h}) == 3
+    # Different anchor quantum → distinct.
+    k_anchor_a = _stable_key(src, quantized_anchor="2026-06-29T00:00:00Z")
+    k_anchor_b = _stable_key(src, quantized_anchor="2026-06-29T00:01:00Z")
+    assert k_anchor_a != k_anchor_b
+
+
+@pytest.mark.security_regression
+def test_stable_key_disjoint_from_legacy_key():
+    """A stable (range_token-present) key can never collide with a legacy
+    anchor-faithful key for otherwise-identical params — the ``k:"rel"``
+    namespace + dropped s/e keep the two shapes in separate spaces, so flipping
+    a request onto the keyed path can't read a stale legacy entry (or vice
+    versa)."""
+    src = {"name": "svc", "service_id": "s"}
+    legacy = _response_cache_key(
+        src, "2026-05-30T00:00:00Z", "2026-06-29T00:00:00Z", {}, "health_score", 5, 30, "all", None, False
+    )
+    stable = _stable_key(src, range_token="30d", quantized_anchor="2026-06-29T00:00:00Z")
+    assert legacy != stable
+
+
+@pytest.mark.security_regression
+def test_clamp_ceiling_still_enforced_when_token_supplied():
+    """(f) THE invariant: a token-resolved window NEVER exceeds the invite
+    ceiling. An analyst on a 24h-window invite who supplies range_token="30d"
+    still scans only the most-recent 24h — choosing a wider token can't widen
+    the scan. Exercises the resolver → TimeBounds.clamp chain the router runs."""
+    from datetime import UTC, datetime, timedelta
+
+    from backend.utils.remote_access import MAX_ANALYST_QUERY_SPAN, _time_bounds_from_params
+    from backend.utils.time_window import resolve_window
+
+    now = datetime(2026, 6, 29, 12, 0, 0, tzinfo=UTC)
+    # Analyst invite ceiling: rolling 24h window.
+    tb = _time_bounds_from_params(None, None, 24, now=now)
+
+    # Analyst asks for the 30d token, anchored at now.
+    resolved_start, resolved_end = resolve_window("30d", now.isoformat(), now=now)
+    rs = datetime.fromisoformat(resolved_start.replace("Z", "+00:00"))
+    re_ = datetime.fromisoformat(resolved_end.replace("Z", "+00:00"))
+    # The RESOLVED (pre-clamp) intent really is 30 days wide …
+    assert re_ - rs >= timedelta(days=29)
+
+    # … but after the analyst clamp the scanned span is bounded by the 24h invite.
+    clamped_start, clamped_end = tb.clamp(rs, re_, max_span=MAX_ANALYST_QUERY_SPAN)
+    assert clamped_end - clamped_start <= timedelta(hours=24)
+    # And never reaches back to the 30d-token start.
+    assert clamped_start > rs
+
+
+@pytest.mark.security_regression
+def test_keyed_path_cache_hit_round_trip(in_memory_duckdb, test_service_source):
+    """(d, end-to-end) Two get_health calls with the SAME (range_token,
+    quantized_anchor) but DIFFERENT resolved scan bounds HIT the same memo entry
+    — the data-plane proof of the cliff fix. (In production the bounds within an
+    anchor quantum are near-identical; here we deliberately vary them to prove
+    the key, not the bounds, decides the hit.)"""
+    from datetime import UTC, datetime, timedelta
+
+    # Production runs DuckDB sessions in UTC (SET TimeZone UTC); the WHERE clause
+    # compares the TIMESTAMP column against CAST(... AS TIMESTAMPTZ), so without
+    # a UTC session the explicit-bounds comparison shifts by the host offset and
+    # drops every row. Match prod here so the keyed window selects the fixture.
+    in_memory_duckdb.execute("SET TimeZone='UTC'")
+
+    table = _safe_table(test_service_source["name"])
+    insert_mock_logs(in_memory_duckdb, table, _net_logs(test_service_source))
+
+    # Mock logs land in [now-1h, now]; both windows must bracket now so each
+    # call has real signal (and so caches). The two FE-supplied starts differ
+    # by seconds within the same anchor quantum — the STABLE key (token+anchor)
+    # is identical, so the second call must hit the first's entry.
+    now = datetime.now(UTC)
+    anchor = now.strftime("%Y-%m-%dT%H:%M:00Z")  # minute-quantized anchor label
+    win_start_a = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:01Z")
+    win_start_b = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:59Z")
+    win_end = (now + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    first = get_health(
+        in_memory_duckdb,
+        test_service_source,
+        win_start_a,
+        win_end,
+        {},
+        range_token="30d",
+        quantized_anchor=anchor,
+    )
+    assert not first.get("is_cached")
+    assert _has_signal(first), "fixture window should carry signal so the entry is cacheable"
+    second = get_health(
+        in_memory_duckdb,
+        test_service_source,
+        win_start_b,
+        win_end,
+        {},
+        range_token="30d",
+        quantized_anchor=anchor,
+    )
+    assert second.get("is_cached") is True
 
 
 # silence ruff unused imports — duckdb + pytest are used by the new tests

@@ -203,6 +203,19 @@ export const FilterBar = React.memo(function FilterBar() {
           finalStart = subDays(latestLog, 1).toISOString()
         }
 
+        // Degenerate-extent guard: a service with a single log — or all logs
+        // sharing one timestamp — has earliest_log_at === latest_log_at, so the
+        // snapped window collapses to finalStart === finalEnd. The backend clamp
+        // uses half-open [start, end) semantics: it rejects a zero-width window
+        // outright ("clamped time range is empty") and would exclude the lone
+        // boundary log even if it didn't. Widen to a 1-hour window centred on the
+        // log so the dashboard renders it (with context) instead of erroring.
+        if (new Date(finalEnd).getTime() <= new Date(finalStart).getTime()) {
+          const anchorMs = new Date(finalEnd).getTime()
+          finalStart = new Date(anchorMs - 30 * 60 * 1000).toISOString()
+          finalEnd = new Date(anchorMs + 30 * 60 * 1000).toISOString()
+        }
+
         if (isAutoRange) {
           // Only snap if the data is stale. If it's fresh, the default "last 24 hours"
           // from the store is perfectly fine and avoids an unnecessary duplicate query.

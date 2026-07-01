@@ -267,6 +267,86 @@ def test_preview_alert_unknown_service_returns_404(client):
     assert resp.json()["detail"] == {"error": "Service not found"}
 
 
+def test_preview_alert_self_heals_stale_view(client, in_memory_duckdb):
+    """View-lag self-heal: the preview window is anchored to ``(SELECT
+    max(timestamp) FROM table)``, which is NULL when the cached Iceberg view
+    SQL lags a fresh ingest → 0 preview rows even though data exists. When the
+    first query returns nothing BUT the status cache reports data, force ONE
+    view rebuild and re-run.
+
+    Simulated by starting with an empty table and having the patched
+    ``force_rebuild_view`` seed the rows (the rebuild is what makes the
+    previously-stale view return data)."""
+    table = "logs_test_service"
+    # Empty table (schema only) → first query returns no rows.
+    in_memory_duckdb.execute(
+        f"CREATE TABLE {table} ("
+        "timestamp TIMESTAMPTZ, status INTEGER, edge BOOLEAN, ottfb DOUBLE, "
+        "elapsed BIGINT, cache VARCHAR, resp_bytes BIGINT, req_bytes BIGINT, req_header_bytes BIGINT)"
+    )
+
+    rebuild_calls = {"n": 0}
+
+    def fake_rebuild(con, src):
+        # The rebuild makes the previously-empty view non-empty: insert rows
+        # into the EXISTING table (don't re-CREATE it).
+        rebuild_calls["n"] += 1
+        now = datetime.now(UTC)
+        rows = [
+            (now - timedelta(seconds=i * 10), 200 if i % 2 == 0 else 500, i % 2 == 0, 50.0, 100, "HIT", 1024, 200, 100)
+            for i in range(10)
+        ]
+        con.executemany(f"INSERT INTO {table} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+
+    with (
+        patch(
+            "backend.core.duckdb.get_source_for_service",
+            return_value={"name": "test_service", "service_id": _SERVICE_ID},
+        ),
+        # Status cache reports data exists (the fresh-ingest snapshot).
+        patch("backend.config.get_status", return_value={"local_rows": 10, "latest_log_at": "2026-06-26T12:00:00Z"}),
+        patch("backend.repositories._base.force_rebuild_view", side_effect=fake_rebuild),
+    ):
+        resp = client.post("/api/alerts/preview", json=_preview_body())
+
+    assert resp.status_code == 200
+    assert rebuild_calls["n"] == 1, f"preview self-heal must rebuild EXACTLY once; got {rebuild_calls['n']}"
+    data = resp.json()["data"]
+    # After the rebuild + re-run, the seeded rows are visible.
+    assert sum(data["values"]) > 0
+
+
+def test_preview_alert_no_self_heal_when_status_cache_empty(client, in_memory_duckdb):
+    """A genuinely empty service (no status-cache row count) must NOT trigger
+    a view rebuild on an empty preview — the false-positive guard."""
+    table = "logs_test_service"
+    in_memory_duckdb.execute(
+        f"CREATE TABLE {table} ("
+        "timestamp TIMESTAMPTZ, status INTEGER, edge BOOLEAN, ottfb DOUBLE, "
+        "elapsed BIGINT, cache VARCHAR, resp_bytes BIGINT, req_bytes BIGINT, req_header_bytes BIGINT)"
+    )
+
+    rebuild_calls = {"n": 0}
+
+    def fake_rebuild(con, src):
+        rebuild_calls["n"] += 1
+
+    with (
+        patch(
+            "backend.core.duckdb.get_source_for_service",
+            return_value={"name": "test_service", "service_id": _SERVICE_ID},
+        ),
+        # Status cache reports NO data → not a stale-view symptom.
+        patch("backend.config.get_status", return_value={}),
+        patch("backend.repositories._base.force_rebuild_view", side_effect=fake_rebuild),
+    ):
+        resp = client.post("/api/alerts/preview", json=_preview_body())
+
+    assert resp.status_code == 200
+    assert rebuild_calls["n"] == 0, "preview self-heal must NOT fire when the status cache reports no data"
+    assert sum(resp.json()["data"]["values"]) == 0
+
+
 def test_preview_alert_relative_evaluation_returns_hist_values(client, in_memory_duckdb):
     """``relative_increase`` returns a parallel ``hist_values`` series shifted
     by ``comparison_period_min`` — needed to render the comparison overlay."""

@@ -29,8 +29,13 @@ type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 export interface ServiceColumnDeps {
   activeServiceId: string | null
-  setActiveServiceId: (id: string) => void
-  router: { push: (href: string) => void }
+  // Switch the active service AND navigate to its dashboard. Encapsulated so
+  // both the store write and the bootstrap-cache refresh happen together (see
+  // ServicesTable.switchToService) — switching to a freshly-added service whose
+  // id isn't yet in the cached bootstrap.services otherwise gets reverted by
+  // useBootstrap's reconcile effect, bouncing the admin back to the old
+  // service + /admin.
+  switchToService: (id: string) => void
   servicesLength: number
   setCronService: (s: ServiceConfig) => void
   setSettingsService: (s: ServiceConfig) => void
@@ -43,8 +48,7 @@ export interface ServiceColumnDeps {
 export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[] {
   const {
     activeServiceId,
-    setActiveServiceId,
-    router,
+    switchToService,
     servicesLength,
     setCronService,
     setSettingsService,
@@ -252,10 +256,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
                   variant="default"
                   size="sm"
                   className="h-8 w-[105px] text-[11px] font-bold uppercase tracking-tight bg-primary hover:bg-primary/90"
-                  onClick={() => {
-                    setActiveServiceId(service.service_id)
-                    router.push(`/dashboard?service=${service.service_id}`)
-                  }}
+                  onClick={() => switchToService(service.service_id)}
                 >
                   <Play className="h-3 w-3 mr-1.5 fill-current" /> Switch to
                 </Button>
@@ -272,10 +273,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
                 } />
                 <DropdownMenuContent align="end" className="w-52">
                   {!isActive && (
-                    <DropdownMenuItem onClick={() => {
-                      setActiveServiceId(service.service_id)
-                      router.push(`/dashboard?service=${service.service_id}`)
-                    }}>
+                    <DropdownMenuItem onClick={() => switchToService(service.service_id)}>
                       <Play className="mr-2 h-4 w-4" /> Switch to Service
                     </DropdownMenuItem>
                   )}

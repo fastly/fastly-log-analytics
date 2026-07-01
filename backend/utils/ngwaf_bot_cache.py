@@ -41,14 +41,9 @@ def get_db_path() -> str:
 
 
 def _get_conn() -> sqlite3.Connection:
-    from backend.core.sqlite_pool import SMALL_CACHE_PRAGMAS
+    from backend.core.sqlite_pool import open_small_cache_db
 
-    con = sqlite3.connect(str(_db_path()), timeout=10)
-    for pragma in SMALL_CACHE_PRAGMAS:
-        con.execute(pragma)
-    con.executescript(_DDL)
-    con.commit()
-    return con
+    return open_small_cache_db(_db_path(), ddl=_DDL)
 
 
 def ensure_schema() -> None:

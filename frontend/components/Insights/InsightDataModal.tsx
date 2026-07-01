@@ -7,7 +7,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { InsightCardData } from '@/types/api'
-import { ImpossibleDistanceData } from './types'
+import { ImpossibleDistanceData, ScriptedTrafficData } from './types'
 import { InsightItemRow } from './InsightItemRow'
 import { ScrollArea } from '@/components/ui/scroll-area'
 
@@ -17,9 +17,10 @@ interface InsightDataModalProps {
   onOpenChange: (open: boolean) => void
   onMapClick?: (data: ImpossibleDistanceData) => void
   onCacheCollapseClick?: (url: string) => void
+  onScriptedTrafficClick?: (data: ScriptedTrafficData) => void
 }
 
-export function InsightDataModal({ insight, isOpen, onOpenChange, onMapClick, onCacheCollapseClick }: InsightDataModalProps) {
+export function InsightDataModal({ insight, isOpen, onOpenChange, onMapClick, onCacheCollapseClick, onScriptedTrafficClick }: InsightDataModalProps) {
   if (!insight.items || insight.items.length === 0) return null;
 
   return (
@@ -41,6 +42,7 @@ export function InsightDataModal({ insight, isOpen, onOpenChange, onMapClick, on
                 insightId={insight.id}
                 onMapClick={onMapClick}
                 onCacheCollapseClick={onCacheCollapseClick}
+                onScriptedTrafficClick={onScriptedTrafficClick}
               />
             ))}
           </div>

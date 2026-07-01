@@ -425,3 +425,49 @@ def test_deliver_stage_coexists_with_edge_and_origin():
     assert "  set req.http.x-fos-edge-data:f_deliver" not in snippets["fetch"]
     assert "  set beresp.http.x-fos-origin-data:f_edge" not in snippets["fetch"]
     assert "f_edge" not in snippets["deliver"]
+
+
+def test_ip_capture_prefers_operator_supplied_fastly_client_ip():
+    """The 'ip' edge capture must trust an operator-overwritten
+    req.http.Fastly-Client-IP (e.g. a real source IP injected when the service
+    sits behind a fronting proxy that carries the origin client in a header)
+    and fall back to the raw socket client.ip otherwise. Both if() branches
+    must be STRING, so the fallback stringifies the IP via ``"" + client.ip``."""
+    snippets = generate_capture_vcl({"groups": ["A"]})
+    assert (
+        "set req.http.x-fos-edge-data:ip = "
+        'if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, "" + client.ip);'
+    ) in snippets["recv"]
+    # The bare, spoofable assignment must be gone.
+    assert "set req.http.x-fos-edge-data:ip = client.ip;" not in snippets["recv"]
+
+
+def test_recv_reset_unsets_client_supplied_fastly_client_ip_at_edge():
+    """A separate snippet (installed at priority -100) drops any client-supplied
+    Fastly-Client-IP at the true edge so a spoofed value can't poison the
+    captured client IP. With no shield secret it is gated on the first edge
+    pass via fastly.ff.visits_this_service == 0 (the operator's own override
+    runs after it, the priority-1 capture reads the result)."""
+    snippets = generate_capture_vcl({"groups": ["A"]})
+    reset = snippets["recv_reset"]
+    assert "unset req.http.Fastly-Client-IP;" in reset
+    assert "req.restarts == 0 && fastly.ff.visits_this_service == 0" in reset
+
+
+def test_recv_reset_edge_gate_is_always_unforgeable_fastly_ff():
+    """X-Edge-Shield-Auth as an edge-detection mechanism is retired. The reset's
+    edge gate is ALWAYS the unforgeable first-edge-pass check
+    (``req.restarts == 0 && fastly.ff.visits_this_service == 0``) — there is no
+    shield-auth secret variant. The reset still drops a client-supplied
+    Fastly-Client-IP at the true edge, and the retired header appears nowhere."""
+    reset = generate_capture_vcl({"groups": ["A"]})["recv_reset"]
+    assert "req.restarts == 0 && fastly.ff.visits_this_service == 0" in reset
+    assert "unset req.http.Fastly-Client-IP;" in reset
+    assert "X-Edge-Shield-Auth" not in reset
+
+
+def test_recv_reset_absent_when_ip_not_edge_captured():
+    """If the ip field is disabled there is nothing to protect, so the reset
+    snippet is not emitted."""
+    snippets = generate_capture_vcl({"groups": [], "field_overrides": {"ip": False}})
+    assert "recv_reset" not in snippets

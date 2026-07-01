@@ -49,7 +49,7 @@ def test_insights_analyst_passes_clamped_window(client, in_memory_duckdb, test_s
 
     from backend.core.request_context import build_request_context
     from backend.main import app
-    from backend.utils.remote_access import TimeBounds, get_analyst_time_bounds
+    from backend.utils.remote_access import TimeBounds
 
     # Bounds in the past relative to the router's `now`, so clamp_end ceilings
     # at `end` and clamp_start floors at `start` regardless of wall-clock.
@@ -68,19 +68,21 @@ def test_insights_analyst_passes_clamped_window(client, in_memory_duckdb, test_s
         captured.update(kw)
         return _stub_insights()
 
+    # The handler clamps via ctx.clamp, which reads ctx.time_bounds (what
+    # build_request_context resolves from get_analyst_time_bounds in prod).
     app.dependency_overrides[build_request_context] = override_request_context(
-        source=test_service_source, con=in_memory_duckdb, session=session, path="/api/insights"
+        source=test_service_source,
+        con=in_memory_duckdb,
+        session=session,
+        path="/api/insights",
+        time_bounds=TimeBounds(start=start, end=end),
     )
-    app.dependency_overrides[get_analyst_time_bounds] = lambda: TimeBounds(start=start, end=end)
-    try:
-        with patch("backend.repositories.insights.get_insights", side_effect=_fake):
-            resp = client.post(
-                "/api/insights",
-                headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-                json={"window_size_hrs": 1.0, "baseline_hours": 168.0},
-            )
-    finally:
-        app.dependency_overrides.pop(get_analyst_time_bounds, None)
+    with patch("backend.repositories.insights.get_insights", side_effect=_fake):
+        resp = client.post(
+            "/api/insights",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={"window_size_hrs": 1.0, "baseline_hours": 168.0},
+        )
 
     assert resp.status_code == 200, resp.text
     # Clamp ceilings the anchor at `end` and floors the earliest scan at `start`.

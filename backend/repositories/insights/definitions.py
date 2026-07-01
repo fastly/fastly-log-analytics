@@ -940,3 +940,93 @@ registry.register(
         row_processor=shield_path_degradation_processor,
     )
 )
+
+# ── 30. Scripted Traffic Patterns ─────────────────────────────────────────────
+
+
+def repeated_patterns_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [ip, n_gaps, n_events, avg_interval, stddev_interval, cv_corr,
+    #              modal_frac, distinct_ua, span_s, mode_gap]
+    # M3: IP-keyed (label + meta.filters.ip + investigate_url) — mask at the
+    # source when the analyst policy sets mask_ips. See connection_abuse.
+    ip = row[0]
+    if context.get("mask_ips") and ip:
+        ip = mask_ip(ip)
+
+    n_gaps = int(row[1] or 0)
+    n_events = int(row[2] or 0)
+    mean_interval = float(row[3] or 0)
+    stddev = float(row[4] or 0)
+    cv = float(row[5] or 0)
+    modal_frac = float(row[6] or 0)
+    distinct_ua = int(row[7] or 0)
+    span_s = int(row[8] or 0)
+    mode_gap = int(row[9]) if row[9] is not None else None
+    rps = round(n_events / span_s, 4) if span_s else 0.0
+
+    # Regularity score 0-100 (higher = more machine-like). The final SQL
+    # (plan §5) surfaces only the two robust regularity signals — the
+    # Sheppard-corrected CV and the modal-dominance fraction; the optional
+    # Bowley term was dropped from the hot-path SQL, so the score renormalizes
+    # the CV/modal weights (0.5/0.3 → 0.625/0.375) to span the full 0-100 range.
+    score = round(100 * (0.625 * (1 - min(cv, 1.0)) + 0.375 * modal_frac))
+
+    # Soft framing: this is a security *accusation* surfaced to a user, so prefer
+    # false negatives. critical only when dense AND near-perfectly regular.
+    if score >= 90 and n_events >= 30:
+        severity = "critical"
+    elif score >= 70:
+        severity = "warning"
+    else:
+        severity = "info"
+
+    return {
+        "label": ip or "(unknown)",
+        "current_val": mean_interval,
+        "baseline_val": stddev,
+        "baseline_label": "jitter (σ)",
+        "unit": "s interval",
+        "meta": {
+            "score": score,
+            "cv": cv,
+            "modal_frac": modal_frac,
+            "mean_interval_s": mean_interval,
+            "stddev_s": stddev,
+            "mode_gap_s": mode_gap,
+            "n_gaps": n_gaps,
+            "n_events": n_events,
+            "span_s": span_s,
+            "rps": rps,
+            # Informational only — NOT a gate (D4). High distinct_ua + low CV is
+            # a UA-rotating scraper (*more* suspicious), not a reason to suppress.
+            "distinct_ua": distinct_ua,
+            "filters": {"ip": ip},
+        },
+        "severity": severity,
+    }
+
+
+def repeated_patterns_severity(items: list[dict]) -> str:
+    if not items:
+        return "clean"
+    if any(i.get("severity") == "critical" for i in items):
+        return "critical"
+    if any(i.get("severity") == "warning" for i in items):
+        return "warning"
+    return "info"
+
+
+registry.register(
+    InsightDefinition(
+        id="repeated_patterns",
+        title="Scripted Traffic Patterns",
+        description=(
+            "IPs sending requests on a highly regular cadence — automated scrapers, "
+            "pollers, or cron-scheduled scripts that evade volumetric rate limits"
+        ),
+        sql_template=SQL.REPEATED_PATTERNS,
+        required_fields=["ip", "timestamp"],
+        row_processor=repeated_patterns_processor,
+        severity_logic=repeated_patterns_severity,
+    )
+)

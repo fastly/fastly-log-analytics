@@ -217,69 +217,36 @@ def test_generate_capture_vcl_accepts_none_config():
     assert "recv" in snippets
 
 
-# ── 007: X-Edge-Shield-Auth cluster-fetch guard (anti Fastly-FF spoof) ──────
+# ── 007: edge-hop detection via unforgeable fastly.ff (anti Fastly-FF spoof) ─
+#
+# X-Edge-Shield-Auth as an edge-detection mechanism is RETIRED. Edge detection
+# is now ALWAYS ``fastly.ff.visits_this_service == 0`` — unforgeable (each
+# Fastly-FF entry is a salted hash only genuine Fastly hops can produce), so a
+# client cannot fake having already transited our edge. No shield-auth secret
+# is generated, validated, or stamped anywhere in the capture VCL.
 
 
-def test_capture_vcl_uses_shield_secret_guard_when_secret_present():
-    """007: with a cluster_secret the edge scrub/capture guard keys on the
-    unspoofable X-Edge-Shield-Auth secret, NOT the client-spoofable
-    fastly.ff.visits_this_service. The auth header is also stripped from
-    inbound client requests so a client can't pre-set it to skip the scrub."""
-    snippets = fastly_api.generate_capture_vcl({"groups": ["A"]}, cluster_secret="SEKRIT")
-    assert 'req.http.X-Edge-Shield-Auth != "SEKRIT"' in snippets["recv"]
-    assert "fastly.ff.visits_this_service" not in snippets["recv"]
-    assert "unset req.http.X-Edge-Shield-Auth;" in snippets["recv"]
-
-
-def test_capture_vcl_falls_back_to_fastly_ff_without_secret():
-    """Without a cluster_secret the legacy guard is emitted (services not
-    yet re-provisioned keep working) and no shield-auth header is used."""
-    snippets = fastly_api.generate_capture_vcl({"groups": ["A"]}, cluster_secret=None)
-    assert "fastly.ff.visits_this_service == 0" in snippets["recv"]
+def test_capture_vcl_uses_fastly_ff_edge_detect_in_scrub_and_capture():
+    """The edge scrub/capture guards key on the unforgeable
+    fastly.ff.visits_this_service == 0 check. There is no shield-auth variant
+    anymore: X-Edge-Shield-Auth must appear NOWHERE in the recv snippet
+    (no scrub unset, no edge-detect comparison)."""
+    snippets = fastly_api.generate_capture_vcl({"groups": ["A"]})
+    # scrub guard (first-pass-only): restarts == 0 && the unforgeable edge check.
+    assert "if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {" in snippets["recv"]
+    # The retired shield-auth mechanism must not reappear in any form.
     assert "X-Edge-Shield-Auth" not in snippets["recv"]
-    assert "X-Edge-Shield-Auth" not in snippets["miss"]
 
 
-def test_capture_vcl_stamps_shield_secret_on_every_bereq_not_just_origin():
-    """007 latent-bug regression: the shield-auth secret must be stamped
-    UNCONDITIONALLY on every outgoing bereq (edge→shield AND shield→origin),
-    mirroring the CDN/scoring VCL. Gating it inside ``if (req.backend.is_origin)``
-    would leave the edge→shield leg unauthenticated, so a shielded service
-    re-captures edge data at the shield with the wrong client IP."""
-    snippets = fastly_api.generate_capture_vcl({"groups": ["A"]}, cluster_secret="SEKRIT")
-    set_line = 'set bereq.http.X-Edge-Shield-Auth = "SEKRIT";'
-    for kind in ("miss", "pass"):
-        lines = snippets[kind].splitlines()
-        # Top-level (column 0) => unconditional, not nested in the is_origin block.
-        assert set_line in lines, f"{kind}: shield secret not stamped unconditionally"
-        assert f"  {set_line}" not in lines, f"{kind}: shield secret wrongly nested/indented"
-
-
-# ── 007: resolve_shield_secret (single secret per service) ──────────────────
-
-
-def test_resolve_shield_secret_prefers_scoring_request_secret():
-    """On a scoring service the capture VCL must ride the SAME secret the
-    scoring VCL stamps (scoring.request_secret) so the shared
-    X-Edge-Shield-Auth header carries one value and the shield honours both
-    snippets' skip checks (no cluster_secret/request_secret collision)."""
-    cfg = {"cluster_secret": "CLUSTER", "scoring": {"enabled": True, "request_secret": "REQ"}}
-    assert fastly_api.resolve_shield_secret(cfg) == "REQ"
-
-
-def test_resolve_shield_secret_uses_cluster_secret_without_scoring():
-    cfg = {"cluster_secret": "CLUSTER", "scoring": {"enabled": False}}
-    assert fastly_api.resolve_shield_secret(cfg) == "CLUSTER"
-
-
-def test_resolve_shield_secret_falls_back_to_cluster_when_scoring_lacks_secret():
-    cfg = {"cluster_secret": "CLUSTER", "scoring": {"enabled": True}}
-    assert fastly_api.resolve_shield_secret(cfg) == "CLUSTER"
-
-
-def test_resolve_shield_secret_none_when_neither_present():
-    assert fastly_api.resolve_shield_secret({}) is None
-    assert fastly_api.resolve_shield_secret(None) is None
+def test_capture_vcl_never_references_shield_auth_anywhere():
+    """The X-Edge-Shield-Auth header is retired from the capture VCL entirely:
+    no inbound scrub unset, and no `set bereq.http.X-Edge-Shield-Auth` stamp on
+    the miss/pass legs. (Previously a cluster_secret stamped it on every bereq;
+    that mechanism is gone — fastly.ff is unforgeable so no auth header is
+    needed to distinguish the edge hop.)"""
+    snippets = fastly_api.generate_capture_vcl({"groups": ["A"]})
+    for kind in ("recv", "miss", "pass"):
+        assert "X-Edge-Shield-Auth" not in snippets[kind], f"{kind}: retired shield-auth header reappeared"
 
 
 # ── EDGE_DATA_MAPPING: structural invariants ───────────────────────────────
@@ -347,6 +314,22 @@ def test_generate_capture_vcl_includes_custom_edge_field_in_recv_snippet():
     out = fastly_api.generate_capture_vcl(cfg)
     assert "my_custom" in out["recv"]
     assert "req.url" in out["recv"]
+
+
+def test_capture_snippet_plan_runs_reset_before_capture():
+    """The Reset Client IP snippet must install at a lower priority than the
+    capture snippet so it (and any operator override that follows) runs first.
+    Pinned because the whole anti-spoof + operator-override design depends on
+    reset(-100) < operator VCL < capture(1) ordering. Lower priority runs
+    first in Fastly."""
+    plan = {key: (name, sub, prio) for key, name, sub, prio, _req in fastly_api.CAPTURE_SNIPPET_PLAN}
+    reset_name, reset_sub, reset_prio = plan["recv_reset"]
+    _cap_name, cap_sub, cap_prio = plan["recv"]
+    assert reset_name == "Fastly Log Analysis Reset Client IP"
+    assert reset_sub == "recv"  # both target vcl_recv
+    assert cap_sub == "recv"
+    assert reset_prio == -100
+    assert reset_prio < cap_prio
 
 
 def test_generate_capture_vcl_emits_group_l_request_id_in_recv():

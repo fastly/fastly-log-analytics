@@ -6,18 +6,13 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
 import { ScorerFailOpenHelp } from '@/components/SessionScoring/help-content'
 import { Skeleton } from '@/components/ui/skeleton'
+import type { components } from '@/types/api.generated'
 
 import { useScoringQuery } from './useScoringQuery'
 
-interface FailOpenBucket {
-  reason: string
-  count: number
-}
-
-interface HealthResponse {
-  since_hours: number
-  fail_open_breakdown?: FailOpenBucket[]
-}
+// Generated from the /scoring/health response_model — single source of truth.
+type HealthResponse = components['schemas']['ScoringHealthResponse']
+type FailOpenBucket = NonNullable<components['schemas']['ScoringReasonCount']>
 
 interface ScorerFailOpenBreakdownCardProps {
   serviceId: string
@@ -50,8 +45,8 @@ export function ScorerFailOpenBreakdownCard({
   )
 
   const buckets = data?.fail_open_breakdown ?? []
-  const total = buckets.reduce((acc, b) => acc + b.count, 0)
-  const max = buckets.reduce((acc, b) => Math.max(acc, b.count), 0)
+  const total = buckets.reduce((acc, b) => acc + (b.count ?? 0), 0)
+  const max = buckets.reduce((acc, b) => Math.max(acc, b.count ?? 0), 0)
 
   return (
     <AnalyticsCard
@@ -90,7 +85,7 @@ export function ScorerFailOpenBreakdownCard({
           </div>
           <div className="space-y-1.5">
             {buckets.map((b) => (
-              <FailOpenRow key={b.reason} bucket={b} max={max} />
+              <FailOpenRow key={b.reason ?? ''} bucket={b} max={max} />
             ))}
           </div>
         </div>
@@ -100,8 +95,8 @@ export function ScorerFailOpenBreakdownCard({
 }
 
 function FailOpenRow({ bucket, max }: { bucket: FailOpenBucket; max: number }) {
-  const { label, status, Icon } = describeFailOpen(bucket.reason)
-  const widthPct = max > 0 ? Math.max(4, Math.round((bucket.count / max) * 100)) : 0
+  const { label, status, Icon } = describeFailOpen(bucket.reason ?? '')
+  const widthPct = max > 0 ? Math.max(4, Math.round(((bucket.count ?? 0) / max) * 100)) : 0
   return (
     <div className="flex items-center gap-3 rounded-md border bg-card px-3 py-2 text-xs">
       <Icon className="h-4 w-4 shrink-0 text-destructive/80" />
@@ -123,7 +118,7 @@ function FailOpenRow({ bucket, max }: { bucket: FailOpenBucket; max: number }) {
         <code className="mt-1 block truncate text-[10px] text-muted-foreground">{bucket.reason}</code>
       </div>
       <span className="shrink-0 font-mono tabular-nums text-foreground">
-        {bucket.count.toLocaleString()}
+        {(bucket.count ?? 0).toLocaleString()}
       </span>
     </div>
   )

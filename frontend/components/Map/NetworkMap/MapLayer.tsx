@@ -121,7 +121,11 @@ export function useMapInit({
         },
         center: [0, 20],
         zoom: 1,
-        interactive: true
+        interactive: true,
+        // Don't hijack page scroll: a plain mousewheel scrolls the PAGE; only
+        // ⌘/Ctrl + wheel (or pinch / the +/- buttons) zooms the map. The map
+        // sits mid-page, so bare-wheel zoom traps the scroll. (cooperative gestures)
+        cooperativeGestures: true,
       })
       map.current.addControl(new maplibregl.NavigationControl(), 'top-right')
 

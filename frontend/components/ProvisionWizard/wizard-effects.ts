@@ -175,6 +175,14 @@ export function useWizardEffects(args: WizardEffectsArgs) {
           "/api/provision/services/{service_id}/ngwaf-workspace" as any,
           {
             params: { path: { service_id: selectedService.id } },
+            // The endpoint runs validate_destructive_token — it requires a
+            // Fastly token with the 'global' scope on this service (mirrors
+            // NgwafDialog's save path). Without it the PATCH 401s with
+            // token_required, and the typed-client 401 handler in lib/api.ts
+            // treats that as a dead analyst session and bounces the admin to
+            // /share-login right after a successful provision. Pass the same
+            // superuser token the wizard already used to deploy.
+            headers: { Authorization: `Bearer ${token}` },
             body: { ngwaf_workspace_id: config.ngwaf_workspace_id } as any,
           },
         )

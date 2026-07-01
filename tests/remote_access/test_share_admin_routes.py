@@ -189,6 +189,69 @@ def test_update_invite_services_unknown_404(client):
     assert r.status_code == 404
 
 
+def test_create_invite_empty_services_400(client):
+    """An invite with no services strands the analyst on 'No service found'."""
+    r = client.post(
+        "/api/admin/share/invites",
+        json={
+            "name": "Drew",
+            "email": "drew@example.com",
+            "passcode": "ocean-breeze-cabin-42",
+            "service_ids": [],
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "invalid_request"
+
+
+def test_update_invite_services_empty_400(client):
+    r = client.post(
+        "/api/admin/share/invites",
+        json={
+            "name": "Drew",
+            "email": "drew@example.com",
+            "passcode": "ocean-breeze-cabin-42",
+            "service_ids": ["svcA"],
+        },
+    )
+    invite_id = r.json()["id"]
+    r2 = client.patch(
+        f"/api/admin/share/invites/{invite_id}/services",
+        json={"service_ids": []},
+    )
+    assert r2.status_code == 400
+    assert r2.json()["detail"]["error"] == "invalid_request"
+
+
+def test_update_invite_pii_toggles_mask_ips(client):
+    r = client.post(
+        "/api/admin/share/invites",
+        json={
+            "name": "Drew",
+            "email": "drew@example.com",
+            "passcode": "ocean-breeze-cabin-42",
+            "service_ids": ["svcA"],
+            "pii_policy": {"mask_ips": False},
+        },
+    )
+    invite_id = r.json()["id"]
+    assert r.json()["pii_policy"]["mask_ips"] is False
+    r2 = client.patch(
+        f"/api/admin/share/invites/{invite_id}/pii",
+        json={"mask_ips": True},
+    )
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["pii_policy"]["mask_ips"] is True
+
+
+def test_update_invite_pii_unknown_404(client):
+    r = client.patch(
+        "/api/admin/share/invites/no-such-invite/pii",
+        json={"mask_ips": True},
+    )
+    assert r.status_code == 404
+
+
 def test_update_invite_passcode_happy_path(client):
     """Rotate passcode without recreating the invite. Verifies the new passcode
     works at the share-login endpoint and the old one no longer does."""
@@ -433,39 +496,40 @@ def test_wordphrase_returns_dashed_string(client):
     assert "-" in passcode
 
 
-# ── /stream (SSE) ──────────────────────────────────────────────────────────
+# ── share-live freshness (now on the multiplexed admin event stream) ───────
 #
-# We don't TestClient-stream the SSE endpoint itself: TestClient.stream
-# waits on the FULL response body before returning, but the /stream
-# generator is a `while True` loop, so the call would deadlock at the
-# `__enter__`. (The cron-runs SSE test works only because its test
-# mocks `publisher.subscribe` to a finite async-generator.) Instead we
-# pin the route is registered AND test the payload shape via the
-# extracted ``_live_payload`` helper — same source of truth as the
-# polling /live endpoint, so payload-shape coverage carries.
+# The dedicated ``/api/admin/share/stream`` SSE endpoint was REMOVED: its
+# live freshness now rides the multiplexed ``/api/admin/events/stream``
+# (``share`` channel) so /admin/share holds ONE SSE connection over the
+# HTTP/1.1 admin tunnel instead of two. The streaming wiring (envelope
+# framing, serviceless start, cleanup) is covered in
+# tests/routers/test_admin_events_stream.py. Here we pin that the dedicated
+# stream route is gone, the polling /live endpoint stays, and the shared
+# payload helper still has the wire shape the frontend cache expects.
 
 
-def test_stream_route_is_registered():
-    """If the route declaration is dropped, the /admin/share page
-    silently falls back to its 5-min safety-net poll. This pins it."""
+def test_dedicated_stream_route_is_removed():
+    """The standalone /api/admin/share/stream endpoint is gone — its job
+    moved to the admin event stream's `share` channel. Guard against an
+    accidental re-add (which would put /admin/share back to two streams)."""
     from fastapi import FastAPI
 
     from backend.routers import share_admin
 
     app = FastAPI()
     app.include_router(share_admin.router)
-    # FastAPI 0.138 includes sub-routers lazily; assert against the public
-    # OpenAPI path table rather than walking app.routes (which now holds a
-    # single _IncludedRouter wrapper instead of the copied child routes).
-    assert "/api/admin/share/stream" in app.openapi()["paths"]
+    paths = app.openapi()["paths"]
+    assert "/api/admin/share/stream" not in paths
+    # The lean polling snapshot endpoint stays (mount + mutation refetch).
+    assert "/api/admin/share/live" in paths
 
 
-def test_stream_payload_shape_matches_live(client):
-    """The SSE channel reuses the same ``_live_payload`` helper as
-    the /live polling endpoint, so the wire-shape contract the
+def test_live_payload_shape_matches_share_channel(client):
+    """The `share` channel and the /live polling endpoint reuse the same
+    ``build_share_live_payload`` helper, so the wire-shape contract the
     frontend SHARE_LIVE_QUERY_KEY cache expects holds for both."""
-    from backend.routers.share_admin import _live_payload
+    from backend.routers.share_admin import build_share_live_payload
 
-    payload = _live_payload()
+    payload = build_share_live_payload()
     for key in ("sharing_active", "public_url", "active_session_count", "rate_limits", "telemetry"):
         assert key in payload, f"missing {key}"
