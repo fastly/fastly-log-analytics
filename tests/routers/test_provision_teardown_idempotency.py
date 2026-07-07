@@ -117,7 +117,7 @@ def test_teardown_is_idempotent_second_call_is_404(isolated_configs_dir):
     with (
         patch("backend.provision.perform_teardown", side_effect=_fake_perform_teardown),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
         patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly_dual),
     ):
         with TestClient(app) as client:
@@ -189,7 +189,7 @@ def test_teardown_preserves_duckdb_when_remove_cache_false(isolated_configs_dir,
     with (
         patch("backend.provision.perform_teardown", side_effect=_fake_perform_teardown),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
         patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly_dual),
     ):
         with TestClient(app) as client:
@@ -230,7 +230,7 @@ def test_teardown_partial_failure_in_perform_teardown_still_succeeds(isolated_co
     with (
         patch("backend.provision.perform_teardown", side_effect=_boom_teardown),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
         patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly_dual),
     ):
         with TestClient(app) as client:

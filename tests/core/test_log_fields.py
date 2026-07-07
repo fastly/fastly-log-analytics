@@ -37,6 +37,71 @@ def test_field_overrides():
     assert '"pop":' not in fmt  # Pop is Group C, shouldn't be included
 
 
+# ── default_off (opt-in) fields ────────────────────────────────────────────
+
+
+def test_default_off_field_registry_non_empty():
+    """At least one field carries the opt-in ``default_off`` flag
+    (``cookie_session``). Guards the mechanism from being silently dropped:
+    if this frozenset empties out, the opt-in gate has regressed to nothing.
+    """
+    from backend.core.log_fields import DEFAULT_OFF_FIELD_IDS
+
+    assert "cookie_session" in DEFAULT_OFF_FIELD_IDS
+
+
+def test_default_off_field_excluded_from_group_by_default():
+    """INVARIANT: a ``default_off`` field is NOT included by
+    ``resolve_enabled_fields`` merely because its group is enabled.
+
+    ``cookie_session`` lives in group H; enabling H (and the whole full
+    preset) must NOT pull it in — capturing a per-session client identifier
+    requires a deliberate opt-in.
+    """
+    from backend.core.log_fields import PRESETS, resolve_enabled_fields
+
+    # Group H directly enabled.
+    enabled = resolve_enabled_fields({"groups": ["H"], "field_overrides": {}})
+    assert "cookie_session" not in enabled
+    # Sibling group-H fields are still auto-enabled (only the opt-in one is held back).
+    assert "ja3" in enabled and "ja4" in enabled and "tls_ciphers_sha" in enabled
+
+    # And via the security / full presets (their default field_overrides).
+    for preset_name in ("security", "full"):
+        preset = PRESETS[preset_name]
+        cfg = {"groups": preset["groups"], "field_overrides": preset.get("field_overrides", {})}
+        assert "cookie_session" not in resolve_enabled_fields(cfg), preset_name
+
+
+def test_default_off_field_included_on_explicit_opt_in():
+    """INVARIANT: an explicit ``field_overrides[id] = True`` opt-in DOES
+    include the ``default_off`` field — and it then reaches both the emitted
+    log format and the edge-capture requirement set (end-to-end opt-in).
+    """
+    from backend.core.log_fields import get_required_edge_headers, resolve_enabled_fields
+
+    cfg = {"groups": ["H"], "field_overrides": {"cookie_session": True}}
+    assert "cookie_session" in resolve_enabled_fields(cfg)
+    assert '"cookie_session":' in generate_log_format(cfg)
+    # The edge must be asked to capture (hash) the cookie only on opt-in.
+    assert "cookie_session" in get_required_edge_headers(cfg)
+
+    # Opt-in works even when the field's group is NOT enabled (override wins
+    # over group membership, same as any other field_override).
+    cfg_no_group = {"groups": [], "field_overrides": {"cookie_session": True}}
+    assert "cookie_session" in resolve_enabled_fields(cfg_no_group)
+
+
+def test_default_off_field_override_false_is_noop():
+    """Explicitly disabling an already-off ``default_off`` field is a no-op
+    (it was never in the set); the config stays valid and cookie_session
+    remains absent."""
+    from backend.core.log_fields import resolve_enabled_fields
+
+    enabled = resolve_enabled_fields({"groups": ["H"], "field_overrides": {"cookie_session": False}})
+    assert "cookie_session" not in enabled
+
+
 def test_custom_origin_field_propagated_to_cluster():
     """Regression: origin custom fields must not be stripped when serving to cluster nodes.
 

@@ -22,6 +22,7 @@
         unset req.http.x-of-start;
         unset req.http.x-of-ttfb;
         unset req.http.x-of-ttlb;
+        unset req.http.x-of-connect;
         unset req.http.x-of-ost;
         unset req.http.x-of-oip;
         unset req.http.x-of-oretries;
@@ -40,7 +41,7 @@
         unset req.http.X-Edge-Sid;
         unset req.http.X-Edge-Score-Set-Cookie;
       }
-      if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+      if (fastly.ff.visits_this_service == 0) {
         # Capture edge data for logging before shielding or backend fetch
         set req.http.x-fos-edge-data:host = req.http.Host;
         set req.http.x-fos-edge-data:ip = if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, "" + client.ip);
@@ -524,7 +525,7 @@
       4. Run `terraform init` and `terraform apply` to deploy the changes.
   
     ''',
-    'log_format.vcl': '{"timestamp":"%{strftime(\\{"%Y-%m-%dT%H:%M:%S%z"\\},time.start)}V","ip":"%{json.escape(if(req.http.x-fos-edge-data:ip != "", req.http.x-fos-edge-data:ip, req.http.Fastly-Client-IP))}V","status":%{if(resp.status > 0, "" + resp.status, "null")}V,"elapsed":%{if(time.elapsed.usec != "", time.elapsed.usec, "null")}V,"cache":"%{json.escape(fastly_info.state)}V","resp_bytes":%{if(resp.bytes_written > 0, "" + resp.bytes_written, "0")}V,"host":"%{json.escape(substr(if(req.http.x-fos-edge-data:host != "", req.http.x-fos-edge-data:host, req.http.Host), 0, 512))}V","url":"%{json.escape(substr(req.url, 0, 2000))}V","method":"%{json.escape(substr(req.method, 0, 128))}V","proto":"%{if(req.proto != "", regsub(req.proto, "^HTTP/", ""), "")}V","ua":"%{json.escape(substr(if(req.http.x-fos-edge-data:ua != "", req.http.x-fos-edge-data:ua, req.http.User-Agent), 0, 1000))}V","referer":"%{json.escape(substr(if(req.http.x-fos-edge-data:referer != "", req.http.x-fos-edge-data:referer, req.http.Referer), 0, 1000))}V","req_bytes":%{if(req.http.Content-Length ~ "^[0-9]+$", req.http.Content-Length, "0")}V,"req_header_bytes":%{if(req.header_bytes_read > 0, "" + req.header_bytes_read, "0")}V}',
+    'log_format.vcl': '{"timestamp":"%{strftime(\\{"%Y-%m-%dT%H:%M:%S%z"\\},time.start)}V","ip":"%{json.escape(if(req.http.x-fos-edge-data:ip != "", req.http.x-fos-edge-data:ip, req.http.Fastly-Client-IP))}V","status":%{if(resp.status > 0, "" + resp.status, "null")}V,"elapsed":%{if(time.elapsed.usec != "", time.elapsed.usec, "null")}V,"cache":"%{json.escape(fastly_info.state)}V","resp_bytes":%{if(resp.bytes_written > 0, "" + resp.bytes_written, "0")}V,"host":"%{json.escape(substr(if(req.http.x-fos-edge-data:host != "", req.http.x-fos-edge-data:host, req.http.Host), 0, 512))}V","url":"%{json.escape(substr(req.url, 0, 333))}V","method":"%{json.escape(substr(req.method, 0, 128))}V","proto":"%{if(req.proto != "", regsub(req.proto, "^HTTP/", ""), "")}V","ua":"%{json.escape(substr(if(req.http.x-fos-edge-data:ua != "", req.http.x-fos-edge-data:ua, req.http.User-Agent), 0, 166))}V","referer":"%{json.escape(substr(if(req.http.x-fos-edge-data:referer != "", req.http.x-fos-edge-data:referer, req.http.Referer), 0, 166))}V","req_bytes":%{if(req.http.Content-Length ~ "^[0-9]+$", req.http.Content-Length, "0")}V,"req_header_bytes":%{if(req.header_bytes_read > 0, "" + req.header_bytes_read, "0")}V,"resp_header_content_encoding":"%{json.escape(resp.http.Content-Encoding)}V"}',
     'logging_service.tf.json': '''
       {
         "resource": {

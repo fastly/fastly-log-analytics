@@ -31,6 +31,8 @@ import { request as httpsRequest } from 'node:https'
 
 import { cookies, headers } from 'next/headers'
 
+import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
+
 // Bootstrap can take 1-3s under cron contention on prod (full FOS scan
 // + iceberg manifest walk). 5s is generous but bounded — past that
 // we'd rather fall through to client fetch and let the page paint with
@@ -140,6 +142,11 @@ export async function ssrUpstreamGet({
     const cookieHeader = cookieJar.toString()
     const proxiedByCaddy = headerBag.get('x-proxied-by-caddy')
     const inboundHost = headerBag.get('host')
+    // DiagnosticsPanel writes this when either debug toggle is on, so SSR's
+    // own upstream fetch can carry x-debug-responses too — otherwise the
+    // Query Debugging panel never sees queries that ran during SSR (see
+    // lib/debug-cookie.ts). Read here, applied on the admin branch below.
+    const debugResponsesRequested = cookieJar.get(DEBUG_RESPONSES_COOKIE)?.value === '1'
 
     // Caddy-marker trust gate (finding-015). Caddy stamps X-Proxied-By-Caddy
     // on every public request unconditionally, so its absence means the
@@ -190,6 +197,14 @@ export async function ssrUpstreamGet({
       if (adminToken) {
         upstreamHeaders['X-Admin-Token'] = adminToken
       }
+    }
+
+    // Debug-query visibility is admin-only, same branch as X-Admin-Token
+    // above (independent of whether this particular caller injects the
+    // admin token) — never sent on the Caddy-proxied/analyst branch, which
+    // the backend would strip anyway (RemoteAccessMiddleware).
+    if (debugResponsesRequested && !proxiedByCaddy) {
+      upstreamHeaders['x-debug-responses'] = '1'
     }
 
     // Serialise the POST body (if any) and stamp its content headers. This

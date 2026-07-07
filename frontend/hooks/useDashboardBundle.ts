@@ -96,9 +96,10 @@ export function useDashboardBundle({
       const { data } = await client.POST('/api/dashboard/bundle', {
         signal,
         body: {
-          // Token mode → {range_token, anchor} (server resolves the window,
-          // ignores absolute bounds). Custom mode → {start_time, end_time} (the
-          // backend falls back to these when range_token is absent).
+          // Token mode → {range_token, anchor} + display bounds (server
+          // resolves the window from the token and ignores the bounds; they
+          // only matter if the token isn't recognized — see lib/range-wire.ts).
+          // Custom mode → {start_time, end_time} only.
           filters: filterPayload,
           chart_metric: metric as any,
           chart_interval: interval,

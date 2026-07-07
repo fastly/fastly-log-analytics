@@ -23,8 +23,8 @@ Wire format (after AES-GCM and Base64URL):
         sum_dt_sq        u64    Σ Δt² seconds² (widened per §3.3)
         last_ts          u32    last-request unix epoch
         score            u8     quantized 0-100 (rounded to nearest 5)
-        issued_at        u32    cookie creation unix epoch  ← end of v1 (30 B)
-        prev_route_len   u8     length of prev_route_path (v2 only, 0-255)
+        issued_at        u32    cookie creation unix epoch  ← end of fixed head (30 B)
+        prev_route_len   u8     length of prev_route_path (0-255)
         prev_route_path  N B    normalized path of last-scored URL (UTF-8)
 
     prev_route_path carries the session's most-recently-scored route so the
@@ -32,8 +32,11 @@ Wire format (after AES-GCM and Base64URL):
     pass prev_route as a header — req.http doesn't persist across separate
     client requests, so a header-based mechanism never worked.
 
-    Decoder accepts v1 (30-byte plaintext, no prev_route_path) for the
-    migration window. Encoder always emits the current SCHEMA_VERSION.
+    The length byte is always present (0 when the path is empty), so valid
+    plaintext is ≥ 31 bytes. The legacy v1 format (bare 30-byte head) was
+    removed 2026-07-06: it was unreachable in production because the AAD
+    binds the schema version, so a genuine v1-era cookie fails AEAD before
+    any version dispatch. Encoder and decoder speak only SCHEMA_VERSION.
 
     aad: ascii(f"{service_id}|v{schema_version}")
          — binds the cookie to one customer service AND one schema
@@ -66,10 +69,10 @@ SCORE_BUCKET: Final[int] = 5  # quantize to nearest 5 per §3.3
 # caps the path at 255 bytes; encoder truncates longer paths silently.
 PREV_ROUTE_MAX_BYTES: Final[int] = 255
 
-# v1 plaintext: 30 bytes fixed. v2 plaintext: 30 + 1 (length) + N (path).
-_V1_PACK_FMT: Final[str] = "<B 6s H I Q I B I"
-_V1_PACK_SIZE: Final[int] = struct.calcsize(_V1_PACK_FMT)
-assert _V1_PACK_SIZE == 30, f"v1 pack size drifted: {_V1_PACK_SIZE} != 30"
+# Fixed head: 30 bytes. Full plaintext: 30 + 1 (length byte) + N (path).
+_HEAD_PACK_FMT: Final[str] = "<B 6s H I Q I B I"
+_HEAD_PACK_SIZE: Final[int] = struct.calcsize(_HEAD_PACK_FMT)
+assert _HEAD_PACK_SIZE == 30, f"head pack size drifted: {_HEAD_PACK_SIZE} != 30"
 
 # Sliding caps per §3.3. Going over u16 for seq triggers a fresh sid (see
 # encode); the u32 / u64 widths leave plenty of headroom for any realistic
@@ -99,8 +102,8 @@ class SessionState:
     score: int  # 0-100, quantized to nearest 5
     issued_at: int  # unix epoch
     v: int = SCHEMA_VERSION
-    # v2: normalized path of the most-recently-scored URL for this session.
-    # Empty on v1 cookies and on first-request-in-session. Truncated to
+    # Normalized path of the most-recently-scored URL for this session.
+    # Empty on first-request-in-session. Truncated to
     # PREV_ROUTE_MAX_BYTES at encode time; the failure mode of truncation
     # is "L2 falls back to uniform-prior probability for this request",
     # not "crash".
@@ -150,12 +153,11 @@ def new_sid() -> bytes:
 
 
 def _pack_payload(state: SessionState) -> bytes:
-    """Pack a state into wire format. v1 (legacy) is the 30-byte fixed
-    header. v2 adds a length-prefixed UTF-8 path suffix; always emit the
-    length byte even when path is empty so the decoder can dispatch on
-    plaintext length unambiguously (== 30 → v1, > 30 → v2)."""
+    """Pack a state into wire format: the 30-byte fixed head followed by a
+    length-prefixed UTF-8 path suffix. The length byte is always emitted,
+    even when the path is empty."""
     head = struct.pack(
-        _V1_PACK_FMT,
+        _HEAD_PACK_FMT,
         state.v,
         state.sid,
         state.seq,
@@ -165,30 +167,26 @@ def _pack_payload(state: SessionState) -> bytes:
         state.score,
         state.issued_at,
     )
-    if state.v == 1:
-        return head
     path_bytes = state.prev_route_path.encode("utf-8")[:PREV_ROUTE_MAX_BYTES]
     path_bytes = path_bytes.decode("utf-8", errors="ignore").encode("utf-8")
     return head + bytes([len(path_bytes)]) + path_bytes
 
 
 def _unpack_payload(buf: bytes) -> SessionState:
-    if len(buf) < _V1_PACK_SIZE:
-        raise CookieError(f"payload too short: {len(buf)} < {_V1_PACK_SIZE}")
-    v, sid, seq, sum_dt, sum_dt_sq, last_ts, score, issued_at = struct.unpack(_V1_PACK_FMT, buf[:_V1_PACK_SIZE])
-    prev_route_path = ""
-    if len(buf) > _V1_PACK_SIZE:
-        path_len = buf[_V1_PACK_SIZE]
-        end = _V1_PACK_SIZE + 1 + path_len
-        if len(buf) != end:
-            raise CookieError(
-                f"prev_route_path length mismatch: payload {len(buf)} bytes, "
-                f"declared len {path_len}, expected end {end}"
-            )
-        try:
-            prev_route_path = buf[_V1_PACK_SIZE + 1 : end].decode("utf-8")
-        except UnicodeDecodeError as e:
-            raise CookieError(f"prev_route_path utf-8 decode failed: {e}") from e
+    # Head + the always-present length byte is the minimum valid payload.
+    if len(buf) < _HEAD_PACK_SIZE + 1:
+        raise CookieError(f"payload too short: {len(buf)} < {_HEAD_PACK_SIZE + 1}")
+    v, sid, seq, sum_dt, sum_dt_sq, last_ts, score, issued_at = struct.unpack(_HEAD_PACK_FMT, buf[:_HEAD_PACK_SIZE])
+    path_len = buf[_HEAD_PACK_SIZE]
+    end = _HEAD_PACK_SIZE + 1 + path_len
+    if len(buf) != end:
+        raise CookieError(
+            f"prev_route_path length mismatch: payload {len(buf)} bytes, declared len {path_len}, expected end {end}"
+        )
+    try:
+        prev_route_path = buf[_HEAD_PACK_SIZE + 1 : end].decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise CookieError(f"prev_route_path utf-8 decode failed: {e}") from e
     return SessionState(
         sid=sid,
         seq=seq,
@@ -273,7 +271,7 @@ class CookieCodec:
         except Exception as e:
             raise CookieError(f"base64url decode failed: {e}") from e
 
-        if len(raw) < NONCE_BYTES + _V1_PACK_SIZE + 16:  # 16-byte GCM tag
+        if len(raw) < NONCE_BYTES + _HEAD_PACK_SIZE + 1 + 16:  # +1 length byte, 16-byte GCM tag
             raise CookieError(f"cookie too short: {len(raw)} bytes")
 
         nonce, ciphertext = raw[:NONCE_BYTES], raw[NONCE_BYTES:]
@@ -293,11 +291,10 @@ class CookieCodec:
             raise CookieError(f"AEAD verification failed: {last_err}") from last_err
 
         state = _unpack_payload(plaintext)
-        # Accept v1 cookies during the migration window — they carry no
-        # prev_route_path, so L2 falls back to uniform prior for that one
-        # request but the request still serves. The decoder is the only
-        # place we accept old schemas; the encoder always emits the
-        # current SCHEMA_VERSION.
-        if state.v != self.schema_version and state.v != 1:
+        # Strict version match. (Legacy v1 acceptance was removed
+        # 2026-07-06 — it was unreachable: the AAD pins the codec's
+        # schema version, so a cookie minted under any other version
+        # fails AEAD verification before reaching this check.)
+        if state.v != self.schema_version:
             raise CookieError(f"payload schema version {state.v} != codec schema version {self.schema_version}")
         return state

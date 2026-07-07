@@ -22,6 +22,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import React from 'react'
 import { DebugPanel } from '@/components/DebugPanel'
 import { useDebugStore } from '@/stores/debugStore'
+import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 import { server } from '../../tests/msw/server'
 
 vi.mock('next/navigation', () => ({
@@ -48,11 +49,53 @@ beforeEach(() => {
   act(() => {
     useDebugStore.setState({ enabled: false, apiCallsEnabled: false })
   })
+  // Satisfy the cookie-heal shim up front so the mount-time
+  // refetchQueries({type:'active'}) doesn't re-run fixture queryFns (which
+  // return null and would clobber initialData) in the tests below. The shim
+  // itself is pinned by its own dedicated tests, which clear this.
+  document.cookie = `${DEBUG_RESPONSES_COOKIE}=1; path=/`
   server.use(
     http.get(`${API_BASE}/api/debug/recent-sqlite`, () =>
       HttpResponse.json({ queries: [], buffer_size: 0, buffer_cap: 500, dropped: 0 }),
     ),
   )
+})
+
+describe('DebugPanel — cookie-heal shim', () => {
+  test('toggle persisted on but cookie missing → writes cookie and invalidates the cache', async () => {
+    // Pre-cookie browser state: localStorage says enabled, but the
+    // fla.debugResponses cookie (introduced later, written only on toggle
+    // FLIP) was never set — SSR omits x-debug-responses and every
+    // server-prefetched page hydrates without the debug envelope.
+    document.cookie = `${DEBUG_RESPONSES_COOKIE}=; path=/; max-age=0`
+    act(() => {
+      useDebugStore.setState({ enabled: true, apiCallsEnabled: false })
+    })
+    const qc = makeClient()
+    // Invalidation (not a point-in-time refetch): the heavy data queries
+    // mount enabled:false until service/filter hydration resolves, so they
+    // must be marked stale to refetch when they switch on.
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries')
+    renderWith(qc)
+
+    await waitFor(() => {
+      expect(document.cookie).toContain(`${DEBUG_RESPONSES_COOKIE}=1`)
+    })
+    expect(invalidateSpy).toHaveBeenCalled()
+  })
+
+  test('cookie already present → no redundant invalidation', async () => {
+    document.cookie = `${DEBUG_RESPONSES_COOKIE}=1; path=/`
+    act(() => {
+      useDebugStore.setState({ enabled: true, apiCallsEnabled: false })
+    })
+    const qc = makeClient()
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries')
+    renderWith(qc)
+
+    await new Promise((r) => setTimeout(r, 20))
+    expect(invalidateSpy).not.toHaveBeenCalled()
+  })
 })
 
 describe('DebugPanel — dedup + lifecycle', () => {
@@ -61,7 +104,7 @@ describe('DebugPanel — dedup + lifecycle', () => {
     expect(container).toBeEmptyDOMElement()
   })
 
-  test('SQLite polling fires when enabled; stops when enabled flips false', async () => {
+  test('SQLite ring-buffer poll only runs in Process-wide scope', async () => {
     let calls = 0
     server.use(
       http.get(`${API_BASE}/api/debug/recent-sqlite`, () => {
@@ -74,9 +117,23 @@ describe('DebugPanel — dedup + lifecycle', () => {
       useDebugStore.setState({ enabled: true, apiCallsEnabled: false })
     })
     renderWith(makeClient())
+    const user = userEvent.setup()
 
+    // Default scope is 'This page' (reads _debug_sqlite off the page's own
+    // responses) — the ring-buffer endpoint must see ZERO traffic. This is
+    // both a UX contract (page view ≠ process view) and a noise contract
+    // (no 5s poll per admin tab unless explicitly asked for).
+    await new Promise((r) => setTimeout(r, 30))
+    expect(calls).toBe(0)
+
+    await user.click(screen.getByRole('button', { name: /Process-wide/i }))
     await waitFor(() => expect(calls).toBeGreaterThanOrEqual(1))
-    const enabledCalls = calls
+    const bufferScopeCalls = calls
+
+    // Back to page scope → poll stops.
+    await user.click(screen.getByRole('button', { name: /This page/i }))
+    await new Promise((r) => setTimeout(r, 30))
+    expect(calls).toBe(bufferScopeCalls)
 
     act(() => {
       useDebugStore.setState({ enabled: false, apiCallsEnabled: false })
@@ -84,7 +141,47 @@ describe('DebugPanel — dedup + lifecycle', () => {
 
     // After disable, the panel unmounts (returns null) → no further polls.
     await new Promise((r) => setTimeout(r, 30))
-    expect(calls).toBe(enabledCalls)
+    expect(calls).toBe(bufferScopeCalls)
+  })
+
+  test("page scope lists _debug_sqlite statements from this page's responses", async () => {
+    act(() => {
+      useDebugStore.setState({ enabled: true, apiCallsEnabled: false })
+    })
+    const qc = makeClient()
+    const { useQuery } = await import('@tanstack/react-query')
+    function Seeder() {
+      useQuery({
+        queryKey: ['debug-fixture', 'sqlite'],
+        initialData: {
+          _debug_sqlite: [
+            { seq: 5, ts: '2026-07-07T12:00:00.000000Z', sql: 'SELECT a FROM t', params_kind: 'none', time_ms: 3.25, rows: -1, op: 'execute' },
+            { seq: 6, ts: '2026-07-07T12:00:00.100000Z', sql: 'INSERT INTO t VALUES (?)', params_kind: 'seq[1]', time_ms: 1.75, rows: 1, op: 'execute' },
+          ],
+        },
+        queryFn: async () => null,
+        staleTime: Infinity,
+      })
+      return null
+    }
+    render(
+      <QueryClientProvider client={qc}>
+        <Seeder />
+        <DebugPanel />
+      </QueryClientProvider>,
+    )
+
+    // Extraction happens without any /api/debug/recent-sqlite traffic.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Show 2 statements/i })).toBeInTheDocument()
+    })
+    // Page-scoped total: 3.25 + 1.75.
+    expect(screen.getByText(/5\.00ms/)).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /Show 2 statements/i }))
+    expect(screen.getByText('SELECT a FROM t')).toBeInTheDocument()
+    expect(screen.getByText('INSERT INTO t VALUES (?)')).toBeInTheDocument()
   })
 
   test('expand/collapse of each section is independent', async () => {

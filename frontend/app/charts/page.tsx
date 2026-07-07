@@ -22,7 +22,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ReportShell } from '@/components/ReportShell'
 import { UpdatingBadge } from '@/components/UpdatingBadge'
-import { useUrlFilterSync } from '@/hooks/useUrlFilterSync'
+import { useViewMetricUrlSync } from '@/hooks/useViewMetricUrlSync'
 import { useDashboardCards } from '@/hooks/useDashboardCards'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 
@@ -63,7 +63,7 @@ export default function ChartsPage() {
   // aggregates request — same wiring as ReportLayout.
   const filterPayload = useDebouncedFilterPayload(true)
 
-  useUrlFilterSync()
+  useViewMetricUrlSync()
 
   const chartFields = React.useMemo(() => Array.from(CHART_CARD_IDS), [])
   const { data: aggregates, isLoading, isFetching, error } = useServiceQuery(

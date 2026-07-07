@@ -5,9 +5,9 @@ Single job (``_run_commit``) that runs on the user-tunable
 the freshness/cost tradeoff can be tuned independently of the Fastly logging
 endpoint period.
 
-After a successful commit the function calls ``_run_metadata_sync`` through
-the ``backend.scheduler`` shim so legacy test patches at
-``backend.scheduler._run_metadata_sync`` continue to intercept the call.
+After a successful commit the function calls ``_run_metadata_sync`` resolved
+off :mod:`backend.cron.jobs.metadata` at call time, so test patches at
+``backend.cron.jobs.metadata._run_metadata_sync`` intercept the call.
 """
 
 from __future__ import annotations
@@ -146,13 +146,13 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
 
             # ── On-demand Sync ──
             # Since we just committed new data to the cloud, trigger a sync
-            # immediately so the local cache/Data Lake view is updated. Route
-            # through the ``backend.scheduler`` shim so legacy patches at
-            # ``backend.scheduler._run_metadata_sync`` still intercept.
+            # immediately so the local cache/Data Lake view is updated.
+            # Resolved off the metadata jobs module at call time so patches
+            # at ``backend.cron.jobs.metadata._run_metadata_sync`` intercept.
             try:
-                import backend.scheduler as _shim
+                from backend.cron.jobs import metadata as _metadata_jobs
 
-                _shim._run_metadata_sync(service_id)
+                _metadata_jobs._run_metadata_sync(service_id)
             except Exception as e:
                 _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "warning", "message": e})
 

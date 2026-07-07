@@ -75,6 +75,7 @@ from backend.core.metadata.base import (
 
 # Cron run history + scoring audit.
 from backend.core.metadata.cron_log import (
+    adaptive_stale_minutes,
     cron_busy,
     cron_summary_for_tasks,
     delete_cron_run,
@@ -288,6 +289,7 @@ __all__ = [
     "reap_running_cron_runs",
     "cron_busy",
     "cron_summary_for_tasks",
+    "adaptive_stale_minutes",
     # ASN cache
     "lookup_asn_names",
     "upsert_asn_names",

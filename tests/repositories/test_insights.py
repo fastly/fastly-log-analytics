@@ -275,7 +275,7 @@ def test_error_path_emits_distinct_insight_ids(in_memory_duckdb, test_service_so
     the same key" warning and risked omitted renders."""
     from datetime import timedelta
 
-    from backend.repositories.insights.registry import InsightDefinition, registry
+    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(f'CREATE TABLE IF NOT EXISTS {table_name} ("timestamp" TIMESTAMPTZ, "status" INTEGER)')
@@ -290,12 +290,14 @@ def test_error_path_emits_distinct_insight_ids(in_memory_duckdb, test_service_so
 
     stub_a = InsightDefinition(
         id="stub_alpha",
+        category=InsightCategory.traffic,
         title="Stub Alpha",
         sql_template="SELECT nonexistent_col_alpha FROM {table_name}",
         required_fields=["timestamp", "status"],
     )
     stub_b = InsightDefinition(
         id="stub_beta",
+        category=InsightCategory.traffic,
         title="Stub Beta",
         sql_template="SELECT nonexistent_col_beta FROM {table_name}",
         required_fields=["timestamp", "status"],
@@ -494,7 +496,7 @@ def test_get_insights_skips_insight_with_keyerror_during_template_hydration(
     swallowed → return None for that insight. Pinned because losing
     this would crash the entire insights pipeline when a single
     template has a typo'd placeholder."""
-    from backend.repositories.insights.registry import InsightDefinition, registry
+    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(f'CREATE TABLE IF NOT EXISTS {table_name} ("timestamp" TIMESTAMPTZ, "status" INTEGER)')
@@ -508,6 +510,7 @@ def test_get_insights_skips_insight_with_keyerror_during_template_hydration(
 
     bad_stub = InsightDefinition(
         id="stub_typo",
+        category=InsightCategory.traffic,
         title="Stub Typo",
         sql_template="SELECT 1 FROM {table_name} WHERE {my_typo}",
         required_fields=["timestamp", "status"],
@@ -528,7 +531,7 @@ def test_get_insights_swallows_row_processor_exceptions_per_row(
     """A row_processor that raises must NOT kill the whole insight;
     losing this would let a single malformed row blank the entire
     "Error Spikes" card."""
-    from backend.repositories.insights.registry import InsightDefinition, registry
+    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(f'CREATE TABLE IF NOT EXISTS {table_name} ("timestamp" TIMESTAMPTZ, "status" INTEGER)')
@@ -549,6 +552,7 @@ def test_get_insights_swallows_row_processor_exceptions_per_row(
 
     stub = InsightDefinition(
         id="stub_proc_raises",
+        category=InsightCategory.traffic,
         title="Stub Proc Raises",
         sql_template='SELECT "status", count(*) FROM {table_name} GROUP BY "status"',
         required_fields=["timestamp", "status"],
@@ -568,7 +572,7 @@ def test_get_insights_error_spikes_summary_renders_url_count(in_memory_duckdb, t
     """When `error_spikes` has items, the summary text is
     "N URLs with elevated server error rates". Pinned because the
     dashboard's anomaly headline keys on that wording."""
-    from backend.repositories.insights.registry import InsightDefinition, registry
+    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(f'CREATE TABLE IF NOT EXISTS {table_name} ("timestamp" TIMESTAMPTZ, "status" INTEGER)')
@@ -585,6 +589,7 @@ def test_get_insights_error_spikes_summary_renders_url_count(in_memory_duckdb, t
 
     stub = InsightDefinition(
         id="error_spikes",
+        category=InsightCategory.traffic,
         title="Error Spikes",
         sql_template='SELECT "status", count(*) FROM {table_name} GROUP BY "status"',
         required_fields=["timestamp", "status"],
@@ -606,7 +611,7 @@ def test_get_insights_botnet_grouping_summary_renders_fingerprint_count(
     """When `botnet_grouping` has items, the summary text is
     "N fingerprints with suspicious IP spread". Same pinning
     rationale as the `error_spikes` summary test above."""
-    from backend.repositories.insights.registry import InsightDefinition, registry
+    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(
@@ -625,6 +630,7 @@ def test_get_insights_botnet_grouping_summary_renders_fingerprint_count(
 
     stub = InsightDefinition(
         id="botnet_grouping",
+        category=InsightCategory.traffic,
         title="Botnet Grouping",
         sql_template='SELECT DISTINCT "ja3" FROM {table_name}',
         required_fields=["timestamp", "ja3"],
@@ -644,7 +650,7 @@ def test_get_insights_severity_logic_callable_overrides_default(in_memory_duckdb
     its return value wins over the default `_sev()`. Pinned because
     custom insights (e.g. proxy_surge → always "warning") rely on
     this hook."""
-    from backend.repositories.insights.registry import InsightDefinition, registry
+    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(f'CREATE TABLE IF NOT EXISTS {table_name} ("timestamp" TIMESTAMPTZ, "status" INTEGER)')
@@ -664,6 +670,7 @@ def test_get_insights_severity_logic_callable_overrides_default(in_memory_duckdb
 
     stub = InsightDefinition(
         id="stub_custom_sev",
+        category=InsightCategory.traffic,
         title="Stub Custom Sev",
         sql_template='SELECT "status" FROM {table_name}',
         required_fields=["timestamp", "status"],
@@ -939,6 +946,423 @@ def test_coalesced_url_path_matches_per_insight_scan_output(in_memory_duckdb, te
             f"{insight_id} item lists differ between fast and slow paths:\n"
             f"  fast: {_norm(fast_items)}\n  slow: {_norm(slow_items)}"
         )
+
+
+def _seed_ip_security_data(con, table_name: str) -> None:
+    """Seed rows that trigger each of the 3 IP-keyed security insights that
+    fold into COALESCED_IP_SECURITY_AGGREGATES, with clean separation so no
+    single IP trips more than one card:
+
+      - low_and_slow: 10.0.0.1 probes 6 distinct sensitive paths (NEW_PROBE
+        set, status 200) spread over ~50 min (span >= 600, rps << 0.2).
+      - credential_enumeration: 10.0.0.2 hits 2 auth paths 15× each in the
+        window, all 401 (w_denied=30, ratio=1.0 >= 0.5, > baseline 5-floor).
+      - content_discovery: 10.0.0.3 hits 30 distinct non-probe/non-auth URLs
+        all 404 in the window (w_404=30, distinct>=15, ratio=1.0 >= 0.7).
+
+    24.5h of history is seeded (one filler baseline row) so available_history
+    >= baseline_hours (24h) and check_baseline doesn't short-circuit.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    window_ts = now - timedelta(minutes=30)  # within last hour (window)
+    baseline_ts = now - timedelta(hours=24, minutes=30)  # >= baseline_hours old
+
+    def _ins(ts: datetime, ip: str, url: str, status: int) -> None:
+        con.execute(
+            f'INSERT INTO {table_name} ("timestamp", "ip", "url", "status") VALUES (?, ?, ?, ?)',
+            [ts.isoformat(), ip, url, status],
+        )
+
+    # Filler baseline row so available_history >= 24h (not an anomaly signal).
+    _ins(baseline_ts, "10.0.0.9", "/healthz", 200)
+
+    # low_and_slow: 6 distinct probe paths, status 200, spanning ~50 min.
+    probe_paths = ["/admin", "/.env", "/.git/config", "/phpmyadmin/", "/backup.sql", "/actuator/health"]
+    for i, path in enumerate(probe_paths):
+        _ins(now - timedelta(minutes=90 - i * 10), "10.0.0.1", path, 200)
+
+    # credential_enumeration: 2 auth paths, 15× each, all 401, in the window.
+    for _ in range(15):
+        _ins(window_ts, "10.0.0.2", "/login", 401)
+    for _ in range(15):
+        _ins(window_ts, "10.0.0.2", "/account/signin", 401)
+
+    # content_discovery: 30 distinct non-probe/non-auth URLs, all 404, in window.
+    for i in range(30):
+        _ins(window_ts, "10.0.0.3", f"/page{i}", 404)
+
+
+def test_coalesced_ip_security_path_matches_per_insight_scan_output(in_memory_duckdb, test_service_source, monkeypatch):
+    """Track A parity: the coalesced IP-security path
+    (`_coalesced_ip_security_aggregates`) must produce per-insight items
+    *equivalent* to the legacy per-insight scans, item-by-item.
+
+    Mirrors test_coalesced_url_path_matches_per_insight_scan_output for the 3
+    IP-keyed security insights (low_and_slow, credential_enumeration,
+    content_discovery): compares the coalesced path (fast, default) against the
+    standalone templates (slow, forced by monkeypatching the coalesce to {}).
+    """
+    from backend.repositories.insights import repository as insights_repo
+
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        '"timestamp" TIMESTAMPTZ, "ip" VARCHAR, "url" VARCHAR, "status" INTEGER)'
+    )
+    _seed_ip_security_data(in_memory_duckdb, table_name)
+
+    ip_ids = ("low_and_slow", "credential_enumeration", "content_discovery")
+
+    # Pass 1 — coalesced path (default).
+    _insights_cache.clear()
+    fast = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    fast_ip = {i["id"]: i for i in fast["insights"] if i["id"] in ip_ids}
+
+    # Pass 2 — disable IP-security coalescing, force per-insight scans.
+    _insights_cache.clear()
+    monkeypatch.setattr(insights_repo, "_coalesced_ip_security_aggregates", lambda *a, **k: {})
+    slow = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    slow_ip = {i["id"]: i for i in slow["insights"] if i["id"] in ip_ids}
+
+    expected_ids = set(ip_ids)
+    assert set(fast_ip.keys()) == expected_ids, f"fast missing: {expected_ids - set(fast_ip.keys())}"
+    assert set(slow_ip.keys()) == expected_ids, f"slow missing: {expected_ids - set(slow_ip.keys())}"
+
+    for insight_id in expected_ids:
+        fast_items = fast_ip[insight_id]["items"]
+        slow_items = slow_ip[insight_id]["items"]
+        # Each seeded IP trips exactly one card → at least one item both ways.
+        assert fast_items, f"{insight_id}: coalesced path produced no items (seed didn't fire)"
+        assert len(fast_items) == len(slow_items), (
+            f"{insight_id}: fast had {len(fast_items)} items, slow had {len(slow_items)}"
+        )
+
+        def _norm(items: list[dict]) -> list[tuple]:
+            return [
+                (
+                    i["label"],
+                    round(float(i.get("current_val") or 0), 4),
+                    round(float(i.get("baseline_val") or 0), 4),
+                )
+                for i in items
+            ]
+
+        assert _norm(fast_items) == _norm(slow_items), (
+            f"{insight_id} item lists differ between fast and slow paths:\n"
+            f"  fast: {_norm(fast_items)}\n  slow: {_norm(slow_items)}"
+        )
+
+
+def test_coalesced_ip_security_aggregates_demux_shapes(in_memory_duckdb, test_service_source):
+    """Directly exercise the coalesced helper: it returns the 3 IP-security
+    insight keys, each row matching its processor's row-schema, so the parity
+    test above can't pass merely because both paths silently fell back."""
+    from backend.repositories._base import QueryRunner
+    from backend.repositories.insights.repository import _coalesced_ip_security_aggregates
+
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        '"timestamp" TIMESTAMPTZ, "ip" VARCHAR, "url" VARCHAR, "status" INTEGER)'
+    )
+    _seed_ip_security_data(in_memory_duckdb, table_name)
+
+    from datetime import UTC, datetime, timedelta
+
+    window_start_s = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    runner = QueryRunner(in_memory_duckdb, test_service_source)
+    out = _coalesced_ip_security_aggregates(runner, table_name, window_start_s, 1.0, 24.0)
+
+    assert set(out.keys()) == {"low_and_slow", "credential_enumeration", "content_discovery"}
+    # low_and_slow: [ip, hits, distinct_paths, span_s, rps]
+    ls = out["low_and_slow"]
+    assert len(ls) == 1 and ls[0][0] == "10.0.0.1" and ls[0][2] == 6
+    # credential_enumeration: [ip, w_denied, w_attempts, w_paths, b_denied]
+    ce = out["credential_enumeration"]
+    assert len(ce) == 1 and ce[0][0] == "10.0.0.2" and ce[0][1] == 30 and ce[0][3] == 2
+    # content_discovery: [ip, w_404, w_total, distinct_404, b_404]
+    cd = out["content_discovery"]
+    assert len(cd) == 1 and cd[0][0] == "10.0.0.3" and cd[0][1] == 30 and cd[0][3] == 30
+
+
+def test_content_discovery_detects_404_enumeration(in_memory_duckdb, test_service_source):
+    """End-to-end: a per-IP 404 burst across many distinct URLs surfaces as a
+    content_discovery card (security section) with the expected counts."""
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        '"timestamp" TIMESTAMPTZ, "ip" VARCHAR, "url" VARCHAR, "status" INTEGER)'
+    )
+    _seed_ip_security_data(in_memory_duckdb, table_name)
+
+    _insights_cache.clear()
+    res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    by_id = {i["id"]: i for i in res["insights"]}
+
+    assert "content_discovery" in by_id
+    cd = by_id["content_discovery"]
+    assert cd["category"] == "security"
+    labels = {item["label"]: item for item in cd["items"]}
+    assert "10.0.0.3" in labels
+    item = labels["10.0.0.3"]
+    assert item["current_val"] == 30  # w_404
+    assert item["meta"]["distinct_404_urls"] == 30
+    assert item["meta"]["not_found_rate_pct"] == 100.0
+
+
+@pytest.mark.security_regression
+def test_coalesced_ip_security_masks_ip_end_to_end_for_analyst(in_memory_duckdb, test_service_source):
+    """End-to-end masking through the ACTIVE coalesced path: with mask_ips=True
+    (analyst policy) the 3 IP-keyed security cards produced via
+    COALESCED_IP_SECURITY_AGGREGATES must render the masked IP in the label AND
+    meta.filters.ip — never the raw IPv4. The processor-level mask tests pin the
+    pure function; this pins the connective tissue so a future pre-agg refactor
+    that bypasses the shared processor loop can't silently leak the raw IP."""
+    from backend.core.share_db.validation import mask_ip
+
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        '"timestamp" TIMESTAMPTZ, "ip" VARCHAR, "url" VARCHAR, "status" INTEGER)'
+    )
+    _seed_ip_security_data(in_memory_duckdb, table_name)
+
+    _insights_cache.clear()
+    res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24, mask_ips=True)
+    by_id = {i["id"]: i for i in res["insights"]}
+
+    # id -> the raw seeded IP that trips that card (see _seed_ip_security_data).
+    seeded_raw_ip = {
+        "low_and_slow": "10.0.0.1",
+        "credential_enumeration": "10.0.0.2",
+        "content_discovery": "10.0.0.3",
+    }
+    for insight_id, raw_ip in seeded_raw_ip.items():
+        card = by_id[insight_id]
+        assert card["items"], f"{insight_id}: coalesced path produced no items under mask_ips"
+        item = card["items"][0]
+        expected = mask_ip(raw_ip)
+        assert item["label"] == expected, f"{insight_id}: label {item['label']!r} not masked"
+        assert item["meta"]["filters"]["ip"] == expected, f"{insight_id}: filters.ip not masked"
+        # Hard fail-closed: the raw IPv4 must not survive anywhere in label/filter.
+        assert item["label"] != raw_ip
+        assert item["meta"]["filters"]["ip"] != raw_ip
+
+
+def _seed_traffic_data(con, table_name: str) -> None:
+    """Seed rows that trigger each of the 3 coalesced traffic/network insights,
+    one clean item each:
+
+      - referer_monoculture: 'https://ref-a.example' drives 100% of window
+        traffic vs a google.com-dominated baseline.
+      - method_drift: POST is 100% of window traffic vs a GET-only baseline.
+      - new_asn_traffic: AS70001 sends 60 window requests with zero baseline.
+
+    24.5h of history is seeded so available_history >= baseline_hours (24h) and
+    check_baseline doesn't short-circuit.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    window_ts = now - timedelta(minutes=30)
+    baseline_ts = now - timedelta(hours=12)
+    old_filler = now - timedelta(hours=24, minutes=30)
+
+    def _ins(ts: datetime, ref: str, method: str, asn: int) -> None:
+        con.execute(
+            f'INSERT INTO {table_name} ("timestamp", "referer", "method", "asn") VALUES (?, ?, ?, ?)',
+            [ts.isoformat(), ref, method, asn],
+        )
+
+    _ins(old_filler, "https://google.com", "GET", 15169)  # history >= 24h
+    for _ in range(100):
+        _ins(baseline_ts, "https://google.com", "GET", 15169)
+    for _ in range(60):
+        _ins(window_ts, "https://ref-a.example", "POST", 70001)
+
+
+def test_coalesced_traffic_detects_all_three_dims(in_memory_duckdb, test_service_source):
+    """End-to-end: the coalesced traffic pass surfaces referer_monoculture,
+    method_drift (traffic) and new_asn_traffic (network) with expected values."""
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        '"timestamp" TIMESTAMPTZ, "referer" VARCHAR, "method" VARCHAR, "asn" UINTEGER)'
+    )
+    _seed_traffic_data(in_memory_duckdb, table_name)
+
+    _insights_cache.clear()
+    res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    by_id = {i["id"]: i for i in res["insights"]}
+
+    ref = by_id["referer_monoculture"]
+    assert ref["category"] == "traffic"
+    assert {it["label"] for it in ref["items"]} == {"https://ref-a.example"}
+    assert ref["items"][0]["current_val"] == 100.0  # 60/60 window share
+
+    meth = by_id["method_drift"]
+    assert meth["category"] == "traffic"
+    assert {it["label"] for it in meth["items"]} == {"POST"}
+
+    asn_card = by_id["new_asn_traffic"]
+    assert asn_card["category"] == "network"
+    assert {it["meta"]["asn"] for it in asn_card["items"]} == {70001}
+
+
+def _seed_network_edge_data(con, table_name: str) -> None:
+    """Seed rows that trip all 5 Track-B2 standalone cards at once:
+    metro delivery halves, connection type flips to cellular, PoP P95 blows up,
+    QUIC collapses to TCP, and the cache HIT ratio cliffs. 150 window rows keep
+    the two service-wide headline cards (http3_fallback, cache_hit_cliff) above
+    their ≥100-window-sample floors. 24.5h history avoids check_baseline."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    window_ts = now - timedelta(minutes=30)
+    baseline_ts = now - timedelta(hours=12)
+    old_filler = now - timedelta(hours=24, minutes=30)
+
+    def _ins(ts, metro, drate, c_type, c_speed, pop, elapsed, transport, cache):
+        con.execute(
+            f'INSERT INTO {table_name} ("timestamp", "metro", "delivery_rate", "c_type", '
+            '"c_speed", "pop", "elapsed", "transport", "cache") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [ts.isoformat(), metro, drate, c_type, c_speed, pop, elapsed, transport, cache],
+        )
+
+    _ins(old_filler, 501, 10_000_000, "residential", "broadband", "JFK", 50_000, "quic", "HIT")
+    for i in range(300):
+        _ins(
+            baseline_ts,
+            501,
+            10_000_000,
+            "residential",
+            "broadband",
+            "JFK",
+            50_000,
+            "quic" if i % 5 < 4 else "tcp",  # 80% QUIC
+            "HIT" if i % 10 < 7 else "MISS",  # 70% HIT of cacheable (no PASS)
+        )
+    for _ in range(150):
+        _ins(window_ts, 501, 1_000_000, "cellular", "mobile", "JFK", 3_000_000, "tcp", "MISS")
+
+
+def test_track_b2_standalone_network_edge_cards_detect(in_memory_duckdb, test_service_source):
+    """End-to-end: the 5 Track-B2 standalone cards each fire with expected
+    values and land in the right section."""
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        '"timestamp" TIMESTAMPTZ, "metro" USMALLINT, "delivery_rate" UBIGINT, '
+        '"c_type" VARCHAR, "c_speed" VARCHAR, "pop" VARCHAR, "elapsed" UBIGINT, '
+        '"transport" VARCHAR, "cache" VARCHAR)'
+    )
+    _seed_network_edge_data(in_memory_duckdb, table_name)
+
+    _insights_cache.clear()
+    res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    by_id = {i["id"]: i for i in res["insights"]}
+
+    metro = by_id["metro_delivery_degradation"]
+    assert metro["category"] == "network"
+    assert metro["items"] and metro["items"][0]["current_val"] == 8.0  # 1MB/s → 8 Mbps
+    assert metro["items"][0]["baseline_val"] == 80.0  # 10MB/s → 80 Mbps
+
+    ctype = by_id["connection_type_mix"]
+    assert ctype["category"] == "network"
+    assert {it["label"] for it in ctype["items"]} == {"cellular / mobile"}
+
+    pop = by_id["pop_latency_regression"]
+    assert pop["category"] == "edge"
+    assert pop["items"] and pop["items"][0]["label"] == "JFK"
+    assert pop["items"][0]["current_val"] == 3000.0  # 3_000_000 µs → 3000 ms
+
+    h3 = by_id["http3_fallback"]
+    assert h3["category"] == "network"
+    assert h3["severity"] == "critical" and h3["items"]
+    assert h3["items"][0]["current_val"] == 0.0  # 0% QUIC in window
+
+    cliff = by_id["cache_hit_cliff"]
+    assert cliff["category"] == "edge"
+    assert cliff["severity"] == "critical" and cliff["items"]
+    assert cliff["items"][0]["current_val"] == 0.0  # 0% HIT in window
+
+
+def _seed_track_c_data(con, table_name: str) -> None:
+    """Seed rows that trip all 3 Track-C field-gated insights: a compressible
+    URL flips gzip→uncompressed, one IP presents 30 distinct session cookies,
+    and origin connect-P95 blows up 5ms→500ms. 24.5h history avoids
+    check_baseline."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    window_ts = now - timedelta(minutes=30)
+    baseline_ts = now - timedelta(hours=12)
+    old_filler = now - timedelta(hours=24, minutes=30)
+
+    def _ins(ts, url, status, rb, ce, ip, cs, oc, ottfb):
+        con.execute(
+            f'INSERT INTO {table_name} ("timestamp", "url", "status", "resp_bytes", '
+            '"resp_header_content_encoding", "ip", "cookie_session", "oconnect_ms", "ottfb") '
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [ts.isoformat(), url, status, rb, ce, ip, cs, oc, ottfb],
+        )
+
+    _ins(old_filler, "/app.js", 200, 50_000, "gzip", "10.0.0.9", "s_old", 5, 50_000)
+    # payload_compression_regression: baseline gzip, window uncompressed
+    for _ in range(60):
+        _ins(baseline_ts, "/app.js", 200, 50_000, "gzip", "10.0.0.9", "s_b", 5, 50_000)
+    for _ in range(20):
+        _ins(window_ts, "/app.js", 200, 50_000, "", "10.0.0.9", "s_w", 5, 50_000)
+    # session_harvesting: 30 distinct sessions from one IP in the window
+    for i in range(30):
+        _ins(window_ts, "/login", 200, 500, "gzip", "10.0.0.2", f"sess_{i}", 5, 50_000)
+    # timeout_split: origin connect P95 5ms → 500ms (dominant connect phase)
+    for _ in range(120):
+        _ins(baseline_ts, "/api", 200, 500, "gzip", "10.0.0.3", "s", 5, 60_000)
+    for _ in range(60):
+        _ins(window_ts, "/api", 200, 500, "gzip", "10.0.0.3", "s", 500, 560_000)
+
+
+def test_track_c_field_gated_insights_detect(in_memory_duckdb, test_service_source):
+    """End-to-end: the 3 Track-C insights each fire once their (simulated) edge
+    fields are present, land in the right section, and session_harvesting masks
+    the IP for an analyst while never surfacing a session id."""
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        '"timestamp" TIMESTAMPTZ, "url" VARCHAR, "status" USMALLINT, "resp_bytes" UBIGINT, '
+        '"resp_header_content_encoding" VARCHAR, "ip" VARCHAR, "cookie_session" VARCHAR, '
+        '"oconnect_ms" UINTEGER, "ottfb" UBIGINT)'
+    )
+    _seed_track_c_data(in_memory_duckdb, table_name)
+
+    _insights_cache.clear()
+    res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    by_id = {i["id"]: i for i in res["insights"]}
+
+    pcr = by_id["payload_compression_regression"]
+    assert pcr["category"] == "edge"
+    assert {it["label"] for it in pcr["items"]} == {"/app.js"}
+    assert pcr["items"][0]["current_val"] == 100.0  # 100% uncompressed in window
+
+    sh = by_id["session_harvesting"]
+    assert sh["category"] == "security"
+    assert sh["items"] and sh["items"][0]["current_val"] == 30
+
+    ts_card = by_id["timeout_split"]
+    assert ts_card["category"] == "origin"
+    assert ts_card["items"] and ts_card["items"][0]["meta"]["phase"] == "connect"
+
+    # Analyst masking end-to-end: IP masked, no raw session id anywhere.
+    _insights_cache.clear()
+    res_m = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24, mask_ips=True)
+    sh_m = {i["id"]: i for i in res_m["insights"]}["session_harvesting"]
+    assert sh_m["items"], "session_harvesting produced no items under mask_ips"
+    label = sh_m["items"][0]["label"]
+    assert label.endswith(".xxx") and "10.0.0.2" != label
+    assert "sess_" not in repr(sh_m["items"][0])  # no session id ever surfaced
 
 
 def _create_url_insights_table(con, table_name: str) -> None:
@@ -1371,3 +1795,146 @@ def test_coalesced_url_aggregates_caps_per_insight_at_top_15():
         # follow /url-99, /url-98, ...
         expected = [f"/url-{99 - n}" for n in range(len(urls))]
         assert urls == expected, f"error_spikes not sorted DESC by score: {urls} vs {expected}"
+
+
+# ── Phase-3 insights: end-to-end detection through get_insights ───────────────
+# These drive the full get_insights() pipeline (template hydration + param
+# binding + row_processor) rather than executing the raw templates, matching
+# the harness the rest of this file uses. Each new insight runs with a SHORT
+# ``baseline_hours=1`` so the ``check_baseline`` gate passes with ~1.5-2h of
+# synthetic history (the templates themselves are baseline-hour agnostic in
+# their firing logic). Timestamps are relative to ``datetime.now(UTC)`` — the
+# same time seam every other test in this module uses; time-machine ticks the
+# clock monotonically forward so no assertion here is wall-clock sensitive.
+#
+# NOTE ON THE ≤15 CAP: the existing cap test
+# ``test_coalesced_url_aggregates_caps_per_insight_at_top_15`` enumerates the
+# keys of ``_coalesced_url_aggregates`` ONLY — the three Phase-3 insights are
+# per-insight scans (not coalesced), so extending that test would assert keys
+# it never produces. Instead each detection test below asserts ``len(items) <=
+# 15`` directly (the templates carry ``LIMIT 15``).
+
+
+def test_low_and_slow_detects_slow_probe_scanner(in_memory_duckdb, test_service_source):
+    """An IP touching 6 distinct sensitive/vuln paths at a deliberately low
+    rate over a ~1.7h span fires low_and_slow (warning; <10 distinct paths)."""
+    table_name = _safe_table(test_service_source["name"])
+    # ja3 present so the ip+timestamp-eligible botnet_grouping insight doesn't
+    # error on a missing fingerprint column — keeps the card set clean.
+    in_memory_duckdb.execute(
+        f'CREATE TABLE IF NOT EXISTS {table_name} ("timestamp" TIMESTAMPTZ, "ip" VARCHAR, "url" VARCHAR, "ja3" VARCHAR)'
+    )
+
+    now = datetime.now(UTC)
+    scanner_ip = "192.0.2.55"
+    # 6 distinct paths, each matching NEW_PROBE_REGEX, spread over ~104 min so
+    # span_s >= 600 and rps (6/6240 ≈ 0.001) < 0.2. All rows sit inside the
+    # temp window [now-2h, now] (baseline_hours=1 + window_hours=1).
+    probes = ["/admin", "/.env", "/.git", "/wp-login.php", "/phpmyadmin/index.php", "/config.json"]
+    minutes_ago = [110, 88, 66, 44, 22, 6]
+    for path, mins in zip(probes, minutes_ago, strict=True):
+        in_memory_duckdb.execute(
+            f'INSERT INTO {table_name} ("timestamp", "ip", "url", "ja3") VALUES (?, ?, ?, ?)',
+            [(now - timedelta(minutes=mins)).isoformat(), scanner_ip, path, None],
+        )
+
+    _insights_cache.clear()
+    result = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=1)
+    card = next((i for i in result["insights"] if i["id"] == "low_and_slow"), None)
+
+    assert card is not None, "low_and_slow card should be present when ip+url are in schema"
+    assert card["severity"] == "warning"  # 6 distinct paths < 10 critical floor
+    assert len(card["items"]) <= 15, "low_and_slow must cap at 15 items"
+    assert len(card["items"]) == 1
+    item = card["items"][0]
+    assert item["label"] == scanner_ip
+    assert item["current_val"] == 6  # distinct_paths
+    assert item["meta"]["distinct_paths"] == 6
+    assert item["meta"]["filters"]["ip"] == scanner_ip
+
+
+def test_credential_enumeration_detects_login_brute_force(in_memory_duckdb, test_service_source):
+    """An IP generating 30 in-window 401s on /api/login fires
+    credential_enumeration (warning; <100 denied)."""
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} "
+        '("timestamp" TIMESTAMPTZ, "ip" VARCHAR, "url" VARCHAR, "status" INTEGER, "ja3" VARCHAR)'
+    )
+
+    now = datetime.now(UTC)
+    attacker_ip = "198.51.100.23"
+    window_ts = now - timedelta(minutes=30)  # is_w (>= window_start = now-1h)
+    baseline_ts = now - timedelta(minutes=90)  # is_b + deepens history past baseline_hours
+
+    def _ins(ts, status):
+        in_memory_duckdb.execute(
+            f'INSERT INTO {table_name} ("timestamp", "ip", "url", "status", "ja3") VALUES (?, ?, ?, ?, ?)',
+            [ts.isoformat(), attacker_ip, "/api/login", status, None],
+        )
+
+    # 30 window 401s → w_denied=30, w_attempts=30 (100% fail rate).
+    for _ in range(30):
+        _ins(window_ts, 401)
+    # A handful of successful baseline attempts (b_denied=0) so available_history
+    # >= baseline_hours=1 and check_baseline lets the insight run.
+    for _ in range(5):
+        _ins(baseline_ts, 200)
+
+    _insights_cache.clear()
+    result = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=1)
+    card = next((i for i in result["insights"] if i["id"] == "credential_enumeration"), None)
+
+    assert card is not None, "credential_enumeration card should be present when ip+url+status are in schema"
+    assert card["severity"] == "warning"  # 30 denied < 100 critical floor
+    assert len(card["items"]) <= 15, "credential_enumeration must cap at 15 items"
+    assert len(card["items"]) == 1
+    item = card["items"][0]
+    assert item["label"] == attacker_ip
+    assert item["current_val"] == 30  # w_denied
+    assert item["meta"]["denied"] == 30
+    assert item["meta"]["attempts"] == 30
+    assert item["meta"]["filters"]["ip"] == attacker_ip
+
+
+def test_network_asn_health_detects_packet_loss_degradation(in_memory_duckdb, test_service_source):
+    """An ASN whose window packet loss (8%) far exceeds its baseline (0.1%),
+    with enough samples on both sides, fires network_asn_health (critical)."""
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} "
+        '("timestamp" TIMESTAMPTZ, "asn" INTEGER, "ploss" DOUBLE, "rtt_var" INTEGER, "retrans" DOUBLE)'
+    )
+
+    now = datetime.now(UTC)
+    degraded_asn = 64500
+    window_ts = now - timedelta(minutes=30)  # is_w
+    baseline_ts = now - timedelta(minutes=90)  # is_b + history depth
+
+    def _ins(ts, ploss):
+        in_memory_duckdb.execute(
+            f'INSERT INTO {table_name} ("timestamp", "asn", "ploss", "rtt_var", "retrans") VALUES (?, ?, ?, ?, ?)',
+            [ts.isoformat(), degraded_asn, ploss, 1000, 0.0],
+        )
+
+    # 60 window rows @ 8% loss, 120 baseline rows @ 0.1% loss (>= 50 / >= 100 gate).
+    for _ in range(60):
+        _ins(window_ts, 0.08)
+    for _ in range(120):
+        _ins(baseline_ts, 0.001)
+
+    # Keep the test hermetic: don't depend on the per-service asn_names SQLite —
+    # the ASN-name label enrichment is covered by the processor test.
+    _insights_cache.clear()
+    with patch("backend.core.duckdb.get_asn_names", return_value={}):
+        result = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=1)
+    card = next((i for i in result["insights"] if i["id"] == "network_asn_health"), None)
+
+    assert card is not None, "network_asn_health card should be present when asn+ploss+rtt_var+retrans are in schema"
+    assert card["severity"] == "critical"  # 8% loss >= 5% critical floor
+    assert len(card["items"]) <= 15, "network_asn_health must cap at 15 items"
+    assert len(card["items"]) == 1
+    item = card["items"][0]
+    assert item["label"] == f"AS{degraded_asn}"
+    assert item["current_val"] == 8.0  # round(0.08 * 100, 2)
+    assert item["meta"]["filters"]["asn"] == degraded_asn

@@ -255,3 +255,64 @@ def test_executescript_failure_is_still_recorded(tmp_path):
         con.executescript("CREATE TABLE BAD SQL BLAH;")
     snap = sqlite_profiler.get_recent()
     assert any("BAD SQL" in q["sql"] for q in snap["queries"])
+
+
+# ── Per-request collector (Debug Panel "This page" scoping) ──────────────────
+
+
+@pytest.fixture()
+def _request_collector():
+    """Isolate the telemetry request-scoped SQLite collector per test —
+    start_call_tracking() sets a ContextVar that would otherwise leak
+    into subsequent tests running in the same context."""
+    from backend.utils.telemetry import _SQLITE_QUERIES
+
+    token = _SQLITE_QUERIES.set(None)
+    yield
+    _SQLITE_QUERIES.reset(token)
+
+
+def test_statement_lands_in_request_collector_when_tracking_active(tmp_path, _request_collector):
+    """The page-scoped Debug Panel view: a statement executed while a
+    request is being tracked must land in BOTH the process-global ring
+    buffer AND the request's contextvar collector."""
+    from backend.utils import telemetry
+
+    telemetry.start_call_tracking()
+    con = _open_instrumented(str(tmp_path / "t.db"))
+    con.execute("CREATE TABLE t (x INTEGER)")
+
+    entries = telemetry.get_sqlite_queries()
+    assert len(entries) == 1
+    assert entries[0]["sql"] == "CREATE TABLE t (x INTEGER)"
+    # Identical entry object also sits in the ring buffer (cron view).
+    snap = sqlite_profiler.get_recent()
+    assert snap["buffer_size"] == 1
+    assert snap["queries"][0]["seq"] == entries[0]["seq"]
+
+
+def test_statement_skips_request_collector_outside_tracking(tmp_path, _request_collector):
+    """Cron/startup statements (no start_call_tracking) must NOT create or
+    populate a request collector — only the ring buffer sees them. This is
+    what keeps the Debug Panel's 'This page' view free of background noise."""
+    from backend.utils.telemetry import _SQLITE_QUERIES
+
+    con = _open_instrumented(str(tmp_path / "t.db"))
+    con.execute("SELECT 1")
+
+    assert _SQLITE_QUERIES.get() is None  # record path never initialises it
+    assert sqlite_profiler.get_recent()["buffer_size"] == 1
+
+
+def test_request_collector_failure_does_not_break_sql_path(tmp_path, _request_collector, monkeypatch):
+    """The profiler contract: observability failures never propagate into
+    the calling SQL path. A broken record_sqlite_query must not raise."""
+    from backend.utils import telemetry
+
+    monkeypatch.setattr(
+        telemetry,
+        "record_sqlite_query",
+        lambda entry: (_ for _ in ()).throw(RuntimeError("collector broken")),
+    )
+    con = _open_instrumented(str(tmp_path / "t.db"))
+    con.execute("SELECT 1")  # must not raise

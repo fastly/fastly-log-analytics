@@ -12,13 +12,9 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { client } from '@/lib/api'
+import type { components } from '@/types/api.generated'
 
-interface ExcludeRegexResponse {
-  current: string
-  is_default: boolean
-  default: string
-  effective: string
-}
+type ExcludeRegexResponse = components['schemas']['ScoringExcludeRegexState']
 
 interface ExcludeRegexCardProps {
   serviceId: string
@@ -74,7 +70,7 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
   const initialisedRef = React.useRef(false)
   React.useEffect(() => {
     if (data && !initialisedRef.current) {
-      setDraft(data.current || data.effective)
+      setDraft(data.current || data.effective || '')
       initialisedRef.current = true
     }
   }, [data])
@@ -125,7 +121,7 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
   }
 
   const handleResetToDefault = () => {
-    if (data) setDraft(data.default)
+    if (data) setDraft(data.default ?? '')
   }
 
   // Pre-publish dry-run lint: fires on textarea blur if the draft has
@@ -324,7 +320,7 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
             variant="outline"
             size="sm"
             onClick={handleResetToDefault}
-            disabled={data.is_default && draft === ''}
+            disabled={(data.is_default ?? false) && draft === ''}
             className="text-xs"
           >
             <RotateCcw className="h-3 w-3 mr-1" />

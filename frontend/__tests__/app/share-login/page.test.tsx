@@ -48,7 +48,7 @@ describe('ShareLoginPage', () => {
 
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(screen.getByLabelText('Email'), 'jane@example.com')
+    await user.type(await screen.findByLabelText('Email'), 'jane@example.com')
     await user.type(screen.getByLabelText('Passcode'), 'ocean-cabin-42')
     await user.click(screen.getByRole('button', { name: /sign in/i }))
 
@@ -71,7 +71,7 @@ describe('ShareLoginPage', () => {
 
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(screen.getByLabelText('Email'), 'jane@example.com')
+    await user.type(await screen.findByLabelText('Email'), 'jane@example.com')
     await user.type(screen.getByLabelText('Passcode'), 'ocean-cabin-42')
     await user.click(screen.getByRole('button', { name: /sign in/i }))
 
@@ -89,7 +89,7 @@ describe('ShareLoginPage', () => {
 
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(screen.getByLabelText('Email'), 'wrong@example.com')
+    await user.type(await screen.findByLabelText('Email'), 'wrong@example.com')
     await user.type(screen.getByLabelText('Passcode'), 'nope')
     await user.click(screen.getByRole('button', { name: /sign in/i }))
 
@@ -109,7 +109,7 @@ describe('ShareLoginPage', () => {
 
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(screen.getByLabelText('Email'), 'jane@example.com')
+    await user.type(await screen.findByLabelText('Email'), 'jane@example.com')
     await user.type(screen.getByLabelText('Passcode'), 'x')
     await user.click(screen.getByRole('button', { name: /sign in/i }))
 
@@ -130,7 +130,7 @@ describe('ShareLoginPage', () => {
 
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(screen.getByLabelText('Email'), 'jane@example.com')
+    await user.type(await screen.findByLabelText('Email'), 'jane@example.com')
     await user.type(screen.getByLabelText('Passcode'), 'x')
     await user.click(screen.getByRole('button', { name: /sign in/i }))
 
@@ -142,7 +142,7 @@ describe('ShareLoginPage', () => {
   it('toggles passcode visibility', async () => {
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    const input = screen.getByLabelText('Passcode') as HTMLInputElement
+    const input = (await screen.findByLabelText('Passcode')) as HTMLInputElement
     expect(input.type).toBe('password')
     await user.click(screen.getByRole('button', { name: /reveal passcode/i }))
     expect(input.type).toBe('text')

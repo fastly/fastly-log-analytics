@@ -2,8 +2,9 @@
 
 The relative-range wire contract (``pending-docs/wire-token-relative-range-
 anchor-spec.md``): time-windowed analytics requests may carry an optional
-``range_token`` (a relative selection like ``"24h"`` / ``"7d"`` / ``"30d"`` /
-``"auto"``) plus a ``anchor`` (a single reference instant). When present, the
+``range_token`` (a relative selection — any FilterBar quick-preset label,
+``"1h"``..``"30d"``, or ``"auto"``) plus a ``anchor`` (a single reference
+instant). When present, the
 server resolves them DETERMINISTICALLY into absolute ``(start, end)`` bounds —
 those bounds then drive the analyst clamp + the scan, and the ``(range_token,
 quantized_anchor)`` pair is what stabilizes the response-memo cache key.
@@ -51,7 +52,12 @@ ANCHOR_QUANTUM_SECONDS = 60
 # ``"auto"`` is resolved adaptively from the service's log extents (see
 # ``_pick_auto_token``) — it is NOT in this map because it has no fixed delta.
 _FIXED_TOKEN_DELTAS: dict[str, timedelta] = {
+    "1h": timedelta(hours=1),
+    "3h": timedelta(hours=3),
+    "6h": timedelta(hours=6),
+    "12h": timedelta(hours=12),
     "24h": timedelta(hours=24),
+    "3d": timedelta(days=3),
     "7d": timedelta(days=7),
     "30d": timedelta(days=30),
 }
@@ -142,7 +148,8 @@ def resolve_window(
 ) -> tuple[str, str]:
     """Resolve ``(range_token, anchor) -> (start_iso, end_iso)`` deterministically.
 
-    Fixed tokens (``"24h"`` / ``"7d"`` / ``"30d"``) → ``[anchor - delta, anchor]``.
+    Fixed tokens (every ``_FIXED_TOKEN_DELTAS`` key — the FilterBar
+    quick-presets ``"1h"``..``"30d"``) → ``[anchor - delta, anchor]``.
     ``"auto"`` → the adaptive default from ``earliest_log_at`` (see
     ``_pick_auto_token``), then the same ``[anchor - delta, anchor]`` shape.
 

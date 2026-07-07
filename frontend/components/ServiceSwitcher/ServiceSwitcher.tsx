@@ -2,10 +2,8 @@
 
 import * as React from 'react'
 import { Check, ChevronsUpDown, Pin, PinOff } from 'lucide-react'
-import { useRouter, usePathname } from 'next/navigation'
-import { useQueryClient } from '@tanstack/react-query'
+import { usePathname } from 'next/navigation'
 
-import { queryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import { Button, buttonVariants } from '@/components/ui/button'
 import {
@@ -73,9 +71,7 @@ export function ServiceSwitcher() {
   const services = useServiceStore((s) => s.services)
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const setActiveServiceId = useServiceStore((s) => s.setActiveServiceId)
-  const router = useRouter()
   const pathname = usePathname()
-  const queryClient = useQueryClient()
 
   // SSR-safe initial state: empty prefs render fine. Hydrate from localStorage
   // on mount. We're inside a 'use client' boundary so the server render of
@@ -136,15 +132,11 @@ export function ServiceSwitcher() {
   const handleSelect = (id: string) => {
     setActiveServiceId(id)
     setOpen(false)
-    // Refresh bootstrap so its services list + active_service_id catch up to
-    // the just-selected id BEFORE useBootstrap's reconcile effect runs against
-    // it. Without this, switching to a freshly-added service whose id isn't yet
-    // in the cached (5-min staleTime) bootstrap.services makes the reconcile
-    // treat the selection as "unknown" and revert it to the previous service —
-    // a bounce that also re-stamps the URL back. Mirrors the teardown
-    // invalidate in ServicesTable.
-    queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
-    router.push(`${pathname}?service=${id}`)
+    // Hard reload so all panels (traffic chart, etc.) start fresh for the new
+    // service rather than trying to reconcile stale React Query / Web Worker
+    // state mid-flight. setActiveServiceId persists to localStorage so the
+    // store rehydrates to the correct service on the reload.
+    window.location.assign(`${pathname}?service=${id}`)
   }
 
   const handleTogglePin = (id: string) => {

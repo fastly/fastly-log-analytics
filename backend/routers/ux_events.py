@@ -22,7 +22,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 
@@ -52,6 +52,29 @@ class UxEventPayload(BaseModel):
     # Event-specific bag. Bounded size at the Pydantic-validation layer
     # so a misbehaving client can't post unbounded JSON.
     details: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("details")
+    @classmethod
+    def validate_details(cls, v: dict[str, Any]) -> dict[str, Any]:
+        if len(str(v)) > 4096:
+            raise ValueError("Details payload too large")
+
+        def _check(obj: Any, depth: int = 0) -> None:
+            if depth > 5:
+                raise ValueError("Details too deep")
+            if isinstance(obj, dict):
+                if len(obj) > 50:
+                    raise ValueError("Too many items")
+                for val in obj.values():
+                    _check(val, depth + 1)
+            elif isinstance(obj, list):
+                if len(obj) > 50:
+                    raise ValueError("Too many items")
+                for item in obj:
+                    _check(item, depth + 1)
+
+        _check(v)
+        return v
 
     model_config = {
         # Reject extra top-level fields so a typo in the SPA caller

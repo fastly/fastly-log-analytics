@@ -12,6 +12,9 @@ const KNOWN_IDS = [
   'new_city_traffic',
   'new_country_traffic',
   'asn_concentration',
+  'referer_monoculture',
+  'method_drift',
+  'new_asn_traffic',
 ] as const
 
 describe('getTrafficContent', () => {

@@ -34,8 +34,11 @@ from ._common import (
     parse_hour_token,
 )
 from .hour_bundles import bundle_hours, bundle_hours_ip_spread
+from .network_health_geo import build_network_geo_bundles
+from .network_health_heatmap import build_network_heatmap_bundles
 from .network_rtt import build_network_rtt_bundles
 from .network_speed import build_network_speed_bundles
+from .ngwaf_bots import build_ngwaf_bots_bundles
 from .origin_dims import build_origin_dims_bundles
 from .origin_latency_ts import build_origin_latency_ts_bundles
 from .origin_summary import build_origin_summary_bundles
@@ -203,6 +206,33 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
             e,
         )
 
+    # Per-ASN heatmap metrics rollup for /api/network-health's heatmap +
+    # leaderboard + summary + buckets sections (all blocked by the 2–4 s
+    # create_filtered_temp_table on 30 d windows). Enables the skip-temp
+    # guard in get_health() when the geo rollup also hits. Same best-effort
+    # contract — a failure leaves those sections on the raw TEMP-table path.
+    try:
+        build_network_heatmap_bundles(service_id, source, touched_hours)
+    except Exception as e:
+        logger.warning(
+            "[rollups] %s: network_heatmap bundle failed (raw scan will serve): %s",
+            service_id,
+            e,
+        )
+
+    # Per-geocell metrics rollup for /api/network-health's map_buckets +
+    # cities + metro_leaderboard sections. Together with the heatmap rollup
+    # above, enables the skip-temp guard in get_health(). Same best-effort
+    # contract — a failure leaves those sections on the raw TEMP-table path.
+    try:
+        build_network_geo_bundles(service_id, source, touched_hours)
+    except Exception as e:
+        logger.warning(
+            "[rollups] %s: network_geo bundle failed (raw scan will serve): %s",
+            service_id,
+            e,
+        )
+
     # Verified-bot minute-granular time-series rollup for the
     # /api/security/aggregates verified_bots_ts panel (~1.2 s on prod
     # 30 d before this rollup). Exact counts SUM across hours; the
@@ -289,6 +319,19 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
             e,
         )
 
+    # Per-hour NGWAF-bots rollup (waf_req_id ⨝ ngwaf_bot_cache aggregated at
+    # write time) for get_top_bots' ngwaf_bots panel. EXACT SUM across hours.
+    # Same best-effort contract — a failure leaves the panel on the direct
+    # base-table join for the affected hours.
+    try:
+        build_ngwaf_bots_bundles(service_id, source, touched_hours)
+    except Exception as e:
+        logger.warning(
+            "[rollups] %s: ngwaf_bots bundle failed (direct join will serve): %s",
+            service_id,
+            e,
+        )
+
 
 def backfill_rollups(service_id: str, source: dict, fields: list[str] | None = None) -> None:
     """One-shot bulk build for all historical hours up to (but not including)
@@ -357,7 +400,11 @@ def backfill_missing_hour_bundles(
     bundle tree is complete).
 
     Returns a summary dict: ``{"missing": N, "rebuilt_fields": F,
-    "bundled": B}`` so callers can log a concise progress line.
+    "bundled": B, "stamped_empty": E}`` so callers can log a concise
+    progress line. ``stamped_empty`` counts zero-row closed hours that
+    received an empty sentinel bundle (see
+    :func:`~backend.core.rollups.hour_bundles.stamp_empty_hour_sentinels`)
+    so the reader can tell verified-empty apart from writer-gap.
     """
     import duckdb as _ddb
 
@@ -409,15 +456,32 @@ def backfill_missing_hour_bundles(
             return {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
 
         missing = sorted(h for h, _ in rows if h < active and h not in existing)
-        if not missing:
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
 
-        logger.info(
-            "[rollups] %s: backfill_missing_hour_bundles found %d hour(s) missing bundles: %s",
-            service_id,
-            len(missing),
-            missing[:10] + (["…"] if len(missing) > 10 else []),
-        )
+        # Closed hours with genuinely ZERO rows can never acquire coverage
+        # through the data-driven writers (the HAVING n > 0 above never
+        # surfaces them) — stamp those with an empty sentinel bundle so the
+        # reader's missing-hour live heal doesn't classify them as writer
+        # gaps and re-scan them on every request forever.
+        with_data = {h for h, _ in rows}
+        empty_hours: list[str] = []
+        cur = start_dt
+        while cur < end_dt:
+            h = cur.strftime("%Y-%m-%d-%H")
+            cur += timedelta(hours=1)
+            if h >= active or h in existing or h in with_data:
+                continue
+            empty_hours.append(h)
+
+        if not missing and not empty_hours:
+            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "stamped_empty": 0}
+
+        if missing:
+            logger.info(
+                "[rollups] %s: backfill_missing_hour_bundles found %d hour(s) missing bundles: %s",
+                service_id,
+                len(missing),
+                missing[:10] + (["…"] if len(missing) > 10 else []),
+            )
 
         # Reuse recompute_touched_hours so the full per-field write +
         # post-write bundle pipeline runs. recompute_touched_hours
@@ -425,6 +489,12 @@ def backfill_missing_hour_bundles(
         # which contends with uvicorn — close ours first.
     finally:
         con.close()
+
+    from backend.core.rollups.hour_bundles import stamp_empty_hour_sentinels
+
+    stamped = stamp_empty_hour_sentinels(service_id, source, empty_hours)
+    if not missing:
+        return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "stamped_empty": stamped}
 
     recompute_touched_hours(service_id, source, set(missing))
 
@@ -444,7 +514,12 @@ def backfill_missing_hour_bundles(
         except OSError:
             pass
 
-    return {"missing": len(missing), "rebuilt_fields": len(_get_fields(source)), "bundled": bundled_now}
+    return {
+        "missing": len(missing),
+        "rebuilt_fields": len(_get_fields(source)),
+        "bundled": bundled_now,
+        "stamped_empty": stamped,
+    }
 
 
 def backfill_missing_hour_ip_spread(

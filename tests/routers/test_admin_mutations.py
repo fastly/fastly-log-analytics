@@ -99,7 +99,7 @@ def test_ingest_logs_starts_sync_and_returns_run_id():
         with (
             patch("backend.core.duckdb.start_cron_run", return_value=42),
             patch("backend.cron_progress.start_progress"),
-            patch("backend.scheduler._run_service_cron"),
+            patch("backend.cron.jobs.sync._run_service_cron"),
             patch("threading.Thread") as mock_thread,
         ):
             mock_t = MagicMock()
@@ -148,8 +148,8 @@ def test_ingest_logs_read_only_source_starts_metadata_sync():
         with (
             patch("backend.core.duckdb.start_cron_run", return_value=7),
             patch("backend.cron_progress.start_progress"),
-            patch("backend.scheduler._run_metadata_sync") as mock_sync,
-            patch("backend.scheduler._run_service_cron") as mock_cron,
+            patch("backend.cron.jobs.metadata._run_metadata_sync") as mock_sync,
+            patch("backend.cron.jobs.sync._run_service_cron") as mock_cron,
             patch("threading.Thread") as mock_thread,
         ):
             mock_t = MagicMock()
@@ -180,7 +180,7 @@ def test_commit_iceberg_starts_commit_thread_and_returns_run_id():
         with (
             patch("backend.core.duckdb.start_cron_run", return_value=55),
             patch("backend.cron_progress.start_progress"),
-            patch("backend.scheduler._run_commit"),
+            patch("backend.cron.jobs.commit._run_commit"),
             patch("threading.Thread") as mock_thread,
         ):
             mock_t = MagicMock()

@@ -1,7 +1,7 @@
 """``sync_admin_state`` — fire-and-forget admin state export after a
 router mutation. Lives under ``backend.routers`` rather than
 ``backend.utils`` because both of its dependencies
-(``backend.state_sync`` and ``backend.scheduler``) sit above
+(``backend.state_sync`` and ``backend.cron.scheduler``) sit above
 ``backend.utils`` in the layering.
 """
 
@@ -27,7 +27,7 @@ def sync_admin_state(service_id: str | None) -> None:
     except Exception:
         pass
     try:
-        from backend.scheduler import get_scheduler
+        from backend.cron.scheduler import get_scheduler
 
         get_scheduler().reload()
     except Exception:

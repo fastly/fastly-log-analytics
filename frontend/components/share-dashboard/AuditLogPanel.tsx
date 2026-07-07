@@ -14,9 +14,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
 import { client, extractApiError } from '@/lib/api'
 
-import { formatStamp, type ShareStatus } from './utils'
+import { SortableHead, useTableSort, type SortAccessors } from './sortable'
+import { formatStamp, type AuditLog, type ShareStatus } from './utils'
 
 const EVENT_TYPE_FILTER_OPTIONS = [
   'ALL',
@@ -38,6 +46,13 @@ const EVENT_TYPE_FILTER_OPTIONS = [
   'BACKUP_EXPORTED',
   'BACKUP_IMPORTED',
   'CLAIM_FAIL',
+  // OAuth / OIDC analyst login events (design §4). Present under "ALL" without
+  // these, but the filter dropdown must offer them explicitly.
+  'OAUTH_AUTH_INIT',
+  'OAUTH_CALLBACK_FAIL',
+  'OAUTH_VERIFY_FAIL',
+  'OAUTH_INVITE_NOT_FOUND',
+  'LOGIN_SUCCESS_OAUTH',
 ]
 
 type AuditFilters = {
@@ -61,7 +76,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
     since: '',
     until: '',
   })
-  const [filteredLogs, setFilteredLogs] = React.useState<any[] | null>(null)
+  const [filteredLogs, setFilteredLogs] = React.useState<AuditLog[] | null>(null)
   const [loading, setLoading] = React.useState(false)
 
   React.useEffect(() => {
@@ -122,6 +137,20 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
   }
 
   const rows = filteredLogs ?? status?.audit_logs ?? []
+
+  const auditAccessors = React.useMemo<SortAccessors<AuditLog>>(
+    () => ({
+      timestamp: (r) => r.timestamp ?? null,
+      event_type: (r) => r.event_type ?? '',
+      email: (r) => (r.email ?? '').toLowerCase(),
+      details: (r) => r.details ?? '',
+    }),
+    [],
+  )
+  const { sorted, sortKey, sortDir, toggle } = useTableSort(rows, auditAccessors, {
+    defaultKey: 'timestamp',
+    defaultDir: 'desc',
+  })
 
   return (
     <div className="space-y-3">
@@ -188,21 +217,41 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
         <h4 className="text-sm font-semibold mb-2">
           {filteredLogs ? 'Filtered audit events' : 'Recent audit events'}
         </h4>
-        <ul className="space-y-1 font-mono text-[11px]">
-          {rows.map((row: any, i: number) => (
-            <li key={`${row.id || i}`} className="flex gap-2">
-              <span className="text-muted-foreground shrink-0">{formatStamp(row.timestamp)}</span>
-              <Badge variant="outline" className="text-[10px] shrink-0">
-                {row.event_type}
-              </Badge>
-              <span className="truncate">{row.email || '—'}</span>
-              <span className="text-muted-foreground truncate">{row.details}</span>
-            </li>
-          ))}
-          {!rows.length && (
-            <li className="text-center text-xs text-muted-foreground">No audit events yet.</li>
-          )}
-        </ul>
+        <Table className="font-mono text-[11px]">
+          <TableHeader>
+            <TableRow>
+              <SortableHead label="Time" sortKey="timestamp" activeKey={sortKey} dir={sortDir} onSort={toggle} className="w-[180px]" />
+              <SortableHead label="Event" sortKey="event_type" activeKey={sortKey} dir={sortDir} onSort={toggle} />
+              <SortableHead label="Email" sortKey="email" activeKey={sortKey} dir={sortDir} onSort={toggle} />
+              <SortableHead label="Details" sortKey="details" activeKey={sortKey} dir={sortDir} onSort={toggle} />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sorted.map((row: AuditLog, i: number) => (
+              <TableRow key={`${row.id || i}`}>
+                <TableCell className="text-muted-foreground align-top whitespace-nowrap">
+                  {formatStamp(row.timestamp)}
+                </TableCell>
+                <TableCell className="align-top">
+                  <Badge variant="outline" className="text-[10px]">
+                    {row.event_type}
+                  </Badge>
+                </TableCell>
+                <TableCell className="align-top">{row.email || '—'}</TableCell>
+                <TableCell className="text-muted-foreground align-top whitespace-normal break-words max-w-[420px]">
+                  {row.details}
+                </TableCell>
+              </TableRow>
+            ))}
+            {!rows.length && (
+              <TableRow>
+                <TableCell colSpan={4} className="text-center text-xs text-muted-foreground">
+                  No audit events yet.
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
       </section>
     </div>
   )

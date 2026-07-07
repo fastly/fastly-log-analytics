@@ -2,7 +2,6 @@
 
 import * as React from 'react'
 import { X, Plus, Bot } from 'lucide-react'
-import { subDays } from 'date-fns'
 
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -10,7 +9,8 @@ import { Badge } from '@/components/ui/badge'
 import { useFilterStore } from '@/stores/filterStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useServiceStore } from '@/stores/serviceStore'
-import { formatForInput, parseFromInput, toUTCDate } from '@/lib/date'
+import { formatForInput, parseFromInput } from '@/lib/date'
+import { resolveSnappedWindow } from '@/lib/log-extents-snap'
 import { useQuery, useIsFetching } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useDateFormat } from '@/hooks/useDateFormat'
@@ -171,68 +171,24 @@ export const FilterBar = React.memo(function FilterBar() {
   })
 
   React.useEffect(() => {
-    // If the app just loaded OR the user clicked Reset, snap to available extents
-    // Also re-snap if extents were initially empty but isAutoRange is still true
+    // If the app just loaded OR the user clicked Reset, snap to available extents.
+    // Also re-snap if extents were initially empty but isAutoRange is still true.
+    // The snap decision itself (spanDays/ageMinutes/15-min staleness threshold,
+    // shared with the SSR seed so first paint doesn't disagree with this effect —
+    // see lib/log-extents-snap.ts) lives in resolveSnappedWindow.
     if (status && (!hasSyncedExtents || isAutoRange)) {
-      if (status.earliest_log_at && status.latest_log_at) {
-        // Parse available log extents
-        const earliestLog = toUTCDate(status.earliest_log_at.length === 10 ? status.earliest_log_at + "T00:00:00.000Z" : status.earliest_log_at)
-        const latestLog = toUTCDate(status.latest_log_at.length === 10 ? status.latest_log_at + "T23:59:59.999Z" : status.latest_log_at)
-
-        // Requirement:
-        // 1. If we have 1 day of data or less, default to the full available range.
-        // 2. If we have more than 1 day, default to the most recent 24 hours of data.
-        // This ensures the dashboard is never empty on load if data exists, while prioritizing recent traffic.
-        // To prevent double-fetching on every page load, only snap the range if
-        // the available data is stale (>15 mins old). If data is actively flowing,
-        // the default "last 24h from now" is correct and captures everything.
-
-        const spanDays = (latestLog.getTime() - earliestLog.getTime()) / (1000 * 3600 * 24)
-        const ageMinutes = (new Date().getTime() - latestLog.getTime()) / (1000 * 60)
-
-        let finalStart: string
-        let finalEnd: string
-
-        if (spanDays <= 1 && spanDays >= 0) {
-          // If we have 1 day of data or less, show the entire available range
-          finalStart = earliestLog.toISOString()
-          finalEnd = latestLog.toISOString()
+      if (isAutoRange) {
+        const snapped = resolveSnappedWindow(status, new Date())
+        if (snapped) {
+          autoSetRange(snapped.start, snapped.end)
         } else {
-          // If we have more than 1 day, show the most recent 24 hours of data
-          finalEnd = latestLog.toISOString()
-          finalStart = subDays(latestLog, 1).toISOString()
+          // Missing extents, or data is fresh (last log <15min old) — the
+          // default "last 24h from now" already captures it. Keep it, just
+          // mark auto-range as done.
+          autoSetRange(useFilterStore.getState().startTime, useFilterStore.getState().endTime)
         }
-
-        // Degenerate-extent guard: a service with a single log — or all logs
-        // sharing one timestamp — has earliest_log_at === latest_log_at, so the
-        // snapped window collapses to finalStart === finalEnd. The backend clamp
-        // uses half-open [start, end) semantics: it rejects a zero-width window
-        // outright ("clamped time range is empty") and would exclude the lone
-        // boundary log even if it didn't. Widen to a 1-hour window centred on the
-        // log so the dashboard renders it (with context) instead of erroring.
-        if (new Date(finalEnd).getTime() <= new Date(finalStart).getTime()) {
-          const anchorMs = new Date(finalEnd).getTime()
-          finalStart = new Date(anchorMs - 30 * 60 * 1000).toISOString()
-          finalEnd = new Date(anchorMs + 30 * 60 * 1000).toISOString()
-        }
-
-        if (isAutoRange) {
-          // Only snap if the data is stale. If it's fresh, the default "last 24 hours"
-          // from the store is perfectly fine and avoids an unnecessary duplicate query.
-          if (ageMinutes > 15) {
-            autoSetRange(finalStart, finalEnd)
-          } else {
-            // Data is fresh. Keep the default range but mark auto-range as done
-            autoSetRange(useFilterStore.getState().startTime, useFilterStore.getState().endTime)
-          }
-        }
-        setHasSyncedExtents(true)
-      } else {
-        // Status came back but no log extents yet (DB may still be empty or view
-        // is stale). Unblock the dashboard so it can fire with the default range
-        // rather than spinning indefinitely. Will re-snap if extents arrive later.
-        setHasSyncedExtents(true)
       }
+      setHasSyncedExtents(true)
     }
   }, [status, hasSyncedExtents, isAutoRange, autoSetRange, setHasSyncedExtents])
 

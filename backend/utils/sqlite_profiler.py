@@ -55,17 +55,24 @@ def _record(sql: str, params: Any, duration_ms: float, rowcount: int, op: str) -
     try:
         if _buffer.maxlen and len(_buffer) == _buffer.maxlen:
             _dropped += 1
-        _buffer.append(
-            {
-                "seq": next(_seq),
-                "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-                "sql": _summarize_sql(sql),
-                "params_kind": _describe_params(params),
-                "time_ms": round(duration_ms, 3),
-                "rows": rowcount,
-                "op": op,
-            }
-        )
+        entry = {
+            "seq": next(_seq),
+            "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "sql": _summarize_sql(sql),
+            "params_kind": _describe_params(params),
+            "time_ms": round(duration_ms, 3),
+            "rows": rowcount,
+            "op": op,
+        }
+        _buffer.append(entry)
+        # Also feed the per-request collector so the Debug Panel can show
+        # THIS page's SQLite statements instead of the process-wide buffer.
+        # No-op outside a tracked request (cron, startup). Lazy import
+        # mirrors the query_registry pattern above — the profiler is
+        # imported very early, before backend.utils.telemetry is safe.
+        from backend.utils.telemetry import record_sqlite_query
+
+        record_sqlite_query(entry)
     except Exception:
         # Profiler errors must never surface to the caller. Log at debug so a
         # broken record doesn't flood the logs either.

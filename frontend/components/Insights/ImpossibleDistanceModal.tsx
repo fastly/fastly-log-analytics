@@ -54,7 +54,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
 
         addCountryBaseLayer(map.current, { isDark })
 
-        const features: any[] = [
+        const features: GeoJSON.Feature[] = [
           {
             type: 'Feature',
             geometry: { type: 'Point', coordinates: [data.client_lon, data.client_lat] },

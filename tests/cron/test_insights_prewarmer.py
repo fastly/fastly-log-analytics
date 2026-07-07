@@ -1,9 +1,12 @@
 """Tests for :mod:`backend.cron.jobs.insights_prewarmer`.
 
 The prewarmer is a ``@cron_task``-wrapped function that periodically
-calls ``get_insights`` for the default selection (window=1h,
-baseline=168h) so the first user after a cold start lands on a warm
-cache hit instead of paying the ~3.5 s cold-path cost.
+calls ``get_insights`` for the service's ADAPTIVE default selection —
+the window/baseline pair ``backend.utils.insights_defaults`` derives from
+the service's log history, mirroring the frontend picker — so the first
+user after a cold start lands on a warm cache hit instead of paying the
+seconds-to-tens-of-seconds cold-path cost. With no extents the pair falls
+back to the static (window=1h, baseline=168h).
 
 Tests stub out the duckdb helpers, ``get_insights``, and (where
 relevant) ``start_cron_run`` to exercise every branch of the
@@ -39,7 +42,9 @@ def stub_cron_run(monkeypatch) -> dict[str, MagicMock]:
 
     Also stubs the analyst-side dependencies to a deterministic *inactive*
     default (sharing off, no invites) so the admin-only path is exercised
-    unless a test explicitly opts into analyst shapes.
+    unless a test explicitly opts into analyst shapes, and pins the service
+    status snapshot to "no extents" so the adaptive picker falls back to the
+    static (1h, 168h) pair unless a test provides extents.
     """
     start = MagicMock(return_value=99)
     log = MagicMock()
@@ -49,12 +54,22 @@ def stub_cron_run(monkeypatch) -> dict[str, MagicMock]:
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", log)
     monkeypatch.setattr("backend.core.duckdb.get_connection", get_conn)
     monkeypatch.setattr("backend.cron.scheduler._display_label", lambda src, sid: src.get("name", sid))
+    get_status = MagicMock(return_value={})
+    monkeypatch.setattr("backend.config.get_status", get_status)
     mgr = MagicMock()
     mgr.is_sharing_active.return_value = False
     monkeypatch.setattr("backend.utils.tunnel.get_tunnel_manager", lambda: mgr)
     invites = MagicMock(return_value=[])
     monkeypatch.setattr("backend.core.share_db.get_remote_invites", invites)
-    return {"start": start, "log": log, "con": con, "get_conn": get_conn, "mgr": mgr, "invites": invites}
+    return {
+        "start": start,
+        "log": log,
+        "con": con,
+        "get_conn": get_conn,
+        "mgr": mgr,
+        "invites": invites,
+        "get_status": get_status,
+    }
 
 
 # ── source / start-cron-run gating ───────────────────────────────────────────
@@ -103,8 +118,9 @@ def test_success_admin_only_logs_and_records(monkeypatch, stub_source, stub_cron
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
-    # Called once (admin) with window/baseline pinned to the dashboard defaults
-    # and force_refresh=True; no clamp (admin/unclamped key).
+    # Called once (admin) with window/baseline at the static default (the
+    # fixture pins a no-extents status snapshot) and force_refresh=True; no
+    # clamp (admin/unclamped key).
     get_insights_mock.assert_called_once()
     args, kwargs = get_insights_mock.call_args
     assert args[0] is stub_cron_run["con"]
@@ -173,6 +189,78 @@ def test_warms_analyst_shapes_when_sharing_active(monkeypatch, stub_source, stub
     assert "admin + 2 analyst" in log_kwargs["summary"]
 
 
+def test_adaptive_shape_from_extents(monkeypatch, stub_source, stub_cron_run):
+    """A service with ≥30 d of history warms the (1, 720) pair the adaptive
+    frontend default will actually request — NOT the static (1, 168). This is
+    the regression test for the stranded prewarm: the /api/insights cache key
+    includes window+baseline, so warming the wrong pair is a guaranteed miss
+    for every default page load."""
+    from datetime import UTC, datetime, timedelta
+
+    earliest = (datetime.now(UTC) - timedelta(days=53)).isoformat()
+    stub_cron_run["get_status"].return_value = {"earliest_log_at": earliest}
+    get_insights_mock = MagicMock(return_value={})
+    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+
+    stub_cron_run["get_status"].assert_called_once_with(stub_source["name"])
+    kwargs = get_insights_mock.call_args.kwargs
+    assert kwargs["window_hours"] == 1.0
+    assert kwargs["baseline_hours"] == 720.0
+    # The warmed shape is surfaced in the cron_runs summary for prod audit.
+    assert "1h/720h" in stub_cron_run["log"].call_args.kwargs["summary"]
+
+
+def test_adaptive_shape_applies_to_analyst_warms(monkeypatch, stub_source, stub_cron_run):
+    """Analyst-shape warms use the SAME adaptive pair as the admin warm (the
+    extents both roles pick from are the un-clamped service snapshot), keyed
+    by the invite's stable clamp fragment."""
+    from datetime import UTC, datetime, timedelta
+
+    earliest = (datetime.now(UTC) - timedelta(days=53)).isoformat()
+    stub_cron_run["get_status"].return_value = {"earliest_log_at": earliest}
+    stub_cron_run["mgr"].is_sharing_active.return_value = True
+    stub_cron_run["invites"].return_value = [
+        {
+            "revoked": 0,
+            "expires_at": None,
+            "service_ids": ["svc-1"],
+            "pii_policy": {"mask_ips": True},
+            "query_start_time": None,
+            "query_end_time": None,
+            "query_window_hours": 24,
+        },
+    ]
+    get_insights_mock = MagicMock(return_value={})
+    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+
+    assert get_insights_mock.call_count == 2  # admin + 1 analyst shape
+    analyst_call = next(c for c in get_insights_mock.call_args_list if c.kwargs.get("clamp_cache_key") is not None)
+    assert analyst_call.kwargs["window_hours"] == 1.0
+    assert analyst_call.kwargs["baseline_hours"] == 720.0
+    assert analyst_call.kwargs["clamp_cache_key"] == "||24"
+    assert analyst_call.kwargs["mask_ips"] is True
+
+
+def test_adaptive_shape_young_service(monkeypatch, stub_source, stub_cron_run):
+    """A ~2 h-old service warms the (1, 1) pair — the small-history bucket —
+    so brand-new services aren't prewarmed against a baseline they can't fill."""
+    from datetime import UTC, datetime, timedelta
+
+    earliest = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    stub_cron_run["get_status"].return_value = {"earliest_log_at": earliest}
+    get_insights_mock = MagicMock(return_value={})
+    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+
+    kwargs = get_insights_mock.call_args.kwargs
+    assert (kwargs["window_hours"], kwargs["baseline_hours"]) == (1.0, 1.0)
+
+
 def test_kill_switch_skips_analyst_shapes(monkeypatch, stub_source, stub_cron_run):
     """INSIGHTS_PREWARM_ANALYST=0 warms admin only even with sharing active."""
     monkeypatch.setenv("INSIGHTS_PREWARM_ANALYST", "0")
@@ -207,7 +295,9 @@ def test_success_logs_info_line(monkeypatch, stub_source, stub_cron_run, caplog)
     with caplog.at_level(logging.INFO, logger="backend.scheduler"):
         insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
-    assert any("prewarmed in" in r.message for r in caplog.records)
+    # The INFO line carries the warmed shape (static default here — the
+    # fixture pins a no-extents snapshot).
+    assert any("prewarmed 1h/168h in" in r.message for r in caplog.records)
 
 
 def test_display_label_falls_back_to_service_id(monkeypatch, stub_source, stub_cron_run, caplog):

@@ -600,3 +600,186 @@ def test_rollup_readers_match_live_sql(tmp_path):
 
     # coverage: exact SUM parity.
     assert roll_cov == (live_total, live_pop)
+
+
+# ── Dashboard conn_requests histogram reader (reuses the conn_reuse bundle) ──
+
+# The dashboard's live histogram SQL — imported via the module so a template
+# edit flags the parity test below.
+from backend.repositories._sql.dashboard import CONN_REQUESTS_BUCKET  # noqa: E402
+
+
+def test_conn_requests_hist_reader_parity_and_fold(tmp_path):
+    """try_conn_requests_hist_from_rollup serves the DASHBOARD histogram from
+    the security_conn_reuse parquets: labels remapped to the dashboard space
+    ('1 (None)'→'1', en-dash ranges), the '21-100'/'>100' tail folded into
+    '21+', fixed bucket order, and byte-parity with the dashboard's live
+    CONN_REQUESTS_BUCKET SQL over the SAME rows (NULL/0 floor included)."""
+    from backend.core.rollups import security_dims
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-cr-1"}
+
+    # 3 closed hours, safely before the active hour so no live top-up fires.
+    base_dt = (datetime.now(UTC) - timedelta(hours=6)).replace(minute=0, second=0, microsecond=0)
+    hours = [base_dt + timedelta(hours=i) for i in range(3)]
+
+    def _canonical_rows(hour_dt):
+        # One row per rollup bucket INCLUDING both tail buckets (50 → '21-100',
+        # 200 → '>100') so the '21+' fold aggregates two source buckets, plus
+        # a NULL and a 0 that the conn_requests > 0 floor must drop.
+        vals = [1, 1, 3, 10, 50, 200, 0, None]
+        return [
+            {
+                "timestamp": hour_dt + timedelta(seconds=j),
+                "ip": "10.0.0.1",
+                "req_header_bytes": 100,
+                "conn_requests": v,
+                "tls_ciphers_sha": "abc",
+            }
+            for j, v in enumerate(vals)
+        ]
+
+    for dt in hours:
+        hour_token = dt.strftime("%Y-%m-%d-%H")
+        canonical = _canonical_rows(dt)
+
+        def _fresh_con(rows=canonical):
+            c = duckdb.connect(":memory:")
+            _seed_logs(c, "logs_cr", rows)
+            return c
+
+        p = _build_patches(cache_root, "logs_cr", _fresh_con)
+        with p[0], p[1], p[2], p[3], p[4]:
+            security_dims.build_security_dims_bundles("svc-cr-1", src, [hour_token])
+
+    # Live dashboard SQL over one table holding ALL hours of the same rows.
+    con = duckdb.connect(":memory:")
+    all_rows: list[dict] = []
+    for dt in hours:
+        all_rows.extend(_canonical_rows(dt))
+    _seed_logs(con, "t_par", all_rows)
+    live = con.execute(
+        CONN_REQUESTS_BUCKET.format(requests_metric="COUNT(*)", table_name="t_par", where_clause="1=1")
+    ).fetchall()
+    live_pairs = [(r[0], int(r[1])) for r in live]
+
+    runner = QueryRunner(con, src)
+    st_iso = hours[0].isoformat().replace("+00:00", "Z")
+    et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        hist = runner.try_conn_requests_hist_from_rollup(
+            st_iso, et_iso, has_filters=False, actual_cols=["conn_requests"]
+        )
+
+    assert hist is not None
+    assert [(r["value"], r["count"]) for r in hist["top"]] == live_pairs
+    # Dashboard label space, fixed order, tail folded (50 + 200 → one '21+').
+    assert [r["value"] for r in hist["top"]] == ["1", "2–5", "6–20", "21+"]
+    assert hist["total"] == sum(c for _b, c in live_pairs)
+
+
+def test_conn_requests_hist_reader_eligibility(tmp_path):
+    """None on: filters present, window < 2h, no bundle coverage, malformed
+    timestamps. (The 2h floor is deliberately LOWER than the 48h security
+    default — the dashboard fallback is a dedicated window scan.)"""
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-cr-2"}
+    con = duckdb.connect(":memory:")
+    runner = QueryRunner(con, src)
+
+    call = lambda s, e, hf: runner.try_conn_requests_hist_from_rollup(s, e, has_filters=hf)  # noqa: E731
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        assert call("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", True) is None
+        assert call("2026-06-01T00:00:00Z", "2026-06-01T01:30:00Z", False) is None
+        assert call("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", False) is None
+        assert call("not-a-date", "2026-06-02T00:00:00Z", False) is None
+
+
+def test_conn_requests_hist_reader_live_topup(tmp_path):
+    """A window crossing the active hour merges the buffer's live rows via the
+    direct active-hour read; closed hours stay rollup-served."""
+    import pyarrow as pa
+
+    from backend.core.rollups import security_dims
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-cr-3"}
+
+    active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    closed = [active_dt - timedelta(hours=2), active_dt - timedelta(hours=1)]
+
+    def _closed_rows(hour_dt):
+        # Per closed hour: 2× '1', 1× '2-5'.
+        return [
+            {
+                "timestamp": hour_dt,
+                "ip": "10.0.0.1",
+                "req_header_bytes": 100,
+                "conn_requests": 1,
+                "tls_ciphers_sha": "x",
+            },
+            {
+                "timestamp": hour_dt + timedelta(seconds=1),
+                "ip": "10.0.0.1",
+                "req_header_bytes": 100,
+                "conn_requests": 1,
+                "tls_ciphers_sha": "x",
+            },
+            {
+                "timestamp": hour_dt + timedelta(seconds=2),
+                "ip": "10.0.0.1",
+                "req_header_bytes": 100,
+                "conn_requests": 3,
+                "tls_ciphers_sha": "x",
+            },
+        ]
+
+    for dt in closed:
+        hour_token = dt.strftime("%Y-%m-%d-%H")
+        canonical = _closed_rows(dt)
+
+        def _fresh_con(rows=canonical):
+            c = duckdb.connect(":memory:")
+            _seed_logs(c, "logs_cr3", rows)
+            return c
+
+        p = _build_patches(cache_root, "logs_cr3", _fresh_con)
+        with p[0], p[1], p[2], p[3], p[4]:
+            security_dims.build_security_dims_bundles("svc-cr-3", src, [hour_token])
+
+    # Buffer parquet for the active hour: 1× '1', 2× '6–20'. Timestamps a few
+    # minutes into the active hour; the window end extends past them so the
+    # [live_start, live_end) clamp keeps them regardless of wall-clock offset.
+    buffer_dir = cache_root / "buffer"
+    buffer_dir.mkdir()
+    ts = active_dt + timedelta(minutes=5)
+    tbl = pa.table(
+        {
+            "timestamp": pa.array([ts, ts, ts], type=pa.timestamp("us", tz="UTC")),
+            "conn_requests": pa.array([1, 7, 7], type=pa.int64()),
+        }
+    )
+    pq.write_table(tbl, str(buffer_dir / "live.parquet"))
+
+    con = duckdb.connect(":memory:")
+    runner = QueryRunner(con, src)
+    st_iso = closed[0].isoformat().replace("+00:00", "Z")
+    et_iso = (active_dt + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        hist = runner.try_conn_requests_hist_from_rollup(
+            st_iso, et_iso, has_filters=False, actual_cols=["conn_requests"]
+        )
+
+    assert hist is not None
+    counts = {r["value"]: r["count"] for r in hist["top"]}
+    # Closed: 2 hours × (2× '1', 1× '2–5'); live buffer adds 1× '1', 2× '6–20'.
+    assert counts == {"1": 5, "2–5": 2, "6–20": 2}
+    assert hist["total"] == 9

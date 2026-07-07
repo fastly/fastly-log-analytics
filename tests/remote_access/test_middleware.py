@@ -472,6 +472,63 @@ def _post_filter(client, *, filters):
     )
 
 
+def _post_field(client, *, field):
+    """POST an analytics body carrying a top-level ``field`` (the field-values
+    enumeration dimension) as an authenticated analyst. The PII lock is
+    path-agnostic within the analyst-allowed /api/dashboard/ prefix, so the
+    stub aggregates route stands in for /api/dashboard/field-values."""
+    return client.post(
+        "/api/dashboard/aggregates",
+        json={"service_id": "svcA", "field": field},
+        headers={
+            "X-Remote-Analyst": "1",
+            "Host": "testserver",
+            "Origin": "https://testserver",
+        },
+    )
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "field",
+    [
+        "ip",
+        "ip.",
+        "ip ",
+        "client_ip.",
+        "cookie_session",
+        "cookie_session.",
+        "cookie_session ",
+        # case variants (DuckDB identifiers are case-insensitive)
+        "IP",
+        "Cookie_Session",
+        "Client_IP",
+    ],
+)
+def test_analyst_masking_blocks_pii_field_values_enumeration(client, field):
+    """A mask_ips analyst must not ENUMERATE a PII column's distinct values via
+    the field-values ``field`` param. Even with values masked, the per-value
+    COUNT + search-prefix matching form an enumeration oracle, so reject at the
+    boundary like a PII filter key — including junk-suffixed evasions."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"], pii_policy={"mask_ips": True})
+    _login_analyst(client, invite)
+    r = _post_field(client, field=field)
+    assert r.status_code == 403, (field, r.status_code, r.text)
+    assert r.json()["error"] == "pii_policy_violation", (field, r.text)
+
+
+@pytest.mark.security_regression
+def test_analyst_masking_allows_non_pii_field_values_enumeration(client):
+    """Enumerating a non-PII dimension (url) stays allowed — the dimension lock
+    must not over-block legitimate field-values pickers."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"], pii_policy={"mask_ips": True})
+    _login_analyst(client, invite)
+    r = _post_field(client, field="url")
+    assert r.status_code == 200, r.text
+
+
 @pytest.mark.security_regression
 @pytest.mark.parametrize("key", ["ip", "filter_ip", "xfilter_ip", "ip_2", "client_ip"])
 def test_analyst_masking_blocks_ip_filter(client, key):
@@ -487,6 +544,23 @@ def test_analyst_masking_blocks_ip_filter(client, key):
     assert r.json()["error"] == "pii_policy_violation"
     # field is the NORMALIZED column (prefixes + dedup suffix stripped).
     assert r.json()["field"] == ("client_ip" if key == "client_ip" else "ip")
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize("key", ["cookie_session", "filter_cookie_session", "cookie_session_2"])
+def test_analyst_masking_blocks_cookie_session_filter(client, key):
+    """Phase-4 Track C: a masking analyst filtering by the session-id column
+    (incl. prefixed / dedup-suffixed variants the SQL builder normalizes) is
+    rejected with 403 — the same presence-oracle guard as the IP filter-lock,
+    so a mask_ips analyst can't probe for / enumerate a specific session hash."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"], pii_policy={"mask_ips": True})
+    _login_analyst(client, invite)
+    r = _post_filter(client, filters={key: {"mode": "include", "values": ["a1b2c3d4deadbeef"]}})
+    assert r.status_code == 403, (key, r.text)
+    assert r.json()["error"] == "pii_policy_violation"
+    # field is the NORMALIZED column (prefixes + dedup suffix stripped).
+    assert r.json()["field"] == "cookie_session"
 
 
 @pytest.mark.security_regression
@@ -509,6 +583,46 @@ def test_analyst_masking_allows_oip_filter(client):
     _login_analyst(client, invite)
     r = _post_filter(client, filters={"oip": {"mode": "include", "values": ["151.101.1.51"]}})
     assert r.status_code == 200, r.text
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "key",
+    [
+        # Trailing / embedded non-word chars that ``normalize_filter_key`` does
+        # NOT strip but ``build_where_clause``'s ``_SAFE_COL_RE.sub("", col)``
+        # DOES — so the middleware lock (which only runs normalize_filter_key)
+        # sees a "different" column while the SQL builder still filters the REAL
+        # cookie_session / ip column. Each of these MUST be blocked.
+        "cookie_session.",
+        "cookie_session ",
+        "cookie_session\t",
+        "cookie_session%",
+        "cookie_session-",
+        "filter_cookie_session.",
+        "ip.",
+        "ip ",
+        "client_ip.",
+    ],
+)
+def test_analyst_masking_blocks_safecol_evasion_filter(client, key):
+    """Regression: the presence-oracle filter-lock must normalize a filter key
+    the SAME way ``build_where_clause`` resolves it to a real column.
+
+    ``build_where_clause`` applies ``normalize_filter_key`` AND THEN
+    ``_SAFE_COL_RE.sub("", col)`` (strip every non-word char), but the analyst
+    filter-lock in ``remote_access`` applies ONLY ``normalize_filter_key``.
+    A key like ``"cookie_session."`` therefore slips past the lock
+    (normalized == "cookie_session." not in the forbidden set) yet still emits
+    ``CAST(cookie_session AS VARCHAR) IN (?)`` in the WHERE clause — a presence
+    oracle / correlation vector on the very session-id (and IP) columns the
+    mask_ips policy exists to protect. It must 403 pii_policy_violation."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"], pii_policy={"mask_ips": True})
+    _login_analyst(client, invite)
+    r = _post_filter(client, filters={key: {"mode": "include", "values": ["a1b2c3d4deadbeef"]}})
+    assert r.status_code == 403, (key, r.status_code, r.text)
+    assert r.json()["error"] == "pii_policy_violation", (key, r.text)
 
 
 def test_analyst_without_masking_allows_ip_filter(client):

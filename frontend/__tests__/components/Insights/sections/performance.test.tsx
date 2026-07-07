@@ -10,6 +10,12 @@ const KNOWN_IDS = [
   'asn_metro_performance',
   'latency_regression',
   'network_asn_health',
+  'pop_latency_regression',
+  'metro_delivery_degradation',
+  'connection_type_mix',
+  'http3_fallback',
+  'payload_compression_regression',
+  'timeout_split',
 ] as const
 
 describe('getPerformanceContent', () => {

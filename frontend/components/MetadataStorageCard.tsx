@@ -10,7 +10,13 @@ import { Input } from '@/components/ui/input'
 import { Trash2, Database, Pencil, Check, X, Lock } from 'lucide-react'
 import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
+import type { Expect, WireParity } from '@/types/api'
+import type { components } from '@/types/api.generated'
 
+// Deliberate narrowing of the all-optional generated MetadataStorageResponse
+// (+ its MetadataTableStat / MetadataRetentionValues sub-schemas): the
+// endpoint always emits tables/db_path/retention; db_bytes is null only when
+// the stat fails. Key/type drift fails on the parity guards below.
 type TableStat = { rows: number; bytes: number | null }
 type StorageResponse = {
   tables: Record<string, TableStat>
@@ -27,6 +33,11 @@ type StorageResponse = {
   // disables the input + shows a tooltip explaining the override.
   ingested_files_locked?: boolean
 }
+export type _TableStatParity = Expect<WireParity<TableStat, components['schemas']['MetadataTableStat']>>
+export type _RetentionParity = Expect<
+  WireParity<StorageResponse['retention'], components['schemas']['MetadataRetentionValues']>
+>
+export type _StorageParity = Expect<WireParity<StorageResponse, components['schemas']['MetadataStorageResponse']>>
 // Tables we surface in the table list. Order matters — the first three
 // are the trimmable ones, shown first; the rest are reference data.
 const TRIMMABLE = ['usage_log', 'ingested_files', 'cron_runs'] as const
@@ -86,7 +97,9 @@ export function MetadataStorageCard() {
   const { data, isLoading, isFetching, error } = useQuery<StorageResponse>({
     queryKey: ['admin', 'metadata-storage'],
     queryFn: async () => {
-      const { data } = await client.GET('/api/admin/metadata-storage' as any, {} as any)
+      const { data } = await client.GET('/api/admin/metadata-storage')
+      // Narrow the all-optional wire type to the producer-guaranteed local
+      // shape; the _StorageParity guard above keeps the assertion honest.
       return data as StorageResponse
     },
     staleTime: 30_000,

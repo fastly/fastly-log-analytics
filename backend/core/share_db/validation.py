@@ -24,6 +24,25 @@ _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 # callers can import it without dragging in the connection pool.
 IP_FAMILY_KEYS = frozenset({"ip", "client_ip", "ip_address", "remote_addr"})
 
+# Client-identifier columns that are NOT IP-shaped but are still per-client PII
+# and must be redacted for a ``mask_ips`` analyst (same policy switch as IPs).
+# ``cookie_session`` is a SHA-256 of the client's session cookie captured at the
+# edge (Phase-4 Track C) — a stable pseudonymous session identifier that lets you
+# correlate a single user's requests, so it is masked on the raw ``/logs`` and
+# ``/query`` surfaces exactly like ``ip``. mask_ip() would fail-closed to
+# "[redacted]" on a hash anyway; we redact explicitly so the intent is clear and
+# doesn't depend on the value shape.
+SESSION_ID_KEYS = frozenset({"cookie_session"})
+
+# Non-word strip used to canonicalize an analyst-supplied field name to the real
+# column it resolves to. MUST match the column resolution used by the query
+# layer — ``_SAFE_COL_RE`` in ``backend/repositories/utils/filters.py`` and the
+# ``clean_field`` alnum/underscore filter in the field-values path — so a
+# junk-suffixed field ("ip.", "cookie_session ") is masked the same as its bare
+# form. Duplicated (not imported) to keep this module dependency-free per the
+# note above. Regression: tests/.../test_pii_policy* + security_regression.
+_NONWORD_RE = re.compile(r"[^\w]")
+
 
 class InvalidNameError(ValueError):
     pass
@@ -200,23 +219,64 @@ def apply_pii_policy(obj, policy: dict):
     def _walk(node, parent_key=None, field_ctx=None):
         if isinstance(node, dict):
             out = {}
+            # A field-values response names its dimension column in a *sibling*
+            # ``field`` key (``{"field": "cookie_session", "values":
+            # [{"value": <hash>}]}``) rather than as the parent key the way the
+            # dashboard top-N panels do (``data["cookie_session"]["top"][i]
+            # ["value"]``). Resolve the owning-field context from that sibling so
+            # the generic ``value``-cell masking below fires on the field-values
+            # surface too — for BOTH IP fields (``field=ip`` enumerates raw
+            # distinct IPs otherwise) and session fields. Falls back to the
+            # parent-key-threaded ``field_ctx`` when there's no sibling ``field``
+            # (the top-N shape), so that path is unchanged.
+            declared_field = node.get("field")
+            # Canonicalize the echoed field to the real column the query
+            # resolved (field-values strips to alnum/underscore). WITHOUT this,
+            # a junk-suffixed field ("ip.", "cookie_session ") echoes back
+            # verbatim, fails the exact-match test below, and the value-cell
+            # masking is skipped — leaking raw IPs / session hashes (adversarial
+            # audit 2026-07-06). Defense-in-depth behind the analyst PII lock,
+            # which now also rejects PII field-values enumeration at the boundary.
+            canon_field = _NONWORD_RE.sub("", declared_field).lower() if isinstance(declared_field, str) else None
+            eff_ctx = (
+                canon_field
+                if canon_field is not None and (canon_field in SESSION_ID_KEYS or canon_field in masked_keys)
+                else field_ctx
+            )
             for k, v in node.items():
+                # Session-identifier columns (e.g. cookie_session) are per-client
+                # PII but not IP-shaped — redact wholesale rather than IP-mask.
+                if isinstance(v, str) and k in SESSION_ID_KEYS:
+                    out[k] = "[redacted]" if v else v
+                    continue
                 if isinstance(v, str) and k in masked_keys:
                     out[k] = mask_ip(v)
                     continue
                 # Dashboard top-N panels carry the dimension value under the
                 # generic key ``value`` (``data["ip"]["top"][i]["value"]`` —
                 # backend/repositories/dashboard.py:608/655), NOT under ``ip``,
-                # so key-name masking misses them. When the nearest owning
-                # field IS an IP field, value-shape mask the cell so the Top
-                # IPs card doesn't leak raw client IPs to a mask_ips analyst —
-                # while url/ua panels (field_ctx not an IP field) stay verbatim.
-                if k == "value" and isinstance(v, str) and field_ctx in masked_keys:
+                # so key-name masking misses them. When the owning field IS an IP
+                # field — threaded via the parent key (top-N) OR resolved from a
+                # sibling ``field`` key (field-values, via ``eff_ctx``) — value-
+                # shape mask the cell so neither the Top IPs card nor a
+                # ``field=ip`` field-values picker leaks raw client IPs to a
+                # mask_ips analyst, while url/ua panels stay verbatim.
+                if k == "value" and isinstance(v, str) and eff_ctx in masked_keys:
                     out[k] = _mask_ip_scalar(v)
                     continue
-                # Carry the IP-field context down through intermediate keys
-                # (e.g. "top") so the nested ``value`` cell still sees it.
-                next_ctx = k if k in masked_keys else field_ctx
+                # Same generic ``value`` cell, but the owning field is a session
+                # id (top-N threads it via the parent key; field-values via the
+                # sibling ``field`` key resolved into ``eff_ctx`` above). A hash
+                # has no reliable value shape, so redact wholesale by field —
+                # the analyst can alias the OUTPUT column but not the field this
+                # top-N / picker is grouped by.
+                if k == "value" and isinstance(v, str) and eff_ctx in SESSION_ID_KEYS:
+                    out[k] = "[redacted]" if v else v
+                    continue
+                # Carry the owning-field context (IP or session) down through
+                # intermediate keys (e.g. "top", "values") so the nested
+                # ``value`` cell still sees it.
+                next_ctx = k if (k in masked_keys or k in SESSION_ID_KEYS) else eff_ctx
                 out[k] = _walk(v, parent_key=k, field_ctx=next_ctx)
             return out
         if isinstance(node, list):
@@ -228,7 +288,9 @@ def apply_pii_policy(obj, policy: dict):
             # a list under an IP field still mask their ``value`` cell.
             return [
                 (
-                    mask_ip(x)
+                    ("[redacted]" if x else x)
+                    if isinstance(x, str) and parent_key in SESSION_ID_KEYS
+                    else mask_ip(x)
                     if isinstance(x, str) and parent_key in masked_keys
                     else _walk(x, parent_key=parent_key, field_ctx=field_ctx)
                 )

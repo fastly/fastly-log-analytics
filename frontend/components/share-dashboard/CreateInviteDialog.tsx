@@ -69,10 +69,34 @@ function CreateInviteDialogInner({
   const [duration, setDuration] = React.useState(24)
   const [ipWhitelist, setIpWhitelist] = React.useState('')
   const [maskIps, setMaskIps] = React.useState(false)
+  const [allowConcurrent, setAllowConcurrent] = React.useState(false)
   const [queryWindow, setQueryWindow] = React.useState(0)
   const [serviceIds, setServiceIds] = React.useState<string[]>([])
   const [creating, setCreating] = React.useState(false)
   const [error, setError] = React.useState('')
+  const [authMode, setAuthMode] = React.useState<'passcode' | 'oauth'>('passcode')
+  const [oauthProvider, setOauthProvider] = React.useState('')
+  const [providers, setProviders] = React.useState<
+    Array<{ id: string; display_name: string; enabled: boolean }>
+  >([])
+
+  // Configured OIDC providers for the SSO auth-mode dropdown (admin surface —
+  // may include disabled providers so an admin can pre-create an invite). Empty
+  // unless the feature is configured; the OAuth toggle then stays unsubmittable.
+  React.useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { data, response } = await client.GET('/api/admin/share/oauth-providers', {})
+        if (!cancelled && response.ok) setProviders(data?.providers ?? [])
+      } catch {
+        /* leave empty — OAuth mode just stays disabled */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const handleWordphrase = async () => {
     try {
@@ -92,12 +116,17 @@ function CreateInviteDialogInner({
         body: {
           name,
           email,
-          passcode,
+          // OAuth invites carry no passcode — the backend synthesizes an
+          // unguessable argon2id placeholder for the NOT NULL column.
+          ...(authMode === 'passcode' ? { passcode } : {}),
+          auth_method: authMode,
+          ...(authMode === 'oauth' ? { oauth_provider: oauthProvider } : {}),
           duration_hours: duration || null,
           ip_whitelist: ipWhitelist || null,
           service_ids: serviceIds,
           pii_policy: { mask_ips: maskIps },
           query_window_hours: queryWindow || null,
+          allow_concurrent_sessions: allowConcurrent,
         },
       } as any)
       await onCreated()
@@ -111,9 +140,17 @@ function CreateInviteDialogInner({
 
   // Require at least one authorized service: an invite with no services
   // strands the analyst on "No service found" (bootstrap returns zero
-  // services), so block creation until one is picked.
+  // services), so block creation until one is picked. In OAuth mode the
+  // passcode requirement is dropped and a configured provider is required
+  // instead (design §5.1).
   const canSubmit =
-    !creating && !!name && !!email && !!passcode && serviceIds.length > 0
+    !creating &&
+    !!name &&
+    !!email &&
+    serviceIds.length > 0 &&
+    (authMode === 'passcode' ? !!passcode : !!oauthProvider)
+
+  const providerLabel = providers.find((p) => p.id === oauthProvider)?.display_name ?? ''
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -151,7 +188,43 @@ function CreateInviteDialogInner({
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="jane@example.com"
               />
+              {authMode === 'oauth' && (
+                <p className="text-[11px] text-muted-foreground">
+                  The analyst must sign in with the {providerLabel || 'provider'} account for
+                  this exact address.
+                </p>
+              )}
             </div>
+
+            {/* Auth-mode selector — a11y: fieldset+legend + role=radiogroup with
+                native radios for arrow-key traversal (design §5.4). */}
+            <fieldset className="md:col-span-2 space-y-1">
+              <legend className="text-xs font-medium">Sign-in method</legend>
+              <div className="flex gap-6 pt-1" role="radiogroup" aria-label="Sign-in method">
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="radio"
+                    name="invite-auth-mode"
+                    value="passcode"
+                    checked={authMode === 'passcode'}
+                    onChange={() => setAuthMode('passcode')}
+                  />
+                  Passcode (local)
+                </label>
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="radio"
+                    name="invite-auth-mode"
+                    value="oauth"
+                    checked={authMode === 'oauth'}
+                    onChange={() => setAuthMode('oauth')}
+                  />
+                  SSO / OIDC
+                </label>
+              </div>
+            </fieldset>
+
+            {authMode === 'passcode' && (
             <div className="space-y-1 md:col-span-2">
               <Label htmlFor="invite-passcode" className="text-xs">Passcode</Label>
               <div className="flex items-center gap-2">
@@ -184,6 +257,40 @@ function CreateInviteDialogInner({
                 </Button>
               </div>
             </div>
+            )}
+
+            {authMode === 'oauth' && (
+            <div className="space-y-1 md:col-span-2">
+              <Label htmlFor="invite-oauth-provider" className="text-xs">Identity provider</Label>
+              {providers.length > 0 ? (
+                <Select value={oauthProvider} onValueChange={(v) => setOauthProvider(v ?? '')}>
+                  <SelectTrigger id="invite-oauth-provider">
+                    <SelectValue placeholder="Select a provider" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {providers.map((p) => (
+                      <SelectItem key={p.id} value={p.id}>
+                        {p.display_name}
+                        {!p.enabled ? ' (disabled)' : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <>
+                  <Select disabled>
+                    <SelectTrigger id="invite-oauth-provider">
+                      <SelectValue placeholder="No identity providers configured" />
+                    </SelectTrigger>
+                    <SelectContent />
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    No identity providers configured — add one to the registry first.
+                  </p>
+                </>
+              )}
+            </div>
+            )}
             <div className="space-y-1">
               <Label htmlFor="invite-expiration" className="text-xs">Expiration</Label>
               <Select
@@ -274,6 +381,22 @@ function CreateInviteDialogInner({
               <Label htmlFor="invite-mask-ips" className="text-xs cursor-pointer">
                 Anonymize client IPs (mask PII)
               </Label>
+            </div>
+            <div className="md:col-span-2 space-y-1">
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="invite-allow-concurrent"
+                  checked={allowConcurrent}
+                  onCheckedChange={(v) => setAllowConcurrent(!!v)}
+                />
+                <Label htmlFor="invite-allow-concurrent" className="text-xs cursor-pointer">
+                  Allow multiple people to use this link at the same time
+                </Label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Off (default): each new login signs out the previous one. On: several
+                people can share this link — audit events won&apos;t distinguish between them.
+              </p>
             </div>
           </div>
         </div>

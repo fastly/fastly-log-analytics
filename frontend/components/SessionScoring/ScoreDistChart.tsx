@@ -3,7 +3,7 @@
 import { AlertCircle } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
+import { CardErrorState } from '@/components/CardErrorState'
 import { ScoreDistHelp } from '@/components/SessionScoring/help-content'
 
 import { StackedHourlyBarChart } from './StackedHourlyBarChart'

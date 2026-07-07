@@ -18,10 +18,18 @@ from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import (
     CheckFosRequest,
     LakeInfoRequest,
+    NgwafWorkspaceSetResponse,
+    NgwafWorkspacesResponse,
+    ProvisionCheckConfigResponse,
+    ProvisionCheckDomainResponse,
+    ProvisionCheckFosResponse,
     ProvisionConfigRequest,
     ProvisionExecuteRequest,
+    ProvisionIngestResponse,
+    ProvisionLakeInfoResponse,
     ProvisionTeardownRequest,
     ProvisionValidateRequest,
+    ProvisionValidateResponse,
 )
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, raise_internal
 
@@ -111,7 +119,7 @@ def provision_list_services(token: str = Query(...)):
     ]
 
 
-@router.post("/validate")
+@router.post("/validate", response_model=ProvisionValidateResponse, response_model_exclude_unset=True)
 def provision_validate(body: ProvisionValidateRequest):
     from backend.core.fastly.client import fastly
 
@@ -164,7 +172,11 @@ def provision_validate(body: ProvisionValidateRequest):
         raise_internal(logger, e, code="provision_validate_failed", status=400)
 
 
-@router.get("/check-domain")
+@router.get(
+    "/check-domain",
+    response_model=ProvisionCheckDomainResponse,
+    response_model_exclude_unset=True,
+)
 def provision_check_domain(prefix: str = Query(...)):
     if not prefix:
         raise HTTPException(status_code=400, detail={"error": "Prefix is required"})
@@ -184,7 +196,7 @@ def provision_check_domain(prefix: str = Query(...)):
     return result
 
 
-@router.post("/check-fos")
+@router.post("/check-fos", response_model=ProvisionCheckFosResponse, response_model_exclude_unset=True)
 def provision_check_fos(req: CheckFosRequest):
     """Validate FOS credentials by attempting to list objects."""
     bucket = req.bucket
@@ -246,6 +258,8 @@ def _require_json_content_type(req: Request) -> None:
         )
 
 
+# response_model intentionally omitted: SSE progress stream
+# (EventSourceResponse), not a JSON body.
 @router.post("/teardown", dependencies=[Depends(_require_json_content_type)])
 def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = None):
     """Destructive service teardown over SSE.
@@ -343,7 +357,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                 # Sync crontab and reload scheduler to remove jobs immediately
                 try:
                     _sync_crontab()
-                    from backend.scheduler import get_scheduler
+                    from backend.cron.scheduler import get_scheduler
 
                     get_scheduler().reload()
                     if remove_cron:
@@ -480,7 +494,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
     return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
 
 
-@router.post("/lake-info")
+@router.post("/lake-info", response_model=ProvisionLakeInfoResponse, response_model_exclude_unset=True)
 def provision_lake_info(req: LakeInfoRequest):
     """Return Iceberg table range and calendar for a given bucket/credentials without registering it."""
     bucket = req.bucket
@@ -513,6 +527,8 @@ def provision_lake_info(req: LakeInfoRequest):
     return fetch_lake_info(src, use_temp_cache=True)
 
 
+# response_model intentionally omitted: SSE progress stream
+# (EventSourceResponse), not a JSON body.
 @router.post("/execute")
 def provision_execute(req: ProvisionExecuteRequest):
     token = req.token
@@ -669,7 +685,7 @@ def provision_execute(req: ProvisionExecuteRequest):
 
                         # Trigger an initial metadata sync
                         try:
-                            from backend.scheduler import _run_metadata_sync
+                            from backend.cron.jobs.metadata import _run_metadata_sync
 
                             _run_metadata_sync(cfg["logging_service_id"])
                         except Exception as e:
@@ -683,7 +699,7 @@ def provision_execute(req: ProvisionExecuteRequest):
     return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
 
 
-@router.post("/terraform/preview")
+@router.post("/terraform/preview", response_model=dict[str, str])
 def provision_terraform_preview(body: ProvisionConfigRequest):
     from backend.utils.terraform_gen import generate_terraform
 
@@ -697,6 +713,8 @@ def provision_terraform_preview(body: ProvisionConfigRequest):
     return generate_terraform(cfg, access_key, secret_key)
 
 
+# response_model intentionally omitted: streams a ZIP (StreamingResponse),
+# not a JSON body.
 @router.post("/terraform/export")
 def provision_terraform_export(body: ProvisionConfigRequest):
     import io
@@ -723,7 +741,7 @@ def provision_terraform_export(body: ProvisionConfigRequest):
     return StreamingResponse(zip_buffer, media_type="application/zip", headers=headers)
 
 
-@router.post("/ingest")
+@router.post("/ingest", response_model=ProvisionIngestResponse, response_model_exclude_unset=True)
 def provision_ingest(payload: ProvisionConfigRequest):
     import secrets
 
@@ -861,7 +879,11 @@ def provision_ingest(payload: ProvisionConfigRequest):
     return {"ok": True, "service_id": state["logging_service_id"]}
 
 
-@router.get("/check-config")
+@router.get(
+    "/check-config",
+    response_model=ProvisionCheckConfigResponse,
+    response_model_exclude_unset=True,
+)
 def provision_check_config(
     token: str = Query(...),
     service_id: str = Query(...),
@@ -989,7 +1011,11 @@ def provision_check_config(
     return results
 
 
-@router.get("/ngwaf-workspaces")
+@router.get(
+    "/ngwaf-workspaces",
+    response_model=NgwafWorkspacesResponse,
+    response_model_exclude_unset=True,
+)
 def provision_ngwaf_workspaces(
     service_id: str = Query(...),
     token: str = Query(default=""),
@@ -1099,7 +1125,11 @@ def provision_ngwaf_workspaces(
         raise_internal(logger, e, code="ngwaf_workspaces_failed", status=400)
 
 
-@router.patch("/services/{service_id}/ngwaf-workspace")
+@router.patch(
+    "/services/{service_id}/ngwaf-workspace",
+    response_model=NgwafWorkspaceSetResponse,
+    response_model_exclude_unset=True,
+)
 def provision_set_ngwaf_workspace(
     service_id: str,
     body: dict,

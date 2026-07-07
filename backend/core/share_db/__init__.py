@@ -28,6 +28,7 @@ re-exported below so ``from backend.core import share_db`` keeps working.
 from __future__ import annotations
 
 from backend.core.share_db.audit import (
+    get_last_login_by_email,
     get_share_audit_logs,
     log_share_audit_event,
     purge_old_audit_logs,
@@ -40,6 +41,7 @@ from backend.core.share_db.connection import (
     reset_for_tests,
 )
 from backend.core.share_db.invites import (
+    bind_invite_oauth_subject,
     claim_token,
     create_claim_token,
     create_remote_invite,
@@ -48,11 +50,13 @@ from backend.core.share_db.invites import (
     gdpr_erase,
     get_remote_invite,
     get_remote_invite_by_email_passcode,
+    get_remote_invite_oauth,
     get_remote_invite_services,
     get_remote_invites,
     import_backup,
     mark_tos_accepted,
     revoke_remote_invite,
+    set_invite_concurrent_sessions,
     update_remote_invite_passcode,
     update_remote_invite_pii,
     update_remote_invite_services,
@@ -147,9 +151,12 @@ __all__ = [
     "get_remote_invite_services",
     "get_remote_invites",
     "get_remote_invite_by_email_passcode",
+    "get_remote_invite_oauth",
+    "bind_invite_oauth_subject",
     "update_remote_invite_services",
     "update_remote_invite_passcode",
     "update_remote_invite_pii",
+    "set_invite_concurrent_sessions",
     "revoke_remote_invite",
     "delete_remote_invite",
     "mark_tos_accepted",
@@ -166,6 +173,7 @@ __all__ = [
     # Audit.
     "log_share_audit_event",
     "get_share_audit_logs",
+    "get_last_login_by_email",
     "purge_old_audit_logs",
     # TOS.
     "get_latest_tos",

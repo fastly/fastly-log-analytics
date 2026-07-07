@@ -50,7 +50,7 @@ def test_apscheduler_max_instances_1_keeps_firing_after_watchdog_kill(monkeypatc
     incident).
     """
     apscheduler = pytest.importorskip("apscheduler.schedulers.background")
-    from backend import scheduler as sched_mod
+    from backend.cron import decorators as sched_mod
 
     monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 0.5)
 
@@ -110,7 +110,7 @@ def test_apscheduler_max_instances_1_keeps_firing_after_watchdog_kill(monkeypatc
 
 
 def test_usage_log_phase_30s_timeout_pattern_does_not_block_caller():
-    """Pins the per-phase pattern in _run_service_cron at backend/scheduler.py:1306-1319.
+    """Pins the per-phase pattern in _run_service_cron (backend/cron/jobs/sync.py).
 
     The phase is wrapped in its own single-worker ThreadPoolExecutor with
     a 30s timeout. On timeout we MUST call ``shutdown(wait=False)`` — if

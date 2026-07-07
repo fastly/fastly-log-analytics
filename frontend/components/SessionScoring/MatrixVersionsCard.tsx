@@ -21,38 +21,23 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { client } from '@/lib/api'
+import type { components } from '@/types/api.generated'
 
 interface MatrixVersionsCardProps {
   serviceId: string
 }
 
-interface MatrixVersion {
-  version: string
-  last_modified: string | null
-  size_bytes: number
-  key?: string
-}
+type MatrixVersionsResponse = components['schemas']['ScoringMatrixVersionsResponse']
+type RestoreResponse = components['schemas']['ScoringMatrixRestoreResponse']
 
-interface MatrixVersionsResponse {
-  versions: MatrixVersion[]
-  current_version: string | null
-}
-
-interface RestoreResponse {
-  ok: boolean
-  restored_version: string
-  restored_at: string
-  deploy_hint: string
-}
-
-function formatBytes(bytes: number): string {
+function formatBytes(bytes?: number | null): string {
   if (!bytes) return '0 B'
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 }
 
-function formatTimestamp(iso: string | null): string {
+function formatTimestamp(iso?: string | null): string {
   if (!iso) return '—'
   try {
     return new Date(iso).toLocaleString()
@@ -192,7 +177,7 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
                       size="sm"
                       className="h-7 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive border-destructive/30"
                       disabled={isCurrent || restore.isPending}
-                      onClick={() => setPendingVersion(v.version)}
+                      onClick={() => setPendingVersion(v.version ?? null)}
                     >
                       <RotateCcw className="h-3 w-3 mr-1" />
                       Restore

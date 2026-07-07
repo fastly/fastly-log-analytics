@@ -1,9 +1,31 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class InsightCategory(StrEnum):
+    """Thematic section an insight belongs to on the Anomaly Detection page.
+
+    The lowercase machine key is the ONLY thing on the API contract; the
+    human-facing section label, icon, and ordering live in the frontend
+    (``frontend/lib/insight-sections.ts``) so a section can be renamed
+    without touching the API or the insight definitions.
+
+    ``network`` (Phase 3) is the dedicated Network Path section: ISP/ASN
+    reachability, RTT/packet-loss, and metro/region delivery quality
+    (asn_concentration, asn_metro_performance, region_latency, and the
+    Phase-3 network_asn_health insight). See the design plan §2/§3.
+    """
+
+    security = "security"
+    origin = "origin"
+    edge = "edge"
+    traffic = "traffic"
+    network = "network"
 
 
 class InsightDefinition(BaseModel):
@@ -13,6 +35,11 @@ class InsightDefinition(BaseModel):
 
     id: str
     title: str
+    # Required, no default — a registration that forgets its category fails
+    # Pydantic validation at import time. That import-time failure is the
+    # entire point: it forces every new insight to declare which section it
+    # belongs to instead of silently landing in a wrong/fallback bucket.
+    category: InsightCategory
     description: str = ""
     sql_template: str
     visual_type: str = "table"  # "table", "chart", "map"

@@ -125,8 +125,8 @@ def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_co
         patch("backend.utils.pop_utils.fetch_pop_locations", return_value=True),
         patch("backend.config.fetch_service_name", return_value="Wizard E2E Service"),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
-        patch("backend.scheduler._run_metadata_sync"),
+        patch("backend.cron.scheduler.get_scheduler"),
+        patch("backend.cron.jobs.metadata._run_metadata_sync"),
         # The orchestrator tries to initialize iceberg on commit; let the
         # try/except swallow our forced failure rather than touching FOS.
         patch("backend.core.iceberg.init_iceberg_table", side_effect=RuntimeError("iceberg init skipped (test)")),
@@ -235,8 +235,8 @@ def test_wizard_execute_e2e_iceberg_init_success(isolated_configs_dir, tmp_path,
         patch("backend.utils.pop_utils.fetch_pop_locations", return_value=True),
         patch("backend.config.fetch_service_name", return_value="Wizard Iceberg Success"),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
-        patch("backend.scheduler._run_metadata_sync"),
+        patch("backend.cron.scheduler.get_scheduler"),
+        patch("backend.cron.jobs.metadata._run_metadata_sync"),
         # NB: NO patch for init_iceberg_table — it runs for real against
         # the moto S3 endpoint (s3_mock fixture) the conftest pre-wires
         # via backend.core.duckdb._get_fos_client.
@@ -312,7 +312,7 @@ def test_wizard_execute_rolls_back_on_helper_failure(isolated_configs_dir, tmp_p
         patch("backend.utils.pop_utils.fetch_pop_locations", return_value=True),
         patch("backend.config.fetch_service_name", return_value="Wizard E2E Service Fail"),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
     ):
         with TestClient(app) as client:
             r = client.post(
@@ -396,7 +396,7 @@ def test_wizard_execute_rollback_actually_invokes_resource_deletion(isolated_con
         patch("backend.utils.pop_utils.fetch_pop_locations", return_value=True),
         patch("backend.config.fetch_service_name", return_value="Wizard Teardown Trace"),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
     ):
         with TestClient(app) as client:
             r = client.post(

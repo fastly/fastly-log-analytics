@@ -17,32 +17,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { client } from '@/lib/api'
+import type { components } from '@/types/api.generated'
 
-interface RetrainResult {
-  ok: boolean
-  matrix_version: string
-  since_days: number
-  sessions_trained_on: number
-  transitions: number
-  vocab_size: number
-  rejected?: {
-    too_few_events: number
-    too_fast: number
-    kept: number
-    routes_seen: number
-  }
-  auc_against_labels?: {
-    auc: number
-    passed: boolean
-    threshold: number
-    n_good: number
-    n_bad: number
-  } | null
-  default_min_auc: number
-  local_matrix_saved: boolean
-  fos_matrix_published: boolean
-  deploy_hint?: string
-}
+type RetrainResult = components['schemas']['ScoringRetrainResponse']
 
 interface RetrainButtonProps {
   serviceId: string
@@ -158,16 +135,16 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
           <div className="space-y-3 py-2 text-sm">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               <Metric label="Matrix version" value={result.matrix_version} mono />
-              <Metric label="Sessions trained" value={result.sessions_trained_on.toLocaleString()} />
-              <Metric label="Transitions" value={result.transitions.toLocaleString()} />
-              <Metric label="Vocab size" value={result.vocab_size.toLocaleString()} />
+              <Metric label="Sessions trained" value={(result.sessions_trained_on ?? 0).toLocaleString()} />
+              <Metric label="Transitions" value={(result.transitions ?? 0).toLocaleString()} />
+              <Metric label="Vocab size" value={(result.vocab_size ?? 0).toLocaleString()} />
             </div>
             {result.rejected && (
               <p className="text-xs text-muted-foreground">
-                Kept {result.rejected.kept.toLocaleString()} sessions ·
-                {' '}dropped {result.rejected.too_few_events.toLocaleString()} too-short,
-                {' '}{result.rejected.too_fast.toLocaleString()} too-fast ·
-                {' '}{result.rejected.routes_seen.toLocaleString()} routes seen
+                Kept {(result.rejected.kept ?? 0).toLocaleString()} sessions ·
+                {' '}dropped {(result.rejected.too_few_events ?? 0).toLocaleString()} too-short,
+                {' '}{(result.rejected.too_fast ?? 0).toLocaleString()} too-fast ·
+                {' '}{(result.rejected.routes_seen ?? 0).toLocaleString()} routes seen
               </p>
             )}
             {result.auc_against_labels ? (
@@ -181,11 +158,11 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
                       result.auc_against_labels.passed ? 'text-emerald-600' : 'text-amber-600'
                     }`}
                   >
-                    {result.auc_against_labels.auc.toFixed(3)}
+                    {(result.auc_against_labels.auc ?? 0).toFixed(3)}
                   </span>
                   <span className="text-sm text-muted-foreground">
                     {result.auc_against_labels.passed ? 'PASS' : 'BELOW THRESHOLD'} (threshold{' '}
-                    {result.auc_against_labels.threshold.toFixed(2)})
+                    {(result.auc_against_labels.threshold ?? 0).toFixed(2)})
                   </span>
                 </div>
                 <p className="text-[11px] text-muted-foreground mt-1">

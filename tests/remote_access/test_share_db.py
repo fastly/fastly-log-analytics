@@ -372,6 +372,128 @@ def test_create_invite_round_trips():
     assert "ocean-breeze-cabin-42" not in fetched["passcode"]
 
 
+def test_create_invite_defaults_allow_concurrent_sessions_false():
+    inv = share_db.create_remote_invite(
+        name="Drew",
+        email="drew@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+    )
+    fetched = share_db.get_remote_invite(inv["id"])
+    assert fetched["allow_concurrent_sessions"] is False
+
+
+def test_create_invite_allow_concurrent_sessions_persists():
+    inv = share_db.create_remote_invite(
+        name="Drew",
+        email="drew@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+        allow_concurrent_sessions=True,
+    )
+    fetched = share_db.get_remote_invite(inv["id"])
+    assert fetched["allow_concurrent_sessions"] is True
+    # Also surfaced (as a real bool) by the list accessor.
+    listed = share_db.get_remote_invites()
+    assert any(r["id"] == inv["id"] and r["allow_concurrent_sessions"] is True for r in listed)
+
+
+def test_set_invite_concurrent_sessions_toggles():
+    inv = share_db.create_remote_invite(
+        name="Drew",
+        email="drew@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+    )
+    assert share_db.set_invite_concurrent_sessions(inv["id"], True) is True
+    assert share_db.get_remote_invite(inv["id"])["allow_concurrent_sessions"] is True
+    assert share_db.set_invite_concurrent_sessions(inv["id"], False) is True
+    assert share_db.get_remote_invite(inv["id"])["allow_concurrent_sessions"] is False
+    # Unknown invite id → False (no row updated).
+    assert share_db.set_invite_concurrent_sessions("does-not-exist", True) is False
+
+
+def test_migration_003_adds_allow_concurrent_sessions_column():
+    """A pre-migration remote_invites table (without the column) gains it,
+    defaulting to 0, and the migration is idempotent."""
+    import sqlite3
+
+    from backend.core.share_db import schema
+
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.execute(
+        """CREATE TABLE remote_invites (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL,
+            passcode TEXT NOT NULL, created_at TEXT NOT NULL,
+            revoked INTEGER NOT NULL DEFAULT 0
+        )"""
+    )
+    con.execute(
+        "INSERT INTO remote_invites(id, name, email, passcode, created_at) "
+        "VALUES ('i1', 'n', 'e', 'p', '2020-01-01T00:00:00Z')"
+    )
+    con.commit()
+
+    schema._migration_003_add_allow_concurrent_sessions(con)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(remote_invites)").fetchall()}
+    assert "allow_concurrent_sessions" in cols
+    existing = con.execute("SELECT allow_concurrent_sessions FROM remote_invites WHERE id='i1'").fetchone()
+    assert existing["allow_concurrent_sessions"] == 0
+
+    # Idempotent: the _has_column guard makes a second run a no-op.
+    schema._migration_003_add_allow_concurrent_sessions(con)
+
+
+def test_init_reconciles_column_when_user_version_ahead(tmp_path, monkeypatch):
+    """Field-observed drift: a DB stamped user_version=3 but MISSING the column
+    (migration skipped by the version gate). _init_db must self-heal it via the
+    additive-column reconcile so create_remote_invite doesn't 500."""
+    import sqlite3
+
+    from backend.core.share_db import connection as conn
+    from backend.core.share_db.schema import _init_db
+
+    db_dir = tmp_path / "drift"
+    db_dir.mkdir()
+    db_file = db_dir / "remote_share.db"
+
+    # Pre-seed a "migrated but column-missing" DB: version already at LATEST,
+    # remote_invites without allow_concurrent_sessions.
+    raw = sqlite3.connect(str(db_file))
+    raw.executescript(
+        """
+        CREATE TABLE remote_invites (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL,
+            passcode TEXT NOT NULL, created_at TEXT NOT NULL,
+            revoked INTEGER NOT NULL DEFAULT 0
+        );
+        PRAGMA user_version = 3;
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    # Run the real init path against this file.
+    monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(db_dir))
+    conn.reset_for_tests()
+    try:
+        con = conn.get_global_share_con()
+        cols = {r[1] for r in con.execute("PRAGMA table_info(remote_invites)")}
+        assert "allow_concurrent_sessions" in cols
+        # Reconcile is idempotent on a second open.
+        _init_db(con)
+    finally:
+        conn.close_all_connections()
+        conn.reset_for_tests()
+
+
 def test_create_invite_weak_passcode_raises():
     with pytest.raises(share_db.WeakPasscodeError):
         share_db.create_remote_invite(
@@ -452,6 +574,255 @@ def test_update_invite_services_replaces_set():
     assert share_db.get_remote_invite_services(inv["id"]) == ["c"]
 
 
+# ── OAuth invites (migration 004: auth_method / oauth_provider / oauth_subject) ─
+
+
+def test_migration_004_adds_oauth_columns():
+    """A pre-migration remote_invites table gains the OAuth columns, existing
+    rows backfill to auth_method='passcode', and the migration is idempotent."""
+    import sqlite3
+
+    from backend.core.share_db import schema
+
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.execute(
+        """CREATE TABLE remote_invites (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL,
+            passcode TEXT NOT NULL, created_at TEXT NOT NULL,
+            revoked INTEGER NOT NULL DEFAULT 0
+        )"""
+    )
+    con.execute(
+        "INSERT INTO remote_invites(id, name, email, passcode, created_at) "
+        "VALUES ('i1', 'n', 'e', 'p', '2020-01-01T00:00:00Z')"
+    )
+    con.commit()
+
+    schema._migration_004_add_oauth_columns(con)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(remote_invites)").fetchall()}
+    assert {"auth_method", "oauth_provider", "oauth_subject"}.issubset(cols)
+    row = con.execute("SELECT auth_method, oauth_provider, oauth_subject FROM remote_invites WHERE id='i1'").fetchone()
+    assert row["auth_method"] == "passcode"  # backfilled via DEFAULT
+    assert row["oauth_provider"] is None
+    assert row["oauth_subject"] is None
+
+    # Idempotent: the _has_column guard makes a second run a no-op.
+    schema._migration_004_add_oauth_columns(con)
+
+
+def test_fresh_db_has_oauth_columns(fresh_share_con):
+    """The _SCHEMA snapshot (fresh DB) carries the OAuth columns without needing
+    the ALTER migration to run."""
+    cols = {r[1] for r in fresh_share_con.execute("PRAGMA table_info(remote_invites)").fetchall()}
+    assert {"auth_method", "oauth_provider", "oauth_subject"}.issubset(cols)
+
+
+def test_create_passcode_invite_defaults_auth_method():
+    inv = share_db.create_remote_invite(
+        name="Drew",
+        email="drew@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+    )
+    fetched = share_db.get_remote_invite(inv["id"])
+    assert fetched["auth_method"] == "passcode"
+    assert fetched["oauth_provider"] is None
+    assert fetched["oauth_subject"] is None
+
+
+def test_create_oauth_invite_synthesizes_placeholder_passcode():
+    """An OAuth invite needs no passcode; the NOT NULL column is filled with an
+    unguessable argon2id-hashed placeholder that is never communicated."""
+    inv = share_db.create_remote_invite(
+        name="Drew",
+        email="drew@example.com",
+        passcode=None,
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+        auth_method="oauth",
+        oauth_provider="google",
+    )
+    fetched = share_db.get_remote_invite(inv["id"])
+    assert fetched["auth_method"] == "oauth"
+    assert fetched["oauth_provider"] == "google"
+    assert fetched["oauth_subject"] is None
+    # Placeholder is a real argon2id hash (satisfies NOT NULL) but is not a
+    # usable login credential — no plaintext is ever returned.
+    assert fetched["passcode"].startswith("$argon2")
+
+
+def test_create_oauth_invite_requires_provider():
+    with pytest.raises(ValueError, match="oauth_provider is required"):
+        share_db.create_remote_invite(
+            name="Drew",
+            email="drew@example.com",
+            passcode=None,
+            expires_at_utc=None,
+            ip_whitelist=None,
+            service_ids=["svcA"],
+            auth_method="oauth",
+            oauth_provider=None,
+        )
+
+
+def test_create_passcode_invite_requires_passcode():
+    with pytest.raises(ValueError, match="passcode is required"):
+        share_db.create_remote_invite(
+            name="Drew",
+            email="drew@example.com",
+            passcode=None,
+            expires_at_utc=None,
+            ip_whitelist=None,
+            service_ids=["svcA"],
+        )
+
+
+def test_create_invite_rejects_unknown_auth_method():
+    with pytest.raises(ValueError, match="unknown auth_method"):
+        share_db.create_remote_invite(
+            name="Drew",
+            email="drew@example.com",
+            passcode="ocean-breeze-cabin-42",
+            expires_at_utc=None,
+            ip_whitelist=None,
+            service_ids=["svcA"],
+            auth_method="saml",
+        )
+
+
+def _make_oauth_invite(email="analyst@corp.com", provider="google", **kw):
+    """Build an OAuth invite through the real producer (not a hand-shaped dict)
+    so tests exercise the same NOT-NULL placeholder path production uses."""
+    return share_db.create_remote_invite(
+        name="Analyst",
+        email=email,
+        passcode=None,
+        expires_at_utc=kw.get("expires_at_utc"),
+        ip_whitelist=kw.get("ip_whitelist"),
+        service_ids=kw.get("service_ids", ["svcA"]),
+        auth_method="oauth",
+        oauth_provider=provider,
+    )
+
+
+def test_get_remote_invite_oauth_matches_only_oauth_and_provider():
+    _make_oauth_invite(email="analyst@corp.com", provider="google")
+    # A passcode invite for the SAME email must never be returned by the OAuth lookup.
+    share_db.create_remote_invite(
+        name="Analyst",
+        email="pass@corp.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+    )
+    found = share_db.get_remote_invite_oauth("analyst@corp.com", "google")
+    assert found is not None
+    assert found["auth_method"] == "oauth"
+    assert found["oauth_provider"] == "google"
+    assert found["service_ids"] == ["svcA"]
+    # Wrong provider, unknown email, and the passcode invite's email all miss.
+    assert share_db.get_remote_invite_oauth("analyst@corp.com", "okta") is None
+    assert share_db.get_remote_invite_oauth("nobody@corp.com", "google") is None
+    assert share_db.get_remote_invite_oauth("pass@corp.com", "google") is None
+
+
+def test_get_remote_invite_oauth_excludes_revoked_and_expired():
+    from datetime import UTC, datetime, timedelta
+
+    inv = _make_oauth_invite(email="revoked@corp.com")
+    share_db.revoke_remote_invite(inv["id"])
+    assert share_db.get_remote_invite_oauth("revoked@corp.com", "google") is None
+
+    past = share_db.iso_z(datetime.now(UTC) - timedelta(days=1))
+    _make_oauth_invite(email="expired@corp.com", expires_at_utc=past)
+    assert share_db.get_remote_invite_oauth("expired@corp.com", "google") is None
+
+
+def test_get_remote_invite_oauth_case_insensitive_email():
+    _make_oauth_invite(email="mixed@corp.com")
+    assert share_db.get_remote_invite_oauth("MiXeD@Corp.Com", "google") is not None
+
+
+@pytest.mark.security_regression
+def test_passcode_lookup_never_returns_oauth_invite():
+    """Positive auth-method gate: the passcode login lookup must never resolve
+    an OAuth invite, even if an attacker somehow guessed the machine-generated
+    placeholder passcode (they can't — it's never revealed). Filtered at the SQL
+    layer via auth_method='passcode'."""
+    from unittest.mock import patch
+
+    inv = _make_oauth_invite(email="gate@corp.com", provider="google")
+    # Even handed the exact stored hash's plaintext is impossible; assert the
+    # lookup returns None for ANY passcode against an OAuth invite. The email
+    # has no passcode invite, so the no-rows timing-equalization path runs.
+    with patch("backend.core.share_db.invites._equalize_passcode_timing") as eq:
+        assert share_db.get_remote_invite_by_email_passcode("gate@corp.com", "anything-at-all-here") is None
+        eq.assert_called_once()  # treated as "email not invited" (no passcode row)
+    # Sanity: the invite genuinely exists on the OAuth path.
+    assert share_db.get_remote_invite_oauth("gate@corp.com", "google") is not None
+    _ = inv
+
+
+def test_bind_invite_oauth_subject_pins_then_enforces():
+    inv = _make_oauth_invite(email="pin@corp.com")
+    # First login pins the subject.
+    assert share_db.bind_invite_oauth_subject(inv["id"], "google-sub-123") is True
+    assert share_db.get_remote_invite(inv["id"])["oauth_subject"] == "google-sub-123"
+    # Subsequent login with the same subject passes.
+    assert share_db.bind_invite_oauth_subject(inv["id"], "google-sub-123") is True
+    # A different subject is rejected and does NOT overwrite the pin.
+    assert share_db.bind_invite_oauth_subject(inv["id"], "attacker-sub-999") is False
+    assert share_db.get_remote_invite(inv["id"])["oauth_subject"] == "google-sub-123"
+    # Empty subject never binds.
+    assert share_db.bind_invite_oauth_subject(inv["id"], "") is False
+
+
+def test_backup_round_trip_preserves_oauth_invite(monkeypatch, tmp_path):
+    """An OAuth invite must survive export→import with auth_method/provider
+    intact — otherwise a restore silently converts it to a passcode invite with
+    an unguessable placeholder → permanent lockout (design §2.5)."""
+    inv = _make_oauth_invite(email="restore@corp.com", provider="google")
+    share_db.bind_invite_oauth_subject(inv["id"], "google-sub-abc")
+    blob = share_db.export_backup("very-long-strong-passphrase")
+
+    monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "wipe"))
+    share_db.reset_for_tests()
+    out = share_db.import_backup(blob, "very-long-strong-passphrase")
+    assert out["inserted"] == 1
+    restored = share_db.get_remote_invite_oauth("restore@corp.com", "google")
+    assert restored is not None
+    assert restored["auth_method"] == "oauth"
+    assert restored["oauth_provider"] == "google"
+    assert restored["oauth_subject"] == "google-sub-abc"
+
+
+def test_backup_round_trip_preserves_allow_concurrent_sessions(monkeypatch, tmp_path):
+    """Regression: the hardcoded import_backup column list historically dropped
+    allow_concurrent_sessions, silently flipping shared invites back to
+    single-seat on restore."""
+    inv = share_db.create_remote_invite(
+        name="Drew",
+        email="shared@corp.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+        allow_concurrent_sessions=True,
+    )
+    blob = share_db.export_backup("very-long-strong-passphrase")
+
+    monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "wipe"))
+    share_db.reset_for_tests()
+    share_db.import_backup(blob, "very-long-strong-passphrase")
+    restored = [r for r in share_db.get_remote_invites() if r["email"] == "shared@corp.com"]
+    assert restored and restored[0]["allow_concurrent_sessions"] is True
+
+
 # ── Audit logs ──────────────────────────────────────────────────────────────
 
 
@@ -477,6 +848,41 @@ def test_purge_old_audit_logs():
     con.commit()
     n = share_db.purge_old_audit_logs(retention_days=30)
     assert n >= 1
+
+
+def test_get_last_login_by_email():
+    """Last login is the MAX timestamp over successful-login events, per email."""
+    con = share_db.get_global_share_con()
+    # alice: two passcode logins + one OAuth login; bob: one; a FAIL for alice
+    # and a non-login event must NOT count toward the last-login timestamp.
+    rows = [
+        ("2026-06-01T00:00:00Z", "LOGIN_SUCCESS", "alice@corp.com"),
+        ("2026-06-02T00:00:00Z", "LOGIN_SUCCESS", "alice@corp.com"),
+        ("2026-06-05T09:30:00Z", "LOGIN_SUCCESS_OAUTH", "Alice@corp.com"),  # case-insensitive
+        ("2026-06-09T00:00:00Z", "LOGIN_FAIL", "alice@corp.com"),  # later, but a FAIL
+        ("2026-06-10T00:00:00Z", "TOS_ACCEPTED", "alice@corp.com"),  # later, non-login
+        ("2026-05-20T12:00:00Z", "LOGIN_SUCCESS", "bob@corp.com"),
+    ]
+    for ts, event, email in rows:
+        con.execute(
+            "INSERT INTO remote_share_audit_logs(timestamp, event_type, email, ip_address, details) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ts, event, email, "1.2.3.4", "x"),
+        )
+    con.commit()
+
+    last = share_db.get_last_login_by_email()
+    # OAuth login is the most recent SUCCESS; the later FAIL/TOS rows are ignored.
+    assert last["alice@corp.com"] == "2026-06-05T09:30:00Z"
+    assert last["bob@corp.com"] == "2026-05-20T12:00:00Z"
+    # An email with only failed logins never appears.
+    assert "nobody@corp.com" not in last
+
+
+def test_get_last_login_by_email_empty():
+    """No login events → empty map (not an error)."""
+    share_db.get_global_share_con()
+    assert share_db.get_last_login_by_email() == {}
 
 
 # ── Claim token (one-time-view) ─────────────────────────────────────────────

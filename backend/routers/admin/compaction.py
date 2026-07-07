@@ -6,13 +6,24 @@ from fastapi import Depends, Query
 from sse_starlette.sse import EventSourceResponse
 
 from backend.deps import get_source
-from backend.models.admin import CompactionStatsResponse
+from backend.models.admin import (
+    BackfillBundleRollupsResponse,
+    CompactionStatsResponse,
+    LocalCompactNowResponse,
+    MetadataRetentionResponse,
+    MetadataStorageResponse,
+    OptimizeNowResponse,
+)
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
 
 from ._router import router
 
 
-@router.post("/admin/optimize-now")
+@router.post(
+    "/admin/optimize-now",
+    response_model=OptimizeNowResponse,
+    response_model_exclude_unset=True,
+)
 def optimize_now(
     source: dict = Depends(get_source),
     min_files: int | None = Query(
@@ -30,7 +41,11 @@ def optimize_now(
     return _ice.optimize_table(source, min_files_per_partition=min_files)
 
 
-@router.post("/admin/backfill-bundle-rollups")
+@router.post(
+    "/admin/backfill-bundle-rollups",
+    response_model=BackfillBundleRollupsResponse,
+    response_model_exclude_unset=True,
+)
 def backfill_bundle_rollups(source: dict = Depends(get_source)):
     """One-shot self-heal for the slow_urls + origin_summary per-hour
     bundle rollups AND the origin_summary per-day compaction.
@@ -56,6 +71,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     from backend.core.rollups import (
         backfill_network_rtt_bundles,
         backfill_network_speed_bundles,
+        backfill_ngwaf_bots_bundles,
         backfill_origin_dims_bundles,
         backfill_origin_latency_ts_bundles,
         backfill_origin_summary_bundles,
@@ -67,6 +83,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         backfill_wellknown_bots_rollup,
         compact_network_rtt_closed_days_to_daily,
         compact_network_speed_closed_days_to_daily,
+        compact_ngwaf_bots_closed_days_to_daily,
         compact_origin_dims_closed_days_to_daily,
         compact_origin_latency_ts_closed_days_to_daily,
         compact_origin_summary_closed_days_to_daily,
@@ -104,6 +121,12 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     # all-rows temp drop off the request path (collapsing the catalog temp to
     # the NGWAF-only subset).
     n_wk = backfill_wellknown_bots_rollup(sid, source)
+    # ngwaf_bots: the write-time waf_req_id ⨝ ngwaf_bot_cache aggregation
+    # behind get_top_bots' ngwaf panel. Backfilling closed hours lets the
+    # reader serve the panel without the per-request direct join. Hours
+    # whose cache rows were already retention-trimmed aggregate to empty —
+    # identical to what the live join returns for them today.
+    n_nb = backfill_ngwaf_bots_bundles(sid, source)
     n_os_day = compact_origin_summary_closed_days_to_daily(sid, source)
     n_od_day = compact_origin_dims_closed_days_to_daily(sid, source)
     n_olts_day = compact_origin_latency_ts_closed_days_to_daily(sid, source)
@@ -113,6 +136,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     n_perf_day = compact_perf_latency_closed_days_to_daily(sid, source)
     n_sd_day = compact_security_dims_closed_days_to_daily(sid, source)
     n_pd_day = compact_perf_dims_closed_days_to_daily(sid, source)
+    n_nb_day = compact_ngwaf_bots_closed_days_to_daily(sid, source)
     return {
         "slow_urls": n_su,
         "origin_summary": n_os,
@@ -133,11 +157,17 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         "security_dims_days": n_sd_day,
         "perf_ttl_dist": n_pd,
         "perf_ttl_dist_days": n_pd_day,
+        "ngwaf_bots": n_nb,
+        "ngwaf_bots_days": n_nb_day,
         "wellknown_bots": n_wk,
     }
 
 
-@router.post("/admin/local-compact-now")
+@router.post(
+    "/admin/local-compact-now",
+    response_model=LocalCompactNowResponse,
+    response_model_exclude_unset=True,
+)
 def local_compact_now(
     source: dict = Depends(get_source),
     min_files: int = Query(
@@ -178,7 +208,11 @@ def compaction_stats(source: dict = Depends(get_source)) -> CompactionStatsRespo
     return CompactionStatsResponse(**_lc.compaction_stats(source))
 
 
-@router.patch("/admin/metadata-retention")
+@router.patch(
+    "/admin/metadata-retention",
+    response_model=MetadataRetentionResponse,
+    response_model_exclude_unset=True,
+)
 def update_metadata_retention(body: dict, source: dict = Depends(get_source)):
     """Update the per-service ``metadata_retention`` config block.
 
@@ -229,7 +263,11 @@ def update_metadata_retention(body: dict, source: dict = Depends(get_source)):
     return {"retention": {**DEFAULT_METADATA_RETENTION, **current}}
 
 
-@router.get("/admin/metadata-storage")
+@router.get(
+    "/admin/metadata-storage",
+    response_model=MetadataStorageResponse,
+    response_model_exclude_unset=True,
+)
 def metadata_storage(source: dict = Depends(get_source)):
     """Per-table row count + estimated bytes for this service's metadata.db.
 
@@ -257,6 +295,8 @@ def metadata_storage(source: dict = Depends(get_source)):
     return {**stats, "retention": retention, "ingested_files_locked": ingested_files_locked}
 
 
+# response_model intentionally omitted: SSE stream (EventSourceResponse),
+# not a JSON body — event shapes are documented in the docstring.
 @router.post("/admin/metadata-cleanup")
 def metadata_cleanup_now(source: dict = Depends(get_source)):
     """Trigger an immediate metadata cleanup, streaming progress as SSE.

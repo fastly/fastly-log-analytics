@@ -126,7 +126,7 @@ test('renders query page and executes a query', async () => {
 
 // Regression for the share-ability gap: /query used to strip ?filters= on
 // hydration and never re-emit, so a teammate who pasted the URL got bare
-// /query. useFilterUrlSync is now mounted here, mirroring the
+// /query. useFilterUrlWriteback is now mounted here, mirroring the
 // ReportLayout pages — every filter mutation rewrites ?filters= via
 // history.replaceState so the visible URL stays shareable.
 test('/query keeps ?filters= in the URL after a filter mutation', async () => {
@@ -156,7 +156,7 @@ test('/query keeps ?filters= in the URL after a filter mutation', async () => {
     </QueryClientProvider>,
   )
 
-  // useFilterUrlSync's effect should re-emit the current store state
+  // useFilterUrlWriteback's effect should re-emit the current store state
   // (one include filter on status=200) back into the URL.
   await waitFor(() => {
     const params = new URLSearchParams(window.location.search)

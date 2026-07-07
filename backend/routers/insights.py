@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends
@@ -20,6 +21,20 @@ from backend.utils.remote_access import analyst_clamp_cache_key
 from backend.utils.router_utils import query_errors
 
 router = APIRouter(prefix="/api", tags=["insights"], responses=DEFAULT_ERROR_RESPONSES)
+
+# Per-service semaphore (capacity=1) serialises concurrent insights scans.
+# A second request for the same service parks here; when the first finishes
+# it writes the cache, and the second gets a cache hit → no duplicate scan.
+# Dict access is guarded by a lock so concurrent service-registrations are safe.
+_insights_sems: dict[str, threading.Semaphore] = {}
+_insights_sems_lock = threading.Lock()
+
+
+def _get_insights_sem(service_id: str) -> threading.Semaphore:
+    with _insights_sems_lock:
+        if service_id not in _insights_sems:
+            _insights_sems[service_id] = threading.Semaphore(1)
+        return _insights_sems[service_id]
 
 
 def _analyst_lookback_clamp(
@@ -64,16 +79,21 @@ def insights_endpoint(
     clamp_start, clamp_end, mask_ips, clamp_cache_key = _analyst_lookback_clamp(
         ctx, req.baseline_hours, req.window_size_hrs
     )
-    return repo.get_insights(
-        con=ctx.con,
-        src=ctx.source,
-        window_hours=req.window_size_hrs,
-        baseline_hours=req.baseline_hours,
-        clamp_start=clamp_start,
-        clamp_end=clamp_end,
-        mask_ips=mask_ips,
-        clamp_cache_key=clamp_cache_key,
-    )
+    sem = _get_insights_sem(ctx.service_id)
+    sem.acquire()
+    try:
+        return repo.get_insights(
+            con=ctx.con,
+            src=ctx.source,
+            window_hours=req.window_size_hrs,
+            baseline_hours=req.baseline_hours,
+            clamp_start=clamp_start,
+            clamp_end=clamp_end,
+            mask_ips=mask_ips,
+            clamp_cache_key=clamp_cache_key,
+        )
+    finally:
+        sem.release()
 
 
 @router.post("/insights/cache-collapse-detail", response_model=CacheCollapseDetailResponse)

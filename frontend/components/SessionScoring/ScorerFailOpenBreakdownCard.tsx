@@ -3,7 +3,7 @@
 import { AlertTriangle, CheckCircle2, Clock, KeyRound, Lock, ServerCrash, XCircle } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
+import { CardErrorState } from '@/components/CardErrorState'
 import { ScorerFailOpenHelp } from '@/components/SessionScoring/help-content'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { components } from '@/types/api.generated'

@@ -3,9 +3,9 @@
 This is the post-carve home for the ``Scheduler`` class, the
 ``get_scheduler`` factory, the global singleton, and the small helpers
 (logger, color/icon tables, throttle dicts, disk/backlog probes) that
-are shared across job modules. The legacy ``backend/scheduler.py`` is
-now a thin shim that re-exports the public surface — see that module's
-docstring for the back-compat story.
+are shared across job modules. (The legacy flat ``backend/scheduler.py``
+compat shim was retired 2026-07-06 — import directly from here or from
+``backend.cron.jobs.*``.)
 """
 
 from __future__ import annotations
@@ -33,9 +33,9 @@ def dev_mode_no_crons() -> bool:
 
     Set ``FLA_DEV_NO_CRONS=1`` in the environment to:
      - skip registering every APScheduler job at startup EXCEPT a small
-       allowlist of LOCAL-ONLY jobs (``local_compact``, ``rollup_compact``)
-       that only rewrite the local parquet cache and never touch the shared
-       FOS bucket or send anything outbound — see
+       allowlist of LOCAL-ONLY jobs (``local_compact``, ``rollup_compact``,
+       ``rollup_heal``) that only rewrite the local parquet cache and never
+       touch the shared FOS bucket or send anything outbound — see
        :meth:`Scheduler._register_dev_local_safe_jobs`
      - skip ``Scheduler.reload()`` re-registration
      - short-circuit ingest-class job entry points
@@ -237,14 +237,9 @@ def _log_and_add_progress(
             icon = TYPE_ICONS.get(t, "ℹ️ ")
 
         prefix = f"{icon}{c}[{job_name}]{c_end}"
-        # Resolve through the ``backend.scheduler`` shim so tests that
-        # ``patch("backend.scheduler.logger")`` continue to intercept these
-        # calls. The helper falls back to the module-local logger if the
-        # shim is not yet (or no longer) importable, which keeps unit
-        # tests for this module isolated from the shim layer.
-        from backend.cron.jobs._common import shim_attr
-
-        log = shim_attr("logger", logger)
+        # Read the logger from module globals at call time so tests that
+        # ``patch("backend.cron.scheduler.logger")`` intercept these calls.
+        log = logger
         if t == "error":
             log.error("%s %s: %s", prefix, display, msg)
         elif t == "warning":
@@ -536,21 +531,21 @@ class Scheduler:
     def _register_dev_local_safe_jobs(self) -> None:
         """FLA_DEV_NO_CRONS allowlist: register ONLY the local-only jobs.
 
-        ``local_compact`` + ``rollup_compact`` rewrite the local parquet
-        cache and never touch the shared FOS bucket or send anything
-        outbound, so they're safe to run against a dev backend that reads
-        the same FOS bucket as prod. Everything else stays gated off (see
-        :func:`dev_mode_no_crons`); the FOS-writing jobs
-        (``optimize``/``commit``/``expire``) are deliberately NOT here.
+        ``local_compact`` + ``rollup_compact`` + ``rollup_heal`` rewrite
+        the local parquet cache and never touch the shared FOS bucket or
+        send anything outbound, so they're safe to run against a dev
+        backend that reads the same FOS bucket as prod. Everything else
+        stays gated off (see :func:`dev_mode_no_crons`); the FOS-writing
+        jobs (``optimize``/``commit``/``expire``) are deliberately NOT here.
 
-        Mirrors the trigger config of the same two jobs in
+        Mirrors the trigger config of the same three jobs in
         :meth:`_sync_jobs` — keep them in sync. Runs once at startup;
         :meth:`reload` stays a no-op under the kill switch so a dev config
         save can't sneak the gated jobs back in.
         """
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
-        from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily
+        from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily, _run_rollup_hour_heal
 
         for cfg in svcconfig.list_configs():
             service_id = cfg.get("service_id", "")
@@ -599,6 +594,24 @@ class Scheduler:
                     self._job_ids[rc_job_id] = rc_job_id
                     logger.info("📦 [scheduler] (dev-local) Registered %s (daily 02:00 UTC).", rc_job_id)
 
+                # rollup_heal — hourly hour-bundle self-heal, local-only
+                # rollup writes (see _run_rollup_hour_heal). Matches
+                # _sync_jobs.
+                rh_job_id = f"rollup_heal_{service_id}"
+                if rh_job_id not in self._job_ids:
+                    self._sched.add_job(
+                        _run_rollup_hour_heal,
+                        "cron",
+                        minute=5,
+                        args=[service_id],
+                        id=rh_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=900,
+                    )
+                    self._job_ids[rh_job_id] = rh_job_id
+                    logger.info("🩹 [scheduler] (dev-local) Registered %s (hourly at :05).", rh_job_id)
+
         # DuckDB instance recycle is local-safe (closes/reopens local conns,
         # no FOS writes) → safe under the dev kill switch. Still OFF unless
         # DUCKDB_RECYCLE_INTERVAL_MIN>0. No seen_ids here (dev path doesn't
@@ -610,7 +623,7 @@ class Scheduler:
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
         from backend.cron.jobs.commit import _run_commit
-        from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily
+        from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily, _run_rollup_hour_heal
         from backend.cron.jobs.expire import _run_expire_snapshots
         from backend.cron.jobs.insights_prewarmer import _run_insights_prewarmer
         from backend.cron.jobs.metadata import (
@@ -912,6 +925,34 @@ class Scheduler:
                     logger.info(
                         "📦 [scheduler] Registered rollup compaction job %s (daily 02:00 UTC).",
                         rc_job_id,
+                    )
+
+                # ── Hourly hour-bundle self-heal ───────────────────────────
+                # :05 past each hour (Fastly log delivery lags a few
+                # minutes, so the just-closed hour's rows have landed by
+                # then). Rebuilds bundles for closed hours the per-sync
+                # recompute missed — on bursty services nothing straddles
+                # the hour boundary, so without this every closed hour of
+                # the current day is silently absent from top-N until the
+                # 02:00 deep pass. Same gate as rollup_compact (local-only
+                # rollup writes, read-write services only).
+                rh_job_id = f"rollup_heal_{service_id}"
+                seen_ids.add(rh_job_id)
+                if rh_job_id not in self._job_ids:
+                    self._sched.add_job(
+                        _run_rollup_hour_heal,
+                        "cron",
+                        minute=5,
+                        args=[service_id],
+                        id=rh_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=900,
+                    )
+                    self._job_ids[rh_job_id] = rh_job_id
+                    logger.info(
+                        "🩹 [scheduler] Registered rollup hour-heal job %s (hourly at :05).",
+                        rh_job_id,
                     )
 
             # ── Weekly expire-snapshots job ───────────────────────────────────

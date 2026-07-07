@@ -7,7 +7,7 @@ import type { AttributionKind, DbFilter, ViewMode } from '../_types'
 /**
  * Two-way sync between the page's filter state and the URL query string.
  *
- * Mirrors the pattern in `frontend/hooks/useFilterUrlSync.ts`:
+ * Mirrors the pattern in `frontend/hooks/useFilterUrlWriteback.ts`:
  * - One-shot hydration from `window.location.search` on first mount.
  * - On every state change after that, `window.history.replaceState` writes
  *   the URL silently (no Next router refresh, which would refetch the page

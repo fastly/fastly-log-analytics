@@ -15,8 +15,9 @@ def ingest_endpoint(
     end_time: str | None = Query(default=None),
     source: dict = Depends(get_source),
 ) -> dict:
+    from backend.cron.jobs.metadata import _run_metadata_sync
+    from backend.cron.jobs.sync import _run_service_cron
     from backend.repositories.dashboard import invalidate_service
-    from backend.scheduler import _run_metadata_sync, _run_service_cron
     from backend.utils.router_utils import start_or_resume_cron
 
     src = source

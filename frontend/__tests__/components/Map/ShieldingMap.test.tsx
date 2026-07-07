@@ -9,6 +9,15 @@
 import { render, act, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
+import {
+  ShieldingMap,
+  greatCirclePoints,
+  efficiencyColor,
+  lineWidth,
+  rafThrottle,
+  buildArcFeatures,
+  buildDotFeatures,
+} from '@/components/Map/ShieldingMap'
 
 vi.mock('next-themes', () => ({
   useTheme: vi.fn(() => ({ theme: 'light' })),
@@ -100,16 +109,14 @@ class MockResizeObserver {
 
 describe('ShieldingMap helpers', () => {
   describe('greatCirclePoints', () => {
-    it('returns a 2-point degenerate when endpoints are identical', async () => {
-      const { greatCirclePoints } = await import('@/components/Map/ShieldingMap')
+    it('returns a 2-point degenerate when endpoints are identical', () => {
       const pts = greatCirclePoints(40, -74, 40, -74)
       expect(pts).toHaveLength(2)
       expect(pts[0]).toEqual([-74, 40])
       expect(pts[1]).toEqual([-74, 40])
     })
 
-    it('handles antimeridian wrap without >180 degree jumps in output', async () => {
-      const { greatCirclePoints } = await import('@/components/Map/ShieldingMap')
+    it('handles antimeridian wrap without >180 degree jumps in output', () => {
       const pts = greatCirclePoints(0, -179, 0, 179)
       // Consecutive longitude deltas must not exceed 180 degrees — that's the
       // exact bug the wrap-handling block in greatCirclePoints prevents.
@@ -122,53 +129,45 @@ describe('ShieldingMap helpers', () => {
   })
 
   describe('efficiencyColor', () => {
-    it('returns the neutral indigo when ratio is null', async () => {
-      const { efficiencyColor } = await import('@/components/Map/ShieldingMap')
+    it('returns the neutral indigo when ratio is null', () => {
       expect(efficiencyColor(null)).toBe('#6366f1')
     })
 
-    it('returns green when ratio < 1.5', async () => {
-      const { efficiencyColor } = await import('@/components/Map/ShieldingMap')
+    it('returns green when ratio < 1.5', () => {
       expect(efficiencyColor(1.0)).toBe('#22c55e')
       expect(efficiencyColor(1.49)).toBe('#22c55e')
     })
 
-    it('returns yellow when ratio < 3', async () => {
-      const { efficiencyColor } = await import('@/components/Map/ShieldingMap')
+    it('returns yellow when ratio < 3', () => {
       expect(efficiencyColor(1.5)).toBe('#eab308')
       expect(efficiencyColor(2.9)).toBe('#eab308')
     })
 
-    it('returns red when ratio >= 3', async () => {
-      const { efficiencyColor } = await import('@/components/Map/ShieldingMap')
+    it('returns red when ratio >= 3', () => {
       expect(efficiencyColor(3.0)).toBe('#ef4444')
       expect(efficiencyColor(10)).toBe('#ef4444')
     })
 
-    it('returns neutral indigo (not green) for a negative ratio (L5)', async () => {
+    it('returns neutral indigo (not green) for a negative ratio (L5)', () => {
       // A negative transit delta → negative efficiency is meaningless, not
       // "excellent". Regression guard: `ratio < 1.5` must NOT paint it green.
-      const { efficiencyColor } = await import('@/components/Map/ShieldingMap')
       expect(efficiencyColor(-0.5)).toBe('#6366f1')
       expect(efficiencyColor(-10)).toBe('#6366f1')
     })
   })
 
   describe('lineWidth', () => {
-    it('clamps to 1.5 at low request counts', async () => {
-      const { lineWidth } = await import('@/components/Map/ShieldingMap')
+    it('clamps to 1.5 at low request counts', () => {
       expect(lineWidth(0)).toBe(1.5)
       expect(lineWidth(1)).toBe(1.5)
     })
 
-    it('clamps to 6 at very high request counts', async () => {
-      const { lineWidth } = await import('@/components/Map/ShieldingMap')
+    it('clamps to 6 at very high request counts', () => {
       expect(lineWidth(1_000_000_000)).toBe(6)
       expect(lineWidth(Number.MAX_SAFE_INTEGER)).toBe(6)
     })
 
-    it('scales logarithmically between the bounds', async () => {
-      const { lineWidth } = await import('@/components/Map/ShieldingMap')
+    it('scales logarithmically between the bounds', () => {
       const w10 = lineWidth(10)
       const w100 = lineWidth(100)
       expect(w10).toBeGreaterThan(1.5)
@@ -194,8 +193,7 @@ describe('ShieldingMap helpers', () => {
       globalThis.requestAnimationFrame = originalRAF
     })
 
-    it('coalesces multiple calls within a frame to a single invocation', async () => {
-      const { rafThrottle } = await import('@/components/Map/ShieldingMap')
+    it('coalesces multiple calls within a frame to a single invocation', () => {
       const fn = vi.fn()
       const throttled = rafThrottle(fn)
       throttled(1)
@@ -210,8 +208,7 @@ describe('ShieldingMap helpers', () => {
       expect(fn).toHaveBeenCalledWith(3)
     })
 
-    it('re-queues on subsequent calls after the frame fires', async () => {
-      const { rafThrottle } = await import('@/components/Map/ShieldingMap')
+    it('re-queues on subsequent calls after the frame fires', () => {
       const fn = vi.fn()
       const throttled = rafThrottle(fn)
       throttled('a')
@@ -226,8 +223,7 @@ describe('ShieldingMap helpers', () => {
   })
 
   describe('buildArcFeatures', () => {
-    it('returns a FeatureCollection with one feature per valid row', async () => {
-      const { buildArcFeatures } = await import('@/components/Map/ShieldingMap')
+    it('returns a FeatureCollection with one feature per valid row', () => {
       const rows = [
         {
           edge_lat: 40, edge_lon: -74,
@@ -255,8 +251,7 @@ describe('ShieldingMap helpers', () => {
       expect(fc.features[0].properties?.line_width).toBeGreaterThan(1.5)
     })
 
-    it('carries anomaly_static through to feature properties (L7 map paint)', async () => {
-      const { buildArcFeatures } = await import('@/components/Map/ShieldingMap')
+    it('carries anomaly_static through to feature properties (L7 map paint)', () => {
       const rows = [
         {
           edge_lat: 40, edge_lon: -74,
@@ -273,8 +268,7 @@ describe('ShieldingMap helpers', () => {
       expect(fc.features[0].properties?.anomaly_static).toBe(true)
     })
 
-    it('paints low_sample routes a neutral grey, not an efficiency colour (low-sample gating)', async () => {
-      const { buildArcFeatures } = await import('@/components/Map/ShieldingMap')
+    it('paints low_sample routes a neutral grey, not an efficiency colour (low-sample gating)', () => {
       const rows = [
         {
           edge_lat: 40, edge_lon: -74,
@@ -292,8 +286,7 @@ describe('ShieldingMap helpers', () => {
       expect(fc.features[0].properties?.low_sample).toBe(true)
     })
 
-    it('skips rows with missing coords or zero-length arcs', async () => {
-      const { buildArcFeatures } = await import('@/components/Map/ShieldingMap')
+    it('skips rows with missing coords or zero-length arcs', () => {
       const rows = [
         // missing shield coords
         { edge_lat: 40, edge_lon: -74, shield_lat: null, shield_lon: null, requests: 10 },
@@ -308,8 +301,7 @@ describe('ShieldingMap helpers', () => {
   })
 
   describe('buildDotFeatures', () => {
-    it('returns one feature per unique edge/shield POP', async () => {
-      const { buildDotFeatures } = await import('@/components/Map/ShieldingMap')
+    it('returns one feature per unique edge/shield POP', () => {
       const rows = [
         { edge_lat: 40, edge_lon: -74, edge_pop: 'JFK', shield_lat: 51, shield_lon: 0, shield_pop: 'LON' },
         // duplicate edge — should dedupe
@@ -323,8 +315,7 @@ describe('ShieldingMap helpers', () => {
       expect(roles).toEqual(['edge', 'shield', 'shield'])
     })
 
-    it('omits the synthetic "Direct to Origin" shield placeholder', async () => {
-      const { buildDotFeatures } = await import('@/components/Map/ShieldingMap')
+    it('omits the synthetic "Direct to Origin" shield placeholder', () => {
       const rows = [
         {
           edge_lat: 40, edge_lon: -74, edge_pop: 'JFK',
@@ -336,8 +327,7 @@ describe('ShieldingMap helpers', () => {
       expect(shieldPops).toHaveLength(0)
     })
 
-    it('returns an empty FeatureCollection for missing coords', async () => {
-      const { buildDotFeatures } = await import('@/components/Map/ShieldingMap')
+    it('returns an empty FeatureCollection for missing coords', () => {
       const rows = [
         { edge_lat: null, edge_lon: null, shield_lat: null, shield_lon: null },
       ]
@@ -375,7 +365,6 @@ describe('ShieldingMap component', () => {
   })
 
   it('mounts a map instance and registers arcs + dots sources', async () => {
-    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
     const rows = [
       {
         edge_lat: 40, edge_lon: -74,
@@ -398,22 +387,19 @@ describe('ShieldingMap component', () => {
     )
   })
 
-  it('renders the edge-only fallback when edgeOnly is true', async () => {
-    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
+  it('renders the edge-only fallback when edgeOnly is true', () => {
     const { getByText } = render(<ShieldingMap rows={[]} edgeOnly />)
     expect(getByText(/edge-only logging detected/i)).toBeInTheDocument()
   })
 
-  it('renders the empty-state when rows is empty and not loading', async () => {
-    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
+  it('renders the empty-state when rows is empty and not loading', () => {
     const { getByText } = render(<ShieldingMap rows={[]} isLoading={false} />)
     expect(getByText(/no shielding path data/i)).toBeInTheDocument()
   })
 
-  it('renders the error state when errored is true (M2 sentinel)', async () => {
+  it('renders the error state when errored is true (M2 sentinel)', () => {
     // A backend handler failure returns 200 with {error: true}; the map must
     // show an explicit "unavailable" state, not the misleading empty state.
-    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
     const { getByText, queryByText } = render(<ShieldingMap rows={[]} isLoading={false} errored />)
     expect(getByText(/shielding analysis unavailable/i)).toBeInTheDocument()
     expect(queryByText(/no shielding path data/i)).not.toBeInTheDocument()
@@ -427,7 +413,6 @@ describe('ShieldingMap component', () => {
     // executed fewer hooks and React threw "Rendered fewer hooks than
     // expected", crashing /network to its segment error boundary. The hooks
     // now sit above the returns, so the transition is safe.
-    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
     const { rerender, getByText } = render(<ShieldingMap rows={[]} isLoading />)
     await act(async () => {
       await Promise.resolve()
@@ -438,8 +423,7 @@ describe('ShieldingMap component', () => {
     expect(getByText(/no shielding path data/i)).toBeInTheDocument()
   })
 
-  it('renders the POP-coordinates-unavailable fallback when rows have no coords', async () => {
-    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
+  it('renders the POP-coordinates-unavailable fallback when rows have no coords', () => {
     const rows = [
       { edge_pop: 'XYZ', shield_pop: 'ABC', edge_lat: null, edge_lon: null, shield_lat: null, shield_lon: null },
     ]
@@ -448,7 +432,6 @@ describe('ShieldingMap component', () => {
   })
 
   it('shows no expand button by default', async () => {
-    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
     const rows = [
       {
         edge_lat: 40, edge_lon: -74,
@@ -466,7 +449,6 @@ describe('ShieldingMap component', () => {
   })
 
   it('opens a fullscreen dialog with a second map when Expand is clicked', async () => {
-    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
     const rows = [
       {
         edge_lat: 40, edge_lon: -74,
@@ -499,7 +481,6 @@ describe('ShieldingMap component', () => {
   })
 
   it('calls map.remove() on unmount to release WebGL resources', async () => {
-    const { ShieldingMap } = await import('@/components/Map/ShieldingMap')
     const rows = [
       {
         edge_lat: 40, edge_lon: -74,

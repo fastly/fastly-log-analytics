@@ -535,7 +535,7 @@ def test_parallel_gather_uses_return_exceptions_true():
     import inspect
 
     src = inspect.getsource(get_aggregates)
-    assert "asyncio.gather(*tasks, return_exceptions=True)" in src, (
+    assert "asyncio.gather(*_tasks, return_exceptions=True)" in src, (
         "asyncio.gather() inside get_aggregates must pass "
         "return_exceptions=True so every worker thread finishes before "
         "the extra pool connections are released (F015 regression)."
@@ -545,6 +545,11 @@ def test_parallel_gather_uses_return_exceptions_true():
     assert "isinstance(part, BaseException)" in src and "raise part" in src, (
         "gather(return_exceptions=True) must be paired with an explicit "
         "BaseException re-raise so failures still propagate to the caller."
+    )
+    # Confirm the CancelledError shield is present (finding 018)
+    assert "CancelledError" in src, (
+        "asyncio.gather in get_aggregates must shield against CancelledError "
+        "so background threads finish before connections are released."
     )
 
 

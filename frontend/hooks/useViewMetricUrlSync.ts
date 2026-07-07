@@ -18,7 +18,7 @@ import { useQueryClient } from '@tanstack/react-query'
 //
 // Anything else in the URL has already been consumed and stripped by
 // the time this effect runs.
-export function useUrlFilterSync() {
+export function useViewMetricUrlSync() {
   const addFilter = useFilterStore(s => s.addFilter)
   const clearFilters = useFilterStore(s => s.clearFilters)
   const setRange = useFilterStore(s => s.setRange)

@@ -2,13 +2,13 @@
  * @vitest-environment jsdom
  *
  * Covers the URL → filterStore hydration that moved out of
- * useUrlFilterSync (commit c25a830) into a sync, pre-render path that
+ * useViewMetricUrlSync (commit c25a830) into a sync, pre-render path that
  * QueryProvider calls from a useState initializer.
  *
  * The legacy ?filter_<col>=, absolute ?start_time/?end_time, modern
  * ?filters JSON, and ?range= cases all live here now. After applying,
  * the consumed params get stripped from window.history so the post-
- * mount useUrlFilterSync effect doesn't see them.
+ * mount useViewMetricUrlSync effect doesn't see them.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 

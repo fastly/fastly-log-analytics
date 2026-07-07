@@ -20,6 +20,7 @@ import { expect, test, vi, beforeEach } from 'vitest'
 import React from 'react'
 
 import { useServiceStore } from '@/stores/serviceStore'
+import { ServicesTable } from '@/app/admin/_sections/ServicesTable'
 import { server } from '../../tests/msw/server'
 
 vi.mock('next/navigation', () => ({
@@ -70,7 +71,6 @@ test('ServicesTable renders services flowed through MSW + openapi-fetch', async 
   // Per-test QueryClient avoids cross-test cache leakage and lets us
   // disable retries cleanly.
   const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
-  const { ServicesTable } = await import('@/app/admin/_sections/ServicesTable')
   render(
     <QueryClientProvider client={queryClient}>
       <ServicesTable />

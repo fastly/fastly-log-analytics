@@ -141,3 +141,99 @@ class CustomFieldsImportBody(BaseModel):
     ``{custom_fields: list[object]}`` instead of an opaque dict."""
 
     custom_fields: list[dict[str, Any]] = []
+
+
+# ── Wire-safe response models for the provision wizard endpoints ────────────
+#
+# Same contract as backend/models/session_scoring.py: ``extra="allow"`` +
+# all-Optional fields + ``response_model_exclude_unset=True`` at the
+# decorator, so branch-dependent key sets (e.g. check-domain's
+# reason-vs-note, lake-info's table-exists variants) and the ``_debug_calls``
+# telemetry envelope pass through byte-identically.
+
+
+class _ProvisionRead(BaseModel):
+    """Base for provision responses — passes undeclared keys through."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class ProvisionTokenInfo(_ProvisionRead):
+    id: str | None = None
+    name: str | None = None
+    user_id: str | None = None
+    type: str | None = None
+
+
+class ProvisionDefaults(_ProvisionRead):
+    endpoint_name: str | None = None
+    fos_region: str | None = None
+    fos_bucket_name: str | None = None
+    fos_prefix: str | None = None
+    sample_rate: int | None = None
+    edge_only: bool | None = None
+    log_period: str | None = None
+    cdn_service_name: str | None = None
+    cdn_prefix: str | None = None
+
+
+class ProvisionValidateResponse(_ProvisionRead):
+    service_name: str | None = None
+    token_info: ProvisionTokenInfo | None = None
+    defaults: ProvisionDefaults | None = None
+
+
+class ProvisionCheckDomainResponse(_ProvisionRead):
+    available: bool | None = None
+    # Mutually exclusive by branch: ``reason`` when unavailable, ``note``
+    # when available-with-caveat. exclude_unset keeps whichever was set.
+    reason: str | None = None
+    note: str | None = None
+
+
+class ProvisionCheckFosResponse(_ProvisionRead):
+    ok: bool | None = None
+    error: str | None = None
+
+
+class ProvisionLakeInfoResponse(_ProvisionRead):
+    """``fetch_lake_info`` result. Only the branch-stable keys are declared;
+    the table-details payload (row counts / calendar / extents) varies by
+    Iceberg layout and rides through ``extra``."""
+
+    ok: bool | None = None
+    table_exists: bool | None = None
+    message: str | None = None
+    error: str | None = None
+
+
+class ProvisionIngestResponse(_ProvisionRead):
+    ok: bool | None = None
+    service_id: str | None = None
+
+
+class ProvisionCheckConfigItem(_ProvisionRead):
+    ok: bool | None = None
+    details: str | None = None
+
+
+class ProvisionCheckConfigResponse(_ProvisionRead):
+    logging_service: ProvisionCheckConfigItem | None = None
+    cdn_service: ProvisionCheckConfigItem | None = None
+
+
+class NgwafWorkspace(_ProvisionRead):
+    id: str | None = None
+    name: str | None = None
+
+
+class NgwafWorkspacesResponse(_ProvisionRead):
+    workspaces: list[NgwafWorkspace] | None = None
+    note: str | None = None
+    error: str | None = None
+    message: str | None = None
+
+
+class NgwafWorkspaceSetResponse(_ProvisionRead):
+    ok: bool | None = None
+    ngwaf_workspace_id: str | None = None

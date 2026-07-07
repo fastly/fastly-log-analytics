@@ -6,7 +6,7 @@ import {
   ORIGIN_SSR_DEFAULTS,
   ORIGIN_SSR_SECTIONS,
 } from '@/lib/ssr/origin'
-import { seedDehydratedState } from '@/lib/ssr/seed'
+import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
 import OriginClient from './_sections/OriginClient'
 
 // Per-request RSC shell for /origin. Pre-fetches the DEFAULT origin aggregates
@@ -27,12 +27,23 @@ import OriginClient from './_sections/OriginClient'
 //   ['origin', 'aggregates', serviceId, rangeToken, anchor, filterPayload,
 //    bucketMinutes, originMetric, originPercentile, ORIGIN_SECTIONS]
 // On a cold load every element is server-reproducible:
-//   - serviceId       = bootstrap.active_service_id (also what the store /
-//                       useEffectiveServiceId resolves to on the hydrated path)
-//   - rangeToken      = 'auto'  (no ?range= → filterStore.relativeRange is null)
-//   - anchor          = quantizeAnchor(now) on the 60s grid (client pins the
-//                       same; the only divergence is the rare minute-boundary
-//                       straddle → one client refetch, never a leak/crash)
+//   - serviceId       = the `?service=` URL param when present (a deep link or
+//                       a same-tab nav whose href carries the currently-active
+//                       service — see useUrlServiceSync), else
+//                       bootstrap.active_service_id. MUST prefer the URL:
+//                       seeding under bootstrap's default instead of the
+//                       URL's service seeds the WRONG entry whenever they
+//                       differ, and the client's own fetch (for the URL's
+//                       real service) then silently replaces that wrong
+//                       seed's data with no loading state (keepPreviousData)
+//                       — a visible wrong-service data flash.
+//   - rangeToken      = '24h'  (no ?range= → filterStore.relativeRange is null)
+//   - anchor          = quantizeAnchor(snapped-end ?? now) on the 60s grid — snaps
+//                       to bootstrap.log_extents when the service's latest log is
+//                       >15min stale (lib/log-extents-snap.ts); otherwise `now`.
+//                       Divergence: the rare minute-boundary straddle, plus a rare
+//                       15-minute-staleness-boundary straddle — both self-heal via
+//                       one client refetch, never a leak/crash.
 //   - filterPayload   = {}      (no filters on a cold load)
 //   - bucketMinutes   = 60      (the default 24h display span → "1 hour")
 //   - originMetric    = 'ttfb', originPercentile = 'p95'  (useState defaults)
@@ -50,15 +61,23 @@ import OriginClient from './_sections/OriginClient'
 // picks up the cold client fetch unchanged.
 export const dynamic = 'force-dynamic'
 
-export default async function OriginPage() {
+export default async function OriginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ service?: string | string[] }>
+}) {
+  const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
   const serviceId =
-    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ?? undefined
+    firstParam(params.service) ??
+    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
+    undefined
+  const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolveOriginDefaultKey + fetchOriginServerSide both floor it).
   const now = new Date()
-  const seed = await fetchOriginServerSide(serviceId, now)
+  const seed = await fetchOriginServerSide(serviceId, now, logExtents)
 
   // Seed under the EXACT client first-paint key. seedDehydratedState returns
   // null when seed is null, so a failed prefetch degrades to the client fetch.

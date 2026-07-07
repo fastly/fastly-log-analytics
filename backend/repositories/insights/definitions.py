@@ -7,7 +7,7 @@ from backend.core.share_db.validation import mask_ip
 from backend.repositories._sql import insights as SQL
 from backend.utils.geo import format_city_label
 
-from .registry import InsightDefinition, registry
+from .registry import InsightCategory, InsightDefinition, registry
 
 # ── 1. Error Spikes ───────────────────────────────────────────────────────
 
@@ -28,6 +28,7 @@ def error_spikes_processor(row: tuple, definition: InsightDefinition, context: d
 registry.register(
     InsightDefinition(
         id="error_spikes",
+        category=InsightCategory.origin,
         title="Error Spikes",
         description="URLs with abnormally elevated 5xx error rates in the window vs. baseline",
         sql_template=SQL.ERROR_SPIKES,
@@ -56,6 +57,7 @@ def botnet_grouping_processor(row: tuple, definition: InsightDefinition, context
 registry.register(
     InsightDefinition(
         id="botnet_grouping",
+        category=InsightCategory.security,
         title="Botnet Grouping",
         description="TLS fingerprints (JA3/JA4) using far more distinct IPs than their baseline",
         sql_template=SQL.BOTNET_GROUPING,
@@ -82,6 +84,7 @@ def new_country_traffic_processor(row: tuple, definition: InsightDefinition, con
 registry.register(
     InsightDefinition(
         id="new_country_traffic",
+        category=InsightCategory.traffic,
         title="New Country Traffic",
         description="Countries that appeared in the window but had zero requests in the baseline",
         sql_template=SQL.NEW_COUNTRY_TRAFFIC,
@@ -111,6 +114,7 @@ def city_surges_processor(row: tuple, definition: InsightDefinition, context: di
 registry.register(
     InsightDefinition(
         id="city_surges",
+        category=InsightCategory.traffic,
         title="City Traffic Surges",
         description="Cities experiencing a significant spike in traffic compared to their baseline",
         sql_template=SQL.CITY_SURGES,
@@ -141,6 +145,7 @@ def city_error_spikes_processor(row: tuple, definition: InsightDefinition, conte
 registry.register(
     InsightDefinition(
         id="city_error_spikes",
+        category=InsightCategory.origin,
         title="City Error Spikes",
         description="Cities with abnormally high error rates in the window vs. baseline",
         sql_template=SQL.CITY_ERROR_SPIKES,
@@ -171,6 +176,7 @@ def city_latency_processor(row: tuple, definition: InsightDefinition, context: d
 registry.register(
     InsightDefinition(
         id="city_latency_regressions",
+        category=InsightCategory.edge,
         title="City Latency Regressions",
         description="Cities experiencing significant increases in P95 latency",
         sql_template=SQL.CITY_LATENCY_REGRESSIONS,
@@ -197,6 +203,7 @@ def new_city_traffic_processor(row: tuple, definition: InsightDefinition, contex
 registry.register(
     InsightDefinition(
         id="new_city_traffic",
+        category=InsightCategory.traffic,
         title="New City Traffic",
         description="Cities that recently started sending traffic after a period of zero activity",
         sql_template=SQL.NEW_CITY_TRAFFIC,
@@ -228,6 +235,7 @@ def ua_monoculture_processor(row: tuple, definition: InsightDefinition, context:
 registry.register(
     InsightDefinition(
         id="ua_monoculture",
+        category=InsightCategory.traffic,
         title="User-Agent Monoculture",
         description="User-agents with an unusually high and spiking share of total traffic",
         sql_template=SQL.UA_MONOCULTURE,
@@ -281,6 +289,7 @@ NEW_PROBE_REGEX = "|".join(re.escape(p) for p in NEW_PROBES)
 registry.register(
     InsightDefinition(
         id="new_probe_urls",
+        category=InsightCategory.security,
         title="New Probe URLs",
         description="Common attack patterns and sensitive paths appearing for the first time",
         sql_template=SQL.NEW_PROBE_URLS,
@@ -307,6 +316,7 @@ def waf_signal_spikes_processor(row: tuple, definition: InsightDefinition, conte
 registry.register(
     InsightDefinition(
         id="waf_signal_spikes",
+        category=InsightCategory.security,
         title="WAF Signal Spikes",
         description=("Security signals from the Next-Gen WAF showing unusual activity"),
         # Reads from {waf_table} — the insights repo materialises a
@@ -345,6 +355,7 @@ def proxy_surge_severity(items: list[dict]) -> str:
 registry.register(
     InsightDefinition(
         id="proxy_surge",
+        category=InsightCategory.security,
         title="Anonymizing Proxy Surge",
         description="Significant increase in traffic from known VPNs and anonymizing proxies",
         sql_template=SQL.PROXY_SURGE,
@@ -382,6 +393,7 @@ def asn_concentration_processor(row: tuple, definition: InsightDefinition, conte
 registry.register(
     InsightDefinition(
         id="asn_concentration",
+        category=InsightCategory.network,
         title="ASN Concentration",
         description="Traffic spiking from specific Autonomous Systems (ISPs/Data Centers)",
         sql_template=SQL.ASN_CONCENTRATION,
@@ -423,6 +435,7 @@ def asn_metro_performance_processor(row: tuple, definition: InsightDefinition, c
 registry.register(
     InsightDefinition(
         id="asn_metro_performance",
+        category=InsightCategory.network,
         title="ASN/Metro Performance Regressions",
         description="Specific ISP/Metro combinations showing significantly higher network latency than baseline",
         sql_template=SQL.ASN_METRO_PERFORMANCE,
@@ -450,6 +463,7 @@ def cache_collapse_processor(row: tuple, definition: InsightDefinition, context:
 registry.register(
     InsightDefinition(
         id="cache_collapse",
+        category=InsightCategory.edge,
         title="Cache Efficiency Collapse",
         description="URLs whose cacheable hit ratio (HIT/(HIT+MISS)) dropped sharply vs. their baseline",
         sql_template=SQL.CACHE_COLLAPSE,
@@ -479,6 +493,7 @@ def cacheability_regression_processor(row: tuple, definition: InsightDefinition,
 registry.register(
     InsightDefinition(
         id="cacheability_regression",
+        category=InsightCategory.edge,
         title="Cacheability Regression",
         description="URLs that flipped from cacheable to mostly PASS (uncacheable) vs. their baseline",
         sql_template=SQL.CACHEABILITY_REGRESSION,
@@ -509,6 +524,7 @@ def latency_regression_processor(row: tuple, definition: InsightDefinition, cont
 registry.register(
     InsightDefinition(
         id="latency_regression",
+        category=InsightCategory.edge,
         title="Latency Regression",
         description="Endpoints showing significantly slower P95 response times than baseline",
         sql_template=SQL.LATENCY_REGRESSION,
@@ -522,6 +538,9 @@ registry.register(
 
 def impossible_distance_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [fp, hits, worst_excess_km, max_dist_km, min_allowed_km, pop, sample_ip, client_lat, client_lon, pop_lat, pop_lon, tcp_rtt, country, city]
+    sample_ip = row[6]
+    if context.get("mask_ips") and sample_ip:
+        sample_ip = mask_ip(sample_ip)
     return {
         "label": row[0],
         "current_val": round(float(row[3]), 0),
@@ -532,7 +551,7 @@ def impossible_distance_processor(row: tuple, definition: InsightDefinition, con
             "hits": row[1],
             "excess_km": round(float(row[2]), 0),
             "pop": row[5],
-            "sample_ip": row[6],
+            "sample_ip": sample_ip,
             "client_lat": row[7],
             "client_lon": row[8],
             "pop_lat": row[9],
@@ -552,6 +571,7 @@ def impossible_distance_processor(row: tuple, definition: InsightDefinition, con
 registry.register(
     InsightDefinition(
         id="impossible_distance",
+        category=InsightCategory.security,
         title="Impossible Distance / Spoofing",
         description="Traffic where the network latency (RTT) is physically too low for the reported client distance",
         sql_template=SQL.IMPOSSIBLE_DISTANCE,
@@ -585,6 +605,7 @@ def tail_latency_processor(row: tuple, definition: InsightDefinition, context: d
 registry.register(
     InsightDefinition(
         id="tail_latency",
+        category=InsightCategory.edge,
         title="Tail Latency Anomaly",
         description="Endpoints where P99 latency is more than 5× higher than P50, indicating major outliers",
         sql_template=SQL.TAIL_LATENCY,
@@ -616,6 +637,7 @@ def cipher_spread_processor(row: tuple, definition: InsightDefinition, context: 
 registry.register(
     InsightDefinition(
         id="cipher_spread",
+        category=InsightCategory.security,
         title="Cipher Fingerprint Clustering",
         description="TLS cipher suites being used by a suspiciously large and spiking number of distinct IPs",
         sql_template=SQL.CIPHER_SPREAD,
@@ -657,6 +679,7 @@ def request_size_anomaly_processor(row: tuple, definition: InsightDefinition, co
 registry.register(
     InsightDefinition(
         id="request_size_anomaly",
+        category=InsightCategory.security,
         title="Oversized Request Headers",
         description="IPs sending headers significantly larger than their historical baseline, potential for DoS or exfiltration",
         sql_template=SQL.REQUEST_SIZE_ANOMALY,
@@ -695,6 +718,7 @@ def connection_abuse_processor(row: tuple, definition: InsightDefinition, contex
 registry.register(
     InsightDefinition(
         id="connection_abuse",
+        category=InsightCategory.security,
         title="Connection Reuse Anomaly",
         description="IPs making an unusually high number of requests per single TCP connection",
         sql_template=SQL.CONNECTION_ABUSE,
@@ -728,6 +752,7 @@ def region_latency_processor(row: tuple, definition: InsightDefinition, context:
 registry.register(
     InsightDefinition(
         id="region_latency",
+        category=InsightCategory.network,
         title="Regional Latency Degradation",
         description="Geographic regions showing a significant increase in P95 latency compared to baseline",
         sql_template=SQL.REGION_LATENCY,
@@ -760,6 +785,7 @@ def cache_ttl_mismatch_processor(row: tuple, definition: InsightDefinition, cont
 registry.register(
     InsightDefinition(
         id="cache_ttl_mismatch",
+        category=InsightCategory.edge,
         title="Cache TTL Inefficiency",
         description="URLs with high TTL but very low hit counts, potentially wasting cache space",
         sql_template=SQL.CACHE_TTL_MISMATCH,
@@ -797,6 +823,7 @@ def image_optimization_processor(row: tuple, definition: InsightDefinition, cont
 registry.register(
     InsightDefinition(
         id="image_optimization_opportunities",
+        category=InsightCategory.edge,
         title="Image Optimization Opportunities",
         description="Large images being served without modern compression (WebP/AVIF), especially to mobile users",
         sql_template=SQL.IMAGE_OPTIMIZATION_OPPORTUNITIES,
@@ -824,6 +851,7 @@ def origin_latency_spike_processor(row: tuple, definition: InsightDefinition, co
 registry.register(
     InsightDefinition(
         id="origin_latency_spike",
+        category=InsightCategory.origin,
         title="Origin Latency Spike",
         description="Sudden and significant increase in P95 response time from the origin server",
         sql_template=SQL.ORIGIN_LATENCY_SPIKE,
@@ -852,6 +880,7 @@ def origin_error_rate_processor(row: tuple, definition: InsightDefinition, conte
 registry.register(
     InsightDefinition(
         id="origin_error_rate",
+        category=InsightCategory.origin,
         title="Origin Error Rate",
         description="Significant increase in 5xx errors returned by the origin server",
         sql_template=SQL.ORIGIN_ERROR_RATE,
@@ -878,6 +907,7 @@ def origin_retries_processor(row: tuple, definition: InsightDefinition, context:
 registry.register(
     InsightDefinition(
         id="origin_retries",
+        category=InsightCategory.origin,
         title="Origin Retries Elevated",
         description="URLs experiencing frequent retries when fetching from origin, indicating backend instability",
         sql_template=SQL.ORIGIN_RETRIES,
@@ -904,6 +934,7 @@ def origin_ip_failure_processor(row: tuple, definition: InsightDefinition, conte
 registry.register(
     InsightDefinition(
         id="origin_ip_failure",
+        category=InsightCategory.origin,
         title="Specific Origin IP Failing",
         description="One or more origin IP addresses are returning significantly more errors than their peers",
         sql_template=SQL.ORIGIN_IP_FAILURE,
@@ -933,6 +964,7 @@ def shield_path_degradation_processor(row: tuple, definition: InsightDefinition,
 registry.register(
     InsightDefinition(
         id="shield_path_degradation",
+        category=InsightCategory.origin,
         title="Shield Path Degradation",
         description="Increased latency on the network path between edge POPs and shield POPs",
         sql_template=SQL.SHIELD_PATH_DEGRADATION,
@@ -1019,6 +1051,7 @@ def repeated_patterns_severity(items: list[dict]) -> str:
 registry.register(
     InsightDefinition(
         id="repeated_patterns",
+        category=InsightCategory.security,
         title="Scripted Traffic Patterns",
         description=(
             "IPs sending requests on a highly regular cadence — automated scrapers, "
@@ -1028,5 +1061,615 @@ registry.register(
         required_fields=["ip", "timestamp"],
         row_processor=repeated_patterns_processor,
         severity_logic=repeated_patterns_severity,
+    )
+)
+
+# ── 31. Low-and-Slow Scans ────────────────────────────────────────────────────
+# Phase-3: promotes the legacy low_and_slow stub to a computed insight.
+
+
+def low_and_slow_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [ip, hits, distinct_paths, span_s, rps]
+    # IP-keyed (label + meta.filters.ip + investigate_url) — mask at the source
+    # when the analyst policy sets mask_ips. See request_size_anomaly.
+    ip = row[0]
+    if context.get("mask_ips") and ip:
+        ip = mask_ip(ip)
+    hits = int(row[1] or 0)
+    distinct_paths = int(row[2] or 0)
+    span_s = int(row[3] or 0)
+    rps = float(row[4] or 0)
+    return {
+        "label": ip or "(unknown)",
+        "current_val": distinct_paths,
+        "baseline_val": None,
+        "unit": "sensitive paths",
+        "meta": {
+            "hits": hits,
+            "distinct_paths": distinct_paths,
+            "span_s": span_s,
+            "rps": rps,
+            "filters": {"ip": ip},
+        },
+        "severity": "critical" if distinct_paths >= 10 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="low_and_slow",
+        category=InsightCategory.security,
+        title="Low and Slow Scans",
+        description=(
+            "IPs probing many sensitive / vulnerability paths at a deliberately low "
+            "request rate spread over a long span — designed to evade rate limits"
+        ),
+        sql_template=SQL.LOW_AND_SLOW,
+        required_fields=["ip", "url"],
+        row_processor=low_and_slow_processor,
+    )
+)
+
+# ── 32. Credential Enumeration / Brute Force ──────────────────────────────────
+
+
+def credential_enumeration_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [ip, w_denied, w_attempts, w_paths, b_denied]
+    # IP-keyed — mask at the source when the analyst policy sets mask_ips.
+    ip = row[0]
+    if context.get("mask_ips") and ip:
+        ip = mask_ip(ip)
+    w_denied = int(row[1] or 0)
+    w_attempts = int(row[2] or 0)
+    w_paths = int(row[3] or 0)
+    b_denied = int(row[4] or 0)
+    fail_rate = round(w_denied * 100.0 / w_attempts, 1) if w_attempts else 0.0
+    return {
+        "label": ip or "(unknown)",
+        "current_val": w_denied,
+        "baseline_val": b_denied,
+        "baseline_label": "baseline denied",
+        "unit": "denied (401/403)",
+        "meta": {
+            "attempts": w_attempts,
+            "denied": w_denied,
+            "fail_rate_pct": fail_rate,
+            "distinct_paths": w_paths,
+            "filters": {"ip": ip},
+        },
+        "severity": "critical" if w_denied >= 100 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="credential_enumeration",
+        category=InsightCategory.security,
+        title="Credential Enumeration / Brute Force",
+        description=(
+            "IPs generating a spike of 401/403 responses on authentication paths "
+            "(login, auth, OAuth, password reset) — credential stuffing or brute force"
+        ),
+        sql_template=SQL.CREDENTIAL_ENUMERATION,
+        required_fields=["ip", "url", "status"],
+        row_processor=credential_enumeration_processor,
+    )
+)
+
+# ── 33. Network Path (ASN) Health ─────────────────────────────────────────────
+# Phase-3: promotes the legacy network_asn_health stub to a computed insight.
+
+
+def network_asn_health_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [asn, w_ploss, b_ploss, w_jitter, b_jitter, w_retrans, b_retrans, w_total, b_total]
+    asn = row[0]
+    w_ploss = float(row[1] or 0)
+    b_ploss = float(row[2] or 0)
+    w_jitter = float(row[3] or 0)
+    b_jitter = float(row[4] or 0)
+    w_retrans = float(row[5] or 0)
+    b_retrans = float(row[6] or 0)
+    w_total = int(row[7] or 0)
+
+    names_map = context.get("asn_names", {})
+    asn_label = f"AS{asn}"
+    if asn in names_map:
+        asn_label += f" ({names_map[asn]})"
+
+    return {
+        "label": asn_label,
+        "current_val": round(w_ploss * 100, 2),
+        "baseline_val": round(b_ploss * 100, 2),
+        "unit": "% packet loss",
+        "meta": {
+            "window_packet_loss_pct": round(w_ploss * 100, 2),
+            "baseline_packet_loss_pct": round(b_ploss * 100, 2),
+            "window_jitter_ms": round(w_jitter / 1000.0, 1),
+            "baseline_jitter_ms": round(b_jitter / 1000.0, 1),
+            "window_retrans_avg": round(w_retrans, 2),
+            "baseline_retrans_avg": round(b_retrans, 2),
+            "requests": w_total,
+            "asn": asn,
+            "filters": {"asn": asn},
+        },
+        "severity": "critical" if w_ploss >= 0.05 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="network_asn_health",
+        category=InsightCategory.network,
+        title="Network Path (ASN) Health",
+        description="ASNs experiencing elevated packet loss, jitter, or TCP retransmissions vs. their baseline",
+        sql_template=SQL.NETWORK_ASN_HEALTH,
+        required_fields=["asn", "ploss", "rtt_var", "retrans"],
+        row_processor=network_asn_health_processor,
+    )
+)
+
+# ── 34. 404 Content-Discovery Scanning ────────────────────────────────────────
+# Track A: per-IP 404 enumeration (directory / endpoint brute-forcing).
+
+
+def content_discovery_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [ip, w_404, w_total, distinct_404, b_404]
+    # IP-keyed — mask at the source when the analyst policy sets mask_ips.
+    # See request_size_anomaly / credential_enumeration.
+    ip = row[0]
+    if context.get("mask_ips") and ip:
+        ip = mask_ip(ip)
+    w_404 = int(row[1] or 0)
+    w_total = int(row[2] or 0)
+    distinct_404 = int(row[3] or 0)
+    b_404 = int(row[4] or 0)
+    ratio = round(w_404 * 100.0 / w_total, 1) if w_total else 0.0
+    return {
+        "label": ip or "(unknown)",
+        "current_val": w_404,
+        "baseline_val": b_404,
+        "baseline_label": "baseline 404s",
+        "unit": "404s",
+        "meta": {
+            "requests": w_total,
+            "not_found": w_404,
+            "not_found_rate_pct": ratio,
+            "distinct_404_urls": distinct_404,
+            "filters": {"ip": ip},
+        },
+        "severity": "critical" if w_404 >= 100 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="content_discovery",
+        category=InsightCategory.security,
+        title="Content-Discovery Scanning",
+        description=(
+            "IPs generating a burst of 404s across many distinct URLs — directory / "
+            "endpoint enumeration probing for hidden or vulnerable paths"
+        ),
+        sql_template=SQL.CONTENT_DISCOVERY,
+        required_fields=["ip", "url", "status"],
+        row_processor=content_discovery_processor,
+    )
+)
+
+# ── 35. Referer Monoculture ───────────────────────────────────────────────────
+# Track B: one Referer dominating window traffic (mirrors ua_monoculture).
+
+
+def referer_monoculture_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [referer, w_cnt, b_cnt, b_total, w_total]
+    referer, w_cnt, b_cnt, b_total, w_total = row
+    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
+    return {
+        "label": referer or "(empty)",
+        "current_val": w_rate,
+        "baseline_val": float(b_cnt * 100.0 / b_total) if b_total else 0.0,
+        "unit": "% of traffic",
+        "meta": {"requests": w_cnt, "filters": {"referer": referer}},
+        "severity": "critical" if w_rate >= 50 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="referer_monoculture",
+        category=InsightCategory.traffic,
+        title="Referer Monoculture",
+        description="A single Referer driving an outsized, spiking share of total traffic — scraping, hotlinking, or a spoofed-referer flood",
+        sql_template=SQL.REFERER_MONOCULTURE,
+        required_fields=["referer", "timestamp"],
+        row_processor=referer_monoculture_processor,
+    )
+)
+
+# ── 36. HTTP Method Drift ─────────────────────────────────────────────────────
+# Track B: a write/verb method surging vs a read-dominated baseline.
+
+
+def method_drift_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [method, w_cnt, b_cnt, w_total, b_total]
+    method, w_cnt, b_cnt, w_total, b_total = row
+    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
+    b_rate = float(b_cnt * 100.0 / b_total) if b_total else 0.0
+    return {
+        "label": method or "(unknown)",
+        "current_val": w_rate,
+        "baseline_val": b_rate,
+        "unit": "% of traffic",
+        "meta": {"requests": w_cnt, "method": method, "filters": {"method": method}},
+        "severity": "critical" if w_rate >= 25 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="method_drift",
+        category=InsightCategory.traffic,
+        title="HTTP Method Drift",
+        description="A write method (POST/PUT/DELETE/…) surging to an outsized share of traffic vs a read-dominated baseline — API abuse or form/credential floods",
+        sql_template=SQL.METHOD_DRIFT,
+        required_fields=["method", "timestamp"],
+        row_processor=method_drift_processor,
+    )
+)
+
+# ── 37. New ASN Traffic ───────────────────────────────────────────────────────
+# Track B: zero-baseline ASN now sending traffic (mirrors new_country/new_city).
+
+
+def new_asn_traffic_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [asn, w_cnt, b_cnt]
+    asn, w_cnt, b_cnt = row
+    names_map = context.get("asn_names", {})
+    asn_label = f"AS{asn}"
+    if asn in names_map:
+        asn_label += f" ({names_map[asn]})"
+    return {
+        "label": asn_label,
+        "current_val": w_cnt,
+        "baseline_val": 0,
+        "unit": "requests",
+        "meta": {"requests": w_cnt, "asn": asn, "filters": {"asn": asn}},
+        "severity": "warning" if w_cnt >= 100 else "info",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="new_asn_traffic",
+        category=InsightCategory.network,
+        title="New ASN Traffic",
+        description="An ASN (ISP/datacenter) with zero baseline presence now sending meaningful traffic — a new botnet source, proxy pool, or datacenter range",
+        sql_template=SQL.NEW_ASN_TRAFFIC,
+        required_fields=["asn", "timestamp"],
+        row_processor=new_asn_traffic_processor,
+    )
+)
+
+# ── 38. Metro Delivery-Rate Degradation ───────────────────────────────────────
+# Track B: per-US-metro kernel TCP delivery-rate drop (network last-mile).
+
+
+def metro_delivery_degradation_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [metro, w_med, b_med, w_total, b_total]
+    metro = row[0]
+    dma_map = context.get("dma_map", {})
+    metro_label = dma_map.get(str(metro)) or f"DMA {metro}"
+    # delivery_rate is bytes/sec; present as Mbps (×8 / 1e6).
+    w_mbps = round(float(row[1] or 0) * 8 / 1e6, 1)
+    b_mbps = round(float(row[2] or 0) * 8 / 1e6, 1)
+    return {
+        "label": metro_label,
+        "current_val": w_mbps,
+        "baseline_val": b_mbps,
+        "unit": "Mbps (median)",
+        "meta": {
+            "window_requests": row[3],
+            "window_mbps": w_mbps,
+            "baseline_mbps": b_mbps,
+            "filters": {"metro": metro},
+        },
+        "severity": "critical" if b_mbps > 0 and w_mbps <= b_mbps * 0.25 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="metro_delivery_degradation",
+        category=InsightCategory.network,
+        title="Metro Delivery-Rate Degradation",
+        description="US metro areas whose median TCP delivery rate (throughput) collapsed vs. baseline — regional last-mile or peering degradation",
+        sql_template=SQL.METRO_DELIVERY_DEGRADATION,
+        required_fields=["metro", "delivery_rate", "timestamp"],
+        row_processor=metro_delivery_degradation_processor,
+    )
+)
+
+# ── 39. Connection-Type Mix Shift ─────────────────────────────────────────────
+# Track B: a client connection (type/speed) combo surging in share.
+
+
+def connection_type_mix_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [c_type, c_speed, w_cnt, b_cnt, w_total, b_total]
+    c_type, c_speed, w_cnt, b_cnt, w_total, b_total = row
+    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
+    b_rate = float(b_cnt * 100.0 / b_total) if b_total else 0.0
+    return {
+        "label": f"{c_type or '?'} / {c_speed or '?'}",
+        "current_val": w_rate,
+        "baseline_val": b_rate,
+        "unit": "% of typed traffic",
+        "meta": {
+            "requests": w_cnt,
+            "c_type": c_type,
+            "c_speed": c_speed,
+            "filters": {"c_type": c_type, "c_speed": c_speed},
+        },
+        "severity": "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="connection_type_mix",
+        category=InsightCategory.network,
+        title="Connection-Type Mix Shift",
+        description="A client connection type/speed combo (e.g. cellular, datacenter) surging to an outsized share of traffic vs. baseline — a bot pool or routing shift",
+        sql_template=SQL.CONNECTION_TYPE_MIX,
+        required_fields=["c_type", "c_speed", "timestamp"],
+        row_processor=connection_type_mix_processor,
+    )
+)
+
+# ── 40. PoP Latency Regression ────────────────────────────────────────────────
+# Track B: per-Fastly-PoP P95 edge latency regression (finer than region/city).
+
+
+def pop_latency_regression_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [pop, w_p95, b_p95, w_total, b_total]
+    return {
+        "label": row[0] or "(unknown)",
+        "current_val": float(row[1] or 0),
+        "baseline_val": float(row[2] or 0),
+        "unit": "ms (P95)",
+        "meta": {
+            "regression_ratio": float(row[1] / row[2]) if row[2] else 0,
+            "window_requests": row[3],
+            "filters": {"pop": row[0]},
+        },
+        "severity": "critical" if float(row[1] or 0) >= 5000 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="pop_latency_regression",
+        category=InsightCategory.edge,
+        title="PoP Latency Regression",
+        description="Individual Fastly PoPs (datacenters) whose P95 edge latency regressed sharply vs. baseline — finer-grained than region or city latency",
+        sql_template=SQL.POP_LATENCY_REGRESSION,
+        required_fields=["pop", "elapsed", "timestamp"],
+        row_processor=pop_latency_regression_processor,
+    )
+)
+
+# ── 41. HTTP/3 → TCP Fallback Spike ───────────────────────────────────────────
+# Track B: service-wide QUIC-share drop = clients falling back to TCP.
+
+
+def http3_fallback_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [w_quic, w_total, b_quic, b_total]
+    w_quic, w_total, b_quic, b_total = row
+    w_share = round(w_quic * 100.0 / w_total, 1) if w_total else 0.0
+    b_share = round(b_quic * 100.0 / b_total, 1) if b_total else 0.0
+    return {
+        "label": "HTTP/3 (QUIC) adoption",
+        "current_val": w_share,
+        "baseline_val": b_share,
+        "baseline_label": "baseline QUIC share",
+        "unit": "% QUIC",
+        "meta": {
+            "window_quic": int(w_quic or 0),
+            "window_total": int(w_total or 0),
+            "share_drop_pts": round(b_share - w_share, 1),
+            "filters": {"transport": "tcp"},
+        },
+        "severity": "critical" if (b_share - w_share) >= 40 else "warning",
+    }
+
+
+def http3_fallback_severity(items: list[dict]) -> str:
+    if not items:
+        return "clean"
+    return "critical" if any(i.get("severity") == "critical" for i in items) else "warning"
+
+
+registry.register(
+    InsightDefinition(
+        id="http3_fallback",
+        category=InsightCategory.network,
+        title="HTTP/3 → TCP Fallback Spike",
+        description="A service-wide drop in QUIC (HTTP/3) share vs. baseline — clients failing to sustain QUIC and falling back to TCP (middlebox/UDP throttling)",
+        sql_template=SQL.HTTP3_FALLBACK,
+        required_fields=["transport", "timestamp"],
+        row_processor=http3_fallback_processor,
+        severity_logic=http3_fallback_severity,
+    )
+)
+
+# ── 42. Cache HIT-Ratio Cliff ─────────────────────────────────────────────────
+# Track B: service-wide edge HIT ratio cliff (headline edge card).
+
+
+def cache_hit_cliff_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [w_hits, w_cacheable, b_hits, b_cacheable]
+    w_hits, w_cacheable, b_hits, b_cacheable = row
+    w_rate = round(w_hits * 100.0 / w_cacheable, 1) if w_cacheable else 0.0
+    b_rate = round(b_hits * 100.0 / b_cacheable, 1) if b_cacheable else 0.0
+    return {
+        "label": "Service-wide cache HIT ratio",
+        "current_val": w_rate,
+        "baseline_val": b_rate,
+        "unit": "% HIT",
+        "meta": {
+            "window_cacheable": int(w_cacheable or 0),
+            "baseline_cacheable": int(b_cacheable or 0),
+            "drop_pts": round(b_rate - w_rate, 1),
+        },
+        "severity": "critical" if (b_rate - w_rate) >= 30 else "warning",
+    }
+
+
+def cache_hit_cliff_severity(items: list[dict]) -> str:
+    if not items:
+        return "clean"
+    return "critical" if any(i.get("severity") == "critical" for i in items) else "warning"
+
+
+registry.register(
+    InsightDefinition(
+        id="cache_hit_cliff",
+        category=InsightCategory.edge,
+        title="Cache HIT-Ratio Cliff",
+        description="The whole service's edge cache HIT ratio (HIT/(HIT+MISS)) fell off a cliff vs. baseline — a purge storm, TTL change, or origin Cache-Control regression",
+        sql_template=SQL.CACHE_HIT_CLIFF,
+        required_fields=["cache", "timestamp"],
+        row_processor=cache_hit_cliff_processor,
+        severity_logic=cache_hit_cliff_severity,
+    )
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Track C — field-gated insights (require the Phase-4 edge fields
+# resp_header_content_encoding / cookie_session / oconnect_ms; empty until a
+# service re-provisions to emit them AND history accrues).
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 43. Payload Compression Regression ────────────────────────────────────────
+
+
+def payload_compression_regression_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [url, w_rate, b_rate, w_total, b_total]  (rates = uncompressed share)
+    return {
+        "label": row[0] or "(empty)",
+        "current_val": float(row[1] or 0) * 100,
+        "baseline_val": float(row[2] or 0) * 100,
+        "unit": "% uncompressed",
+        "meta": {
+            "window_requests": row[3],
+            "baseline_requests": row[4],
+            "filters": {"url": row[0]},
+        },
+        "severity": "critical" if (row[1] or 0) >= 0.90 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="payload_compression_regression",
+        category=InsightCategory.edge,
+        title="Payload Compression Regression",
+        description="Compressible responses (JS/CSS/HTML/JSON/SVG/XML) that flipped from compressed (gzip/br) to served uncompressed vs. baseline — a broken Accept-Encoding path or origin regression inflating egress and TTFB",
+        sql_template=SQL.PAYLOAD_COMPRESSION_REGRESSION,
+        required_fields=["url", "resp_header_content_encoding", "resp_bytes", "status"],
+        row_processor=payload_compression_regression_processor,
+    )
+)
+
+# ── 44. Session-ID Harvesting / Rotation ──────────────────────────────────────
+
+
+def session_harvesting_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [ip, w_sessions, w_reqs, b_sessions]
+    # IP-keyed — mask at the source when the analyst policy sets mask_ips. The
+    # cookie_session hash is only COUNTED upstream (never selected), so no session
+    # id can appear in the card; only the client IP needs masking here.
+    ip = row[0]
+    if context.get("mask_ips") and ip:
+        ip = mask_ip(ip)
+    w_sessions = int(row[1] or 0)
+    w_reqs = int(row[2] or 0)
+    b_sessions = int(row[3] or 0)
+    return {
+        "label": ip or "(unknown)",
+        "current_val": w_sessions,
+        "baseline_val": b_sessions,
+        "baseline_label": "baseline sessions",
+        "unit": "distinct sessions",
+        "meta": {
+            "requests": w_reqs,
+            "distinct_sessions": w_sessions,
+            "baseline_distinct_sessions": b_sessions,
+            "filters": {"ip": ip},
+        },
+        "severity": "critical" if w_sessions >= 100 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="session_harvesting",
+        category=InsightCategory.security,
+        title="Session-ID Harvesting",
+        description="A single IP presenting a large, spiking number of distinct session cookies vs. baseline — session-token brute forcing, cookie replay, or credential stuffing that mints a fresh session per attempt",
+        sql_template=SQL.SESSION_HARVESTING,
+        required_fields=["ip", "cookie_session"],
+        row_processor=session_harvesting_processor,
+    )
+)
+
+# ── 45. Origin Connect vs Read Timeout Split ──────────────────────────────────
+
+
+def timeout_split_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [w_conn, b_conn, w_read, b_read, w_total, b_total]  (ms P95)
+    w_conn = float(row[0] or 0)
+    b_conn = float(row[1] or 0)
+    w_read = float(row[2] or 0)
+    b_read = float(row[3] or 0)
+    conn_regressed = w_conn >= b_conn * 2 and (w_conn - b_conn) >= 50
+    read_regressed = w_read >= b_read * 2 and (w_read - b_read) >= 100
+    # Surface the dominant phase (larger absolute regression) as the headline.
+    if conn_regressed and (not read_regressed or (w_conn - b_conn) >= (w_read - b_read)):
+        phase, cur, base = "connect", round(w_conn, 1), round(b_conn, 1)
+    else:
+        phase, cur, base = "read", round(w_read, 1), round(b_read, 1)
+    return {
+        "label": f"Origin {phase} P95",
+        "current_val": cur,
+        "baseline_val": base,
+        "unit": "ms (P95)",
+        "meta": {
+            "phase": phase,
+            "connect_p95_ms": round(w_conn, 1),
+            "baseline_connect_p95_ms": round(b_conn, 1),
+            "read_p95_ms": round(w_read, 1),
+            "baseline_read_p95_ms": round(b_read, 1),
+            "window_requests": int(row[4] or 0),
+        },
+        "severity": "critical" if base > 0 and cur >= base * 3 else "warning",
+    }
+
+
+def timeout_split_severity(items: list[dict]) -> str:
+    if not items:
+        return "clean"
+    return "critical" if any(i.get("severity") == "critical" for i in items) else "warning"
+
+
+registry.register(
+    InsightDefinition(
+        id="timeout_split",
+        category=InsightCategory.origin,
+        title="Origin Connect vs Read Timeout Split",
+        description="Splits origin slowness into connect (TCP+TLS handshake) vs read (processing to first byte) phases and flags whichever P95 regressed — slow-connect points at origin/LB saturation, slow-read at app/DB processing",
+        sql_template=SQL.TIMEOUT_SPLIT,
+        required_fields=["oconnect_ms", "ottfb"],
+        row_processor=timeout_split_processor,
+        severity_logic=timeout_split_severity,
     )
 )

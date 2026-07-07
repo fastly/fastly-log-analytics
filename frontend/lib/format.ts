@@ -3,12 +3,19 @@
  */
 
 // Binary units (1 KB = 1024 B); matches GCP/AWS/Fastly console conventions.
+// Bumps to the next unit once the value would show 4+ digits (e.g. 1023.24 MB
+// reads as "1 GB" instead), rather than only at the strict 1024 boundary.
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+  let value = bytes
+  let i = 0
+  while (value >= 1000 && i < sizes.length - 1) {
+    value /= k
+    i++
+  }
+  return parseFloat(value.toFixed(2)) + ' ' + sizes[i]
 }
 
 /**

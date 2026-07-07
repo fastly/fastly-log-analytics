@@ -23,6 +23,8 @@ import {
   installMaplibreSideEffects,
 } from '../helpers/maplibre-mock'
 
+import { ChoroplethMap } from '@/components/Map/ChoroplethMap'
+
 vi.mock('next-themes', () => ({
   useTheme: vi.fn(() => ({ theme: 'light' })),
 }))
@@ -39,7 +41,6 @@ describe('ChoroplethMap', () => {
   })
 
   it('mounts a map instance into the container ref', async () => {
-    const { ChoroplethMap } = await import('@/components/Map/ChoroplethMap')
     const { container } = render(
       <ChoroplethMap data={[{ country: 'US', count: 100 } as any]} />,
     )
@@ -50,14 +51,12 @@ describe('ChoroplethMap', () => {
     expect(mapInstances.length).toBe(1)
   })
 
-  it('renders an empty container when given an empty data array', async () => {
-    const { ChoroplethMap } = await import('@/components/Map/ChoroplethMap')
+  it('renders an empty container when given an empty data array', () => {
     const { container } = render(<ChoroplethMap data={[]} />)
     expect(container.firstChild).not.toBeNull()
   })
 
-  it('re-renders without crashing when the data prop changes', async () => {
-    const { ChoroplethMap } = await import('@/components/Map/ChoroplethMap')
+  it('re-renders without crashing when the data prop changes', () => {
     const { rerender, container } = render(
       <ChoroplethMap data={[{ country: 'US', count: 10 } as any]} />,
     )
@@ -74,7 +73,6 @@ describe('ChoroplethMap', () => {
 
   it('accepts an onCountryClick handler without invoking it on mount', async () => {
     const handler = vi.fn()
-    const { ChoroplethMap } = await import('@/components/Map/ChoroplethMap')
     render(<ChoroplethMap data={[{ country: 'US', count: 1 } as any]} onCountryClick={handler} />)
     await Promise.resolve()
     expect(handler).not.toHaveBeenCalled()

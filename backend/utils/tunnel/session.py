@@ -36,6 +36,14 @@ class AnalystSession:
     last_activity: str | None = None
     tos_pending: bool = False
     service_ids: list[str] = field(default_factory=list)
+    # How this session authenticated. Carried from the invite so the admin
+    # Sessions tab can tell OAuth from passcode without a DB round-trip; an
+    # OAuth session is otherwise indistinguishable downstream (same RBAC /
+    # masking / TOS / boot / revoke). Not persisted to remote_sessions — on
+    # restart these default to 'passcode' and validate_session re-syncs them
+    # from the invite on the next request.
+    auth_method: str = "passcode"
+    oauth_provider: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -59,6 +67,8 @@ class AnalystSession:
             last_activity=row.get("last_activity"),
             tos_pending=row.get("tos_pending", False),
             service_ids=row.get("service_ids", []),
+            auth_method=row.get("auth_method", "passcode"),
+            oauth_provider=row.get("oauth_provider"),
         )
 
 

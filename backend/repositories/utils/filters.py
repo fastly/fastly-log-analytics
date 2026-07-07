@@ -43,13 +43,26 @@ def normalize_filter_key(filter_key: str) -> str:
     ``/_\\d+$/`` at entry, so a real field whose name ends in ``_<digit>``
     cannot reach this strip and be corrupted — any future field naming
     convention must preserve that constraint or this regex needs to change.
+
+    Security: the final ``_SAFE_COL_RE`` strip + ``.lower()`` make this resolve
+    to the SAME column :func:`build_where_clause` targets (it applies
+    ``_SAFE_COL_RE.sub`` to the result below) AND to the SAME identifier DuckDB
+    binds (identifier matching is case-INSENSITIVE, even when quoted). The
+    analyst PII filter-lock in ``backend.utils.remote_access`` compares this
+    against a lowercase forbidden-column set, so WITHOUT both steps a
+    junk-suffixed OR case-variant key (``ip.``, ``ip``+space, ``IP``,
+    ``Cookie_Session``) would slip the lock yet still bind the real PII column
+    in SQL — a masking bypass (adversarial audit 2026-07-06). Capture columns
+    are lowercase word-only names, so both steps are a no-op for legit keys
+    (e.g. ``waf_sig_ind``, ``_bot_name`` are preserved).
     """
     col = filter_key
     for prefix in ("xfilter_", "filter_"):
         if col.startswith(prefix):
             col = col[len(prefix) :]
             break
-    return re.sub(r"_\d+$", "", col)
+    col = re.sub(r"_\d+$", "", col)
+    return _SAFE_COL_RE.sub("", col).lower()
 
 
 def _get_utc_date_str(iso_str: str) -> str:

@@ -285,6 +285,69 @@ def test_raw_csv_multi_chunk_emits_header_once(client, monkeypatch):
     assert len(lines) == 2501
 
 
+def _inject_mask_ips_analyst(in_memory_duckdb, test_service_source):
+    """Re-point build_request_context so ctx carries a mask_ips analyst session
+    (the local TestClient socket classifies as admin in the middleware, so we
+    exercise the router's masking branch via the injected ctx.analyst_session)."""
+    from types import SimpleNamespace
+
+    from backend.core.request_context import build_request_context
+    from backend.main import app
+    from tests.conftest import override_request_context
+
+    session = SimpleNamespace(service_ids=[test_service_source["service_id"]], pii_policy={"mask_ips": True})
+    app.dependency_overrides[build_request_context] = override_request_context(
+        source=test_service_source, con=in_memory_duckdb, session=session
+    )
+
+
+@pytest.mark.security_regression
+def test_raw_csv_masks_ip_and_redacts_cookie_session_for_masking_analyst(
+    client, monkeypatch, in_memory_duckdb, test_service_source
+):
+    """Streaming CSV bypasses the middleware JSON PII pass (text/csv), so the
+    handler masks itself. A mask_ips analyst export must have IPs masked AND
+    session hashes (cookie_session) redacted — the raw hash must never leak,
+    empty stays empty, and non-PII columns pass through verbatim."""
+    df = pd.DataFrame(
+        {
+            "ip": ["203.0.113.45", "198.51.100.7"],
+            "cookie_session": ["a1b2c3d4deadbeef", ""],
+            "url": ["/a", "/b"],
+        }
+    )
+    monkeypatch.setattr("backend.repositories.dashboard.get_raw_df", lambda **kw: df)
+    _inject_mask_ips_analyst(in_memory_duckdb, test_service_source)
+
+    resp = client.post(
+        "/api/dashboard/raw/csv",
+        json={"start_time": "2026-06-12T00:00:00Z", "end_time": "2026-06-12T01:00:00Z", "filters": {}},
+    )
+    assert resp.status_code == 200, resp.text
+    text = resp.text
+    assert "deadbeef" not in text  # raw session hash never leaks
+    assert "203.0.113.45" not in text  # raw IP never leaks
+    assert "[redacted]" in text  # session redacted to the exact sentinel
+    assert "203.0.113.xxx" in text  # IP masking still applied
+    assert "/a" in text and "/b" in text  # non-PII columns verbatim
+
+
+@pytest.mark.security_regression
+def test_raw_csv_keeps_raw_cookie_session_for_non_masking_caller(client, monkeypatch):
+    """The redaction is policy-gated: an admin / non-masking caller (the default
+    ctx has no analyst_session) still exports the raw session value, so the mask
+    branch can't silently over-redact everyone."""
+    df = pd.DataFrame({"cookie_session": ["a1b2c3d4deadbeef"], "url": ["/a"]})
+    monkeypatch.setattr("backend.repositories.dashboard.get_raw_df", lambda **kw: df)
+
+    resp = client.post(
+        "/api/dashboard/raw/csv",
+        json={"start_time": "2026-06-12T00:00:00Z", "end_time": "2026-06-12T01:00:00Z", "filters": {}},
+    )
+    assert resp.status_code == 200, resp.text
+    assert "a1b2c3d4deadbeef" in resp.text
+
+
 # ── /api/dashboard/bundle + /aggregates sections selector ─────────────────────
 
 

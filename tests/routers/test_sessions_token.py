@@ -210,3 +210,94 @@ def test_detail_body_ip_column_is_masked_by_policy():
     assert [r["ip"] for r in masked["data"]] == ["203.0.113.xxx", "198.51.100.xxx"]
     # non-PII columns stay verbatim
     assert [r["url"] for r in masked["data"]] == ["/a", "/b"]
+
+
+@pytest.mark.security_regression
+def test_detail_body_cookie_session_is_redacted_by_policy():
+    """Phase-4 Track C added `cookie_session` — a hashed per-client session id
+    captured at the edge. It is client PII, so a mask_ips analyst viewing raw
+    /logs or /query rows must NOT see the hash. apply_pii_policy redacts the
+    cookie_session column (SESSION_ID_KEYS) wholesale; if a future change drops
+    it from the masked set this fails."""
+    body = {
+        "columns": ["ip", "cookie_session", "url"],
+        "data": [
+            {"ip": "203.0.113.45", "cookie_session": "a1b2c3d4deadbeef", "url": "/a"},
+            {"ip": "198.51.100.7", "cookie_session": "", "url": "/b"},
+        ],
+    }
+    masked = apply_pii_policy(body, {"mask_ips": True})
+    # Non-empty session hash → redacted; empty stays empty; raw hash never leaks.
+    assert [r["cookie_session"] for r in masked["data"]] == ["[redacted]", ""]
+    assert all("deadbeef" not in str(r.get("cookie_session")) for r in masked["data"])
+    # IP still masked, url still verbatim.
+    assert [r["ip"] for r in masked["data"]] == ["203.0.113.xxx", "198.51.100.xxx"]
+    assert [r["url"] for r in masked["data"]] == ["/a", "/b"]
+
+
+@pytest.mark.security_regression
+def test_aggregates_topn_cookie_session_value_is_redacted_by_policy():
+    """/api/dashboard/aggregates top-N panels carry the dimension value under a
+    generic ``value`` key nested as ``data[<field>]["top"][i]["value"]`` — the
+    field name is the PARENT key, not the cell key. Pins that apply_pii_policy
+    threads that field context so a cookie_session top-N cell is redacted (a
+    mask_ips analyst must not read raw session hashes off the Top card) while
+    the IP top-N cell stays masked (unchanged) and url stays verbatim."""
+    body = {
+        "data": {
+            "ip": {"top": [{"value": "203.0.113.45", "count": 9}], "total": 9},
+            "cookie_session": {
+                "top": [{"value": "a1b2c3d4deadbeef", "count": 7}, {"value": "", "count": 1}],
+                "total": 8,
+            },
+            "url": {"top": [{"value": "/login", "count": 5}], "total": 5},
+        }
+    }
+    masked = apply_pii_policy(body, {"mask_ips": True})
+    cs_top = masked["data"]["cookie_session"]["top"]
+    assert [c["value"] for c in cs_top] == ["[redacted]", ""]  # empty preserved
+    assert "deadbeef" not in str(masked["data"]["cookie_session"])
+    # IP top-N still value-shape masked; url panel untouched.
+    assert masked["data"]["ip"]["top"][0]["value"] == "203.0.113.xxx"
+    assert masked["data"]["url"]["top"][0]["value"] == "/login"
+
+
+@pytest.mark.security_regression
+def test_field_values_cookie_session_is_redacted_by_policy():
+    """/api/dashboard/field-values names its column in a SIBLING ``field`` key
+    (``{"field": "cookie_session", "values": [{"value": <hash>}]}``), not the
+    parent key. Pins that apply_pii_policy resolves that sibling so the distinct
+    cookie_session values are redacted — otherwise a mask_ips analyst could
+    enumerate every raw session hash via the value picker."""
+    body = {
+        "field": "cookie_session",
+        "values": [
+            {"value": "a1b2c3d4deadbeef", "count": 12},
+            {"value": "", "count": 3},
+        ],
+    }
+    masked = apply_pii_policy(body, {"mask_ips": True})
+    assert [v["value"] for v in masked["values"]] == ["[redacted]", ""]  # empty preserved
+    assert "deadbeef" not in str(masked)
+    assert masked["field"] == "cookie_session"  # the field NAME is fine to show
+
+
+@pytest.mark.security_regression
+def test_field_values_ip_is_masked_by_policy():
+    """/api/dashboard/field-values with field=ip names the column in the SIBLING
+    ``field`` key, so the raw distinct IP ``value`` cells slipped past the
+    key-name masker — a mask_ips analyst could enumerate every raw client IP via
+    the value picker. Pins that apply_pii_policy resolves the sibling ``field``
+    for IP columns too and value-shape masks the cells (non-IP values verbatim)."""
+    body = {
+        "field": "ip",
+        "values": [
+            {"value": "203.0.113.45", "count": 12},
+            {"value": "198.51.100.7", "count": 3},
+        ],
+    }
+    masked = apply_pii_policy(body, {"mask_ips": True})
+    assert [v["value"] for v in masked["values"]] == ["203.0.113.xxx", "198.51.100.xxx"]
+    # A non-IP dimension (url) must stay verbatim — even an IP-shaped url value.
+    url_body = {"field": "url", "values": [{"value": "/a"}, {"value": "1.2.3.4"}]}
+    assert [v["value"] for v in apply_pii_policy(url_body, {"mask_ips": True})["values"]] == ["/a", "1.2.3.4"]

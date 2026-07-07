@@ -395,7 +395,7 @@ def test_background_startup_reloads_db_and_initialises_each_service():
     with (
         patch("backend.core.duckdb.reload_default_source"),
         patch("backend.main._ensure_pop_cache"),
-        patch("backend.scheduler.get_scheduler", return_value=fake_scheduler),
+        patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
         patch("backend.config.list_configs", return_value=configs),
         patch("backend.main._initialize_service") as mock_init,
     ):
@@ -418,7 +418,7 @@ def test_background_startup_tolerates_reload_default_source_failure():
     with (
         patch("backend.core.duckdb.reload_default_source", side_effect=RuntimeError("S3 down")),
         patch("backend.main._ensure_pop_cache"),
-        patch("backend.scheduler.get_scheduler", return_value=fake_scheduler),
+        patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
         patch("backend.config.list_configs", return_value=[]),
     ):
         _background_startup()
@@ -434,7 +434,7 @@ def test_background_startup_swallows_scheduler_failure():
     with (
         patch("backend.core.duckdb.reload_default_source"),
         patch("backend.main._ensure_pop_cache"),
-        patch("backend.scheduler.get_scheduler", side_effect=RuntimeError("scheduler oom")),
+        patch("backend.cron.scheduler.get_scheduler", side_effect=RuntimeError("scheduler oom")),
     ):
         _background_startup()  # must not raise
 

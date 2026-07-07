@@ -210,6 +210,20 @@ services:
       # explicitly opts in. Enabled samples land in
       # /app/data/system/web_vitals.jsonl for scripts/analyze_web_vitals.py.
       - WEB_VITALS_COLLECT=${WEB_VITALS_COLLECT:-}
+      # Analyst OAuth/OIDC login (opt-in; same VM-.env passthrough pattern as
+      # ADMIN_SHARED_SECRET). ALL empty by default → the feature stays OFF: it is
+      # inert unless OAUTH_FLOW_STATE_SECRET is set AND a provider is configured
+      # in the gitignored registry (default /app/data/system/oauth_providers.json,
+      # i.e. /mnt/app-data/data/system/ on the host). The client_id/secret are the
+      # Google "Web application" client's; keep them out of the repo (VM .env only).
+      # OAUTH_REDIRECT_BASE pins the exact callback origin registered at the IdP
+      # (empty → derived from the tunnel public_endpoint).
+      - OAUTH_FLOW_STATE_SECRET=${OAUTH_FLOW_STATE_SECRET:-}
+      - OAUTH_GOOGLE_CLIENT_ID=${OAUTH_GOOGLE_CLIENT_ID:-}
+      - OAUTH_GOOGLE_CLIENT_SECRET=${OAUTH_GOOGLE_CLIENT_SECRET:-}
+      - OAUTH_REDIRECT_BASE=${OAUTH_REDIRECT_BASE:-}
+      # SSO-exclusive deployments only: set to 0 to disable passcode login.
+      - SHARE_PASSCODE_LOGIN_ENABLED=${SHARE_PASSCODE_LOGIN_ENABLED:-}
     volumes: !override
       - /mnt/app-data/configs:/app/configs
       - /mnt/app-data/data:/app/data

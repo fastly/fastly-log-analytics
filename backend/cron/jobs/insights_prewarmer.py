@@ -1,16 +1,27 @@
 """Background prewarmer cron for the default /api/insights selection.
 
-The dashboard's default insights view (window=1h, baseline=168h) costs
-~3.5 s per cold call on prod even after session-4's #74 column trim.
-INSIGHTS_CACHE_TTL is 300 s, so a steady stream of users would mostly
-hit the warm cache — but the cache is process-local and the first user
-after any backend restart, cache eviction, or 5-min idle window pays
-the full cost.
+The dashboard's default insights view costs seconds-to-tens-of-seconds
+per cold call (scales with the baseline scan breadth; the 720 h shape on
+a long-history service runs ~20 s). INSIGHTS_CACHE_TTL is 300 s, so a
+steady stream of users would mostly hit the warm cache — but the cache
+is process-local and the first user after any backend restart, cache
+eviction, or 5-min idle window pays the full cost.
 
 Running ``get_insights`` every 240 s per service keeps that user-facing
 p50 at the warm hit (~100 ms). Implementation mirrors
 :mod:`backend.cron.jobs.compaction`: ``@cron_task`` decorator + per-service
 start_cron_run + sync DuckDB connection acquisition.
+
+ADAPTIVE default (load-bearing): the frontend picks the default
+window/baseline pair from the service's log history
+(``frontend/lib/insights-defaults.ts`` — e.g. ≥30 d of history defaults to
+window=1 h / baseline=720 h, NOT the static 1 h/168 h). The /api/insights
+cache key folds in both hour values, so this cron derives the same pair via
+:mod:`backend.utils.insights_defaults` (the Python mirror of that picker)
+from the same ``earliest_log_at`` snapshot the clients read. Warming a
+hardcoded static pair on a ≥30 d service is a guaranteed miss for every
+default page load — that regression shipped with the adaptive-defaults
+feature and is why this derivation exists.
 
 ANALYST coverage: the admin entry alone never warmed the analyst path —
 an analyst request keys on its invite's clamp shape + mask_ips, which the
@@ -43,10 +54,6 @@ from backend.cron.decorators import cron_task
 from backend.cron.scheduler import _display_label
 
 logger = logging.getLogger("backend.scheduler")
-
-# The dashboard's default insights selection (InsightsRequest field defaults).
-_PREWARM_WINDOW_HOURS = 1.0
-_PREWARM_BASELINE_HOURS = 168.0
 
 # Cap on distinct analyst clamp-shapes warmed per tick — bounds background
 # compute (each shape is a full recompute). Prod typically has 1. Truncation
@@ -110,11 +117,14 @@ def _active_analyst_shapes(service_id: str) -> list[tuple[str | None, str | None
 
 @cron_task("insights_prewarmer")
 def _run_insights_prewarmer(service_id: str) -> None:
-    """Warm the default (window=1h, baseline=168h) insights selection — the
-    admin/unclamped entry plus each active analyst clamp shape — so the first
-    user (admin OR analyst) lands on a cache hit instead of the cold path."""
+    """Warm the default insights selection — the pair the adaptive frontend
+    picker will request for this service's history, for the admin/unclamped
+    entry plus each active analyst clamp shape — so the first user (admin OR
+    analyst) lands on a cache hit instead of the cold path."""
+    from backend import config as svcconfig
     from backend.core.duckdb import get_connection, get_source_for_service, log_cron_run, start_cron_run
     from backend.repositories.insights import get_insights
+    from backend.utils.insights_defaults import history_hours_from_earliest, pick_insights_default
     from backend.utils.remote_access import resolve_analyst_insights_clamp
     from backend.utils.tunnel import get_tunnel_manager
 
@@ -133,6 +143,14 @@ def _run_insights_prewarmer(service_id: str) -> None:
     started = time.time()
     con = None
     try:
+        # Same cached snapshot the clients' picker reads (bootstrap
+        # log_extents / /api/log-extents both project svcconfig status,
+        # un-clamped for analysts) → same bucket → same cache key.
+        cached_status = svcconfig.get_status(src["name"]) or {}
+        window_hours, baseline_hours = pick_insights_default(
+            history_hours_from_earliest(cached_status.get("earliest_log_at"))
+        )
+
         # Read-only + skip_view_update: insights queries against the live
         # Iceberg view; a few seconds of view staleness across cron-tick
         # boundaries is fine here (the next prewarmer tick will resolve
@@ -143,8 +161,8 @@ def _run_insights_prewarmer(service_id: str) -> None:
         get_insights(
             con,
             src,
-            window_hours=_PREWARM_WINDOW_HOURS,
-            baseline_hours=_PREWARM_BASELINE_HOURS,
+            window_hours=window_hours,
+            baseline_hours=baseline_hours,
             force_refresh=True,
         )
 
@@ -160,16 +178,16 @@ def _run_insights_prewarmer(service_id: str) -> None:
                         qs,
                         qe,
                         qwh,
-                        baseline_hours=_PREWARM_BASELINE_HOURS,
-                        window_hours=_PREWARM_WINDOW_HOURS,
+                        baseline_hours=baseline_hours,
+                        window_hours=window_hours,
                     )
                 except ValueError:
                     continue  # empty window for this shape — nothing to warm
                 get_insights(
                     con,
                     src,
-                    window_hours=_PREWARM_WINDOW_HOURS,
-                    baseline_hours=_PREWARM_BASELINE_HOURS,
+                    window_hours=window_hours,
+                    baseline_hours=baseline_hours,
                     clamp_start=cs,
                     clamp_end=ce,
                     mask_ips=mask,
@@ -179,7 +197,13 @@ def _run_insights_prewarmer(service_id: str) -> None:
                 analyst_warmed += 1
 
         duration = time.time() - started
-        summary = f"Prewarmed default insights selection (admin + {analyst_warmed} analyst shape{'' if analyst_warmed == 1 else 's'})"
+        # The warmed shape is in the summary so cron_runs alone can confirm
+        # the prewarm matches what the page requests (the drift this cron
+        # once had was invisible in an "admin + N analyst" summary).
+        summary = (
+            f"Prewarmed default insights selection ({window_hours:g}h/{baseline_hours:g}h: "
+            f"admin + {analyst_warmed} analyst shape{'' if analyst_warmed == 1 else 's'})"
+        )
         log_cron_run(
             src,
             "insights_prewarmer",
@@ -189,8 +213,10 @@ def _run_insights_prewarmer(service_id: str) -> None:
             run_id=run_id,
         )
         logger.info(
-            "✅ [insights-prewarmer] %s: prewarmed in %.2fs (admin + %d analyst)",
+            "✅ [insights-prewarmer] %s: prewarmed %gh/%gh in %.2fs (admin + %d analyst)",
             _display,
+            window_hours,
+            baseline_hours,
             duration,
             analyst_warmed,
         )

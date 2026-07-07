@@ -3,8 +3,9 @@
 import React, { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { cn } from '@/lib/utils'
 import { useServiceStore } from '@/stores/serviceStore'
-import { InsightCard } from '@/components/Insights/InsightCard'
+import { InsightCard, SEVERITY_BADGE_CLASS } from '@/components/Insights/InsightCard'
 import { InsightCardSkeleton } from '@/components/Insights/InsightCardSkeleton'
 import { InsightCardData } from '@/types/api'
 import {
@@ -14,7 +15,9 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Badge } from '@/components/ui/badge'
 import { Info, AlertCircle, CheckCircle, Lightbulb, Filter, Loader2 } from 'lucide-react'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import {
@@ -26,6 +29,13 @@ import {
 import { ReportLayout } from '@/components/ReportLayout'
 import { WINDOW_OPTIONS, BASELINE_OPTIONS } from '@/lib/insights-defaults'
 import { useInsightsDefaults } from '@/hooks/useInsightsDefaults'
+import {
+  groupInsightsBySection,
+  summarizeSeverities,
+  type InsightSectionGroup,
+  type SectionableInsight,
+  type SeveritySummary,
+} from '@/lib/insight-sections'
 
 const STATUS_OPTIONS = [
   { label: 'All Statuses', value: 'all' },
@@ -37,6 +47,135 @@ const STATUS_OPTIONS = [
   // silently dropped from every non-"all" filter without this option.
   { label: 'Error', value: 'error' },
 ]
+
+// Full per-severity rollup chips (e.g. "2 CRITICAL" "3 WARNING" "4 CLEAN"),
+// reusing the exact card palette (SEVERITY_BADGE_CLASS) so the panel header and
+// the cards read the same. Shown in the ACTIVE panel header — the whole
+// breakdown, not the compact critical/warning-only badges on the tab triggers.
+// Renders nothing when there are no known severities (skeleton entries have
+// none), so the loading panel header shows only the count.
+function SeverityChips({ severities }: { severities: SeveritySummary[] }) {
+  if (severities.length === 0) return null
+  return (
+    <span className="ml-1 flex flex-wrap items-center gap-1">
+      {severities.map(({ severity, count }) => (
+        <Badge
+          key={severity}
+          variant="outline"
+          className={cn(
+            'border px-1.5 py-0 text-[10px] font-medium uppercase tracking-wide tabular-nums',
+            SEVERITY_BADGE_CLASS[severity as keyof typeof SEVERITY_BADGE_CLASS] ?? '',
+          )}
+        >
+          {count} {severity}
+        </Badge>
+      ))}
+    </span>
+  )
+}
+
+// Compact per-tab severity badges: colored count-only pills for the high-signal
+// severities (critical=red, warning=amber). clean/info/error are folded away
+// here to keep the tab row scannable — the FULL breakdown lives in the active
+// panel header (SeverityChips). Screen readers still get the severity name via
+// the sr-only span so a bare "2" isn't ambiguous. Colors reuse the AA-cleared
+// SEVERITY_BADGE_CLASS palette (axe color-contrast gate).
+const TAB_BADGE_SEVERITIES = new Set(['critical', 'warning'])
+
+function TabSeverityBadges({ severities }: { severities: SeveritySummary[] }) {
+  const compact = severities.filter((s) => TAB_BADGE_SEVERITIES.has(s.severity))
+  if (compact.length === 0) return null
+  return (
+    <span className="flex items-center gap-1">
+      {compact.map(({ severity, count }) => (
+        <span
+          key={severity}
+          className={cn(
+            'inline-flex min-w-[1.125rem] items-center justify-center rounded-full border px-1 text-[10px] font-semibold leading-4 tabular-nums',
+            SEVERITY_BADGE_CLASS[severity as keyof typeof SEVERITY_BADGE_CLASS] ?? '',
+          )}
+        >
+          {count}
+          <span className="sr-only"> {severity}</span>
+        </span>
+      ))}
+    </span>
+  )
+}
+
+// The tabs UI. One tab per NON-EMPTY section in fixed INSIGHT_SECTIONS order
+// (+ Other last), the tab bar rendered from `groups` (skeleton groups during
+// load, real groups after, so the row never pops in — CLS). base-ui Tabs give
+// roving-tabindex + arrow-key nav for free, and Tabs.Panel UNMOUNTS inactive
+// panels by default (keepMounted defaults false) — so a section's cards only
+// render when its tab is active (the "load when I click it" behaviour the user
+// asked for, even though /api/insights returns everything in one call).
+//
+// The active tab is controlled by the parent so the selection survives the
+// loading→loaded swap and status-filter changes; `activeKey` falls back to the
+// first group whenever the current selection isn't among the rendered groups.
+function InsightTabs<T extends SectionableInsight>({
+  groups,
+  activeTab,
+  onTabChange,
+  renderCards,
+}: {
+  groups: InsightSectionGroup<T>[]
+  activeTab: string | null
+  onTabChange: (key: string) => void
+  renderCards: (group: InsightSectionGroup<T>) => React.ReactNode
+}) {
+  const activeKey =
+    (activeTab && groups.some((g) => g.section.key === activeTab)
+      ? activeTab
+      : groups[0]?.section.key) ?? null
+
+  return (
+    <Tabs value={activeKey} onValueChange={(value) => onTabChange(String(value))}>
+      {/* h-auto + flex-wrap so the richer triggers (icon + label + count +
+          severity pills) aren't clipped by the primitive's default h-8 and
+          wrap instead of overflowing on narrow screens. */}
+      <TabsList className="group-data-horizontal/tabs:h-auto w-full flex-wrap justify-start gap-1 p-1">
+        {groups.map(({ section, cards }) => {
+          const Icon = section.icon
+          return (
+            <TabsTrigger
+              key={section.key}
+              value={section.key}
+              className="h-auto flex-none gap-2 px-3 py-2 data-active:border-border data-active:font-semibold"
+            >
+              <Icon className="size-4 shrink-0" aria-hidden="true" />
+              <span>{section.label}</span>
+              <span className="text-xs tabular-nums">{cards.length}</span>
+              <TabSeverityBadges severities={summarizeSeverities(cards)} />
+            </TabsTrigger>
+          )
+        })}
+      </TabsList>
+
+      {groups.map((group) => {
+        const { section, cards } = group
+        const Icon = section.icon
+        return (
+          <TabsContent key={section.key} value={section.key} className="mt-4 space-y-4">
+            <div>
+              <h2 className="flex flex-wrap items-center gap-2 text-lg font-semibold tracking-tight">
+                <Icon className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <span>{section.label}</span>
+                <span className="text-xs font-normal text-muted-foreground tabular-nums">
+                  ({cards.length})
+                </span>
+                <SeverityChips severities={summarizeSeverities(cards)} />
+              </h2>
+              <p className="mt-1 text-sm text-muted-foreground">{section.description}</p>
+            </div>
+            {renderCards(group)}
+          </TabsContent>
+        )
+      })}
+    </Tabs>
+  )
+}
 
 // Lifted out of the ReportLayout render-prop so the hooks live at the
 // top of a stable component instead of being recreated every time
@@ -63,6 +202,11 @@ function InsightsBody({
   full,
   abbr,
 }: InsightsBodyProps) {
+  // Which section tab is active. Controlled here (not inside InsightTabs) so the
+  // selection survives the loading→loaded swap between the two InsightTabs
+  // instances and the status-filter regrouping.
+  const [activeTab, setActiveTab] = useState<string | null>(null)
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['insights', activeServiceId, windowHours, baselineHours],
     queryFn: async ({ signal }) => {
@@ -104,21 +248,31 @@ function InsightsBody({
   // insight). Single render path during loading — no SkeletonGrid → per-
   // insight swap; the only transition is content-fill when real data lands.
   const availableInsights = useMemo(() => {
-    const list = (availability as any)?.insights as
-      | Array<{ id: string; title: string; description?: string; available?: boolean }>
-      | undefined
+    const list = availability?.insights
     if (!list) return []
     return list.filter((i) => i.available !== false)
   }, [availability])
 
+  // Group both real cards and skeleton entries by section, in the same fixed
+  // order, so the loading tab bar mirrors the loaded tab bar (CLS). Skeleton
+  // entries have no severity → sortInsights orders them by title.
+  const groupedInsights = useMemo(
+    () => groupInsightsBySection(filteredInsights as InsightCardData[]),
+    [filteredInsights],
+  )
+  const groupedSkeletons = useMemo(
+    () => groupInsightsBySection(availableInsights),
+    [availableInsights],
+  )
+
   return (
     <>
-      {(availability as any)?.unavailable && (availability as any).unavailable.length > 0 && (
+      {availability?.unavailable && availability.unavailable.length > 0 && (
         <Alert>
           <Info className="h-4 w-4" />
           <AlertTitle>Some insights are unavailable</AlertTitle>
           <AlertDescription className="text-xs">
-            {(availability as any).unavailable.length} insights require additional log fields to be enabled.
+            {availability.unavailable.length} insights require additional log fields to be enabled.
             Check your service configuration.
           </AlertDescription>
         </Alert>
@@ -129,22 +283,25 @@ function InsightsBody({
           <Info className="h-4 w-4" />
           <AlertTitle>Availability check failed</AlertTitle>
           <AlertDescription className="text-xs">
-            Couldn't determine which insights apply to this service — results below may be incomplete.
+            Couldn&apos;t determine which insights apply to this service — results below may be incomplete.
           </AlertDescription>
         </Alert>
       )}
 
       {isLoading ? (
-        availableInsights.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {availableInsights.map((i) => (
-              <InsightCardSkeleton
-                key={i.id}
-                title={i.title}
-                description={i.description}
-              />
-            ))}
-          </div>
+        groupedSkeletons.length > 0 ? (
+          <InsightTabs
+            groups={groupedSkeletons}
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            renderCards={({ cards }) => (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {cards.map((i) => (
+                  <InsightCardSkeleton key={i.id} title={i.title ?? ''} description={i.description} />
+                ))}
+              </div>
+            )}
+          />
         ) : (
           <div className="text-center py-20 text-sm text-muted-foreground">
             <Loader2 className="inline-block animate-spin h-4 w-4 mr-2" />
@@ -159,39 +316,45 @@ function InsightsBody({
             {error instanceof Error ? error.message : 'An unknown error occurred'}
           </AlertDescription>
         </Alert>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredInsights.map((insight: InsightCardData) => (
-            <InsightCard
-              key={insight.id}
-              insight={insight}
-              windowHours={windowHours}
-              baselineHours={baselineHours}
-            />
-          ))}
-          {filteredInsights.length === 0 && (
-            <div className="col-span-full py-20 text-center border rounded-xl border-dashed">
-              <CheckCircle className="h-10 w-10 text-green-500 mx-auto mb-4" />
-              <h3 className="text-lg font-medium">
-                {statusFilter === 'all' ? 'No anomalies detected' : `No insights matching '${statusFilter}'`}
-              </h3>
-              <p className="text-muted-foreground">
-                {statusFilter === 'all' ? 'Traffic patterns are within normal baseline ranges.' : 'Try changing your filter criteria.'}
-              </p>
+      ) : groupedInsights.length > 0 ? (
+        <InsightTabs
+          groups={groupedInsights}
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          renderCards={({ cards }) => (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {cards.map((insight) => (
+                <InsightCard
+                  key={insight.id}
+                  insight={insight}
+                  windowHours={windowHours}
+                  baselineHours={baselineHours}
+                />
+              ))}
             </div>
           )}
+        />
+      ) : (
+        <div className="py-20 text-center border rounded-xl border-dashed">
+          <CheckCircle className="h-10 w-10 text-green-500 mx-auto mb-4" />
+          <h3 className="text-lg font-medium">
+            {statusFilter === 'all' ? 'No anomalies detected' : `No insights matching '${statusFilter}'`}
+          </h3>
+          <p className="text-muted-foreground">
+            {statusFilter === 'all' ? 'Traffic patterns are within normal baseline ranges.' : 'Try changing your filter criteria.'}
+          </p>
         </div>
       )}
 
-      {data && (data as any).computed_at && (
+      {data && data.computed_at && (
         <div className="text-[10px] text-muted-foreground text-right italic">
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger render={<span className="" />}>
-                Computed {relative((data as any).computed_at)}
+                Computed {relative(data.computed_at)}
               </TooltipTrigger>
               <TooltipContent className="text-xs">
-                {full((data as any).computed_at)} {abbr()}
+                {full(data.computed_at)} {abbr()}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -284,7 +447,7 @@ export default function InsightsClient() {
                 <Info className="inline-block w-3 h-3 opacity-50" />
               </TooltipTrigger>
               <TooltipContent side="top" className="max-w-[200px] text-xs">
-                The historical period to compare against (acts as the 'normal' baseline)
+                The historical period to compare against (acts as the &apos;normal&apos; baseline)
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>

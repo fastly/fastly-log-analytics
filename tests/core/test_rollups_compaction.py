@@ -10,7 +10,7 @@ Two pieces pinned here:
   compaction attempt blocked 5 min on the DuckDB file lock and never
   produced any per-day files.
 
-* ``_run_rollup_compact_daily`` (backend/scheduler.py): passes
+* ``_run_rollup_compact_daily`` (backend/cron/jobs/compaction.py): passes
   ``run_id`` through both the success AND error branches of
   ``log_cron_run`` so the row started by ``start_cron_run`` is
   UPDATEd in place. Without this fix the running row is orphaned on
@@ -449,7 +449,17 @@ def test_backfill_missing_hour_bundles_noop_when_complete(tmp_path, monkeypatch)
         result = rollups.backfill_missing_hour_bundles("svc-noop", src, lookback_days=2)
 
     assert dispatched == [], "must not dispatch when everything is already bundled"
-    assert result == {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
+    assert result["missing"] == 0 and result["rebuilt_fields"] == 0 and result["bundled"] == 0
+    # First pass stamps empty SENTINEL bundles for the zero-row hours in the
+    # 2-day lookback (48 hours minus the one bundled data hour) so the
+    # reader can tell verified-empty from writer-gap.
+    assert result["stamped_empty"] == 47, f"expected 47 sentinel stamps, got {result}"
+
+    # Second pass is a TRUE no-op: every hour (data or empty) is covered.
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        result2 = rollups.backfill_missing_hour_bundles("svc-noop", src, lookback_days=2)
+    assert dispatched == []
+    assert result2 == {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "stamped_empty": 0}
 
 
 def test_compact_returns_zero_when_rollups_dir_missing(tmp_path):
@@ -476,7 +486,7 @@ def test_run_rollup_compact_daily_passes_run_id_on_success(monkeypatch):
     running row instead of inserting a fresh terminal row. Without
     this, every successful run orphans the 'running' row created by
     start_cron_run."""
-    from backend import scheduler as sch
+    from backend.cron.jobs import compaction as sch
 
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: {"name": sid})
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 4242)
@@ -505,7 +515,7 @@ def test_run_rollup_compact_daily_passes_run_id_on_error(monkeypatch):
     run_id in the except block, inserting a fresh 'error' row and
     leaving the original 'running' row stuck forever. Pinned with the
     exact prod incident in mind (cron_runs row 103760 on 2026-06-06)."""
-    from backend import scheduler as sch
+    from backend.cron.jobs import compaction as sch
 
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: {"name": sid})
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 9999)
@@ -659,7 +669,7 @@ def test_run_rollup_compact_daily_returns_silently_when_start_cron_run_skips(mon
     no row to UPDATE because none was created. Pinned because the
     pre-fix code had the same skip-on-RuntimeError behaviour but a
     careless refactor could accidentally enter the try-block anyway."""
-    from backend import scheduler as sch
+    from backend.cron.jobs import compaction as sch
 
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: {"name": sid})
 

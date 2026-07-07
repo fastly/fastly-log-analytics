@@ -100,7 +100,7 @@ def test_teardown_emits_done_and_removes_config(isolated_configs_dir, tmp_path, 
     with (
         patch("backend.provision.perform_teardown", side_effect=fake_perform_teardown),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
         # Security: stub token validation. The auth gate itself is
         # exercised in test_provision_teardown_auth.py.
         patch(
@@ -171,7 +171,7 @@ def test_teardown_remove_cache_clears_service_metadata(isolated_configs_dir):
     with (
         patch("backend.provision.perform_teardown", side_effect=fake_perform_teardown),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
         patch("backend.core.metadata.teardown", side_effect=lambda s: meta_calls.append(s)),
         patch(
             "backend.utils.fastly_auth.fastly",
@@ -212,7 +212,7 @@ def test_teardown_skips_perform_teardown_when_no_logging_service(isolated_config
     with (
         patch("backend.provision.perform_teardown", side_effect=fake_perform_teardown),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
         patch(
             "backend.utils.fastly_auth.fastly",
             side_effect=lambda method, path, *, token, **kw: (
@@ -251,7 +251,7 @@ def test_execute_delegates_to_provision_with_query_args(isolated_configs_dir):
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.config.fetch_service_name", return_value="My Service"),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
     ):
         with TestClient(app) as client:
             r = client.post(

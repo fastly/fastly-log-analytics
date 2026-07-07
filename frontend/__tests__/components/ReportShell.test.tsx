@@ -10,6 +10,7 @@ import { render, screen } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Server } from 'lucide-react'
 import React from 'react'
+import { ReportShell } from '@/components/ReportShell'
 
 let mockActiveServiceId: string | null = 'svc-1'
 let mockIsDataReady = true
@@ -53,8 +54,7 @@ describe('ReportShell', () => {
     mockBootstrapResolved = true
   })
 
-  it('renders title + children once the service is selected and data is ready', async () => {
-    const { ReportShell } = await import('@/components/ReportShell')
+  it('renders title + children once the service is selected and data is ready', () => {
     render(
       <ReportShell title="My Report" description="A descriptive line" icon={Server}>
         <div data-testid="content">body</div>
@@ -64,9 +64,8 @@ describe('ReportShell', () => {
     expect(screen.getByTestId('content')).toBeInTheDocument()
   })
 
-  it('falls back to NoServiceSelected when no active service id is set (requireService default)', async () => {
+  it('falls back to NoServiceSelected when no active service id is set (requireService default)', () => {
     mockActiveServiceId = null
-    const { ReportShell } = await import('@/components/ReportShell')
     render(
       <ReportShell title="Security" icon={Server}>
         <div data-testid="content">body</div>
@@ -76,9 +75,8 @@ describe('ReportShell', () => {
     expect(screen.queryByTestId('content')).not.toBeInTheDocument()
   })
 
-  it('shows the dashboard skeleton when isDataReady is false', async () => {
+  it('shows the dashboard skeleton when isDataReady is false', () => {
     mockIsDataReady = false
-    const { ReportShell } = await import('@/components/ReportShell')
     render(
       <ReportShell title="Logs" icon={Server}>
         <div data-testid="content">body</div>
@@ -88,9 +86,8 @@ describe('ReportShell', () => {
     expect(screen.queryByTestId('content')).not.toBeInTheDocument()
   })
 
-  it('isReadyOverride wins over the internal isReady computation', async () => {
+  it('isReadyOverride wins over the internal isReady computation', () => {
     mockIsDataReady = false
-    const { ReportShell } = await import('@/components/ReportShell')
     render(
       <ReportShell title="Logs" icon={Server} isReadyOverride>
         <div data-testid="content">body</div>
@@ -100,7 +97,7 @@ describe('ReportShell', () => {
     expect(screen.queryByTestId('skeleton')).not.toBeInTheDocument()
   })
 
-  it('flash defense: bootstrap unresolved AND no active service → skeleton, not NoServiceSelected', async () => {
+  it('flash defense: bootstrap unresolved AND no active service → skeleton, not NoServiceSelected', () => {
     // Cold load with empty localStorage: useBootstrap hasn't returned
     // yet (bootstrapResolved = false) AND useServiceStore is null
     // (mockActiveServiceId = null). Pre-fix this rendered
@@ -112,7 +109,6 @@ describe('ReportShell', () => {
     mockActiveServiceId = null
     mockBootstrapResolved = false
     mockIsDataReady = false
-    const { ReportShell } = await import('@/components/ReportShell')
     render(
       <ReportShell title="Dashboard" icon={Server}>
         <div data-testid="content">body</div>
@@ -122,11 +118,10 @@ describe('ReportShell', () => {
     expect(screen.getByTestId('skeleton')).toBeInTheDocument()
   })
 
-  it('requireService=false bypasses the NoServiceSelected gate AND uses range-ready as the loading signal', async () => {
+  it('requireService=false bypasses the NoServiceSelected gate AND uses range-ready as the loading signal', () => {
     mockActiveServiceId = null
     mockIsAutoRange = true
     mockHasSyncedExtents = false
-    const { ReportShell } = await import('@/components/ReportShell')
     render(
       <ReportShell title="Insights" icon={Server} requireService={false}>
         <div data-testid="content">body</div>

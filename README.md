@@ -21,7 +21,7 @@ You'll need:
 - A **Fastly account** with permission to create [services](https://www.fastly.com/documentation/guides/getting-started/services/about-services/) and Object Storage buckets
 - **Object Storage enabled** on the account — it's a separately activated product, not on by default
 - At least one **VCL service** to stream logs from
-- **Docker** (recommended) — or Python 3.10+ and Node.js 24+ for a manual install
+- **Docker** (recommended) — or Python 3.12+ and Node.js 24+ for a manual install
 - *Optional:* a Fastly API token with the **Billing** permission to power the [Usage & Cost page](docs/features.md#usage--cost-page)
 - *Optional:* [`falco`](https://github.com/ysugimoto/falco) to validate VCL during provisioning (highly recommended; the app degrades gracefully without it)
 - *Optional:* **Rust 1.90+** with the `wasm32-wasip1` target (`rustup target add wasm32-wasip1`) — only needed if you plan to rebuild the [Session Scoring](docs/session_scoring_runbook.md) Compute Wasm scorer from source
@@ -81,12 +81,12 @@ The analyst runs their own independent copy of the app on their laptop or server
 
 ### Path B: Live Shared Server (Web-Accessible Host)
 
-You run the application as a central web-accessible server on a dedicated VM (or a laptop reachable at its own hostname / IP). Your associates connect using a standard web browser and enter a passcode.
+You run the application as a central web-accessible server on a dedicated VM (or a laptop reachable at its own hostname / IP). Your associates connect using a standard web browser and sign in with a passcode — or, if you configure an OAuth/OIDC identity provider, with single sign-on.
 
 #### How it works:
 1. **Admin:** Click **Share Dashboard** in your dashboard. The sharing manager prompts for your server's public URL — a custom domain or IP that the analyst can reach over HTTPS. (The previous SSH-reverse-tunnel mode via `localhost.run` was removed in v2.0; production deployments use direct-mode against a real public endpoint.)
-2. **Admin:** Mint an analyst invitation in the sharing manager by specifying their name, an optional IP allowlist, and a passcode. Give them the public URL and passcode.
-3. **Analyst:** Open the shared link in a standard browser, accept the Terms of Service, enter the passcode, and view the live read-only dashboard. All database queries are executed securely on your host server. You can revoke access or **Sever All Access** instantly.
+2. **Admin:** Mint an analyst invitation in the sharing manager by specifying their name, an optional IP allowlist, and either a passcode or (with an OAuth/OIDC provider configured) their email for single sign-on. Invites are single-seat by default; a per-invite toggle allows shared logins. Give them the public URL (and passcode, if used).
+3. **Analyst:** Open the shared link in a standard browser, accept the Terms of Service, enter the passcode or sign in with your identity provider, and view the live read-only dashboard. All database queries are executed securely on your host server. You can revoke access or **Sever All Access** instantly.
 
 ---
 
@@ -100,11 +100,11 @@ You run the application as a central web-accessible server on a dedicated VM (or
 - **Log sampling** — optionally log a random percentage of requests to manage cost on high-traffic services
 - **Multi-source support** — analyze logs from multiple services side by side
 - **Interactive dashboards** — traffic over time, global request map, top-N aggregations, raw log viewer with click-to-filter
-- **Insights** — automated anomaly detection (error spikes, regional surges, new-region traffic, botnet IP-spread, scripted-traffic cadence, WAF signal changes, cache regressions, latency)
+- **Insights** — automated anomaly detection, 45 detections organized into traffic, security, network, edge, and origin tabs with severity indicators (error spikes, regional surges, botnet IP-spread, content-discovery scans, session harvesting, scripted-traffic cadence, WAF signal changes, cache regressions, latency, and more)
 - **Usage & Cost** — live storage breakdown, FOS operation counts, period totals, interactive cost estimator
 - **Log field configuration** — built-in field groups (HTTP, network, geo, TLS, NGWAF) plus custom VCL expressions
 - **Alerts** — threshold-based, webhook-delivered
-- **Live dashboard sharing** — direct-mode via your own hostname or IP, with per-analyst passcode invites, IP allowlisting, optional client-IP anonymization, and instant revoke
+- **Live dashboard sharing** — direct-mode via your own hostname or IP, with per-analyst invites (passcode or OAuth/OIDC single sign-on), IP allowlisting, optional client-IP anonymization, and instant revoke
 - **Session scoring** — edge-computed 0-100 risk score per request combining cookie/timing signals with a PageRank transition matrix, with live threshold enforcement, audit logging, key rotation, and matrix version history. See the [runbook](docs/session_scoring_runbook.md) and [feature reference](docs/features.md)
 
 See [docs/features.md](docs/features.md) for the full feature reference.

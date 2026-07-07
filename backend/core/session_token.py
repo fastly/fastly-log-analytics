@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import secrets
+import threading
 from typing import Final
 
 from cryptography.exceptions import InvalidTag
@@ -59,6 +60,7 @@ class SessionTokenError(Exception):
 
 
 _key: bytes | None = None
+_key_lock = threading.Lock()
 
 
 def _resolve_key() -> bytes:
@@ -67,11 +69,21 @@ def _resolve_key() -> bytes:
     Cached for the process lifetime so the ephemeral default is stable within a
     worker. Tests that need to flip keys reset the module-level ``_key`` to
     ``None`` after changing ``SESSION_TOKEN_SECRET``.
+
+    The double-checked lock matters only for the ephemeral default: without it,
+    two concurrent first-ever requests could each mint a *different* random key
+    and one would overwrite the other, so a token sealed under the loser's key
+    could never be opened (a spurious ``SessionTokenError`` until the client
+    reloads). Under a set ``SESSION_TOKEN_SECRET`` both threads derive the same
+    key, so the race is harmless — but the lock is free and keeps the test
+    rekey path deterministic.
     """
     global _key
     if _key is None:
-        env = os.getenv(_ENV_SECRET, "").strip()
-        _key = hashlib.sha256(env.encode("utf-8")).digest() if env else secrets.token_bytes(KEY_BYTES)
+        with _key_lock:
+            if _key is None:
+                env = os.getenv(_ENV_SECRET, "").strip()
+                _key = hashlib.sha256(env.encode("utf-8")).digest() if env else secrets.token_bytes(KEY_BYTES)
     return _key
 
 

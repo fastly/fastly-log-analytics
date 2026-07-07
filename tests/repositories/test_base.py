@@ -1218,6 +1218,65 @@ class TestExecuteTopNBatchIntegerAggregation:
             f"day+bundled (200) or day+bundled+per-field (300). Got {values}."
         )
 
+    def test_execute_top_n_rollups_bundled_branch_scopes_to_requested_fields(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """The bundled branches carry EVERY field's rows; a single-field
+        caller (e.g. the security UA-rollup read) must still get exactly its
+        field back. Guards the ``WHERE field IN (...)`` scoping added to the
+        bundled read — a malformed IN-list would fail the whole rollup read
+        (rolled_res == []) and this asserts through that seam."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        from datetime import UTC, datetime, timedelta
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        day_d = (active_dt - timedelta(days=2)).date()
+        day_d_str = day_d.isoformat()
+
+        # The reader requires the per-field hour root to exist (it early-
+        # returns otherwise); the data itself lives in the bundle below.
+        (cache_root / "rollups" / "hour").mkdir(parents=True, exist_ok=True)
+        # One bundled hour carrying TWO fields' rows.
+        bd = cache_root / "rollups" / "hour_bundled" / f"hour={day_d_str}-05"
+        bd.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "field": ["ua", "ua", "country"],
+                    "value": ["bot-a", "bot-b", "US"],
+                    "count": pa.array([7, 3, 99], type=pa.int64()),
+                }
+            ),
+            str(bd / "all_fields.parquet"),
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "ua", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "ua", "type": "VARCHAR"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = f"{day_d_str}T05:00:00+00:00"
+        et = f"{day_d_str}T06:00:00+00:00"
+        rows, _ = runner.execute_top_n_rollups(["ua"], st, et, limit=50000, per_field_limits={"ua": 50000})
+
+        assert {(f, v, c) for (f, v, c) in rows} == {("ua", "bot-a", 7), ("ua", "bot-b", 3)}, (
+            f"single-field bundled read must return exactly the requested field's rows. Got {rows}."
+        )
+
     def test_execute_top_n_rollups_bundled_still_used_when_no_day_file_for_field(
         self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
     ):
@@ -1585,3 +1644,551 @@ class TestExecuteTopNBatchIntegerAggregation:
         assert order == ["status"]
         assert len(rows) == 2
         assert all(row[0] == "status" for row in rows)
+
+    def test_execute_top_n_rollups_live_heals_unrolled_closed_hour(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Missing-hour live heal (2026-07-06): a CLOSED hour with rows in
+        the base table but NO rollup coverage (no bundle, no per-field
+        file) must be live-queried and merged — previously those rows
+        silently vanished from every top-N panel until the nightly deep
+        pass, making field_total disagree with total_rows by the whole
+        day's traffic on bursty services."""
+        from datetime import UTC, datetime, timedelta
+
+        from backend.repositories._base import QueryRunner
+
+        in_memory_duckdb.execute("SET TimeZone='UTC'")
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        closed_dt = active_dt - timedelta(hours=2)
+        in_memory_duckdb.execute("CREATE TABLE logs_healtest (timestamp TIMESTAMPTZ, country VARCHAR)")
+        # Rows ONLY in a closed hour: the active-hour live branch can't
+        # source them, and there are no rollup files — the heal is the
+        # only path that can return them.
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_healtest VALUES (?, 'US'), (?, 'US'), (?, 'JP')",
+            [
+                closed_dt + timedelta(minutes=5),
+                closed_dt + timedelta(minutes=15),
+                closed_dt + timedelta(minutes=25),
+            ],
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_healtest")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+        (tmp_path / "rollups" / "hour").mkdir(parents=True)
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+
+        # Window is ENTIRELY closed hours (ends before the active hour), so
+        # the active-hour live branch never fires.
+        st = (active_dt - timedelta(hours=3)).isoformat()
+        et = (active_dt - timedelta(hours=1)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_healtest")
+
+        country_counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert country_counts.get("US") == 2 and country_counts.get("JP") == 1, (
+            f"missing-hour heal did not run — closed un-rolled hours are invisible to top-N. Got: {country_counts}"
+        )
+
+    def test_execute_top_n_rollups_heal_does_not_double_count_bundled_hours(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Steady state: an hour served by its bundle must NOT also be
+        live-healed — the merge would double-count. The bundle count (5)
+        deliberately differs from the raw rows (3) so a double-read is
+        unambiguous."""
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        in_memory_duckdb.execute("SET TimeZone='UTC'")
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        closed_dt = active_dt - timedelta(hours=2)
+        hour_token = closed_dt.strftime("%Y-%m-%d-%H")
+        in_memory_duckdb.execute("CREATE TABLE logs_healbundle (timestamp TIMESTAMPTZ, country VARCHAR)")
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_healbundle VALUES (?, 'US'), (?, 'US'), (?, 'US')",
+            [
+                closed_dt + timedelta(minutes=5),
+                closed_dt + timedelta(minutes=15),
+                closed_dt + timedelta(minutes=25),
+            ],
+        )
+        bundle_dir = tmp_path / "rollups" / "hour_bundled" / f"hour={hour_token}"
+        bundle_dir.mkdir(parents=True)
+        pq.write_table(
+            pa.table({"field": ["country"], "value": ["US"], "count": pa.array([5], type=pa.int64())}),
+            str(bundle_dir / "all_fields.parquet"),
+        )
+        (tmp_path / "rollups" / "hour").mkdir(parents=True)
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_healbundle")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = closed_dt.isoformat()
+        et = (closed_dt + timedelta(hours=1)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_healbundle")
+
+        country_counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert country_counts.get("US") == 5, (
+            f"bundled hour was double-counted by the live heal (expected bundle-only count 5). Got: {country_counts}"
+        )
+
+    def test_execute_top_n_rollups_heal_skips_day_compacted_days(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Boundary hours of an already-day-compacted day are a KNOWN,
+        bounded read gap (their per-hour files were deleted by design) —
+        the heal must NOT live-scan them, or every mid-day window edge
+        would pay a per-request day scan forever."""
+        from datetime import UTC, datetime, timedelta
+
+        from backend.repositories._base import QueryRunner
+
+        in_memory_duckdb.execute("SET TimeZone='UTC'")
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        # A closed hour ~26h back — on a different, closed UTC day for any
+        # active_dt (26 > 24), i.e. the day-compacted-day scenario.
+        compacted_hour_dt = active_dt - timedelta(hours=26)
+        day_token = compacted_hour_dt.strftime("%Y-%m-%d")
+        in_memory_duckdb.execute("CREATE TABLE logs_healcompacted (timestamp TIMESTAMPTZ, country VARCHAR)")
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_healcompacted VALUES (?, 'US')",
+            [compacted_hour_dt + timedelta(minutes=10)],
+        )
+        # Day-rollup presence: a REAL day parquet proves the day was
+        # compacted (its hour files were deleted by design). The window
+        # below only PARTIALLY covers the day, so the day file is rightly
+        # skipped by the rollup read too — only the heal could surface the
+        # raw row, and it must decline. (An EMPTY day dir is the crashed-
+        # compaction case and is deliberately healable — see the companion
+        # test below.) The count (99) differs from the raw row so a
+        # wrong-source read would be visible.
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        day_dir = tmp_path / "rollups" / "day" / "field=country" / f"day={day_token}"
+        day_dir.mkdir(parents=True)
+        pq.write_table(
+            pa.table({"value": ["US"], "count": pa.array([99], type=pa.int64())}),
+            str(day_dir / "compacted.parquet"),
+        )
+        (tmp_path / "rollups" / "hour").mkdir(parents=True)
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_healcompacted")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        # Window cuts INTO the compacted day (not fully containing it), so
+        # the day file (if it had data) would be skipped too — the exact
+        # boundary-sliver case the heal must leave alone.
+        st = (compacted_hour_dt - timedelta(hours=1)).isoformat()
+        et = (compacted_hour_dt + timedelta(hours=2)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_healcompacted")
+
+        country_counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert "US" not in country_counts, (
+            f"heal live-scanned a day-compacted day's boundary hours — that turns every mid-day "
+            f"window edge into a per-request day scan. Got: {country_counts}"
+        )
+
+    def _heal_test_setup(self, in_memory_duckdb, tmp_path, monkeypatch, table):
+        """Shared monkeypatch seam for the missing-hour heal tests below."""
+        from backend.repositories._base import QueryRunner
+
+        in_memory_duckdb.execute("SET TimeZone='UTC'")
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: table)
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+        (tmp_path / "rollups" / "hour").mkdir(parents=True, exist_ok=True)
+        return QueryRunner
+
+    def test_execute_top_n_rollups_heal_midhour_start_excludes_out_of_window_rows(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """A custom range starting MID-HOUR over an un-rolled closed hour:
+        the heal's start clamp must exclude rows before st even though the
+        hour token is in the missing set."""
+        from datetime import UTC, datetime, timedelta
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        closed_dt = active_dt - timedelta(hours=2)
+        in_memory_duckdb.execute("CREATE TABLE logs_mh1 (timestamp TIMESTAMPTZ, country VARCHAR)")
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_mh1 VALUES (?, 'US'), (?, 'US'), (?, 'US'), (?, 'JP')",
+            [
+                closed_dt + timedelta(minutes=5),  # OUTSIDE window (before st)
+                closed_dt + timedelta(minutes=15),  # OUTSIDE window (before st)
+                closed_dt + timedelta(minutes=35),  # inside
+                closed_dt + timedelta(minutes=45),  # inside
+            ],
+        )
+        QueryRunner = self._heal_test_setup(in_memory_duckdb, tmp_path, monkeypatch, "logs_mh1")
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+
+        st = (closed_dt + timedelta(minutes=30)).isoformat()
+        et = (closed_dt + timedelta(hours=1)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_mh1")
+
+        counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert counts.get("US") == 1 and counts.get("JP") == 1, (
+            f"mid-hour start clamp failed — heal returned rows outside [st, et). Got {counts}"
+        )
+
+    def test_execute_top_n_rollups_heal_midhour_end_excludes_out_of_window_rows(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Companion end-clamp pin: a window ending mid-hour must not pick
+        up the un-rolled hour's rows after et."""
+        from datetime import UTC, datetime, timedelta
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        closed_dt = active_dt - timedelta(hours=2)
+        in_memory_duckdb.execute("CREATE TABLE logs_mh2 (timestamp TIMESTAMPTZ, country VARCHAR)")
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_mh2 VALUES (?, 'US'), (?, 'US'), (?, 'JP')",
+            [
+                closed_dt + timedelta(minutes=5),  # inside
+                closed_dt + timedelta(minutes=35),  # OUTSIDE window (after et)
+                closed_dt + timedelta(minutes=45),  # OUTSIDE window (after et)
+            ],
+        )
+        QueryRunner = self._heal_test_setup(in_memory_duckdb, tmp_path, monkeypatch, "logs_mh2")
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+
+        st = closed_dt.isoformat()
+        et = (closed_dt + timedelta(minutes=30)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_mh2")
+
+        counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert counts.get("US") == 1 and "JP" not in counts, (
+            f"mid-hour end clamp failed — heal returned rows outside [st, et). Got {counts}"
+        )
+
+    def test_execute_top_n_rollups_heal_cap_bounds_lookback(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Un-rolled hours OLDER than _MISSING_HOUR_HEAL_CAP are NOT healed
+        — the cap is the sole bound on the heal's live scan, so removing
+        (or breaking) it would let a wiped rollup tree turn every request
+        into an unbounded historical scan."""
+        from datetime import UTC, datetime, timedelta
+
+        from backend.repositories import _base as base_mod
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        beyond_cap_dt = active_dt - timedelta(hours=base_mod._MISSING_HOUR_HEAL_CAP + 2)
+        in_memory_duckdb.execute("CREATE TABLE logs_healcap (timestamp TIMESTAMPTZ, country VARCHAR)")
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_healcap VALUES (?, 'US')",
+            [beyond_cap_dt + timedelta(minutes=10)],
+        )
+        QueryRunner = self._heal_test_setup(in_memory_duckdb, tmp_path, monkeypatch, "logs_healcap")
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+
+        st = (beyond_cap_dt - timedelta(hours=1)).isoformat()
+        et = (beyond_cap_dt + timedelta(hours=2)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_healcap")
+
+        counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert "US" not in counts, (
+            f"heal scanned an hour beyond the {base_mod._MISSING_HOUR_HEAL_CAP}h cap. Got {counts}"
+        )
+
+    def test_execute_top_n_rollups_heal_does_not_double_count_per_field_hours(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """An hour covered by a PER-FIELD hour file (the pre-bundle
+        intermediate state) must not also be live-healed. The file count
+        (5) deliberately differs from the raw rows (3) so a double-read
+        is unambiguous."""
+        import uuid
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        closed_dt = active_dt - timedelta(hours=2)
+        hour_token = closed_dt.strftime("%Y-%m-%d-%H")
+        in_memory_duckdb.execute("CREATE TABLE logs_healpf (timestamp TIMESTAMPTZ, country VARCHAR)")
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_healpf VALUES (?, 'US'), (?, 'US'), (?, 'US')",
+            [
+                closed_dt + timedelta(minutes=5),
+                closed_dt + timedelta(minutes=15),
+                closed_dt + timedelta(minutes=25),
+            ],
+        )
+        QueryRunner = self._heal_test_setup(in_memory_duckdb, tmp_path, monkeypatch, "logs_healpf")
+        pf_dir = tmp_path / "rollups" / "hour" / "field=country" / f"hour={hour_token}"
+        pf_dir.mkdir(parents=True)
+        pq.write_table(
+            pa.table({"value": ["US"], "count": pa.array([5], type=pa.int64())}),
+            str(pf_dir / f"compacted_{uuid.uuid4().hex[:8]}.parquet"),
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = closed_dt.isoformat()
+        et = (closed_dt + timedelta(hours=1)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_healpf")
+
+        counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert counts.get("US") == 5, (
+            f"per-field-covered hour was double-counted by the live heal (expected 5). Got {counts}"
+        )
+
+    def test_execute_top_n_rollups_heal_failure_never_raises(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Best-effort contract: a heal-internal failure degrades to the
+        pre-fallback behavior (rollups + active hour only) — it must never
+        propagate and 500 the aggregates request."""
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner as _QR
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        closed_dt = active_dt - timedelta(hours=2)
+        bundled_dt = active_dt - timedelta(hours=3)
+        in_memory_duckdb.execute("CREATE TABLE logs_healfail (timestamp TIMESTAMPTZ, country VARCHAR)")
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_healfail VALUES (?, 'US')",
+            [closed_dt + timedelta(minutes=10)],
+        )
+        QueryRunner = self._heal_test_setup(in_memory_duckdb, tmp_path, monkeypatch, "logs_healfail")
+        # A bundled hour so the rollup path has something to return even
+        # when the heal explodes.
+        bundle_dir = tmp_path / "rollups" / "hour_bundled" / f"hour={bundled_dt.strftime('%Y-%m-%d-%H')}"
+        bundle_dir.mkdir(parents=True)
+        pq.write_table(
+            pa.table({"field": ["country"], "value": ["JP"], "count": pa.array([7], type=pa.int64())}),
+            str(bundle_dir / "all_fields.parquet"),
+        )
+        monkeypatch.setattr(
+            _QR,
+            "create_filtered_temp_table",
+            lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError("temp build exploded")),
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = bundled_dt.isoformat()
+        et = (closed_dt + timedelta(hours=1)).isoformat()
+        # Must not raise despite the heal's temp builder exploding.
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_healfail")
+
+        counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert counts.get("JP") == 7, f"rollup results must survive a failed heal. Got {counts}"
+        assert "US" not in counts, "the failed heal cannot have contributed rows"
+
+    def test_execute_top_n_rollups_sentinel_bundle_suppresses_heal(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """A verified-empty hour (empty sentinel bundle stamped by the heal
+        cron) counts as COVERED: the reader must not classify it as a
+        writer gap, so no heal temp table is ever built. This is the
+        steady-state zero-cost contract for quiet hours on bursty
+        services."""
+        from datetime import UTC, datetime, timedelta
+
+        from backend.core.rollups.hour_bundles import stamp_empty_hour_sentinels
+        from backend.repositories._base import QueryRunner as _QR
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        empty_dt = active_dt - timedelta(hours=2)
+        in_memory_duckdb.execute("CREATE TABLE logs_healsent (timestamp TIMESTAMPTZ, country VARCHAR)")
+        QueryRunner = self._heal_test_setup(in_memory_duckdb, tmp_path, monkeypatch, "logs_healsent")
+        stamped = stamp_empty_hour_sentinels(
+            "test_service",
+            {"name": "test_service"},
+            [empty_dt.strftime("%Y-%m-%d-%H")],
+        )
+        assert stamped == 1
+
+        calls: list = []
+        _orig = _QR.create_filtered_temp_table
+        monkeypatch.setattr(
+            _QR,
+            "create_filtered_temp_table",
+            lambda self, *a, **k: (calls.append(a), _orig(self, *a, **k))[1],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = empty_dt.isoformat()
+        et = (empty_dt + timedelta(hours=1)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_healsent")
+
+        assert calls == [], "sentinel-covered hour must not trigger the heal's temp build"
+        assert not [r for r in rows if r[0] == "country"], "sentinel hour contributes zero rows"
+
+    def test_execute_top_n_rollups_heal_rescues_crashed_compaction_day_dir(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """An EMPTY day dir (crashed compaction left the dir but no
+        parquet) must NOT count as day-compacted — dir presence alone
+        would permanently exclude the whole day from the heal and
+        re-create the silent undercount this fallback exists to close."""
+        from datetime import UTC, datetime, timedelta
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        crashed_hour_dt = active_dt - timedelta(hours=26)
+        day_token = crashed_hour_dt.strftime("%Y-%m-%d")
+        in_memory_duckdb.execute("CREATE TABLE logs_healcrash (timestamp TIMESTAMPTZ, country VARCHAR)")
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_healcrash VALUES (?, 'US')",
+            [crashed_hour_dt + timedelta(minutes=10)],
+        )
+        QueryRunner = self._heal_test_setup(in_memory_duckdb, tmp_path, monkeypatch, "logs_healcrash")
+        # Dir exists, NO parquet inside — the crashed-compaction state.
+        (tmp_path / "rollups" / "day" / "field=country" / f"day={day_token}").mkdir(parents=True)
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = (crashed_hour_dt - timedelta(hours=1)).isoformat()
+        et = (crashed_hour_dt + timedelta(hours=2)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_healcrash")
+
+        counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert counts.get("US") == 1, (
+            f"empty day dir wrongly treated as compacted — the heal must rescue it. Got {counts}"
+        )
+
+
+class TestActiveHourDirectTempSchemaDrift:
+    def test_mixed_buffer_schemas_fall_back_to_union_by_name(self, in_memory_duckdb, tmp_path, monkeypatch):
+        """The fast path reads multi-file parquet WITHOUT union_by_name (the
+        per-file full-schema reconciliation dominated the temp create on
+        prod). When buffer files drift — e.g. a new column mid-deploy —
+        DuckDB raises rather than mis-binding, and the retry with
+        union_by_name=true must still build the temp with every row."""
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        buffer_dir = cache_root / "buffer"
+        buffer_dir.mkdir(parents=True)
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        ts = active_start + timedelta(minutes=5)
+
+        pq.write_table(
+            pa.table({"timestamp": pa.array([ts], type=pa.timestamp("us", tz="UTC"))}),
+            str(buffer_dir / "old_schema.parquet"),
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "timestamp": pa.array([ts, ts], type=pa.timestamp("us", tz="UTC")),
+                    "brand_new_col": pa.array(["x", "y"], type=pa.string()),
+                }
+            ),
+            str(buffer_dir / "new_schema.parquet"),
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        runner = QueryRunner(in_memory_duckdb, {"name": "drift_svc"})
+        tmp = runner._create_active_hour_temp_direct([], ["timestamp"], active_start, active_start + timedelta(hours=1))
+
+        assert tmp is not None, "drifted buffer schemas must retry with union_by_name, not fail"
+        assert in_memory_duckdb.execute(f'SELECT COUNT(*) FROM "{tmp}"').fetchone()[0] == 3
+        in_memory_duckdb.execute(f'DROP TABLE IF EXISTS "{tmp}"')
+
+
+class TestActiveHourDirectTempTombstones:
+    def test_tombstoned_buffer_files_are_not_double_counted(self, in_memory_duckdb, tmp_path, monkeypatch):
+        """A tombstoned buffer parquet's rows were ALREADY committed into the
+        hourly partition this read also scans — the file only lingers for the
+        sweep grace window. The direct read must count those rows exactly
+        ONCE (via the hourly partition), never twice. Pre-fix, every
+        active-hour live slice double-counted up to ~10 min of the freshest
+        rows (prod 2026-07-07: 40 of 55 buffer files were tombstoned)."""
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        buffer_dir = cache_root / "buffer"
+        buffer_dir.mkdir(parents=True)
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        hourly_dir = cache_root / "data" / f"timestamp_hour={active_start.strftime('%Y-%m-%d-%H')}"
+        hourly_dir.mkdir(parents=True)
+        ts = active_start + timedelta(minutes=5)
+
+        def _write(path, n):
+            pq.write_table(
+                pa.table({"timestamp": pa.array([ts] * n, type=pa.timestamp("us", tz="UTC"))}),
+                str(path),
+            )
+
+        # Live (un-tombstoned) buffer file: 2 rows.
+        _write(buffer_dir / "batch_live.parquet", 2)
+        # Tombstoned buffer file: 3 rows + its .consumed-<ts> marker...
+        _write(buffer_dir / "batch_committed.parquet", 3)
+        (buffer_dir / "batch_committed.parquet.consumed-1234567890").touch()
+        # ...whose rows the commit already landed in the hourly partition.
+        _write(hourly_dir / "00000-0-committed.parquet", 3)
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        runner = QueryRunner(in_memory_duckdb, {"name": "tombstone_svc"})
+        tmp = runner._create_active_hour_temp_direct([], ["timestamp"], active_start, active_start + timedelta(hours=1))
+
+        assert tmp is not None
+        n = in_memory_duckdb.execute(f'SELECT COUNT(*) FROM "{tmp}"').fetchone()[0]
+        assert n == 5, f"expected live(2) + committed-via-hourly(3) = 5 rows, got {n} (8 = double count)"
+        # Telemetry counts only the files actually opened (2, not 3).
+        assert runner._last_active_direct_n_files == 2
+        in_memory_duckdb.execute(f'DROP TABLE IF EXISTS "{tmp}"')

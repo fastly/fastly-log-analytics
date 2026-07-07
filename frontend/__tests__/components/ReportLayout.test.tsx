@@ -12,6 +12,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Server } from 'lucide-react'
 import React from 'react'
+import { ReportLayout } from '@/components/ReportLayout'
 
 vi.mock('@/hooks/useTimeRange', () => ({
   useTimeRange: () => ({ startTime: '2026-01-01T00:00:00Z', endTime: '2026-01-01T01:00:00Z' }),
@@ -24,7 +25,7 @@ vi.mock('@/hooks/useFilterPayload', () => ({
   useFilterPayload: () => ({ filters: [] }),
   useDebouncedFilterPayload: () => ({ filters: [] }),
 }))
-vi.mock('@/hooks/useUrlFilterSync', () => ({ useUrlFilterSync: vi.fn() }))
+vi.mock('@/hooks/useViewMetricUrlSync', () => ({ useViewMetricUrlSync: vi.fn() }))
 vi.mock('@/hooks/useReportConfig', () => ({
   useReportConfig: () => ({
     config: { effectiveInterval: '1 hour', validIntervals: ['1 hour'] },
@@ -62,7 +63,6 @@ describe('ReportLayout', () => {
 
   it('invokes apiCall with the resolved time range + filters + bucket', async () => {
     const apiCall = vi.fn().mockResolvedValue({ rows: ['row-a'] })
-    const { ReportLayout } = await import('@/components/ReportLayout')
     const Wrapper = wrapper()
     render(
       <Wrapper>
@@ -89,7 +89,6 @@ describe('ReportLayout', () => {
   })
 
   it('skips the query when no apiCall is provided', async () => {
-    const { ReportLayout } = await import('@/components/ReportLayout')
     const Wrapper = wrapper()
     render(
       <Wrapper>
@@ -108,8 +107,7 @@ describe('ReportLayout', () => {
     expect(screen.getByTestId('loading').textContent).toBe('false')
   })
 
-  it('renders the interval buttons in the render-prop arg', async () => {
-    const { ReportLayout } = await import('@/components/ReportLayout')
+  it('renders the interval buttons in the render-prop arg', () => {
     const Wrapper = wrapper()
     render(
       <Wrapper>

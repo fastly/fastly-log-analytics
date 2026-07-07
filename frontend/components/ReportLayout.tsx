@@ -6,7 +6,7 @@ import { useTimeRange } from '@/hooks/useTimeRange'
 import { useTimezone } from '@/hooks/useTimezone'
 import { useReportConfig, type ReportConfiguration } from '@/hooks/useReportConfig'
 import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
-import { useUrlFilterSync } from '@/hooks/useUrlFilterSync'
+import { useViewMetricUrlSync } from '@/hooks/useViewMetricUrlSync'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { ReportShell } from '@/components/ReportShell'
 import { INTERVAL_SECONDS, type ChartInterval } from '@/lib/constants'
@@ -70,7 +70,7 @@ export function ReportLayout<TData = unknown>({
   // was visible in the UI but discarded before reaching the backend.
   const filterPayload = useDebouncedFilterPayload(true)
 
-  useUrlFilterSync()
+  useViewMetricUrlSync()
 
   const bucketSeconds = INTERVAL_SECONDS[config.effectiveInterval as keyof typeof INTERVAL_SECONDS] ?? 3600
 

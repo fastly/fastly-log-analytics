@@ -306,11 +306,13 @@ if (fastly.ff.visits_this_service == 0 && req.restarts == 0 && req.http.X-Edge-S
 # shield the request.
 if (req.restarts == 1 && req.http.x-edge-score) {{
   set var.fastly_req_do_shield = true;
+}}
+if (req.restarts == 1) {{
   # Real-origin pass — ensure NGWAF inspects it. We set
   # x-sigsci-skip-inspection-once on the scoring sub-fetch (restarts == 0);
   # edge_security unsets only its bereq copy, so the req.http value persists
   # across the restart. Unset it here so attack traffic to the real origin is
-  # never skipped.
+  # never skipped — even on scorer fail-open.
   unset req.http.x-sigsci-skip-inspection-once;
 }}"""
 

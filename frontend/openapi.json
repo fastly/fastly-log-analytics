@@ -3,7 +3,7 @@
   "info": {
     "title": "Fastly Log Analytics API",
     "description": "FastAPI backend for the Fastly Log Analytics tool. Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json.",
-    "version": "2.0.0b2"
+    "version": "2.1.0"
   },
   "paths": {
     "/api/dashboard/aggregates": {
@@ -2834,7 +2834,13 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SavedViewRecord"
+                  },
+                  "title": "Response List Views Api Views  Service Id  Get"
+                }
               }
             }
           },
@@ -2954,7 +2960,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ViewSaveResponse"
+                }
               }
             }
           },
@@ -3629,6 +3637,7 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "minimum": 1,
               "default": 24,
               "title": "Lookback Hours"
             }
@@ -6832,7 +6841,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionLakeInfoResponse"
+                }
               }
             }
           },
@@ -7083,7 +7094,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OkMessageResponse"
+                }
               }
             }
           },
@@ -7442,7 +7455,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CronScheduleResponse"
+                }
               }
             }
           },
@@ -7573,7 +7588,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialsUpdateResponse"
+                }
               }
             }
           },
@@ -7945,7 +7962,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/LogFieldsUpdateResponse"
+                }
               }
             }
           },
@@ -9302,7 +9321,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CustomFieldsImportResponse"
+                }
               }
             }
           },
@@ -11792,7 +11813,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OptimizeNowResponse"
+                }
               }
             }
           },
@@ -11968,7 +11991,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillBundleRollupsResponse"
+                }
               }
             }
           },
@@ -12169,7 +12194,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/LocalCompactNowResponse"
+                }
               }
             }
           },
@@ -12535,7 +12562,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MetadataRetentionResponse"
+                }
               }
             }
           },
@@ -12711,7 +12740,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MetadataStorageResponse"
+                }
               }
             }
           },
@@ -16326,7 +16357,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UsageLoggingConfigResponse"
+                }
               }
             }
           },
@@ -16444,7 +16477,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UsageLoggingConfigResponse"
+                }
               }
             }
           },
@@ -16869,7 +16904,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
               }
             }
           },
@@ -18039,9 +18076,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Count Persisted Slow Queries Api Admin Slow Queries Count Get"
+                  "$ref": "#/components/schemas/SlowQueriesCountResponse"
                 }
               }
             }
@@ -18300,9 +18335,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response List Persisted Slow Queries Api Admin Slow Queries Get"
+                  "$ref": "#/components/schemas/SlowQueriesResponse"
                 }
               }
             }
@@ -18426,9 +18459,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Get Query Api Admin Queries  Qid  Get"
+                  "$ref": "#/components/schemas/ActiveQueryRow"
                 }
               }
             }
@@ -18664,9 +18695,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Query Monitor Config Api Admin App Config Query Monitor Get"
+                  "$ref": "#/components/schemas/QueryMonitorConfigResponse"
                 }
               }
             }
@@ -18912,7 +18941,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionValidateResponse"
+                }
               }
             }
           },
@@ -19032,7 +19063,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionCheckDomainResponse"
+                }
               }
             }
           },
@@ -19152,7 +19185,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionCheckFosResponse"
+                }
               }
             }
           },
@@ -19399,7 +19434,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionLakeInfoResponse"
+                }
               }
             }
           },
@@ -19637,7 +19674,13 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Provision Terraform Preview Api Provision Terraform Preview Post"
+                }
               }
             }
           },
@@ -19875,7 +19918,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionIngestResponse"
+                }
               }
             }
           },
@@ -20023,7 +20068,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionCheckConfigResponse"
+                }
               }
             }
           },
@@ -20170,7 +20217,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/NgwafWorkspacesResponse"
+                }
               }
             }
           },
@@ -20329,7 +20378,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/NgwafWorkspaceSetResponse"
+                }
               }
             }
           },
@@ -22782,9 +22833,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Retrain Api Services  Service Id  Scoring Retrain Post"
+                  "$ref": "#/components/schemas/ScoringRetrainResponse"
                 }
               }
             }
@@ -22931,9 +22980,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Session Events Api Services  Service Id  Scoring Sessions  Sid  Events Get"
+                  "$ref": "#/components/schemas/ScoringSessionEventsResponse"
                 }
               }
             }
@@ -23067,9 +23114,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Enforce Threshold Get Api Services  Service Id  Scoring Enforce Threshold Get"
+                  "$ref": "#/components/schemas/ScoringEnforceThresholdResponse"
                 }
               }
             }
@@ -23223,9 +23268,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Enforce Threshold Put Api Services  Service Id  Scoring Enforce Threshold Put"
+                  "$ref": "#/components/schemas/ScoringEnforceThresholdPutResponse"
                 }
               }
             }
@@ -23359,9 +23402,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring L2 Enforce Get Api Services  Service Id  Scoring L2 Enforce Get"
+                  "$ref": "#/components/schemas/ScoringL2EnforceState"
                 }
               }
             }
@@ -23515,9 +23556,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring L2 Enforce Put Api Services  Service Id  Scoring L2 Enforce Put"
+                  "$ref": "#/components/schemas/ScoringL2EnforcePutResponse"
                 }
               }
             }
@@ -23641,9 +23680,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Exclude Regex Get Api Services  Service Id  Scoring Exclude Regex Get"
+                  "$ref": "#/components/schemas/ScoringExcludeRegexState"
                 }
               }
             }
@@ -23797,9 +23834,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Exclude Regex Put Api Services  Service Id  Scoring Exclude Regex Put"
+                  "$ref": "#/components/schemas/ScoringExcludeRegexPutResponse"
                 }
               }
             }
@@ -23933,9 +23968,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Exclude Regex Validate Api Services  Service Id  Scoring Exclude Regex Validate Post"
+                  "$ref": "#/components/schemas/ScoringExcludeRegexValidateResponse"
                 }
               }
             }
@@ -24059,9 +24092,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Enforce Status Code Get Api Services  Service Id  Scoring Enforce Status Code Get"
+                  "$ref": "#/components/schemas/ScoringEnforceStatusCodeState"
                 }
               }
             }
@@ -24215,9 +24246,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Enforce Status Code Put Api Services  Service Id  Scoring Enforce Status Code Put"
+                  "$ref": "#/components/schemas/ScoringEnforceStatusCodePutResponse"
                 }
               }
             }
@@ -24341,9 +24370,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Matrix Versions List Api Services  Service Id  Scoring Matrix Versions Get"
+                  "$ref": "#/components/schemas/ScoringMatrixVersionsResponse"
                 }
               }
             }
@@ -24492,9 +24519,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Matrix Versions Restore Api Services  Service Id  Scoring Matrix Versions  Version  Restore Post"
+                  "$ref": "#/components/schemas/ScoringMatrixRestoreResponse"
                 }
               }
             }
@@ -24628,9 +24653,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Rotate Key Api Services  Service Id  Scoring Rotate Key Post"
+                  "$ref": "#/components/schemas/ScoringRotateKeyResponse"
                 }
               }
             }
@@ -24784,9 +24807,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Audit List Api Services  Service Id  Scoring Audit Get"
+                  "$ref": "#/components/schemas/ScoringAuditListResponse"
                 }
               }
             }
@@ -24910,9 +24931,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Threshold Get Api Services  Service Id  Scoring Threshold Get"
+                  "$ref": "#/components/schemas/ScoringThresholdState"
                 }
               }
             }
@@ -25044,9 +25063,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Threshold Put Api Services  Service Id  Scoring Threshold Put"
+                  "$ref": "#/components/schemas/ScoringThresholdState"
                 }
               }
             }
@@ -25170,9 +25187,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Evaluation Per Reason Api Services  Service Id  Scoring Evaluation Per Reason Get"
+                  "$ref": "#/components/schemas/ScoringPerReasonResponse"
                 }
               }
             }
@@ -25322,9 +25337,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Dashboard Api Services  Service Id  Scoring Dashboard Get"
+                  "$ref": "#/components/schemas/ScoringDashboardResponse"
                 }
               }
             }
@@ -25685,6 +25698,118 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/share/auth-config": {
+      "get": {
+        "tags": [
+          "share-auth"
+        ],
+        "summary": "Share Auth Config",
+        "description": "Unauthenticated: which auth modes the ``/share-login`` page should render.\n\nReached pre-auth (no session cookie) \u2014 exempted in the middleware unauth\nallowlist. Exposes only enabled providers, and only ``id`` + ``display_name``\n(never client_id/secret/discovery_url). Drives graceful degradation (\u00a75.2):\non fetch failure the frontend fails OPEN to the passcode form.",
+        "operationId": "share_auth_config_api_share_auth_config_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthConfigResponse"
+                }
               }
             }
           },
@@ -26481,6 +26606,295 @@
         }
       }
     },
+    "/api/share/oauth/authorize": {
+      "get": {
+        "tags": [
+          "share-oauth"
+        ],
+        "summary": "Oauth Authorize",
+        "operationId": "oauth_authorize_api_share_oauth_authorize_get",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider"
+            }
+          },
+          {
+            "name": "return",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "/dashboard",
+              "title": "Return"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/share/oauth/callback": {
+      "get": {
+        "tags": [
+          "share-oauth"
+        ],
+        "summary": "Oauth Callback",
+        "operationId": "oauth_callback_api_share_oauth_callback_get",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/share/banner": {
       "get": {
         "tags": [
@@ -26494,7 +26908,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ShareBannerResponse"
+                }
               }
             }
           },
@@ -26603,7 +27019,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ShareStatusResponse"
+                }
               }
             }
           },
@@ -26713,7 +27131,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ShareLiveResponse"
+                }
               }
             }
           },
@@ -26900,7 +27320,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ShareAuditLogsResponse"
+                }
               }
             }
           },
@@ -27019,7 +27441,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ShareStartResponse"
+                }
               }
             }
           },
@@ -27128,7 +27552,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
               }
             }
           },
@@ -27237,7 +27663,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SharePanicResponse"
+                }
               }
             }
           },
@@ -27356,7 +27784,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InviteRecord"
+                }
               }
             }
           },
@@ -27486,7 +27916,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InviteRecord"
+                }
               }
             }
           },
@@ -27617,7 +28049,142 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InviteRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/share/invites/{invite_id}/sharing": {
+      "patch": {
+        "tags": [
+          "share-admin"
+        ],
+        "summary": "Update Invite Sharing",
+        "description": "Toggle whether the invite allows shared (concurrent) analyst logins.\n\nTurning it ON lets several analysts use the same link at once instead of\neach login booting the previous session (still bounded by the global\nmax_concurrent_analyst_sessions cap). Turning it OFF only affects *future*\nlogins \u2014 any sessions already live under the invite are left to age out via\nthe idle/absolute timeout; revoke the invite to force them off immediately.",
+        "operationId": "update_invite_sharing_api_admin_share_invites__invite_id__sharing_patch",
+        "parameters": [
+          {
+            "name": "invite_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Invite Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SharingPolicyPayload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteRecord"
+                }
               }
             }
           },
@@ -27748,7 +28315,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
               }
             }
           },
@@ -27868,7 +28437,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InviteMutationAck"
+                }
               }
             }
           },
@@ -27989,7 +28560,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InviteMutationAck"
+                }
               }
             }
           },
@@ -28109,7 +28682,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimTokenResponse"
+                }
               }
             }
           },
@@ -28229,7 +28804,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
               }
             }
           },
@@ -28467,7 +29044,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BackupImportResponse"
+                }
               }
             }
           },
@@ -28586,7 +29165,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GdprEraseResponse"
+                }
               }
             }
           },
@@ -28705,7 +29286,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ShareSettingsResponse"
+                }
               }
             }
           },
@@ -28814,7 +29397,121 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WordphraseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/share/oauth-providers": {
+      "get": {
+        "tags": [
+          "share-admin"
+        ],
+        "summary": "Oauth Providers",
+        "description": "List the configured OIDC providers for the admin invite form.\n\nIncludes disabled providers (``enabled=false``) so an admin can pre-create\nan invite for a temporarily-disabled IdP \u2014 distinct from the unauth analyst\n``/api/share/auth-config`` which exposes enabled providers only. Empty when\nthe feature switch (``OAUTH_FLOW_STATE_SECRET``) is off. Never returns\nclient_id/client_secret.",
+        "operationId": "oauth_providers_api_admin_share_oauth_providers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthProvidersResponse"
+                }
               }
             }
           },
@@ -29165,7 +29862,7 @@
           "meta"
         ],
         "summary": "Health Check",
-        "description": "Liveness/readiness probe.\n\nDefault (``?deep=0``) is a cheap liveness response \u2014 200 as soon as the\nHTTP server is answering. Pass ``?deep=1`` to also verify ingest\nfreshness per configured service. A service is reported ``degraded``\nwhen ANY of:\n  - its newest ``ingested_files.ingested_at`` is older than\n    ``stale_minutes`` (default 30);\n  - the last terminal ``sync`` cron run ended in ``error``;\n  - a ``sync`` row is stuck in ``running`` past ``_STUCK_SYNC_RUNNING_MINS``\n    (SRE-04 \u2014 the orphan-stall / OOM-leak the success-only filter hides);\n  - the latest terminal run of a critical non-sync ingest task\n    (``commit`` / ``metadata_sync``) ended in ``error`` (SRE-05).\nThe endpoint returns HTTP 503 when ANY service is degraded; otherwise 200.\n\nCost: hits SQLite only \u2014 no FOS, no CDN, no Fastly API. Safe to wire\ninto a load-balancer health check.\n\nSecurity (finding 003): the deep variant enumerates every configured\nservice_id and reports per-service sync errors / staleness, which is\noperational metadata an analyst should not see. Force ``deep`` to\nFalse for remote (live-share) callers so analysts only ever get the\nshallow ok/degraded liveness signal.",
+        "description": "Liveness/readiness probe.\n\nDefault (``?deep=0``) is a cheap liveness response \u2014 200 as soon as the\nHTTP server is answering. Pass ``?deep=1`` to also verify ingest\nfreshness per configured service. A service is reported ``degraded``\nwhen ANY of:\n  - its newest ``ingested_files.ingested_at`` is older than\n    ``stale_minutes`` (default 30) \u2014 SRE-22: before degrading on this\n    check, the cutoff is widened to the service's own historical p95\n    gap between non-empty ingests (never narrower than\n    ``stale_minutes``), so a low-traffic service's organic quiet\n    periods don't false-positive;\n  - the last terminal ``sync`` cron run ended in ``error``;\n  - a ``sync`` row is stuck in ``running`` past ``_STUCK_SYNC_RUNNING_MINS``\n    (SRE-04 \u2014 the orphan-stall / OOM-leak the success-only filter hides);\n  - the latest terminal run of a critical non-sync ingest task\n    (``commit`` / ``metadata_sync``) ended in ``error`` (SRE-05).\nThe endpoint returns HTTP 503 when ANY service is degraded; otherwise 200.\n\nCost: hits SQLite only \u2014 no FOS, no CDN, no Fastly API. Safe to wire\ninto a load-balancer health check.\n\nSecurity (finding 003): the deep variant enumerates every configured\nservice_id and reports per-service sync errors / staleness, which is\noperational metadata an analyst should not see. Force ``deep`` to\nFalse for remote (live-share) callers so analysts only ever get the\nshallow ok/degraded liveness signal.",
         "operationId": "health_check_api_health_get",
         "parameters": [
           {
@@ -29294,6 +29991,134 @@
   },
   "components": {
     "schemas": {
+      "ActiveQueryRow": {
+        "properties": {
+          "query_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Id"
+          },
+          "db_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Db Type"
+          },
+          "sql_preview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql Preview"
+          },
+          "sql": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql"
+          },
+          "sql_len": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql Len"
+          },
+          "attribution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QueryAttribution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
+          },
+          "started_at_utc": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At Utc"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          },
+          "cancellable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancellable"
+          },
+          "cancelled_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancelled At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ActiveQueryRow",
+        "description": "One in-flight query (``_row_for_active``). ``sql`` is only populated\nwhen the caller asked for ``full_sql``; ``started_at_utc`` is epoch\nseconds (``time.time()``)."
+      },
       "AggregatesRequest": {
         "properties": {
           "start_time": {
@@ -29477,6 +30302,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -29724,6 +30557,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -29771,6 +30612,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -29828,6 +30677,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -29868,6 +30725,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -29972,6 +30837,297 @@
         ],
         "title": "AnalystInvite"
       },
+      "AuthConfigProvider": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "display_name"
+        ],
+        "title": "AuthConfigProvider",
+        "description": "One enabled OIDC provider as seen by the unauthenticated login page.\n\nDeliberately id + display_name ONLY \u2014 no client_id / discovery_url / secret\nis ever exposed to an unauthenticated caller."
+      },
+      "AuthConfigResponse": {
+        "properties": {
+          "passcode_enabled": {
+            "type": "boolean",
+            "title": "Passcode Enabled"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/AuthConfigProvider"
+            },
+            "type": "array",
+            "title": "Providers",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "passcode_enabled"
+        ],
+        "title": "AuthConfigResponse",
+        "description": "Body for the unauth ``GET /api/share/auth-config`` \u2014 drives graceful\ndegradation on ``/share-login`` (which auth modes to render)."
+      },
+      "BackfillBundleRollupsResponse": {
+        "properties": {
+          "slow_urls": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slow Urls"
+          },
+          "origin_summary": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Summary"
+          },
+          "origin_summary_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Summary Days"
+          },
+          "origin_dims": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Dims"
+          },
+          "origin_dims_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Dims Days"
+          },
+          "origin_latency_ts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Latency Ts"
+          },
+          "origin_latency_ts_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Latency Ts Days"
+          },
+          "network_rtt": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network Rtt"
+          },
+          "network_rtt_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network Rtt Days"
+          },
+          "network_speed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network Speed"
+          },
+          "network_speed_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network Speed Days"
+          },
+          "verified_bots_ts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified Bots Ts"
+          },
+          "verified_bots_ts_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified Bots Ts Days"
+          },
+          "perf_latency": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Perf Latency"
+          },
+          "perf_latency_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Perf Latency Days"
+          },
+          "security_dims": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Security Dims"
+          },
+          "security_dims_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Security Dims Days"
+          },
+          "perf_ttl_dist": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Perf Ttl Dist"
+          },
+          "perf_ttl_dist_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Perf Ttl Dist Days"
+          },
+          "ngwaf_bots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ngwaf Bots"
+          },
+          "ngwaf_bots_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ngwaf Bots Days"
+          },
+          "wellknown_bots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wellknown Bots"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "BackfillBundleRollupsResponse",
+        "description": "Per-kind bundle counts from ``POST /admin/backfill-bundle-rollups``."
+      },
       "BackupExportPayload": {
         "properties": {
           "passphrase": {
@@ -29985,6 +31141,46 @@
         ],
         "title": "BackupExportPayload",
         "description": "Body for ``POST /api/share-admin/backup/export`` \u2014 passphrase used\nto encrypt the share-db backup blob (minimum 12 characters)."
+      },
+      "BackupImportResponse": {
+        "properties": {
+          "inserted": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inserted"
+          },
+          "skipped": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skipped"
+          },
+          "merged": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "BackupImportResponse"
       },
       "Body_backup_import_api_admin_share_backup_import_post": {
         "properties": {
@@ -30025,6 +31221,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -30184,14 +31388,6 @@
             "type": "array",
             "title": "Custom Dashboard Cards"
           },
-          "custom_fields_catalog": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Custom Fields Catalog"
-          },
           "active_log_field_ids": {
             "items": {
               "type": "string"
@@ -30291,18 +31487,6 @@
             ],
             "title": "Ops Overview"
           },
-          "cron_schedule": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cron Schedule"
-          },
           "cron_runs_first_page": {
             "anyOf": [
               {
@@ -30338,18 +31522,6 @@
               }
             ],
             "title": "Scoring Labels"
-          },
-          "share_status": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Share Status"
           }
         },
         "type": "object",
@@ -30461,6 +31633,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -30507,6 +31687,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -30616,6 +31804,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -30824,6 +32020,24 @@
         "title": "CheckFosRequest",
         "description": "Body for ``POST /api/provision/check-fos`` \u2014 FOS credentials to\nvalidate by attempting a single list-objects call."
       },
+      "ClaimTokenResponse": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ClaimTokenResponse"
+      },
       "ClearSqliteResponse": {
         "properties": {
           "ok": {
@@ -30893,6 +32107,208 @@
         "type": "object",
         "title": "CompactionStatsResponse",
         "description": "File-count distribution across local cache partitions.\n\nReturned by ``GET /api/admin/compaction-stats`` and consumed by the\nadmin System Health card."
+      },
+      "CompletedQueryRow": {
+        "properties": {
+          "query_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Id"
+          },
+          "db_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Db Type"
+          },
+          "sql_preview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql Preview"
+          },
+          "sql": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql"
+          },
+          "sql_len": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql Len"
+          },
+          "attribution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QueryAttribution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
+          },
+          "started_at_utc": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At Utc"
+          },
+          "ended_at_utc": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At Utc"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "error_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Type"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "peak_memory_mb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Memory Mb"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "CompletedQueryRow",
+        "description": "One finished query (``_row_for_completed``); also the exact layout\nthe persisted ``/slow-queries`` rows are re-shaped into."
+      },
+      "CredentialsUpdateResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "access_key_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Key Id"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "CredentialsUpdateResponse",
+        "description": "PATCH /services/{id}/credentials \u2014 ``access_key_id`` present only on\nthe Fastly-API rotation branch."
       },
       "CronRunEntry": {
         "properties": {
@@ -31101,6 +32517,106 @@
         "type": "object",
         "title": "CronRunsResponse"
       },
+      "CronScheduleEntry": {
+        "properties": {
+          "task": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task"
+          },
+          "next_run_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Run Time"
+          },
+          "last_run_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run Time"
+          },
+          "last_run_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run Status"
+          },
+          "last_run_duration_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run Duration S"
+          },
+          "last_run_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run Summary"
+          },
+          "disabled_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disabled Reason"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "CronScheduleEntry",
+        "description": "One row of GET /api/cron-schedule (``build_cron_schedule_payload``).\n``disabled_reason`` appears only on synthesized disabled rows; the\nlast_run_* trio only when a run has been recorded."
+      },
+      "CronScheduleResponse": {
+        "properties": {
+          "schedules": {
+            "items": {
+              "$ref": "#/components/schemas/CronScheduleEntry"
+            },
+            "type": "array",
+            "title": "Schedules",
+            "default": []
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "CronScheduleResponse"
+      },
       "CronSettingsPartial": {
         "properties": {
           "enabled": {
@@ -31211,6 +32727,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -31494,6 +33018,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -31714,6 +33246,35 @@
         "title": "CustomFieldsImportBody",
         "description": "Body for ``POST /api/services/{id}/custom-fields/import``.\n\nThe handler validates each entry through\n``backend.core.field_registry.validate_custom_field`` \u2014 too dynamic\nto typify in Pydantic \u2014 so the list elements stay loosely typed\nhere. The wrapper exists so the OpenAPI surface shows\n``{custom_fields: list[object]}`` instead of an opaque dict."
       },
+      "CustomFieldsImportResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "imported_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Imported Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "CustomFieldsImportResponse"
+      },
       "CustomFieldsListResponse": {
         "properties": {
           "_debug_queries": {
@@ -31729,6 +33290,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -32015,6 +33584,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -32124,6 +33701,46 @@
         ],
         "title": "GdprErasePayload",
         "description": "Body for ``POST /api/share-admin/gdpr/erase`` \u2014 GDPR right-to-be-\nforgotten request for an analyst email."
+      },
+      "GdprEraseResponse": {
+        "properties": {
+          "deleted_invites": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted Invites"
+          },
+          "redacted_log_rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Redacted Log Rows"
+          },
+          "retained_recent_rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retained Recent Rows"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "GdprEraseResponse"
       },
       "HTTPValidationError": {
         "properties": {
@@ -32614,6 +34231,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -32737,6 +34362,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -32777,6 +34410,17 @@
           "description": {
             "type": "string",
             "title": "Description"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
           },
           "missing_fields": {
             "anyOf": [
@@ -32887,6 +34531,17 @@
             },
             "type": "array",
             "title": "Items"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
           }
         },
         "type": "object",
@@ -33101,6 +34756,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -33163,6 +34826,36 @@
         ],
         "title": "InsightsResponse"
       },
+      "InviteMutationAck": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "booted_sessions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Booted Sessions"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "InviteMutationAck",
+        "description": "``{ok: true}`` acks that also report booted session count."
+      },
       "InvitePayload": {
         "properties": {
           "name": {
@@ -33174,7 +34867,14 @@
             "title": "Email"
           },
           "passcode": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Passcode"
           },
           "duration_hours": {
@@ -33251,16 +34951,261 @@
               }
             ],
             "title": "Query End Time"
+          },
+          "allow_concurrent_sessions": {
+            "type": "boolean",
+            "title": "Allow Concurrent Sessions",
+            "default": false
+          },
+          "auth_method": {
+            "type": "string",
+            "enum": [
+              "passcode",
+              "oauth"
+            ],
+            "title": "Auth Method",
+            "default": "passcode"
+          },
+          "oauth_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Provider"
           }
         },
         "type": "object",
         "required": [
           "name",
-          "email",
-          "passcode"
+          "email"
         ],
         "title": "InvitePayload",
-        "description": "Body for ``POST /api/share-admin/invites`` \u2014 create a new\nanalyst-facing share invite."
+        "description": "Body for ``POST /api/share-admin/invites`` \u2014 create a new\nanalyst-facing share invite.\n\n``auth_method`` selects how the analyst redeems the invite:\n\n* ``'passcode'`` (default) \u2014 a ``passcode`` is required and hashed.\n* ``'oauth'`` \u2014 ``oauth_provider`` (a configured registry key) is required;\n  no ``passcode`` is sent (the backend synthesizes an unguessable argon2id\n  placeholder for the NOT NULL column). Passcode flow is unchanged."
+      },
+      "InviteRecord": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "ip_whitelist": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ip Whitelist"
+          },
+          "pii_policy": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pii Policy"
+          },
+          "query_window_hours": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Window Hours"
+          },
+          "query_start_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Start Time"
+          },
+          "query_end_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query End Time"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "revoked": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked"
+          },
+          "tos_accepted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tos Accepted At"
+          },
+          "tos_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tos Version"
+          },
+          "allow_concurrent_sessions": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Concurrent Sessions"
+          },
+          "auth_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Method"
+          },
+          "oauth_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Provider"
+          },
+          "oauth_subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Subject"
+          },
+          "last_login_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Login At"
+          },
+          "service_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Ids"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "InviteRecord",
+        "description": "One remote-invite row (``SELECT *`` + derived fields). The stored\npasscode hash rides through ``extra`` untouched \u2014 intentionally NOT\ndeclared here so the OpenAPI surface doesn't advertise it; the schema\nitself may grow columns via share_db migrations, which ``extra`` also\nabsorbs. ``last_login_at`` is attached by ``build_share_status`` only."
       },
       "LakeInfoRequest": {
         "properties": {
@@ -33318,6 +35263,160 @@
         "title": "LakeInfoRequest",
         "description": "Body for ``POST /api/provision/lake-info`` \u2014 credentials + optional\nIceberg-metadata pointer used to read an Iceberg table's range without\nregistering it as a service."
       },
+      "LocalCompactNowResponse": {
+        "properties": {
+          "partitions_scanned": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Partitions Scanned"
+          },
+          "partitions_compacted": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Partitions Compacted"
+          },
+          "files_merged": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files Merged"
+          },
+          "files_removed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files Removed"
+          },
+          "bytes_before": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bytes Before"
+          },
+          "bytes_after": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bytes After"
+          },
+          "daily_rollups": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily Rollups"
+          },
+          "weekly_rollups": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weekly Rollups"
+          },
+          "active_hour_skipped": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Hour Skipped"
+          },
+          "stale_tmp_removed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stale Tmp Removed"
+          },
+          "errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errors"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          },
+          "dry_run": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dry Run"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "LocalCompactNowResponse",
+        "description": "``compact_local_partitions`` result dict."
+      },
       "LogAccountingBucket": {
         "properties": {
           "ts": {
@@ -33371,6 +35470,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -33530,6 +35637,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -33607,6 +35722,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -33675,6 +35798,59 @@
         ],
         "title": "LogFieldsUpdateRequest"
       },
+      "LogFieldsUpdateResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "estimate": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimate"
+          },
+          "line_budget_warning": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Budget Warning"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "LogFieldsUpdateResponse",
+        "description": "POST /services/{id}/log-fields \u2014 no-change branch carries\n``message``; the applied branch carries ``estimate`` +\n``line_budget_warning`` (the ``waf_warning``-shaped dict, or null)."
+      },
       "LoggingSettingsResponse": {
         "properties": {
           "_debug_queries": {
@@ -33690,6 +35866,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -33788,6 +35972,159 @@
           "count"
         ],
         "title": "MapPoint"
+      },
+      "MetadataRetentionResponse": {
+        "properties": {
+          "retention": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MetadataRetentionValues"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "MetadataRetentionResponse"
+      },
+      "MetadataRetentionValues": {
+        "properties": {
+          "usage_log_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage Log Days"
+          },
+          "ingested_files_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingested Files Days"
+          },
+          "cron_runs_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cron Runs Days"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "MetadataRetentionValues",
+        "description": "Resolved retention days (defaults merged with per-service cfg)."
+      },
+      "MetadataStorageResponse": {
+        "properties": {
+          "tables": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/MetadataTableStat"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tables"
+          },
+          "db_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Db Bytes"
+          },
+          "db_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Db Path"
+          },
+          "retention": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MetadataRetentionValues"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ingested_files_locked": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingested Files Locked"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "MetadataStorageResponse",
+        "description": "``GET /admin/metadata-storage`` \u2014 feeds the Metadata Storage card."
+      },
+      "MetadataTableStat": {
+        "properties": {
+          "rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rows"
+          },
+          "bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bytes"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "MetadataTableStat",
+        "description": "Per-table row count + estimated bytes (``None`` when SQLite lacks\nthe ``dbstat`` vtable)."
       },
       "MetricHistoryBatchResponse": {
         "properties": {
@@ -33977,6 +36314,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -34225,6 +36570,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -34336,6 +36689,264 @@
           "label"
         ],
         "title": "NetworkWorstEntry"
+      },
+      "NgwafWorkspace": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "NgwafWorkspace"
+      },
+      "NgwafWorkspaceSetResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "ngwaf_workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ngwaf Workspace Id"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "NgwafWorkspaceSetResponse"
+      },
+      "NgwafWorkspacesResponse": {
+        "properties": {
+          "workspaces": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/NgwafWorkspace"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaces"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "NgwafWorkspacesResponse"
+      },
+      "OAuthProviderInfo": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "display_name",
+          "enabled"
+        ],
+        "title": "OAuthProviderInfo",
+        "description": "One configured OIDC provider as seen by the admin invite form."
+      },
+      "OAuthProvidersResponse": {
+        "properties": {
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/OAuthProviderInfo"
+            },
+            "type": "array",
+            "title": "Providers"
+          }
+        },
+        "type": "object",
+        "title": "OAuthProvidersResponse",
+        "description": "Body for ``GET /api/admin/share/oauth-providers`` \u2014 the configured\nproviders an admin can attach to an OAuth invite (may include disabled)."
+      },
+      "OkMessageResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "OkMessageResponse",
+        "description": "``{ok, message}`` ack used by time-range clear and similar routes."
+      },
+      "OkResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "OkResponse",
+        "description": "Mixin for \"ack\" endpoints that only return ``{\"ok\": True}``.\n\nSix share-auth response models all carry ``ok: bool = True`` as\ntheir first field \u2014 promoted here so the field's default + name\ncan't drift across the set."
+      },
+      "OptimizeNowResponse": {
+        "properties": {
+          "files_rewritten": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files Rewritten"
+          },
+          "files_added": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files Added"
+          },
+          "eligible_partitions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eligible Partitions"
+          },
+          "partition_errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Partition Errors"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "OptimizeNowResponse",
+        "description": "``optimize_table`` result \u2014 success carries the rewrite counters,\nthe error branches carry ``error`` (+ ``files_rewritten: 0``)."
       },
       "OriginAggregatesRequest": {
         "properties": {
@@ -34483,6 +37094,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -34610,6 +37229,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -34661,6 +37288,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -34759,6 +37394,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -34905,6 +37548,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -35043,6 +37694,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -35095,6 +37754,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -35146,6 +37813,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -35376,6 +38051,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -35441,6 +38124,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -35695,6 +38386,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -35737,6 +38436,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -35905,6 +38612,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -36089,6 +38804,131 @@
         },
         "type": "object",
         "title": "PrefillResponse"
+      },
+      "ProvisionCheckConfigItem": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ProvisionCheckConfigItem"
+      },
+      "ProvisionCheckConfigResponse": {
+        "properties": {
+          "logging_service": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProvisionCheckConfigItem"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cdn_service": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProvisionCheckConfigItem"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ProvisionCheckConfigResponse"
+      },
+      "ProvisionCheckDomainResponse": {
+        "properties": {
+          "available": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Available"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ProvisionCheckDomainResponse"
+      },
+      "ProvisionCheckFosResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ProvisionCheckFosResponse"
       },
       "ProvisionConfigRequest": {
         "properties": {
@@ -36383,6 +39223,112 @@
         "title": "ProvisionConfigRequest",
         "description": "Body shape shared by ``/provision/terraform/preview``,\n``/provision/terraform/export``, and ``/provision/ingest``.\n\nAll three endpoints accept a wizard-shaped service config that flows\nthrough to ``backend.utils.terraform_gen.generate_terraform`` or to\nthe on-disk config writer. The wizard sometimes posts partial\nconfigs (terraform preview during mid-edit) so every field is\noptional; ``extra=\"allow\"`` lets future / experimental wizard fields\nflow through unchanged without forcing the model in lockstep with\nevery UI tweak. Required-field checks (token / fos_bucket_name on\nthe ingest path) stay in the handlers so the existing 400 envelopes\nare preserved."
       },
+      "ProvisionDefaults": {
+        "properties": {
+          "endpoint_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint Name"
+          },
+          "fos_region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fos Region"
+          },
+          "fos_bucket_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fos Bucket Name"
+          },
+          "fos_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fos Prefix"
+          },
+          "sample_rate": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Rate"
+          },
+          "edge_only": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge Only"
+          },
+          "log_period": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Period"
+          },
+          "cdn_service_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cdn Service Name"
+          },
+          "cdn_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cdn Prefix"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ProvisionDefaults"
+      },
       "ProvisionExecuteRequest": {
         "properties": {
           "token": {
@@ -36522,6 +39468,87 @@
         "title": "ProvisionExecuteRequest",
         "description": "Body for ``POST /api/provision/execute`` \u2014 full Fastly-side\nprovisioning payload (service, FOS sink, optional CDN, cron schedule,\nlog fields)."
       },
+      "ProvisionIngestResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ProvisionIngestResponse"
+      },
+      "ProvisionLakeInfoResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "table_exists": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Exists"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ProvisionLakeInfoResponse",
+        "description": "``fetch_lake_info`` result. Only the branch-stable keys are declared;\nthe table-details payload (row counts / calendar / extents) varies by\nIceberg layout and rides through ``extra``."
+      },
       "ProvisionService": {
         "properties": {
           "id": {
@@ -36598,6 +39625,57 @@
         "title": "ProvisionTeardownRequest",
         "description": "Body for ``POST /api/provision/teardown`` \u2014 destructive removal of a\nprovisioned service. ``remove_*`` flags toggle each component.\n``service_id`` and ``token`` are required at the handler level so the\nexisting 400/404 envelopes are preserved."
       },
+      "ProvisionTokenInfo": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ProvisionTokenInfo"
+      },
       "ProvisionValidateRequest": {
         "properties": {
           "token": {
@@ -36614,6 +39692,176 @@
         "type": "object",
         "title": "ProvisionValidateRequest",
         "description": "Body for ``POST /api/provision/validate`` \u2014 Fastly token + service id\nthe wizard uses to look up the service name and seed the bucket-name\ndefaults before any side effects."
+      },
+      "ProvisionValidateResponse": {
+        "properties": {
+          "service_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Name"
+          },
+          "token_info": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProvisionTokenInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "defaults": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProvisionDefaults"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ProvisionValidateResponse"
+      },
+      "QueryAttribution": {
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "principal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Principal Id"
+          },
+          "caller_qualname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caller Qualname"
+          },
+          "caller_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caller File"
+          },
+          "request_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Path"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "cron_job": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cron Job"
+          },
+          "cron_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cron Run Id"
+          },
+          "pool_slot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pool Slot"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "QueryAttribution",
+        "description": "``attribution`` block from ``_attribution_payload``."
+      },
+      "QueryMonitorConfigResponse": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "QueryMonitorConfigResponse",
+        "description": "Nav-gating flag for the Live Query Monitor tab."
       },
       "QueryRequest": {
         "properties": {
@@ -36879,6 +40127,113 @@
         ],
         "title": "SavedView"
       },
+      "SavedViewRecord": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "filters_json": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filters Json"
+          },
+          "time_range_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Range Type"
+          },
+          "start_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Time"
+          },
+          "end_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Time"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "SavedViewRecord",
+        "description": "Wire-safe read shape for ``GET /api/views/{service_id}`` rows.\n\nDistinct from the strict ``SavedView`` request body: all-Optional +\n``extra=\"allow\"`` so a partial row (or a future column) can never 500\nthe read path; ``response_model_exclude_unset`` keeps the emitted key\nset byte-identical to the producer's."
+      },
       "ScoringAnalyticsResponse": {
         "properties": {
           "top_flagged": {
@@ -36960,6 +40315,148 @@
         "type": "object",
         "title": "ScoringAnalyticsResponse",
         "description": "Composite of the analyst-safe sub-reads (plus the two admin-only\nevaluation blocks, present only on the admin path)."
+      },
+      "ScoringAucAgainstLabels": {
+        "properties": {
+          "auc": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auc"
+          },
+          "passed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passed"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold"
+          },
+          "n_good": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Good"
+          },
+          "n_bad": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Bad"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringAucAgainstLabels"
+      },
+      "ScoringAuditListResponse": {
+        "properties": {
+          "audit": {
+            "items": {
+              "$ref": "#/components/schemas/ScoringAuditRow"
+            },
+            "type": "array",
+            "title": "Audit",
+            "default": []
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringAuditListResponse"
+      },
+      "ScoringAuditRow": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "details": {
+            "title": "Details"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringAuditRow"
       },
       "ScoringComplianceBreakdownResponse": {
         "properties": {
@@ -37212,6 +40709,158 @@
         "type": "object",
         "title": "ScoringCurvesResponse"
       },
+      "ScoringDashboardResponse": {
+        "properties": {
+          "since_hours": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since Hours"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "evaluation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringEvaluationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evaluation_per_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringPerReasonResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "health": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringHealthResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "top_flagged": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringTopFlaggedResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "score_distribution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringScoreDistributionResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "compliance_breakdown": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringComplianceBreakdownResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "curves": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringCurvesResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "threshold_preview": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringThresholdPreviewResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "config_threshold": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringThresholdState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exclude_regex": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringExcludeRegexState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enforce_status_code": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringEnforceStatusCodeState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringDashboardResponse",
+        "description": "Composite of the per-endpoint producers \u2014 each sub-block is the\nbyte-identical dict its standalone endpoint returns, so each nests the\nsame model that endpoint declares. ``status`` stays a free dict: it's\nthe secret-filtered cfg.scoring block, whose keys vary by provisioning\nhistory."
+      },
       "ScoringDistributionRow": {
         "properties": {
           "hour": {
@@ -37269,6 +40918,232 @@
         "type": "object",
         "title": "ScoringEnforceStatusCodeBody",
         "description": "Body for ``PUT /scoring/enforce-status-code``.\n\nHTTP code returned by the enforce snippet when the scorer flags a\nrequest. ``None`` resets to the default 429."
+      },
+      "ScoringEnforceStatusCodePutResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "effective_status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Status Code"
+          },
+          "is_default": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Default"
+          },
+          "logging_service_active_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logging Service Active Version"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringEnforceStatusCodePutResponse"
+      },
+      "ScoringEnforceStatusCodeState": {
+        "properties": {
+          "current": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default"
+          },
+          "effective": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective"
+          },
+          "min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min"
+          },
+          "max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max"
+          },
+          "is_default": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Default"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringEnforceStatusCodeState"
+      },
+      "ScoringEnforceThresholdPutResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold"
+          },
+          "enforced": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enforced"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringEnforceThresholdPutResponse"
+      },
+      "ScoringEnforceThresholdResponse": {
+        "properties": {
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold"
+          },
+          "enforced": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enforced"
+          },
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringEnforceThresholdResponse"
       },
       "ScoringEvaluationResponse": {
         "properties": {
@@ -37431,6 +41306,187 @@
         "type": "object",
         "title": "ScoringExcludeRegexBody",
         "description": "Body for ``PUT /scoring/exclude-regex`` and ``POST /scoring/exclude-regex/validate``.\n\nEmpty string resets to the bundled default regex."
+      },
+      "ScoringExcludeRegexPutResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "effective_regex": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Regex"
+          },
+          "is_default": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Default"
+          },
+          "logging_service_active_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logging Service Active Version"
+          },
+          "lint_warnings": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lint Warnings"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringExcludeRegexPutResponse"
+      },
+      "ScoringExcludeRegexState": {
+        "properties": {
+          "current": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current"
+          },
+          "is_default": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Default"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default"
+          },
+          "effective": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringExcludeRegexState"
+      },
+      "ScoringExcludeRegexValidateResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "lint_warnings": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lint Warnings"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringExcludeRegexValidateResponse"
       },
       "ScoringHealthResponse": {
         "properties": {
@@ -37619,6 +41675,197 @@
         "type": "object",
         "title": "ScoringL2EnforceBody",
         "description": "Body for ``PUT /scoring/l2-enforce``.\n\n``enabled`` is the operator's explicit opt-in: ``True`` makes edge Layer-2\njoin the *enforced* combined score (fading in over a few days from the moment\nof consent); ``False`` keeps L2 observe-only. Default ``False`` so an empty\nbody is a no-op-toward-off rather than an accidental enable."
+      },
+      "ScoringL2EnforcePutResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "l2_enabled_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "L2 Enabled At"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringL2EnforcePutResponse"
+      },
+      "ScoringL2EnforceState": {
+        "properties": {
+          "available": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Available"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "l2_enabled_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "L2 Enabled At"
+          },
+          "days_since_optin": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days Since Optin"
+          },
+          "ramp_progress": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ramp Progress"
+          },
+          "fully_ramped": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fully Ramped"
+          },
+          "warmup_days_remaining": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warmup Days Remaining"
+          },
+          "scoring_enabled_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scoring Enabled At"
+          },
+          "deployment_age_days": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment Age Days"
+          },
+          "ready": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ready"
+          },
+          "ramp_days": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ramp Days"
+          },
+          "readiness_days": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Readiness Days"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringL2EnforceState",
+        "description": "Shape from _build_l2_enforce_block / _l2_enforce_unavailable \u2014\nalso nested as ``l2_enforce`` in ScoringHealthResponse (left ``dict``\nthere for wire-compat; this standalone GET carries the real schema)."
       },
       "ScoringLabelCreate": {
         "properties": {
@@ -38068,6 +42315,68 @@
         "type": "object",
         "title": "ScoringLatencyTimeseriesResponse"
       },
+      "ScoringMatrixRestoreResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "restored_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Restored Version"
+          },
+          "restored_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Restored At"
+          },
+          "matrix_kv_written": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matrix Kv Written"
+          },
+          "deploy_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deploy Hint"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringMatrixRestoreResponse"
+      },
       "ScoringMatrixStaleness": {
         "properties": {
           "l2_evaluated": {
@@ -38130,6 +42439,251 @@
         "type": "object",
         "title": "ScoringMatrixStaleness"
       },
+      "ScoringMatrixVersion": {
+        "properties": {
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "last_modified": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Modified"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringMatrixVersion"
+      },
+      "ScoringMatrixVersionsResponse": {
+        "properties": {
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/ScoringMatrixVersion"
+            },
+            "type": "array",
+            "title": "Versions",
+            "default": []
+          },
+          "current_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringMatrixVersionsResponse"
+      },
+      "ScoringPerReasonBucket": {
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "n_good": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Good"
+          },
+          "n_bad": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Bad"
+          },
+          "min_per_class": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Per Class"
+          },
+          "has_min_samples": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Has Min Samples"
+          },
+          "auc": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auc"
+          },
+          "passed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passed"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringPerReasonBucket"
+      },
+      "ScoringPerReasonResponse": {
+        "properties": {
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/ScoringPerReasonBucket"
+            },
+            "type": "array",
+            "title": "Buckets",
+            "default": []
+          },
+          "min_per_class": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Per Class"
+          },
+          "known_reasons": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Known Reasons"
+          },
+          "has_min_samples_overall": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Has Min Samples Overall"
+          },
+          "n_good": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Good"
+          },
+          "n_bad": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Bad"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringPerReasonResponse"
+      },
       "ScoringReasonCount": {
         "properties": {
           "reason": {
@@ -38159,6 +42713,256 @@
         "type": "object",
         "title": "ScoringReasonCount"
       },
+      "ScoringRetrainRejected": {
+        "properties": {
+          "too_few_events": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Too Few Events"
+          },
+          "too_fast": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Too Fast"
+          },
+          "kept": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kept"
+          },
+          "routes_seen": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routes Seen"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringRetrainRejected"
+      },
+      "ScoringRetrainResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "matrix_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matrix Version"
+          },
+          "since_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since Days"
+          },
+          "sessions_trained_on": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessions Trained On"
+          },
+          "transitions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transitions"
+          },
+          "vocab_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vocab Size"
+          },
+          "rejected": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringRetrainRejected"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "auc_against_labels": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringAucAgainstLabels"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "default_min_auc": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Min Auc"
+          },
+          "local_matrix_saved": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Matrix Saved"
+          },
+          "fos_matrix_published": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fos Matrix Published"
+          },
+          "matrix_kv_written": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matrix Kv Written"
+          },
+          "deploy_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deploy Hint"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringRetrainResponse"
+      },
+      "ScoringRotateKeyResponse": {
+        "properties": {
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "rotated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rotated At"
+          },
+          "previous_key_grace": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Key Grace"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringRotateKeyResponse"
+      },
       "ScoringScoreDistributionResponse": {
         "properties": {
           "rows": {
@@ -38184,6 +42988,149 @@
         "additionalProperties": true,
         "type": "object",
         "title": "ScoringScoreDistributionResponse"
+      },
+      "ScoringSessionEvent": {
+        "properties": {
+          "ts": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "ip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ip"
+          },
+          "ua": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ua"
+          },
+          "edge_score": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge Score"
+          },
+          "edge_cookie_compliance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge Cookie Compliance"
+          },
+          "edge_score_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge Score Reason"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringSessionEvent"
+      },
+      "ScoringSessionEventsResponse": {
+        "properties": {
+          "sid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sid"
+          },
+          "since_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since Days"
+          },
+          "event_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Count"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/ScoringSessionEvent"
+            },
+            "type": "array",
+            "title": "Events",
+            "default": []
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringSessionEventsResponse"
       },
       "ScoringThresholdBody": {
         "properties": {
@@ -38335,6 +43282,47 @@
         "additionalProperties": true,
         "type": "object",
         "title": "ScoringThresholdPreviewResponse"
+      },
+      "ScoringThresholdState": {
+        "properties": {
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold"
+          },
+          "set_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Set At"
+          },
+          "enforced": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enforced"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringThresholdState",
+        "description": "GET and PUT /scoring/threshold both return this exact shape."
       },
       "ScoringTokenBody": {
         "properties": {
@@ -38619,6 +43607,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -38754,6 +43750,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -39204,6 +44208,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -39495,6 +44507,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -39630,6 +44650,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -39739,6 +44767,57 @@
         "type": "object",
         "title": "ShareAcknowledgeResponse"
       },
+      "ShareAuditLogsResponse": {
+        "properties": {
+          "audit_logs": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audit Logs"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ShareAuditLogsResponse"
+      },
+      "ShareBannerResponse": {
+        "properties": {
+          "sharing_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sharing Active"
+          },
+          "public_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Public Url"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ShareBannerResponse"
+      },
       "ShareClaimResponse": {
         "properties": {
           "ok": {
@@ -39815,6 +44894,71 @@
           "last_active"
         ],
         "title": "ShareHeartbeatResponse"
+      },
+      "ShareLiveResponse": {
+        "properties": {
+          "sharing_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sharing Active"
+          },
+          "public_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Public Url"
+          },
+          "active_session_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Session Count"
+          },
+          "rate_limits": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate Limits"
+          },
+          "telemetry": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Telemetry"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ShareLiveResponse",
+        "description": "``build_share_live_payload()`` \u2014 the lean 10-s poll subset."
       },
       "ShareLoginPayload": {
         "properties": {
@@ -39897,6 +45041,71 @@
         "type": "object",
         "title": "ShareLogoutResponse"
       },
+      "SharePanicResponse": {
+        "properties": {
+          "sessions_booted": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessions Booted"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "SharePanicResponse"
+      },
+      "ShareServiceEntry": {
+        "properties": {
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ShareServiceEntry"
+      },
+      "ShareSettingsResponse": {
+        "properties": {
+          "max_concurrent_analyst_sessions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Concurrent Analyst Sessions"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ShareSettingsResponse"
+      },
       "ShareStartPayload": {
         "properties": {
           "public_endpoint": {
@@ -39919,6 +45128,205 @@
         "type": "object",
         "title": "ShareStartPayload",
         "description": "Body for ``POST /api/share-admin/start`` \u2014 start the analyst-facing\ntunnel on an optional public endpoint, forwarding to ``forward_port``."
+      },
+      "ShareStartResponse": {
+        "properties": {
+          "public_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Public Url"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ShareStartResponse"
+      },
+      "ShareStatusResponse": {
+        "properties": {
+          "sharing_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sharing Active"
+          },
+          "public_endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Public Endpoint"
+          },
+          "public_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Public Url"
+          },
+          "forward_port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Forward Port"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "max_concurrent_sessions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Concurrent Sessions"
+          },
+          "active_session_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Session Count"
+          },
+          "services": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ShareServiceEntry"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Services"
+          },
+          "invites": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/InviteRecord"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invites"
+          },
+          "sessions": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessions"
+          },
+          "audit_logs": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audit Logs"
+          },
+          "rate_limits": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate Limits"
+          },
+          "telemetry": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Telemetry"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ShareStatusResponse",
+        "description": "``build_share_status()``. The high-churn nested collections\n(sessions / audit_logs / rate_limits / telemetry) stay free dicts:\ntheir shapes are owned by TunnelManager internals and consumed\ngenerically."
+      },
+      "SharingPolicyPayload": {
+        "properties": {
+          "allow_concurrent_sessions": {
+            "type": "boolean",
+            "title": "Allow Concurrent Sessions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "allow_concurrent_sessions"
+        ],
+        "title": "SharingPolicyPayload",
+        "description": "Body for ``PATCH /api/share-admin/invites/{id}/sharing`` \u2014 toggle\nwhether the invite allows shared (concurrent) analyst logins."
       },
       "ShieldingAnalysis": {
         "properties": {
@@ -40164,6 +45572,57 @@
         "title": "ShieldingRow",
         "description": "One edge\u2192shield POP pair in the transit map / analysis table.\n\nEvery field is populated by ``origin._enrich_with_distance`` on the\nhappy path (coords resolve to None when a POP is absent from the\npop-location map, but the keys are always present)."
       },
+      "SlowQueriesCountResponse": {
+        "properties": {
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "since_hours": {
+            "type": "integer",
+            "title": "Since Hours"
+          },
+          "threshold_ms": {
+            "type": "number",
+            "title": "Threshold Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "count",
+          "since_hours",
+          "threshold_ms"
+        ],
+        "title": "SlowQueriesCountResponse",
+        "description": "Aggregate row-count for the operations-overview card."
+      },
+      "SlowQueriesResponse": {
+        "properties": {
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/CompletedQueryRow"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "since_hours": {
+            "type": "integer",
+            "title": "Since Hours"
+          },
+          "threshold_ms": {
+            "type": "number",
+            "title": "Threshold Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rows",
+          "since_hours",
+          "threshold_ms"
+        ],
+        "title": "SlowQueriesResponse",
+        "description": "Persisted slow-SQL history (``GET /api/admin/slow-queries``)."
+      },
       "SnapshotResponse": {
         "properties": {
           "last_seq": {
@@ -40172,16 +45631,14 @@
           },
           "active": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/ActiveQueryRow"
             },
             "type": "array",
             "title": "Active"
           },
           "completed": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CompletedQueryRow"
             },
             "type": "array",
             "title": "Completed"
@@ -40447,6 +45904,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -40552,6 +46017,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -40761,6 +46234,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -40826,6 +46307,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -40929,6 +46418,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -41199,6 +46696,14 @@
             "type": "array",
             "title": "Debug Calls"
           },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -41245,6 +46750,120 @@
           "aggregate"
         ],
         "title": "UsageLogResponse"
+      },
+      "UsageLoggingConfigResponse": {
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "retention_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retention Days"
+          },
+          "class_a_rate_per_1k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Class A Rate Per 1K"
+          },
+          "class_b_rate_per_10k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Class B Rate Per 10K"
+          },
+          "cdn_egress_rate_per_gb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cdn Egress Rate Per Gb"
+          },
+          "storage_rate_per_gb_month": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Rate Per Gb Month"
+          },
+          "min_billed_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Billed Days"
+          },
+          "track_duckdb_httpfs": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Track Duckdb Httpfs"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "UsageLoggingConfigResponse",
+        "description": "Merged global usage-logging config (``_USAGE_LOGGING_DEFAULTS`` +\nstored overrides). GET and PATCH both return this shape. The two\nday-count fields are ``int | float`` because the defaults are ints but\na PATCH body stores floats \u2014 smart-union keeps whichever arrives."
       },
       "UsageLoggingUpdateBody": {
         "properties": {
@@ -41368,6 +46987,14 @@
             },
             "type": "array",
             "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
           },
           "_is_cached": {
             "type": "boolean",
@@ -41589,6 +47216,25 @@
         ],
         "title": "VclLintResponse"
       },
+      "ViewSaveResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "status"
+        ],
+        "title": "ViewSaveResponse",
+        "description": "Ack from ``POST /api/views/`` \u2014 id of the created row."
+      },
       "WebVitalsPayload": {
         "properties": {
           "id": {
@@ -41666,6 +47312,24 @@
         ],
         "title": "WebVitalsPayload",
         "description": "Mirrors the web-vitals SDK metric shape (v5 API).\n\nField names match the JS Metric object so the frontend can pass it\nthrough without reshape. ``rating`` is computed by the SDK against\nGoogle's good/needs-improvement/poor thresholds."
+      },
+      "WordphraseResponse": {
+        "properties": {
+          "passcode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passcode"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "WordphraseResponse"
       },
       "_ToggleBody": {
         "properties": {

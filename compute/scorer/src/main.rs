@@ -21,9 +21,10 @@ mod normalize;
 mod scorer;
 
 use fastly::{ConfigStore, Error, Request, Response};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 // Lightweight in-process counters. Emitted via dbg_log every
 // METRICS_EMIT_EVERY requests so the operator can grep `metrics:` in
@@ -687,7 +688,8 @@ fn extract_cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a st
 /// treats the value as not-replay (eviction is a documented residual risk —
 /// it can only MISS a replay, never manufacture a false positive).
 fn is_sustained_replay(cookie_value: &str, now_secs: u32) -> bool {
-    let mut hasher = DefaultHasher::new();
+    static REPLAY_HASHER: OnceLock<RandomState> = OnceLock::new();
+    let mut hasher = REPLAY_HASHER.get_or_init(RandomState::new).build_hasher();
     cookie_value.hash(&mut hasher);
     let h = hasher.finish();
     let h = if h == 0 { 1 } else { h }; // 0 marks an empty slot

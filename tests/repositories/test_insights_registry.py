@@ -1,4 +1,41 @@
-from backend.repositories.insights.registry import registry
+from backend.repositories.insights.registry import InsightCategory, registry
+
+
+def test_every_insight_has_valid_category():
+    """Drift guard: every registered insight declares a category in the
+    known enum. ``InsightDefinition.category`` is a required, enum-typed
+    field, so a forgotten/invalid category already fails at import — this
+    test documents the valid set and pins the invariant explicitly (design
+    plan §6). A new insight added without a category can't reach this test."""
+    valid = {c.value for c in InsightCategory}
+    for d in registry.get_all():
+        assert str(d.category) in valid, f"{d.id} has bad category {d.category!r}"
+
+
+def test_availability_catalog_categories_match_registry():
+    """The runtime registry (definitions.py) and the legacy availability
+    catalog (``INSIGHT_DEFINITIONS`` in _log_fields_data.py) are SEPARATE
+    subsystems with no data flow — category is set in both independently.
+    For every id they share, the category MUST agree so the loaded cards
+    and the loading skeletons group into the same sections. Legacy-only
+    stubs (not computed by the registry) are exempt."""
+    from backend.core.field_registry import INSIGHT_DEFINITIONS
+
+    reg = {d.id: str(d.category) for d in registry.get_all()}
+    legacy = {d["id"]: d.get("category") for d in INSIGHT_DEFINITIONS}
+
+    # Every computed insight must be represented in the availability catalog
+    # (18-vs-30 drift resolution — design plan §5.1 step 5).
+    missing = sorted(set(reg) - set(legacy))
+    assert not missing, f"computed insights missing from availability catalog: {missing}"
+
+    # Every legacy entry (including stubs) must carry a category.
+    no_cat = sorted(i for i, c in legacy.items() if not c)
+    assert not no_cat, f"availability catalog entries without a category: {no_cat}"
+
+    # Shared ids must agree on category.
+    mismatch = {i: (reg[i], legacy[i]) for i in reg if i in legacy and reg[i] != legacy[i]}
+    assert not mismatch, f"category mismatch between registry and availability catalog: {mismatch}"
 
 
 def test_registry_initialization():

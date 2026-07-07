@@ -18,10 +18,15 @@
 // 30d for mature services and squashed the bars), anchor=quantizeAnchor(now) on the 60s grid,
 // filterPayload={}, sort='p99' (the literal default in both query keys). The
 // performance page has NO bucket element in its keys (the request carries no
-// bucket field). Only divergence is the rare minute-boundary anchor straddle →
-// one client refetch, never a leak/crash.
+// bucket field). anchor also snaps to bootstrap.log_extents when the service's
+// latest log is >15min stale (lib/log-extents-snap.ts — shared with FilterBar's
+// client-side autoSetRange decision), computed ONCE upstream of both section
+// fetches so core/distributions always share the identical anchor. Divergence:
+// the rare minute-boundary straddle, plus a rare 15-minute-staleness-boundary
+// straddle — both self-heal via one client refetch, never a leak/crash.
 
 import { quantizeAnchor } from '@/lib/time-window'
+import { resolveSnappedWindow, narrowLogExtents } from '@/lib/log-extents-snap'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
@@ -48,11 +53,15 @@ export interface PerformanceSsrSeed {
   anchor: string
 }
 
-export function resolvePerformanceDefaultKey(now: Date = new Date()): {
+export function resolvePerformanceDefaultKey(
+  now: Date = new Date(),
+  logExtents?: unknown,
+): {
   rangeToken: string
   anchor: string
 } {
-  return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
+  const snapped = resolveSnappedWindow(narrowLogExtents(logExtents), now)
+  return { rangeToken: '24h', anchor: quantizeAnchor(snapped?.end ?? now.toISOString(), now) }
 }
 
 async function fetchSection(
@@ -88,13 +97,16 @@ async function fetchSection(
  * then degrades to the client-fetch path for both cards (no partial seed, which
  * keeps the failure mode simple: all-or-nothing, identical to a cold load).
  *
- * @param now  Render instant; floored to the anchor quantum. Injectable.
+ * @param now         Render instant; floored to the anchor quantum. Injectable.
+ * @param logExtents  bootstrap.log_extents for serviceId, if available. See
+ *                    resolvePerformanceDefaultKey.
  */
 export async function fetchPerformanceServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
+  logExtents?: unknown,
 ): Promise<PerformanceSsrSeed | null> {
-  const { rangeToken, anchor } = resolvePerformanceDefaultKey(now)
+  const { rangeToken, anchor } = resolvePerformanceDefaultKey(now, logExtents)
 
   if (!serviceId) return null
 

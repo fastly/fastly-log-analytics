@@ -173,11 +173,20 @@ def tombstone_buffer_files(source: dict, paths: list[str], *, ts: int | None = N
        view rebuilds will not bind it. Crucially, any DuckDB view ALREADY
        bound to that path continues to work because the file is still
        readable.
-    2. **Sweep** (``sweep_tombstoned_buffer_files``): after a grace
-       window (default 60 s) elapses, the next commit run unlinks both
-       the parquet and its tombstone sidecar. By then no view should
-       reference the file — typical bind-to-execute windows are
-       milliseconds, and 60 s comfortably exceeds the slowest cold query.
+    2. **Sweep** (``sweep_tombstoned_buffer_files``): after the
+       ``_TOMBSTONE_GRACE_SECONDS`` (300 s) grace window elapses, the
+       next commit run unlinks both the parquet and its tombstone
+       sidecar. By then no view should reference the file — typical
+       bind-to-execute windows are milliseconds, and the grace window
+       comfortably exceeds the slowest cold query.
+
+    Readers that bind at query time must EXCLUDE tombstoned files: their
+    rows already live in the committed hourly partitions, so reading both
+    double-counts (the 2026-07-07 active-hour live-slice bug —
+    ``buffer_files()`` below and ``_create_active_hour_temp_direct`` in
+    ``backend/repositories/_base.py`` both filter via
+    ``_tombstoned_parquet_paths``). The on-disk grace copy exists ONLY
+    for views bound before the commit.
 
     **Why this fixes the 2026-06-05 incident:** the previous code did
     ``os.remove(path)`` inline at commit time. A dashboard query whose
@@ -456,8 +465,9 @@ def commit_buffer(source: dict, progress_callback=None) -> dict:
         into a single in-process pa.Table. At 200+ files this OOM'd the
         commit cron. Chunking caps peak memory at one chunk's worth.
       * **Crash safety** — each chunk that lands becomes a durable
-        snapshot, and its files are deleted from the buffer immediately.
-        If the process dies mid-loop, the next commit cron picks up the
+        snapshot, and its files are tombstoned immediately (unlinked
+        after the grace window — see ``tombstone_buffer_files``). If the
+        process dies mid-loop, the next commit cron picks up the
         un-committed remainder rather than redoing work.
 
     Returns ``{files_committed, rows_committed, snapshot_id, quarantined_files}``.

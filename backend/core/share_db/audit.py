@@ -68,6 +68,38 @@ def get_share_audit_logs(
     return [dict(r) for r in rows]
 
 
+# Audit event types that mean "an analyst successfully signed in" — the two
+# login paths (passcode + OIDC/OAuth). Kept as one tuple so the last-login
+# derivation and any future login-analytics stay in sync.
+_LOGIN_SUCCESS_EVENTS = ("LOGIN_SUCCESS", "LOGIN_SUCCESS_OAUTH")
+
+
+def get_last_login_by_email(*, con: sqlite3.Connection | None = None) -> dict[str, str]:
+    """Per-analyst most-recent successful-login timestamp, keyed by lowercased email.
+
+    Derived from successful-login audit events (``LOGIN_SUCCESS`` +
+    ``LOGIN_SUCCESS_OAUTH``) rather than a dedicated column, so it works
+    retroactively and needs no schema migration. Bounded by the audit
+    retention window (default 90 days) — which is exactly the "who is
+    actually using the app lately" horizon an admin cares about.
+
+    Returns ``{email_lc: last_login_at_iso_z}``. One GROUP BY over the audit
+    table (indexed by timestamp; the table is small). ``timestamp`` is stored as
+    monotonic ``iso_z_now()`` text, so ``MAX`` gives the most recent login
+    without parsing.
+    """
+    con = con or get_global_share_con()
+    placeholders = ",".join("?" * len(_LOGIN_SUCCESS_EVENTS))
+    rows = con.execute(
+        f"""SELECT lower(email) AS email_lc, MAX(timestamp) AS last_login_at
+              FROM remote_share_audit_logs
+             WHERE event_type IN ({placeholders}) AND email IS NOT NULL
+             GROUP BY lower(email)""",
+        _LOGIN_SUCCESS_EVENTS,
+    ).fetchall()
+    return {r["email_lc"]: r["last_login_at"] for r in rows if r["email_lc"]}
+
+
 def purge_old_audit_logs(retention_days: int = 90, *, con: sqlite3.Connection | None = None) -> int:
     """Delete audit rows older than the retention window. Returns row count."""
     con = con or get_global_share_con()

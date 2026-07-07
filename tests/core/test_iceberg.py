@@ -275,6 +275,53 @@ def test_get_iceberg_schema_field_ids_stable():
         assert dyn_field.field_id == base_field.field_id
 
 
+def test_field_order_covers_ingest_storage_fields():
+    """Drift guard: every storage-backed catalog field has a slot in _FIELD_ORDER.
+
+    Regression for the Track-C bug where resp_header_content_encoding /
+    oconnect_ms / cookie_session were added to LOG_FIELD_CATALOG but never
+    appended to the hand-maintained _FIELD_ORDER positional list, so
+    get_iceberg_schema silently omitted them, the DuckDB `logs` view had no such
+    columns, ingest dropped them, and the field-gated insights stayed dark
+    forever — with a green CI. This asserts the two lists can never diverge
+    again in either direction.
+
+    `get_catalog_field_ids(None)` IS the exact predicate ingest uses to select
+    columns it will store (group not in METRICS/VIRTUAL/INTERNAL and vcl set),
+    so keying the guard off it keeps the check in lock-step with the ingest
+    pipeline rather than a hand-copied field list.
+    """
+    from backend.core._log_fields_data import LOG_FIELD_CATALOG
+    from backend.core.iceberg import _core
+    from backend.core.ingest import get_catalog_field_ids
+
+    storage_ids = set(get_catalog_field_ids())  # None config → base storage fields only
+    order_names = set(_core._FIELD_ORDER)
+
+    # (1) Every field ingest stores must have a positional slot — else its
+    # column never materializes in the schema / arrow view / parquet.
+    missing = storage_ids - order_names
+    assert not missing, (
+        f"Storage-backed catalog fields missing from _FIELD_ORDER (won't materialize): {sorted(missing)}"
+    )
+
+    # (2) Every _FIELD_ORDER name must be either a storage field, a reserved
+    # slot, or an INTERNAL catalog field (e.g. _source_file). Anything else is a
+    # typo or a name that will never carry data.
+    internal_ids = {f["id"] for f in LOG_FIELD_CATALOG if f.get("group") == "INTERNAL"}
+    allowed_non_storage = _core._RESERVED_FIELD_SLOTS | internal_ids
+    extra = order_names - storage_ids - allowed_non_storage
+    assert not extra, (
+        f"_FIELD_ORDER has names that are neither storage fields, reserved slots, nor INTERNAL: {sorted(extra)}"
+    )
+
+    # (3) End-to-end: the emitted Arrow schema (what the DuckDB `logs` view is
+    # built from) actually contains every storage field.
+    schema_names = iceberg.get_schema_field_names()
+    unmaterialized = storage_ids - schema_names
+    assert not unmaterialized, f"Storage fields absent from the emitted Arrow/DuckDB schema: {sorted(unmaterialized)}"
+
+
 def _reset_pointer_cache():
     with iceberg._pointer_cache_lock:
         iceberg._pointer_cache.clear()

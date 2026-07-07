@@ -273,18 +273,22 @@ def get_aggregates(
     rollup_dir = os.path.join(_cache_dir_for_rollups(src), "rollups", "hour")
     use_rollups = not filters and os.path.isdir(rollup_dir)
     # Freshness contract on the rollup path: execute_top_n_rollups
-    # (backend/repositories/_base.py:563) is window-correct.
+    # (backend/repositories/_base.py) is window-correct.
     #   - Fully-contained UTC days: served from the per-day compacted rollup.
-    #   - Partial-day boundary days (window cuts through midnight): the
-    #     per-day rollup is SKIPPED (it covers [00:00, +24h) and would
-    #     over-count hours outside the window); the in-window portion of
-    #     such days is live-queried from the base table. Per-hour rollups
-    #     for compacted days have already been deleted, so live is the
-    #     only correct source.
+    #   - Closed hours of uncompacted days: served from hour bundles /
+    #     per-field hour rollups; hours with NO rollup coverage (writer
+    #     gap — e.g. bursty services whose closed hours the per-sync
+    #     recompute never touched) are live-queried by the missing-hour
+    #     heal, capped at _MISSING_HOUR_HEAL_CAP hours.
+    #   - Boundary hours of already-compacted days (window cuts into a
+    #     day whose per-hour files were deleted by day compaction): a
+    #     known, bounded read gap — deliberately NOT live-queried so a
+    #     mid-day window edge doesn't pay a per-request day scan.
     #   - Active hour: live-queried, intersected with the window.
-    # All three sources are merged before truncation. The narrow live_temp
-    # built below is for OTHER queries (time_series, signal unnests,
-    # conn_requests histogram) that don't go through the rollup path.
+    # All sources are merged before truncation. The rollup path builds NO
+    # per-request temp: the remaining non-top-N sections are rollup-served
+    # too (time_series / conn_requests histogram / signal unnests), and
+    # each one's rollup-miss fallback queries the base table directly.
 
     # `temp_table` ends up holding the per-request materialization (if
     # any) so the `finally` cleanup at the bottom of the function can
@@ -292,113 +296,36 @@ def get_aggregates(
     temp_table: str | None = None
     # Stash the originals so fallback paths (e.g. the runtime CSV
     # explode for virtual fields when the rollup is missing rows) can
-    # query the base table directly even after live_temp creation has
-    # rewritten table_name/where_clause/params to point at the temp.
+    # query the base table directly even on the non-rollup path, where
+    # the wide temp rewrites table_name/where_clause/params.
     orig_table_name = _safe_table(source_name)
     orig_where_clause = where_clause
     orig_params = list(params) if params is not None else []
 
-    # The per-request materialization (live-hour temp on the rollup path,
-    # or the wide filtered temp on the non-rollup path) is factored into a
-    # closure so the view-lag self-heal can rebuild it a second time after
-    # forcing a fresh view. It returns the (table_name, where_clause,
-    # params, temp_table) the downstream queries read from, or None when
-    # the wide temp build fails (the caller returns the empty shape).
+    # The per-request materialization (wide filtered temp, non-rollup path
+    # only — the rollup path builds no temp) is factored into a closure so
+    # the view-lag self-heal can rebuild it a second time after forcing a
+    # fresh view. It returns the (table_name, where_clause, params,
+    # temp_table) the downstream queries read from, or None when the wide
+    # temp build fails (the caller returns the empty shape).
     def _build_query_target() -> tuple[str, str, list, str | None] | None:
         _table_name = _safe_table(source_name)
         _where = orig_where_clause
         _params = list(orig_params)
-        _temp: str | None = None
-        # Skip the live_temp build on the rollup path when no consumer of
-        # the temp would actually fire. /charts already passes all three
-        # include_X flags false, so its rollup-path requests pay the
-        # 300-1000 ms live_temp_create for nothing — total_rows can be
-        # served by a single count against the base table directly.
-        _live_temp_has_consumer = (
-            include_conn_requests  # CONN_REQUESTS_BUCKET reads the temp
-            or include_time_series  # time_series raw fallback reads the temp
-        )
-        if use_rollups and not _live_temp_has_consumer:
-            # No-temp path: keep table_name/where_clause/params pointed at
-            # the base table. ``total_rows`` below runs as a single count
-            # against the base table — same row count, no narrow-projection
-            # materialisation cost.
-            return _table_name, _where, _params, _temp
         if use_rollups:
-            # Plan item 14 — live-hour TEMP TABLE on the rollup path.
-            # Without this, the rollup branch fires FOUR separate parquet
-            # scans for the window-scan sub-queries that the rollups don't
-            # cover: total_rows COUNT, the two signal-unnest queries
-            # (waf_sig + edge_score_reason), conn_requests bucket, and the
-            # time_series chart. Each is independent on the base table.
-            # Materializing the filtered window once amortizes the parquet
-            # scan + manifest read across all of them. `execute_top_n_rollups`
-            # below reads from disk directly and is unaffected.
-            #
-            # NARROW projection: only the columns the temp consumers
-            # actually use. The unconditional base set covers:
-            #   - conn_requests       → conn_requests bucket
-            #   - timestamp           → time_series raw fallback
-            #
-            # Previously the set also included country (for the map_data
-            # fallback), waf_sig (for waf_sig_ind_explode), and
-            # edge_score_reason (for edge_score_reason_ind_explode). The
-            # use_rollups path no longer needs ANY of them: map_data is
-            # derived from all_top_res (per_field_limits country=500), and
-            # the virtual-field rollup serves waf_sig_ind /
-            # edge_score_reason_ind on the hot path. Misses fall back to
-            # base-table scans inside _exploded_top_n.
-            #
-            # The time_series chart usually serves from the per-hour rollup
-            # (F1 — try_time_series_from_rollup), so the chart-metric
-            # helper columns (cache/elapsed/status/resp_bytes/...) are
-            # almost never needed in the temp. We add ONLY the helper(s)
-            # for the SPECIFIC chart_metric being requested — that way the
-            # rare rollup-returns-None fallback still runs against the
-            # temp, but the typical (chart_metric=requests) case keeps the
-            # temp at 2 columns instead of 13.
-            narrow_col_set: list[str] = [
-                "conn_requests",
-                "timestamp",
-            ]
-            # chart_metric → columns the raw time_series fallback would
-            # touch if the rollup returns None. Default ('requests') only
-            # needs timestamp which is already included above.
-            if chart_metric in ("5xx", "4xx"):
-                narrow_col_set.append("status")
-            elif chart_metric == "hit_rate":
-                # `cache` is primary; `resp_state` is the fallback when cache
-                # is missing from the service schema.
-                narrow_col_set.extend(["cache", "resp_state"])
-            elif chart_metric.endswith("_latency"):
-                narrow_col_set.append("elapsed")
-            elif chart_metric == "throughput":
-                narrow_col_set.extend(["cache", "elapsed", "resp_bytes"])
-            elif chart_metric == "req_size":
-                narrow_col_set.extend(["req_header_bytes", "req_bytes"])
-            elif chart_metric == "ttfb":
-                narrow_col_set.append("ttfb")
-            # Dedupe while preserving order; filter to columns the service
-            # actually has.
-            seen: set[str] = set()
-            narrow: list[str] = []
-            for c in narrow_col_set:
-                if c in seen or c not in actual_cols:
-                    continue
-                seen.add(c)
-                narrow.append(f'"{c}"')
-            narrow_cols_str = ", ".join(narrow) if narrow else "*"
-            live_temp = f"t_live_hour_{uuid.uuid4().hex}"
-            sql = (
-                f"CREATE TEMP TABLE {live_temp} AS "
-                f"SELECT {narrow_cols_str} FROM {_table_name} WHERE {orig_where_clause}"
-            )
-            if timer.call("live_temp_create", lambda: runner.create_temp_table(sql, _params)):
-                return live_temp, "1=1", [], live_temp
-            # If the live-hour TEMP TABLE creation fails (e.g. stale view),
-            # fall back transparently to per-query base-table scans. Slower
-            # but functionally correct.
-            return _table_name, _where, _params, _temp
+            # Rollup path: NO per-request materialization. Every window-scan
+            # section is rollup-served — top-N/map via execute_top_n_rollups,
+            # the chart via try_time_series_from_rollup, the conn_requests
+            # histogram via try_conn_requests_hist_from_rollup, the signal
+            # unnests via the virtual-field rollups — and each section's
+            # rollup-miss fallback runs its ONE query against the base table
+            # directly. With at most one consumer per scan there is nothing
+            # for a shared temp to amortize: the 2026-07-06 trace measured
+            # the old eager narrow temp at 391ms for ~12ms of temp reads
+            # (its chart consumer had been served by the rollup). total_rows
+            # runs as a single COUNT against the base table — the shape the
+            # /charts include-nothing path always used.
+            return _table_name, _where, _params, None
         # Non-rollup path. Use TEMP TABLE instead of TEMP VIEW to
         # materialize the filtered results in memory. This prevents DuckDB
         # from re-scanning the underlying files for every branch of the
@@ -432,6 +359,12 @@ def get_aggregates(
     # the guarded block after get_source_extent below.
     _self_heal_attempted = False
 
+    if use_rollups:
+        # Share ONE direct active-hour temp across this request's three
+        # live-slice consumers (top-N merge, conn_requests top-up, chart
+        # slice) — each would otherwise re-open every buffer + active-hour
+        # parquet. Dropped in the finally below.
+        runner.begin_shared_active_hour_temps()
     try:
         field_totals: dict[str, int] = {}
         total_rows = 0
@@ -737,19 +670,36 @@ def get_aggregates(
 
         # Special handling for conn_requests (bucketed histogram).
         # Skipped entirely when the caller (e.g. /charts) doesn't render it.
+        # Rollup fast path: served from the security_conn_reuse per-hour/
+        # per-day parquets (same backing column + bucket edges as this
+        # panel — see try_conn_requests_hist_from_rollup) + a live active-
+        # hour top-up. Falls back to the raw bucket scan on any miss; on
+        # the rollup path table_name is the BASE table, so the fallback
+        # needs the real where_clause + params (not the temp's "1=1").
         t_conn_req_0 = time.perf_counter()
         if include_conn_requests and "conn_requests" in actual_cols:
-            q = SQL.CONN_REQUESTS_BUCKET.format(
-                requests_metric=CANONICAL_METRICS["requests"],
-                table_name=table_name,
-                where_clause=where_clause,
-            )
-            res = runner.execute(q).fetchall()
-            total_conn = sum(r[1] for r in res)
-            results["conn_requests"] = {
-                "top": [{"value": r[0], "count": r[1]} for r in res],
-                "total": total_conn,
-            }
+            hist = None
+            if use_rollups:
+                hist = runner.try_conn_requests_hist_from_rollup(
+                    start_time,
+                    end_time,
+                    has_filters=bool(filters),
+                    actual_cols=actual_cols,
+                )
+            if hist is not None:
+                results["conn_requests"] = hist
+            else:
+                q = SQL.CONN_REQUESTS_BUCKET.format(
+                    requests_metric=CANONICAL_METRICS["requests"],
+                    table_name=table_name,
+                    where_clause=where_clause,
+                )
+                res = runner.execute(q, params).fetchall()
+                total_conn = sum(r[1] for r in res)
+                results["conn_requests"] = {
+                    "top": [{"value": r[0], "count": r[1]} for r in res],
+                    "total": total_conn,
+                }
         else:
             results["conn_requests"] = {"top": [], "total": 0}
         section_timings.append(
@@ -789,6 +739,10 @@ def get_aggregates(
                     table_name=table_name,
                     where_clause=where_clause,
                     params=params,
+                    # This branch is inside `if use_rollups` (no row filters),
+                    # which is what licenses the reader's direct active-hour
+                    # read to substitute its own timestamp clamp.
+                    unfiltered_window=True,
                 )
                 section_timings.append(
                     {
@@ -964,9 +918,11 @@ def get_aggregates(
         return payload
 
     finally:
-        # Covers both the non-rollup TEMP TABLE and the rollup-path
-        # live-hour TEMP TABLE (item 14). When TEMP TABLE creation
-        # failed and `temp_table` is None, this is a no-op.
+        # Rollup path: drop the request-scoped shared active-hour temps
+        # (no-op when the scope was never enabled — filters present).
+        runner.end_shared_active_hour_temps()
+        # Non-rollup path: drop the wide filtered TEMP TABLE. When TEMP
+        # TABLE creation failed and `temp_table` is None, this is a no-op.
         if temp_table is not None:
             try:
                 con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')

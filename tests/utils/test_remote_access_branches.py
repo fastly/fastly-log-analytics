@@ -295,6 +295,7 @@ def test_strip_envelope_removes_debug_keys():
         "data": [1],
         "_debug_queries": ["SELECT 1"],
         "_debug_calls": [{"url": "https://api.fastly.com/foo"}],
+        "_debug_sqlite": [{"seq": 1, "sql": "SELECT session_id FROM scoring_labels"}],
         "_is_cached": True,
     }
     resp = _make_streaming(json.dumps(payload).encode(), content_type="application/json")
@@ -302,6 +303,7 @@ def test_strip_envelope_removes_debug_keys():
     parsed = json.loads(out.body)
     assert "_debug_queries" not in parsed
     assert "_debug_calls" not in parsed
+    assert "_debug_sqlite" not in parsed
     assert "_is_cached" not in parsed
     assert parsed["data"] == [1]
     assert out.headers["content-length"] == str(len(out.body))
@@ -325,11 +327,13 @@ def test_strip_envelope_removes_bare_debug_queries():
         "columns": ["x"],
         "data": [{"x": 1}],
         "debug_queries": [{"sql": "-- DuckDB Iceberg View Resolution\nCREATE VIEW logs ..."}],
+        "debug_sqlite": [{"seq": 1, "sql": "SELECT * FROM cron_runs"}],
     }
     resp = _make_streaming(json.dumps(payload).encode(), content_type="application/json")
     out = asyncio.run(_strip_analyst_envelope(resp))
     parsed = json.loads(out.body)
     assert "debug_queries" not in parsed
+    assert "debug_sqlite" not in parsed
     assert parsed["data"] == [{"x": 1}]
 
 
@@ -1537,8 +1541,14 @@ def test_ip_family_set_single_source_of_truth_across_stack():
     from backend.core.share_db import validation
     from backend.utils.remote_access import _PII_FORBIDDEN_FILTER_COLS
 
-    # Backend: filter-lock and response masker reference the same constant.
-    assert _PII_FORBIDDEN_FILTER_COLS is validation.IP_FAMILY_KEYS
+    # Backend: the filter-lock is the UNION of the PII families the response
+    # masker redacts — the IP family (masked via mask_ip) and the session-id
+    # family (cookie_session, redacted wholesale, Phase-4 Track C). Both come
+    # from validation.py so the filter-lock and the response masker can't drift
+    # (mask-in-response but filter-allowed, or vice-versa).
+    assert _PII_FORBIDDEN_FILTER_COLS == validation.IP_FAMILY_KEYS | validation.SESSION_ID_KEYS
+    assert validation.IP_FAMILY_KEYS <= _PII_FORBIDDEN_FILTER_COLS
+    assert validation.SESSION_ID_KEYS <= _PII_FORBIDDEN_FILTER_COLS
 
     # Frontend: parse the actual IP_FAMILY_FIELDS literal from lib/pii.ts.
     repo_root = Path(__file__).resolve().parents[2]

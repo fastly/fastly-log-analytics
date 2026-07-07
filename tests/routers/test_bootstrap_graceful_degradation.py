@@ -1,8 +1,8 @@
 """Graceful degradation guarantees for /api/bootstrap.
 
 Audit finding: ``backend/routers/bootstrap.py`` resolves ~10 optional
-sub-payloads (share_banner, ops_overview, cron_schedule, cron_runs_first_page,
-last_sync, scoring_labels, share_status, views, ...) inside dedicated
+sub-payloads (share_banner, ops_overview, cron_runs_first_page,
+last_sync, scoring_labels, views, ...) inside dedicated
 ``try/except Exception`` blocks. Sub-call failures are non-essential UX and
 MUST NOT propagate into a 500 on the bootstrap endpoint — the frontend's
 blocking startup call. If any block regresses (e.g. a refactor lifts a
@@ -67,17 +67,6 @@ def test_bootstrap_survives_ops_overview_slow_query_count_failure(client, tmp_pa
     assert "slow_queries_count" not in ov
 
 
-def test_bootstrap_survives_cron_schedule_failure(client, tmp_path, monkeypatch):
-    """build_cron_schedule_payload raising → cron_schedule=None."""
-    _seed_active_service(monkeypatch, tmp_path)
-    with patch("backend.cron.schedule.build_cron_schedule_payload", side_effect=RuntimeError("cron hiccup")):
-        response = _get(client)
-    assert response.status_code == 200
-    data = response.json()
-    assert data.get("cron_schedule") is None
-    assert data["active_service_id"] == MOCK_SERVICE_ID
-
-
 def test_bootstrap_survives_cron_runs_first_page_failure(client, tmp_path, monkeypatch):
     """get_cron_runs raising → cron_runs_first_page=None."""
     _seed_active_service(monkeypatch, tmp_path)
@@ -107,17 +96,6 @@ def test_bootstrap_survives_scoring_labels_failure(client, tmp_path, monkeypatch
     assert response.json().get("scoring_labels") is None
 
 
-def test_bootstrap_survives_share_status_failure(client, tmp_path, monkeypatch):
-    """build_share_status raising → share_status=None (share dashboard nicety)."""
-    _seed_active_service(monkeypatch, tmp_path)
-    with patch("backend.routers.share_admin.build_share_status", side_effect=RuntimeError("share admin broken")):
-        response = _get(client)
-    assert response.status_code == 200
-    data = response.json()
-    assert data.get("share_status") is None
-    assert "services" in data
-
-
 def test_bootstrap_survives_simultaneous_optional_failures(client, tmp_path, monkeypatch):
     """Worst case — every optional resolver dies. Bootstrap must still
     return 200 with the core fields populated. Pins the per-block
@@ -129,11 +107,9 @@ def test_bootstrap_survives_simultaneous_optional_failures(client, tmp_path, mon
 
     with (
         patch("backend.utils.tunnel.get_tunnel_manager", side_effect=RuntimeError("boom")),
-        patch("backend.cron.schedule.build_cron_schedule_payload", side_effect=RuntimeError("boom")),
         patch("backend.core.metadata.cron_log.get_cron_runs", side_effect=RuntimeError("boom")),
         patch("backend.core.metadata.cron_log.latest_cron_per_task", side_effect=RuntimeError("boom")),
         patch("backend.scoring.labels.list_labels", side_effect=RuntimeError("boom")),
-        patch("backend.routers.share_admin.build_share_status", side_effect=RuntimeError("boom")),
     ):
         response = _get(client)
 
@@ -143,11 +119,9 @@ def test_bootstrap_survives_simultaneous_optional_failures(client, tmp_path, mon
     data = response.json()
     # Every optional field at its documented default
     assert data.get("share_banner") is None
-    assert data.get("cron_schedule") is None
     assert data.get("cron_runs_first_page") is None
     assert data.get("last_sync") is None
     assert data.get("scoring_labels") is None
-    assert data.get("share_status") is None
     assert data["views"] == []
     # Core (non-optional) fields still populated
     assert data["active_service_id"] == MOCK_SERVICE_ID

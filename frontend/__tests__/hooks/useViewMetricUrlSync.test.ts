@@ -5,7 +5,7 @@
  * absolute ?start_time/?end_time, and ?range= is handled synchronously
  * in lib/urlFilterHydration.ts (covered by urlFilterHydration.test.ts).
  *
- * useUrlFilterSync now only handles the two cases that can't run
+ * useViewMetricUrlSync now only handles the two cases that can't run
  * pre-render: async ?view=<id> loading and ?metric=<val>. The legacy
  * tests for filter_/start_time/end_time hydration moved with the code.
  */
@@ -41,7 +41,7 @@ vi.mock('@/stores/filterStore', () => ({
   ),
 }))
 
-// useUrlFilterSync calls useQueryClient() to read the bootstrap-seeded
+// useViewMetricUrlSync calls useQueryClient() to read the bootstrap-seeded
 // views cache as a fast path before falling back to client.GET. The hook
 // no longer needs a real QueryClientProvider in tests — we just stub the
 // hook to return a query client with the methods we exercise.
@@ -65,7 +65,7 @@ function setSearch(search: string) {
   window.history.pushState({}, '', search ? `?${search}` : '/')
 }
 
-describe('useUrlFilterSync', () => {
+describe('useViewMetricUrlSync', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     window.history.pushState({}, '', '/')
@@ -76,8 +76,8 @@ describe('useUrlFilterSync', () => {
   })
 
   it('does nothing when there are no URL params', async () => {
-    const { useUrlFilterSync } = await import('@/hooks/useUrlFilterSync')
-    renderHook(() => useUrlFilterSync())
+    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync())
     expect(mockAddFilter).not.toHaveBeenCalled()
     expect(mockSetRange).not.toHaveBeenCalled()
     expect(mockSetMetric).not.toHaveBeenCalled()
@@ -85,15 +85,15 @@ describe('useUrlFilterSync', () => {
 
   it('parses metric param and calls setMetric', async () => {
     setSearch('metric=bandwidth')
-    const { useUrlFilterSync } = await import('@/hooks/useUrlFilterSync')
-    renderHook(() => useUrlFilterSync())
+    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync())
     expect(mockSetMetric).toHaveBeenCalledWith('bandwidth')
   })
 
   it('strips metric param from URL after processing while leaving unrelated params untouched', async () => {
     setSearch('metric=requests&other=keep')
-    const { useUrlFilterSync } = await import('@/hooks/useUrlFilterSync')
-    renderHook(() => useUrlFilterSync())
+    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync())
     const remaining = new URLSearchParams(window.location.search)
     expect(remaining.get('metric')).toBeNull()
     expect(remaining.get('other')).toBe('keep')
@@ -111,8 +111,8 @@ describe('useUrlFilterSync', () => {
       ],
     })
     setSearch('view=view-123')
-    const { useUrlFilterSync } = await import('@/hooks/useUrlFilterSync')
-    renderHook(() => useUrlFilterSync())
+    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync())
     // Give the async loadView a tick to run
     await new Promise(r => setTimeout(r, 0))
     expect(mockClientGet).toHaveBeenCalled()

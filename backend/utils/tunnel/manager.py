@@ -7,7 +7,8 @@ Singleton ``TunnelManager`` owns:
   startup)
 - sliding-window login rate limiter (per client IP)
 - session timeout enforcement (2h idle / 24h absolute)
-- multi-device boot (one active session per invite at a time)
+- multi-device boot (one active session per invite at a time, unless the
+  invite opts into shared logins via ``allow_concurrent_sessions``)
 - direct-mode state persistence so a backend restart re-arms the public
   endpoint automatically
 
@@ -137,20 +138,25 @@ class TunnelManager:
         """
         invite_id = invite["id"]
         with self._lock:
-            # Multi-device boot.
-            booted = [s for s in self._sessions.values() if s.invite_id == invite_id]
-            for prev in booted:
-                self._sessions.pop(prev.session_id, None)
-                try:
-                    share_db.delete_session(prev.session_id)
-                    share_db.log_share_audit_event(
-                        event_type="SESSION_BOOT",
-                        email=prev.email,
-                        ip_address=prev.ip_address,
-                        details="concurrent login booted previous session",
-                    )
-                except Exception:
-                    logger.exception("[tunnel] failed to record SESSION_BOOT for %s", prev.session_id)
+            # Multi-device boot — single-seat invites only. When the invite opts
+            # into shared logins (allow_concurrent_sessions), skip the boot so
+            # several analysts can be active under one invite at once (still
+            # bounded by the global max_concurrent_analyst_sessions cap the
+            # caller enforces).
+            if not invite.get("allow_concurrent_sessions"):
+                booted = [s for s in self._sessions.values() if s.invite_id == invite_id]
+                for prev in booted:
+                    self._sessions.pop(prev.session_id, None)
+                    try:
+                        share_db.delete_session(prev.session_id)
+                        share_db.log_share_audit_event(
+                            event_type="SESSION_BOOT",
+                            email=prev.email,
+                            ip_address=prev.ip_address,
+                            details="concurrent login booted previous session",
+                        )
+                    except Exception:
+                        logger.exception("[tunnel] failed to record SESSION_BOOT for %s", prev.session_id)
 
             now = iso_z_now()
             session = AnalystSession(
@@ -169,6 +175,8 @@ class TunnelManager:
                 last_active_time=now,
                 last_activity=None,
                 service_ids=invite.get("service_ids", []) or [],
+                auth_method=invite.get("auth_method", "passcode"),
+                oauth_provider=invite.get("oauth_provider"),
             )
             self._sessions[session.session_id] = session
             try:
@@ -283,6 +291,11 @@ class TunnelManager:
             if "service_ids" in invite:
                 fresh_service_ids = invite["service_ids"]
                 session.service_ids = list(fresh_service_ids) if fresh_service_ids is not None else []
+            # Auth-method display fields aren't persisted to remote_sessions, so
+            # a session rehydrated after a restart defaults to 'passcode' — re-sync
+            # from the invite here so the Sessions tab is accurate on next request.
+            session.auth_method = invite.get("auth_method", "passcode")
+            session.oauth_provider = invite.get("oauth_provider")
 
             tos = share_db.get_latest_tos()
             session.tos_pending = bool(
@@ -388,9 +401,6 @@ class TunnelManager:
             except Exception:
                 logger.exception("[tunnel] failed to write LOCKOUT audit log")
         return triggered
-
-    def clear_login_failures(self, ip: str) -> None:
-        self._rate_limiter.clear(ip)
 
     # ── Direct-mode share state ───────────────────────────────────────
 

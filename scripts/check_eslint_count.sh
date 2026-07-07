@@ -26,7 +26,7 @@ cd "$REPO_ROOT/frontend"
 # scoped to the production source dirs below (generated types/, __tests__/,
 # e2e/, and build output are out of scope — build output is ignored in
 # eslint.config.mjs). Lower this number whenever a PR drives the count down.
-# Lineage (ratchet down as `as any` / violations are removed): 940 -> 936 -> 932 -> 901 -> 895 -> 889 -> 875 -> 873.
+# Lineage (ratchet down as `as any` / violations are removed): 940 -> 936 -> 932 -> 901 -> 895 -> 889 -> 875 -> 873 -> 866 -> 837 -> 835.
 # The big drops came from typing openapi-fetch responses instead of `any` — UX-17
 # (network/page.tsx), the SRE observability pass (health/scoring fields), and the
 # UX type-drift remediation (sections request bodies, usage/dashboard/alerts reads,
@@ -35,8 +35,20 @@ cd "$REPO_ROOT/frontend"
 # audit display fixes typed shielding_analysis (ShieldingAnalysis/ShieldingRow) end
 # to end, removing `as any` casts in network/page.tsx + ShieldingMap. 875 -> 873:
 # the typed adjustShieldingRows helper (min-requests threshold) replaced ad-hoc
-# row handling without new `any`. Drive toward zero.
-CEILING=873
+# row handling without new `any`. 873 -> 866: the share-dashboard usage/sort work
+# typed ShareStatus.invites/sessions/audit_logs (Invite/ShareSession/AuditLog)
+# instead of `any[]`, net-removing casts across the three share panels. 866 ->
+# 837: Phase-4 Track D insights cleanup — typed InsightsClient availability/data
+# reads against InsightsAvailabilityResponse/InsightsResponse (dropped `as any`),
+# GeoJSON.Feature[] in ImpossibleDistanceModal, and escaped pre-existing JSX
+# entities across the InsightHelpModal section files. 837 ->
+# 835: MetadataStorageCard adopted the typed /api/admin/metadata-storage path
+# (dropped both `as any` casts on the client.GET call). 835 -> 832: the
+# FieldSearchDialog pinned-selected rework replaced its index key and both
+# `v.value as any` casts (FieldTopEntry.value is `unknown` on the wire) with
+# `String(v.value)` / `as string | number`.
+# Drive toward zero.
+CEILING=832
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make

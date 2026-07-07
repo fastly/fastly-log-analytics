@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  *
- * useFilterUrlSync — bidirectional sync between the global filterStore and
+ * useFilterUrlWriteback — bidirectional sync between the global filterStore and
  * the page URL. Pins the gating on isAutoRange: only persist
  * start_time/end_time in the URL when the user has explicitly chosen a
  * range. On fresh load and after Reset the store sits at its auto-range
@@ -10,7 +10,7 @@
  */
 import { renderHook, act } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { useFilterUrlSync } from '@/hooks/useFilterUrlSync'
+import { useFilterUrlWriteback } from '@/hooks/useFilterUrlWriteback'
 import { useFilterStore } from '@/stores/filterStore'
 
 function resetStore() {
@@ -36,9 +36,9 @@ beforeEach(() => {
   resetStore()
 })
 
-describe('useFilterUrlSync', () => {
+describe('useFilterUrlWriteback', () => {
   it('does not write start_time/end_time on fresh load (isAutoRange=true)', () => {
-    renderHook(() => useFilterUrlSync())
+    renderHook(() => useFilterUrlWriteback())
 
     // Force a store mutation so the write effect fires post-hydration.
     act(() => {
@@ -51,7 +51,7 @@ describe('useFilterUrlSync', () => {
   })
 
   it('writes start_time/end_time after user picks a range (isAutoRange=false)', () => {
-    renderHook(() => useFilterUrlSync())
+    renderHook(() => useFilterUrlWriteback())
 
     act(() => {
       useFilterStore.getState().setRange(
@@ -66,7 +66,7 @@ describe('useFilterUrlSync', () => {
   })
 
   it('removes start_time/end_time on Reset (user-picked range → defaults)', () => {
-    renderHook(() => useFilterUrlSync())
+    renderHook(() => useFilterUrlWriteback())
 
     // First: user picks a range — URL gets params.
     act(() => {
@@ -88,7 +88,7 @@ describe('useFilterUrlSync', () => {
   })
 
   it('removes filters from URL when filter list is cleared', () => {
-    renderHook(() => useFilterUrlSync())
+    renderHook(() => useFilterUrlWriteback())
 
     act(() => {
       useFilterStore.getState().addFilter('country', 'US', 'include')

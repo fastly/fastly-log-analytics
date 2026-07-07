@@ -307,6 +307,179 @@ class TestValueShapeMasking:
         assert result["data"][0]["addr"] == "1.2.3.4"
 
 
+class TestSessionIdRedaction:
+    """Phase-4 Track C: ``mask_ips`` redacts session-identifier columns
+    (SESSION_ID_KEYS, e.g. cookie_session) at the DATA SOURCE.
+
+    A session hash has no reliable value shape, so ``mask_ip_values``
+    (value-shape) can't catch it and key-name masking is trivially aliased
+    away (``SELECT cookie_session AS s``). The repo rebinds the log table to a
+    source view that rewrites the column to ``'[redacted]'``, so no projection
+    / alias / string-concat can recover the raw value. Analysts always run
+    with a clamped ``time_filter`` and a real ``src``, so the tests mirror that
+    (the source view fires on the analyst path, not the admin ``src=None`` one).
+    """
+
+    SRC = {"name": "svc"}
+    WINDOW = ("2026-06-17T09:45:00+00:00", "2026-06-17T11:00:00+00:00")
+    HASH = "a1b2c3d4deadbeefcafef00dfeedface"
+
+    def _con(self) -> duckdb.DuckDBPyConnection:
+        con = duckdb.connect(":memory:")
+        con.execute("CREATE TABLE logs_svc (timestamp TIMESTAMPTZ, ip VARCHAR, cookie_session VARCHAR, url VARCHAR)")
+        con.executemany(
+            "INSERT INTO logs_svc VALUES (?, ?, ?, ?)",
+            [
+                ("2026-06-17T10:00:00+00:00", "1.2.3.4", self.HASH, "/a"),
+                ("2026-06-17T10:30:00+00:00", "5.6.7.8", "", "/b"),  # empty session stays empty
+            ],
+        )
+        return con
+
+    @pytest.mark.security_regression
+    def test_mask_ips_redacts_aliased_cookie_session(self):
+        """``SELECT cookie_session AS s`` defeats key-name masking; the source
+        view redaction does not. The raw hash must never appear and IP masking
+        must still apply on the same row."""
+        con = self._con()
+        result = execute_query(
+            con,
+            self.SRC,
+            "SELECT cookie_session AS s, ip AS addr, url FROM logs ORDER BY url",
+            max_rows=100,
+            want_explain=False,
+            time_filter=self.WINDOW,
+            mask_ips=True,
+        )
+        assert [r["s"] for r in result["data"]] == ["[redacted]", ""]  # empty session preserved
+        # ip is ALSO source-redacted on the analyst /query path now (2026-07-06):
+        # output-side octet masking ("1.2.3.xxx") is defeated by string ops, so
+        # the client-IP family is redacted at the source like cookie_session.
+        # Both rows have a non-empty ip → both redact.
+        assert [r["addr"] for r in result["data"]] == ["[redacted]", "[redacted]"]
+        assert self.HASH not in str(result["data"])
+
+    @pytest.mark.security_regression
+    def test_mask_ips_redacts_cookie_session_via_string_concat(self):
+        """String-building the column back out (``'x' || cookie_session``) can
+        defeat OUTPUT-side masking but not SOURCE-side redaction — the view
+        never emits the raw hash."""
+        con = self._con()
+        result = execute_query(
+            con,
+            self.SRC,
+            "SELECT 'x' || cookie_session AS c FROM logs ORDER BY url",
+            max_rows=100,
+            want_explain=False,
+            time_filter=self.WINDOW,
+            mask_ips=True,
+        )
+        assert [r["c"] for r in result["data"]] == ["x[redacted]", "x"]
+        assert self.HASH not in str(result["data"])
+
+    @pytest.mark.security_regression
+    def test_mask_ips_redacts_ip_via_string_concat_and_group_by(self):
+        """Regression (adversarial audit 2026-07-06): the client-IP family is
+        source-redacted, not just octet-masked output-side. Output-side masking
+        only touches IP-SHAPED cells, so ``'x' || ip`` / ``split_part(ip,...)``
+        / ``GROUP BY ip`` used to leak/enumerate raw client IPs on /api/query.
+        The source view must redact ip so none of these recover a real IP."""
+        con = self._con()
+        # string-concat: used to yield 'x1.2.3.4'
+        concat = execute_query(
+            con,
+            self.SRC,
+            "SELECT 'x' || ip AS a FROM logs ORDER BY url",
+            max_rows=100,
+            want_explain=False,
+            time_filter=self.WINDOW,
+            mask_ips=True,
+        )
+        assert [r["a"] for r in concat["data"]] == ["x[redacted]", "x[redacted]"]
+        # GROUP BY ip enumeration: used to return every raw IP with a per-IP count
+        grouped = execute_query(
+            con,
+            self.SRC,
+            "SELECT 'x' || ip AS a, count(*) AS c FROM logs GROUP BY ip",
+            max_rows=100,
+            want_explain=False,
+            time_filter=self.WINDOW,
+            mask_ips=True,
+        )
+        assert {r["a"] for r in grouped["data"]} == {"x[redacted]"}
+        for raw in ("1.2.3.4", "5.6.7.8"):
+            assert raw not in str(concat["data"]) and raw not in str(grouped["data"])
+
+    @pytest.mark.security_regression
+    def test_mask_ips_false_returns_raw_ip_on_query(self):
+        """mask_ips=False (admin / non-masking analyst) still sees the raw ip —
+        the source redaction is gated on the policy, not on analyst-hood."""
+        con = self._con()
+        result = execute_query(
+            con,
+            self.SRC,
+            "SELECT ip AS a FROM logs ORDER BY url",
+            max_rows=100,
+            want_explain=False,
+            time_filter=self.WINDOW,
+            mask_ips=False,
+        )
+        assert result["data"][0]["a"] == "1.2.3.4"
+
+    @pytest.mark.security_regression
+    def test_mask_ips_redacts_cookie_session_via_select_star(self):
+        """``SELECT *`` surfaces cookie_session under its own name; it is still
+        redacted at the source while non-PII columns pass through."""
+        con = self._con()
+        result = execute_query(
+            con,
+            self.SRC,
+            "SELECT * FROM logs ORDER BY url",
+            max_rows=100,
+            want_explain=False,
+            time_filter=self.WINDOW,
+            mask_ips=True,
+        )
+        assert [r["cookie_session"] for r in result["data"]] == ["[redacted]", ""]
+        assert [r["url"] for r in result["data"]] == ["/a", "/b"]
+        assert self.HASH not in str(result["data"])
+
+    @pytest.mark.security_regression
+    def test_mask_ips_false_returns_raw_cookie_session(self):
+        """Admin / non-masking analyst (mask_ips=False) still sees the raw hash
+        — the redaction is gated on the policy, not on analyst-hood."""
+        con = self._con()
+        result = execute_query(
+            con,
+            self.SRC,
+            "SELECT cookie_session AS s FROM logs ORDER BY url",
+            max_rows=100,
+            want_explain=False,
+            time_filter=self.WINDOW,
+            mask_ips=False,
+        )
+        assert result["data"][0]["s"] == self.HASH
+
+    def test_missing_cookie_session_column_does_not_break_query(self):
+        """A service whose schema has no session column must not raise a Binder
+        error from a REPLACE on an absent column — the redaction targets only
+        columns that exist."""
+        con = duckdb.connect(":memory:")
+        con.execute("CREATE TABLE logs_svc (timestamp TIMESTAMPTZ, ip VARCHAR, url VARCHAR)")
+        con.execute("INSERT INTO logs_svc VALUES (TIMESTAMPTZ '2026-06-17T10:00:00+00:00', '1.2.3.4', '/a')")
+        result = execute_query(
+            con,
+            self.SRC,
+            "SELECT * FROM logs",
+            max_rows=100,
+            want_explain=False,
+            time_filter=self.WINDOW,
+            mask_ips=True,
+        )
+        assert result["data"][0]["ip"] == "[redacted]"  # ip source-redacted (2026-07-06)
+        assert result["data"][0]["url"] == "/a"
+
+
 class TestMaxRowsClamp:
     """M1: execute_query re-clamps max_rows to MAX_QUERY_ROWS regardless of the
     requested value (defense-in-depth for callers that bypass the model)."""

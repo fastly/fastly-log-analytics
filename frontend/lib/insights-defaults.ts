@@ -9,6 +9,12 @@
 // (window_size_hrs ∈ {0.25,1,4,24}; baseline_hours ∈ {1,24,168,720}). The
 // pure functions here are the single source of truth shared by the page, the
 // useInsightsDefaults hook, and the unit tests.
+//
+// PARITY (load-bearing): backend/utils/insights_defaults.py mirrors
+// historyHoursFromExtents + pickInsightsDefault for the insights prewarmer.
+// The /api/insights cache key includes window+baseline, so the prewarmer must
+// warm exactly the pair picked here — change the bands in BOTH files
+// (tests/utils/test_insights_defaults.py parses this file to catch drift).
 
 export const WINDOW_OPTIONS = [
   { label: 'Last 15 Minutes', value: '0.25' },

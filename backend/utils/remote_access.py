@@ -30,7 +30,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 
 from backend.core import share_db
-from backend.core.share_db.validation import IP_FAMILY_KEYS
+from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS
 from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
@@ -55,9 +55,11 @@ logger = logging.getLogger(__name__)
 _ANALYST_STRIPPED_ENVELOPE_KEYS = (
     "_debug_queries",
     "_debug_calls",
+    "_debug_sqlite",
     "_is_cached",
     "debug_queries",
     "debug_calls",
+    "debug_sqlite",
 )
 
 # Cap on how many bytes of a POST body the middleware will buffer to
@@ -80,6 +82,9 @@ _UNAUTH_ANALYST_PATHS = {
     # the middleware can't gate it on a full session — the handler validates
     # the pending or full cookie itself, mirroring /acknowledge.
     "/api/share/tos",
+    # /auth-config drives which auth modes the unauth /share-login page renders
+    # (passcode vs SSO providers); reached before any session exists.
+    "/api/share/auth-config",
     "/api/health",
     # Bootstrap is callable without a session so the frontend can detect
     # is_remote_analyst=true and redirect anonymous remote visitors to
@@ -458,7 +463,7 @@ def _is_blocked_path(path: str) -> bool:
     # Normalize: strip one or more trailing slashes for matching, but keep
     # the root "/" path itself intact (it doesn't appear in any blocklist
     # and an analyst can always reach the SPA shell).
-    normalized = path.rstrip("/") or "/"
+    normalized = path.rstrip("/\r\n") or "/"
     if any(normalized == p.rstrip("/") or normalized.startswith(p) for p in _ANALYST_BLOCKED_PREFIXES):
         return True
     for sp in _ANALYST_BLOCKED_SUBPATHS:
@@ -701,7 +706,7 @@ async def _drain_request_body(request: Request) -> dict | None:
     if method != "POST":
         return None
     ct = request.headers.get("content-type", "")
-    if "application/json" not in ct:
+    if "application/json" not in ct.lower():
         return None
     # Drain the receive stream once, capture the body bytes.
     #
@@ -792,12 +797,15 @@ async def _body_service_ids(request: Request) -> list[str]:
     return out
 
 
-# IP-family columns a masking analyst must never be able to filter on — the
-# same set ``apply_pii_policy`` masks in responses (imported as the single
+# Columns a masking analyst must never be able to filter on — the same PII
+# families ``apply_pii_policy`` masks in responses (imported as the single
 # source of truth, so the filter-lock and the response masker can't drift).
 # Masking those values in the response is pointless if the analyst can still
-# pivot the whole dataset by an exact IP they're guessing at.
-_PII_FORBIDDEN_FILTER_COLS = IP_FAMILY_KEYS
+# pivot the whole dataset by an exact value they are guessing at: an ``ip``
+# filter is a presence oracle for a specific real client, and a
+# ``cookie_session`` filter is the same oracle for a specific session hash
+# (Phase-4 Track C).
+_PII_FORBIDDEN_FILTER_COLS = IP_FAMILY_KEYS | SESSION_ID_KEYS
 
 
 async def _body_filter_keys(request: Request) -> list[str]:
@@ -815,6 +823,24 @@ async def _body_filter_keys(request: Request) -> list[str]:
     if not isinstance(filters, dict):
         return []
     return [str(k) for k in filters]
+
+
+async def _body_field_param(request: Request) -> str | None:
+    """Return the top-level ``field`` string from a JSON POST body, if any.
+
+    Backs the analyst PII lock for the field-values ENUMERATION surface
+    (POST /api/dashboard/field-values ``{"field": "..."}``). A mask_ips analyst
+    who cannot filter on a PII column must likewise not be able to enumerate its
+    distinct values — even with the values masked, the per-value COUNT plus
+    ``search`` prefix matching form an enumeration oracle. Returns None when
+    there is no JSON body or no string ``field``. Body is already drained +
+    cached by the earlier service-scope check, so this is a dict read.
+    """
+    body = await _inspect_request_body(request)
+    if not isinstance(body, dict):
+        return None
+    field = body.get("field")
+    return field if isinstance(field, str) else None
 
 
 # ── Sliding-window static-asset rate limiter (per IP) ───────────────────────
@@ -1044,8 +1070,16 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
                     content={"error": "origin_not_allowed", "origin": origin},
                 )
 
-        # Unauthenticated paths (login, heartbeat, health).
-        if path in _UNAUTH_ANALYST_PATHS or path.startswith("/api/share/claim/"):
+        # Unauthenticated paths (login, heartbeat, health). The OAuth handshake
+        # routes (/api/share/oauth/authorize + /callback) carry NO analyst
+        # session cookie during the handshake — they ARE the pre-auth login
+        # step — so they must be exempted here or they'd 401 before the handler
+        # runs (design §3.4). They set the session cookie themselves on success.
+        if (
+            path in _UNAUTH_ANALYST_PATHS
+            or path.startswith("/api/share/claim/")
+            or path.startswith("/api/share/oauth/")
+        ):
             response = await call_next(request)
             # /api/bootstrap is in _UNAUTH_ANALYST_PATHS so it short-circuits
             # here, BEFORE the analyst-envelope strip applied on the
@@ -1196,6 +1230,20 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
                         return JSONResponse(
                             status_code=403,
                             content={"error": "pii_policy_violation", "field": col},
+                        )
+                # Same lock for the field-values ENUMERATION dimension
+                # (POST /api/dashboard/field-values {"field": "ip"}): enumerating
+                # a PII column's distinct values — even masked — leaks per-value
+                # counts + a search-prefix oracle, so reject it exactly like a
+                # PII filter key. normalize_filter_key resolves junk-suffixed
+                # variants ("ip.", "cookie_session ") to the real column.
+                dim = await _body_field_param(request)
+                if dim is not None:
+                    dim_col = normalize_filter_key(dim)
+                    if dim_col in _PII_FORBIDDEN_FILTER_COLS:
+                        return JSONResponse(
+                            status_code=403,
+                            content={"error": "pii_policy_violation", "field": dim_col},
                         )
 
         # IP-roaming: update without booting if whitelist still passes. This is

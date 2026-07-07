@@ -678,7 +678,7 @@ def update_iceberg_view(con, source: dict, lock_timeout: float = 5.0, force: boo
             #      view to query (production-observed: restart-during-
             #      sync left RO sessions with "table not found").
             cached = _view_cache.get(source_key)
-            if cached and cached[3]:
+            if cached and cached[3] and len(cached) > 6 and cached[6] == _source_variant_fp(source):
                 try:
                     con.execute(cached[3])
                 except Exception:

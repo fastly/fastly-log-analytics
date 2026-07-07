@@ -11,6 +11,12 @@ logger = logging.getLogger(__name__)
 # Global context for tracking API and FOS calls during a request
 _CALLS: ContextVar[list[dict] | None] = ContextVar("_CALLS", default=None)
 _QUERIES: ContextVar[list[dict] | None] = ContextVar("_QUERIES", default=None)
+# SQLite statements executed while serving the current request. Fed by
+# backend/utils/sqlite_profiler.py (which also keeps its process-global ring
+# buffer — that one exists for cron visibility; THIS one is what makes the
+# Debug Panel's SQLite section page-scoped). None outside a request, so cron
+# statements never accumulate here.
+_SQLITE_QUERIES: ContextVar[list[dict] | None] = ContextVar("_SQLITE_QUERIES", default=None)
 
 # Per-request start time + dedupe flag for the iothread-call augmentation in
 # get_tracked_calls(). ContextVars don't propagate into fsspec's iothread or
@@ -178,6 +184,7 @@ def start_call_tracking():
     """Initialise call tracking for the current context."""
     _CALLS.set([])
     _QUERIES.set([])
+    _SQLITE_QUERIES.set([])
     _REQUEST_START_TS.set(time.time())
     _IOTHREAD_QUERIED.set(False)
 
@@ -322,6 +329,34 @@ def get_queries() -> list[dict]:
     if res is None:
         res = []
         _QUERIES.set(res)
+    return res
+
+
+def record_sqlite_query(entry: dict) -> None:
+    """Append one profiled SQLite statement to the current request's
+    collector. No-op when no request is being tracked (cron / startup /
+    test paths that never called start_call_tracking) — those statements
+    are still visible in the profiler's process-global ring buffer.
+
+    Works across FastAPI's ``run_in_threadpool`` and ``asyncio.to_thread``
+    because both copy the caller's context: the copied ContextVar still
+    points at the SAME list object, so appends land in the middleware's
+    view. Statements issued from raw worker threads (metadata writer
+    thread, fsspec iothread) don't inherit the context and are skipped —
+    same documented gap as ``_CALLS``.
+    """
+    entries = _SQLITE_QUERIES.get()
+    if entries is None:
+        return
+    entries.append(entry)
+
+
+def get_sqlite_queries() -> list[dict]:
+    """Return the SQLite statements recorded for the current request."""
+    res = _SQLITE_QUERIES.get()
+    if res is None:
+        res = []
+        _SQLITE_QUERIES.set(res)
     return res
 
 

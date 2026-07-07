@@ -15,8 +15,15 @@ import {
 } from '@/components/ui/table'
 import { client } from '@/lib/api'
 
+import { SortableHead, useTableSort, type SortAccessors } from './sortable'
 import { useShareMutation } from './useShareMutation'
-import { formatStamp, type RateLimitFailure, type RateLimitLockout, type ShareStatus } from './utils'
+import {
+  formatStamp,
+  type RateLimitFailure,
+  type RateLimitLockout,
+  type ShareSession,
+  type ShareStatus,
+} from './utils'
 
 interface SessionsPanelProps {
   status: ShareStatus | null
@@ -48,24 +55,48 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
 
   const sessions = status?.sessions || []
 
+  const accessors = React.useMemo<SortAccessors<ShareSession>>(
+    () => ({
+      analyst: (s) => (s.name || s.email || '').toLowerCase(),
+      signin: (s) => s.auth_method || 'passcode',
+      ip: (s) => s.ip_address || '',
+      last_active_time: (s) => s.last_active_time ?? null,
+    }),
+    [],
+  )
+  const { sorted, sortKey, sortDir, toggle } = useTableSort(sessions, accessors, {
+    defaultKey: 'last_active_time',
+    defaultDir: 'desc',
+  })
+
   return (
     <section className="rounded-lg border bg-card p-4 space-y-3">
       <h4 className="text-sm font-semibold">Active sessions</h4>
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Analyst</TableHead>
-            <TableHead>IP</TableHead>
-            <TableHead>Last activity</TableHead>
+            <SortableHead label="Analyst" sortKey="analyst" activeKey={sortKey} dir={sortDir} onSort={toggle} />
+            <SortableHead label="Sign-in" sortKey="signin" activeKey={sortKey} dir={sortDir} onSort={toggle} />
+            <SortableHead label="IP" sortKey="ip" activeKey={sortKey} dir={sortDir} onSort={toggle} />
+            <SortableHead label="Last activity" sortKey="last_active_time" activeKey={sortKey} dir={sortDir} onSort={toggle} />
             <TableHead className="text-right">Action</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {sessions.map((s: any) => (
+          {sorted.map((s: ShareSession) => (
             <TableRow key={s.session_id}>
               <TableCell className="text-xs">
                 {s.name || s.email}
                 <div className="text-[10px] text-muted-foreground">{s.email}</div>
+              </TableCell>
+              <TableCell className="text-xs">
+                {s.auth_method === 'oauth' ? (
+                  <Badge variant="outline" className="text-[10px] font-normal">
+                    SSO{s.oauth_provider ? ` · ${s.oauth_provider}` : ''}
+                  </Badge>
+                ) : (
+                  <span className="text-[10px] text-muted-foreground">Passcode</span>
+                )}
               </TableCell>
               <TableCell className="text-xs font-mono">
                 <div className="flex items-center gap-1 flex-wrap">
@@ -101,7 +132,7 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
           ))}
           {!sessions.length && (
             <TableRow>
-              <TableCell colSpan={4} className="text-center text-xs text-muted-foreground">
+              <TableCell colSpan={5} className="text-center text-xs text-muted-foreground">
                 No active sessions.
               </TableCell>
             </TableRow>

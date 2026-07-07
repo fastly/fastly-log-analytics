@@ -1,8 +1,9 @@
 import React from 'react'
 
-/** Shared empty state for the security chart cards. The wrapping
- *  `data.length === 0 && !isLoading` guard stays at each call site; this only
- *  owns the inner markup.
+/** Shared chart-inner empty state (promoted from the security page's
+ *  `_sections/` in the 2026-07-06 DRY pass so other chart bodies can adopt
+ *  it). The wrapping `data.length === 0 && !isLoading` guard stays at each
+ *  call site; this only owns the inner markup.
  *
  *  `requires` is OPTIONAL: pass it only when the underlying field group is
  *  genuinely NOT enabled (callers decide via `useActiveLogFields`). When the

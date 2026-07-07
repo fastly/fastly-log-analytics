@@ -219,3 +219,69 @@ def test_rollup_compact_records_error_on_exception(monkeypatch, stub_source, stu
     args, kwargs = _db.log_cron_run.call_args
     assert args[3] == "error"
     assert "manifest read failed" in kwargs["error_message"]
+
+
+# ── _run_rollup_hour_heal ─────────────────────────────────────────────────────
+
+
+def test_rollup_heal_returns_when_source_missing(monkeypatch):
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
+    compaction._run_rollup_hour_heal.__wrapped__("missing-svc")
+
+
+def test_rollup_heal_defers_under_api_load(monkeypatch, stub_source, stub_progress):
+    """The heal's view scan is CPU-bound — an in-flight API request wins."""
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **k: True)
+    heal_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    heal_mock.assert_not_called()
+
+
+def test_rollup_heal_skips_when_start_cron_run_raises(monkeypatch, stub_source, stub_progress):
+    monkeypatch.setattr(
+        "backend.core.duckdb.start_cron_run",
+        MagicMock(side_effect=RuntimeError("already running")),
+    )
+    heal_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    heal_mock.assert_not_called()
+
+
+def test_rollup_heal_success_uses_one_day_lookback(monkeypatch, stub_source, stub_progress):
+    """The hourly tick must stay CHEAP: 1-day lookback, not the daily
+    deep pass's 30 — the whole point of the split cadence."""
+    heal_mock = MagicMock(return_value={"missing": 2, "rebuilt_fields": 8, "bundled": 2})
+    monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    assert heal_mock.call_args.kwargs.get("lookback_days") == 1
+
+    from backend.core import duckdb as _db
+
+    args, kwargs = _db.log_cron_run.call_args
+    assert args[1] == "rollup_hour_heal"
+    assert args[3] == "success"
+    assert "Healed 2 missing hour(s)" in kwargs["summary"]
+    assert "2 hour(s) bundled" in kwargs["summary"]
+
+
+def test_rollup_heal_records_error_on_exception(monkeypatch, stub_source, stub_progress):
+    monkeypatch.setattr(
+        "backend.core.rollups.backfill_missing_hour_bundles",
+        MagicMock(side_effect=RuntimeError("view refresh failed")),
+    )
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    from backend.core import duckdb as _db
+
+    args, kwargs = _db.log_cron_run.call_args
+    assert args[3] == "error"
+    assert "view refresh failed" in kwargs["error_message"]

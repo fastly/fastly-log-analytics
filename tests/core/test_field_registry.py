@@ -139,6 +139,22 @@ def test_wire_order_matches_legacy_emission_order() -> None:
     assert WIRE_ORDER == legacy_emission_order
 
 
+def test_default_off_codes_match_legacy_catalog() -> None:
+    """The registry's ``DEFAULT_OFF_CODES`` covers exactly the catalog entries
+    flagged ``default_off`` — and agrees with ``log_fields.DEFAULT_OFF_FIELD_IDS``.
+
+    ``default_off`` fields are opt-in (excluded from ``resolve_enabled_fields``
+    unless explicitly enabled); a divergence between the two views would let a
+    field be opt-in in one resolution path and auto-on in another.
+    """
+    from backend.core.log_fields import DEFAULT_OFF_FIELD_IDS
+
+    legacy = {entry["id"] for entry in LOG_FIELD_CATALOG if entry.get("default_off")}
+    assert fr.DEFAULT_OFF_CODES == legacy
+    assert fr.DEFAULT_OFF_CODES == DEFAULT_OFF_FIELD_IDS
+    assert "cookie_session" in fr.DEFAULT_OFF_CODES
+
+
 @pytest.mark.security_regression
 def test_security_hook_codes_match_legacy_hooks() -> None:
     """Every field the registry tags as security-hooked has a `json.escape`

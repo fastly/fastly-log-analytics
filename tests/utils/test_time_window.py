@@ -6,7 +6,9 @@ bands + the invite-clamp fingerprint that the network relative-range keyed path
 ceiling invariants live in tests/repositories/test_network.py (security_regression).
 """
 
+import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +22,7 @@ from backend.utils.time_window import (
 )
 
 _NOW = datetime(2026, 6, 29, 12, 30, 45, tzinfo=UTC)
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _dt(iso: str) -> datetime:
@@ -34,7 +37,7 @@ def test_valid_tokens_are_recognized():
     assert is_valid_range_token("7d")
     assert is_valid_range_token("30d")
     assert is_valid_range_token("auto")
-    assert VALID_RANGE_TOKENS == {"24h", "7d", "30d", "auto"}
+    assert VALID_RANGE_TOKENS == {"1h", "3h", "6h", "12h", "24h", "3d", "7d", "30d", "auto"}
 
 
 def test_unknown_token_falls_through_not_raises():
@@ -43,6 +46,44 @@ def test_unknown_token_falls_through_not_raises():
     assert not is_valid_range_token("")
     assert not is_valid_range_token("90d")
     assert not is_valid_range_token("nonsense")
+
+
+def test_filterbar_presets_lockstep_with_token_vocabulary():
+    """Every FilterBar quick-preset must be a recognized range token.
+
+    A preset the backend doesn't recognize degrades off the memo-stable
+    keyed path — and before resolveRangeWire also sent the display bounds
+    in token mode, it degraded all the way to clamp(None, None): an
+    all-time scan for admins (1h/3h/6h/12h/3d shipped showing all-time
+    top-N counts). This test pins the FE preset vocabulary to
+    VALID_RANGE_TOKENS so it can't recur. The FE-mirror leg lives in
+    frontend/__tests__/lib/time-window.parity.test.ts (same scrape).
+    """
+    filterbar = REPO_ROOT / "frontend" / "components" / "FilterBar" / "FilterBar.tsx"
+    src = filterbar.read_text()
+    presets = re.findall(r"pickRelative\(\s*'([^']+)'\s*,\s*([\d.]+)\s*\)", src)
+    assert presets, f"no pickRelative presets found in {filterbar} — regex stale?"
+    # Partial-drop guard: every pickRelative CALL SITE must have matched the
+    # extraction regex. Without this, a preset written with double quotes, a
+    # template literal, or an hours arg the pattern doesn't cover would be
+    # silently skipped while the other presets keep the test green — exactly
+    # the drift this gate exists to catch. (The definition
+    # ``const pickRelative = React.useCallback(`` contains no ``pickRelative(``
+    # substring, so the count is call sites only.)
+    call_sites = src.count("pickRelative(")
+    assert len(presets) == call_sites, (
+        f"{call_sites - len(presets)} pickRelative call(s) in {filterbar} did not "
+        "match the preset-extraction regex — fix the regex (or the preset shape) "
+        "so EVERY quick-preset is vocabulary-checked"
+    )
+    for label, hours in presets:
+        assert is_valid_range_token(label), f"FilterBar preset {label!r} not in VALID_RANGE_TOKENS"
+        # The wire label must also MEAN the same thing on both sides: the
+        # backend's delta for the token must equal the FE's hour count.
+        start, end = resolve_window(label, _NOW.isoformat(), now=_NOW)
+        assert _dt(end) - _dt(start) == timedelta(hours=float(hours)), (
+            f"FilterBar preset {label!r} is {hours}h on the FE but {_dt(end) - _dt(start)} on the backend"
+        )
 
 
 # ── anchor quantization ───────────────────────────────────────────────────────
@@ -81,7 +122,16 @@ def test_anchor_quantum_aligns_with_memo_ttl_intent():
 
 @pytest.mark.parametrize(
     "token,delta",
-    [("24h", timedelta(hours=24)), ("7d", timedelta(days=7)), ("30d", timedelta(days=30))],
+    [
+        ("1h", timedelta(hours=1)),
+        ("3h", timedelta(hours=3)),
+        ("6h", timedelta(hours=6)),
+        ("12h", timedelta(hours=12)),
+        ("24h", timedelta(hours=24)),
+        ("3d", timedelta(days=3)),
+        ("7d", timedelta(days=7)),
+        ("30d", timedelta(days=30)),
+    ],
 )
 def test_fixed_tokens_resolve_to_anchor_minus_delta(token, delta):
     start, end = resolve_window(token, _NOW.isoformat(), now=_NOW)

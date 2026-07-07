@@ -75,8 +75,10 @@ def test_scheduler_start_skips_full_registration_but_runs_local_allowlist(monkey
 
 
 def test_dev_local_allowlist_registers_only_local_compaction(monkeypatch):
-    """_register_dev_local_safe_jobs arms local_compact + rollup_compact and
-    NOTHING else — no sync/commit/optimize/expire/ngwaf/etc."""
+    """_register_dev_local_safe_jobs arms local_compact + rollup_compact +
+    rollup_heal and NOTHING else — no sync/commit/optimize/expire/ngwaf/etc.
+    All three only rewrite the local parquet cache (never FOS), which is the
+    allowlist's admission bar."""
     monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
 
     from backend.cron.scheduler import Scheduler
@@ -94,9 +96,9 @@ def test_dev_local_allowlist_registers_only_local_compaction(monkeypatch):
     ):
         sched._register_dev_local_safe_jobs()
 
-    assert sorted(sched._job_ids) == ["local_compact_svc-x", "rollup_compact_svc-x"]
+    assert sorted(sched._job_ids) == ["local_compact_svc-x", "rollup_compact_svc-x", "rollup_heal_svc-x"]
     added = sorted(c.kwargs["id"] for c in add_job.call_args_list)
-    assert added == ["local_compact_svc-x", "rollup_compact_svc-x"]
+    assert added == ["local_compact_svc-x", "rollup_compact_svc-x", "rollup_heal_svc-x"]
 
 
 def test_dev_local_allowlist_skips_rollup_compact_for_read_only(monkeypatch):

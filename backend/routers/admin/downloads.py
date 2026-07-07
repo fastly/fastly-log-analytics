@@ -17,6 +17,9 @@ from ._router import router
 
 logger = logging.getLogger(__name__)
 
+# response_model intentionally omitted on all three routes in this module:
+# they stream file/zip bytes (StreamingResponse / FileResponse), not JSON.
+
 
 @router.get("/download-folder")
 def download_folder(

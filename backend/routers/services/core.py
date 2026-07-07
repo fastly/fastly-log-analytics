@@ -15,9 +15,14 @@ from sse_starlette.sse import EventSourceResponse
 
 from backend.deps import get_service_id, get_source
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.provision import CustomFieldsImportBody
+from backend.models.provision import CustomFieldsImportBody, ProvisionLakeInfoResponse
 from backend.models.services import (
+    CredentialsUpdateResponse,
+    CronScheduleResponse,
+    CustomFieldsImportResponse,
     LogFieldsUpdateRequest,
+    LogFieldsUpdateResponse,
+    OkMessageResponse,
     ServiceCredentialsBody,
     ServiceCronSettingsBody,
     ServicesListResponse,
@@ -99,7 +104,11 @@ def api_services_list(request: Request, service_id: str | None = Depends(get_ser
     return ServicesListResponse.with_telemetry(services=result, debug_queries=_debug_queries)
 
 
-@router.get("/services/{service_id}/lake-info")
+@router.get(
+    "/services/{service_id}/lake-info",
+    response_model=ProvisionLakeInfoResponse,
+    response_model_exclude_unset=True,
+)
 def get_service_lake_info(source: dict = Depends(get_source)):
     """Return Iceberg table range and calendar for a configured service."""
     from backend.core.iceberg.lake_info import fetch_lake_info
@@ -107,6 +116,8 @@ def get_service_lake_info(source: dict = Depends(get_source)):
     return fetch_lake_info(source, use_temp_cache=False)
 
 
+# response_model intentionally omitted: SSE progress stream
+# (EventSourceResponse), not a JSON body.
 @router.post("/services/{service_id}/cron-settings")
 def api_service_cron_settings(service_id: str, body: ServiceCronSettingsBody):
     from backend import config as svcconfig
@@ -164,7 +175,11 @@ def api_service_cron_settings(service_id: str, body: ServiceCronSettingsBody):
     return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
 
 
-@router.delete("/services/{service_id}/time-range")
+@router.delete(
+    "/services/{service_id}/time-range",
+    response_model=OkMessageResponse,
+    response_model_exclude_unset=True,
+)
 def api_service_clear_time_range(service_id: str):
     """Remove the persisted time_range filter from a service config.
 
@@ -190,6 +205,7 @@ def api_service_clear_time_range(service_id: str):
     return {"ok": True, "message": "time_range cleared. Cron will now ingest all available data."}
 
 
+# response_model intentionally omitted: SSE log stream (EventSourceResponse).
 @router.get("/cron-runs/{run_id}/stream")
 async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_service_id)):
     import asyncio
@@ -284,7 +300,7 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
     return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
 
 
-@router.get("/cron-schedule")
+@router.get("/cron-schedule", response_model=CronScheduleResponse, response_model_exclude_unset=True)
 def api_cron_schedule(source: dict = Depends(get_source)):
     from backend.cron.schedule import build_cron_schedule_payload
 
@@ -298,7 +314,11 @@ def api_cron_schedule(source: dict = Depends(get_source)):
     return payload
 
 
-@router.patch("/services/{service_id}/credentials")
+@router.patch(
+    "/services/{service_id}/credentials",
+    response_model=CredentialsUpdateResponse,
+    response_model_exclude_unset=True,
+)
 def api_service_update_credentials(request: Request, service_id: str, body: ServiceCredentialsBody):
     """Rotate FOS credentials for a service.
 
@@ -584,7 +604,11 @@ def api_service_log_fields_get(service_id: str):
     }
 
 
-@router.post("/services/{service_id}/log-fields")
+@router.post(
+    "/services/{service_id}/log-fields",
+    response_model=LogFieldsUpdateResponse,
+    response_model_exclude_unset=True,
+)
 def api_service_log_fields_set(service_id: str, body: LogFieldsUpdateRequest):
 
     from backend import config as svcconfig
@@ -650,8 +674,11 @@ def api_service_log_fields_set(service_id: str, body: LogFieldsUpdateRequest):
 # `<img src=...>` or `<link rel=preload>` can no longer trigger a
 # state-changing Fastly logging-settings update. The frontend's useSSE
 # helper handles POST-with-streaming-response transparently.
+# response_model intentionally omitted: SSE progress stream
+# (EventSourceResponse via useSSE's POST-with-streaming), not a JSON body.
 @router.post("/services/{service_id}/logging-settings/update")
 def api_service_update_logging_settings(
+    request: Request,
     service_id: str,
     period: int | None = Query(default=None),
     sample_rate: int | None = Query(default=None),
@@ -661,6 +688,8 @@ def api_service_update_logging_settings(
     update_format: bool = Query(default=False),
 ):
     from backend import config as svcconfig
+
+    _require_service_scope(request, service_id)
 
     cfg = load_service_config(service_id)
     prov = cfg.setdefault("provisioning", {})
@@ -810,6 +839,7 @@ def api_invite_analyst(service_id: str):
     return result
 
 
+# response_model intentionally omitted: SSE progress stream.
 @router.post("/services/{service_id}/ngwaf-sync")
 def api_ngwaf_sync(service_id: str):
     """Manually trigger an NGWAF bot-sync run for a service, streamed as SSE."""
@@ -1215,6 +1245,8 @@ def api_validate_custom_vcl(request: Request, service_id: str, body: VclLintRequ
     )
 
 
+# response_model intentionally omitted: streams a JSON file download
+# (StreamingResponse with Content-Disposition), not an inline JSON body.
 @router.get("/services/{service_id}/custom-fields/export")
 def api_export_custom_fields(request: Request, service_id: str):
     import json
@@ -1232,7 +1264,11 @@ def api_export_custom_fields(request: Request, service_id: str):
     )
 
 
-@router.post("/services/{service_id}/custom-fields/import")
+@router.post(
+    "/services/{service_id}/custom-fields/import",
+    response_model=CustomFieldsImportResponse,
+    response_model_exclude_unset=True,
+)
 def api_import_custom_fields(request: Request, service_id: str, body: CustomFieldsImportBody):
     from datetime import UTC
 

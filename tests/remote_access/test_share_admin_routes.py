@@ -72,6 +72,44 @@ def test_audit_logs_endpoint_returns_filtered_rows(client):
     assert all(row["event_type"] == "LOGIN_FAIL" for row in body["audit_logs"])
 
 
+def test_status_invites_carry_last_login(client):
+    """Each invite in /status carries its derived last_login_at."""
+    inv = share_db.create_remote_invite(
+        name="Alice",
+        email="alice@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=[],
+    )
+    # A successful login for this invite's email; a FAIL must not set last-login.
+    share_db.log_share_audit_event(
+        event_type="LOGIN_SUCCESS", email="alice@example.com", ip_address="1.1.1.1", details="x"
+    )
+    share_db.log_share_audit_event(
+        event_type="LOGIN_FAIL", email="alice@example.com", ip_address="1.1.1.1", details="x"
+    )
+
+    body = client.get("/api/admin/share/status").json()
+    row = next(i for i in body["invites"] if i["id"] == inv["id"])
+    assert row["last_login_at"] is not None
+
+
+def test_status_invite_never_logged_in_has_null_last_login(client):
+    """An invite with no successful-login events reports last_login_at null."""
+    inv = share_db.create_remote_invite(
+        name="Bob",
+        email="bob@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=[],
+    )
+    body = client.get("/api/admin/share/status").json()
+    row = next(i for i in body["invites"] if i["id"] == inv["id"])
+    assert row["last_login_at"] is None
+
+
 def test_audit_logs_endpoint_rejects_bad_limit(client):
     """``limit`` out of [1, 2000] now rejected by FastAPI's Query(ge/le)
     validator → 422 with the structured ``loc`` path that every other
@@ -248,6 +286,70 @@ def test_update_invite_pii_unknown_404(client):
     r = client.patch(
         "/api/admin/share/invites/no-such-invite/pii",
         json={"mask_ips": True},
+    )
+    assert r.status_code == 404
+
+
+def test_create_invite_allow_concurrent_sessions(client):
+    r = client.post(
+        "/api/admin/share/invites",
+        json={
+            "name": "Drew",
+            "email": "drew@example.com",
+            "passcode": "ocean-breeze-cabin-42",
+            "service_ids": ["svcA"],
+            "allow_concurrent_sessions": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["allow_concurrent_sessions"] is True
+
+
+def test_create_invite_defaults_allow_concurrent_sessions_false(client):
+    r = client.post(
+        "/api/admin/share/invites",
+        json={
+            "name": "Drew",
+            "email": "drew@example.com",
+            "passcode": "ocean-breeze-cabin-42",
+            "service_ids": ["svcA"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["allow_concurrent_sessions"] is False
+
+
+def test_update_invite_sharing_toggles(client):
+    r = client.post(
+        "/api/admin/share/invites",
+        json={
+            "name": "Drew",
+            "email": "drew@example.com",
+            "passcode": "ocean-breeze-cabin-42",
+            "service_ids": ["svcA"],
+        },
+    )
+    invite_id = r.json()["id"]
+    assert r.json()["allow_concurrent_sessions"] is False
+    r2 = client.patch(
+        f"/api/admin/share/invites/{invite_id}/sharing",
+        json={"allow_concurrent_sessions": True},
+    )
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["allow_concurrent_sessions"] is True
+    # And back off again.
+    r3 = client.patch(
+        f"/api/admin/share/invites/{invite_id}/sharing",
+        json={"allow_concurrent_sessions": False},
+    )
+    assert r3.status_code == 200
+    assert r3.json()["allow_concurrent_sessions"] is False
+
+
+def test_update_invite_sharing_unknown_404(client):
+    r = client.patch(
+        "/api/admin/share/invites/no-such-invite/sharing",
+        json={"allow_concurrent_sessions": True},
     )
     assert r.status_code == 404
 

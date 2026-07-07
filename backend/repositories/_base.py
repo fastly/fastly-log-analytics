@@ -31,6 +31,16 @@ _logger = logging.getLogger(__name__)
 _EMPTY_ROLLUP_WARN_TS: dict[tuple[str, str], float] = {}
 _EMPTY_ROLLUP_WARN_INTERVAL_S = 300.0
 
+# Missing-hour live heal (execute_top_n_rollups): closed hours of NOT-yet-
+# day-compacted days that have no hour bundle (and no per-field hour files)
+# are live-queried so top-N stays correct through rollup-writer gaps. The
+# cap bounds the worst-case live scan when the writer has been down for a
+# long stretch — beyond it the oldest gap hours are dropped (the counts
+# degrade exactly as they did before the fallback existed) and the warning
+# below tells the operator to run the deep backfill instead.
+_MISSING_HOUR_HEAL_CAP = 48
+_MISSING_HOUR_HEAL_WARN_TS: dict[str, float] = {}
+
 # Fields excluded from the LIVE active-hour top-up in execute_top_n_rollups.
 # The live merge tops up each field's rollup top-N with the current (not-yet-
 # rolled-up) hour, computed at query time. That cost is dominated by per-field
@@ -630,10 +640,61 @@ class QueryRunner:
         self.src = src
         self.debug_queries: list[dict] = []
         self.actual_cols: set[str] = set()
+        # Request-scoped sharing of the direct active-hour temps (see
+        # begin_shared_active_hour_temps). None = sharing disabled: every
+        # _create_active_hour_temp_direct caller owns + drops its own temp.
+        self._shared_active_temps: list[tuple[frozenset[str], Any, Any, str]] | None = None
+        # File count of the most recent direct active-hour read — telemetry
+        # only (surfaced as live_active_hour:n_files).
+        self._last_active_direct_n_files: int = 0
 
         from backend.core.iceberg import inject_view_debug
 
         inject_view_debug(self.debug_queries, src)
+
+    def begin_shared_active_hour_temps(self) -> None:
+        """Enable request-scoped reuse of the direct active-hour temps.
+
+        The dashboard rollup path reads the active hour up to THREE times
+        per request — the top-N live merge (wide projection), the
+        conn_requests histogram top-up, and the chart's live slice — and
+        each direct read pays a per-file open over the buffer + active
+        hourly partition (46 files on prod 2026-07-07). Within this scope
+        the first temp whose projected columns cover a later caller's
+        needs (same [start, end) window) is reused, and every shared temp
+        is dropped together in :meth:`end_shared_active_hour_temps`.
+
+        Callers inside the scope must release via
+        :meth:`release_active_direct_temp` instead of a bare DROP.
+        """
+        self._shared_active_temps = []
+
+    def end_shared_active_hour_temps(self) -> None:
+        """Drop every shared active-hour temp and disable sharing.
+
+        Safe to call unconditionally (no-op when sharing was never
+        enabled) — callers put it in a ``finally`` so pooled connections
+        never accumulate session temps across requests.
+        """
+        temps, self._shared_active_temps = self._shared_active_temps, None
+        for _cols, _ws, _we, name in temps or []:
+            try:
+                self.execute(f'DROP TABLE IF EXISTS "{name}"')
+            except Exception:
+                pass
+
+    def release_active_direct_temp(self, name: str) -> None:
+        """Drop a direct active-hour temp unless the shared scope owns it.
+
+        Inside :meth:`begin_shared_active_hour_temps` the scope-exit drop
+        is authoritative; outside it this is a plain guarded DROP.
+        """
+        if self._shared_active_temps is not None and any(n == name for _c, _s, _e, n in self._shared_active_temps):
+            return
+        try:
+            self.execute(f'DROP TABLE IF EXISTS "{name}"')
+        except Exception:
+            pass
 
     @property
     def debug_calls(self) -> list[dict]:
@@ -867,6 +928,7 @@ class QueryRunner:
         """
         import os
         import uuid as _uuid
+        from datetime import timedelta as _timedelta
 
         from backend.core.duckdb import _cache_dir
 
@@ -879,58 +941,132 @@ class QueryRunner:
         active_hour_token = live_start.strftime("%Y-%m-%d-%H")
         hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour_token}")
 
-        # Probe for any parquet files in either location. listdir is faster
-        # than glob.glob and bounded — buffer ~4 files, hourly ~1-30.
-        def _has_parquets(d: str) -> bool:
+        # Columns the temp will physically carry: timestamp + every
+        # requested field that actually exists in the schema.
+        projected: list[str] = ["timestamp"]
+        for f in fields:
+            if f in actual_cols and f not in projected:
+                projected.append(f)
+        projected_set = frozenset(projected)
+
+        # Shared-scope reuse (see begin_shared_active_hour_temps): an
+        # earlier temp over the SAME window whose projection covers this
+        # caller's columns serves as-is — zero file opens.
+        if self._shared_active_temps is not None:
+            for cols_have, ws, we, name in self._shared_active_temps:
+                if ws == live_start and we == live_end and projected_set <= cols_have:
+                    self._last_active_direct_n_files = 0
+                    return name
+
+        # Enumerate candidate parquets EXPLICITLY (not a glob) so buffer
+        # files that cannot contain live-window rows are pruned by mtime:
+        # a buffer parquet is write-once, so every row in it is stamped no
+        # later than the file's close time — a file finalized before
+        # (live_start - skew margin) cannot hold rows >= live_start. On
+        # prod (2026-07-07) the buffer held 42 files spanning >1h while
+        # the live read needed only the tail; opening all of them via the
+        # old directory glob was the dominant cost of this temp (~166ms
+        # measured via live_active_hour:temp_create). The margin absorbs
+        # edge-vs-VM clock skew; correctness only needs "no file whose
+        # rows could reach live_start is dropped".
+        mtime_floor = (live_start - _timedelta(seconds=300)).timestamp()
+
+        # TOMBSTONED buffer parquets MUST be excluded: their rows were
+        # already committed into the hourly partitions this read also
+        # scans, and the file only lingers on disk for the sweep grace
+        # window (so views bound BEFORE the commit stay readable — see
+        # tombstone_buffer_files). Reading them here double-counted up to
+        # ~10 min of the freshest rows in every active-hour live slice —
+        # on prod (2026-07-07) 40 of 55 buffer files were tombstoned. The
+        # view path already filters via buffer_files(); this closes the
+        # same hole for the direct read. A commit landing between this
+        # marker scan and the read leaves a sub-second race — down from
+        # the ~10-minute exposure.
+        try:
+            from backend.core.iceberg.buffer import _tombstoned_parquet_paths
+
+            tombstoned = _tombstoned_parquet_paths(buffer_dir)
+        except Exception:
+            tombstoned = set()
+
+        def _list_parquets(d: str, *, prune_mtime: bool) -> list[str]:
+            out: list[str] = []
             try:
-                for f in os.listdir(d):
-                    if f.endswith(".parquet") and not f.startswith(".tmp_"):
-                        return True
+                with os.scandir(d) as it:
+                    for e in it:
+                        if not e.name.endswith(".parquet") or e.name.startswith(".tmp_"):
+                            continue
+                        if e.path in tombstoned:
+                            continue
+                        if prune_mtime:
+                            try:
+                                if e.stat().st_mtime < mtime_floor:
+                                    continue
+                            except OSError:
+                                pass  # can't stat → keep (correctness over speed)
+                        out.append(e.path)
             except OSError:
                 pass
-            return False
+            return out
 
-        buffer_exists = _has_parquets(buffer_dir)
-        hourly_exists = _has_parquets(hourly_dir)
-        if not buffer_exists and not hourly_exists:
+        buffer_files = _list_parquets(buffer_dir, prune_mtime=True)
+        # Hourly-partition files are already scoped to the active hour —
+        # no mtime pruning (compaction may rewrite them with fresh mtimes
+        # anyway), and tombstones only ever mark buffer files.
+        hourly_files = _list_parquets(hourly_dir, prune_mtime=False)
+        self._last_active_direct_n_files = len(buffer_files) + len(hourly_files)
+        if not buffer_files and not hourly_files:
             # Nothing on disk for the active hour. Caller will report
             # empty live_res — semantically correct (no current-hour rows).
             return None
 
-        # Project timestamp + every requested field that actually exists
-        # in the schema. Keeping the projection narrow lets DuckDB skip
-        # parquet column blocks we don't need.
-        select_parts = ['"timestamp"']
-        seen: set[str] = {"timestamp"}
-        for f in fields:
-            if f in actual_cols and f not in seen:
-                # Escape internal double quotes (audit finding 004).
-                select_parts.append('"{}"'.format(f.replace('"', '""')))
-                seen.add(f)
-        cols_sql = ", ".join(select_parts)
+        # Escape internal double quotes (audit finding 004).
+        cols_sql = ", ".join('"{}"'.format(c.replace('"', '""')) for c in projected)
         where = (
             f"timestamp >= TIMESTAMPTZ '{live_start.isoformat()}' AND timestamp < TIMESTAMPTZ '{live_end.isoformat()}'"
         )
 
-        branches: list[str] = []
-        if buffer_exists:
-            buffer_glob = os.path.join(buffer_dir, "*.parquet").replace("'", "''")
-            branches.append(f"SELECT {cols_sql} FROM read_parquet('{buffer_glob}', union_by_name=true) WHERE {where}")
-        if hourly_exists:
-            hourly_glob = os.path.join(hourly_dir, "*.parquet").replace("'", "''")
-            branches.append(f"SELECT {cols_sql} FROM read_parquet('{hourly_glob}', union_by_name=true) WHERE {where}")
+        def _create_sql(union_by_name: str) -> str:
+            branches: list[str] = []
+            if buffer_files:
+                paths_sql = quote_path_list(buffer_files)
+                branches.append(
+                    f"SELECT {cols_sql} FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
+                )
+            if hourly_files:
+                paths_sql = quote_path_list(hourly_files)
+                branches.append(
+                    f"SELECT {cols_sql} FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
+                )
+            return " UNION ALL ".join(branches)
 
         temp_name = f"t_active_direct_{_uuid.uuid4().hex}"
-        sql = f"CREATE TEMP TABLE {temp_name} AS " + " UNION ALL ".join(branches)
+        # union_by_name=false first: with =true DuckDB reconciles every
+        # file's FULL schema by name before projecting, and on the ~90-col
+        # log files that bind cost (~6ms/file × 27 files on prod
+        # 2026-07-07, regardless of how narrow the projection is) dominated
+        # this temp. Plain multi-file reads validate that schemas MATCH and
+        # raise on any drift — never a silent positional mis-bind — so the
+        # =true retry only pays its reconciliation cost in the rare
+        # mid-schema-change buffer window.
         try:
-            self.con.execute(sql)
+            self.con.execute(f"CREATE TEMP TABLE {temp_name} AS " + _create_sql("false"))
         except Exception:
-            # Schema mismatch, missing column, etc. Caller falls back.
             try:
                 self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
             except Exception:
                 pass
-            return None
+            try:
+                self.con.execute(f"CREATE TEMP TABLE {temp_name} AS " + _create_sql("true"))
+            except Exception:
+                # Missing column, unreadable file, etc. Caller falls back.
+                try:
+                    self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
+                except Exception:
+                    pass
+                return None
+        if self._shared_active_temps is not None:
+            self._shared_active_temps.append((projected_set, live_start, live_end, temp_name))
         return temp_name
 
     @contextlib.contextmanager
@@ -988,6 +1124,15 @@ class QueryRunner:
         and the result is merged into the rollup output before
         truncation. So the returned top-N IS current — the rollup file
         exclusion is implementation, not staleness.
+
+        Robustness contract (missing-hour live heal): closed in-window
+        hours of not-yet-day-compacted days that have NO rollup coverage
+        (no hour bundle, no per-field hour file) are live-queried the same
+        way and merged in, bounded by ``_MISSING_HOUR_HEAL_CAP`` hours.
+        Zero-cost in steady state (the hourly ``rollup_heal`` cron keeps
+        the bundle tree complete); it only pays while the writer is
+        behind, so a rollup-writer gap degrades to a slower-but-correct
+        read instead of silently under-counted panels.
         """
         import os
         from datetime import UTC, datetime, timedelta
@@ -1134,6 +1279,13 @@ class QueryRunner:
         # day file for that day) still works because the per-field walk
         # uses its OWN per-field covered_days set, not this global one.
         day_covered_by_any_field: set[str] = set()
+        # Every day token with ANY day-rollup presence on disk, ignoring the
+        # window checks below. Consumed by the missing-hour live heal: a day
+        # that has been day-compacted had its per-hour files deleted BY
+        # DESIGN, so its boundary hours falling outside a fully-contained
+        # window are a known, bounded read gap — NOT a writer failure — and
+        # must not trigger a per-request live scan.
+        days_with_day_files_any: set[str] = set()
         for field in safe_fields:
             field_day_dir = os.path.join(day_root, f"field={field}")
             if not os.path.isdir(field_day_dir):
@@ -1143,7 +1295,10 @@ class QueryRunner:
                 if not day_entry.startswith("day="):
                     continue
                 day = day_entry[len("day=") :]
-                if len(day) != 10 or day in day_covered_by_any_field:
+                if len(day) != 10:
+                    continue
+                days_with_day_files_any.add(day)
+                if day in day_covered_by_any_field:
                     continue
                 if day >= active_day:
                     continue
@@ -1173,6 +1328,7 @@ class QueryRunner:
                 day = day_entry[len("day=") :]
                 if len(day) != 10:
                     continue
+                days_with_day_files_any.add(day)
                 if day >= active_day:
                     continue
                 if st_str_floor and day < st_str_floor[:10]:
@@ -1218,6 +1374,10 @@ class QueryRunner:
                     bundled_hours.add(hour)
 
         _t_dir_enum = time.perf_counter()
+        # Hour tokens served by at least one per-field hour file (the pre-
+        # bundle intermediate state). Consumed by the missing-hour live heal
+        # below — such hours have rollup coverage, just not bundled yet.
+        per_field_hours_seen: set[str] = set()
         for field in safe_fields:
             field_hour_dir = os.path.join(rollup_dir, f"field={field}")
             field_day_dir = os.path.join(day_root, f"field={field}")
@@ -1285,6 +1445,7 @@ class QueryRunner:
                 for fname in _cached_listdir(hour_dir):
                     if fname.endswith(".parquet"):
                         hour_paths.append(os.path.join(hour_dir, fname))
+                        per_field_hours_seen.add(hour)
 
         _phase("dir_enum", (time.perf_counter() - _t_dir_enum) * 1000)
         _phase("dir_enum:n_day_files", float(len(day_paths)))
@@ -1304,6 +1465,18 @@ class QueryRunner:
             # DOUBLE in some configurations); UNION ALL requires
             # matching types per column.
             branches = []
+            # Bundled files carry EVERY field's rows (the bundler folds the
+            # whole per-field tree into one parquet), while the per-field
+            # branches below are already field-scoped by the directory
+            # enumeration above. Without this IN-list a single-field caller
+            # (e.g. the security UA-rollup read) pays the GROUP BY + window
+            # sort over every field in the bundle — 217ms of the 2026-07-06
+            # trace vs the one field it consumed. The filter can't prune
+            # bundle IO (rows aren't sorted by field) but it collapses the
+            # aggregation hash table and the QUALIFY partitions to just the
+            # requested fields. safe_fields is _is_safe_ident-validated;
+            # quotes escaped anyway (defense-in-depth, see the note above).
+            field_in_list = ", ".join("'" + f.replace("'", "''") + "'" for f in safe_fields)
             if day_paths:
                 paths_sql = quote_path_list(day_paths)
                 branches.append(
@@ -1324,7 +1497,8 @@ class QueryRunner:
                 paths_sql = quote_path_list(bundled_hour_paths)
                 branches.append(
                     f"SELECT field, value, CAST(count AS BIGINT) AS count "
-                    f"FROM read_parquet([{paths_sql}], hive_partitioning=0)"
+                    f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
+                    f"WHERE field IN ({field_in_list})"
                 )
             if bundled_day_paths:
                 # Same shape as bundled_hour (field/value/count as
@@ -1332,7 +1506,8 @@ class QueryRunner:
                 paths_sql = quote_path_list(bundled_day_paths)
                 branches.append(
                     f"SELECT field, value, CAST(count AS BIGINT) AS count "
-                    f"FROM read_parquet([{paths_sql}], hive_partitioning=0)"
+                    f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
+                    f"WHERE field IN ({field_in_list})"
                 )
             _max_limit = max([limit] + list((per_field_limits or {}).values()))
             q = (
@@ -1417,11 +1592,22 @@ class QueryRunner:
                 # current-hour freshness. Narrowing here also keeps the
                 # high-cardinality columns out of the active-hour temp itself.
                 live_topn_fields = [f for f in safe_fields if f not in _LIVE_TOPN_SKIP_FIELDS]
+                _t_lt = time.perf_counter()
                 tmp_name = self._create_active_hour_temp_direct(live_topn_fields, actual_cols, live_start, live_end)
                 if tmp_name is None:
                     tmp_name = self.create_filtered_temp_table(live_topn_fields, actual_cols, base_table, live_where)
+                _phase("live_active_hour:temp_create", (time.perf_counter() - _t_lt) * 1000)
+                _phase("live_active_hour:n_files", float(self._last_active_direct_n_files))
                 if tmp_name:
                     try:
+                        # Diagnostic row count (in-memory temp, ~free): tells
+                        # the perf harness whether a slow live merge is data
+                        # volume (busy active hour) or per-field batch cost.
+                        try:
+                            _n_live = self.execute(f'SELECT COUNT(*) FROM "{tmp_name}"').fetchone()[0]
+                            _phase("live_active_hour:n_rows", float(_n_live))
+                        except Exception:
+                            pass
                         # Filter to columns present in the temp's projection.
                         # Virtual fields (waf_sig_ind, edge_score_reason_ind)
                         # have rollup parquets but no live column — including
@@ -1431,17 +1617,149 @@ class QueryRunner:
                         # the real fields too.
                         live_fields = [f for f in live_topn_fields if f in actual_cols]
                         if live_fields:
+                            _t_lb = time.perf_counter()
                             live_res, _ = self.execute_top_n_batch(
                                 live_fields, tmp_name, actual_cols, schema_types, limit=_live_limit
                             )
+                            _phase("live_active_hour:batch", (time.perf_counter() - _t_lb) * 1000)
                     finally:
-                        try:
-                            self.execute(f'DROP TABLE IF EXISTS "{tmp_name}"')
-                        except Exception:
-                            pass
+                        # Deferred to scope-exit when the shared active-hour
+                        # scope owns this temp (dashboard rollup path).
+                        self.release_active_direct_temp(tmp_name)
             except Exception:
                 pass
         _phase("live_active_hour", (time.perf_counter() - _t_live) * 1000)
+
+        # ── Missing-hour live heal ────────────────────────────────────────
+        # Closed hours of NOT-yet-day-compacted days that have no rollup
+        # coverage (no hour bundle, no per-field hour file) are live-queried
+        # here so the returned top-N stays window-correct through rollup-
+        # writer gaps. Diagnosed 2026-07-06: the per-sync recompute only
+        # fires when a sync batch ingests rows stamped in an already-closed
+        # hour, so on bursty services every closed hour of the current day
+        # was silently absent until the nightly deep pass — total_rows (a
+        # live COUNT) disagreed with every card's field_total by the same
+        # factor. Steady-state cost is ZERO: the hourly rollup_heal cron
+        # keeps the bundle tree complete — real bundles for hours with
+        # data, empty SENTINEL bundles for verified-zero-row hours (which
+        # would otherwise be indistinguishable from writer gaps and re-
+        # scanned forever) — so `missing` is empty. The scan only fires
+        # while the writer is behind, bounded by _MISSING_HOUR_HEAL_CAP
+        # hours.
+        #
+        # Hours of day-compacted days are deliberately excluded
+        # (days_with_day_files_any): their per-hour files were deleted by
+        # design, so a window that cuts through such a day would otherwise
+        # pay a per-request day-scan forever — that boundary sliver keeps
+        # its pre-existing fast-but-partial behavior.
+        _t_heal = time.perf_counter()
+        heal_res: list[tuple] = []
+        heal_floor_dt = active_dt - timedelta(hours=_MISSING_HOUR_HEAL_CAP)
+        if st_dt and st_dt > heal_floor_dt:
+            heal_floor_dt = st_dt
+
+        # Lazy per-day verification for the day-compacted exclusion: a dir
+        # entry alone isn't proof of compaction — a crashed compaction can
+        # leave an empty day dir, and treating that as "compacted" would
+        # permanently exclude the day from the heal (re-creating the silent
+        # undercount this fallback exists to close). Verified only for heal
+        # CANDIDATE days (≤ a few per request) and memoized, so the cheap
+        # dir-presence set stays the prefilter and the walks above pay
+        # nothing extra.
+        _day_rollup_presence: dict[str, bool] = {}
+
+        def _day_has_real_day_rollup(day: str) -> bool:
+            cached = _day_rollup_presence.get(day)
+            if cached is not None:
+                return cached
+            present = os.path.isfile(os.path.join(bundled_day_root, f"day={day}", "all_fields.parquet"))
+            if not present:
+                for f_ in safe_fields:
+                    d_ = os.path.join(day_root, f"field={f_}", f"day={day}")
+                    if not os.path.isdir(d_):
+                        continue
+                    try:
+                        if any(n_.endswith(".parquet") and not n_.startswith(".tmp_") for n_ in os.listdir(d_)):
+                            present = True
+                            break
+                    except OSError:
+                        continue
+            _day_rollup_presence[day] = present
+            return present
+
+        missing_hours: list[str] = []
+        missing_hour_dts: list[datetime] = []
+        cur_dt = heal_floor_dt.replace(minute=0, second=0, microsecond=0)
+        while cur_dt < active_dt:
+            h = cur_dt.strftime("%Y-%m-%d-%H")
+            h_dt = cur_dt
+            cur_dt += timedelta(hours=1)
+            if et_str_floor and h > et_str_floor:
+                break
+            if h in bundled_hours or h in per_field_hours_seen:
+                continue
+            if h[:10] in days_with_day_files_any and _day_has_real_day_rollup(h[:10]):
+                continue
+            missing_hours.append(h)
+            missing_hour_dts.append(h_dt)
+        if missing_hours:
+            _now_mono = time.monotonic()
+            _svc_key = self.src.get("name") or self.src.get("service_id") or "default"
+            if _now_mono - _MISSING_HOUR_HEAL_WARN_TS.get(_svc_key, 0.0) >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
+                _MISSING_HOUR_HEAL_WARN_TS[_svc_key] = _now_mono
+                _logger.warning(
+                    "[top_n_rollups] live-healing %d un-rolled closed hour(s) for service=%r "
+                    "(%s..%s) — expected when the writer is <1 heal tick behind; persistent "
+                    "occurrences mean the rollup_heal cron is failing (check cron_runs), and "
+                    "gaps older than %dh need the daily deep pass or scripts/backfill_rollups.py",
+                    len(missing_hours),
+                    _svc_key,
+                    missing_hours[0],
+                    missing_hours[-1],
+                    _MISSING_HOUR_HEAL_CAP,
+                )
+            try:
+                if not actual_cols:
+                    actual_cols = actual_cols_seed if actual_cols_seed is not None else self.get_schema_cols()
+                if not schema_types:
+                    if schema_types_seed is not None:
+                        schema_types = schema_types_seed
+                    else:
+                        schema_types = {col["name"]: col["type"] for col in _get_schema(self.con, self.src)}
+                heal_topn_fields = [f for f in safe_fields if f not in _LIVE_TOPN_SKIP_FIELDS]
+                # Clamp to the requested window so a mid-hour window edge
+                # (custom range) can't over-count rows outside it; the IN
+                # list prunes to exactly the un-rolled hours in between.
+                heal_start_dt = max(missing_hour_dts[0], st_dt) if st_dt else missing_hour_dts[0]
+                heal_end_dt = missing_hour_dts[-1] + timedelta(hours=1)
+                if et_dt and et_dt < heal_end_dt:
+                    heal_end_dt = et_dt
+                hours_in_sql = ", ".join(f"'{h}'" for h in missing_hours)
+                heal_where = (
+                    f"timestamp >= '{heal_start_dt.isoformat()}' "
+                    f"AND timestamp < '{heal_end_dt.isoformat()}' "
+                    f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
+                )
+                _heal_limit = max([limit] + list((per_field_limits or {}).values()))
+                heal_tmp = self.create_filtered_temp_table(heal_topn_fields, actual_cols, base_table, heal_where)
+                if heal_tmp:
+                    try:
+                        heal_fields = [f for f in heal_topn_fields if f in actual_cols]
+                        if heal_fields:
+                            heal_res, _ = self.execute_top_n_batch(
+                                heal_fields, heal_tmp, actual_cols, schema_types, limit=_heal_limit
+                            )
+                    finally:
+                        try:
+                            self.execute(f'DROP TABLE IF EXISTS "{heal_tmp}"')
+                        except Exception:
+                            pass
+            except Exception:
+                # Best-effort: a failed heal leaves the pre-fallback
+                # behavior (rollups + active hour only), never a 500.
+                _logger.debug("[top_n_rollups] missing-hour live heal failed", exc_info=True)
+        _phase("live_missing_hours", (time.perf_counter() - _t_heal) * 1000)
+        _phase("live_missing_hours:n_hours", float(len(missing_hours)))
 
         # Combine rolled and live, bucketed by field. The prior
         # implementation kept a flat (field, value) keyed dict and then
@@ -1457,6 +1775,9 @@ class QueryRunner:
             bucket = by_field.setdefault(field, {})
             bucket[value] = bucket.get(value, 0) + count
         for field, value, count in live_res:
+            bucket = by_field.setdefault(field, {})
+            bucket[value] = bucket.get(value, 0) + count
+        for field, value, count in heal_res:
             bucket = by_field.setdefault(field, {})
             bucket[value] = bucket.get(value, 0) + count
 
@@ -1533,13 +1854,17 @@ class QueryRunner:
     # value. Percentile / median metrics (p50/p95/p99 latency, throughput,
     # req_size, ttfb median) are excluded — they need sketch-based re-aggregation
     # DuckDB doesn't ship — and fall through to the raw scan.
-    _TS_ROLLUP_METRIC_PARTS: dict[str, dict[str, str]] = {
+    # ``live_cols`` lists the raw columns the num_live/den_live expressions
+    # touch (beyond ``timestamp``) — the direct active-hour read below
+    # projects exactly these into its temp.
+    _TS_ROLLUP_METRIC_PARTS: dict[str, dict[str, Any]] = {
         "requests": {
             "kind": "count",
             "num_rollup": "SUM(requests)",
             "den_rollup": "0",
             "num_live": "COUNT(*)",
             "den_live": "0",
+            "live_cols": (),
         },
         "5xx": {
             "kind": "rate",
@@ -1547,6 +1872,7 @@ class QueryRunner:
             "den_rollup": "SUM(requests)",
             "num_live": "COUNT(*) FILTER (WHERE status >= 500)",
             "den_live": "COUNT(*)",
+            "live_cols": ("status",),
         },
         "4xx": {
             "kind": "rate",
@@ -1554,6 +1880,7 @@ class QueryRunner:
             "den_rollup": "SUM(requests)",
             "num_live": "COUNT(*) FILTER (WHERE status BETWEEN 400 AND 499)",
             "den_live": "COUNT(*)",
+            "live_cols": ("status",),
         },
         "hit_rate": {
             "kind": "rate",
@@ -1561,6 +1888,7 @@ class QueryRunner:
             "den_rollup": "SUM(requests)",
             "num_live": "COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE'))",
             "den_live": "COUNT(*)",
+            "live_cols": ("cache",),
         },
     }
 
@@ -1578,6 +1906,7 @@ class QueryRunner:
         table_name: str,
         where_clause: str,
         params: list,
+        unfiltered_window: bool = False,
     ) -> list[dict] | None:
         """Serve the dashboard time_series chart from per-hour rollup parquets
         when eligible, falling back transparently to ``None`` otherwise (the
@@ -1596,7 +1925,9 @@ class QueryRunner:
         rolled up (the bundler skips them — see
         :func:`backend.core.rollups.build_time_series_bundles`). If the
         window includes the active hour we run the live SQL for that hour
-        only, UNION ALL it with the rollup-served portion, and re-aggregate
+        only — preferring a direct buffer + active-hourly-partition read
+        over the bound iceberg view (see the ``crosses_active`` block) —
+        UNION ALL it with the rollup-served portion, and re-aggregate
         in an outer ``GROUP BY out_bucket`` so the chart is always current to
         the second AND a coarse bucket (e.g. ``1 day``) that straddles the
         closed/active boundary combines into one value instead of being
@@ -1681,22 +2012,52 @@ class QueryRunner:
                 f"GROUP BY 1"
             )
 
+        direct_live_tmp: str | None = None
+        live_needs_params = False
         if crosses_active:
-            # Live SQL for the [max(st, active_hour_start), et) slice. Read
-            # from the per-request table (TEMP table or base view) using
+            # Live SQL for the [max(st, active_hour_start), et) slice, using
             # the same metric-derivation logic as the rollup branch so the
-            # buckets align exactly. The where_clause already encodes any
-            # filter — we further constrain by the live-slice timestamps.
+            # buckets align exactly.
             live_start = max(st, active_hour_dt)
             live_end = et
             live_st_tz = live_start.astimezone(UTC).isoformat()
             live_et_tz = live_end.astimezone(UTC).isoformat()
 
+            # Fast path: read buffer + active hourly partition directly,
+            # bypassing the bound iceberg view — same trick as the top-N
+            # live branch. Reading the 1-hour slice through the view pays
+            # its manifest/union/CASE-projection overhead every load (~60-90ms
+            # observed on prod 2026-07-06 vs ~6ms direct). Gated on the
+            # caller declaring ``unfiltered_window=True`` (the dashboard's
+            # ``use_rollups`` path): the direct read applies ONLY its own
+            # timestamp clamp, so a where_clause carrying row filters would
+            # be silently ignored on the live slice. Falls back to the
+            # view-based scan when the direct read is unavailable (no files
+            # on disk, schema mismatch, ...).
+            if unfiltered_window:
+                live_cols = parts["live_cols"]
+                try:
+                    # Schema lookup only when the metric projects extra
+                    # columns — the default `requests` metric needs just
+                    # `timestamp`, which the direct read always includes.
+                    _cols: list[str] = self.get_schema_cols() if live_cols else []
+                    if all(c in _cols for c in live_cols):
+                        direct_live_tmp = self._create_active_hour_temp_direct(
+                            list(live_cols), _cols, live_start, live_end
+                        )
+                except Exception:
+                    direct_live_tmp = None
+            if direct_live_tmp is not None:
+                live_source, live_where = direct_live_tmp, "1=1"
+            else:
+                live_source, live_where = table_name, where_clause
+                live_needs_params = True
+
             select_clauses.append(
                 f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
                 f"       {parts['num_live']} AS num, {parts['den_live']} AS den "
-                f"FROM {table_name} "
-                f"WHERE {where_clause} "
+                f"FROM {live_source} "
+                f"WHERE {live_where} "
                 f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
                 f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}' "
                 f"GROUP BY 1"
@@ -1727,7 +2088,7 @@ class QueryRunner:
         )
 
         try:
-            rows = self.execute(final_sql, params if crosses_active else []).fetchall()
+            rows = self.execute(final_sql, params if live_needs_params else []).fetchall()
         except duckdb.Error as e:
             # Any read failure (stale view, missing column, schema drift
             # in older bundles, …) drops us to the raw path. Logged at
@@ -1736,6 +2097,9 @@ class QueryRunner:
 
             _logging.getLogger(__name__).debug("[time_series_rollup] read failed, falling back to raw: %s", e)
             return None
+        finally:
+            if direct_live_tmp is not None:
+                self.release_active_direct_temp(direct_live_tmp)
 
         out: list[dict] = []
         for r in rows:
@@ -1762,6 +2126,7 @@ class QueryRunner:
         *,
         has_filters: bool,
         require_top_asns: list[int] | None = None,
+        min_hours: int | None = None,
     ) -> tuple[datetime, datetime] | None:
         """Shared eligibility preamble for the ``try_*_from_rollup`` readers.
 
@@ -1770,9 +2135,12 @@ class QueryRunner:
         order: unfiltered only; both bounds present; optional non-empty
         ``require_top_asns`` (network readers pass their top-N list); both
         bounds parse as ISO-8601 UTC with ``et > st``; window spans at least
-        :attr:`_SLOW_URLS_ROLLUP_MIN_HOURS` and at most 366 days. Every guard
-        is a side-effect-free ``return None``, so the short-circuit order is
-        equivalent to the per-method preambles it replaces.
+        ``min_hours`` (default :attr:`_SLOW_URLS_ROLLUP_MIN_HOURS` — readers
+        whose fallback is a panel-dedicated raw scan rather than an
+        already-materialized temp pass a lower floor) and at most 366 days.
+        Every guard is a side-effect-free ``return None``, so the
+        short-circuit order is equivalent to the per-method preambles it
+        replaces.
         """
         from datetime import timedelta
 
@@ -1788,7 +2156,7 @@ class QueryRunner:
         et = parse_iso_utc(end_time)
         if st is None or et is None or et <= st:
             return None
-        if (et - st) < timedelta(hours=self._SLOW_URLS_ROLLUP_MIN_HOURS):
+        if (et - st) < timedelta(hours=min_hours if min_hours is not None else self._SLOW_URLS_ROLLUP_MIN_HOURS):
             return None
         if (et - st) > timedelta(days=366):
             return None
@@ -2733,6 +3101,174 @@ class QueryRunner:
             return None
         return [(int(r[0]), str(r[1]), int(r[2])) for r in rows]
 
+    def try_network_heatmap_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> list | None:
+        """Serve the /api/network-health ``heatmap`` section (and the
+        derived ``leaderboard`` / ``summary`` / ``buckets`` sections)
+        from per-hour + per-day network_heatmap parquets when eligible.
+
+        Same eligibility posture as :meth:`try_network_rtt_from_rollup`:
+        unfiltered only, window ≥ 48 h, ≥ 50% closed-hour coverage.
+
+        Each parquet row covers exactly one (asn, hour) pair. The reader
+        returns one row per (asn, hour) with the hour as the heatmap
+        bucket — hourly bucket granularity on 30 d windows (720 buckets
+        instead of the 5-min live resolution of 8640), which is still
+        meaningful for trend/health analysis.
+
+        Returns rows shaped as
+        ``(asn, bucket_ts, throughput_bps, rtt_med_us, rtt_baseline_us,
+           rtt_congestion_us, avg_ploss, jitter_us, error_pct, reqs)``
+        matching positions ``r[0]–r[9]`` in the live heatmap loop, or
+        ``None`` on any eligibility miss / read error.
+        """
+        from backend.core.rollups._common import NETWORK_HEATMAP_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, NETWORK_HEATMAP_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        st_iso = st.isoformat()
+        et_iso = et.isoformat()
+        sql = (
+            f"SELECT"
+            f"  asn,"
+            f"  hour_ts                                                             AS bucket_ts,"
+            f"  resp_bytes_sum / 3600.0                                            AS throughput_bps,"
+            f"  rtt_p50_us                                                         AS rtt_med_us,"
+            f"  rtt_min_p50_us                                                     AS rtt_baseline_us,"
+            f"  rtt_p50_us - COALESCE(rtt_min_p50_us, rtt_p50_us)                AS rtt_congestion_us,"
+            f"  ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,"
+            f"  rtt_var_p50_us                                                     AS jitter_us,"
+            f"  errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
+            f"  CAST(reqs AS BIGINT)                                               AS reqs"
+            f" FROM read_parquet([{paths_sql}])"
+            f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+            f" ORDER BY reqs DESC"
+        )
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[network_heatmap_rollup] read failed, falling back: %s", e)
+            return None
+
+        if not rows:
+            return None
+        return list(rows)
+
+    def try_network_geo_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        map_asn: str = "all",
+        has_filters: bool,
+    ) -> tuple[list, list] | None:
+        """Serve the /api/network-health ``map_buckets`` + ``cities`` +
+        ``metro_leaderboard`` sections from per-hour network_geo parquets.
+
+        Same eligibility posture as :meth:`try_network_heatmap_from_rollup`
+        (unfiltered, >= 48 h, >= 50% closed-hour coverage). Also returns
+        ``None`` when ``map_asn != "all"`` because the geo rollup is built
+        across all ASNs and cannot serve per-ASN map drill-down.
+
+        Returns ``(map_rows, metro_rows)`` on hit:
+          - ``map_rows``: list of tuples shaped as
+            ``(country, city, lat, lon, metro, bucket_ts, rtt_med, avg_ploss,
+               error_pct, reqs)`` — matching positions ``r[0]–r[9]`` in the
+            live ``MAP_BY_COUNTRY_BUCKET`` loop (top 5000 by reqs).
+          - ``metro_rows``: list of tuples shaped as
+            ``(country, city, region, metro, rtt_med_us, avg_ploss, error_pct,
+               reqs)`` — matching positions ``r[0]–r[7]`` in the live
+            ``METRO_LEADERBOARD`` loop (top 100). ``region`` is always ``''``
+            (the city display falls back to city + country in format_city_label).
+
+        Returns ``None`` on any eligibility miss / read error.
+        """
+        from backend.core.rollups._common import NETWORK_GEO_BUNDLE_FILENAME
+
+        if map_asn != "all":
+            return None  # per-ASN map drill-down not supported by geo rollup
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, NETWORK_GEO_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        st_iso = st.isoformat()
+        et_iso = et.isoformat()
+
+        # Map rows: per (geocell, hour) — one heatmap time-bucket per hour.
+        # Row shape matches MAP_BY_COUNTRY_BUCKET output:
+        #   (country, city, lat, lon, metro, bucket_ts, rtt_med, avg_ploss, error_pct, reqs)
+        map_sql = (
+            f"SELECT"
+            f"  country,"
+            f"  city,"
+            f"  lat,"
+            f"  lon,"
+            f"  metro,"
+            f"  hour_ts                                           AS bucket_ts,"
+            f"  rtt_sum / NULLIF(rtt_count, 0)                  AS rtt_med_us,"
+            f"  ploss_sum / NULLIF(ploss_count, 0)              AS avg_ploss,"
+            f"  errors * 100.0 / NULLIF(reqs, 0)                AS error_pct,"
+            f"  CAST(reqs AS BIGINT)                             AS reqs"
+            f" FROM read_parquet([{paths_sql}])"
+            f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+            f" ORDER BY hour_ts, reqs DESC"
+            f" LIMIT 5000"
+        )
+
+        # Metro rows: aggregated across all hours — no time dimension.
+        # Row shape matches METRO_LEADERBOARD output:
+        #   (country, city, region, metro, rtt_med_us, avg_ploss, error_pct, reqs)
+        metro_sql = (
+            f"SELECT"
+            f"  country,"
+            f"  city,"
+            f"  CAST('' AS VARCHAR)                                   AS region,"
+            f"  metro,"
+            f"  SUM(rtt_sum) / NULLIF(SUM(rtt_count), 0)             AS rtt_med_us,"
+            f"  SUM(ploss_sum) / NULLIF(SUM(ploss_count), 0)         AS avg_ploss,"
+            f"  SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0)           AS error_pct,"
+            f"  CAST(SUM(reqs) AS BIGINT)                             AS total_reqs"
+            f" FROM read_parquet([{paths_sql}])"
+            f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+            f" GROUP BY country, city, metro"
+            f" ORDER BY total_reqs DESC"
+            f" LIMIT 100"
+        )
+        try:
+            map_rows = self.execute(map_sql).fetchall()
+            metro_rows = self.execute(metro_sql).fetchall()
+        except duckdb.Error as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[network_geo_rollup] read failed, falling back: %s", e)
+            return None
+
+        if not map_rows and not metro_rows:
+            return None
+        return list(map_rows), list(metro_rows)
+
     def try_verified_bots_ts_from_rollup(
         self,
         start_time: str | None,
@@ -3013,6 +3549,210 @@ class QueryRunner:
         if not rows:
             return None
         return [{"bucket": r[0], "count": int(r[1] or 0)} for r in rows]
+
+    # security_conn_reuse.parquet bucket labels → the dashboard conn_requests
+    # histogram's label space. Bucket EDGES line up exactly (1 / 2–5 / 6–20 /
+    # >20 — both writers replicate the same ``conn_requests > 0`` floor), so
+    # folding the rollup's finer '21-100'/'>100' tail into '21+' is exact.
+    # Dashboard labels use en-dash (U+2013) — the FE matches them exactly.
+    _CONN_REUSE_TO_DASHBOARD_BUCKET: dict[str, str] = {
+        "1 (None)": "1",
+        "2-5": "2–5",
+        "6-20": "6–20",
+        "21-100": "21+",
+        ">100": "21+",
+    }
+    _CONN_REQUESTS_BUCKET_ORDER: tuple[str, ...] = ("1", "2–5", "6–20", "21+")
+
+    def try_conn_requests_hist_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        actual_cols: list[str] | set[str] | None = None,
+    ) -> dict | None:
+        """Serve the dashboard ``conn_requests`` histogram from the per-hour/
+        per-day ``security_conn_reuse`` parquets + a live active-hour top-up.
+
+        Reuses /api/security/aggregates' conn_reuse rollup wholesale — same
+        backing column, same ``conn_requests > 0`` floor, exactly-aligned
+        bucket edges (see :attr:`_CONN_REUSE_TO_DASHBOARD_BUCKET`) — so the
+        dashboard panel needs no writer/backfill machinery of its own.
+
+        Differences from :meth:`try_security_conn_reuse_from_rollup`:
+
+        * ``min_hours=2`` instead of the 48h default. The security panel's
+          fallback reads an already-materialized catalog temp, so short
+          windows ride along ~free; the dashboard fallback is a dedicated
+          window scan, so the rollup should win at the default 24h window.
+        * The active hour ∩ window is merged live via the same direct
+          buffer+hourly-partition read the top-N live branch uses, so the
+          histogram stays current like the other dashboard cards. When the
+          direct read isn't available the top-up is skipped rather than
+          escalated to a view scan — matching the security panel's shipped
+          posture (it serves closed hours only).
+
+        Window edge: a mid-hour window START loses its partial leading hour
+        (whole-hour rollup grain, ``skip_partial_start``) — ≤1h on a ≥2h
+        window; the distribution shape is what the card communicates.
+
+        Returns ``{"top": [{"value", "count"}, ...], "total": int}`` in
+        fixed bucket order — the exact shape the dashboard's live
+        ``CONN_REQUESTS_BUCKET`` block produces — or ``None`` on any
+        eligibility miss (caller falls back to that live scan).
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from backend.core.rollups._common import SECURITY_CONN_REUSE_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=2)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_CONN_REUSE_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        sql = f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([{paths_sql}]) GROUP BY bucket"
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.Error as e:
+            _logger.debug("[conn_requests_hist_rollup] read failed, falling back: %s", e)
+            return None
+        if not rows:
+            return None
+
+        counts: dict[str, int] = {}
+        for bucket, cnt in rows:
+            label = self._CONN_REUSE_TO_DASHBOARD_BUCKET.get(bucket, bucket)
+            counts[label] = counts.get(label, 0) + int(cnt or 0)
+
+        # Live top-up: [active hour ∩ window). Closed hours are all rollup-
+        # served (_collect_rollup_paths stops at the active hour).
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        live_start = max(active_dt, st)
+        live_end = min(active_dt + timedelta(hours=1), et)
+        if live_start < live_end:
+            cols = actual_cols if actual_cols is not None else self.get_schema_cols()
+            if "conn_requests" in cols:
+                tmp = self._create_active_hour_temp_direct(["conn_requests"], cols, live_start, live_end)
+                if tmp is not None:
+                    try:
+                        from backend.repositories._sql import dashboard as _dash_sql
+
+                        live_q = _dash_sql.CONN_REQUESTS_BUCKET.format(
+                            requests_metric=CANONICAL_METRICS["requests"],
+                            table_name=tmp,
+                            where_clause="1=1",
+                        )
+                        for bucket, cnt in self.execute(live_q).fetchall():
+                            counts[bucket] = counts.get(bucket, 0) + int(cnt or 0)
+                    except duckdb.Error as e:
+                        _logger.debug("[conn_requests_hist_rollup] live top-up failed (skipped): %s", e)
+                    finally:
+                        self.release_active_direct_temp(tmp)
+
+        known = [b for b in self._CONN_REQUESTS_BUCKET_ORDER if b in counts]
+        # Unknown labels (writer drift) are appended rather than dropped so
+        # their counts stay visible instead of silently vanishing.
+        extras = [b for b in counts if b not in self._CONN_REQUESTS_BUCKET_ORDER]
+        top = [{"value": b, "count": counts[b]} for b in known + extras]
+        return {"top": top, "total": sum(counts.values())}
+
+    def try_ngwaf_top_bots_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        n: int,
+    ) -> list[dict] | None:
+        """Serve ``get_top_bots``' ``ngwaf_bots`` panel from the per-hour/
+        per-day ``ngwaf_bots`` parquets + a live active-hour top-up.
+
+        The rollup writer already joined each closed hour's ``waf_req_id``s
+        against the SQLite bot cache (see
+        :mod:`backend.core.rollups.ngwaf_bots`), so this reader SUMs tiny
+        aggregated parquets instead of the per-request direct join over the
+        raw window (~115ms on prod 24h, 2026-07-07). EXACT SUM; no
+        ``_approx``.
+
+        ``min_hours=2`` (not the 48h default): the fallback is a dedicated
+        window join, so the rollup should win at the default 24h window.
+
+        Active hour ∩ window merges live via the direct buffer read +
+        ``ngwaf_top`` join — the caller has already ATTACHed the cache (this
+        reader is only invoked from the ``ngwaf_attached`` branch). A failed
+        top-up is skipped, not escalated (bounded staleness ≤1h, same
+        posture as the conn_requests histogram reader).
+
+        Returns ``[{"name", "category", "request_count"}, ...]`` sorted by
+        count descending, capped at ``n`` — the exact shape the direct-join
+        branch produces. An EMPTY list is a valid result (covered window,
+        zero bots); ``None`` means ineligible/no coverage → caller falls
+        back to the direct join.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from backend.core.rollups._common import NGWAF_BOTS_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=2)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, NGWAF_BOTS_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        sql = (
+            f"SELECT bot_name, category, CAST(SUM(count) AS BIGINT) AS c "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"GROUP BY bot_name, category"
+        )
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.Error as e:
+            _logger.debug("[ngwaf_bots_rollup] read failed, falling back: %s", e)
+            return None
+
+        counts: dict[tuple[str, str], int] = {}
+        for bot_name, category, cnt in rows:
+            key = (bot_name, category)
+            counts[key] = counts.get(key, 0) + int(cnt or 0)
+
+        # Live top-up: [active hour ∩ window). Closed hours are all rollup-
+        # served (_collect_rollup_paths stops at the active hour).
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        live_start = max(active_dt, st)
+        live_end = min(active_dt + timedelta(hours=1), et)
+        if live_start < live_end:
+            cols = self.get_schema_cols()
+            if "waf_req_id" in cols:
+                tmp = self._create_active_hour_temp_direct(["waf_req_id"], cols, live_start, live_end)
+                if tmp is not None:
+                    try:
+                        live_q = (
+                            f"SELECT nb.bot_name, nb.category, CAST(COUNT(*) AS BIGINT) AS c "
+                            f'FROM "{tmp}" t '
+                            f"INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id) "
+                            f"WHERE nb.bot_name IS NOT NULL "
+                            f"GROUP BY 1, 2"
+                        )
+                        for bot_name, category, cnt in self.execute(live_q).fetchall():
+                            key = (bot_name, category)
+                            counts[key] = counts.get(key, 0) + int(cnt or 0)
+                    except duckdb.Error as e:
+                        _logger.debug("[ngwaf_bots_rollup] live top-up failed (skipped): %s", e)
+                    finally:
+                        self.release_active_direct_temp(tmp)
+
+        ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[: max(0, int(n))]
+        return [{"name": bn, "category": cat, "request_count": c} for (bn, cat), c in ranked]
 
     def try_security_top_ips_from_rollup(
         self,
@@ -3502,3 +4242,5 @@ _CacheRegistry.register("repositories._base._listdir_cache", _listdir_cache)
 # a test that triggers an empty-rollup warning leaves entries behind, and
 # a later test that expects the warning to fire again is silently throttled.
 _CacheRegistry.register("repositories._base._EMPTY_ROLLUP_WARN_TS", _EMPTY_ROLLUP_WARN_TS)
+# Same leak class for the missing-hour live-heal warning throttle.
+_CacheRegistry.register("repositories._base._MISSING_HOUR_HEAL_WARN_TS", _MISSING_HOUR_HEAL_WARN_TS)

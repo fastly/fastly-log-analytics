@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from backend.deps import get_service_id
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.views import SavedView
+from backend.models.views import SavedView, SavedViewRecord, ViewSaveResponse
 from backend.repositories import views as repo
 from backend.routers._state_sync import sync_admin_state
 from backend.utils.auth import require_service_in_scope
@@ -14,7 +14,11 @@ from backend.utils.auth import require_service_in_scope
 router = APIRouter(prefix="/api/views", tags=["views"], responses=DEFAULT_ERROR_RESPONSES)
 
 
-@router.get("/{service_id}")
+@router.get(
+    "/{service_id}",
+    response_model=list[SavedViewRecord],
+    response_model_exclude_unset=True,
+)
 def list_views(
     service_id: str,
     request: Request,
@@ -31,7 +35,7 @@ def list_views(
     return repo.get_views(service_id)[:limit]
 
 
-@router.post("/", status_code=201)
+@router.post("/", status_code=201, response_model=ViewSaveResponse)
 def create_view(view: SavedView, request: Request):
     """Security: analyst can only create views for services in
     their scope. Middleware already blocks POST on /api/views for
@@ -45,6 +49,7 @@ def create_view(view: SavedView, request: Request):
     return res
 
 
+# response_model intentionally omitted: 204 No Content — empty body.
 @router.delete("/{view_id}", status_code=204)
 def delete_view(view_id: str, request: Request, service_id: str | None = Depends(get_service_id)):
     # Security: service_id is required (audit finding 018). The pre-fix

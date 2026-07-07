@@ -16,7 +16,8 @@ export interface FilterPill {
  *
  * Dedup scheme: when the same column needs both an include AND an exclude
  * bucket, the second bucket gets a `_<n>` suffix (`country`, `country_1`).
- * useFilterUrlSync strips this suffix on URL hydration, and the backend
+ * hydrateFilterStoreFromUrl (lib/urlFilterHydration.ts) strips this suffix
+ * on URL hydration, and the backend
  * (backend/repositories/utils/filters.py) strips it when building WHERE
  * clauses. As a consequence, column names literally ending in `_<digit>`
  * would be corrupted on round-trip. filterStore.addFilter guards entry —

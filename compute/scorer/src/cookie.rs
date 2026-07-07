@@ -17,12 +17,15 @@
 //!   sum_dt_sq        u64        Σ Δt² seconds²
 //!   last_ts          u32        last-request unix epoch
 //!   score            u8         quantized 0-100
-//!   issued_at        u32        cookie creation unix epoch     ← end of v1 (30 B)
-//!   prev_route_len   u8         length of prev_route_path  (v2 only, 0-255)
+//!   issued_at        u32        cookie creation unix epoch     ← end of fixed head (30 B)
+//!   prev_route_len   u8         length of prev_route_path  (0-255)
 //!   prev_route_path  [u8;N]     normalized path of last-scored URL (UTF-8)
 //! ```
 //!
-//! v1 cookies still decode (with prev_route_path = ""). Encoder always emits v2.
+//! The length byte is always present (0 for an empty path), so valid plaintext
+//! is >= 31 bytes. The legacy v1 format (bare 30-byte head) was removed
+//! 2026-07-06 — it was unreachable in production because the AAD binds the
+//! schema version. Encoder and decoder speak only SCHEMA_VERSION.
 //!
 //! aad: ASCII `{service_id}|v{schema_version}`
 
@@ -37,18 +40,18 @@ pub const SID_BYTES: usize = 6;
 pub const NONCE_BYTES: usize = 12;
 pub const KEY_BYTES: usize = 32;
 pub const SCORE_BUCKET: u8 = 5;
-/// v1 plaintext size (fixed 30 bytes). Kept exposed because the decoder
-/// uses it to dispatch v1 vs v2 layout.
-pub const V1_PLAINTEXT_BYTES: usize = 30;
+/// Fixed head size (30 bytes) — everything before the length-prefixed
+/// prev_route_path suffix.
+pub const HEAD_PLAINTEXT_BYTES: usize = 30;
 /// Maximum bytes we'll encode for prev_route_path. Long paths get
 /// truncated at encode time — the matrix transition lookup tolerates an
 /// unknown prev_route by returning the uniform-prior probability, so the
 /// failure mode of truncation is "L2 = uniform" not "crash".
 pub const PREV_ROUTE_MAX_BYTES: usize = 255;
 pub const GCM_TAG_BYTES: usize = 16;
-/// Minimum total envelope size (v1 plaintext + nonce + tag). Used by
+/// Minimum total envelope size (nonce + head + length byte + tag). Used by
 /// decode() to reject obviously-malformed cookies before attempting AEAD.
-pub const ENVELOPE_BYTES: usize = NONCE_BYTES + V1_PLAINTEXT_BYTES + GCM_TAG_BYTES;
+pub const ENVELOPE_BYTES: usize = NONCE_BYTES + HEAD_PLAINTEXT_BYTES + 1 + GCM_TAG_BYTES;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CookieError {
@@ -80,8 +83,8 @@ pub struct SessionState {
     /// Carried in the cookie so the scorer can compute the L2 transition
     /// probability without VCL having to pass prev_route via a header
     /// (req.http doesn't persist across separate client requests, so a
-    /// header-based mechanism was always broken). Empty when the cookie
-    /// was a v1 decode or when this is the first request in a session.
+    /// header-based mechanism was always broken). Empty on the first
+    /// request in a session.
     pub prev_route_path: String,
 }
 
@@ -114,10 +117,9 @@ pub fn quantize_score(raw: f64) -> u8 {
 }
 
 fn pack_payload(state: &SessionState) -> Vec<u8> {
-    // v2 layout: 30-byte fixed header + 1-byte length prefix + N bytes
-    // of UTF-8 path. We always emit the v2 length prefix even when the
-    // path is empty so the decoder can dispatch unambiguously on
-    // plaintext length (== 30 → v1 legacy, > 30 → v2).
+    // Layout: 30-byte fixed head + 1-byte length prefix + N bytes of
+    // UTF-8 path. The length prefix is always emitted, even when the
+    // path is empty.
     // Largest char boundary <= PREV_ROUTE_MAX_BYTES so we never split a
     // multi-byte UTF-8 sequence. Equivalent to the unstable
     // `str::floor_char_boundary`, written with stable `is_char_boundary` so
@@ -131,7 +133,7 @@ fn pack_payload(state: &SessionState) -> Vec<u8> {
         i
     };
     let path_bytes = state.prev_route_path.as_bytes();
-    let mut out = Vec::with_capacity(V1_PLAINTEXT_BYTES + 1 + path_len);
+    let mut out = Vec::with_capacity(HEAD_PLAINTEXT_BYTES + 1 + path_len);
     out.push(state.v);
     out.extend_from_slice(&state.sid);
     out.extend_from_slice(&state.seq.to_le_bytes());
@@ -146,7 +148,8 @@ fn pack_payload(state: &SessionState) -> Vec<u8> {
 }
 
 fn unpack_payload(buf: &[u8]) -> Result<SessionState, CookieError> {
-    if buf.len() < V1_PLAINTEXT_BYTES {
+    // Head + the always-present length byte is the minimum valid payload.
+    if buf.len() < HEAD_PLAINTEXT_BYTES + 1 {
         return Err(CookieError::BadFraming("plaintext too short"));
     }
     let mut sid = [0u8; SID_BYTES];
@@ -162,18 +165,15 @@ fn unpack_payload(buf: &[u8]) -> Result<SessionState, CookieError> {
         issued_at: u32::from_le_bytes(buf[26..30].try_into().unwrap()),
         prev_route_path: String::new(),
     };
-    // v1 cookies stop here (30 bytes total). v2 has a length-prefixed
-    // UTF-8 path suffix.
-    if buf.len() > V1_PLAINTEXT_BYTES {
-        let path_len = buf[V1_PLAINTEXT_BYTES] as usize;
-        let path_end = V1_PLAINTEXT_BYTES + 1 + path_len;
-        if buf.len() != path_end {
-            return Err(CookieError::BadFraming("prev_route_path length"));
-        }
-        state.prev_route_path = std::str::from_utf8(&buf[V1_PLAINTEXT_BYTES + 1..path_end])
-            .map_err(|_| CookieError::BadFraming("prev_route_path utf-8"))?
-            .to_string();
+    // Length-prefixed UTF-8 path suffix (length byte always present).
+    let path_len = buf[HEAD_PLAINTEXT_BYTES] as usize;
+    let path_end = HEAD_PLAINTEXT_BYTES + 1 + path_len;
+    if buf.len() != path_end {
+        return Err(CookieError::BadFraming("prev_route_path length"));
     }
+    state.prev_route_path = std::str::from_utf8(&buf[HEAD_PLAINTEXT_BYTES + 1..path_end])
+        .map_err(|_| CookieError::BadFraming("prev_route_path utf-8"))?
+        .to_string();
     Ok(state)
 }
 
@@ -271,12 +271,11 @@ pub fn decode(
     };
 
     let state = unpack_payload(&plaintext)?;
-    // Accept v1 cookies during the migration window — they have no
-    // prev_route_path, which means L2 transition lookup falls back to
-    // uniform probability for that one request, but the request still
-    // serves. The decoder is the only place we accept old schemas; the
-    // encoder always emits the current SCHEMA_VERSION.
-    if state.v != schema_version && state.v != 1 {
+    // Strict version match. (Legacy v1 acceptance was removed 2026-07-06 —
+    // it was unreachable: the AAD pins the codec's schema version, so a
+    // cookie minted under any other version fails AEAD verification before
+    // reaching this check.)
+    if state.v != schema_version {
         return Err(CookieError::BadSchemaVersion(state.v));
     }
     Ok(state)
@@ -376,23 +375,22 @@ mod tests {
         assert_eq!(&packed[..], &expected[..]);
     }
 
-    /// v2 with empty prev_route_path still emits the length-prefix byte
-    /// (= 0). The wire layout is always v2 from the encoder; v1 is only a
-    /// decode-side back-compat.
+    /// An empty prev_route_path still emits the length-prefix byte (= 0).
     #[test]
     fn pack_layout_empty_prev_route() {
         let mut s = state();
         s.prev_route_path = String::new();
         let packed = pack_payload(&s);
-        assert_eq!(packed.len(), V1_PLAINTEXT_BYTES + 1);
-        assert_eq!(packed[V1_PLAINTEXT_BYTES], 0);
+        assert_eq!(packed.len(), HEAD_PLAINTEXT_BYTES + 1);
+        assert_eq!(packed[HEAD_PLAINTEXT_BYTES], 0);
     }
 
-    /// v1 decoder back-compat: a 30-byte plaintext should round-trip into
-    /// a SessionState with prev_route_path = empty (legacy cookies issued
-    /// before the schema bump).
+    /// The legacy v1 format (bare 30-byte head, no length byte) was
+    /// removed 2026-07-06 — it was unreachable in production because the
+    /// AAD binds the schema version. A 30-byte plaintext now fails framing.
+    /// Mirrors Python's `test_unpack_rejects_legacy_v1_30_byte_plaintext`.
     #[test]
-    fn unpack_accepts_v1_30_byte_plaintext() {
+    fn unpack_rejects_legacy_v1_30_byte_plaintext() {
         let v1 = hex::decode(
             "01\
              112233445566\
@@ -404,10 +402,10 @@ mod tests {
              00000064",
         )
         .unwrap();
-        let s = unpack_payload(&v1).unwrap();
-        assert_eq!(s.v, 1);
-        assert_eq!(s.prev_route_path, "");
-        assert_eq!(s.score, 80);
+        assert!(matches!(
+            unpack_payload(&v1),
+            Err(CookieError::BadFraming(_))
+        ));
     }
 
     #[test]
@@ -415,8 +413,8 @@ mod tests {
         let mut s = state();
         s.prev_route_path = "/checkout".to_string();
         let packed = pack_payload(&s);
-        // v1 header (30) + 1 length byte + 9 path bytes = 40 bytes
-        assert_eq!(packed.len(), V1_PLAINTEXT_BYTES + 1 + 9);
+        // head (30) + 1 length byte + 9 path bytes = 40 bytes
+        assert_eq!(packed.len(), HEAD_PLAINTEXT_BYTES + 1 + 9);
         let recovered = unpack_payload(&packed).unwrap();
         assert_eq!(recovered, s);
     }
@@ -441,11 +439,12 @@ mod tests {
 
     #[test]
     fn encode_envelope_size_with_empty_path() {
-        // v2 always emits a length-prefix byte even when path is empty,
-        // so envelope is one byte larger than the v1 baseline.
+        // The length-prefix byte is always emitted, so an empty-path
+        // envelope is exactly the ENVELOPE_BYTES minimum.
         let cookie = encode(&state(), &KEY_A, &NONCE_FIXED, SVC, SCHEMA_VERSION).unwrap();
         let raw = URL_SAFE_NO_PAD.decode(&cookie).unwrap();
-        assert_eq!(raw.len(), NONCE_BYTES + V1_PLAINTEXT_BYTES + 1 + GCM_TAG_BYTES);
+        assert_eq!(raw.len(), ENVELOPE_BYTES);
+        assert_eq!(raw.len(), NONCE_BYTES + HEAD_PLAINTEXT_BYTES + 1 + GCM_TAG_BYTES);
     }
 
     #[test]
@@ -520,15 +519,41 @@ mod tests {
     #[test]
     fn decode_rejects_wrong_schema_version() {
         // Encode at AAD "svc|v1", decode at AAD "svc|v99" → AAD mismatch
-        // → BadAuth. (v1 is intentionally accepted by the decoder for
-        // back-compat, so we exercise a version the encoder won't ever
-        // emit and the decoder won't accept.)
+        // → BadAuth. The AAD pins the version, so a cross-version cookie
+        // never even reaches the plaintext version check.
         let mut s = state();
         s.v = 1;
         let cookie = encode(&s, &KEY_A, &NONCE_FIXED, SVC, 1).unwrap();
         assert_eq!(
             decode(&cookie, &KEY_A, None, SVC, 99),
             Err(CookieError::BadAuth) // AAD mismatch surfaces first
+        );
+    }
+
+    /// Legacy v1 acceptance removed: even when AEAD verifies (same key,
+    /// v2 AAD — producible only by a key-holder, since the public encoder
+    /// refuses v != schema_version), a payload tagged v=1 is rejected with
+    /// BadSchemaVersion. Mirrors Python's
+    /// `test_codec_decode_rejects_v1_schema_version`.
+    #[test]
+    fn decode_rejects_v1_payload_under_matching_aad() {
+        let mut s = state();
+        s.v = 1;
+        let plaintext = pack_payload(&s);
+        let aad_bytes = aad(SVC, SCHEMA_VERSION);
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&KEY_A));
+        let ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(&NONCE_FIXED),
+                Payload { msg: &plaintext, aad: &aad_bytes },
+            )
+            .unwrap();
+        let mut raw = NONCE_FIXED.to_vec();
+        raw.extend_from_slice(&ciphertext);
+        let cookie = URL_SAFE_NO_PAD.encode(&raw);
+        assert_eq!(
+            decode(&cookie, &KEY_A, None, SVC, SCHEMA_VERSION),
+            Err(CookieError::BadSchemaVersion(1))
         );
     }
 

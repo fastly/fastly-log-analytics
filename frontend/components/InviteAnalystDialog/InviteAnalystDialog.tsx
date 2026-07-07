@@ -117,12 +117,13 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
 
   useEffect(() => {
     if (!open) {
-      setTimeout(() => {
+      const tid = setTimeout(() => {
         setStep('confirm')
         setError('')
         setResult(null)
         setJsonCopied(false)
       }, 300)
+      return () => clearTimeout(tid)
     }
   }, [open])
 

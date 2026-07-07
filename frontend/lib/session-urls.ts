@@ -1,6 +1,6 @@
 /**
  * Builds a dashboard URL pre-filtered to a specific session time window.
- * Centralised so the param names can't drift between link generation and useUrlFilterSync.
+ * Centralised so the param names can't drift between link generation and useViewMetricUrlSync.
  */
 export function buildSessionDashboardUrl(
   serviceId: string | null | undefined,

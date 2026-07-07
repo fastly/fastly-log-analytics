@@ -11,6 +11,7 @@ sources registry, and usage_log telemetry.
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -717,6 +718,87 @@ def test_cron_summary_for_tasks_returns_latest_per_task(sid):
     assert out["sync"]["summary"] == "OK"
     # commit hasn't run — absent from the dict
     assert "commit" not in out
+
+
+# ── adaptive_stale_minutes (SRE-22) ─────────────────────────────────────────
+
+
+def _seed_sync_run(sid: str, minutes_ago: float, *, status: str = "success", rows_ingested: int = 1) -> None:
+    """Insert a terminal `sync` cron_runs row directly — bypasses
+    start_cron_run/log_cron_run's running-gate so many synthetic history
+    rows can be seeded quickly for percentile tests."""
+    con = metadata_db.get_con(sid)
+    ts = (datetime.now(UTC) - timedelta(minutes=minutes_ago)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    con.execute(
+        "INSERT INTO cron_runs (task, started_at, status, rows_ingested) VALUES (?, ?, ?, ?)",
+        ("sync", ts, status, rows_ingested),
+    )
+    con.commit()
+
+
+def test_adaptive_stale_minutes_falls_back_with_too_little_history(sid):
+    # Only 3 non-empty runs — below min_samples=10 (needs >=11 points for 10
+    # gaps) — must return default_minutes unchanged.
+    for i in range(3):
+        _seed_sync_run(sid, minutes_ago=i * 40)
+    con = metadata_db.get_con(sid)
+    assert metadata_db.adaptive_stale_minutes(con, default_minutes=30) == 30
+
+
+def test_adaptive_stale_minutes_widens_to_2x_p95_gap_for_a_steady_cadence(sid):
+    # 15 non-empty runs spaced exactly 40 minutes apart (ending at "now") →
+    # every gap is 40min, so p95(gaps) == 40 and the widened threshold should
+    # land at 2 * 40 = 80, well above the 30-minute default.
+    for i in range(15):
+        _seed_sync_run(sid, minutes_ago=i * 40)
+    con = metadata_db.get_con(sid)
+    got = metadata_db.adaptive_stale_minutes(con, default_minutes=30)
+    assert got == 80
+
+
+def test_adaptive_stale_minutes_never_narrows_below_default(sid):
+    # A very tight historical cadence (5min gaps) must not pull the
+    # threshold BELOW the caller's default_minutes.
+    for i in range(15):
+        _seed_sync_run(sid, minutes_ago=i * 5)
+    con = metadata_db.get_con(sid)
+    assert metadata_db.adaptive_stale_minutes(con, default_minutes=30) == 30
+
+
+def test_adaptive_stale_minutes_caps_at_max_minutes_on_a_huge_outlier(sid):
+    # One enormous historical gap (2 days) among otherwise-tight runs must
+    # not blow the threshold past max_minutes (default 1440 = 24h).
+    for i in range(15):
+        _seed_sync_run(sid, minutes_ago=i * 10)
+    _seed_sync_run(sid, minutes_ago=15 * 10 + 2 * 24 * 60)
+    con = metadata_db.get_con(sid)
+    got = metadata_db.adaptive_stale_minutes(con, default_minutes=30, max_minutes=1440)
+    assert got == 1440
+
+
+def test_adaptive_stale_minutes_ignores_empty_and_errored_runs(sid):
+    # Empty ("no new files") and errored runs must not count as ingest
+    # events — only status='success' AND (files_downloaded>0 OR
+    # rows_ingested>0) rows contribute to the gap calculation.
+    for i in range(15):
+        _seed_sync_run(sid, minutes_ago=i * 40)  # real ingests, 40min apart
+        _seed_sync_run(sid, minutes_ago=i * 40 + 20, rows_ingested=0)  # empty tick in between
+    _seed_sync_run(sid, minutes_ago=5, status="error", rows_ingested=5)  # errored — excluded regardless of count
+    con = metadata_db.get_con(sid)
+    got = metadata_db.adaptive_stale_minutes(con, default_minutes=30)
+    assert got == 80  # unaffected by the empty/errored noise
+
+
+def test_adaptive_stale_minutes_falls_back_on_query_error():
+    # Any exception (e.g. a missing/older schema without files_downloaded)
+    # must degrade to default_minutes, never propagate — this is what keeps
+    # the existing minimal-schema health-check test fixtures passing
+    # unmodified.
+    class _BoomConnection:
+        def execute(self, *_a, **_k):
+            raise sqlite3.OperationalError("no such column: files_downloaded")
+
+    assert metadata_db.adaptive_stale_minutes(_BoomConnection(), default_minutes=30) == 30
 
 
 # ── asn_names cache ─────────────────────────────────────────────────────────

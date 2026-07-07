@@ -6,7 +6,7 @@ import {
   DASHBOARD_SSR_DEFAULTS,
   DASHBOARD_SSR_SECTIONS,
 } from '@/lib/ssr/dashboard'
-import { seedDehydratedState } from '@/lib/ssr/seed'
+import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
 import DashboardClient from './_sections/DashboardClient'
 
 // Per-request RSC shell for /dashboard (the highest-traffic route). Pre-fetches
@@ -23,7 +23,18 @@ import DashboardClient from './_sections/DashboardClient'
 // SSR): the seed key MUST byte-match DashboardBody's first-paint bundle key:
 //   ['dashboard','bundle', serviceId, rangeKey, anchor, filterPayload, metric, interval, fields, sections]
 // On a cold load every element is server-reproducible:
-//   - serviceId    = bootstrap.active_service_id
+//   - serviceId    = the `?service=` URL param when present (a deep link or a
+//                    same-tab nav whose href carries the currently-active
+//                    service — see useUrlServiceSync), else
+//                    bootstrap.active_service_id. MUST prefer the URL: the
+//                    client's cold-mount key is activeServiceId from
+//                    serviceStore, which useUrlServiceSync adopts FROM the URL
+//                    on mount — seeding under bootstrap's service instead
+//                    seeds the WRONG entry whenever the URL names a service
+//                    other than bootstrap's default, and the client's own
+//                    fetch (for the URL's real service) then silently
+//                    replaces that wrong seed's data with no loading state
+//                    (keepPreviousData) — a visible wrong-service data flash.
 //   - rangeKey     = '24h'  (no ?range= → filterStore.relativeRange null +
 //                    isAutoRange true → resolveRangeWire's token default; a custom
 //                    absolute range would key on 'abs:<start>|<end>' instead, but
@@ -49,15 +60,23 @@ import DashboardClient from './_sections/DashboardClient'
 // client fetch unchanged.
 export const dynamic = 'force-dynamic'
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ service?: string | string[] }>
+}) {
+  const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
   const serviceId =
-    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ?? undefined
+    firstParam(params.service) ??
+    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
+    undefined
+  const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolveDashboardDefaultKey + fetchDashboardServerSide both floor it).
   const now = new Date()
-  const seed = await fetchDashboardServerSide(serviceId, now)
+  const seed = await fetchDashboardServerSide(serviceId, now, logExtents)
 
   const dehydratedState = seed
     ? seedDehydratedState(

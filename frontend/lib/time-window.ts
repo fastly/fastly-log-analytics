@@ -36,7 +36,12 @@ export const ANCHOR_QUANTUM_SECONDS = 60
 // `_FIXED_TOKEN_DELTAS` (timedelta) in time_window.py. "auto" is NOT here — it
 // is resolved adaptively from log extents (see `pickAutoToken`).
 export const FIXED_TOKEN_DELTAS: Record<string, number> = {
+  '1h': 60 * 60 * 1000,
+  '3h': 3 * 60 * 60 * 1000,
+  '6h': 6 * 60 * 60 * 1000,
+  '12h': 12 * 60 * 60 * 1000,
   '24h': 24 * 60 * 60 * 1000,
+  '3d': 3 * 24 * 60 * 60 * 1000,
   '7d': 7 * 24 * 60 * 60 * 1000,
   '30d': 30 * 24 * 60 * 60 * 1000,
 }
@@ -133,7 +138,8 @@ export interface ResolveWindowExtents {
  * Resolve `(rangeToken, anchor) -> { start, end }` deterministically.
  *
  * Mirrors `resolve_window` in time_window.py:
- *   - fixed tokens ("24h"/"7d"/"30d") → `[quantizedAnchor - delta, quantizedAnchor]`,
+ *   - fixed tokens (every FIXED_TOKEN_DELTAS key — the FilterBar quick-presets
+ *     "1h".."30d") → `[quantizedAnchor - delta, quantizedAnchor]`,
  *   - "auto" → `pickAutoToken(earliestLogAt)`, then the same shape.
  * The anchor used for the math is the QUANTIZED anchor (floored to the quantum)
  * so the bounds are stable within the quantum — the property that stabilizes the

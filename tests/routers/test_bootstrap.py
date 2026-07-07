@@ -487,11 +487,10 @@ def test_bootstrap_views_survives_repo_error(client, tmp_path, monkeypatch):
 
 def test_bootstrap_drops_cron_schedule_and_share_status_seeds(client, tmp_path, monkeypatch):
     """P1#5 (perf audit): ``cron_schedule`` (~3s build) and ``share_status``
-    (~2.1s build) are no longer folded into the admin bootstrap payload —
-    they sat on the SSR first-paint critical path. Both fields STAY on the
-    response model (wire/OpenAPI back-compat) but must now serialize as
-    ``null``: the /logs cron tab and /admin/share page each refetch their
-    own standalone endpoint on mount.
+    (~2.1s build) are not folded into the admin bootstrap payload — they sat
+    on the SSR first-paint critical path. The response model fields were
+    dropped in v2.1.0: the /logs cron tab and /admin/share page each refetch
+    their own standalone endpoint on mount.
 
     Pinned with an EXPLODING build helper for each: if a future change
     re-wires the seed, the helper would be called and this test catches the
@@ -516,9 +515,9 @@ def test_bootstrap_drops_cron_schedule_and_share_status_seeds(client, tmp_path, 
     response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
     assert response.status_code == 200
     data = response.json()
-    # Fields present (model back-compat) but null (no longer seeded).
-    assert "cron_schedule" in data and data["cron_schedule"] is None
-    assert "share_status" in data and data["share_status"] is None
+    # Fields dropped from the wire entirely (v2.1.0).
+    assert "cron_schedule" not in data
+    assert "share_status" not in data
 
 
 def test_bootstrap_keeps_last_sync_share_banner_ops_overview_seeds(client, tmp_path, monkeypatch):

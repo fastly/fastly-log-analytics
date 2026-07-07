@@ -23,7 +23,7 @@ function caddyMarked(host = 'fastly-log-analytics.global.ssl.fastly.net') {
 }
 
 beforeEach(() => {
-  mockCookies.mockReturnValue({ toString: () => 'session=abc123' })
+  mockCookies.mockReturnValue({ toString: () => 'session=abc123', get: () => undefined })
   mockHeaders.mockReturnValue(caddyMarked())
 })
 
@@ -105,7 +105,7 @@ describe('fetchTosServerSide', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockCookies.mockReturnValue({ toString: () => 'session=xyz; theme=dark' })
+    mockCookies.mockReturnValue({ toString: () => 'session=xyz; theme=dark', get: () => undefined })
     mockHeaders.mockReturnValue({
       get: (k: string) => {
         const norm = k.toLowerCase()
@@ -137,7 +137,7 @@ describe('fetchTosServerSide', () => {
     // the SSR would forward over loopback with no X-Remote-Analyst and the
     // backend would classify it admin-from-loopback, leaking operator data.
     process.env.API_PROXY_URL = 'http://127.0.0.1:1' // must not be reached
-    mockCookies.mockReturnValue({ toString: () => '' })
+    mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
     mockHeaders.mockReturnValue({
       get: (k: string) => {
         const norm = k.toLowerCase()
@@ -170,7 +170,7 @@ describe('fetchTosServerSide', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockCookies.mockReturnValue({ toString: () => '' })
+    mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
     mockHeaders.mockReturnValue({
       get: (k: string) => (k.toLowerCase() === 'host' ? 'localhost:3001' : null),
     })
@@ -187,7 +187,7 @@ describe('fetchTosServerSide', () => {
 
   it('fail-closed: no Caddy marker + absent Host → null (drift / SSRF without a loopback Host)', async () => {
     process.env.API_PROXY_URL = 'http://127.0.0.1:1' // must not be reached
-    mockCookies.mockReturnValue({ toString: () => '' })
+    mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
     mockHeaders.mockReturnValue({ get: (_k: string) => null })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { fetchTosServerSide } = await import('@/lib/ssr/tos')

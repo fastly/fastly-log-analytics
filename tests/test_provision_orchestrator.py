@@ -94,6 +94,50 @@ def test_build_log_fields_config_field_overrides_merge_with_disable_last():
     assert overrides["fld.b"] is False
 
 
+def test_build_log_fields_config_seeds_preset_field_overrides():
+    """A preset's own ``field_overrides`` are honored (previously dropped).
+
+    The ``security`` preset declares ``{"tls_ciphers_sha": True}``; the built
+    config must carry it so preset-declared opt-ins actually apply. Pinned
+    because the wizard/CLI otherwise silently ignored preset field_overrides.
+    """
+    args = SimpleNamespace(
+        preset="security", enable_group=None, disable_group=None, enable_field=None, disable_field=None
+    )
+    cfg = orchestrator._build_log_fields_config(args)
+    assert cfg["field_overrides"].get("tls_ciphers_sha") is True
+
+
+def test_build_log_fields_config_opts_in_default_off_field():
+    """``--enable-field cookie_session`` on any preset yields the opt-in in
+    ``field_overrides``, and ``resolve_enabled_fields`` then includes the
+    otherwise-default-off field — the end-to-end opt-in path.
+
+    Without the flag the security preset must NOT emit cookie_session even
+    though group H is enabled (deliberate-opt-in invariant).
+    """
+    from backend.core.log_fields import resolve_enabled_fields
+
+    # Default security preset: cookie_session stays off.
+    base = SimpleNamespace(
+        preset="security", enable_group=None, disable_group=None, enable_field=None, disable_field=None
+    )
+    base_cfg = orchestrator._build_log_fields_config(base)
+    assert "cookie_session" not in resolve_enabled_fields(base_cfg)
+
+    # Explicit opt-in turns it on.
+    optin = SimpleNamespace(
+        preset="security",
+        enable_group=None,
+        disable_group=None,
+        enable_field=["cookie_session"],
+        disable_field=None,
+    )
+    optin_cfg = orchestrator._build_log_fields_config(optin)
+    assert optin_cfg["field_overrides"].get("cookie_session") is True
+    assert "cookie_session" in resolve_enabled_fields(optin_cfg)
+
+
 # ── write_service_config ────────────────────────────────────────────────────
 
 
@@ -560,7 +604,7 @@ def test_sync_crontab_swallows_scheduler_import_failure():
     """The CLI runs without the scheduler module loaded (no FastAPI
     process); _sync_crontab must no-op rather than raise. Pinned
     because `cleanup_local_data` calls it on every teardown."""
-    with patch("backend.scheduler.get_scheduler", side_effect=ImportError("no scheduler")):
+    with patch("backend.cron.scheduler.get_scheduler", side_effect=ImportError("no scheduler")):
         # Should not raise
         orchestrator._sync_crontab()
 
@@ -575,7 +619,7 @@ def test_sync_crontab_swallows_reload_exception():
         def reload(self):
             raise RuntimeError("scheduler busy")
 
-    with patch("backend.scheduler.get_scheduler", return_value=_Sched()):
+    with patch("backend.cron.scheduler.get_scheduler", return_value=_Sched()):
         orchestrator._sync_crontab()
 
 

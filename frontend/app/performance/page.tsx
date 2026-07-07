@@ -5,7 +5,7 @@ import {
   fetchPerformanceServerSide,
   PERFORMANCE_SSR_DEFAULTS,
 } from '@/lib/ssr/performance'
-import { seedDehydratedState } from '@/lib/ssr/seed'
+import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
 import PerformanceClient from './_sections/PerformanceClient'
 
 // Per-request RSC shell for /performance. Pre-fetches BOTH default aggregates
@@ -19,10 +19,20 @@ import PerformanceClient from './_sections/PerformanceClient'
 // byte-match PerformanceBody's first-paint keys:
 //   ['performance','aggregates','core', sid, rangeToken, anchor, filterPayload, 'p99']
 //   ['performance','aggregates','distributions', sid, rangeToken, anchor, filterPayload, 'p99']
-// On a cold load: rangeToken='auto', anchor=quantizeAnchor(now) on the 60s grid,
-// filterPayload={}, sort='p99' (the literal default the page hard-codes). The
-// performance keys carry NO bucket element. Only divergence is the rare
-// minute-boundary anchor straddle → one client refetch, never a leak/crash.
+// On a cold load: serviceId = the `?service=` URL param when present (a deep
+// link or a same-tab nav whose href carries the currently-active service —
+// see useUrlServiceSync), else bootstrap.active_service_id. MUST prefer the
+// URL: seeding under bootstrap's default instead of the URL's service seeds
+// the WRONG entry whenever they differ, and the client's own fetch (for the
+// URL's real service) then silently replaces that wrong seed's data with no
+// loading state (keepPreviousData) — a visible wrong-service data flash.
+// rangeToken='24h', anchor=quantizeAnchor(snapped-end ?? now) on
+// the 60s grid — snapped to bootstrap.log_extents when the service's latest log
+// is >15min stale (lib/log-extents-snap.ts), otherwise just `now` — filterPayload
+// ={}, sort='p99' (the literal default the page hard-codes). The performance keys
+// carry NO bucket element. Divergence: the rare minute-boundary straddle, plus a
+// rare 15-minute-staleness-boundary straddle — both self-heal via one client
+// refetch, never a leak/crash.
 //
 // force-dynamic because the fetchers read cookies + the Caddy marker via
 // next/headers. Failure path: fetchPerformanceServerSide returns null (any
@@ -30,15 +40,23 @@ import PerformanceClient from './_sections/PerformanceClient'
 // client fetch for both cards.
 export const dynamic = 'force-dynamic'
 
-export default async function PerformancePage() {
+export default async function PerformancePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ service?: string | string[] }>
+}) {
+  const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
   const serviceId =
-    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ?? undefined
+    firstParam(params.service) ??
+    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
+    undefined
+  const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolvePerformanceDefaultKey + fetchPerformanceServerSide floor it).
   const now = new Date()
-  const seed = await fetchPerformanceServerSide(serviceId, now)
+  const seed = await fetchPerformanceServerSide(serviceId, now, logExtents)
 
   // Seed BOTH keys under one dehydrated state. seedDehydratedState seeds a
   // single entry, so build the two-entry state inline (same QueryClient +

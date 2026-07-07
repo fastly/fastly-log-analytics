@@ -1,14 +1,13 @@
 """Decorator that wraps every cron handler with telemetry + a hard watchdog.
 
-The ``cron_task`` factory used to live at the top of ``backend/scheduler.py``
+The ``cron_task`` factory used to live at the top of the old monolithic scheduler module
 alongside the APScheduler lifecycle and every cron body. This module isolates
 the decorator so the job modules can import it without dragging the whole
 scheduler module in.
 
 The hard-cap is module-level so tests can monkeypatch
-``backend.cron.decorators._CRON_HARD_CAP_S`` (or the shim alias
-``backend.scheduler._CRON_HARD_CAP_S``) without modifying the decorator
-itself.
+``backend.cron.decorators._CRON_HARD_CAP_S`` without modifying the
+decorator itself (the wrapper reads it from module globals at call time).
 """
 
 from __future__ import annotations
@@ -18,9 +17,9 @@ import logging
 import threading
 from functools import wraps
 
-# We intentionally bind to the shim's logger name so caplog filters that
-# historically read ``logger="backend.scheduler"`` still receive watchdog
-# error lines after the carve.
+# We intentionally keep the historical logger NAME (a plain string, not a
+# module reference) so caplog filters and log-shipping rules that read
+# ``logger="backend.scheduler"`` keep receiving watchdog error lines.
 logger = logging.getLogger("backend.scheduler")
 
 # Hard upper bound on any single cron invocation. Ingest is already capped at
@@ -109,14 +108,10 @@ def cron_task(name: str):
                     finally:
                         flush_usage_log(service_id)
 
-            # Read the cap at call time so tests can monkeypatch it without
-            # Resolve through the backend.scheduler shim so existing tests
-            # that do ``monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S",
-            # ...)`` continue to take effect, while still falling back to
-            # the value defined in this module.
-            from backend.cron.jobs._common import shim_attr
-
-            cap = shim_attr("_CRON_HARD_CAP_S", _CRON_HARD_CAP_S)
+            # Read the cap from module globals at call time so tests that
+            # ``monkeypatch.setattr(backend.cron.decorators,
+            # "_CRON_HARD_CAP_S", ...)`` take effect per-invocation.
+            cap = _CRON_HARD_CAP_S
             # Submit to the SHARED watchdog pool — do NOT create (or shut down)
             # an executor per call; that churn leaked a SQLite connection per
             # tick (the 2026-06-22 OOM). On the happy path the pool is reused;

@@ -584,7 +584,9 @@ def _walk_and_validate(
                 # the engine exposes is rejected unless explicitly vetted as
                 # I/O-free. This is the durable file-read / external-DB /
                 # secrets-introspection gate.
-                if fl in _TABLE_FUNCTIONS and fl not in _ALLOWED_TABLE_FUNCTIONS:
+                if (
+                    fl in _TABLE_FUNCTIONS or node.get("type") == "TABLE_FUNCTION"
+                ) and fl not in _ALLOWED_TABLE_FUNCTIONS:
                     _reject(
                         original_sql,
                         f"function_table_not_allowed:{fl}",

@@ -14,7 +14,7 @@ vi.mock('next/headers', () => ({
 }))
 
 beforeEach(() => {
-  mockCookies.mockReturnValue({ toString: () => '' })
+  mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
   mockHeaders.mockReturnValue({ get: (_k: string) => null })
 })
 

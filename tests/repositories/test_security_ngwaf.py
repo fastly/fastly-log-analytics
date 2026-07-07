@@ -285,3 +285,134 @@ def test_ngwaf_unmatched_waf_req_ids_not_in_result(con_with_waf_logs, tmp_path):
 
     assert result["ngwaf_verified_bots"] == []
     assert result["ngwaf_verified_bots_ts"] == []
+
+
+def test_top_bots_ngwaf_only_skips_temp_and_joins_direct(con_with_waf_logs, tmp_path):
+    """When the UA branch is rollup-served and NGWAF is attached, the join is
+    the temp's only would-be consumer — get_top_bots must materialize NO temp
+    and run NGWAF_TOP_BOTS_JOIN_DIRECT against the base table, returning the
+    same bot rows the temp path produced."""
+    from unittest.mock import patch as _patch
+
+    from backend.repositories._base import QueryRunner
+    from backend.repositories.security import get_top_bots
+
+    db_path = str(tmp_path / "ngwaf_bot_cache.db")
+    _create_cache_db(db_path)
+
+    table_name = _safe_table("ngwaf_direct_svc")
+    _create_log_table_with_waf(con_with_waf_logs, table_name)
+
+    src = {"name": "ngwaf_direct_svc", "service_id": "ngwaf-direct"}
+
+    temp_creates: list[str] = []
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "CREATE TEMP TABLE" in sql:
+            temp_creates.append(sql)
+        return orig_execute(self, sql, *args, **kwargs)
+
+    with (
+        _patch("backend.config.ngwaf_db_path", return_value=db_path),
+        # UA branch rollup-served → needs_filtered_ua_scan is False.
+        _patch.object(
+            QueryRunner,
+            "execute_top_n_rollups",
+            lambda self, fields, s, e, limit=10, per_field_limits=None, **kw: ([("ua", "GPTBot/1.0", 5)], ["ua"]),
+        ),
+        _patch.object(QueryRunner, "execute", _spy),
+    ):
+        result = get_top_bots(
+            con=con_with_waf_logs,
+            src=src,
+            start_time=None,
+            end_time=None,
+            filters={},
+        )
+
+    assert temp_creates == [], f"ngwaf-only top_bots must not materialize a temp: {temp_creates}"
+    markers = {e["section"] for e in result["section_timings"]}
+    assert "top_bots:ngwaf_join_direct" in markers, f"direct-join marker missing; timings={markers}"
+    assert "top_bots:temp_table_create" not in markers, f"temp path fired; timings={markers}"
+    assert result["ngwaf_bots"] == [{"name": _BOT_NAME, "category": _CATEGORY, "request_count": 1}]
+
+
+def test_top_bots_ngwaf_rollup_served_skips_direct_join(con_with_waf_logs, tmp_path):
+    """When try_ngwaf_top_bots_from_rollup returns rows, the direct join must
+    not run at all — the panel serves fully from the rollup."""
+    from unittest.mock import patch as _patch
+
+    from backend.repositories._base import QueryRunner
+    from backend.repositories.security import get_top_bots
+
+    db_path = str(tmp_path / "ngwaf_bot_cache.db")
+    _create_cache_db(db_path)
+    table_name = _safe_table("ngwaf_rollup_svc")
+    _create_log_table_with_waf(con_with_waf_logs, table_name)
+    src = {"name": "ngwaf_rollup_svc", "service_id": "ngwaf-rollup"}
+
+    sentinel = [{"name": "GPTBot", "category": "AI-CRAWLER", "request_count": 42}]
+    join_queries: list[str] = []
+    orig_execute = QueryRunner.execute
+
+    def _spy(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and "ngwaf_top.ngwaf_bots" in sql:
+            join_queries.append(sql)
+        return orig_execute(self, sql, *args, **kwargs)
+
+    with (
+        _patch("backend.config.ngwaf_db_path", return_value=db_path),
+        _patch.object(
+            QueryRunner,
+            "execute_top_n_rollups",
+            lambda self, fields, s, e, limit=10, per_field_limits=None, **kw: ([("ua", "GPTBot/1.0", 5)], ["ua"]),
+        ),
+        _patch.object(
+            QueryRunner,
+            "try_ngwaf_top_bots_from_rollup",
+            lambda self, s, e, *, has_filters, n: list(sentinel),
+        ),
+        _patch.object(QueryRunner, "execute", _spy),
+    ):
+        result = get_top_bots(con=con_with_waf_logs, src=src, start_time=None, end_time=None, filters={})
+
+    assert result["ngwaf_bots"] == sentinel
+    assert join_queries == [], f"direct join ran despite rollup hit: {join_queries}"
+    markers = {e["section"] for e in result["section_timings"]}
+    assert "top_bots:ngwaf_rollup" in markers
+    assert "top_bots:ngwaf_join_direct" not in markers
+
+
+def test_top_bots_ngwaf_rollup_miss_falls_back_to_direct_join(con_with_waf_logs, tmp_path):
+    """Reader returns None (no coverage / short window) → the direct join
+    still serves the panel exactly as before."""
+    from unittest.mock import patch as _patch
+
+    from backend.repositories._base import QueryRunner
+    from backend.repositories.security import get_top_bots
+
+    db_path = str(tmp_path / "ngwaf_bot_cache.db")
+    _create_cache_db(db_path)
+    table_name = _safe_table("ngwaf_rollup_miss_svc")
+    _create_log_table_with_waf(con_with_waf_logs, table_name)
+    src = {"name": "ngwaf_rollup_miss_svc", "service_id": "ngwaf-rollup-miss"}
+
+    with (
+        _patch("backend.config.ngwaf_db_path", return_value=db_path),
+        _patch.object(
+            QueryRunner,
+            "execute_top_n_rollups",
+            lambda self, fields, s, e, limit=10, per_field_limits=None, **kw: ([("ua", "GPTBot/1.0", 5)], ["ua"]),
+        ),
+        _patch.object(
+            QueryRunner,
+            "try_ngwaf_top_bots_from_rollup",
+            lambda self, s, e, *, has_filters, n: None,
+        ),
+    ):
+        result = get_top_bots(con=con_with_waf_logs, src=src, start_time=None, end_time=None, filters={})
+
+    assert result["ngwaf_bots"] == [{"name": _BOT_NAME, "category": _CATEGORY, "request_count": 1}]
+    markers = {e["section"] for e in result["section_timings"]}
+    assert "top_bots:ngwaf_join_direct" in markers
