@@ -1,12 +1,42 @@
 'use client'
 import React from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useDebugStore } from '@/stores/debugStore'
+import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 
 export function DiagnosticsPanel() {
   const { enabled: debugEnabled, setEnabled: setDebugEnabled, apiCallsEnabled, setApiCallsEnabled } = useDebugStore()
+  const queryClient = useQueryClient()
+
+  // Mirrors the OR the backend header itself represents (x-debug-responses
+  // doesn't distinguish which panel asked) — written so SSR's own fetch
+  // (lib/ssr/_transport.ts) can see the toggle on the NEXT navigation/reload,
+  // and immediately refetches active queries so the CURRENT page also picks
+  // it up without needing one.
+  function syncDebugCookie(nextEnabled: boolean, nextApiCallsEnabled: boolean) {
+    const shouldAttach = nextEnabled || nextApiCallsEnabled
+    document.cookie = `${DEBUG_RESPONSES_COOKIE}=${shouldAttach ? '1' : '0'}; path=/; max-age=31536000; samesite=lax`
+  }
+
+  // Invalidate (not refetchQueries({type:'active'})): data queries that are
+  // momentarily enabled:false at flip time (service/filter hydration still
+  // resolving) would be missed by a point-in-time refetch and then serve
+  // their envelope-less cached data as fresh — same gap DebugPanel's
+  // cookie-heal shim hit. Invalidation refetches active queries now AND
+  // marks the rest stale so they refetch the moment they enable.
+  const handleSetDebugEnabled = (val: boolean) => {
+    setDebugEnabled(val)
+    syncDebugCookie(val, apiCallsEnabled)
+    queryClient.invalidateQueries()
+  }
+  const handleSetApiCallsEnabled = (val: boolean) => {
+    setApiCallsEnabled(val)
+    syncDebugCookie(debugEnabled, val)
+    queryClient.invalidateQueries()
+  }
 
   // Backend gate for the two "Show ... panel" toggles below. The frontend
   // panels render data from response.`_debug_queries` / `_debug_calls` —
@@ -46,7 +76,7 @@ export function DiagnosticsPanel() {
           <Switch
             aria-labelledby="diag-query-debug-label"
             checked={debugEnabled}
-            onCheckedChange={setDebugEnabled}
+            onCheckedChange={handleSetDebugEnabled}
             disabled={!debugBackendOn}
           />
         </div>
@@ -68,7 +98,7 @@ export function DiagnosticsPanel() {
           <Switch
             aria-labelledby="diag-api-panel-label"
             checked={apiCallsEnabled}
-            onCheckedChange={setApiCallsEnabled}
+            onCheckedChange={handleSetApiCallsEnabled}
             disabled={!debugBackendOn}
           />
         </div>

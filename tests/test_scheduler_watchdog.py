@@ -1,4 +1,4 @@
-"""Tests for the hard-cap watchdog inside ``backend.scheduler.cron_task``.
+"""Tests for the hard-cap watchdog inside ``backend.cron.decorators.cron_task``.
 
 Pins the deadlock fix landed for the 2026-05-21 incident where
 ``_run_service_cron`` hung 10+ minutes on the usage-log step and APScheduler's
@@ -22,7 +22,7 @@ def test_cron_task_returns_when_inner_function_exceeds_hard_cap(monkeypatch, cap
     for. The wrapper returns None and an ERROR log line names the cron +
     service so the next incident leaves a breadcrumb.
     """
-    from backend import scheduler as sched_mod
+    from backend.cron import decorators as sched_mod
 
     monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 0.5)
 
@@ -55,7 +55,7 @@ def test_cron_task_propagates_normal_return(monkeypatch):
     Pins that the watchdog is transparent on the happy path — refactoring
     it must not silently swallow the return value or wrap it in a Future.
     """
-    from backend import scheduler as sched_mod
+    from backend.cron import decorators as sched_mod
 
     monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 60)
 
@@ -80,7 +80,7 @@ def test_cron_task_preserves_telemetry_context(monkeypatch):
     The 2026-05-21 incident left this contract intact and we don't want a
     silent regression where every cron's usage rows land with NULL context.
     """
-    from backend import scheduler as sched_mod
+    from backend.cron import decorators as sched_mod
     from backend.utils.telemetry import get_process_context
 
     captured = {}

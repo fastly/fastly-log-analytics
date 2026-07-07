@@ -12,7 +12,7 @@ from unittest.mock import patch
 class TestRunServiceCronSignature:
     def test_start_time_is_str_not_float(self):
         """start_time in _run_service_cron must be str|None, not float."""
-        from backend.scheduler import _run_service_cron
+        from backend.cron.jobs.sync import _run_service_cron
 
         sig = inspect.signature(_run_service_cron)
         ann = sig.parameters["start_time"].annotation
@@ -21,7 +21,7 @@ class TestRunServiceCronSignature:
         assert "float" not in ann_str, "start_time became float — timing regression risk"
 
     def test_end_time_is_str_not_float(self):
-        from backend.scheduler import _run_service_cron
+        from backend.cron.jobs.sync import _run_service_cron
 
         sig = inspect.signature(_run_service_cron)
         ann = sig.parameters["end_time"].annotation
@@ -37,7 +37,7 @@ class TestRunCommitUsesLocalStartTime:
 
     def test_run_commit_no_str_subtraction(self):
         """_run_commit should not raise TypeError even if called with no string start_time."""
-        from backend.scheduler import _run_commit
+        from backend.cron.jobs.commit import _run_commit
 
         mock_src = {
             "name": "test",
@@ -63,7 +63,7 @@ class TestLogCronRunDurationIsFloat:
 
     def test_duration_passed_to_log_cron_run_is_float(self):
         """Mock ingest to yield a done event and capture what log_cron_run receives."""
-        from backend.scheduler import _run_service_cron
+        from backend.cron.jobs.sync import _run_service_cron
 
         mock_src = {
             "name": "test",

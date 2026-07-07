@@ -40,7 +40,7 @@ def test_query_response_does_not_leak_debug_queries(probe_session):
     )
     assert status == 200, f"SELECT 1 should succeed for analyst, got {status}: {body[:200]!r}"
     resp = json.loads(body)
-    for key in ("debug_queries", "_debug_queries", "debug_calls", "_debug_calls"):
+    for key in ("debug_queries", "_debug_queries", "debug_calls", "_debug_calls", "debug_sqlite", "_debug_sqlite"):
         assert key not in resp, f"{key!r} present in /api/query response — strip helper missed it"
 
 
@@ -58,7 +58,7 @@ def test_dashboard_bundle_does_not_leak_debug_queries(probe_session):
     status, raw = analyst_request(probe_session, "POST", "/api/dashboard/bundle", body)
     assert status == 200, f"/api/dashboard/bundle failed for analyst: {status} {raw[:200]!r}"
     resp = json.loads(raw)
-    for key in ("debug_queries", "_debug_queries", "debug_calls", "_debug_calls"):
+    for key in ("debug_queries", "_debug_queries", "debug_calls", "_debug_calls", "debug_sqlite", "_debug_sqlite"):
         assert key not in resp, f"{key!r} present in /api/dashboard/bundle response"
 
 

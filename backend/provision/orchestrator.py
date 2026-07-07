@@ -33,7 +33,7 @@ from backend.provision.utils import ok, step, warn
 def _sync_crontab():
     """Refresh the background scheduler if running within the web app."""
     try:
-        from backend.scheduler import get_scheduler
+        from backend.cron.scheduler import get_scheduler
 
         get_scheduler().reload()
     except Exception:
@@ -798,6 +798,14 @@ def _build_log_fields_config(args) -> dict:
     for g in getattr(args, "disable_group", None) or []:
         if g in groups:
             groups.remove(g)
-    field_overrides = {fid: True for fid in (getattr(args, "enable_field", None) or [])}
+    # Seed from the preset's own field_overrides so preset-level opt-ins/outs
+    # apply (e.g. security → ``tls_ciphers_sha: True``). Without this a preset's
+    # declared overrides were silently dropped, and — post default_off — an
+    # opt-in field a preset wanted on could never be turned on through a preset.
+    # CLI --enable-field / --disable-field then layer on top (disable last so it
+    # wins). This is also the path that turns a ``default_off`` field (e.g.
+    # cookie_session) ON: ``--enable-field cookie_session``.
+    field_overrides = dict(preset.get("field_overrides") or {})
+    field_overrides.update({fid: True for fid in (getattr(args, "enable_field", None) or [])})
     field_overrides.update({fid: False for fid in (getattr(args, "disable_field", None) or [])})
     return {"schema_version": 2, "preset": preset_name, "groups": sorted(groups), "field_overrides": field_overrides}

@@ -437,9 +437,26 @@ export const handlers = [
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/passcode`, ok({ ok: true })),
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/services`, ok({ ok: true })),
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/pii`, ok({ ok: true })),
+  http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/sharing`, ok({ ok: true })),
   http.post(`${API_BASE}/api/admin/share/sessions/:session_id/boot`, ok({ ok: true })),
 
   // ── Share-login (analyst auth) ────────────────────────────────────
+  // Default auth-config: passcode-only (the OAuth feature is off unless a test
+  // overrides this). ShareLoginForm fetches this on mount to decide what to render.
+  http.get('/api/share/auth-config', () =>
+    HttpResponse.json({ passcode_enabled: true, providers: [] }),
+  ),
+  http.get('/api/admin/share/oauth-providers', () =>
+    HttpResponse.json({ providers: [] }),
+  ),
+  // OAuth handshake routes are top-level browser navigations (302), never
+  // fetched by the typed client — stub them so the coverage guard is satisfied.
+  http.get('/api/share/oauth/authorize', () =>
+    new HttpResponse(null, { status: 302, headers: { Location: '/idp-stub' } }),
+  ),
+  http.get('/api/share/oauth/callback', () =>
+    new HttpResponse(null, { status: 302, headers: { Location: '/dashboard' } }),
+  ),
   http.get('/api/share/tos', () =>
     HttpResponse.json({ version: 'v1', text: 'Test TOS' }),
   ),

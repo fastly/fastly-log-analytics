@@ -9,7 +9,7 @@ import { client } from '@/lib/api'
 import { useFilterStore } from '@/stores/filterStore'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
 import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
-import { useFilterUrlSync } from '@/hooks/useFilterUrlSync'
+import { useFilterUrlWriteback } from '@/hooks/useFilterUrlWriteback'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
@@ -71,7 +71,7 @@ function QueryPageInner() {
   // shareable. URL → store hydration is owned at module load by
   // hydrateFilterStoreFromUrl in QueryProvider; this hook only handles the
   // write-back loop the audit identified as missing here.
-  useFilterUrlSync()
+  useFilterUrlWriteback()
 
   // ── One-shot URL hydration ────────────────────────────────────────────────
   // The dashboard "See Raw Logs" CTA links here with ?start_time, ?end_time,
@@ -123,7 +123,7 @@ function QueryPageInner() {
 
     if (mutated) {
       // Deep-link landings are an explicit user intent — auto-run is
-      // the entire point of the See Raw Logs CTA. useFilterUrlSync owns
+      // the entire point of the See Raw Logs CTA. useFilterUrlWriteback owns
       // the canonical URL state from the next effect tick onward, so we
       // intentionally do NOT strip the consumed params here.
       setHasUserRun(true)

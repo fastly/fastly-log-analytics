@@ -1,4 +1,4 @@
-"""Tests for ``backend.scheduler`` — APScheduler wrapper + small jobs.
+"""Tests for ``backend.cron`` — APScheduler wrapper + small jobs.
 
 The big per-service jobs (``_run_service_cron``, ``_run_commit``,
 ``_run_optimize``, ``_run_expire_snapshots``, ``_run_ngwaf_bot_sync``,
@@ -38,7 +38,7 @@ def test_elapsed_since_formats_seconds_below_60_with_one_decimal():
     progress log lines key on this format — refactoring to integer
     would silently drop sub-second resolution that admins use to
     debug fast cron loops."""
-    from backend.scheduler import _elapsed_since
+    from backend.cron.scheduler import _elapsed_since
 
     out = _elapsed_since(time.time() - 1.5)
     assert out.endswith("s")
@@ -49,7 +49,7 @@ def test_elapsed_since_formats_seconds_below_60_with_one_decimal():
 def test_elapsed_since_formats_60s_and_above_as_minutes_seconds():
     """>=60 s → ``"1m30s"``. Pinned because the dashboard's "last
     run took X" pill renders this exact format."""
-    from backend.scheduler import _elapsed_since
+    from backend.cron.scheduler import _elapsed_since
 
     out = _elapsed_since(time.time() - 90)
     assert "m" in out
@@ -61,7 +61,7 @@ def test_elapsed_since_formats_60s_and_above_as_minutes_seconds():
 def test_elapsed_since_zeros_correctly_for_just_passed():
     """Approximately zero seconds → ``"0.0s"`` or similar (NOT empty,
     NOT crash on negative jitter)."""
-    from backend.scheduler import _elapsed_since
+    from backend.cron.scheduler import _elapsed_since
 
     out = _elapsed_since(time.time())
     assert out.endswith("s")
@@ -74,7 +74,7 @@ def test_extract_log_text_returns_empty_when_no_progress():
     """Unknown run_id → empty string. Pinned because the admin
     "download cron log" button must produce SOMETHING (empty file)
     even if the progress store was reaped."""
-    from backend.scheduler import _extract_log_text
+    from backend.cron.scheduler import _extract_log_text
 
     with patch("backend.cron_progress.get_progress", return_value=None):
         assert _extract_log_text(999) == ""
@@ -83,7 +83,7 @@ def test_extract_log_text_returns_empty_when_no_progress():
 def test_extract_log_text_formats_events_with_type_prefix():
     """Each event renders as ``[TYPE_UPPERCASE] message``. Pinned
     because admins grep these logs for [ERROR] / [DONE] prefixes."""
-    from backend.scheduler import _extract_log_text
+    from backend.cron.scheduler import _extract_log_text
 
     fake_events = [
         {"type": "status", "message": "Starting sync"},
@@ -105,7 +105,7 @@ def test_extract_log_text_filters_out_progress_events():
     numerical 0/8 → 8/8 counter, not user-readable lines. Pinned
     because including them would clutter the downloaded log with
     9-12 noise lines per run."""
-    from backend.scheduler import _extract_log_text
+    from backend.cron.scheduler import _extract_log_text
 
     fake_events = [
         {"type": "progress", "current": 1, "total": 8},  # filter out
@@ -127,7 +127,7 @@ def test_extract_log_text_skips_events_without_message():
     """An event with no ``message`` key is skipped (not stringified
     as None). Pinned because the progress store sometimes captures
     raw API responses with no `message` field."""
-    from backend.scheduler import _extract_log_text
+    from backend.cron.scheduler import _extract_log_text
 
     fake_events = [
         {"type": "status"},  # no message
@@ -148,7 +148,7 @@ def test_get_scheduler_returns_singleton():
     admin endpoints + cron handlers all call get_scheduler() to
     inspect jobs — losing the singleton would mean each importer
     has its own APScheduler with no jobs."""
-    import backend.scheduler as sched_mod
+    import backend.cron.scheduler as sched_mod
 
     # Reset module-global so test is independent of previous calls
     sched_mod._scheduler = None
@@ -161,7 +161,7 @@ def test_get_scheduler_creates_lazily_on_first_call():
     """First call returns a Scheduler (not None). Pinned because the
     main app calls get_scheduler() at startup — if it returned None,
     the first job registration would AttributeError."""
-    import backend.scheduler as sched_mod
+    import backend.cron.scheduler as sched_mod
 
     sched_mod._scheduler = None
     s = sched_mod.get_scheduler()
@@ -177,7 +177,7 @@ def test_scheduler_shutdown_swallows_exception():
     contention), the wrapper swallows the error and logs. Pinned
     because shutdown is called from a finally block during pytest
     teardown — a raise here would mask test failures."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     s = Scheduler()
     # Force shutdown to fail
@@ -196,7 +196,7 @@ def test_scheduler_shutdown_forwards_wait_kwarg_to_apscheduler():
     with wait=False, and the bounded-wait pattern in backend.main
     became a no-op. A mid-flight 4-minute sync tick would then get
     cut at Docker's SIGTERM grace period instead of draining."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     s = Scheduler()
     s._sched.shutdown = MagicMock()
@@ -214,7 +214,7 @@ def test_scheduler_get_job_returns_none_for_unknown_id():
     """Unknown job_id → None (not raise). Pinned because the admin
     /system-jobs endpoint calls get_job() on every job_id and
     distinguishes None (no schedule yet) from a real job."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     s = Scheduler()
     assert s.get_job("nonexistent_job_id") is None
@@ -225,7 +225,7 @@ def test_scheduler_reload_calls_sync_jobs():
     every wizard "save" calls reload via the route helper, and a
     refactor that broke the wiring would silently ignore wizard
     changes until process restart."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     s = Scheduler()
     with patch.object(s, "_sync_jobs") as mock_sync:
@@ -253,7 +253,7 @@ def test_sync_jobs_registers_sync_commit_and_alerts_for_readwrite_service():
     """A read-write service with at least one alert gets sync + commit
     + alerts jobs. Pinned because these are the three baseline cron
     jobs every admin service needs once alerts are configured."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     cfg = {
         "service_id": "svc-1",
@@ -281,7 +281,7 @@ def test_sync_jobs_registers_metadata_sync_and_alerts_for_readonly_service():
     """Read-only (analyst) services with at least one alert get
     metadata_sync + alerts — NOT the sync/commit jobs. Pinned because
     analyst replicas can't perform write operations against Fastly."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     cfg = {
         "service_id": "svc-2",
@@ -312,7 +312,7 @@ def test_sync_jobs_skips_alerts_cron_when_no_alerts_configured():
     registered — otherwise it just fires every `log_period` writing
     "skipped" cron_runs entries. Once an alert is created, the alerts
     router calls scheduler.reload() to register the job."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     cfg = {
         "service_id": "svc-noalert",
@@ -341,7 +341,7 @@ def test_sync_jobs_skips_disabled_services():
     """`cron_sync.enabled=False` → no jobs registered for that
     service. Pinned because the wizard's "pause cron" toggle keys
     on this flag."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     cfg = {
         "service_id": "paused-svc",
@@ -367,7 +367,7 @@ def test_sync_jobs_skips_unconfigured_service():
     """`is_configured` returning False → warn + skip (no jobs).
     Pinned because mid-teardown can leave a config without
     credentials, and crashing here would freeze the scheduler."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     cfg = {
         "service_id": "halfbaked",
@@ -392,7 +392,7 @@ def test_sync_jobs_registers_ngwaf_job_when_workspace_configured():
     """Service with NGWAF workspace_id → also gets an ngwaf_sync job.
     Pinned because losing this would silently disable bot sync for
     NGWAF-enabled services."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     cfg = {
         "service_id": "ngwaf-svc",
@@ -417,7 +417,7 @@ def test_sync_jobs_omits_optimize_and_expire_when_compact_disabled():
     """`cron_compact.enabled=False` → no optimize or expire jobs.
     Pinned because customers retaining ALL snapshots (legal hold)
     must be able to disable the expire job."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     cfg = {
         "service_id": "no-compact",
@@ -444,7 +444,7 @@ def test_sync_jobs_always_registers_global_system_jobs():
     jobs (not per-service). They must register on every _sync_jobs call.
     Pinned because losing these would freeze the global bot list, rDNS
     cache, or remote-share audit retention."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     s = Scheduler()
     with (
@@ -462,7 +462,7 @@ def test_sync_jobs_removes_stale_jobs_for_deleted_services():
     config gets removed (service was deleted). Pinned because losing
     the cleanup would leave zombie jobs trying to ingest deleted
     services and 500ing every interval."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     s = Scheduler()
     # Seed a stale job_id from a "previous" config sync
@@ -485,7 +485,7 @@ def test_sync_jobs_uses_interval_mins_over_interval_seconds_when_both_present():
     interval_mins while admin provisioning scripts write
     interval_seconds — letting interval_seconds win would silently
     ignore UI changes."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     cfg = {
         "service_id": "svc-priority",
@@ -527,7 +527,7 @@ def test_log_and_add_progress_persists_event_to_cron_progress():
     """Always adds the event to the cron-progress store. Pinned
     because the SSE consumer in the cron-runs-stream endpoint reads
     from that exact store."""
-    from backend.scheduler import _log_and_add_progress
+    from backend.cron.scheduler import _log_and_add_progress
 
     event = {"type": "status", "message": "Step 1"}
     with (
@@ -544,13 +544,13 @@ def test_log_and_add_progress_handles_missing_message_silently():
     Pinned because the progress store sometimes captures raw API
     responses; logging None as a message would render "Test (svc):
     None" in the cron log."""
-    from backend.scheduler import _log_and_add_progress
+    from backend.cron.scheduler import _log_and_add_progress
 
     event = {"type": "progress", "current": 1, "total": 8}
     with (
         patch("backend.cron_progress.add_progress") as mock_add,
         patch("backend.config.load_config", return_value=None),
-        patch("backend.scheduler.logger") as mock_logger,
+        patch("backend.cron.scheduler.logger") as mock_logger,
     ):
         _log_and_add_progress(run_id=1, service_id="svc-1", event=event)
 
@@ -566,13 +566,13 @@ def test_log_and_add_progress_uses_error_logger_for_error_type():
     """`type=error` → `logger.error()` (not `.info()`). Pinned
     because error-rate dashboards/alerts key on the log level —
     misrouting to .info would hide cron failures."""
-    from backend.scheduler import _log_and_add_progress
+    from backend.cron.scheduler import _log_and_add_progress
 
     event = {"type": "error", "message": "DB locked"}
     with (
         patch("backend.cron_progress.add_progress"),
         patch("backend.config.load_config", return_value={"name": "svc"}),
-        patch("backend.scheduler.logger") as mock_logger,
+        patch("backend.cron.scheduler.logger") as mock_logger,
     ):
         _log_and_add_progress(run_id=1, service_id="svc-1", event=event)
 
@@ -582,13 +582,13 @@ def test_log_and_add_progress_uses_error_logger_for_error_type():
 
 def test_log_and_add_progress_uses_warning_logger_for_warning_type():
     """`type=warning` → `logger.warning()`."""
-    from backend.scheduler import _log_and_add_progress
+    from backend.cron.scheduler import _log_and_add_progress
 
     event = {"type": "warning", "message": "slow query"}
     with (
         patch("backend.cron_progress.add_progress"),
         patch("backend.config.load_config", return_value={"name": "svc"}),
-        patch("backend.scheduler.logger") as mock_logger,
+        patch("backend.cron.scheduler.logger") as mock_logger,
     ):
         _log_and_add_progress(run_id=1, service_id="svc-1", event=event)
 
@@ -602,7 +602,7 @@ def test_run_bot_data_refresh_records_success_with_total_entries():
     """Successful refresh records job result with total entry count.
     Pinned because the /admin/system-jobs endpoint renders this
     summary in the "last run" cell."""
-    from backend.scheduler import _run_bot_data_refresh
+    from backend.cron.jobs.metadata import _run_bot_data_refresh
 
     fake_results = [{"id": "googlebot", "entry_count": 100}, {"id": "bingbot", "entry_count": 50}]
 
@@ -626,7 +626,7 @@ def test_run_bot_data_refresh_records_error_on_exception():
     """If refresh_all_sources raises, record as error with the
     exception message. Pinned because the system-jobs endpoint
     distinguishes success from error to render the badge color."""
-    from backend.scheduler import _run_bot_data_refresh
+    from backend.cron.jobs.metadata import _run_bot_data_refresh
 
     with (
         patch("backend.utils.bot_sources.refresh_all_sources", side_effect=RuntimeError("network down")),
@@ -647,7 +647,7 @@ def test_run_rdns_enrichment_records_success_with_counts():
     """Successful enrichment records resolved/errors/discovered counts.
     Pinned because admins watch the /system-jobs page to monitor the
     rDNS cache health."""
-    from backend.scheduler import _run_rdns_enrichment
+    from backend.cron.jobs.metadata import _run_rdns_enrichment
 
     fake_summary = {"resolved": 10, "errors": 2, "discovered": 5}
 
@@ -670,7 +670,7 @@ def test_run_rdns_enrichment_records_error_on_exception():
     """Exception → error record. Pinned because rDNS DB lock errors
     are common and should surface on the system-jobs page rather
     than silently breaking enrichment."""
-    from backend.scheduler import _run_rdns_enrichment
+    from backend.cron.jobs.metadata import _run_rdns_enrichment
 
     with (
         patch("backend.utils.rdns_cache.enrich_batch", side_effect=RuntimeError("db locked")),
@@ -690,7 +690,7 @@ def test_run_share_audit_purge_uses_default_retention_when_setting_missing():
     """No setting → default 90 days. Pinned because the cron is the only
     call site for purge_old_audit_logs and a wrong default would silently
     grow the audit log forever (or wipe it)."""
-    from backend.scheduler import _run_share_audit_purge
+    from backend.cron.jobs.metadata import _run_share_audit_purge
 
     with (
         patch("backend.core.share_db.get_setting", return_value=None),
@@ -709,7 +709,7 @@ def test_run_share_audit_purge_uses_default_retention_when_setting_missing():
 def test_run_share_audit_purge_reads_setting_when_present():
     """Admins can override retention via the `share_audit_retention_days`
     setting. Pinned so the setting actually plumbs through to the cron."""
-    from backend.scheduler import _run_share_audit_purge
+    from backend.cron.jobs.metadata import _run_share_audit_purge
 
     with (
         patch("backend.core.share_db.get_setting", return_value="30"),
@@ -725,7 +725,7 @@ def test_run_share_audit_purge_falls_back_on_garbage_setting():
     """A non-int setting value falls back to the default rather than
     crashing the cron. Pinned because a typo in the admin UI should not
     silently disable retention."""
-    from backend.scheduler import _run_share_audit_purge
+    from backend.cron.jobs.metadata import _run_share_audit_purge
 
     with (
         patch("backend.core.share_db.get_setting", return_value="not-a-number"),
@@ -740,7 +740,7 @@ def test_run_share_audit_purge_falls_back_on_garbage_setting():
 def test_run_share_audit_purge_records_error_on_exception():
     """SQLite lock / disk-full → error record. Pinned because a silent
     failure here means audit log grows unbounded."""
-    from backend.scheduler import _run_share_audit_purge
+    from backend.cron.jobs.metadata import _run_share_audit_purge
 
     with (
         patch("backend.core.share_db.get_setting", return_value="90"),
@@ -762,7 +762,7 @@ def test_run_service_alerts_evaluation_no_op_when_source_missing():
     job logs a warning and returns without calling alert_repo. Pinned
     because the scheduler can fire this for a service deleted between
     job registration and run-time."""
-    from backend.scheduler import _run_service_alerts_evaluation
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
@@ -778,7 +778,7 @@ def test_run_service_alerts_evaluation_skips_when_no_alerts_configured():
     and return without opening a DuckDB connection. Pinned because
     losing this would create unnecessary DuckDB connections every
     interval for services without alerts."""
-    from backend.scheduler import _run_service_alerts_evaluation
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
 
     src = {"name": "svc-1", "service_id": "svc-1"}
     log_calls = []
@@ -806,7 +806,7 @@ def test_run_service_alerts_evaluation_filters_to_enabled_alerts_only():
     Pinned because admins disable alerts during cleanup/migration —
     evaluating disabled alerts would still ping their (now-stale)
     webhook URLs."""
-    from backend.scheduler import _run_service_alerts_evaluation
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
 
     src = {"name": "svc-1", "service_id": "svc-1"}
     alerts = [
@@ -832,7 +832,7 @@ def test_run_service_alerts_evaluation_writes_timestamps_before_sending_webhooks
     webhook dispatch loop. Pinned because losing this ordering
     would cause duplicate notifications on the next eval run if a
     webhook call crashes (the timestamp wouldn't persist)."""
-    from backend.scheduler import _run_service_alerts_evaluation
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
 
     src = {"name": "svc-1", "service_id": "svc-1"}
     alerts = [{"id": "a1", "name": "alert-1", "enabled": True}]
@@ -875,7 +875,7 @@ def test_run_service_alerts_evaluation_continues_after_per_alert_eval_failure():
     get evaluated. Pinned because losing this would let a single
     broken alert SQL freeze evaluation of every other alert in the
     service."""
-    from backend.scheduler import _run_service_alerts_evaluation
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
 
     src = {"name": "svc-1", "service_id": "svc-1"}
     alerts = [
@@ -911,7 +911,7 @@ def test_run_service_alerts_evaluation_swallows_webhook_post_failure():
     """A webhook POST that raises must NOT abort the rest of the
     dispatch loop. Pinned because losing this would let one dead
     Slack URL prevent every other webhook from firing."""
-    from backend.scheduler import _run_service_alerts_evaluation
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
 
     src = {"name": "svc-1", "service_id": "svc-1"}
     alerts = [
@@ -957,7 +957,7 @@ def test_run_metadata_sync_no_op_when_config_missing():
     return immediately without trying to refresh iceberg. Pinned
     because the analyst-replica config can be deleted between job
     registration and run time."""
-    from backend.scheduler import _run_metadata_sync
+    from backend.cron.jobs.metadata import _run_metadata_sync
 
     with (
         patch("backend.config.load_config", return_value=None),
@@ -972,7 +972,7 @@ def test_run_metadata_sync_no_op_when_source_missing():
     """`get_source_for_service` returns None → early return. Pinned
     because config can exist while the source-builder returns None
     (mid-teardown, credentials cleared)."""
-    from backend.scheduler import _run_metadata_sync
+    from backend.cron.jobs.metadata import _run_metadata_sync
 
     with (
         patch("backend.config.load_config", return_value={"service_id": "svc"}),
@@ -988,7 +988,7 @@ def test_run_metadata_sync_returns_silently_when_start_cron_run_raises():
     """`start_cron_run` raising RuntimeError (busy) → log info and
     return. Pinned because losing this would crash the scheduler
     thread when an existing run is in progress."""
-    from backend.scheduler import _run_metadata_sync
+    from backend.cron.jobs.metadata import _run_metadata_sync
 
     with (
         patch("backend.config.load_config", return_value={"service_id": "svc"}),
@@ -1012,7 +1012,7 @@ def test_run_metadata_sync_handles_iceberg_table_not_found_gracefully():
     committed" message + log_cron_run success. Pinned because brand-
     new analyst services hit this path on first sync — losing it
     would log a misleading error to the system-jobs panel."""
-    from backend.scheduler import _run_metadata_sync
+    from backend.cron.jobs.metadata import _run_metadata_sync
 
     log_calls = []
 
@@ -1044,7 +1044,7 @@ def test_run_metadata_sync_propagates_non_not_found_iceberg_exception():
     (network failure, auth error) propagates up. Pinned because
     losing this would mask real catalog errors behind the "Table
     not found" success path."""
-    from backend.scheduler import _run_metadata_sync
+    from backend.cron.jobs.metadata import _run_metadata_sync
 
     with (
         patch("backend.config.load_config", return_value={"service_id": "svc"}),
@@ -1074,7 +1074,7 @@ def test_run_metadata_sync_persists_time_range_when_explicit_args_provided():
     because the DuckDB view uses this saved range for strict
     bounding — losing the persist would silently widen the view
     on the next cron tick."""
-    from backend.scheduler import _run_metadata_sync
+    from backend.cron.jobs.metadata import _run_metadata_sync
 
     saved_cfgs = []
 
@@ -1117,7 +1117,7 @@ def test_run_metadata_sync_clears_time_range_on_manual_sync_all():
     `time_range`. Pinned because losing this would let an old
     range mask new data on subsequent cron ticks (sync-all should
     truly sync everything)."""
-    from backend.scheduler import _run_metadata_sync
+    from backend.cron.jobs.metadata import _run_metadata_sync
 
     saved_cfgs = []
 
@@ -1174,7 +1174,7 @@ def test_run_commit_returns_silently_when_config_missing():
     """If `svcconfig.load_config` returns None → no-op. Pinned because
     deleted services can still have queued cron ticks; crashing here
     would take down the scheduler thread."""
-    from backend.scheduler import _run_commit
+    from backend.cron.jobs.commit import _run_commit
 
     with (
         patch("backend.config.load_config", return_value=None),
@@ -1189,7 +1189,7 @@ def test_run_commit_returns_silently_when_source_missing():
     """`get_source_for_service` returns None → early return. Pinned
     because credentials can be revoked between config-load and
     source-build."""
-    from backend.scheduler import _run_commit
+    from backend.cron.jobs.commit import _run_commit
 
     with (
         patch("backend.config.load_config", return_value={"service_id": "svc"}),
@@ -1206,7 +1206,7 @@ def test_run_commit_skipped_on_read_only_source_without_force():
     Pinned because committing on a viewer-only credential would surface
     a confusing iceberg permission error in the cron log instead of a
     clean skip."""
-    from backend.scheduler import _run_commit
+    from backend.cron.jobs.commit import _run_commit
 
     with (
         patch("backend.config.load_config", return_value={"service_id": "svc"}),
@@ -1226,7 +1226,7 @@ def test_run_commit_skipped_when_sync_disabled():
     return without starting a cron run. Pinned because the admin
     'pause sync' toggle relies on this — losing it would silently
     keep committing data after the toggle was flipped."""
-    from backend.scheduler import _run_commit
+    from backend.cron.jobs.commit import _run_commit
 
     with (
         patch(
@@ -1248,7 +1248,7 @@ def test_run_commit_skipped_when_start_cron_run_raises():
     """`start_cron_run` raising RuntimeError (busy) → log info + return.
     Pinned because losing this would crash the scheduler thread when
     a commit is already in flight."""
-    from backend.scheduler import _run_commit
+    from backend.cron.jobs.commit import _run_commit
 
     with (
         patch(
@@ -1273,7 +1273,7 @@ def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
     is invoked to refresh the local cache. Pinned because losing the
     auto-sync would leave the dashboard's "rows in lake" counter
     stale for up to a full sync interval."""
-    from backend.scheduler import _run_commit
+    from backend.cron.jobs.commit import _run_commit
 
     log_calls = []
     src = {"name": "svc", "service_id": "svc", "access_level": "read_write"}
@@ -1299,7 +1299,7 @@ def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
         # test sandbox.
         patch("backend.core.iceberg.update_iceberg_view"),
         patch("backend.core.duckdb.get_connection", return_value=MagicMock()),
-        patch("backend.scheduler._run_metadata_sync") as mock_sync,
+        patch("backend.cron.jobs.metadata._run_metadata_sync") as mock_sync,
         patch("backend.cron_progress.cleanup_progress"),
         patch("backend.cron_progress.start_progress"),
         patch("backend.cron_progress.end_progress"),
@@ -1322,7 +1322,7 @@ def test_run_commit_no_data_path_logs_success_without_triggering_sync():
     commit" and do NOT invoke `_run_metadata_sync`. Pinned because
     triggering an empty sync would burn CDN bandwidth and shave the
     DuckDB cache for no reason."""
-    from backend.scheduler import _run_commit
+    from backend.cron.jobs.commit import _run_commit
 
     log_calls = []
 
@@ -1344,7 +1344,7 @@ def test_run_commit_no_data_path_logs_success_without_triggering_sync():
             "backend.core.iceberg.commit_buffer",
             return_value={"files_committed": 0, "rows_committed": 0},
         ),
-        patch("backend.scheduler._run_metadata_sync") as mock_sync,
+        patch("backend.cron.jobs.metadata._run_metadata_sync") as mock_sync,
         patch("backend.cron_progress.cleanup_progress"),
         patch("backend.cron_progress.start_progress"),
         patch("backend.cron_progress.end_progress"),
@@ -1365,7 +1365,7 @@ def test_run_commit_logs_error_when_commit_buffer_raises():
     with the exception message. Pinned because losing this would
     leave the cron-runs admin panel blank on the most-important
     failure mode (catalog write rejected, S3 perms broken)."""
-    from backend.scheduler import _run_commit
+    from backend.cron.jobs.commit import _run_commit
 
     log_calls = []
 
@@ -1384,7 +1384,7 @@ def test_run_commit_logs_error_when_commit_buffer_raises():
             side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
         ),
         patch("backend.core.iceberg.commit_buffer", side_effect=RuntimeError("S3 perm denied")),
-        patch("backend.scheduler._run_metadata_sync"),
+        patch("backend.cron.jobs.metadata._run_metadata_sync"),
         patch("backend.cron_progress.cleanup_progress"),
         patch("backend.cron_progress.start_progress"),
         patch("backend.cron_progress.end_progress"),
@@ -1409,7 +1409,7 @@ def test_run_optimize_returns_silently_when_source_missing():
     """No source → early return without invoking iceberg. Pinned
     because the scheduler can fire this for a service that was
     deleted mid-tick."""
-    from backend.scheduler import _run_optimize
+    from backend.cron.jobs.optimize import _run_optimize
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
@@ -1423,7 +1423,7 @@ def test_run_optimize_returns_silently_when_source_missing():
 def test_run_optimize_skipped_when_start_cron_run_raises():
     """`start_cron_run` raising → log info, return. Pinned because a
     busy state must not crash the scheduler thread."""
-    from backend.scheduler import _run_optimize
+    from backend.cron.jobs.optimize import _run_optimize
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "s", "service_id": "s"}),
@@ -1440,7 +1440,7 @@ def test_run_optimize_success_records_files_rewritten_and_added():
     records ``parquet_files_optimized`` and ``parquet_files_created``.
     Pinned because the admin maintenance dashboard charts those
     fields by name; renaming would silently zero them out."""
-    from backend.scheduler import _run_optimize
+    from backend.cron.jobs.optimize import _run_optimize
 
     log_calls = []
 
@@ -1473,7 +1473,7 @@ def test_run_optimize_logs_error_when_result_has_error_key():
     because the iceberg helper signals soft failures via this key
     (vs. raising) — losing the branch would log soft errors as
     success."""
-    from backend.scheduler import _run_optimize
+    from backend.cron.jobs.optimize import _run_optimize
 
     log_calls = []
 
@@ -1510,7 +1510,7 @@ def test_run_optimize_records_error_when_all_partitions_fail():
     optimize_table returns partition_errors AND added zero files, the cron
     must record status=error with the error preview in error_message — not
     swallow it."""
-    from backend.scheduler import _run_optimize
+    from backend.cron.jobs.optimize import _run_optimize
 
     log_calls = []
     errors = [
@@ -1562,7 +1562,7 @@ def test_run_optimize_records_warning_when_some_partitions_succeed():
     """If optimize made partial progress (some partitions compacted, others
     failed), status should be ``warning`` — not ``success`` (which would hide
     the failures) and not ``error`` (which would imply no progress)."""
-    from backend.scheduler import _run_optimize
+    from backend.cron.jobs.optimize import _run_optimize
 
     log_calls = []
 
@@ -1604,7 +1604,7 @@ def test_run_optimize_records_warning_when_some_partitions_succeed():
 def test_run_expire_snapshots_returns_silently_when_source_missing():
     """No source → early return. Pinned because the weekly maintenance
     cron must not crash for deleted services."""
-    from backend.scheduler import _run_expire_snapshots
+    from backend.cron.jobs.expire import _run_expire_snapshots
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
@@ -1619,7 +1619,7 @@ def test_run_expire_snapshots_swallows_iceberg_exception():
     """`run_cloud_maintenance` raising must NOT propagate — losing the
     swallow would crash the scheduler thread on a single maintenance
     failure (network blip, S3 throttle)."""
-    from backend.scheduler import _run_expire_snapshots
+    from backend.cron.jobs.expire import _run_expire_snapshots
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "s", "service_id": "s"}),
@@ -1634,7 +1634,7 @@ def test_run_expire_snapshots_handles_error_dict_without_raising():
     soft-failure signal — logged as warning, not raised. Pinned
     because losing the branch would treat soft failures as success
     (silently incorrect maintenance reporting)."""
-    from backend.scheduler import _run_expire_snapshots
+    from backend.cron.jobs.expire import _run_expire_snapshots
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "s", "service_id": "s"}),
@@ -1650,7 +1650,7 @@ def test_run_expire_snapshots_writes_cron_runs_row_on_success(monkeypatch):
     summary that includes the keys returned by run_cloud_maintenance.
     Without this row the weekly maintenance is invisible to the cron
     audit UI."""
-    from backend import scheduler as sch
+    from backend.cron.jobs import expire as sch
 
     log_calls: list = []
     start_calls: list = []
@@ -1708,7 +1708,7 @@ def test_run_expire_snapshots_writes_cron_runs_row_on_sub_step_error(monkeypatch
     so the audit shows partial-success — the cleanups that DID complete still
     register, but the failing sub-step's error message surfaces in
     error_message for triage."""
-    from backend import scheduler as sch
+    from backend.cron.jobs import expire as sch
 
     log_calls: list = []
     monkeypatch.setattr(
@@ -1747,7 +1747,7 @@ def test_run_expire_snapshots_writes_cron_runs_row_on_uncaught_exception(monkeyp
     """An uncaught exception from run_cloud_maintenance must still produce
     a cron_runs row (status='error') with the run_id threaded through —
     otherwise the row started by start_cron_run sits forever as 'running'."""
-    from backend import scheduler as sch
+    from backend.cron.jobs import expire as sch
 
     log_calls: list = []
     monkeypatch.setattr(
@@ -1783,7 +1783,7 @@ def test_run_expire_snapshots_skips_silently_when_start_cron_run_raises(monkeypa
     """RuntimeError from start_cron_run means another maintenance instance
     is already running (overlap guard). The function returns silently with
     no log_cron_run call — there's no row to update."""
-    from backend import scheduler as sch
+    from backend.cron.jobs import expire as sch
 
     log_calls: list = []
 
@@ -1821,7 +1821,7 @@ def test_run_expire_snapshots_skips_silently_when_start_cron_run_raises(monkeypa
 def test_run_ngwaf_bot_sync_no_op_when_config_missing():
     """No config → early return. Pinned because the NGWAF sync cron
     can fire for a deleted service."""
-    from backend.scheduler import _run_ngwaf_bot_sync
+    from backend.cron.jobs.metadata import _run_ngwaf_bot_sync
 
     with (
         patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
@@ -1837,7 +1837,7 @@ def test_run_ngwaf_bot_sync_no_op_when_workspace_id_missing():
     """No `ngwaf_workspace_id` configured → return silently. Pinned
     because services without NGWAF enabled should NOT log noisy
     error cron runs (admin sees clean "skipped" silence instead)."""
-    from backend.scheduler import _run_ngwaf_bot_sync
+    from backend.cron.jobs.metadata import _run_ngwaf_bot_sync
 
     with (
         patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
@@ -1854,7 +1854,7 @@ def test_run_ngwaf_bot_sync_no_op_when_api_key_missing():
     """No `fastly_api_key` → warn + return without starting cron run.
     Pinned because credentials may have been cleared from config but
     the workspace_id still present (manual edit) — must not crash."""
-    from backend.scheduler import _run_ngwaf_bot_sync
+    from backend.cron.jobs.metadata import _run_ngwaf_bot_sync
 
     with (
         patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
@@ -1874,7 +1874,7 @@ def test_run_ngwaf_bot_sync_seeds_watermark_at_now_on_cold_start():
     cold-start path called `oldest_unenriched_timestamp`, generating
     thousands of manifest reads on the very first cycle. Next cycle picks
     up from the seeded watermark with zero cloud I/O."""
-    from backend.scheduler import _run_ngwaf_bot_sync
+    from backend.cron.jobs.metadata import _run_ngwaf_bot_sync
 
     log_calls = []
     seeded: dict[str, str] = {}
@@ -1914,7 +1914,7 @@ def test_run_ngwaf_bot_sync_seeds_watermark_at_now_on_cold_start():
 def test_run_ngwaf_bot_sync_uses_watermark_for_fetch_in_steady_state():
     """When the local watermark is set, it's forwarded as `from_ts` to the
     NGWAF fetcher — no cloud I/O for planning."""
-    from backend.scheduler import _run_ngwaf_bot_sync
+    from backend.cron.jobs.metadata import _run_ngwaf_bot_sync
 
     with (
         patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
@@ -1945,7 +1945,7 @@ def test_run_ngwaf_bot_sync_upserts_pages_and_logs_success():
     `log_cron_run(status="success")` with the count summary. Pinned
     because the bot-cache row count drives the admin dashboard's
     'NGWAF enrichment coverage' panel."""
-    from backend.scheduler import _run_ngwaf_bot_sync
+    from backend.cron.jobs.metadata import _run_ngwaf_bot_sync
 
     log_calls = []
     upserts = []
@@ -1992,7 +1992,7 @@ def test_run_ngwaf_bot_sync_logs_error_when_fetcher_raises():
     """`fetch_verified_bots_paged` raising → `log_cron_run(status="error")`.
     Pinned because losing this would leave NGWAF API failures invisible
     to admins (they'd only notice via stale enrichment counts)."""
-    from backend.scheduler import _run_ngwaf_bot_sync
+    from backend.cron.jobs.metadata import _run_ngwaf_bot_sync
 
     log_calls = []
 
@@ -2041,7 +2041,7 @@ def _gap_heal_src(service_id="svc-gap"):
 
 def test_run_gap_heal_no_op_when_source_missing():
     """No source → silent return. Same pattern as _run_full_sweep."""
-    from backend.scheduler import _run_gap_heal
+    from backend.cron.jobs.sync import _run_gap_heal
 
     with patch("backend.core.duckdb.get_source_for_service", return_value=None):
         _run_gap_heal("svc-missing")  # should not raise
@@ -2049,7 +2049,7 @@ def test_run_gap_heal_no_op_when_source_missing():
 
 def test_run_gap_heal_no_op_when_source_read_only():
     """Analyst (read_only) services never heal — they don't ingest."""
-    from backend.scheduler import _run_gap_heal
+    from backend.cron.jobs.sync import _run_gap_heal
 
     src = {**_gap_heal_src(), "access_level": "read_only"}
     with patch("backend.core.duckdb.get_source_for_service", return_value=src):
@@ -2061,7 +2061,7 @@ def test_run_gap_heal_logs_success_when_no_sustained_loss():
     success with "no sustained loss" summary and does NOT trigger
     full_sweep. The detector being free from triggers is the healthy
     case and should not produce errors."""
-    from backend.scheduler import _run_gap_heal
+    from backend.cron.jobs.sync import _run_gap_heal
 
     log_calls = []
     full_sweep_calls = []
@@ -2069,7 +2069,7 @@ def test_run_gap_heal_logs_success_when_no_sustained_loss():
         patch("backend.core.duckdb.get_source_for_service", return_value=_gap_heal_src()),
         patch("backend.core.duckdb.start_cron_run", return_value=42),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **k: log_calls.append((a, k))),
-        patch("backend.scheduler._run_full_sweep", side_effect=lambda sid: full_sweep_calls.append(sid)),
+        patch("backend.cron.jobs.sync._run_full_sweep", side_effect=lambda sid: full_sweep_calls.append(sid)),
         patch(
             "backend.routers.admin.compute_log_accounting",
             return_value={"sustained_loss": None, "buckets": [], "totals": None},
@@ -2088,8 +2088,8 @@ def test_run_gap_heal_triggers_full_sweep_on_sustained_loss():
     """When compute_log_accounting reports sustained_loss, the heal
     cron must invoke _run_full_sweep AND record a "triggering"-style
     summary so users can see the heal decision in cron history."""
+    from backend.cron.jobs.sync import _run_gap_heal
     from backend.routers.admin import SustainedLossAlert
-    from backend.scheduler import _run_gap_heal
 
     log_calls = []
     full_sweep_calls = []
@@ -2104,15 +2104,15 @@ def test_run_gap_heal_triggers_full_sweep_on_sustained_loss():
         patch("backend.core.duckdb.start_cron_run", return_value=43),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **k: log_calls.append((a, k))),
         patch(
-            "backend.scheduler._run_full_sweep",
+            "backend.cron.jobs.sync._run_full_sweep",
             side_effect=lambda sid, **kw: full_sweep_calls.append((sid, kw)),
         ),
         patch(
             "backend.routers.admin.compute_log_accounting",
             return_value={"sustained_loss": sustained, "buckets": [], "totals": None},
         ),
-        patch("backend.scheduler._last_successful_gap_heal_trigger", return_value=None),
-        patch("backend.scheduler._mark_gap_heal_triggered"),
+        patch("backend.cron.jobs.sync._last_successful_gap_heal_trigger", return_value=None),
+        patch("backend.cron.jobs.sync._mark_gap_heal_triggered"),
     ):
         _run_gap_heal("svc-gap")
 
@@ -2133,8 +2133,8 @@ def test_run_gap_heal_respects_throttle_window():
     sustained-loss observation should be logged but NOT trigger another
     full_sweep — prevents thrashing on unrecoverable Fastly→FOS
     transport loss."""
+    from backend.cron.jobs.sync import GAP_HEAL_THROTTLE_HOURS, _run_gap_heal
     from backend.routers.admin import SustainedLossAlert
-    from backend.scheduler import GAP_HEAL_THROTTLE_HOURS, _run_gap_heal
 
     log_calls = []
     full_sweep_calls = []
@@ -2152,14 +2152,14 @@ def test_run_gap_heal_respects_throttle_window():
         patch("backend.core.duckdb.start_cron_run", return_value=44),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **k: log_calls.append((a, k))),
         patch(
-            "backend.scheduler._run_full_sweep",
+            "backend.cron.jobs.sync._run_full_sweep",
             side_effect=lambda sid, **kw: full_sweep_calls.append((sid, kw)),
         ),
         patch(
             "backend.routers.admin.compute_log_accounting",
             return_value={"sustained_loss": sustained, "buckets": [], "totals": None},
         ),
-        patch("backend.scheduler._last_successful_gap_heal_trigger", return_value=one_hour_ago),
+        patch("backend.cron.jobs.sync._last_successful_gap_heal_trigger", return_value=one_hour_ago),
     ):
         _run_gap_heal("svc-gap")
 
@@ -2198,8 +2198,8 @@ def test_run_gap_heal_critical_bypasses_throttle_and_widens_sweep():
     detector tick (no throttle) and pass a far larger sweep budget so the
     backlog drains in hours not days. Without this a single 200k-line
     burst would take ~40 hours at the default 20k files/run."""
+    from backend.cron.jobs.sync import _run_gap_heal
     from backend.routers.admin import SustainedLossAlert
-    from backend.scheduler import _run_gap_heal
 
     log_calls = []
     full_sweep_calls: list[tuple[str, dict]] = []
@@ -2216,15 +2216,15 @@ def test_run_gap_heal_critical_bypasses_throttle_and_widens_sweep():
         patch("backend.core.duckdb.start_cron_run", return_value=45),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **k: log_calls.append((a, k))),
         patch(
-            "backend.scheduler._run_full_sweep",
+            "backend.cron.jobs.sync._run_full_sweep",
             side_effect=lambda sid, **kw: full_sweep_calls.append((sid, kw)),
         ),
         patch(
             "backend.routers.admin.compute_log_accounting",
             return_value={"sustained_loss": sustained, "buckets": [], "totals": None},
         ),
-        patch("backend.scheduler._last_successful_gap_heal_trigger", return_value=one_min_ago),
-        patch("backend.scheduler._mark_gap_heal_triggered"),
+        patch("backend.cron.jobs.sync._last_successful_gap_heal_trigger", return_value=one_min_ago),
+        patch("backend.cron.jobs.sync._mark_gap_heal_triggered"),
     ):
         _run_gap_heal("svc-gap")
 
@@ -2241,8 +2241,8 @@ def test_run_gap_heal_critical_bypasses_throttle_and_widens_sweep():
 def test_run_gap_heal_severe_uses_15min_throttle():
     """Severe band (≥50% gap or ≥100k lost lines) cuts throttle to 15 min
     so a 200k-line burst gets ~4 sweeps/hour instead of one every 4h."""
+    from backend.cron.jobs.sync import _run_gap_heal
     from backend.routers.admin import SustainedLossAlert
-    from backend.scheduler import _run_gap_heal
 
     log_calls = []
     full_sweep_calls: list[tuple[str, dict]] = []
@@ -2259,15 +2259,15 @@ def test_run_gap_heal_severe_uses_15min_throttle():
         patch("backend.core.duckdb.start_cron_run", return_value=46),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **k: log_calls.append((a, k))),
         patch(
-            "backend.scheduler._run_full_sweep",
+            "backend.cron.jobs.sync._run_full_sweep",
             side_effect=lambda sid, **kw: full_sweep_calls.append((sid, kw)),
         ),
         patch(
             "backend.routers.admin.compute_log_accounting",
             return_value={"sustained_loss": sustained, "buckets": [], "totals": None},
         ),
-        patch("backend.scheduler._last_successful_gap_heal_trigger", return_value=thirty_min_ago),
-        patch("backend.scheduler._mark_gap_heal_triggered"),
+        patch("backend.cron.jobs.sync._last_successful_gap_heal_trigger", return_value=thirty_min_ago),
+        patch("backend.cron.jobs.sync._mark_gap_heal_triggered"),
     ):
         _run_gap_heal("svc-gap")
 
@@ -2293,7 +2293,7 @@ def test_run_full_sweep_default_budget_unchanged_for_daily_scheduled_run():
 def test_sync_jobs_registers_gap_heal_when_logging_service_id_present():
     """Gap-heal cron should register only when the service has a
     logging_service_id (the Fastly Stats API call keys on it)."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     cfg = {
         "service_id": "svc-heal",
@@ -2322,7 +2322,7 @@ def test_sync_jobs_registers_gap_heal_when_only_service_id_present():
     ``service_id`` for the Fastly Stats call, and the scheduler check
     must do the same. Regression: missing this fallback let a 200k-line
     burst go unhealed (gap_heal cron was simply never scheduled)."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     cfg = {
         "service_id": "svc-fallback",
@@ -2347,7 +2347,7 @@ def test_sync_jobs_registers_gap_heal_when_only_service_id_present():
 def test_sync_jobs_skips_gap_heal_when_disabled():
     """``cron_gap_heal.enabled: False`` must keep the heal cron out of
     the schedule even if the service has a logging_service_id."""
-    from backend.scheduler import Scheduler
+    from backend.cron.scheduler import Scheduler
 
     cfg = {
         "service_id": "svc-disabled",
@@ -2377,7 +2377,7 @@ def test_check_disk_space_passes_when_plenty_free(tmp_path):
     """Happy path: 10 GB total / 9.5 GB free → no abort."""
     from collections import namedtuple
 
-    from backend.scheduler import _check_disk_space
+    from backend.cron.scheduler import _check_disk_space
 
     Usage = namedtuple("usage", "total used free")
     with patch("shutil.disk_usage", return_value=Usage(total=10 * 1024**3, used=512 * 1024**2, free=9 * 1024**3)):
@@ -2391,7 +2391,7 @@ def test_check_disk_space_aborts_when_below_byte_floor(tmp_path):
     human-readable reason."""
     from collections import namedtuple
 
-    from backend.scheduler import _check_disk_space
+    from backend.cron.scheduler import _check_disk_space
 
     Usage = namedtuple("usage", "total used free")
     with patch(
@@ -2408,7 +2408,7 @@ def test_check_disk_space_aborts_when_below_pct_floor(tmp_path):
     only 2% of 50 GB total — pct floor (3%) should still trip."""
     from collections import namedtuple
 
-    from backend.scheduler import _check_disk_space
+    from backend.cron.scheduler import _check_disk_space
 
     Usage = namedtuple("usage", "total used free")
     with patch(
@@ -2425,7 +2425,7 @@ def test_check_disk_space_does_not_block_on_probe_failure(tmp_path):
     NOT block — let the underlying job try and fail with the real
     error. Conservative because we don't want a transient FS issue to
     kill all cron runs."""
-    from backend.scheduler import _check_disk_space
+    from backend.cron.scheduler import _check_disk_space
 
     with patch("shutil.disk_usage", side_effect=OSError("gone")):
         ok, msg = _check_disk_space(str(tmp_path), "svc", "sync")
@@ -2435,7 +2435,7 @@ def test_check_disk_space_does_not_block_on_probe_failure(tmp_path):
 
 def test_check_buffer_backlog_returns_empty_when_drained():
     """Healthy drain: nothing in buffer after commit → no suffix, no warning."""
-    from backend.scheduler import _check_buffer_backlog
+    from backend.cron.scheduler import _check_buffer_backlog
 
     with patch(
         "backend.core.iceberg.buffer_backlog_stats",
@@ -2446,7 +2446,7 @@ def test_check_buffer_backlog_returns_empty_when_drained():
 
 def test_check_buffer_backlog_warns_when_file_count_exceeds_threshold():
     """More than 200 files left after a commit → suffix mentions count."""
-    from backend.scheduler import _check_buffer_backlog
+    from backend.cron.scheduler import _check_buffer_backlog
 
     with patch(
         "backend.core.iceberg.buffer_backlog_stats",
@@ -2460,7 +2460,7 @@ def test_check_buffer_backlog_warns_when_file_count_exceeds_threshold():
 def test_check_buffer_backlog_warns_when_oldest_age_exceeds_scaled_threshold():
     """Oldest file > 3 × commit_interval_mins → suffix flags age. At
     interval=5, threshold is 15min; pass 30 min and expect a warning."""
-    from backend.scheduler import _check_buffer_backlog
+    from backend.cron.scheduler import _check_buffer_backlog
 
     with patch(
         "backend.core.iceberg.buffer_backlog_stats",
@@ -2473,7 +2473,7 @@ def test_check_buffer_backlog_warns_when_oldest_age_exceeds_scaled_threshold():
 def test_check_buffer_backlog_never_raises_on_probe_failure():
     """The backlog probe must not bubble exceptions back to _run_commit.
     A corrupt iceberg helper must yield "" not a stack trace."""
-    from backend.scheduler import _check_buffer_backlog
+    from backend.cron.scheduler import _check_buffer_backlog
 
     with patch("backend.core.iceberg.buffer_backlog_stats", side_effect=OSError("disk gone")):
         assert _check_buffer_backlog({"name": "svc"}, "svc", commit_interval_mins=5) == ""
@@ -2482,3 +2482,64 @@ def test_check_buffer_backlog_never_raises_on_probe_failure():
 # Silence ruff unused-imports
 _ = MagicMock
 _ = pytest
+
+
+def test_sync_jobs_registers_hourly_rollup_heal_for_readwrite_service():
+    """Read-write services get the hourly rollup_heal job alongside the
+    daily rollup_compact. Pinned because without it, closed hours of
+    bursty services stay absent from top-N until the 02:00 deep pass
+    (the 2026-07-06 huge total_rows-vs-field_total divergence)."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-1",
+        "log_period": 60,
+        "provisioning": {"cron_sync": {"enabled": True}, "cron_compact": {"enabled": True}},
+    }
+
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src()),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "rollup_compact_svc-1" in s._job_ids
+    assert "rollup_heal_svc-1" in s._job_ids
+    heal_job = s._sched.get_job("rollup_heal_svc-1")
+    assert heal_job is not None
+    # Hourly at :05 — late enough for Fastly log delivery lag to land the
+    # just-closed hour's rows, hourly so staleness caps at ~1 hour.
+    assert "minute='5'" in str(heal_job.trigger)
+    assert "hour=" not in str(heal_job.trigger)
+
+
+def test_sync_jobs_skips_rollup_heal_for_read_only_service():
+    """Analyst replicas own no rollup data — same gate as rollup_compact."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-2",
+        "log_period": 60,
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_compact": {"enabled": True},
+            "access_level": "read_only",
+        },
+    }
+
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-2")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "rollup_compact_svc-2" not in s._job_ids
+    assert "rollup_heal_svc-2" not in s._job_ids

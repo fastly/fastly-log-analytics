@@ -110,9 +110,15 @@ from backend.core.field_registry import LOG_FIELD_CATALOG
 # every service enables every log field group — absent fields are written as
 # nulls by _align_to_schema() so the Parquet schema stays uniform.
 #
-# Adding a new field to LOG_FIELD_CATALOG automatically flows through to this
-# schema, the Arrow schema, and the DuckDB view. The schema evolution code in
-# _init_iceberg_table_locked handles adding new columns to existing tables.
+# Adding a storage-backed field to LOG_FIELD_CATALOG is NOT enough on its own:
+# its id must ALSO be appended to the hand-maintained _FIELD_ORDER list below,
+# which is what actually drives this schema, the Arrow schema, and the DuckDB
+# view (field ids are position-assigned). A catalog field left out of
+# _FIELD_ORDER silently never materializes as a column. The drift guard
+# tests/core/test_iceberg.py::test_field_order_covers_ingest_storage_fields
+# fails CI if that happens. Once a field is in _FIELD_ORDER, the schema
+# evolution code in _init_iceberg_table_locked adds it (by name) to existing
+# tables on the next tick.
 # ---------------------------------------------------------------------------
 
 _DUCKDB_TO_ICEBERG = {
@@ -214,26 +220,37 @@ _FIELD_ORDER = [
     "oretries",
     "rid",
     "prid",
-    # IDs 67–68 are reserved positional slots: they hold an Iceberg field_id so
-    # that _source_file keeps field_id 69 and every custom field keeps its
-    # base_count-anchored id (the field-id stability contract in
-    # get_iceberg_schema). They are never emitted in the schema — see the
-    # _RESERVED_FIELD_SLOTS filter below.
-    "_reserved_67",
-    "_reserved_68",
-    # Internal fields (IDs 69+)
+    # Late-adds that CONSUME the two former reserved positional slots: they take
+    # field_ids 67 and 68 EXACTLY (zero shift vs the old _reserved_67/_reserved_68),
+    # so _source_file keeps its committed field_id 69.
+    "resp_header_content_encoding",  # Group A — id 67 (was _reserved_67)
+    "oconnect_ms",  # Group L — id 68 (was _reserved_68)
+    # Internal fields (ID 69)
     "_source_file",
+    # Reserved buffer now exhausted; this real field takes a fresh slot (id 70).
+    # base_count grows 69→70, so the base_count-anchored *computed* custom-field
+    # ids shift 70-78 → 71-79. SAFE for existing tables: every read path binds
+    # columns by NAME (read_parquet union_by_name / UNION ALL BY NAME /
+    # iceberg_scan over the table's own metadata), writes align to
+    # schema_to_pyarrow(table.schema()), and schema-evolution add_column matches
+    # by NAME and mints fresh ids. Positional ids are consumed only by the
+    # initial create_table for a brand-new table.
+    "cookie_session",  # Group H — id 70; default_off + pii
 ]
 
-# Positional slots that hold an Iceberg field_id but are never emitted in the
-# schema, so later field_ids never shift for existing tables.
-_RESERVED_FIELD_SLOTS = {"_reserved_67", "_reserved_68"}
+# No non-emitted positional slots remain — the reserved buffer was consumed by
+# resp_header_content_encoding (67) and oconnect_ms (68) above. Append future
+# storage-backed fields to the end of _FIELD_ORDER; the drift guard
+# (tests/core/test_iceberg.py::test_field_order_covers_ingest_storage_fields)
+# fails CI if a catalog field ingest stores is ever left out of _FIELD_ORDER.
+_RESERVED_FIELD_SLOTS: set[str] = set()
 
 _CATALOG_TYPE_MAP = {f["id"]: f["duckdb_type"] for f in LOG_FIELD_CATALOG}
 
-# Reserved slots aren't in _CATALOG_TYPE_MAP, so map them to a placeholder type
-# purely to keep the enumerate() positions aligned — their NestedField is
-# filtered out in get_iceberg_schema.
+# Every current _FIELD_ORDER entry is a real catalog field, so the VARCHAR
+# fallback below is now a defensive placeholder only (the reserved slots that
+# once needed it have been consumed). It keeps enumerate() positions aligned if
+# a future non-catalog positional slot is ever reintroduced.
 _fields = [
     (fid, _DUCKDB_TO_ICEBERG[_CATALOG_TYPE_MAP[fid]] if fid in _CATALOG_TYPE_MAP else _DUCKDB_TO_ICEBERG["VARCHAR"])
     for fid in _FIELD_ORDER

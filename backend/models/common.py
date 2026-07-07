@@ -180,6 +180,13 @@ class BaseResponse(BaseModel):
 
     debug_queries: list[DebugQuery] = Field(default_factory=list, serialization_alias="_debug_queries")
     debug_calls: list[DebugCall] = Field(default_factory=list, serialization_alias="_debug_calls")
+    # SQLite statements executed while serving THIS request (page-scoped
+    # sibling of debug_queries). Plain dicts — the wire shape is pinned by
+    # backend/models/debug.py::SqliteProfilerEntry, which the ring-buffer
+    # endpoint already exposes; duplicating the model here as a typed field
+    # would force common.py → debug.py imports for zero runtime validation
+    # gain on a debug-only envelope.
+    debug_sqlite: list[dict] = Field(default_factory=list, serialization_alias="_debug_sqlite")
     is_cached: bool = Field(default=False, serialization_alias="_is_cached")
     # Per-phase wall-clock timing for the handler. Always emitted as
     # _section_timings under serialization. Default empty so endpoints
@@ -194,19 +201,26 @@ class BaseResponse(BaseModel):
         if not _debug_responses_enabled():
             data.pop("_debug_queries", None)
             data.pop("_debug_calls", None)
+            data.pop("_debug_sqlite", None)
             data.pop("debug_queries", None)
             data.pop("debug_calls", None)
+            data.pop("debug_sqlite", None)
         return data
 
     @classmethod
     def with_telemetry(cls, **data):
         """Helper to create a response with context-local telemetry."""
-        from backend.utils.telemetry import get_queries, get_tracked_calls
+        from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
 
         dq = data.pop("debug_queries", None) or get_queries()
+        # Snapshot-copy: get_tracked_calls() below may itself run a SQLite
+        # SELECT (the usage_log iothread augmentation), and the collector
+        # returns a live list — copying first keeps that debug-induced
+        # statement out of the page's view.
+        ds = data.pop("debug_sqlite", None) or list(get_sqlite_queries())
         dc = data.pop("debug_calls", None) or get_tracked_calls()
 
-        return cls(**data, debug_queries=dq, debug_calls=dc)
+        return cls(**data, debug_queries=dq, debug_calls=dc, debug_sqlite=ds)
 
 
 class BootstrapService(BaseModel):
@@ -234,7 +248,6 @@ class BootstrapResponse(BaseResponse):
     pop_geo: dict[str, dict[str, str]] | None = None
     settings: dict[str, str | bool | None] | None = None
     custom_dashboard_cards: list[dict] = Field(default_factory=list)
-    custom_fields_catalog: list[dict] = Field(default_factory=list)
     active_log_field_ids: list[str] = Field(default_factory=list)
     # Saved views for the active service, folded in so the frontend can
     # render ViewSelector and rehydrate from URL view params without a
@@ -282,16 +295,14 @@ class BootstrapResponse(BaseResponse):
     # on first paint so the cards render with real values instead of
     # "—" placeholders. ADMIN ONLY.
     ops_overview: dict | None = None
-    # Seed for the /logs cron tab. ``cron_schedule`` mirrors the
-    # /api/cron-schedule response (the endpoint's 5-s TTL cache means
-    # the bootstrap call is usually a cache hit). ``cron_runs_first_page``
-    # mirrors the lean delta-poll shape of /api/cron-runs?per_page=10
-    # with ``with_total=False`` so the count(*) precount stays off the
-    # cold-path WAL writer. The heavy 500-row cron-history pull is
-    # intentionally NOT seeded — it's tab-gated and a session-3 lesson
-    # (commit bbbd381) showed seeding expensive payloads dominates the
-    # bootstrap hot path. ADMIN ONLY — analysts don't reach /logs.
-    cron_schedule: dict | None = None
+    # Seed for the /logs cron tab: mirrors the lean delta-poll shape of
+    # /api/cron-runs?per_page=10 with ``with_total=False`` so the
+    # count(*) precount stays off the cold-path WAL writer. The heavy
+    # 500-row cron-history pull is intentionally NOT seeded — it's
+    # tab-gated and a session-3 lesson (commit bbbd381) showed seeding
+    # expensive payloads dominates the bootstrap hot path. The cron
+    # schedule itself is a lazy-load on the cron tab (P1#5).
+    # ADMIN ONLY — analysts don't reach /logs.
     cron_runs_first_page: dict | None = None
     # Seed for useLastSync (the "Last Sync: Xs ago" header badge).
     # Shape: ``{started_at, status, duration_s}`` of the latest non-running
@@ -307,11 +318,4 @@ class BootstrapResponse(BaseResponse):
     # analyst). Shape mirrors the endpoint: ``{labels: [...], counts: {...}}``.
     # ADMIN ONLY.
     scoring_labels: dict | None = None
-    # Seed for the /admin/share page's mount-time useQuery on
-    # ``['admin', 'share', 'status']``. Mirrors GET /admin/share/status
-    # — services, invites, sessions, audit_logs, rate_limits, telemetry.
-    # ~2.6 KB compressed. Without this seed every /admin/share cold
-    # load pays a 187 ms p95 round-trip before InvitationsPanel can
-    # render. ADMIN ONLY.
-    share_status: dict | None = None
     # section_timings is inherited from BaseResponse.

@@ -37,6 +37,8 @@ paths = [
     '''^tests/scoring/.*\.py$''',                                # cookie/scoring test fixtures
     '''^tests/repositories/test_alerts\.py$''',                  # zeros Slack webhook fixture
     '''^tests/utils/test_sql_validator\.py$''',                  # blocked-function NAMES (e.g. "AWS_SECRET_ACCESS_KEY")
+    '''^tests/remote_access/test_oauth_.*\.py$''',               # OAuth tests — fake flow-state/client secrets
+    '''^tests/remote_access/oauth_helpers\.py$''',               # OAuth test harness — fake client id/secret
 
     # Documentation: release notes and runbooks may reference example
     # tokens / credentials in prose.

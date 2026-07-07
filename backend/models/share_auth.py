@@ -17,6 +17,25 @@ class TosDocument(BaseModel):
     text: str
 
 
+class AuthConfigProvider(BaseModel):
+    """One enabled OIDC provider as seen by the unauthenticated login page.
+
+    Deliberately id + display_name ONLY — no client_id / discovery_url / secret
+    is ever exposed to an unauthenticated caller.
+    """
+
+    id: str
+    display_name: str
+
+
+class AuthConfigResponse(BaseModel):
+    """Body for the unauth ``GET /api/share/auth-config`` — drives graceful
+    degradation on ``/share-login`` (which auth modes to render)."""
+
+    passcode_enabled: bool
+    providers: list[AuthConfigProvider] = []
+
+
 class ShareLoginResponse(OkResponse):
     # session_id is intentionally NOT returned: the session id is the bearer
     # token and lives only in the httponly/secure/samesite cookie. Mirroring

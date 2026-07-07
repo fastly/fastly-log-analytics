@@ -45,7 +45,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"ip":"%{json.escape(if(req.http.x-fos-edge-data:ip != "", req.http.x-fos-edge-data:ip, req.http.Fastly-Client-IP))}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 22,
-        "required_by": ["low_and_slow", "botnet_grouping"],
+        "required_by": ["low_and_slow", "credential_enumeration", "content_discovery", "botnet_grouping"],
     },
     {
         "id": "status",
@@ -56,7 +56,14 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"status":%{if(resp.status > 0, "" + resp.status, "null")}V',
         "duckdb_type": "USMALLINT",
         "typical_bytes": 17,
-        "required_by": ["error_spikes", "city_error_spikes", "waf_signal_spikes", "image_optimization_opportunities"],
+        "required_by": [
+            "error_spikes",
+            "city_error_spikes",
+            "credential_enumeration",
+            "content_discovery",
+            "waf_signal_spikes",
+            "image_optimization_opportunities",
+        ],
     },
     {
         "id": "elapsed",
@@ -84,7 +91,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"cache":"%{json.escape(fastly_info.state)}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 18,
-        "required_by": ["cache_collapse", "cache_pressure"],
+        "required_by": ["cache_collapse", "cache_hit_cliff", "cache_pressure"],
     },
     {
         "id": "resp_bytes",
@@ -121,6 +128,8 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
             "latency_regression",
             "new_probe_urls",
             "low_and_slow",
+            "credential_enumeration",
+            "content_discovery",
             "tail_latency",
             "image_optimization_opportunities",
         ],
@@ -133,7 +142,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"method":"%{json.escape(substr(req.method, 0, 128))}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 19,
-        "required_by": [],
+        "required_by": ["method_drift"],
     },
     {
         "id": "proto",
@@ -168,7 +177,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "duckdb_type": "VARCHAR",
         "typical_bytes": 44,
         "individually_toggleable": True,
-        "required_by": [],
+        "required_by": ["referer_monoculture"],
     },
     {
         "id": "req_bytes",
@@ -198,6 +207,25 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "duckdb_type": "UINTEGER",
         "typical_bytes": 20,
         "required_by": ["request_size_anomaly"],
+    },
+    {
+        "id": "resp_header_content_encoding",
+        "group": "A",
+        "label": "Response Content-Encoding",
+        "description": (
+            "Content-Encoding of the response served to the client "
+            "(gzip / br / zstd, or empty when the response was sent "
+            "uncompressed). Low-cardinality. Read directly from the final "
+            "response at log time — no edge capture needed."
+        ),
+        # Response header, read at log time (like status / cache). json.escape
+        # so a weird / multi-value Content-Encoding cannot break out of the JSON
+        # string; an absent header renders as an empty string.
+        "vcl": '"resp_header_content_encoding":"%{json.escape(resp.http.Content-Encoding)}V"',
+        "duckdb_type": "VARCHAR",
+        "typical_bytes": 38,
+        "individually_toggleable": True,
+        "required_by": ["payload_compression_regression"],
     },
     # ── Group B — Cache Deep-Dive ──────────────────────────────────────────
     {
@@ -253,7 +281,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"digest":"%{req.digest}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 47,
-        "required_by": ["cache_pressure"],
+        "required_by": ["cache_pressure", "pop_latency_regression"],
     },
     # ── Group C — Infrastructure ───────────────────────────────────────────
     {
@@ -418,7 +446,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"metro":%{if(req.http.x-fos-edge-data:metro ~ "^[0-9]+$", req.http.x-fos-edge-data:metro, if(client.geo.metro_code > 0, "" + client.geo.metro_code, "null"))}V',
         "duckdb_type": "USMALLINT",
         "typical_bytes": 14,
-        "required_by": [],
+        "required_by": ["metro_delivery_degradation"],
     },
     # ── Group F — Network Quality Core ────────────────────────────────────
     {
@@ -429,7 +457,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"asn":%{if(req.http.x-fos-edge-data:asn ~ "^[0-9]+$", req.http.x-fos-edge-data:asn, if(client.as.number > 0, "" + client.as.number, "null"))}V',
         "duckdb_type": "UINTEGER",
         "typical_bytes": 11,
-        "required_by": ["asn_concentration", "network_asn_health", "region_latency"],
+        "required_by": ["asn_concentration", "new_asn_traffic", "network_asn_health", "region_latency"],
     },
     {
         "id": "tcp_rtt",
@@ -451,7 +479,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"transport":"%{json.escape(if(req.http.x-fos-edge-data:transport != "", req.http.x-fos-edge-data:transport, transport.type))}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 18,
-        "required_by": ["network_asn_health"],
+        "required_by": ["network_asn_health", "http3_fallback"],
     },
     # ── Group G — Network Quality Deep (requires F) ────────────────────────
     {
@@ -520,7 +548,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"c_speed":"%{json.escape(if(req.http.x-fos-edge-data:c_speed != "", req.http.x-fos-edge-data:c_speed, if(client.geo.conn_speed == "?", "", client.geo.conn_speed)))}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 14,
-        "required_by": ["network_asn_health"],
+        "required_by": ["network_asn_health", "connection_type_mix"],
     },
     {
         "id": "c_type",
@@ -530,7 +558,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"c_type":"%{json.escape(if(req.http.x-fos-edge-data:c_type != "", req.http.x-fos-edge-data:c_type, if(client.geo.conn_type == "?", "", client.geo.conn_type)))}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 27,
-        "required_by": ["network_asn_health"],
+        "required_by": ["network_asn_health", "connection_type_mix"],
     },
     {
         "id": "delivery_rate",
@@ -541,7 +569,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"delivery_rate":%{if(req.http.x-fos-edge-data:del_rate ~ "^[0-9]+$", req.http.x-fos-edge-data:del_rate, if(client.socket.tcpi_delivery_rate > 0, "" + client.socket.tcpi_delivery_rate, "null"))}V',
         "duckdb_type": "UBIGINT",
         "typical_bytes": 22,
-        "required_by": ["network_asn_health"],
+        "required_by": ["network_asn_health", "metro_delivery_degradation"],
     },
     {
         "id": "data_segs_out",
@@ -587,6 +615,42 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "typical_bytes": 48,
         "individually_toggleable": True,
         "required_by": ["cipher_spread"],
+    },
+    {
+        "id": "cookie_session",
+        "group": "H",
+        "label": "Session Cookie (hashed)",
+        "description": (
+            "SHA-256 hash of the client's session cookie — the FIRST present "
+            "among a common framework allowlist (sessionid, PHPSESSID, "
+            "JSESSIONID, ASP.NET_SessionId, connect.sid, session, sid). Hashed "
+            "AT THE EDGE via digest.hash_sha256, so the raw cookie value is "
+            "never logged or forwarded past Fastly. Empty when no session "
+            "cookie is present. PRIVACY: this is a stable per-session client "
+            "identifier — it MUST be masked for analysts exactly like the "
+            "client IP (see mask_ips policy)."
+        ),
+        # Reads the edge-captured, already-hashed value out of the
+        # x-fos-edge-data header (see fastly_api.EDGE_DATA_MAPPING /
+        # _session_cookie_hash_vcl). json.escape is belt-and-suspenders — the
+        # value is hex or "" — and marks the field as security-hooked.
+        "vcl": '"cookie_session":"%{json.escape(req.http.x-fos-edge-data:cookie_session)}V"',
+        "duckdb_type": "VARCHAR",
+        "typical_bytes": 40,
+        "individually_toggleable": True,
+        # Advisory: this is a client identifier. Downstream masking (insight
+        # processors + the analyst log/query middleware) must treat it like ip.
+        "pii": True,
+        # Opt-in only. ``default_off`` fields are EXCLUDED from
+        # ``resolve_enabled_fields`` even when their group is enabled — they
+        # emit ONLY when explicitly turned on via ``field_overrides`` (admin
+        # per-field toggle / provisioning ``--enable-field``). Capturing a
+        # stable per-session client identifier must be a deliberate operator
+        # choice, not a side effect of selecting the security/full preset.
+        # (Distinct from ``pii``, which is purely a masking advisory; a field
+        # can be one, both, or neither.)
+        "default_off": True,
+        "required_by": ["session_harvesting"],
     },
     # ── Group I — Security: Proxy & Anonymization ─────────────────────────
     {
@@ -745,6 +809,28 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "duckdb_type": "UBIGINT",
         "typical_bytes": 16,
         "required_by": ["origin_latency_spike"],
+    },
+    {
+        "id": "oconnect_ms",
+        "group": "L",
+        "label": "Origin Connect (ms)",
+        "description": (
+            "Milliseconds to establish the connection (TCP + TLS handshake) to "
+            "origin/shield, from beresp.handshake_time_to_origin_ms. Distinct "
+            "from ottfb (first byte). Null on HITs and on failed fetches that "
+            "never connected — connection timeouts land in vcl_error, where "
+            "beresp (and therefore the handshake timing) is unavailable."
+        ),
+        "formatter": "number",
+        "unit": "ms",
+        # Captured into req.http.x-of-connect in vcl_fetch (see
+        # fastly_api.generate_capture_vcl). Digit-regex guard mirrors the other
+        # group-L origin metrics: the header is scrubbed on inbound req, and the
+        # guard keeps a spoofed non-numeric value out of the JSON log line.
+        "vcl": '"oconnect_ms":%{if(req.http.x-of-connect ~ "^[0-9]+$", req.http.x-of-connect, "null")}V',
+        "duckdb_type": "UINTEGER",
+        "typical_bytes": 16,
+        "required_by": ["timeout_split"],
     },
     {
         "id": "ost",
@@ -1006,7 +1092,7 @@ GROUP_INFO: dict[str | None, dict[str, Any]] = {
     },
     "A": {
         "label": "Request Identity",
-        "description": "Host, URL, HTTP method/version, User-Agent, Referer, and request body size.",
+        "description": "Host, URL, HTTP method/version, User-Agent, Referer, request body size, and response Content-Encoding.",
         "locked": False,
         "requires": None,
     },
@@ -1048,7 +1134,7 @@ GROUP_INFO: dict[str | None, dict[str, Any]] = {
     },
     "H": {
         "label": "Security: TLS Fingerprinting",
-        "description": "JA3, JA4, TLS handshake failure codes, and cipher suite fingerprints for botnet grouping and scanner detection.",
+        "description": "JA3, JA4, cipher suite fingerprints, and a hashed session-cookie id for botnet grouping, scanner detection, and session-harvesting analysis.",
         "locked": False,
         "requires": None,
     },
@@ -1074,7 +1160,7 @@ GROUP_INFO: dict[str | None, dict[str, Any]] = {
     },
     "L": {
         "label": "Origin Metrics",
-        "description": "Origin/shield fetch timing, bytes, IP, and retries on cache misses and passes. VCL hooks applied automatically. ottfb/ottlb/ost/obytes/oip/oretries are null on HITs; rid is always set; prid set only on shield log lines.",
+        "description": "Origin/shield fetch timing, bytes, IP, and retries on cache misses and passes. VCL hooks applied automatically. ottfb/ottlb/oconnect_ms/ost/obytes/oip/oretries are null on HITs; rid is always set; prid set only on shield log lines.",
         "locked": False,
         "requires": None,
         "note": "Enabling this group deploys additional VCL timing snippets to your service automatically.",
@@ -1142,6 +1228,7 @@ PRESETS: dict[str, dict[str, Any]] = {
 INSIGHT_DEFINITIONS = [
     {
         "id": "error_spikes",
+        "category": "origin",
         "title": "Error Spikes",
         "description": "URLs with abnormally elevated 5xx error rates in the window vs. baseline",
         "required_fields": ["status", "url"],
@@ -1149,6 +1236,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "botnet_grouping",
+        "category": "security",
         "title": "Botnet Grouping",
         "description": "TLS fingerprints (JA3/JA4) using far more distinct IPs than their baseline — attackers rotate IPs but rarely change TLS stacks",
         "required_fields": ["ja3", "ja4"],
@@ -1156,13 +1244,37 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "low_and_slow",
+        # Phase-3: promoted from stub to a computed insight (definitions.py).
+        # Keep category + required_fields in lockstep with the registry entry
+        # (drift-guard test).
+        "category": "security",
         "title": "Low and Slow Scans",
-        "description": "IPs making few, spread-out requests to admin panels and known vulnerability paths — designed to evade rate limits",
+        "description": "IPs probing many sensitive / vulnerability paths at a deliberately low request rate spread over a long span — designed to evade rate limits",
         "required_fields": ["ip", "url"],
         "required_groups": ["A"],
     },
     {
+        "id": "credential_enumeration",
+        # Phase-3: 401/403 spike per IP on authentication paths.
+        "category": "security",
+        "title": "Credential Enumeration / Brute Force",
+        "description": "IPs generating a spike of 401/403 responses on authentication paths (login, auth, OAuth, password reset) — credential stuffing or brute force",
+        "required_fields": ["ip", "url", "status"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "content_discovery",
+        # Phase-4 (Track A): per-IP 404 enumeration. Keep category +
+        # required_fields in lockstep with the registry entry (drift-guard test).
+        "category": "security",
+        "title": "Content-Discovery Scanning",
+        "description": "IPs generating a burst of 404s across many distinct URLs — directory / endpoint enumeration probing for hidden or vulnerable paths",
+        "required_fields": ["ip", "url", "status"],
+        "required_groups": ["A"],
+    },
+    {
         "id": "city_surges",
+        "category": "traffic",
         "title": "City Traffic Surges",
         "description": "Cities with traffic volumes significantly higher than their historical baseline",
         "required_fields": ["city", "country"],
@@ -1170,6 +1282,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "city_error_spikes",
+        "category": "origin",
         "title": "City Error Spikes",
         "description": "Cities experiencing abnormally high error rates compared to their own baseline",
         "required_fields": ["city", "status"],
@@ -1177,6 +1290,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "city_latency_regressions",
+        "category": "edge",
         "title": "City Latency Regressions",
         "description": "Cities where response times (P95) have significantly slowed down compared to their baseline",
         "required_fields": ["city", "elapsed"],
@@ -1184,6 +1298,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "new_city_traffic",
+        "category": "traffic",
         "title": "New City Traffic",
         "description": "Cities with zero baseline presence now sending traffic",
         "required_fields": ["city"],
@@ -1191,6 +1306,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "new_country_traffic",
+        "category": "traffic",
         "title": "New Country Traffic",
         "description": "Countries with zero baseline presence now sending traffic",
         "required_fields": ["country"],
@@ -1198,6 +1314,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "latency_regression",
+        "category": "edge",
         "title": "URL Latency Regressions",
         "description": "URLs where response times (P95) have significantly slowed down compared to their baseline",
         "required_fields": ["url", "elapsed"],
@@ -1205,6 +1322,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "asn_concentration",
+        "category": "network",
         "title": "ASN Concentration",
         "description": "ISPs (ASNs) with a disproportionately large share of total traffic compared to the baseline",
         "required_fields": ["asn"],
@@ -1212,6 +1330,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "proxy_surge",
+        "category": "security",
         "title": "Proxy Traffic Surge",
         "description": "Significant increase in traffic from known anonymizing proxies (VPN, Tor, etc.)",
         "required_fields": ["p_type"],
@@ -1219,6 +1338,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "ua_monoculture",
+        "category": "traffic",
         "title": "User-Agent Monoculture",
         "description": "A single User-Agent string responsible for a massive percentage of traffic — typical for scraping or DDoS bots",
         "required_fields": ["ua"],
@@ -1226,6 +1346,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "request_size_anomaly",
+        "category": "security",
         "title": "Request Size Anomalies",
         "description": "Drastic increase in average request body or header size — signal for data exfiltration or buffer overflow attempts",
         "required_fields": ["req_bytes", "req_header_bytes"],
@@ -1233,6 +1354,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "cache_ttl_mismatch",
+        "category": "edge",
         "title": "Cache TTL Mismatches",
         "description": "Objects being served from cache with very low hits and low TTLs — indicates inefficient caching strategy",
         "required_fields": ["cache", "ttl", "age", "hits"],
@@ -1240,6 +1362,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "waf_signal_spikes",
+        "category": "security",
         "title": "WAF Signal Spikes",
         "description": "Abnormal increase in specific NGWAF signals (e.g. SQLi, XSS) across multiple IPs",
         "required_fields": ["waf", "waf_sig", "waf_resp", "status"],
@@ -1247,29 +1370,22 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "network_asn_health",
+        # Phase-3: promoted from stub to a computed insight (definitions.py) and
+        # filed under the dedicated Network Path section. required_fields are
+        # narrowed to exactly what the computed SQL scans (asn + the Group-G
+        # quality metrics it aggregates) so the availability gate matches the
+        # registry eligibility check — an over-broad list would gray the card
+        # out on services that CAN compute it. Keep in lockstep with the
+        # registry entry (drift-guard test).
+        "category": "network",
         "title": "Network Path (ASN) Health",
-        "description": "ASNs experiencing packet loss or high jitter spikes vs. baseline",
-        "required_fields": [
-            "asn",
-            "tcp_rtt",
-            "transport",
-            "ploss",
-            "rtt_var",
-            "rtt_min",
-            "retrans",
-            "c_speed",
-            "c_type",
-            "delivery_rate",
-            "data_segs_out",
-            "lat",
-            "lon",
-            "elapsed",
-            "resp_bytes",
-        ],
-        "required_groups": ["F", "G", "E"],
+        "description": "ASNs experiencing elevated packet loss, jitter, or TCP retransmissions vs. their baseline",
+        "required_fields": ["asn", "ploss", "rtt_var", "retrans"],
+        "required_groups": ["F", "G"],
     },
     {
         "id": "region_latency",
+        "category": "network",
         "title": "Billing Region Latency",
         "description": "Fastly regions showing elevated edge latency or TTFB spikes",
         "required_fields": ["server_region", "elapsed", "ttfb", "asn", "ottfb"],
@@ -1277,6 +1393,7 @@ INSIGHT_DEFINITIONS = [
     },
     {
         "id": "repeated_patterns",
+        "category": "security",
         "title": "Scripted Traffic Patterns",
         "description": "IPs demonstrating highly regular request intervals — automated scrapers, pollers, or cron-scheduled scripts that evade volumetric rate limits",
         # Only hard-requires the always-on core fields (ip, timestamp), so the
@@ -1286,6 +1403,218 @@ INSIGHT_DEFINITIONS = [
         # out in the LogSettings/ProvisionWizard previews even though it runs.
         "required_fields": ["ip"],
         "required_groups": [],
+    },
+    # ── 18-vs-30 catalog reconciliation (design plan §5.1 step 5) ───────────
+    # The registry (definitions.py) computes 30 insights; this legacy catalog
+    # historically listed only 16 of them (+ 2 stubs). The entries below add
+    # the missing computed insights so /api/insight-availability + the loading
+    # skeletons cover every card and group under the same `category` as the
+    # registry. `category` here MUST match the registry (drift-guard test).
+    {
+        "id": "new_probe_urls",
+        "category": "security",
+        "title": "New Probe URLs",
+        "description": "Common attack patterns and sensitive paths appearing for the first time",
+        "required_fields": ["url", "status"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "cipher_spread",
+        "category": "security",
+        "title": "Cipher Fingerprint Clustering",
+        "description": "TLS cipher suites being used by a suspiciously large and spiking number of distinct IPs",
+        "required_fields": ["tls_ciphers_sha"],
+        "required_groups": ["H"],
+    },
+    {
+        "id": "impossible_distance",
+        "category": "security",
+        "title": "Impossible Distance / Spoofing",
+        "description": "Traffic where the network latency (RTT) is physically too low for the reported client distance",
+        "required_fields": ["pop", "lat", "lon", "tcp_rtt"],
+        "required_groups": ["C", "E", "F"],
+    },
+    {
+        "id": "connection_abuse",
+        "category": "security",
+        "title": "Connection Reuse Anomaly",
+        "description": "IPs making an unusually high number of requests per single TCP connection",
+        "required_fields": ["conn_requests"],
+        "required_groups": ["C"],
+    },
+    {
+        "id": "origin_latency_spike",
+        "category": "origin",
+        "title": "Origin Latency Spike",
+        "description": "Sudden and significant increase in P95 response time from the origin server",
+        "required_fields": ["ottfb"],
+        "required_groups": ["L"],
+    },
+    {
+        "id": "origin_error_rate",
+        "category": "origin",
+        "title": "Origin Error Rate",
+        "description": "Significant increase in 5xx errors returned by the origin server",
+        "required_fields": ["ost"],
+        "required_groups": ["L"],
+    },
+    {
+        "id": "origin_retries",
+        "category": "origin",
+        "title": "Origin Retries Elevated",
+        "description": "URLs experiencing frequent retries when fetching from origin, indicating backend instability",
+        "required_fields": ["oretries"],
+        "required_groups": ["L"],
+    },
+    {
+        "id": "origin_ip_failure",
+        "category": "origin",
+        "title": "Specific Origin IP Failing",
+        "description": "One or more origin IP addresses are returning significantly more errors than their peers",
+        "required_fields": ["oip", "ost"],
+        "required_groups": ["L"],
+    },
+    {
+        "id": "shield_path_degradation",
+        "category": "origin",
+        "title": "Shield Path Degradation",
+        "description": "Increased latency on the network path between edge POPs and shield POPs",
+        "required_fields": ["rid", "prid", "edge", "pop", "ottfb"],
+        "required_groups": ["C", "L"],
+    },
+    {
+        "id": "cache_collapse",
+        "category": "edge",
+        "title": "Cache Efficiency Collapse",
+        "description": "URLs whose cacheable hit ratio (HIT/(HIT+MISS)) dropped sharply vs. their baseline",
+        "required_fields": ["url", "cache"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "cacheability_regression",
+        "category": "edge",
+        "title": "Cacheability Regression",
+        "description": "URLs that flipped from cacheable to mostly PASS (uncacheable) vs. their baseline",
+        "required_fields": ["url", "cache"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "tail_latency",
+        "category": "edge",
+        "title": "Tail Latency Anomaly",
+        "description": "Endpoints where P99 latency is more than 5× higher than P50, indicating major outliers",
+        "required_fields": ["url", "elapsed"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "image_optimization_opportunities",
+        "category": "edge",
+        "title": "Image Optimization Opportunities",
+        "description": "Large images being served without modern compression (WebP/AVIF), especially to mobile users",
+        "required_fields": ["url", "ua", "resp_bytes"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "asn_metro_performance",
+        "category": "network",
+        "title": "ASN/Metro Performance Regressions",
+        "description": "Specific ISP/Metro combinations showing significantly higher network latency than baseline",
+        "required_fields": ["asn", "metro", "tcp_rtt", "country"],
+        "required_groups": ["D", "E", "F"],
+    },
+    # ── Phase-4 Track B: coalesced traffic dims (referer/method/asn) ─────────
+    # Keep category + required_fields in lockstep with the registry (drift-guard).
+    {
+        "id": "referer_monoculture",
+        "category": "traffic",
+        "title": "Referer Monoculture",
+        "description": "A single Referer driving an outsized, spiking share of total traffic — scraping, hotlinking, or a spoofed-referer flood",
+        "required_fields": ["referer"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "method_drift",
+        "category": "traffic",
+        "title": "HTTP Method Drift",
+        "description": "A write method (POST/PUT/DELETE/…) surging to an outsized share of traffic vs a read-dominated baseline — API abuse or form/credential floods",
+        "required_fields": ["method"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "new_asn_traffic",
+        "category": "network",
+        "title": "New ASN Traffic",
+        "description": "An ASN (ISP/datacenter) with zero baseline presence now sending meaningful traffic — a new botnet source, proxy pool, or datacenter range",
+        "required_fields": ["asn"],
+        "required_groups": ["F"],
+    },
+    # ── Phase-4 Track B2: standalone network + edge cards ───────────────────
+    # Keep category + required_fields in lockstep with the registry (drift-guard).
+    {
+        "id": "metro_delivery_degradation",
+        "category": "network",
+        "title": "Metro Delivery-Rate Degradation",
+        "description": "US metro areas whose median TCP delivery rate (throughput) collapsed vs. baseline — regional last-mile or peering degradation",
+        "required_fields": ["metro", "delivery_rate"],
+        "required_groups": ["E", "G"],
+    },
+    {
+        "id": "connection_type_mix",
+        "category": "network",
+        "title": "Connection-Type Mix Shift",
+        "description": "A client connection type/speed combo (e.g. cellular, datacenter) surging to an outsized share of traffic vs. baseline — a bot pool or routing shift",
+        "required_fields": ["c_type", "c_speed"],
+        "required_groups": ["G"],
+    },
+    {
+        "id": "pop_latency_regression",
+        "category": "edge",
+        "title": "PoP Latency Regression",
+        "description": "Individual Fastly PoPs (datacenters) whose P95 edge latency regressed sharply vs. baseline — finer-grained than region or city latency",
+        "required_fields": ["pop", "elapsed"],
+        "required_groups": ["C"],
+    },
+    {
+        "id": "http3_fallback",
+        "category": "network",
+        "title": "HTTP/3 → TCP Fallback Spike",
+        "description": "A service-wide drop in QUIC (HTTP/3) share vs. baseline — clients failing to sustain QUIC and falling back to TCP (middlebox/UDP throttling)",
+        "required_fields": ["transport"],
+        "required_groups": ["F"],
+    },
+    {
+        "id": "cache_hit_cliff",
+        "category": "edge",
+        "title": "Cache HIT-Ratio Cliff",
+        "description": "The whole service's edge cache HIT ratio (HIT/(HIT+MISS)) fell off a cliff vs. baseline — a purge storm, TTL change, or origin Cache-Control regression",
+        "required_fields": ["cache"],
+        "required_groups": [],
+    },
+    # ── Phase-4 Track C: field-gated insights (new edge fields required) ─────
+    # Keep category + required_fields in lockstep with the registry (drift-guard).
+    {
+        "id": "payload_compression_regression",
+        "category": "edge",
+        "title": "Payload Compression Regression",
+        "description": "Compressible responses (JS/CSS/HTML/JSON/SVG/XML) that flipped from compressed (gzip/br) to served uncompressed vs. baseline — a broken Accept-Encoding path or origin regression inflating egress and TTFB",
+        "required_fields": ["url", "resp_header_content_encoding", "resp_bytes", "status"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "session_harvesting",
+        "category": "security",
+        "title": "Session-ID Harvesting",
+        "description": "A single IP presenting a large, spiking number of distinct session cookies vs. baseline — session-token brute forcing, cookie replay, or credential stuffing that mints a fresh session per attempt",
+        "required_fields": ["ip", "cookie_session"],
+        "required_groups": ["H"],
+    },
+    {
+        "id": "timeout_split",
+        "category": "origin",
+        "title": "Origin Connect vs Read Timeout Split",
+        "description": "Splits origin slowness into connect (TCP+TLS handshake) vs read (processing to first byte) phases and flags whichever P95 regressed — slow-connect points at origin/LB saturation, slow-read at app/DB processing",
+        "required_fields": ["oconnect_ms", "ottfb"],
+        "required_groups": ["L"],
     },
 ]
 

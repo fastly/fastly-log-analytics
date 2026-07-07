@@ -29,9 +29,17 @@
 //                    so the chart x-axis range and the scan window agree — the
 //                    old 'auto' resolved to 30d for mature services and squashed
 //                    the bars under an off-screen-spike y-axis)
-//   - anchor       = quantizeAnchor(now) on the 60s grid (client pins the same;
-//                    only divergence is the rare minute-boundary straddle → one
-//                    client refetch, never a leak/crash)
+//   - anchor       = quantizeAnchor(snapped-end ?? now) on the 60s grid. When
+//                    bootstrap.log_extents shows the service's latest log is
+//                    >15min stale, this snaps to the same [latest-24h, latest]
+//                    window FilterBar's client-side autoSetRange would land on
+//                    (lib/log-extents-snap.ts — shared with FilterBar so both
+//                    sides make the identical decision); otherwise it's just
+//                    `now`, unchanged from before. Divergence cases: the rare
+//                    minute-boundary straddle (unchanged), plus a new rare
+//                    15-minute-staleness-boundary straddle where SSR and the
+//                    client disagree on stale-vs-fresh — both self-heal via one
+//                    client refetch, never a leak/crash.
 //   - filterPayload= {}      (no filters on a cold load)
 //   - metric       = 'requests'  (DashboardBody's useState default)
 //   - interval     = '1 hour'    (useReportConfig picks "1 hour" at the 24h
@@ -41,6 +49,7 @@
 //   - sections     = ['core','topten','bots']  (DASHBOARD_SECTIONS)
 
 import { quantizeAnchor } from '@/lib/time-window'
+import { resolveSnappedWindow, narrowLogExtents } from '@/lib/log-extents-snap'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
@@ -69,26 +78,41 @@ export interface DashboardSsrSeed {
  * Resolve the default (rangeToken, anchor) pair the client computes on first
  * paint. Exported so the unit test can pin the key-match without a network
  * round-trip. `now` is injectable for deterministic tests.
+ *
+ * `logExtents` (from the same SSR'd bootstrap call, cost-free) lets this
+ * agree with FilterBar's client-side snap-to-real-data decision instead of
+ * always anchoring on the naive "now" — closing the SSR/client anchor
+ * mismatch that used to flash the naive-window data before the extents-
+ * corrected data replaced it. Omitting it (or fresh/missing extents) falls
+ * back to today's "now" anchor unchanged.
  */
-export function resolveDashboardDefaultKey(now: Date = new Date()): {
+export function resolveDashboardDefaultKey(
+  now: Date = new Date(),
+  logExtents?: unknown,
+): {
   rangeToken: string
   anchor: string
 } {
-  return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
+  const snapped = resolveSnappedWindow(narrowLogExtents(logExtents), now)
+  return { rangeToken: '24h', anchor: quantizeAnchor(snapped?.end ?? now.toISOString(), now) }
 }
 
 /**
  * SSR-prefetch the default dashboard bundle for the active service.
  *
- * @param serviceId  Active service id (from the SSR'd bootstrap). Without it the
- *                   backend's context resolution 400s — bail to client fetch.
- * @param now        Render instant; floored to the anchor quantum. Injectable.
+ * @param serviceId   Active service id (from the SSR'd bootstrap). Without it the
+ *                    backend's context resolution 400s — bail to client fetch.
+ * @param now         Render instant; floored to the anchor quantum. Injectable.
+ * @param logExtents  bootstrap.log_extents for serviceId, if the caller already
+ *                    has it (it always does — every SSR page calls
+ *                    fetchBootstrapServerSide() first). See resolveDashboardDefaultKey.
  */
 export async function fetchDashboardServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
+  logExtents?: unknown,
 ): Promise<DashboardSsrSeed | null> {
-  const { rangeToken, anchor } = resolveDashboardDefaultKey(now)
+  const { rangeToken, anchor } = resolveDashboardDefaultKey(now, logExtents)
 
   if (!serviceId) return null
 

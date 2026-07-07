@@ -1377,8 +1377,8 @@ def scoring_evaluation(
                 "n_bad": n_bad,
                 "n_neutral": n_neutral,
                 "matrix_version": matrix_version,
-                "error": "Trained matrix is missing on disk (compute/scorer/matrix.json). "
-                "Run scripts/scoring/train.py to produce one.",
+                "error": "Trained matrix is missing (no local compute/scorer/matrix_<service_id>.json "
+                "and no FOS copy). Run scripts/scoring/train.py to produce one.",
             }
 
         labeled_sessions = _reconstruct_labeled_sessions(service_id, label_rows)

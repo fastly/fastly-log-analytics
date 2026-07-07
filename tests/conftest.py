@@ -53,27 +53,11 @@ import warnings as _warnings
 _warnings.filterwarnings("ignore", message="unclosed database", category=ResourceWarning)
 
 
-# Pre-import the backend.scheduler shim so its re-exports bind to the
-# real ``backend.cron.scheduler`` symbols BEFORE any test gets a chance
-# to monkeypatch them. Several cron-job test fixtures (test_commit,
-# test_compaction_jobs, test_optimize, test_sync_job) replace
-# ``backend.cron.scheduler._extract_log_text`` (and friends) with stub
-# lambdas. If ``backend.scheduler`` is imported for the first time
-# WHILE those patches are active — which can happen because some of
-# those fixtures also touch ``backend.scheduler._run_metadata_sync``
-# via ``monkeypatch.setattr("backend.scheduler....", ...)``, triggering
-# the first import — then ``backend.scheduler``'s
-# ``from backend.cron.scheduler import _extract_log_text`` line binds
-# permanently to the stub lambda. When the fixture restores
-# ``backend.cron.scheduler._extract_log_text``, the shim's local copy
-# is unaffected, so later tests in ``tests/test_scheduler.py`` that do
-# ``from backend.scheduler import _extract_log_text`` get the lambda
-# and their ``patch("backend.cron_progress.get_progress", ...)`` calls
-# become no-ops (the lambda never calls get_progress). Result: ordering-
-# dependent failures under pytest-randomly. Pre-importing here pins
-# the correct binding at session start; the fixture patches no longer
-# pollute the shim.
-import backend.scheduler  # noqa: E402, F401
+# NOTE: the historical ``backend.scheduler`` compat shim (and the
+# session-start pre-import that defended its binding order under
+# pytest-randomly) was retired 2026-07-06 — every caller and test patch
+# now targets the real homes under ``backend.cron.*`` directly, so the
+# shim-binding pollution class no longer exists.
 
 
 def pytest_configure(config):

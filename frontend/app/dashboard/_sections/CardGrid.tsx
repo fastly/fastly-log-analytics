@@ -3,7 +3,7 @@
 import React from 'react'
 import { TopTenTable } from '@/components/Dashboard/TopTenTable'
 import { LazyMount } from '@/components/LazyMount'
-import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
+import { CardErrorState } from '@/components/CardErrorState'
 import { ChevronDown, ChevronRight, Bot } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CARD_CATEGORIES, CATEGORIZED_CARD_IDS, CUSTOM_TINT } from './categories'

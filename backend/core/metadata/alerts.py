@@ -162,7 +162,7 @@ def save_alert(service_id: str, alert) -> dict:
         """,
         (
             alert_id,
-            alert.service_id,
+            service_id,
             alert.name,
             alert.category,
             alert.metric,

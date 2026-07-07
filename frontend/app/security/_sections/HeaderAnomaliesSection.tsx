@@ -6,7 +6,7 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { FilterValueCell } from '@/components/FilterValueCell'
-import { ChartEmptyState } from './ChartEmptyState'
+import { ChartEmptyState } from '@/components/ChartEmptyState'
 import { SECURITY_INFO, TOP_IP_COLUMN_IDS } from './securityInfo'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import type { components } from '@/types/api.generated'

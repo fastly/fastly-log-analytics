@@ -17,6 +17,7 @@ import duckdb
 from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table
 from backend.repositories._sql.insights import (
     COALESCED_CITY_AGGREGATES,
+    COALESCED_IP_SECURITY_AGGREGATES,
     COALESCED_URL_AGGREGATES,
     REPEATED_BOT_UA_REGEX,
 )
@@ -322,6 +323,129 @@ def _coalesced_url_aggregates(
     }
 
 
+def _coalesced_ip_security_aggregates(
+    runner: QueryRunner,
+    table_name: str,
+    window_start_s: str,
+    window_hours: float,
+    baseline_hours: float,
+) -> dict[str, list[tuple]]:
+    """Coalesce the 3 IP-keyed security scans (low_and_slow,
+    credential_enumeration, content_discovery) into ONE ``GROUP BY ip`` pass
+    over ``table_name``.
+
+    Each of those insights previously ran its own ``GROUP BY ip`` scan of the
+    temp. §9.7 of the design plan requires folding same-key insights into a
+    shared pre-agg (mirrors ``_coalesced_url_aggregates``) so cold-path latency
+    doesn't grow linearly with the number of IP scans. ``COALESCED_IP_SECURITY_
+    AGGREGATES`` computes conditional aggregates for all three keyed on ``ip``;
+    this demuxes them into each insight's existing processor row-schema, applies
+    each insight's HAVING/ORDER/LIMIT in Python, and (via the caller's
+    try/except) falls back to the standalone scans on any exception.
+
+    Returns ``{insight_id: rows}`` where each rows list matches the insight's
+    existing processor row-schema:
+
+    - low_and_slow:            [ip, hits, distinct_paths, span_s, rps]
+    - credential_enumeration:  [ip, w_denied, w_attempts, w_paths, b_denied]
+    - content_discovery:       [ip, w_404, w_total, distinct_404, b_404]
+    """
+    sql = COALESCED_IP_SECURITY_AGGREGATES.format(table_name=table_name)
+    cursor = runner.execute(sql, [window_start_s, window_start_s])
+
+    # Bounded top-K via min-heap on a per-insight sort key — each insight holds
+    # at most _TOP_K entries regardless of IP cardinality, so an attacker
+    # spraying millions of distinct IPs (each tripping the outer HAVING with a
+    # single probe/auth/404 request) can't OOM the worker. The counter
+    # tie-breaker preserves insertion order for equal keys (stable-sort parity
+    # with the standalone ORDER BY). Sort keys are tuples so multi-column ORDER
+    # BYs (low_and_slow's distinct DESC, span DESC) compare lexicographically.
+    _TOP_K = 15
+    low_and_slow_heap: list[tuple] = []
+    credential_enumeration_heap: list[tuple] = []
+    content_discovery_heap: list[tuple] = []
+
+    def _push_top_k(heap: list[tuple], sortkey: tuple, counter: int, item: tuple) -> None:
+        if len(heap) < _TOP_K:
+            heapq.heappush(heap, (sortkey, counter, item))
+        else:
+            heapq.heappushpop(heap, (sortkey, counter, item))
+
+    baseline_scale = max(baseline_hours, 1.0)
+    counter = 0
+
+    while True:
+        rows = cursor.fetchmany(10000)
+        if not rows:
+            break
+        for r in rows:
+            (
+                ip,
+                ls_hits,
+                ls_distinct,
+                ls_min_sec,
+                ls_max_sec,
+                ce_w_denied,
+                ce_w_attempts,
+                ce_w_paths,
+                ce_b_denied,
+                cd_w_404,
+                cd_w_total,
+                cd_distinct_404,
+                cd_b_404,
+            ) = r
+            counter += 1
+
+            # ── low_and_slow ──────────────────────────────────────────────────
+            # Standalone HAVING: hits >= 5 AND distinct >= 3 AND span >= 600 AND
+            # hits/span < 0.2. ORDER BY distinct DESC, span DESC LIMIT 15.
+            ls_hits_i = ls_hits or 0
+            ls_distinct_i = ls_distinct or 0
+            span_s = (ls_max_sec - ls_min_sec) if (ls_min_sec is not None and ls_max_sec is not None) else 0
+            if (
+                ls_hits_i >= 5
+                and ls_distinct_i >= 3
+                and span_s >= 600
+                and (ls_hits_i / span_s) < 0.2  # span_s >= 600 here, never zero
+            ):
+                rps = round(ls_hits_i / span_s, 5)
+                item_ls: tuple = (ip, ls_hits_i, ls_distinct_i, span_s, rps)
+                _push_top_k(low_and_slow_heap, (ls_distinct_i, span_s), counter, item_ls)
+
+            # ── credential_enumeration ────────────────────────────────────────
+            # Standalone HAVING: w_denied >= 20 AND w_denied/w_attempts >= 0.5 AND
+            # w_denied > b_denied/baseline_hours*window_hours*3 + 5.
+            # ORDER BY w_denied DESC LIMIT 15.
+            ce_w_denied_i = ce_w_denied or 0
+            if ce_w_denied_i >= 20:
+                ce_ratio = (ce_w_denied_i / ce_w_attempts) if ce_w_attempts else 0.0
+                b_norm = (ce_b_denied or 0) / baseline_scale * window_hours * 3 + 5
+                if ce_ratio >= 0.5 and ce_w_denied_i > b_norm:
+                    item_ce: tuple = (ip, ce_w_denied_i, ce_w_attempts, ce_w_paths, ce_b_denied)
+                    _push_top_k(credential_enumeration_heap, (ce_w_denied_i,), counter, item_ce)
+
+            # ── content_discovery ─────────────────────────────────────────────
+            # Standalone HAVING: w_404 >= 20 AND w_404/w_total >= 0.7 AND
+            # distinct_404 >= 15. ORDER BY w_404 DESC LIMIT 15.
+            cd_w_404_i = cd_w_404 or 0
+            cd_distinct_404_i = cd_distinct_404 or 0
+            if cd_w_404_i >= 20 and cd_distinct_404_i >= 15:
+                cd_ratio = (cd_w_404_i / cd_w_total) if cd_w_total else 0.0
+                if cd_ratio >= 0.7:
+                    item_cd: tuple = (ip, cd_w_404_i, cd_w_total, cd_distinct_404_i, cd_b_404)
+                    _push_top_k(content_discovery_heap, (cd_w_404_i,), counter, item_cd)
+
+    def _heap_to_sorted_items(heap: list[tuple]) -> list[tuple]:
+        # heap is (sortkey, counter, item); return items sorted by sortkey desc.
+        return [entry[2] for entry in sorted(heap, key=lambda e: e[0], reverse=True)]
+
+    return {
+        "low_and_slow": _heap_to_sorted_items(low_and_slow_heap),
+        "credential_enumeration": _heap_to_sorted_items(credential_enumeration_heap),
+        "content_discovery": _heap_to_sorted_items(content_discovery_heap),
+    }
+
+
 def get_insights(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -582,11 +706,13 @@ def get_insights(
         def check_baseline(insight_id: str) -> dict | None:
             if available_history_hours < baseline_hours:
                 d = _def(insight_id)
+                reg = registry.get(insight_id)
                 avail = max(0.1, round(available_history_hours, 1))
                 return {
                     "id": insight_id,
                     "title": d.get("title", insight_id.replace("_", " ").title()),
                     "description": d.get("description", ""),
+                    "category": str(reg.category) if reg else None,
                     "severity": "info",
                     "summary": f"Requires {int(baseline_hours)}h of historical data (only {avail}h available)",
                     "items": [],
@@ -740,6 +866,31 @@ def get_insights(
                 logging.getLogger(__name__).warning("[insights] coalesced URL aggregates failed, falling back: %s", e)
                 url_precomputed = {}
 
+        # ── Coalesced IP-security aggregates (Track A / §9.7) ─────────────────────
+        # The 3 IP-keyed security insights (low_and_slow, credential_enumeration,
+        # content_discovery) each GROUP BY ip over the same temp. Coalescing them
+        # into ONE pass mirrors the city/url coalesced pattern so the cold-path
+        # cost doesn't grow linearly as more IP-scans are added.
+        #
+        # Fires only when all the columns the CTE touches are present (ip, url,
+        # status, timestamp). When a service is missing any of them the eligible
+        # subset runs its standalone scan (low_and_slow only needs ip+url, so it
+        # still runs when status is absent). Failure transparently falls back to
+        # the per-insight scans — never blocks the page.
+        ip_security_precomputed: dict[str, list[tuple]] = {}
+        if "ip" in actual_cols and "url" in actual_cols and "status" in actual_cols and "timestamp" in actual_cols:
+            try:
+                ip_security_precomputed = _coalesced_ip_security_aggregates(
+                    runner, table_name, window_start_s, window_hours, baseline_hours
+                )
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "[insights] coalesced IP-security aggregates failed, falling back: %s", e
+                )
+                ip_security_precomputed = {}
+
         for definition in registry.get_all():
             # Check if all required fields are present
             if not all(col in actual_cols for col in definition.required_fields):
@@ -784,6 +935,8 @@ def get_insights(
                         rows = city_precomputed[d.id]
                     elif d.id in url_precomputed:
                         rows = url_precomputed[d.id]
+                    elif d.id in ip_security_precomputed:
+                        rows = ip_security_precomputed[d.id]
                     else:
                         try:
                             sql = d.sql_template.format(
@@ -870,6 +1023,7 @@ def get_insights(
                         "id": d.id,
                         "title": d.title,
                         "description": d.description,
+                        "category": str(d.category),
                         "severity": severity,
                         "summary": summary,
                         "items": items,
@@ -882,6 +1036,7 @@ def get_insights(
                 # React then warns about as duplicate keys.
                 compute_insight._insight_id = d.id  # type: ignore[attr-defined]
                 compute_insight._insight_title = d.title  # type: ignore[attr-defined]
+                compute_insight._insight_category = str(d.category)  # type: ignore[attr-defined]
                 return compute_insight
 
             tasks.append(_make_task())
@@ -897,9 +1052,11 @@ def get_insights(
             except Exception as e:
                 insight_id = getattr(fn, "_insight_id", "unknown")
                 insight_title = getattr(fn, "_insight_title", insight_id.replace("_", " ").title())
+                insight_category = getattr(fn, "_insight_category", None)
                 return {
                     "id": insight_id,
                     "title": insight_title,
+                    "category": insight_category,
                     "severity": "error",
                     "summary": f"Query failed: {str(e)}",
                     "description": "",

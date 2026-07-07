@@ -132,7 +132,12 @@ def test_history_cap_is_400():
 def _deep_health(cron_rows: list[tuple], *, ingest_minutes_ago: int = 1):
     """Drive health_check(deep=True) against an in-memory metadata.db seeded
     with one recent ingest + the given cron_runs rows. Returns (status_code,
-    parsed_body)."""
+    parsed_body).
+
+    Each cron_rows tuple is (task, status, mins_ago, err) or, for SRE-22
+    adaptive-staleness tests, (task, status, mins_ago, err, ingest_count) —
+    the 5th element is optional (defaults to 0, i.e. an "empty tick" that
+    adaptive_stale_minutes' gap calculation ignores)."""
     from backend.main import health_check
 
     now = datetime.now(UTC)
@@ -141,16 +146,19 @@ def _deep_health(cron_rows: list[tuple], *, ingest_minutes_ago: int = 1):
     con.execute("CREATE TABLE ingested_files (source_name TEXT, ingested_at TEXT)")
     con.execute(
         "CREATE TABLE cron_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, "
-        "status TEXT, started_at TEXT, error_message TEXT)"
+        "status TEXT, started_at TEXT, error_message TEXT, "
+        "files_downloaded INTEGER DEFAULT 0, rows_ingested INTEGER DEFAULT 0)"
     )
     con.execute(
         "INSERT INTO ingested_files VALUES (?, ?)",
         ("svc", (now - timedelta(minutes=ingest_minutes_ago)).strftime("%Y-%m-%d %H:%M:%S")),
     )
-    for task, status, mins_ago, err in cron_rows:
+    for row in cron_rows:
+        task, status, mins_ago, err = row[:4]
+        ingest_count = row[4] if len(row) > 4 else 0
         con.execute(
-            "INSERT INTO cron_runs (task, status, started_at, error_message) VALUES (?, ?, ?, ?)",
-            (task, status, (now - timedelta(minutes=mins_ago)).strftime("%Y-%m-%d %H:%M:%S"), err),
+            "INSERT INTO cron_runs (task, status, started_at, error_message, rows_ingested) VALUES (?, ?, ?, ?, ?)",
+            (task, status, (now - timedelta(minutes=mins_ago)).strftime("%Y-%m-%d %H:%M:%S"), err, ingest_count),
         )
     con.commit()
 
@@ -208,6 +216,43 @@ def test_deep_health_degrades_on_metadata_sync_error():
     assert code == 503
     assert body["services"][0]["status"] == "degraded"
     assert "metadata_sync cron errored" in body["services"][0]["reason"]
+
+
+# ── SRE-22: adaptive per-service staleness widening ──────────────────────────
+
+
+def _steady_cadence_rows(n: int, gap_minutes: int, *, start_after_minutes: int) -> list[tuple]:
+    """n non-empty successful sync runs, gap_minutes apart, the most recent
+    ending start_after_minutes ago — the historical cadence the naive-stale
+    ingest (at ingest_minutes_ago, seeded separately) needs to be judged
+    against."""
+    return [("sync", "success", start_after_minutes + i * gap_minutes, None, 5) for i in range(n)]
+
+
+def test_deep_health_widens_staleness_for_historically_quiet_service():
+    # This service has always had ~40min gaps between real ingests — an
+    # organic quiet period this long is normal for it. The naive 30-min
+    # default would flag it degraded at 35min stale; the widened threshold
+    # (2 * 40 = 80min) must not.
+    history = _steady_cadence_rows(12, gap_minutes=40, start_after_minutes=35)
+    code, body = _deep_health(history, ingest_minutes_ago=35)
+    assert code == 200
+    svc = body["services"][0]
+    assert svc["status"] == "ok"
+    assert svc["stale_minutes_used"] == 80
+
+
+def test_deep_health_still_degrades_on_a_real_outage():
+    # Same historical cadence as above, but now it's been quiet for 200
+    # minutes — well past even the widened (80min) threshold. Must still
+    # degrade; adaptive widening isn't a way to silence a genuine outage.
+    history = _steady_cadence_rows(12, gap_minutes=40, start_after_minutes=200)
+    code, body = _deep_health(history, ingest_minutes_ago=200)
+    assert code == 503
+    svc = body["services"][0]
+    assert svc["status"] == "degraded"
+    assert svc["stale_minutes_used"] == 80
+    assert "no ingest since" in svc["reason"]
 
 
 # ── SRE-03 / 06 / 11 / 13 / 20: health-snapshot additions ────────────────────

@@ -15,6 +15,7 @@ from ._common import (
     DAY_BUNDLE_TOP_K,
     NETWORK_RTT_BUNDLE_FILENAME,
     NETWORK_SPEED_BUNDLE_FILENAME,
+    NGWAF_BOTS_BUNDLE_FILENAME,
     ORIGIN_DIMS_BUNDLE_TOP_K,
     ORIGIN_IP_BUNDLE_FILENAME,
     ORIGIN_LATENCY_TS_BUNDLE_FILENAME,
@@ -599,6 +600,32 @@ def compact_network_speed_closed_days_to_daily(service_id: str, source: dict) ->
         service_id,
         source,
         jobs=[(NETWORK_SPEED_BUNDLE_FILENAME, ".tmp_ns_", _copy_sql)],
+        logger=logger,
+    )
+
+
+def compact_ngwaf_bots_closed_days_to_daily(service_id: str, source: dict) -> int:
+    """Consolidate closed-day per-hour ngwaf_bots parquets into per-day
+    files at ``day_bundled/day=YYYY-MM-DD/ngwaf_bots.parquet``.
+
+    Same shape as :func:`compact_network_speed_closed_days_to_daily`:
+    pure GROUP BY (bot_name, category) + SUM(count) — exact for integer
+    counts, no re-cap needed (bot cardinality is tens per day).
+    """
+
+    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT bot_name, category, CAST(SUM(count) AS BIGINT) AS count "
+            f"  FROM read_parquet([{paths_sql}]) "
+            f"  GROUP BY bot_name, category"
+            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+
+    return compact_closed_days(
+        service_id,
+        source,
+        jobs=[(NGWAF_BOTS_BUNDLE_FILENAME, ".tmp_nb_", _copy_sql)],
         logger=logger,
     )
 

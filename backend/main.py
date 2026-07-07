@@ -275,8 +275,21 @@ def _background_startup():
         _ensure_pop_cache()
         _ensure_scoring_matrix()
 
+        # Pre-compile the bot-UA matcher off the request path. build_matcher
+        # is mtime-cached, but a fresh process pays the full pattern compile
+        # on the first /top-bots (or bot_name field-values) request otherwise
+        # — ~300ms observed on prod after each deploy (2026-07-06). Best-
+        # effort: on failure the first request compiles it as before.
         try:
-            from backend.scheduler import get_scheduler
+            from backend.utils.bot_sources import build_matcher
+
+            build_matcher()
+            logging.info("[fastapi] Bot-UA matcher pre-compiled.")
+        except Exception as e:
+            logging.warning("[fastapi] bot matcher prewarm failed (first request pays the compile): %s", e)
+
+        try:
+            from backend.cron.scheduler import get_scheduler
 
             scheduler = get_scheduler()
             scheduler.start()
@@ -371,8 +384,8 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     import asyncio
 
+    from backend.cron.scheduler import get_scheduler
     from backend.cron_runs_publisher import publisher as _cron_runs_publisher
-    from backend.scheduler import get_scheduler
     from backend.sync_status_publisher import publisher as _sync_status_publisher
 
     # Bind both in-process SSE publishers (badge + cron-runs) to this loop
@@ -521,7 +534,7 @@ def _bounded_scheduler_shutdown(scheduler, *, timeout_secs: float = 60.0) -> Non
 
 app = FastAPI(
     title="Fastly Log Analytics API",
-    version="2.0.0b2",
+    version="2.1.0",
     description=(
         "FastAPI backend for the Fastly Log Analytics tool. "
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."
@@ -821,6 +834,7 @@ from backend.routers import (
     session_scoring,
     share_admin,
     share_auth,
+    share_oauth,
     usage,
     ux_events,
     web_vitals,
@@ -838,7 +852,14 @@ app.include_router(provision.router)
 app.include_router(session_scoring.router)
 app.include_router(debug.router)
 app.include_router(share_auth.router)
+app.include_router(share_oauth.router)
 app.include_router(share_admin.router)
+# E2E/dev-only in-process mock OIDC provider — mounted ONLY when OAUTH_MOCK_IDP=1
+# so it never appears in the OpenAPI schema or in production.
+from backend.routers import mock_idp  # noqa: E402
+
+if mock_idp.mock_idp_enabled():
+    app.include_router(mock_idp.router)
 app.include_router(web_vitals.router)
 app.include_router(ux_events.router)
 
@@ -856,7 +877,7 @@ try:
 
     _APP_VERSION = _pkg_version("fastly-log-analytics")
 except Exception:
-    _APP_VERSION = "2.0.0b2"
+    _APP_VERSION = "2.1.0"
 
 
 # Documents the canonical error codes this probe can surface — notably the
@@ -892,7 +913,11 @@ def health_check(
     freshness per configured service. A service is reported ``degraded``
     when ANY of:
       - its newest ``ingested_files.ingested_at`` is older than
-        ``stale_minutes`` (default 30);
+        ``stale_minutes`` (default 30) — SRE-22: before degrading on this
+        check, the cutoff is widened to the service's own historical p95
+        gap between non-empty ingests (never narrower than
+        ``stale_minutes``), so a low-traffic service's organic quiet
+        periods don't false-positive;
       - the last terminal ``sync`` cron run ended in ``error``;
       - a ``sync`` row is stuck in ``running`` past ``_STUCK_SYNC_RUNNING_MINS``
         (SRE-04 — the orphan-stall / OOM-leak the success-only filter hides);
@@ -1019,8 +1044,22 @@ def health_check(
                 norm_last = str(last_ingest).replace(" ", "T").rstrip("Z")
                 norm_cutoff = str(cutoff).replace(" ", "T").rstrip("Z")
                 if norm_last < norm_cutoff:
-                    svc_state["status"] = "degraded"
-                    svc_state["reason"] = f"no ingest since {last_ingest} (cutoff {cutoff})"
+                    # SRE-22: a fixed stale_minutes cutoff false-positives on a
+                    # low-traffic service's organic quiet periods. Before
+                    # degrading, widen the cutoff to this service's own
+                    # historical p95 inter-ingest gap (never narrower than
+                    # stale_minutes) and re-check against that. Only reached
+                    # once the naive check already looks stale, so the
+                    # common healthy path pays zero extra query cost.
+                    effective_minutes = metadata_db.adaptive_stale_minutes(con, default_minutes=stale_minutes)
+                    effective_cutoff = cutoff
+                    if effective_minutes > stale_minutes:
+                        effective_cutoff = iso_z(datetime.now(UTC) - timedelta(minutes=effective_minutes))
+                        svc_state["stale_minutes_used"] = effective_minutes
+                    norm_effective_cutoff = str(effective_cutoff).replace(" ", "T").rstrip("Z")
+                    if norm_last < norm_effective_cutoff:
+                        svc_state["status"] = "degraded"
+                        svc_state["reason"] = f"no ingest since {last_ingest} (cutoff {effective_cutoff})"
         except Exception as e:
             svc_state["status"] = "degraded"
             svc_state["reason"] = f"metadata_db query failed: {e}"

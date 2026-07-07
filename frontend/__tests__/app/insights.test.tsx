@@ -11,8 +11,13 @@ import { client } from '@/lib/api'
 import React from 'react'
 
 
-// Mock complicated components
-vi.mock('@/components/Insights/InsightCard', () => ({ InsightCard: ({ insight }: any) => <div data-testid="insight-card">{insight.name}</div> }))
+// Mock complicated components. SEVERITY_BADGE_CLASS is a real named export of
+// this module (the section-header severity chips reuse it), so the mock must
+// provide it too or SeverityChips throws on undefined-map indexing.
+vi.mock('@/components/Insights/InsightCard', () => ({
+  InsightCard: ({ insight }: any) => <div data-testid="insight-card">{insight.name}</div>,
+  SEVERITY_BADGE_CLASS: { clean: '', info: '', warning: '', critical: '', error: '' },
+}))
 vi.mock('@/components/ReportLayout', () => ({
   ReportLayout: ({ children, title }: any) => <div><h1>{title}</h1>{children({ activeServiceId: 'test-svc', startTime: null, endTime: null, filterPayload: {} })}</div>
 }))

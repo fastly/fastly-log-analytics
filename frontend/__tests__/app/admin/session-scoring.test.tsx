@@ -29,6 +29,9 @@ import React from 'react'
 import { server } from '../../../tests/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
+// vitest hoists the vi.mock(...) calls below above this import, so the
+// static SUT import still binds the mocked next/dynamic + sub-components.
+import SessionScoringPage from '@/app/admin/session-scoring/page'
 
 // next/navigation is jsdom-incompatible; stub the bits the page touches.
 vi.mock('next/navigation', () => ({
@@ -105,11 +108,6 @@ describe('admin/session-scoring page', () => {
         })
       }),
     )
-
-    // Import inside the test so the next/dynamic mock is wired BEFORE
-    // the page module evaluates.
-    const PageMod = await import('@/app/admin/session-scoring/page')
-    const SessionScoringPage = PageMod.default
 
     const client = createTestQueryClient()
 

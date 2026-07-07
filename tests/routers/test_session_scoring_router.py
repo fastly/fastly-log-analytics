@@ -1684,11 +1684,12 @@ def test_matrix_versions_restore_requires_confirm_flag(client, with_config):
 
 def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tmp_path):
     """With ?confirm=true and a valid version, the endpoint calls
-    restore_scoring_matrix_version, unlinks the local matrix.json so
-    _load_matrix falls through to the FOS-restored copy, records a
-    'matrix_restored' audit, updates cfg.scoring.matrix_version, and
-    returns ok + restored_version + deploy_hint, and pushes the restored
-    matrix into the scoring_matrix KV Store for the live scorer."""
+    restore_scoring_matrix_version, unlinks the tenant-scoped local matrix
+    (matrix_<sid>.json) so _load_matrix falls through to the FOS-restored
+    copy, records a 'matrix_restored' audit, updates
+    cfg.scoring.matrix_version, and returns ok + restored_version +
+    deploy_hint, and pushes the restored matrix into the scoring_matrix KV
+    Store for the live scorer."""
     with_config[LOG_SVC] = {
         "service_id": LOG_SVC,
         "scoring": {
@@ -1700,8 +1701,11 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
     saved: dict = {}
     monkeypatch.setattr("backend.config.save_config", lambda sid, cfg: saved.update(sid=sid, cfg=cfg))
 
-    # Create a real on-disk matrix.json so we can verify it gets unlinked.
-    fake_matrix_path = tmp_path / "matrix.json"
+    # Create a real on-disk tenant matrix so we can verify it gets
+    # unlinked. The endpoint derives matrix_<sid>.json from _MATRIX_PATH
+    # (patched below to tmp_path / "matrix.json").
+    fake_shared_path = tmp_path / "matrix.json"
+    fake_matrix_path = tmp_path / f"matrix_{LOG_SVC}.json"
     fake_matrix_path.write_text('{"transitions": {}}')
 
     audit_calls: list = []
@@ -1714,7 +1718,7 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
             "backend.state_sync.restore_scoring_matrix_version",
             return_value={"version": "2026-06-01-a", "restored_at": "2026-06-03T11:00:00+00:00"},
         ) as mock_restore,
-        patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_matrix_path),
+        patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_shared_path),
         patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
         patch("backend.routers.session_scoring_admin._resolve_token", return_value="tok"),
         patch("backend.provision.session_scoring_orchestrator._write_matrix_to_kv") as mock_kv,
@@ -1734,8 +1738,9 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
     # state_sync was invoked with (service_id, version)
     mock_restore.assert_called_once_with(LOG_SVC, "2026-06-01-a")
 
-    # local matrix.json must be gone so the next _load_matrix call
-    # falls through to FOS instead of shadowing the restore.
+    # The tenant-scoped local matrix must be gone so the next
+    # _load_matrix call falls through to FOS instead of shadowing the
+    # restore.
     assert not fake_matrix_path.exists()
 
     # cfg.scoring.matrix_version was rolled back to the restored version

@@ -34,10 +34,28 @@ from fastapi import Header, HTTPException, Path, Query, Request
 
 from backend.deps import ServiceId
 from backend.models.session_scoring import (
+    ScoringAuditListResponse,
+    ScoringDashboardResponse,
     ScoringEnforceStatusCodeBody,
+    ScoringEnforceStatusCodePutResponse,
+    ScoringEnforceStatusCodeState,
+    ScoringEnforceThresholdPutResponse,
+    ScoringEnforceThresholdResponse,
     ScoringExcludeRegexBody,
+    ScoringExcludeRegexPutResponse,
+    ScoringExcludeRegexState,
+    ScoringExcludeRegexValidateResponse,
     ScoringL2EnforceBody,
+    ScoringL2EnforcePutResponse,
+    ScoringL2EnforceState,
+    ScoringMatrixRestoreResponse,
+    ScoringMatrixVersionsResponse,
+    ScoringPerReasonResponse,
+    ScoringRetrainResponse,
+    ScoringRotateKeyResponse,
+    ScoringSessionEventsResponse,
     ScoringThresholdBody,
+    ScoringThresholdState,
 )
 from backend.provision.session_scoring_setup import (
     L2_ENABLED_AT_KEY as _L2_ENABLED_AT_KEY,
@@ -257,7 +275,11 @@ def l2_enforce_readiness_block(service_id: str) -> dict:
         return _l2_enforce_unavailable()
 
 
-@router.post("/{service_id}/scoring/retrain")
+@router.post(
+    "/{service_id}/scoring/retrain",
+    response_model=ScoringRetrainResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_retrain(
     service_id: ServiceId,
     since_days: int = Query(default=7, ge=1, le=90, description="Window of DuckDB traffic to train on"),
@@ -444,7 +466,11 @@ def scoring_retrain(
 # ── Session details (sid → page sequence) ────────────────────────────────────
 
 
-@router.get("/{service_id}/scoring/sessions/{sid}/events")
+@router.get(
+    "/{service_id}/scoring/sessions/{sid}/events",
+    response_model=ScoringSessionEventsResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_session_events(
     request: Request,
     service_id: ServiceId,
@@ -480,7 +506,11 @@ def scoring_session_events(
     }
 
 
-@router.get("/{service_id}/scoring/enforce-threshold")
+@router.get(
+    "/{service_id}/scoring/enforce-threshold",
+    response_model=ScoringEnforceThresholdResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_enforce_threshold_get(
     service_id: ServiceId,
     token: str = Header(default=""),
@@ -535,7 +565,11 @@ def scoring_enforce_threshold_get(
     return result
 
 
-@router.put("/{service_id}/scoring/enforce-threshold")
+@router.put(
+    "/{service_id}/scoring/enforce-threshold",
+    response_model=ScoringEnforceThresholdPutResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_enforce_threshold_put(
     body: ScoringThresholdBody,
     service_id: ServiceId,
@@ -622,7 +656,11 @@ def scoring_enforce_threshold_put(
 # ── L2 enforcement opt-in (operator decides when L2 joins the enforced score) ─
 
 
-@router.get("/{service_id}/scoring/l2-enforce")
+@router.get(
+    "/{service_id}/scoring/l2-enforce",
+    response_model=ScoringL2EnforceState,
+    response_model_exclude_unset=True,
+)
 def scoring_l2_enforce_get(
     service_id: ServiceId,
     token: str = Header(default=""),
@@ -657,7 +695,11 @@ def scoring_l2_enforce_get(
         raise_internal(logger, exc, code="l2_enforce_read_failed", status=502)
 
 
-@router.put("/{service_id}/scoring/l2-enforce")
+@router.put(
+    "/{service_id}/scoring/l2-enforce",
+    response_model=ScoringL2EnforcePutResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_l2_enforce_put(
     body: ScoringL2EnforceBody,
     service_id: ServiceId,
@@ -767,7 +809,11 @@ def scoring_l2_enforce_put(
 # ── Recv exclusion regex (URLs that bypass the scorer) ─────────────────────
 
 
-@router.get("/{service_id}/scoring/exclude-regex")
+@router.get(
+    "/{service_id}/scoring/exclude-regex",
+    response_model=ScoringExcludeRegexState,
+    response_model_exclude_unset=True,
+)
 def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
     """Return the operator-configured URL-exclusion regex for the recv snippet.
 
@@ -809,7 +855,11 @@ def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
     }
 
 
-@router.put("/{service_id}/scoring/exclude-regex")
+@router.put(
+    "/{service_id}/scoring/exclude-regex",
+    response_model=ScoringExcludeRegexPutResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_exclude_regex_put(
     body: ScoringExcludeRegexBody,
     service_id: ServiceId,
@@ -919,7 +969,11 @@ def scoring_exclude_regex_put(
 # ── Dry-run validator for the exclude-regex (no persistence, no VCL) ──────
 
 
-@router.post("/{service_id}/scoring/exclude-regex/validate")
+@router.post(
+    "/{service_id}/scoring/exclude-regex/validate",
+    response_model=ScoringExcludeRegexValidateResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_exclude_regex_validate(
     body: ScoringExcludeRegexBody,
     service_id: ServiceId,
@@ -975,7 +1029,11 @@ def scoring_exclude_regex_validate(
 # ── Enforce response status code (default 429, operator-overridable) ──────
 
 
-@router.get("/{service_id}/scoring/enforce-status-code")
+@router.get(
+    "/{service_id}/scoring/enforce-status-code",
+    response_model=ScoringEnforceStatusCodeState,
+    response_model_exclude_unset=True,
+)
 def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
     """Return the operator-configured HTTP status code that the enforce
     snippet returns when the scorer flags a request.
@@ -1015,7 +1073,11 @@ def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
     }
 
 
-@router.put("/{service_id}/scoring/enforce-status-code")
+@router.put(
+    "/{service_id}/scoring/enforce-status-code",
+    response_model=ScoringEnforceStatusCodePutResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_enforce_status_code_put(
     body: ScoringEnforceStatusCodeBody,
     service_id: ServiceId,
@@ -1105,7 +1167,11 @@ def scoring_enforce_status_code_put(
 # ── Matrix version history + rollback ──────────────────────────────────────
 
 
-@router.get("/{service_id}/scoring/matrix-versions")
+@router.get(
+    "/{service_id}/scoring/matrix-versions",
+    response_model=ScoringMatrixVersionsResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_matrix_versions_list(service_id: ServiceId) -> dict:
     """List historical scoring matrices archived in FOS.
 
@@ -1124,7 +1190,11 @@ def scoring_matrix_versions_list(service_id: ServiceId) -> dict:
     }
 
 
-@router.post("/{service_id}/scoring/matrix-versions/{version}/restore")
+@router.post(
+    "/{service_id}/scoring/matrix-versions/{version}/restore",
+    response_model=ScoringMatrixRestoreResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_matrix_versions_restore(
     service_id: ServiceId,
     version: str = Path(
@@ -1162,17 +1232,17 @@ def scoring_matrix_versions_restore(
             detail={"error": f"Matrix version {version!r} not found in FOS history"},
         )
 
-    # Drop the local matrix.json so _load_matrix falls through to the
-    # FOS-restored version instead of shadowing it. Wipe both the
-    # tenant-scoped path (matrix_<sid>.json) and the legacy shared path
-    # since either could shadow the FOS-restored version.
+    # Drop the tenant-scoped local matrix (matrix_<sid>.json) so
+    # _load_matrix falls through to the FOS-restored version instead of
+    # shadowing it. (_load_matrix's resolution order consults only the
+    # tenant path — the pre-audit-005 shared matrix.json is never read,
+    # and prod was verified clean of it on 2026-07-06.)
     tenant_matrix_path = _MATRIX_PATH.with_name(f"{_MATRIX_PATH.stem}_{service_id}{_MATRIX_PATH.suffix}")
-    for p in (tenant_matrix_path, _MATRIX_PATH):
-        try:
-            if p.exists():
-                p.unlink()
-        except Exception as exc:
-            logger.warning(f"Could not remove local {p.name} after restore: {exc}")
+    try:
+        if tenant_matrix_path.exists():
+            tenant_matrix_path.unlink()
+    except Exception as exc:
+        logger.warning(f"Could not remove local {tenant_matrix_path.name} after restore: {exc}")
 
     # Update cfg.scoring.matrix_version so /scoring/status reflects the rollback.
     cfg = svcconfig.load_config(service_id)
@@ -1224,7 +1294,11 @@ def scoring_matrix_versions_restore(
 # ── AES key rotation ────────────────────────────────────────────────────────
 
 
-@router.post("/{service_id}/scoring/rotate-key")
+@router.post(
+    "/{service_id}/scoring/rotate-key",
+    response_model=ScoringRotateKeyResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_rotate_key(
     service_id: ServiceId,
     token: str = Header(default=""),
@@ -1296,7 +1370,11 @@ def scoring_rotate_key(
 # ── Operator audit log ──────────────────────────────────────────────────────
 
 
-@router.get("/{service_id}/scoring/audit")
+@router.get(
+    "/{service_id}/scoring/audit",
+    response_model=ScoringAuditListResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_audit_list(
     service_id: ServiceId,
     limit: int = Query(default=100, ge=1, le=1000),
@@ -1329,7 +1407,11 @@ def scoring_audit_list(
 # ── Operator's chosen threshold (persisted, not enforced) ───────────────────
 
 
-@router.get("/{service_id}/scoring/threshold")
+@router.get(
+    "/{service_id}/scoring/threshold",
+    response_model=ScoringThresholdState,
+    response_model_exclude_unset=True,
+)
 def scoring_threshold_get(service_id: ServiceId) -> dict:
     """Return the operator's chosen score threshold.
 
@@ -1351,7 +1433,11 @@ def scoring_threshold_get(service_id: ServiceId) -> dict:
     }
 
 
-@router.put("/{service_id}/scoring/threshold")
+@router.put(
+    "/{service_id}/scoring/threshold",
+    response_model=ScoringThresholdState,
+    response_model_exclude_unset=True,
+)
 def scoring_threshold_put(
     body: ScoringThresholdBody,
     service_id: ServiceId,
@@ -1399,7 +1485,11 @@ def scoring_threshold_put(
 # ── Per-reason AUC breakdown ────────────────────────────────────────────────
 
 
-@router.get("/{service_id}/scoring/evaluation/per-reason")
+@router.get(
+    "/{service_id}/scoring/evaluation/per-reason",
+    response_model=ScoringPerReasonResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_evaluation_per_reason(
     service_id: ServiceId,
 ) -> dict:
@@ -1457,7 +1547,11 @@ def scoring_evaluation_per_reason(
 # individual queries, or keep fanning out for now.
 
 
-@router.get("/{service_id}/scoring/dashboard")
+@router.get(
+    "/{service_id}/scoring/dashboard",
+    response_model=ScoringDashboardResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_dashboard(
     request: Request,
     service_id: ServiceId,

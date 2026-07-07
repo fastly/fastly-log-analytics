@@ -19,24 +19,14 @@ import {
 } from '@/components/ui/table'
 import { client } from '@/lib/api'
 import { formatTimeAgo } from '@/lib/date'
+import type { components } from '@/types/api.generated'
 
 interface AuditLogTabProps {
   serviceId: string
 }
 
-interface AuditRow {
-  id: number | string
-  timestamp: string
-  service_id: string
-  action: string
-  actor: string | null
-  details: unknown
-}
-
-interface AuditResponse {
-  audit: AuditRow[]
-  limit?: number
-}
+type AuditRow = components['schemas']['ScoringAuditRow']
+type AuditResponse = components['schemas']['ScoringAuditListResponse']
 
 const AUDIT_LIMIT = 200
 
@@ -146,9 +136,9 @@ export function AuditLogTab({ serviceId }: AuditLogTabProps) {
                   <TableRow key={String(r.id)}>
                     <TableCell
                       className="text-xs whitespace-nowrap text-muted-foreground"
-                      title={r.timestamp}
+                      title={r.timestamp ?? undefined}
                     >
-                      {formatTimeAgo(r.timestamp) || r.timestamp}
+                      {formatTimeAgo(r.timestamp ?? '') || r.timestamp}
                     </TableCell>
                     <TableCell>
                       <Badge variant="secondary" className="font-mono text-[10px]">

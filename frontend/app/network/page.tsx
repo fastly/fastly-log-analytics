@@ -141,13 +141,18 @@ export default function NetworkPage() {
   // exactly what the chart x-axis (hard-clamped to startTime/endTime) displays.
   const relativeRange = useFilterStore((s) => s.relativeRange)
   const isAutoRange = useFilterStore((s) => s.isAutoRange)
-  // Pin the quantized anchor at mount so the first-paint key holds still for the
-  // page session (it floors to the 60s grid, so re-renders within the quantum
-  // would yield the same string anyway — pinning it just avoids advancing the
-  // key on the rare cross-minute re-render, which would refire the scan). Both
-  // this and the cache key below carry it; quantizeAnchor mirrors the backend's
+  const storeEndTime = useFilterStore((s) => s.endTime)
+  // Anchor the keyed path to the SELECTED window's end (floored to the 60s
+  // grid), not to mount time: every explicit range selection writes a fresh
+  // endTime (ReportLayout's ctx times ARE the store times), so a preset clicked
+  // in a long-lived tab re-anchors at click time and scans [click−N, click] —
+  // matching the hard-clamped x-axis — instead of a mount-pinned window that,
+  // for the short presets (1h..12h), could be fully disjoint from the display.
+  // Memoized on endTime so a cross-minute re-render still can't advance the key
+  // (no scan refire); on cold load endTime is the store-init default (≈ mount
+  // now), so behavior there is unchanged. quantizeAnchor mirrors the backend's
   // quantize_anchor byte-for-byte (lib/time-window.ts ≡ backend/utils/time_window.py).
-  const [anchor] = useState(() => quantizeAnchor(new Date().toISOString()))
+  const anchor = React.useMemo(() => quantizeAnchor(storeEndTime), [storeEndTime])
 
   return (
     <ReportLayout

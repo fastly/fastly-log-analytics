@@ -61,13 +61,17 @@ def test_rate_limiter_locks_after_threshold():
     assert 0 < remaining <= tunnel.LOGIN_LOCKOUT_S
 
 
-def test_rate_limiter_clear_resets():
+def test_rate_limiter_failures_persist_across_lockout():
+    """Per-IP failure counters must NOT be clearable by a successful login —
+    otherwise an attacker with valid credentials can interleave brute-force
+    guesses with valid logins to keep the counter below threshold indefinitely
+    (finding 016). The clear() method was removed."""
     rl = tunnel._LoginRateLimiter()
     for _ in range(tunnel.LOGIN_FAILURE_THRESHOLD):
         rl.record_failure("1.2.3.4")
-    rl.clear("1.2.3.4")
     locked, _ = rl.is_locked("1.2.3.4")
-    assert not locked
+    assert locked
+    assert not hasattr(rl, "clear"), "clear() method must not exist (finding 016)"
 
 
 def test_rate_limiter_per_ip_isolation():
@@ -81,7 +85,7 @@ def test_rate_limiter_per_ip_isolation():
 # ── Session lifecycle ──────────────────────────────────────────────────────
 
 
-def _seed_invite(service_ids=None) -> dict:
+def _seed_invite(service_ids=None, *, allow_concurrent_sessions=False) -> dict:
     return share_db.create_remote_invite(
         name="Drew",
         email="drew@example.com",
@@ -89,6 +93,7 @@ def _seed_invite(service_ids=None) -> dict:
         expires_at_utc=None,
         ip_whitelist=None,
         service_ids=service_ids or ["svcA"],
+        allow_concurrent_sessions=allow_concurrent_sessions,
     )
 
 
@@ -186,6 +191,33 @@ def test_multi_device_boot():
     assert mgr.get_session(second.session_id) is not None
     audits = share_db.get_share_audit_logs()
     assert any(a["event_type"] == "SESSION_BOOT" for a in audits)
+
+
+def test_shared_invite_allows_concurrent_sessions():
+    """An invite opted into shared logins keeps both sessions alive instead of
+    booting the first — and writes no SESSION_BOOT audit row."""
+    mgr = tunnel.get_tunnel_manager()
+    invite = _seed_invite(allow_concurrent_sessions=True)
+    first = mgr.create_session(
+        invite=invite,
+        ip_address="1.2.3.4",
+        user_agent="Chrome",
+        headers={"user-agent": "Chrome/126 Mac OS X"},
+    )
+    second = mgr.create_session(
+        invite=invite,
+        ip_address="5.6.7.8",
+        user_agent="Firefox",
+        headers={"user-agent": "Firefox/120 Windows"},
+    )
+    # Both sessions coexist under the same invite.
+    assert mgr.get_session(first.session_id) is not None
+    assert mgr.get_session(second.session_id) is not None
+    assert first.session_id != second.session_id
+    assert mgr.active_session_count() == 2
+    # No boot audit event was written for the shared invite.
+    audits = share_db.get_share_audit_logs()
+    assert not any(a["event_type"] == "SESSION_BOOT" for a in audits)
 
 
 def test_touch_session_bumps_last_active_and_ip():

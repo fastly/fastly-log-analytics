@@ -14,10 +14,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Floor = 24 verified security fixes as of 2026-06-08 (originally tracked in
-# an audit-findings/ folder that has since been removed). Bump ONLY when
-# (a) a new fix lands AND its test gets the mark added — never to "fix" a regression.
-FLOOR=24
+# Floor = the monotonic count of @pytest.mark.security_regression tests. Bump
+# ONLY when (a) a new fix lands AND its test gets the mark added — never to "fix"
+# a regression. Lineage: 24 (Phase 0 baseline, 2026-06-08) -> 206 (analyst
+# OAuth/OIDC login negative-path battery: csrf/pkce/unverified/expired/aud/iss/
+# nonce/alg-confusion/no-enumeration/wrong-provider/RBAC-parity/passcode-bypass/
+# logout+revoke/flow-state AEAD, 2026-07-01).
+FLOOR=206
 
 # Count: uv run pytest -m security_regression --collect-only
 # We use pytest's own collection so module-level pytestmark = ... is

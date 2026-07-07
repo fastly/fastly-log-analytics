@@ -7,8 +7,9 @@
   * ``_run_gap_heal`` — periodic gap detector that triggers a full sweep
     when sustained loss is observed between Fastly stats and our ingest.
 
-The gap-heal trigger goes through the ``backend.scheduler`` shim so legacy
-test patches at ``backend.scheduler._run_full_sweep`` continue to work.
+The gap-heal trigger reads its collaborators (``_run_full_sweep`` and the
+throttle-marker helpers) from module globals at call time, so tests patch
+them at ``backend.cron.jobs.sync.<name>``.
 """
 
 from __future__ import annotations
@@ -916,12 +917,10 @@ def _run_gap_heal(service_id: str) -> None:
         # actual heal trigger. Worse loss = shorter throttle + bigger sweep
         # budget. See ``_gap_heal_severity`` for the bands.
         band = _gap_heal_severity(sustained.max_gap_pct, sustained.total_lost_lines)
-        # Look up the throttle state through the shim so legacy patches on
-        # ``backend.scheduler._last_successful_gap_heal_trigger`` continue to
+        # Module-global lookup at call time so patches on
+        # ``backend.cron.jobs.sync._last_successful_gap_heal_trigger``
         # intercept the call.
-        import backend.scheduler as _shim
-
-        last_heal = _shim._last_successful_gap_heal_trigger(service_id)
+        last_heal = _last_successful_gap_heal_trigger(service_id)
         if band.throttle_hours > 0 and last_heal is not None:
             elapsed_hours = (time.time() - last_heal) / 3600.0
             if elapsed_hours < band.throttle_hours:
@@ -964,11 +963,11 @@ def _run_gap_heal(service_id: str) -> None:
         )
         # Mark heal trigger BEFORE invoking the sweep so a long-running sweep
         # doesn't itself trip a second gap_heal tick into re-triggering. Both
-        # the marker and the sweep go through the shim so legacy patches at
-        # ``backend.scheduler._mark_gap_heal_triggered`` /
-        # ``backend.scheduler._run_full_sweep`` keep intercepting.
-        _shim._mark_gap_heal_triggered(service_id)
-        _shim._run_full_sweep(
+        # resolve from module globals at call time so patches at
+        # ``backend.cron.jobs.sync._mark_gap_heal_triggered`` /
+        # ``backend.cron.jobs.sync._run_full_sweep`` keep intercepting.
+        _mark_gap_heal_triggered(service_id)
+        _run_full_sweep(
             service_id,
             max_files=band.sweep_max_files,
             max_seconds=band.sweep_max_seconds,

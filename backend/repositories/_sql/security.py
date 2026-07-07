@@ -51,6 +51,38 @@ Requires the SQLite ``ngwaf_top`` database to be ATTACHed (done by the
 caller before invoking).
 """
 
+NGWAF_TOP_BOTS_JOIN_DIRECT = """
+                    SELECT nb.bot_name, nb.category, count(*) AS cnt
+                    FROM (
+                        SELECT waf_req_id FROM {table_name}
+                        WHERE {where_clause} AND waf_req_id IS NOT NULL
+                    ) t
+                    INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id)
+                    WHERE nb.bot_name IS NOT NULL
+                    GROUP BY 1, 2
+                    ORDER BY 3 DESC
+                    LIMIT {n}
+                """
+"""``NGWAF_TOP_BOTS_JOIN`` joined straight against the base table.
+
+Used when the join would be the temp's ONLY consumer (the UA branch was
+rollup-served): materializing the window's waf_req_ids to probe them once
+is pure overhead, so this variant scans the base table exactly once. The
+``waf_req_id IS NOT NULL`` floor is semantically identical to the INNER
+JOIN (NULLs can never match) and keeps the join's build input minimal.
+
+Inputs (trusted-identifier / trusted-fragment substitutions only):
+- ``{table_name}`` — quoted/safe base table identifier.
+- ``{where_clause}`` — pre-built time/filters clause from
+  ``build_where_clause`` (values inlined upstream).
+- ``{n}`` — integer LIMIT (caller passes an in-range Python ``int``).
+
+Output rows: ``(bot_name: str, category: str, cnt: int)``.
+
+Requires the SQLite ``ngwaf_top`` database to be ATTACHed (done by the
+caller before invoking).
+"""
+
 # ── Verified bots time series (get_security_aggregates) ───────────────────────
 
 VERIFIED_BOTS_TS = """
@@ -312,6 +344,7 @@ Output rows: ``(ua: str, ip: str, cnt: int)``.
 __all__ = [
     "TOP_UAS_BY_COUNT",
     "NGWAF_TOP_BOTS_JOIN",
+    "NGWAF_TOP_BOTS_JOIN_DIRECT",
     "VERIFIED_BOTS_TS",
     "NGWAF_VERIFIED_BOTS",
     "NGWAF_VERIFIED_BOTS_TS",

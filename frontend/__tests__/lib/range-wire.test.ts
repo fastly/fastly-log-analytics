@@ -17,11 +17,15 @@ describe('resolveRangeWire', () => {
     })
     expect(w.rangeToken).toBe(DEFAULT_RANGE_TOKEN)
     expect(w.rangeKey).toBe('24h')
-    expect(w.rangeBody).toEqual({ range_token: '24h', anchor: ANCHOR })
+    expect(w.rangeBody).toEqual({ range_token: '24h', anchor: ANCHOR, start_time: START, end_time: END })
   })
 
-  it('explicit preset pill → forwards the label as the token', () => {
-    for (const preset of ['24h', '7d', '30d']) {
+  it('explicit preset pill → forwards the label as the token + display bounds', () => {
+    // Every FilterBar quick-preset label. The backend must recognize each one
+    // (tests/utils/test_time_window.py pins that side); the display bounds ride
+    // along so an unrecognized token degrades to the anchor-faithful absolute
+    // path instead of an all-time scan (the 12h-preset huge-counts bug).
+    for (const preset of ['1h', '3h', '6h', '12h', '24h', '3d', '7d', '30d']) {
       const w = resolveRangeWire({
         relativeRange: preset,
         isAutoRange: false,
@@ -31,7 +35,7 @@ describe('resolveRangeWire', () => {
       })
       expect(w.rangeToken).toBe(preset)
       expect(w.rangeKey).toBe(preset)
-      expect(w.rangeBody).toEqual({ range_token: preset, anchor: ANCHOR })
+      expect(w.rangeBody).toEqual({ range_token: preset, anchor: ANCHOR, start_time: START, end_time: END })
     }
   })
 

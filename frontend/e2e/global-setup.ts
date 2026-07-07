@@ -82,7 +82,29 @@ async function globalSetup() {
   const fs = await import('node:fs')
   fs.mkdirSync(configsDir, { recursive: true })
   fs.mkdirSync(dataDir, { recursive: true })
+  // The share DB resolves its dir from REMOTE_SHARE_DB_DIR (default literal
+  // ``data/system``) — it does NOT honor CONTRACT_DATA_DIR's svcconfig patch —
+  // so without this the e2e backend would read/write the developer's REAL
+  // remote_share.db. Sandbox it explicitly.
+  const shareDbDir = join(dataDir, 'system')
+  fs.mkdirSync(shareDbDir, { recursive: true })
   _seedDefaultServiceConfig(configsDir)
+
+  // Wire the analyst-OAuth feature against the in-process mock IdP (all on
+  // 127.0.0.1, no network). The registry points discovery at the backend's own
+  // /mock-idp routes; the browser's callback lands on the frontend proxy origin.
+  const oauthRegistryPath = join(sandbox, 'oauth_providers.json')
+  writeFileSync(
+    oauthRegistryPath,
+    JSON.stringify({
+      google: {
+        display_name: 'Google Workspace',
+        discovery_url: `http://${HOST}:${E2E_BACKEND_PORT}/mock-idp/.well-known/openid-configuration`,
+        scopes: 'openid email',
+        enabled: true,
+      },
+    }),
+  )
 
   const repoRoot = join(__dirname, '..', '..')
 
@@ -105,6 +127,16 @@ async function globalSetup() {
         FASTLY_MOCK_MODE: '1',
         CONTRACT_CONFIGS_DIR: configsDir,
         CONTRACT_DATA_DIR: dataDir,
+        // Isolate the share DB from the developer's real data/system (see above).
+        REMOTE_SHARE_DB_DIR: shareDbDir,
+        // Analyst OAuth against the in-process mock IdP.
+        OAUTH_MOCK_IDP: '1',
+        OAUTH_MOCK_IDP_ISSUER: `http://${HOST}:${E2E_BACKEND_PORT}/mock-idp`,
+        OAUTH_PROVIDERS_CONFIG_PATH: oauthRegistryPath,
+        OAUTH_FLOW_STATE_SECRET: 'e2e-oauth-flow-state-secret-0123456789',
+        OAUTH_GOOGLE_CLIENT_ID: 'e2e-mock-client-id',
+        OAUTH_GOOGLE_CLIENT_SECRET: 'e2e-mock-client-secret',
+        OAUTH_REDIRECT_BASE: `http://${HOST}:${E2E_FRONTEND_PORT}`,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       // Detach so the child doesn't share our TTY signal group.

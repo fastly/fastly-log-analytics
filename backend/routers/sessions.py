@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -34,6 +34,15 @@ def sessions_endpoint(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    # Guard against unbounded scans (14–20s observed) when the frontend hasn't
+    # sent a time range yet. Default to the last 7 days — matches the max
+    # window the repository enforces when a range IS provided.
+    if not start_time or not end_time:
+        _now = datetime.now(UTC)
+        if not end_time:
+            end_time = _now.isoformat()
+        if not start_time:
+            start_time = (_now - timedelta(days=7)).isoformat()
     result = repo.get_sessions(
         con=ctx.con,
         src=ctx.source,

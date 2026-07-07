@@ -7,8 +7,10 @@ import logging
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from backend.core import share_db
+from backend.core.oauth import registry as oauth_registry
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.share_auth import (
+    AuthConfigResponse,
     ShareAcknowledgeResponse,
     ShareClaimResponse,
     ShareHeartbeatResponse,
@@ -18,30 +20,39 @@ from backend.models.share_auth import (
     TosAckPayload,
     TosDocument,
 )
+from backend.utils.analyst_session import (
+    ANALYST_PENDING_SESSION_COOKIE,
+    ANALYST_SESSION_COOKIE,
+    safe_audit_email,
+)
 from backend.utils.remote_access import client_ip
 from backend.utils.tunnel import get_tunnel_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/share", tags=["share-auth"], responses=DEFAULT_ERROR_RESPONSES)
-COOKIE_NAME = "analyst_session_id"
-PENDING_COOKIE_NAME = "analyst_pending_session_id"
+# Canonical definitions live in backend.utils.analyst_session (shared with the
+# OAuth router without a router→router import). Kept as module-level aliases so
+# existing references (and tests) keep resolving them here.
+COOKIE_NAME = ANALYST_SESSION_COOKIE
+PENDING_COOKIE_NAME = ANALYST_PENDING_SESSION_COOKIE
+_safe_audit_email = safe_audit_email
 
 
-def _safe_audit_email(email: str | None) -> str:
-    """Bound + strip an unauth-supplied email before it reaches the audit log.
+@router.get("/auth-config", response_model=AuthConfigResponse)
+def share_auth_config():
+    """Unauthenticated: which auth modes the ``/share-login`` page should render.
 
-    The login failure / rate-limit paths are reachable pre-auth with a fully
-    attacker-controlled ``email`` (ShareLoginPayload.email is an unvalidated
-    str). Logging it raw lets an attacker inject newlines/control chars into
-    the audit stream (log forging) or bloat it with a megabyte of text. Strip
-    control characters (incl. CR/LF) and cap the length; the value is for
-    operator forensics only, never re-parsed.
+    Reached pre-auth (no session cookie) — exempted in the middleware unauth
+    allowlist. Exposes only enabled providers, and only ``id`` + ``display_name``
+    (never client_id/secret/discovery_url). Drives graceful degradation (§5.2):
+    on fetch failure the frontend fails OPEN to the passcode form.
     """
-    if not email:
-        return "-"
-    cleaned = "".join(c for c in email if c.isprintable())
-    return cleaned[:254] or "-"
+    providers = [p.public_dict() for p in oauth_registry.get_enabled_providers()]
+    return AuthConfigResponse(
+        passcode_enabled=oauth_registry.passcode_login_enabled(),
+        providers=providers,
+    )
 
 
 @router.post("/login", response_model=ShareLoginResponse)
@@ -49,6 +60,18 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
     ip = client_ip(request)
     user_agent = request.headers.get("user-agent", "")
     headers = {k.lower(): v for k, v in request.headers.items()}
+
+    # Passcode login can be turned off (SSO-exclusive deployments). Fail closed
+    # at the endpoint, not just in the UI, so disabling it in /auth-config can't
+    # be bypassed by posting directly. Default is ON — passcode flow unchanged.
+    if not oauth_registry.passcode_login_enabled():
+        share_db.log_share_audit_event(
+            event_type="LOGIN_FAIL",
+            email=_safe_audit_email(payload.email),
+            ip_address=ip,
+            details="passcode login disabled",
+        )
+        raise HTTPException(status_code=403, detail={"error": "passcode_login_disabled"})
 
     mgr = get_tunnel_manager()
 
@@ -103,10 +126,6 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
 
     # Success.
     session = mgr.create_session(invite=invite, ip_address=ip, user_agent=user_agent, headers=headers)
-    # Clear the per-IP failure counter so a successful login resets the
-    # lockout window — otherwise accumulated failures could lock out an IP
-    # even after it authenticates (clear_login_failures had no caller).
-    mgr.clear_login_failures(ip)
     share_db.log_share_audit_event(
         event_type="LOGIN_SUCCESS",
         email=invite["email"],

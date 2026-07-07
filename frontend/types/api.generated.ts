@@ -3427,6 +3427,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/share/auth-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Share Auth Config
+         * @description Unauthenticated: which auth modes the ``/share-login`` page should render.
+         *
+         *     Reached pre-auth (no session cookie) — exempted in the middleware unauth
+         *     allowlist. Exposes only enabled providers, and only ``id`` + ``display_name``
+         *     (never client_id/secret/discovery_url). Drives graceful degradation (§5.2):
+         *     on fetch failure the frontend fails OPEN to the passcode form.
+         */
+        get: operations["share_auth_config_api_share_auth_config_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/share/login": {
         parameters: {
             query?: never;
@@ -3556,6 +3581,40 @@ export interface paths {
          *     putting credentials in a chat tool that retains history.
          */
         post: operations["share_claim_api_share_claim__token__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/share/oauth/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Oauth Authorize */
+        get: operations["oauth_authorize_api_share_oauth_authorize_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/share/oauth/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Oauth Callback */
+        get: operations["oauth_callback_api_share_oauth_callback_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3763,6 +3822,32 @@ export interface paths {
         patch: operations["update_invite_pii_api_admin_share_invites__invite_id__pii_patch"];
         trace?: never;
     };
+    "/api/admin/share/invites/{invite_id}/sharing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Invite Sharing
+         * @description Toggle whether the invite allows shared (concurrent) analyst logins.
+         *
+         *     Turning it ON lets several analysts use the same link at once instead of
+         *     each login booting the previous session (still bounded by the global
+         *     max_concurrent_analyst_sessions cap). Turning it OFF only affects *future*
+         *     logins — any sessions already live under the invite are left to age out via
+         *     the idle/absolute timeout; revoke the invite to force them off immediately.
+         */
+        patch: operations["update_invite_sharing_api_admin_share_invites__invite_id__sharing_patch"];
+        trace?: never;
+    };
     "/api/admin/share/invites/{invite_id}/passcode": {
         parameters: {
             query?: never;
@@ -3945,6 +4030,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/share/oauth-providers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Oauth Providers
+         * @description List the configured OIDC providers for the admin invite form.
+         *
+         *     Includes disabled providers (``enabled=false``) so an admin can pre-create
+         *     an invite for a temporarily-disabled IdP — distinct from the unauth analyst
+         *     ``/api/share/auth-config`` which exposes enabled providers only. Empty when
+         *     the feature switch (``OAUTH_FLOW_STATE_SECRET``) is off. Never returns
+         *     client_id/client_secret.
+         */
+        get: operations["oauth_providers_api_admin_share_oauth_providers_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/web-vitals": {
         parameters: {
             query?: never;
@@ -4009,7 +4120,11 @@ export interface paths {
          *     freshness per configured service. A service is reported ``degraded``
          *     when ANY of:
          *       - its newest ``ingested_files.ingested_at`` is older than
-         *         ``stale_minutes`` (default 30);
+         *         ``stale_minutes`` (default 30) — SRE-22: before degrading on this
+         *         check, the cutoff is widened to the service's own historical p95
+         *         gap between non-empty ingests (never narrower than
+         *         ``stale_minutes``), so a low-traffic service's organic quiet
+         *         periods don't false-positive;
          *       - the last terminal ``sync`` cron run ended in ``error``;
          *       - a ``sync`` row is stuck in ``running`` past ``_STUCK_SYNC_RUNNING_MINS``
          *         (SRE-04 — the orphan-stall / OOM-leak the success-only filter hides);
@@ -4039,6 +4154,37 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * ActiveQueryRow
+         * @description One in-flight query (``_row_for_active``). ``sql`` is only populated
+         *     when the caller asked for ``full_sql``; ``started_at_utc`` is epoch
+         *     seconds (``time.time()``).
+         */
+        ActiveQueryRow: {
+            /** Query Id */
+            query_id?: number | null;
+            /** Db Type */
+            db_type?: string | null;
+            /** Sql Preview */
+            sql_preview?: string | null;
+            /** Sql */
+            sql?: string | null;
+            /** Sql Len */
+            sql_len?: number | null;
+            attribution?: components["schemas"]["QueryAttribution"] | null;
+            /** Service Id */
+            service_id?: string | null;
+            /** Started At Utc */
+            started_at_utc?: number | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+            /** Cancellable */
+            cancellable?: boolean | null;
+            /** Cancelled At */
+            cancelled_at?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** AggregatesRequest */
         AggregatesRequest: {
             /** Start Time */
@@ -4088,6 +4234,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -4178,6 +4328,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -4198,6 +4352,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -4220,6 +4378,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -4240,6 +4402,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -4275,6 +4441,85 @@ export interface components {
             cdn_secret?: string | null;
         };
         /**
+         * AuthConfigProvider
+         * @description One enabled OIDC provider as seen by the unauthenticated login page.
+         *
+         *     Deliberately id + display_name ONLY — no client_id / discovery_url / secret
+         *     is ever exposed to an unauthenticated caller.
+         */
+        AuthConfigProvider: {
+            /** Id */
+            id: string;
+            /** Display Name */
+            display_name: string;
+        };
+        /**
+         * AuthConfigResponse
+         * @description Body for the unauth ``GET /api/share/auth-config`` — drives graceful
+         *     degradation on ``/share-login`` (which auth modes to render).
+         */
+        AuthConfigResponse: {
+            /** Passcode Enabled */
+            passcode_enabled: boolean;
+            /**
+             * Providers
+             * @default []
+             */
+            providers: components["schemas"]["AuthConfigProvider"][];
+        };
+        /**
+         * BackfillBundleRollupsResponse
+         * @description Per-kind bundle counts from ``POST /admin/backfill-bundle-rollups``.
+         */
+        BackfillBundleRollupsResponse: {
+            /** Slow Urls */
+            slow_urls?: number | null;
+            /** Origin Summary */
+            origin_summary?: number | null;
+            /** Origin Summary Days */
+            origin_summary_days?: number | null;
+            /** Origin Dims */
+            origin_dims?: number | null;
+            /** Origin Dims Days */
+            origin_dims_days?: number | null;
+            /** Origin Latency Ts */
+            origin_latency_ts?: number | null;
+            /** Origin Latency Ts Days */
+            origin_latency_ts_days?: number | null;
+            /** Network Rtt */
+            network_rtt?: number | null;
+            /** Network Rtt Days */
+            network_rtt_days?: number | null;
+            /** Network Speed */
+            network_speed?: number | null;
+            /** Network Speed Days */
+            network_speed_days?: number | null;
+            /** Verified Bots Ts */
+            verified_bots_ts?: number | null;
+            /** Verified Bots Ts Days */
+            verified_bots_ts_days?: number | null;
+            /** Perf Latency */
+            perf_latency?: number | null;
+            /** Perf Latency Days */
+            perf_latency_days?: number | null;
+            /** Security Dims */
+            security_dims?: number | null;
+            /** Security Dims Days */
+            security_dims_days?: number | null;
+            /** Perf Ttl Dist */
+            perf_ttl_dist?: number | null;
+            /** Perf Ttl Dist Days */
+            perf_ttl_dist_days?: number | null;
+            /** Ngwaf Bots */
+            ngwaf_bots?: number | null;
+            /** Ngwaf Bots Days */
+            ngwaf_bots_days?: number | null;
+            /** Wellknown Bots */
+            wellknown_bots?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * BackupExportPayload
          * @description Body for ``POST /api/share-admin/backup/export`` — passphrase used
          *     to encrypt the share-db backup blob (minimum 12 characters).
@@ -4282,6 +4527,17 @@ export interface components {
         BackupExportPayload: {
             /** Passphrase */
             passphrase: string;
+        };
+        /** BackupImportResponse */
+        BackupImportResponse: {
+            /** Inserted */
+            inserted?: number | null;
+            /** Skipped */
+            skipped?: number | null;
+            /** Merged */
+            merged?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** Body_backup_import_api_admin_share_backup_import_post */
         Body_backup_import_api_admin_share_backup_import_post: {
@@ -4301,6 +4557,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -4345,10 +4605,6 @@ export interface components {
             custom_dashboard_cards?: {
                 [key: string]: unknown;
             }[];
-            /** Custom Fields Catalog */
-            custom_fields_catalog?: {
-                [key: string]: unknown;
-            }[];
             /** Active Log Field Ids */
             active_log_field_ids?: string[];
             /** Views */
@@ -4383,10 +4639,6 @@ export interface components {
             ops_overview?: {
                 [key: string]: unknown;
             } | null;
-            /** Cron Schedule */
-            cron_schedule?: {
-                [key: string]: unknown;
-            } | null;
             /** Cron Runs First Page */
             cron_runs_first_page?: {
                 [key: string]: unknown;
@@ -4397,10 +4649,6 @@ export interface components {
             } | null;
             /** Scoring Labels */
             scoring_labels?: {
-                [key: string]: unknown;
-            } | null;
-            /** Share Status */
-            share_status?: {
                 [key: string]: unknown;
             } | null;
         };
@@ -4432,6 +4680,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -4466,6 +4718,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -4510,6 +4766,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -4591,6 +4851,13 @@ export interface components {
             /** Secret Key */
             secret_key: string;
         };
+        /** ClaimTokenResponse */
+        ClaimTokenResponse: {
+            /** Token */
+            token?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ClearSqliteResponse */
         ClearSqliteResponse: {
             /**
@@ -4648,6 +4915,57 @@ export interface components {
              * @default 0
              */
             avg_files_per_partition: number;
+        };
+        /**
+         * CompletedQueryRow
+         * @description One finished query (``_row_for_completed``); also the exact layout
+         *     the persisted ``/slow-queries`` rows are re-shaped into.
+         */
+        CompletedQueryRow: {
+            /** Query Id */
+            query_id?: number | null;
+            /** Db Type */
+            db_type?: string | null;
+            /** Sql Preview */
+            sql_preview?: string | null;
+            /** Sql */
+            sql?: string | null;
+            /** Sql Len */
+            sql_len?: number | null;
+            attribution?: components["schemas"]["QueryAttribution"] | null;
+            /** Service Id */
+            service_id?: string | null;
+            /** Started At Utc */
+            started_at_utc?: number | null;
+            /** Ended At Utc */
+            ended_at_utc?: number | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+            /** Outcome */
+            outcome?: string | null;
+            /** Error Type */
+            error_type?: string | null;
+            /** Error Message */
+            error_message?: string | null;
+            /** Peak Memory Mb */
+            peak_memory_mb?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * CredentialsUpdateResponse
+         * @description PATCH /services/{id}/credentials — ``access_key_id`` present only on
+         *     the Fastly-API rotation branch.
+         */
+        CredentialsUpdateResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Message */
+            message?: string | null;
+            /** Access Key Id */
+            access_key_id?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * CronRunEntry
@@ -4712,6 +5030,40 @@ export interface components {
             [key: string]: unknown;
         };
         /**
+         * CronScheduleEntry
+         * @description One row of GET /api/cron-schedule (``build_cron_schedule_payload``).
+         *     ``disabled_reason`` appears only on synthesized disabled rows; the
+         *     last_run_* trio only when a run has been recorded.
+         */
+        CronScheduleEntry: {
+            /** Task */
+            task?: string | null;
+            /** Next Run Time */
+            next_run_time?: string | null;
+            /** Last Run Time */
+            last_run_time?: string | null;
+            /** Last Run Status */
+            last_run_status?: string | null;
+            /** Last Run Duration S */
+            last_run_duration_s?: number | null;
+            /** Last Run Summary */
+            last_run_summary?: string | null;
+            /** Disabled Reason */
+            disabled_reason?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CronScheduleResponse */
+        CronScheduleResponse: {
+            /**
+             * Schedules
+             * @default []
+             */
+            schedules: components["schemas"]["CronScheduleEntry"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * CronSettingsPartial
          * @description Partial-update slice of a single cron block (sync / compact / ngwaf).
          *
@@ -4745,6 +5097,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -4915,6 +5271,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -4982,12 +5342,25 @@ export interface components {
                 [key: string]: unknown;
             }[];
         };
+        /** CustomFieldsImportResponse */
+        CustomFieldsImportResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Imported Count */
+            imported_count?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** CustomFieldsListResponse */
         CustomFieldsListResponse: {
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5105,6 +5478,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5166,6 +5543,17 @@ export interface components {
             email: string;
             /** Reason */
             reason: string;
+        };
+        /** GdprEraseResponse */
+        GdprEraseResponse: {
+            /** Deleted Invites */
+            deleted_invites?: number | null;
+            /** Redacted Log Rows */
+            redacted_log_rows?: number | null;
+            /** Retained Recent Rows */
+            retained_recent_rows?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -5344,6 +5732,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5389,6 +5781,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5409,6 +5805,8 @@ export interface components {
             title: string;
             /** Description */
             description: string;
+            /** Category */
+            category?: string | null;
             /** Missing Fields */
             missing_fields?: string[] | null;
             /** Missing Groups */
@@ -5436,6 +5834,8 @@ export interface components {
             summary: string;
             /** Items */
             items: components["schemas"]["InsightItem"][];
+            /** Category */
+            category?: string | null;
         };
         /** InsightItem */
         InsightItem: {
@@ -5508,6 +5908,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5535,9 +5939,28 @@ export interface components {
             baseline_hours: number;
         };
         /**
+         * InviteMutationAck
+         * @description ``{ok: true}`` acks that also report booted session count.
+         */
+        InviteMutationAck: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Booted Sessions */
+            booted_sessions?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * InvitePayload
          * @description Body for ``POST /api/share-admin/invites`` — create a new
          *     analyst-facing share invite.
+         *
+         *     ``auth_method`` selects how the analyst redeems the invite:
+         *
+         *     * ``'passcode'`` (default) — a ``passcode`` is required and hashed.
+         *     * ``'oauth'`` — ``oauth_provider`` (a configured registry key) is required;
+         *       no ``passcode`` is sent (the backend synthesizes an unguessable argon2id
+         *       placeholder for the NOT NULL column). Passcode flow is unchanged.
          */
         InvitePayload: {
             /** Name */
@@ -5545,7 +5968,7 @@ export interface components {
             /** Email */
             email: string;
             /** Passcode */
-            passcode: string;
+            passcode?: string | null;
             /**
              * Duration Hours
              * @default 24
@@ -5565,6 +5988,71 @@ export interface components {
             query_start_time?: string | null;
             /** Query End Time */
             query_end_time?: string | null;
+            /**
+             * Allow Concurrent Sessions
+             * @default false
+             */
+            allow_concurrent_sessions: boolean;
+            /**
+             * Auth Method
+             * @default passcode
+             * @enum {string}
+             */
+            auth_method: "passcode" | "oauth";
+            /** Oauth Provider */
+            oauth_provider?: string | null;
+        };
+        /**
+         * InviteRecord
+         * @description One remote-invite row (``SELECT *`` + derived fields). The stored
+         *     passcode hash rides through ``extra`` untouched — intentionally NOT
+         *     declared here so the OpenAPI surface doesn't advertise it; the schema
+         *     itself may grow columns via share_db migrations, which ``extra`` also
+         *     absorbs. ``last_login_at`` is attached by ``build_share_status`` only.
+         */
+        InviteRecord: {
+            /** Id */
+            id?: string | null;
+            /** Name */
+            name?: string | null;
+            /** Email */
+            email?: string | null;
+            /** Expires At */
+            expires_at?: string | null;
+            /** Ip Whitelist */
+            ip_whitelist?: string | null;
+            /** Pii Policy */
+            pii_policy?: {
+                [key: string]: unknown;
+            } | null;
+            /** Query Window Hours */
+            query_window_hours?: number | null;
+            /** Query Start Time */
+            query_start_time?: string | null;
+            /** Query End Time */
+            query_end_time?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Revoked */
+            revoked?: number | null;
+            /** Tos Accepted At */
+            tos_accepted_at?: string | null;
+            /** Tos Version */
+            tos_version?: string | null;
+            /** Allow Concurrent Sessions */
+            allow_concurrent_sessions?: boolean | null;
+            /** Auth Method */
+            auth_method?: string | null;
+            /** Oauth Provider */
+            oauth_provider?: string | null;
+            /** Oauth Subject */
+            oauth_subject?: string | null;
+            /** Last Login At */
+            last_login_at?: string | null;
+            /** Service Ids */
+            service_ids?: string[] | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * LakeInfoRequest
@@ -5591,6 +6079,40 @@ export interface components {
             /** Iceberg Metadata Location */
             iceberg_metadata_location?: string | null;
         };
+        /**
+         * LocalCompactNowResponse
+         * @description ``compact_local_partitions`` result dict.
+         */
+        LocalCompactNowResponse: {
+            /** Partitions Scanned */
+            partitions_scanned?: number | null;
+            /** Partitions Compacted */
+            partitions_compacted?: number | null;
+            /** Files Merged */
+            files_merged?: number | null;
+            /** Files Removed */
+            files_removed?: number | null;
+            /** Bytes Before */
+            bytes_before?: number | null;
+            /** Bytes After */
+            bytes_after?: number | null;
+            /** Daily Rollups */
+            daily_rollups?: number | null;
+            /** Weekly Rollups */
+            weekly_rollups?: number | null;
+            /** Active Hour Skipped */
+            active_hour_skipped?: boolean | null;
+            /** Stale Tmp Removed */
+            stale_tmp_removed?: number | null;
+            /** Errors */
+            errors?: string[] | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+            /** Dry Run */
+            dry_run?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** LogAccountingBucket */
         LogAccountingBucket: {
             /** Ts */
@@ -5612,6 +6134,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5671,6 +6197,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5705,6 +6235,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5735,12 +6269,36 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /**
+         * LogFieldsUpdateResponse
+         * @description POST /services/{id}/log-fields — no-change branch carries
+         *     ``message``; the applied branch carries ``estimate`` +
+         *     ``line_budget_warning`` (the ``waf_warning``-shaped dict, or null).
+         */
+        LogFieldsUpdateResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Message */
+            message?: string | null;
+            /** Estimate */
+            estimate?: number | null;
+            /** Line Budget Warning */
+            line_budget_warning?: {
+                [key: string]: unknown;
+            } | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** LoggingSettingsResponse */
         LoggingSettingsResponse: {
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5773,6 +6331,58 @@ export interface components {
             country: string;
             /** Count */
             count: number;
+        };
+        /** MetadataRetentionResponse */
+        MetadataRetentionResponse: {
+            retention?: components["schemas"]["MetadataRetentionValues"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * MetadataRetentionValues
+         * @description Resolved retention days (defaults merged with per-service cfg).
+         */
+        MetadataRetentionValues: {
+            /** Usage Log Days */
+            usage_log_days?: number | null;
+            /** Ingested Files Days */
+            ingested_files_days?: number | null;
+            /** Cron Runs Days */
+            cron_runs_days?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * MetadataStorageResponse
+         * @description ``GET /admin/metadata-storage`` — feeds the Metadata Storage card.
+         */
+        MetadataStorageResponse: {
+            /** Tables */
+            tables?: {
+                [key: string]: components["schemas"]["MetadataTableStat"];
+            } | null;
+            /** Db Bytes */
+            db_bytes?: number | null;
+            /** Db Path */
+            db_path?: string | null;
+            retention?: components["schemas"]["MetadataRetentionValues"] | null;
+            /** Ingested Files Locked */
+            ingested_files_locked?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * MetadataTableStat
+         * @description Per-table row count + estimated bytes (``None`` when SQLite lacks
+         *     the ``dbstat`` vtable).
+         */
+        MetadataTableStat: {
+            /** Rows */
+            rows?: number | null;
+            /** Bytes */
+            bytes?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * MetricHistoryBatchResponse
@@ -5852,6 +6462,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5961,6 +6575,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6021,6 +6639,104 @@ export interface components {
             label: string;
             /** Score */
             score?: number | null;
+        };
+        /** NgwafWorkspace */
+        NgwafWorkspace: {
+            /** Id */
+            id?: string | null;
+            /** Name */
+            name?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** NgwafWorkspaceSetResponse */
+        NgwafWorkspaceSetResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Ngwaf Workspace Id */
+            ngwaf_workspace_id?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** NgwafWorkspacesResponse */
+        NgwafWorkspacesResponse: {
+            /** Workspaces */
+            workspaces?: components["schemas"]["NgwafWorkspace"][] | null;
+            /** Note */
+            note?: string | null;
+            /** Error */
+            error?: string | null;
+            /** Message */
+            message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * OAuthProviderInfo
+         * @description One configured OIDC provider as seen by the admin invite form.
+         */
+        OAuthProviderInfo: {
+            /** Id */
+            id: string;
+            /** Display Name */
+            display_name: string;
+            /** Enabled */
+            enabled: boolean;
+        };
+        /**
+         * OAuthProvidersResponse
+         * @description Body for ``GET /api/admin/share/oauth-providers`` — the configured
+         *     providers an admin can attach to an OAuth invite (may include disabled).
+         */
+        OAuthProvidersResponse: {
+            /** Providers */
+            providers?: components["schemas"]["OAuthProviderInfo"][];
+        };
+        /**
+         * OkMessageResponse
+         * @description ``{ok, message}`` ack used by time-range clear and similar routes.
+         */
+        OkMessageResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Message */
+            message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * OkResponse
+         * @description Mixin for "ack" endpoints that only return ``{"ok": True}``.
+         *
+         *     Six share-auth response models all carry ``ok: bool = True`` as
+         *     their first field — promoted here so the field's default + name
+         *     can't drift across the set.
+         */
+        OkResponse: {
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+        };
+        /**
+         * OptimizeNowResponse
+         * @description ``optimize_table`` result — success carries the rewrite counters,
+         *     the error branches carry ``error`` (+ ``files_rewritten: 0``).
+         */
+        OptimizeNowResponse: {
+            /** Files Rewritten */
+            files_rewritten?: number | null;
+            /** Files Added */
+            files_added?: number | null;
+            /** Eligible Partitions */
+            eligible_partitions?: number | null;
+            /** Partition Errors */
+            partition_errors?: string[] | null;
+            /** Error */
+            error?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginAggregatesRequest */
         OriginAggregatesRequest: {
@@ -6103,6 +6819,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6197,6 +6917,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6230,6 +6954,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6287,6 +7015,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6360,6 +7092,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6436,6 +7172,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6469,6 +7209,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6502,6 +7246,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6586,6 +7334,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6628,6 +7380,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6740,6 +7496,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6763,6 +7523,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6832,6 +7596,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6901,6 +7669,42 @@ export interface components {
             /** Edge Ratio */
             edge_ratio?: number | null;
         };
+        /** ProvisionCheckConfigItem */
+        ProvisionCheckConfigItem: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Details */
+            details?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ProvisionCheckConfigResponse */
+        ProvisionCheckConfigResponse: {
+            logging_service?: components["schemas"]["ProvisionCheckConfigItem"] | null;
+            cdn_service?: components["schemas"]["ProvisionCheckConfigItem"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ProvisionCheckDomainResponse */
+        ProvisionCheckDomainResponse: {
+            /** Available */
+            available?: boolean | null;
+            /** Reason */
+            reason?: string | null;
+            /** Note */
+            note?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ProvisionCheckFosResponse */
+        ProvisionCheckFosResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Error */
+            error?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * ProvisionConfigRequest
          * @description Body shape shared by ``/provision/terraform/preview``,
@@ -6969,6 +7773,29 @@ export interface components {
             log_fields?: string | {
                 [key: string]: unknown;
             } | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ProvisionDefaults */
+        ProvisionDefaults: {
+            /** Endpoint Name */
+            endpoint_name?: string | null;
+            /** Fos Region */
+            fos_region?: string | null;
+            /** Fos Bucket Name */
+            fos_bucket_name?: string | null;
+            /** Fos Prefix */
+            fos_prefix?: string | null;
+            /** Sample Rate */
+            sample_rate?: number | null;
+            /** Edge Only */
+            edge_only?: boolean | null;
+            /** Log Period */
+            log_period?: string | null;
+            /** Cdn Service Name */
+            cdn_service_name?: string | null;
+            /** Cdn Prefix */
+            cdn_prefix?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -7056,6 +7883,33 @@ export interface components {
             /** Log Fields */
             log_fields?: string | null;
         };
+        /** ProvisionIngestResponse */
+        ProvisionIngestResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Service Id */
+            service_id?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ProvisionLakeInfoResponse
+         * @description ``fetch_lake_info`` result. Only the branch-stable keys are declared;
+         *     the table-details payload (row counts / calendar / extents) varies by
+         *     Iceberg layout and rides through ``extra``.
+         */
+        ProvisionLakeInfoResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Table Exists */
+            table_exists?: boolean | null;
+            /** Message */
+            message?: string | null;
+            /** Error */
+            error?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ProvisionService */
         ProvisionService: {
             /** Id */
@@ -7111,6 +7965,19 @@ export interface components {
              */
             remove_cron: boolean;
         };
+        /** ProvisionTokenInfo */
+        ProvisionTokenInfo: {
+            /** Id */
+            id?: string | null;
+            /** Name */
+            name?: string | null;
+            /** User Id */
+            user_id?: string | null;
+            /** Type */
+            type?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * ProvisionValidateRequest
          * @description Body for ``POST /api/provision/validate`` — Fastly token + service id
@@ -7128,6 +7995,51 @@ export interface components {
              * @default
              */
             service_id: string;
+        };
+        /** ProvisionValidateResponse */
+        ProvisionValidateResponse: {
+            /** Service Name */
+            service_name?: string | null;
+            token_info?: components["schemas"]["ProvisionTokenInfo"] | null;
+            defaults?: components["schemas"]["ProvisionDefaults"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * QueryAttribution
+         * @description ``attribution`` block from ``_attribution_payload``.
+         */
+        QueryAttribution: {
+            /** Kind */
+            kind?: string | null;
+            /** Label */
+            label?: string | null;
+            /** Principal Id */
+            principal_id?: string | null;
+            /** Caller Qualname */
+            caller_qualname?: string | null;
+            /** Caller File */
+            caller_file?: string | null;
+            /** Request Path */
+            request_path?: string | null;
+            /** Request Id */
+            request_id?: string | null;
+            /** Cron Job */
+            cron_job?: string | null;
+            /** Cron Run Id */
+            cron_run_id?: string | null;
+            /** Pool Slot */
+            pool_slot?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * QueryMonitorConfigResponse
+         * @description Nav-gating flag for the Live Query Monitor tab.
+         */
+        QueryMonitorConfigResponse: {
+            /** Enabled */
+            enabled: boolean;
         };
         /** QueryRequest */
         QueryRequest: {
@@ -7237,6 +8149,37 @@ export interface components {
             created_at?: string | null;
         };
         /**
+         * SavedViewRecord
+         * @description Wire-safe read shape for ``GET /api/views/{service_id}`` rows.
+         *
+         *     Distinct from the strict ``SavedView`` request body: all-Optional +
+         *     ``extra="allow"`` so a partial row (or a future column) can never 500
+         *     the read path; ``response_model_exclude_unset`` keeps the emitted key
+         *     set byte-identical to the producer's.
+         */
+        SavedViewRecord: {
+            /** Id */
+            id?: string | null;
+            /** Service Id */
+            service_id?: string | null;
+            /** Name */
+            name?: string | null;
+            /** Filters Json */
+            filters_json?: string | null;
+            /** Time Range Type */
+            time_range_type?: string | null;
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /** Page */
+            page?: string | null;
+            /** Created At */
+            created_at?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * ScoringAnalyticsResponse
          * @description Composite of the analyst-safe sub-reads (plus the two admin-only
          *     evaluation blocks, present only on the admin path).
@@ -7255,6 +8198,48 @@ export interface components {
             evaluation_per_reason?: {
                 [key: string]: unknown;
             } | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringAucAgainstLabels */
+        ScoringAucAgainstLabels: {
+            /** Auc */
+            auc?: number | null;
+            /** Passed */
+            passed?: boolean | null;
+            /** Threshold */
+            threshold?: number | null;
+            /** N Good */
+            n_good?: number | null;
+            /** N Bad */
+            n_bad?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringAuditListResponse */
+        ScoringAuditListResponse: {
+            /**
+             * Audit
+             * @default []
+             */
+            audit: components["schemas"]["ScoringAuditRow"][];
+            /** Limit */
+            limit?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringAuditRow */
+        ScoringAuditRow: {
+            /** Id */
+            id?: number | null;
+            /** Timestamp */
+            timestamp?: string | null;
+            /** Action */
+            action?: string | null;
+            /** Actor */
+            actor?: string | null;
+            /** Details */
+            details?: unknown;
         } & {
             [key: string]: unknown;
         };
@@ -7321,6 +8306,37 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * ScoringDashboardResponse
+         * @description Composite of the per-endpoint producers — each sub-block is the
+         *     byte-identical dict its standalone endpoint returns, so each nests the
+         *     same model that endpoint declares. ``status`` stays a free dict: it's
+         *     the secret-filtered cfg.scoring block, whose keys vary by provisioning
+         *     history.
+         */
+        ScoringDashboardResponse: {
+            /** Since Hours */
+            since_hours?: number | null;
+            /** Threshold */
+            threshold?: number | null;
+            /** Status */
+            status?: {
+                [key: string]: unknown;
+            } | null;
+            evaluation?: components["schemas"]["ScoringEvaluationResponse"] | null;
+            evaluation_per_reason?: components["schemas"]["ScoringPerReasonResponse"] | null;
+            health?: components["schemas"]["ScoringHealthResponse"] | null;
+            top_flagged?: components["schemas"]["ScoringTopFlaggedResponse"] | null;
+            score_distribution?: components["schemas"]["ScoringScoreDistributionResponse"] | null;
+            compliance_breakdown?: components["schemas"]["ScoringComplianceBreakdownResponse"] | null;
+            curves?: components["schemas"]["ScoringCurvesResponse"] | null;
+            threshold_preview?: components["schemas"]["ScoringThresholdPreviewResponse"] | null;
+            config_threshold?: components["schemas"]["ScoringThresholdState"] | null;
+            exclude_regex?: components["schemas"]["ScoringExcludeRegexState"] | null;
+            enforce_status_code?: components["schemas"]["ScoringEnforceStatusCodeState"] | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ScoringDistributionRow */
         ScoringDistributionRow: {
             /** Hour */
@@ -7342,6 +8358,62 @@ export interface components {
         ScoringEnforceStatusCodeBody: {
             /** Status Code */
             status_code?: number | null;
+        };
+        /** ScoringEnforceStatusCodePutResponse */
+        ScoringEnforceStatusCodePutResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Effective Status Code */
+            effective_status_code?: number | null;
+            /** Is Default */
+            is_default?: boolean | null;
+            /** Logging Service Active Version */
+            logging_service_active_version?: number | null;
+            /** Message */
+            message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringEnforceStatusCodeState */
+        ScoringEnforceStatusCodeState: {
+            /** Current */
+            current?: number | null;
+            /** Default */
+            default?: number | null;
+            /** Effective */
+            effective?: number | null;
+            /** Min */
+            min?: number | null;
+            /** Max */
+            max?: number | null;
+            /** Is Default */
+            is_default?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringEnforceThresholdPutResponse */
+        ScoringEnforceThresholdPutResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Threshold */
+            threshold?: number | null;
+            /** Enforced */
+            enforced?: boolean | null;
+            /** Message */
+            message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringEnforceThresholdResponse */
+        ScoringEnforceThresholdResponse: {
+            /** Threshold */
+            threshold?: number | null;
+            /** Enforced */
+            enforced?: boolean | null;
+            /** Key */
+            key?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /** ScoringEvaluationResponse */
         ScoringEvaluationResponse: {
@@ -7386,6 +8458,49 @@ export interface components {
              * @default
              */
             regex: string;
+        };
+        /** ScoringExcludeRegexPutResponse */
+        ScoringExcludeRegexPutResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Effective Regex */
+            effective_regex?: string | null;
+            /** Is Default */
+            is_default?: boolean | null;
+            /** Logging Service Active Version */
+            logging_service_active_version?: number | null;
+            /** Lint Warnings */
+            lint_warnings?: string[] | null;
+            /** Message */
+            message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringExcludeRegexState */
+        ScoringExcludeRegexState: {
+            /** Current */
+            current?: string | null;
+            /** Is Default */
+            is_default?: boolean | null;
+            /** Default */
+            default?: string | null;
+            /** Effective */
+            effective?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringExcludeRegexValidateResponse */
+        ScoringExcludeRegexValidateResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Lint Warnings */
+            lint_warnings?: string[] | null;
+            /** Error */
+            error?: string | null;
+            /** Reason */
+            reason?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /** ScoringHealthResponse */
         ScoringHealthResponse: {
@@ -7445,6 +8560,53 @@ export interface components {
              * @default false
              */
             enabled: boolean;
+        };
+        /** ScoringL2EnforcePutResponse */
+        ScoringL2EnforcePutResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** L2 Enabled At */
+            l2_enabled_at?: number | null;
+            /** Message */
+            message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ScoringL2EnforceState
+         * @description Shape from _build_l2_enforce_block / _l2_enforce_unavailable —
+         *     also nested as ``l2_enforce`` in ScoringHealthResponse (left ``dict``
+         *     there for wire-compat; this standalone GET carries the real schema).
+         */
+        ScoringL2EnforceState: {
+            /** Available */
+            available?: boolean | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** L2 Enabled At */
+            l2_enabled_at?: number | null;
+            /** Days Since Optin */
+            days_since_optin?: number | null;
+            /** Ramp Progress */
+            ramp_progress?: number | null;
+            /** Fully Ramped */
+            fully_ramped?: boolean | null;
+            /** Warmup Days Remaining */
+            warmup_days_remaining?: number | null;
+            /** Scoring Enabled At */
+            scoring_enabled_at?: number | null;
+            /** Deployment Age Days */
+            deployment_age_days?: number | null;
+            /** Ready */
+            ready?: boolean | null;
+            /** Ramp Days */
+            ramp_days?: number | null;
+            /** Readiness Days */
+            readiness_days?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * ScoringLabelCreate
@@ -7612,6 +8774,21 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** ScoringMatrixRestoreResponse */
+        ScoringMatrixRestoreResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Restored Version */
+            restored_version?: string | null;
+            /** Restored At */
+            restored_at?: string | null;
+            /** Matrix Kv Written */
+            matrix_kv_written?: boolean | null;
+            /** Deploy Hint */
+            deploy_hint?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ScoringMatrixStaleness */
         ScoringMatrixStaleness: {
             /** L2 Evaluated */
@@ -7627,12 +8804,133 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** ScoringMatrixVersion */
+        ScoringMatrixVersion: {
+            /** Version */
+            version?: string | null;
+            /** Key */
+            key?: string | null;
+            /** Size Bytes */
+            size_bytes?: number | null;
+            /** Last Modified */
+            last_modified?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringMatrixVersionsResponse */
+        ScoringMatrixVersionsResponse: {
+            /**
+             * Versions
+             * @default []
+             */
+            versions: components["schemas"]["ScoringMatrixVersion"][];
+            /** Current Version */
+            current_version?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringPerReasonBucket */
+        ScoringPerReasonBucket: {
+            /** Reason */
+            reason?: string | null;
+            /** N Good */
+            n_good?: number | null;
+            /** N Bad */
+            n_bad?: number | null;
+            /** Min Per Class */
+            min_per_class?: number | null;
+            /** Has Min Samples */
+            has_min_samples?: boolean | null;
+            /** Auc */
+            auc?: number | null;
+            /** Passed */
+            passed?: boolean | null;
+            /** Threshold */
+            threshold?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringPerReasonResponse */
+        ScoringPerReasonResponse: {
+            /**
+             * Buckets
+             * @default []
+             */
+            buckets: components["schemas"]["ScoringPerReasonBucket"][];
+            /** Min Per Class */
+            min_per_class?: number | null;
+            /** Known Reasons */
+            known_reasons?: string[] | null;
+            /** Has Min Samples Overall */
+            has_min_samples_overall?: boolean | null;
+            /** N Good */
+            n_good?: number | null;
+            /** N Bad */
+            n_bad?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ScoringReasonCount */
         ScoringReasonCount: {
             /** Reason */
             reason?: string | null;
             /** Count */
             count?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringRetrainRejected */
+        ScoringRetrainRejected: {
+            /** Too Few Events */
+            too_few_events?: number | null;
+            /** Too Fast */
+            too_fast?: number | null;
+            /** Kept */
+            kept?: number | null;
+            /** Routes Seen */
+            routes_seen?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringRetrainResponse */
+        ScoringRetrainResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Matrix Version */
+            matrix_version?: string | null;
+            /** Since Days */
+            since_days?: number | null;
+            /** Sessions Trained On */
+            sessions_trained_on?: number | null;
+            /** Transitions */
+            transitions?: number | null;
+            /** Vocab Size */
+            vocab_size?: number | null;
+            rejected?: components["schemas"]["ScoringRetrainRejected"] | null;
+            auc_against_labels?: components["schemas"]["ScoringAucAgainstLabels"] | null;
+            /** Default Min Auc */
+            default_min_auc?: number | null;
+            /** Local Matrix Saved */
+            local_matrix_saved?: boolean | null;
+            /** Fos Matrix Published */
+            fos_matrix_published?: boolean | null;
+            /** Matrix Kv Written */
+            matrix_kv_written?: boolean | null;
+            /** Deploy Hint */
+            deploy_hint?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringRotateKeyResponse */
+        ScoringRotateKeyResponse: {
+            /** Ok */
+            ok?: boolean | null;
+            /** Rotated At */
+            rotated_at?: string | null;
+            /** Previous Key Grace */
+            previous_key_grace?: boolean | null;
+            /** Message */
+            message?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -7645,6 +8943,43 @@ export interface components {
             rows: components["schemas"]["ScoringDistributionRow"][];
             /** Since Hours */
             since_hours?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringSessionEvent */
+        ScoringSessionEvent: {
+            /** Ts */
+            ts?: string | null;
+            /** Url */
+            url?: string | null;
+            /** Status */
+            status?: number | null;
+            /** Ip */
+            ip?: string | null;
+            /** Ua */
+            ua?: string | null;
+            /** Edge Score */
+            edge_score?: number | null;
+            /** Edge Cookie Compliance */
+            edge_cookie_compliance?: string | null;
+            /** Edge Score Reason */
+            edge_score_reason?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringSessionEventsResponse */
+        ScoringSessionEventsResponse: {
+            /** Sid */
+            sid?: string | null;
+            /** Since Days */
+            since_days?: number | null;
+            /** Event Count */
+            event_count?: number | null;
+            /**
+             * Events
+             * @default []
+             */
+            events: components["schemas"]["ScoringSessionEvent"][];
         } & {
             [key: string]: unknown;
         };
@@ -7687,6 +9022,20 @@ export interface components {
             precision?: number | null;
             /** Recall */
             recall?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ScoringThresholdState
+         * @description GET and PUT /scoring/threshold both return this exact shape.
+         */
+        ScoringThresholdState: {
+            /** Threshold */
+            threshold?: number | null;
+            /** Set At */
+            set_at?: string | null;
+            /** Enforced */
+            enforced?: boolean | null;
         } & {
             [key: string]: unknown;
         };
@@ -7777,6 +9126,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -7875,6 +9228,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8024,6 +9381,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8096,6 +9457,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8161,6 +9526,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8218,6 +9587,24 @@ export interface components {
              */
             ok: boolean;
         };
+        /** ShareAuditLogsResponse */
+        ShareAuditLogsResponse: {
+            /** Audit Logs */
+            audit_logs?: {
+                [key: string]: unknown;
+            }[] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ShareBannerResponse */
+        ShareBannerResponse: {
+            /** Sharing Active */
+            sharing_active?: boolean | null;
+            /** Public Url */
+            public_url?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ShareClaimResponse */
         ShareClaimResponse: {
             /**
@@ -8246,6 +9633,28 @@ export interface components {
             ok: boolean;
             /** Last Active */
             last_active: string | number;
+        };
+        /**
+         * ShareLiveResponse
+         * @description ``build_share_live_payload()`` — the lean 10-s poll subset.
+         */
+        ShareLiveResponse: {
+            /** Sharing Active */
+            sharing_active?: boolean | null;
+            /** Public Url */
+            public_url?: string | null;
+            /** Active Session Count */
+            active_session_count?: number | null;
+            /** Rate Limits */
+            rate_limits?: {
+                [key: string]: unknown;
+            } | null;
+            /** Telemetry */
+            telemetry?: {
+                [key: string]: unknown;
+            } | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * ShareLoginPayload
@@ -8287,6 +9696,29 @@ export interface components {
              */
             ok: boolean;
         };
+        /** SharePanicResponse */
+        SharePanicResponse: {
+            /** Sessions Booted */
+            sessions_booted?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ShareServiceEntry */
+        ShareServiceEntry: {
+            /** Service Id */
+            service_id?: string | null;
+            /** Name */
+            name?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ShareSettingsResponse */
+        ShareSettingsResponse: {
+            /** Max Concurrent Analyst Sessions */
+            max_concurrent_analyst_sessions?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * ShareStartPayload
          * @description Body for ``POST /api/share-admin/start`` — start the analyst-facing
@@ -8300,6 +9732,67 @@ export interface components {
              * @default 3000
              */
             forward_port: number;
+        };
+        /** ShareStartResponse */
+        ShareStartResponse: {
+            /** Public Url */
+            public_url?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ShareStatusResponse
+         * @description ``build_share_status()``. The high-churn nested collections
+         *     (sessions / audit_logs / rate_limits / telemetry) stay free dicts:
+         *     their shapes are owned by TunnelManager internals and consumed
+         *     generically.
+         */
+        ShareStatusResponse: {
+            /** Sharing Active */
+            sharing_active?: boolean | null;
+            /** Public Endpoint */
+            public_endpoint?: string | null;
+            /** Public Url */
+            public_url?: string | null;
+            /** Forward Port */
+            forward_port?: number | null;
+            /** Started At */
+            started_at?: string | null;
+            /** Max Concurrent Sessions */
+            max_concurrent_sessions?: number | null;
+            /** Active Session Count */
+            active_session_count?: number | null;
+            /** Services */
+            services?: components["schemas"]["ShareServiceEntry"][] | null;
+            /** Invites */
+            invites?: components["schemas"]["InviteRecord"][] | null;
+            /** Sessions */
+            sessions?: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Audit Logs */
+            audit_logs?: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Rate Limits */
+            rate_limits?: {
+                [key: string]: unknown;
+            } | null;
+            /** Telemetry */
+            telemetry?: {
+                [key: string]: unknown;
+            } | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * SharingPolicyPayload
+         * @description Body for ``PATCH /api/share-admin/invites/{id}/sharing`` — toggle
+         *     whether the invite allows shared (concurrent) analyst logins.
+         */
+        SharingPolicyPayload: {
+            /** Allow Concurrent Sessions */
+            allow_concurrent_sessions: boolean;
         };
         /**
          * ShieldingAnalysis
@@ -8394,6 +9887,30 @@ export interface components {
             shield_lon?: number | null;
         };
         /**
+         * SlowQueriesCountResponse
+         * @description Aggregate row-count for the operations-overview card.
+         */
+        SlowQueriesCountResponse: {
+            /** Count */
+            count: number;
+            /** Since Hours */
+            since_hours: number;
+            /** Threshold Ms */
+            threshold_ms: number;
+        };
+        /**
+         * SlowQueriesResponse
+         * @description Persisted slow-SQL history (``GET /api/admin/slow-queries``).
+         */
+        SlowQueriesResponse: {
+            /** Rows */
+            rows: components["schemas"]["CompletedQueryRow"][];
+            /** Since Hours */
+            since_hours: number;
+            /** Threshold Ms */
+            threshold_ms: number;
+        };
+        /**
          * SnapshotResponse
          * @description Incremental snapshot of the in-process query registry.
          *
@@ -8404,13 +9921,9 @@ export interface components {
             /** Last Seq */
             last_seq: number;
             /** Active */
-            active: {
-                [key: string]: unknown;
-            }[];
+            active: components["schemas"]["ActiveQueryRow"][];
             /** Completed */
-            completed: {
-                [key: string]: unknown;
-            }[];
+            completed: components["schemas"]["CompletedQueryRow"][];
         };
         /** SqliteProfilerEntry */
         SqliteProfilerEntry: {
@@ -8497,6 +10010,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8530,6 +10047,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8598,6 +10119,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8625,6 +10150,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8662,6 +10191,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8782,6 +10315,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8798,6 +10335,33 @@ export interface components {
             /** Total */
             total: number;
             aggregate: components["schemas"]["UsageLogAggregate"];
+        };
+        /**
+         * UsageLoggingConfigResponse
+         * @description Merged global usage-logging config (``_USAGE_LOGGING_DEFAULTS`` +
+         *     stored overrides). GET and PATCH both return this shape. The two
+         *     day-count fields are ``int | float`` because the defaults are ints but
+         *     a PATCH body stores floats — smart-union keeps whichever arrives.
+         */
+        UsageLoggingConfigResponse: {
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Retention Days */
+            retention_days?: number | null;
+            /** Class A Rate Per 1K */
+            class_a_rate_per_1k?: number | null;
+            /** Class B Rate Per 10K */
+            class_b_rate_per_10k?: number | null;
+            /** Cdn Egress Rate Per Gb */
+            cdn_egress_rate_per_gb?: number | null;
+            /** Storage Rate Per Gb Month */
+            storage_rate_per_gb_month?: number | null;
+            /** Min Billed Days */
+            min_billed_days?: number | null;
+            /** Track Duckdb Httpfs */
+            track_duckdb_httpfs?: boolean | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * UsageLoggingUpdateBody
@@ -8839,6 +10403,10 @@ export interface components {
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8924,6 +10492,16 @@ export interface components {
             format_length_limit: number;
         };
         /**
+         * ViewSaveResponse
+         * @description Ack from ``POST /api/views/`` — id of the created row.
+         */
+        ViewSaveResponse: {
+            /** Id */
+            id: string;
+            /** Status */
+            status: string;
+        };
+        /**
          * WebVitalsPayload
          * @description Mirrors the web-vitals SDK metric shape (v5 API).
          *
@@ -8952,6 +10530,13 @@ export interface components {
             navigation_type?: string | null;
             /** Delta */
             delta?: number | null;
+        };
+        /** WordphraseResponse */
+        WordphraseResponse: {
+            /** Passcode */
+            passcode?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /** _ToggleBody */
         _ToggleBody: {
@@ -10648,7 +12233,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SavedViewRecord"][];
                 };
             };
             /** @description Bad request */
@@ -10753,7 +12338,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ViewSaveResponse"];
                 };
             };
             /** @description Bad request */
@@ -13148,7 +14733,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ProvisionLakeInfoResponse"];
                 };
             };
             /** @description Bad request */
@@ -13358,7 +14943,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OkMessageResponse"];
                 };
             };
             /** @description Bad request */
@@ -13574,7 +15159,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CronScheduleResponse"];
                 };
             };
             /** @description Bad request */
@@ -13681,7 +15266,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CredentialsUpdateResponse"];
                 };
             };
             /** @description Bad request */
@@ -13994,7 +15579,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["LogFieldsUpdateResponse"];
                 };
             };
             /** @description Bad request */
@@ -15049,7 +16634,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CustomFieldsImportResponse"];
                 };
             };
             /** @description Bad request */
@@ -16456,7 +18041,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OptimizeNowResponse"];
                 };
             };
             /** @description Bad request */
@@ -16563,7 +18148,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["BackfillBundleRollupsResponse"];
                 };
             };
             /** @description Bad request */
@@ -16674,7 +18259,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["LocalCompactNowResponse"];
                 };
             };
             /** @description Bad request */
@@ -16894,7 +18479,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["MetadataRetentionResponse"];
                 };
             };
             /** @description Bad request */
@@ -17001,7 +18586,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["MetadataStorageResponse"];
                 };
             };
             /** @description Bad request */
@@ -19251,7 +20836,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["UsageLoggingConfigResponse"];
                 };
             };
             /** @description Bad request */
@@ -19356,7 +20941,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["UsageLoggingConfigResponse"];
                 };
             };
             /** @description Bad request */
@@ -19577,7 +21162,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OkResponse"];
                 };
             };
             /** @description Bad request */
@@ -20320,9 +21905,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SlowQueriesCountResponse"];
                 };
             };
             /** @description Bad request */
@@ -20435,9 +22018,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SlowQueriesResponse"];
                 };
             };
             /** @description Bad request */
@@ -20540,9 +22121,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ActiveQueryRow"];
                 };
             };
             /** @description Bad request */
@@ -20746,9 +22325,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["QueryMonitorConfigResponse"];
                 };
             };
             /** @description Bad request */
@@ -20956,7 +22533,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ProvisionValidateResponse"];
                 };
             };
             /** @description Bad request */
@@ -21059,7 +22636,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ProvisionCheckDomainResponse"];
                 };
             };
             /** @description Bad request */
@@ -21164,7 +22741,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ProvisionCheckFosResponse"];
                 };
             };
             /** @description Bad request */
@@ -21374,7 +22951,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ProvisionLakeInfoResponse"];
                 };
             };
             /** @description Bad request */
@@ -21584,7 +23161,9 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": {
+                        [key: string]: string;
+                    };
                 };
             };
             /** @description Bad request */
@@ -21794,7 +23373,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ProvisionIngestResponse"];
                 };
             };
             /** @description Bad request */
@@ -21900,7 +23479,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ProvisionCheckConfigResponse"];
                 };
             };
             /** @description Bad request */
@@ -22006,7 +23585,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["NgwafWorkspacesResponse"];
                 };
             };
             /** @description Bad request */
@@ -22119,7 +23698,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["NgwafWorkspaceSetResponse"];
                 };
             };
             /** @description Bad request */
@@ -24031,9 +25610,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringRetrainResponse"];
                 };
             };
             /** @description Bad request */
@@ -24140,9 +25717,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringSessionEventsResponse"];
                 };
             };
             /** @description Bad request */
@@ -24247,9 +25822,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringEnforceThresholdResponse"];
                 };
             };
             /** @description Bad request */
@@ -24361,9 +25934,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringEnforceThresholdPutResponse"];
                 };
             };
             /** @description Bad request */
@@ -24468,9 +26039,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringL2EnforceState"];
                 };
             };
             /** @description Bad request */
@@ -24582,9 +26151,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringL2EnforcePutResponse"];
                 };
             };
             /** @description Bad request */
@@ -24687,9 +26254,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringExcludeRegexState"];
                 };
             };
             /** @description Bad request */
@@ -24801,9 +26366,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringExcludeRegexPutResponse"];
                 };
             };
             /** @description Bad request */
@@ -24910,9 +26473,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringExcludeRegexValidateResponse"];
                 };
             };
             /** @description Bad request */
@@ -25015,9 +26576,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringEnforceStatusCodeState"];
                 };
             };
             /** @description Bad request */
@@ -25129,9 +26688,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringEnforceStatusCodePutResponse"];
                 };
             };
             /** @description Bad request */
@@ -25234,9 +26791,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringMatrixVersionsResponse"];
                 };
             };
             /** @description Bad request */
@@ -25344,9 +26899,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringMatrixRestoreResponse"];
                 };
             };
             /** @description Bad request */
@@ -25451,9 +27004,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringRotateKeyResponse"];
                 };
             };
             /** @description Bad request */
@@ -25560,9 +27111,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringAuditListResponse"];
                 };
             };
             /** @description Bad request */
@@ -25665,9 +27214,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringThresholdState"];
                 };
             };
             /** @description Bad request */
@@ -25774,9 +27321,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringThresholdState"];
                 };
             };
             /** @description Bad request */
@@ -25879,9 +27424,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringPerReasonResponse"];
                 };
             };
             /** @description Bad request */
@@ -25988,9 +27531,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringDashboardResponse"];
                 };
             };
             /** @description Bad request */
@@ -26297,6 +27838,107 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    share_auth_config_api_share_auth_config_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthConfigResponse"];
                 };
             };
             /** @description Bad request */
@@ -26998,6 +28640,215 @@ export interface operations {
             };
         };
     };
+    oauth_authorize_api_share_oauth_authorize_get: {
+        parameters: {
+            query: {
+                provider: string;
+                return?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    oauth_callback_api_share_oauth_callback_get: {
+        parameters: {
+            query?: {
+                code?: string | null;
+                state?: string | null;
+                error?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     share_banner_api_admin_share_banner_get: {
         parameters: {
             query?: never;
@@ -27013,7 +28864,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ShareBannerResponse"];
                 };
             };
             /** @description Bad request */
@@ -27114,7 +28965,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ShareStatusResponse"];
                 };
             };
             /** @description Bad request */
@@ -27215,7 +29066,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ShareLiveResponse"];
                 };
             };
             /** @description Bad request */
@@ -27322,7 +29173,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ShareAuditLogsResponse"];
                 };
             };
             /** @description Bad request */
@@ -27427,7 +29278,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ShareStartResponse"];
                 };
             };
             /** @description Bad request */
@@ -27528,7 +29379,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OkResponse"];
                 };
             };
             /** @description Bad request */
@@ -27629,7 +29480,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SharePanicResponse"];
                 };
             };
             /** @description Bad request */
@@ -27734,7 +29585,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["InviteRecord"];
                 };
             };
             /** @description Bad request */
@@ -27841,7 +29692,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["InviteRecord"];
                 };
             };
             /** @description Bad request */
@@ -27948,7 +29799,114 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["InviteRecord"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    update_invite_sharing_api_admin_share_invites__invite_id__sharing_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                invite_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SharingPolicyPayload"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InviteRecord"];
                 };
             };
             /** @description Bad request */
@@ -28055,7 +30013,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OkResponse"];
                 };
             };
             /** @description Bad request */
@@ -28158,7 +30116,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["InviteMutationAck"];
                 };
             };
             /** @description Bad request */
@@ -28261,7 +30219,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["InviteMutationAck"];
                 };
             };
             /** @description Bad request */
@@ -28364,7 +30322,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ClaimTokenResponse"];
                 };
             };
             /** @description Bad request */
@@ -28467,7 +30425,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OkResponse"];
                 };
             };
             /** @description Bad request */
@@ -28677,7 +30635,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["BackupImportResponse"];
                 };
             };
             /** @description Bad request */
@@ -28782,7 +30740,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["GdprEraseResponse"];
                 };
             };
             /** @description Bad request */
@@ -28887,7 +30845,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ShareSettingsResponse"];
                 };
             };
             /** @description Bad request */
@@ -28988,7 +30946,108 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WordphraseResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    oauth_providers_api_admin_share_oauth_providers_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthProvidersResponse"];
                 };
             };
             /** @description Bad request */

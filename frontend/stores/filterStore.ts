@@ -118,7 +118,7 @@ export const useFilterStore = create<FilterState>((set) => ({
   addFilter: (column, value, mode) => set((state) => {
     // Reject column names matching /_\d+$/. buildFiltersPayload uses
     // `_<n>` as a dedup suffix when the same column needs both include
-    // and exclude buckets, and useFilterUrlSync strips that suffix on
+    // and exclude buckets, and hydrateFilterStoreFromUrl (lib/urlFilterHydration.ts) strips that suffix on
     // URL hydration. A column literally ending in `_<digit>` (e.g.
     // `response_1`) would be silently corrupted on round-trip. The
     // field catalog (source schema) is the source of truth for column

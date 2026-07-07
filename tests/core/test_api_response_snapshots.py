@@ -28,7 +28,7 @@ def _strip_volatile(payload: dict) -> dict:
     # Telemetry envelope keys are present in tests via the
     # DEBUG_RESPONSES_FORCE_INCLUDE escape hatch in conftest. The values
     # are run-specific; strip them so the snapshot stays stable.
-    for key in ("_debug_queries", "_debug_calls", "_section_timings", "_is_cached"):
+    for key in ("_debug_queries", "_debug_calls", "_debug_sqlite", "_section_timings", "_is_cached"):
         out.pop(key, None)
     if isinstance(out.get("version"), str):
         # `_health` includes the app version — pinning it would re-snap

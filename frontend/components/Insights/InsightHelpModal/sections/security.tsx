@@ -13,6 +13,7 @@ import {
   Clock,
   Lock,
   Bot,
+  KeyRound,
 } from 'lucide-react'
 import type { InsightContent } from '../types'
 
@@ -29,7 +30,7 @@ export function getSecurityContent(id: string): InsightContent | null {
             <ul className="space-y-3 list-none pl-0">
               <li className="flex gap-3">
                 <MapPin className="h-5 w-5 shrink-0 text-blue-500" />
-                <span><strong>The Claim:</strong> We check the geographical location the user's IP address claims to be from, and calculate the distance to the exact Fastly datacenter they connected to.</span>
+                <span><strong>The Claim:</strong> We check the geographical location the user&apos;s IP address claims to be from, and calculate the distance to the exact Fastly datacenter they connected to.</span>
               </li>
               <li className="flex gap-3">
                 <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
@@ -85,7 +86,7 @@ export function getSecurityContent(id: string): InsightContent | null {
             <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
               <li className="flex gap-3">
                 <Activity className="h-5 w-5 shrink-0 text-blue-500" />
-                <span><strong>Baseline Comparison:</strong> We calculate the "normal" percentage of traffic for each User-Agent over your selected baseline period.</span>
+                <span><strong>Baseline Comparison:</strong> We calculate the &quot;normal&quot; percentage of traffic for each User-Agent over your selected baseline period.</span>
               </li>
               <li className="flex gap-3">
                 <Fingerprint className="h-5 w-5 shrink-0 text-yellow-500" />
@@ -107,7 +108,7 @@ export function getSecurityContent(id: string): InsightContent | null {
         fields: ['url'],
         description: (
           <div className="space-y-4">
-            <p>Flags requests to "sensitive" paths that have never appeared in your logs before today.</p>
+            <p>Flags requests to &quot;sensitive&quot; paths that have never appeared in your logs before today.</p>
             <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
               <li className="flex gap-3">
                 <Clock className="h-5 w-5 shrink-0 text-blue-500" />
@@ -115,7 +116,7 @@ export function getSecurityContent(id: string): InsightContent | null {
               </li>
               <li className="flex gap-3">
                 <Search className="h-5 w-5 shrink-0 text-yellow-500" />
-                <span><strong>Vulnerability Patterns:</strong> We specifically look for "new" URLs containing patterns like <code>/admin</code>, <code>.env</code>, <code>wp-login.php</code>, or <code>config.json</code>.</span>
+                <span><strong>Vulnerability Patterns:</strong> We specifically look for &quot;new&quot; URLs containing patterns like <code>/admin</code>, <code>.env</code>, <code>wp-login.php</code>, or <code>config.json</code>.</span>
               </li>
               <li className="flex gap-3">
                 <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
@@ -159,11 +160,11 @@ export function getSecurityContent(id: string): InsightContent | null {
             <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
               <li className="flex gap-3">
                 <MapPin className="h-5 w-5 shrink-0 text-blue-500" />
-                <span><strong>Proxy Metadata:</strong> Powered by Fastly's real-time Geolocation metadata which identifies the "type" of IP address (hosting, vpn, proxy, tor).</span>
+                <span><strong>Proxy Metadata:</strong> Powered by Fastly&apos;s real-time Geolocation metadata which identifies the &quot;type&quot; of IP address (hosting, vpn, proxy, tor).</span>
               </li>
               <li className="flex gap-3">
                 <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
-                <span><strong>Volume Check:</strong> We flag when these "anonymous" traffic types suddenly account for a larger-than-normal percentage of your overall requests.</span>
+                <span><strong>Volume Check:</strong> We flag when these &quot;anonymous&quot; traffic types suddenly account for a larger-than-normal percentage of your overall requests.</span>
               </li>
             </ul>
           </div>
@@ -208,6 +209,58 @@ export function getSecurityContent(id: string): InsightContent | null {
               <li className="flex gap-3">
                 <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
                 <span><strong>Evasion Tactics:</strong> Flags traffic that generates a small but steady stream of errors over hours or days, bypassing standard WAF velocity rules.</span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'credential_enumeration':
+      return {
+        title: 'Credential Enumeration / Brute Force',
+        icon: <KeyRound className="h-5 w-5 text-primary" />,
+        fields: ['ip', 'url', 'status'],
+        description: (
+          <div className="space-y-4">
+            <p>Detects spikes of authentication failures (<code>401</code> / <code>403</code>) concentrated on login and identity paths — the fingerprint of credential stuffing and brute-force attempts.</p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <KeyRound className="h-5 w-5 shrink-0 text-blue-500" />
+                <span><strong>Auth path focus:</strong> We isolate requests to sensitive endpoints such as <code>/login</code>, <code>/auth</code>, <code>/oauth</code>, and <code>/password-reset</code>, where a burst of rejected credentials is meaningful rather than noise.</span>
+              </li>
+              <li className="flex gap-3">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span><strong>Failure-rate spike:</strong> We flag when the volume of <code>401</code>/<code>403</code> responses on those paths jumps well above the historical baseline — a single IP hammering a login, or many IPs replaying leaked credential lists.</span>
+              </li>
+              <li className="flex gap-3">
+                <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
+                <span><strong>Intent:</strong> Attackers cycle through username/password pairs looking for a valid one. A sudden cluster of auth failures is the earliest signal of an account-takeover campaign in progress.</span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'content_discovery':
+      return {
+        title: 'Content-Discovery Scanning',
+        icon: <Search className="h-5 w-5 text-primary" />,
+        fields: ['ip', 'url', 'status'],
+        description: (
+          <div className="space-y-4">
+            <p>Detects a single IP generating a burst of <code>404 Not Found</code> responses across many <em>distinct</em> URLs — the fingerprint of directory and endpoint enumeration probing for hidden or vulnerable paths.</p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Search className="h-5 w-5 shrink-0 text-blue-500" />
+                <span><strong>Breadth, not one broken link:</strong> We require many distinct 404 URLs from the same IP, so a single stale asset or a bad deploy won&apos;t trip the card — only a client sweeping the URL space does.</span>
+              </li>
+              <li className="flex gap-3">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span><strong>404-dominated traffic:</strong> We flag IPs whose window traffic is overwhelmingly 404s, the signature of a scanner walking a wordlist rather than a user browsing real pages.</span>
+              </li>
+              <li className="flex gap-3">
+                <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
+                <span><strong>Intent:</strong> Attackers enumerate paths (<code>/.git</code>, <code>/admin</code>, backup files, API routes) to find something the app never meant to expose. A 404 sweep is reconnaissance that usually precedes a targeted exploit.</span>
               </li>
             </ul>
           </div>
@@ -266,6 +319,32 @@ export function getSecurityContent(id: string): InsightContent | null {
                 ))}
               </div>
             </div>
+          </div>
+        )
+      }
+
+    case 'session_harvesting':
+      return {
+        title: 'Session-ID Harvesting',
+        icon: <KeyRound className="h-5 w-5 text-primary" />,
+        fields: ['ip', 'cookie_session'],
+        description: (
+          <div className="space-y-4">
+            <p>Flags a single IP presenting a large, spiking number of <em>distinct</em> session cookies — the fingerprint of session-token brute forcing, cookie replay, or credential stuffing that mints a fresh session per attempt.</p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Fingerprint className="h-5 w-5 shrink-0 text-blue-500" />
+                <span><strong>Hashed at the edge:</strong> the session cookie is SHA-256 hashed at the true edge before it ever reaches storage — we only ever <em>count distinct</em> hashes per IP, never store or show a raw session token.</span>
+              </li>
+              <li className="flex gap-3">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span><strong>Rotation spike:</strong> a normal client reuses one session for many requests. An IP cycling through dozens of distinct sessions in the window, far above its baseline, is enumerating or replaying tokens.</span>
+              </li>
+              <li className="flex gap-3">
+                <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
+                <span><strong>Privacy:</strong> the client IP on this card is masked for analysts (like every IP-keyed insight), and the session hash itself is never surfaced.</span>
+              </li>
+            </ul>
           </div>
         )
       }

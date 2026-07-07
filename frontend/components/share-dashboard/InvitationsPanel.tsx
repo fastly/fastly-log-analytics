@@ -23,8 +23,9 @@ import {
 import { client, extractApiError } from '@/lib/api'
 
 import { CreateInviteDialog } from './CreateInviteDialog'
+import { SortableHead, useTableSort, type SortAccessors } from './sortable'
 import { useShareMutation } from './useShareMutation'
-import { formatStamp, type ShareStatus } from './utils'
+import { formatStamp, type Invite, type ShareStatus } from './utils'
 
 interface InvitationsPanelProps {
   status: ShareStatus | null
@@ -48,6 +49,13 @@ function buildShareCard(
     return name ? `${name} (${id})` : id
   })
   const services = formatted.length ? formatted.join(', ') : 'all assigned services'
+  // Auth-method-aware hand-off: an OAuth invite has NOTHING secret to transmit
+  // — the analyst just signs in with the matching account (design §5.1).
+  const credLines =
+    invite.auth_method === 'oauth'
+      ? `Sign-in:      ${invite.oauth_provider ? `${invite.oauth_provider} (SSO)` : 'SSO'}
+              Sign in at the link with the account for ${invite.email}.`
+      : `Passcode:     (delivered separately — never paste here)`
   return `==================================================
 FASTLY LOG ANALYSIS - SHARE DASHBOARD INVITATION
 ==================================================
@@ -55,7 +63,7 @@ You have been invited to view the analyst dashboard.
 
 Access Link:  ${url}/share-login
 Login Email:  ${invite.email}
-Passcode:     (delivered separately — never paste here)
+${credLines}
 Authorized Services: ${services}
 Valid Until:  ${invite.expires_at ? new Date(invite.expires_at).toUTCString() : 'Unlimited'}
 ==================================================`
@@ -69,6 +77,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
   const [editingServicesFor, setEditingServicesFor] = React.useState<string | null>(null)
   const [editingServicesDraft, setEditingServicesDraft] = React.useState<string[]>([])
   const [editingMaskIps, setEditingMaskIps] = React.useState(false)
+  const [editingAllowConcurrent, setEditingAllowConcurrent] = React.useState(false)
   const [savingServices, setSavingServices] = React.useState(false)
   const [editingPasscodeFor, setEditingPasscodeFor] = React.useState<string | null>(null)
   const [passcodeDraft, setPasscodeDraft] = React.useState('')
@@ -79,6 +88,33 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
 
   const services = status?.services || []
   const invites = status?.invites || []
+
+  // "Online now": an invite is live if it has a current session. Match on the
+  // exact invite_id the session carries (email would be looser).
+  const onlineInviteIds = React.useMemo(
+    () => new Set((status?.sessions || []).map((s) => s.invite_id)),
+    [status?.sessions],
+  )
+
+  // service_id -> display name, so the Services column can show "Name (id)".
+  const svcNameById = React.useMemo(
+    () => new Map(services.map((s) => [s.service_id, s.name])),
+    [services],
+  )
+
+  const accessors = React.useMemo<SortAccessors<Invite>>(
+    () => ({
+      name: (i) => (i.name || '').toLowerCase(),
+      email: (i) => (i.email || '').toLowerCase(),
+      last_login_at: (i) => i.last_login_at ?? null,
+      expires_at: (i) => i.expires_at ?? null,
+    }),
+    [],
+  )
+  const { sorted, sortKey, sortDir, toggle } = useTableSort(invites, accessors, {
+    defaultKey: 'last_login_at',
+    defaultDir: 'desc',
+  })
 
   const handleRevokeInvite = (id: string) => {
     if (!confirm('Delete this invite and boot any sessions linked to it? This cannot be undone.')) return
@@ -97,6 +133,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     setEditingServicesFor(invite.id)
     setEditingServicesDraft(invite.service_ids || [])
     setEditingMaskIps(!!invite.pii_policy?.mask_ips)
+    setEditingAllowConcurrent(!!invite.allow_concurrent_sessions)
   }
 
   const handleSaveServices = async (inviteId: string) => {
@@ -110,6 +147,10 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
       await client.PATCH('/api/admin/share/invites/{invite_id}/pii', {
         params: { path: { invite_id: inviteId } },
         body: { mask_ips: editingMaskIps },
+      })
+      await client.PATCH('/api/admin/share/invites/{invite_id}/sharing', {
+        params: { path: { invite_id: inviteId } },
+        body: { allow_concurrent_sessions: editingAllowConcurrent },
       })
       setEditingServicesFor(null)
       await onRefresh()
@@ -170,18 +211,45 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Name</TableHead>
-            <TableHead>Email</TableHead>
+            <SortableHead label="Name" sortKey="name" activeKey={sortKey} dir={sortDir} onSort={toggle} />
+            <SortableHead label="Email" sortKey="email" activeKey={sortKey} dir={sortDir} onSort={toggle} />
+            <SortableHead label="Last login" sortKey="last_login_at" activeKey={sortKey} dir={sortDir} onSort={toggle} />
             <TableHead>Services</TableHead>
-            <TableHead>Expires</TableHead>
+            <SortableHead label="Expires" sortKey="expires_at" activeKey={sortKey} dir={sortDir} onSort={toggle} />
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {invites.map((invite: any) => (
+          {sorted.map((invite: Invite) => {
+            const online = onlineInviteIds.has(invite.id)
+            return (
             <TableRow key={invite.id}>
               <TableCell className="font-medium">
-                <div>{invite.name}</div>
+                <div className="flex items-center gap-1.5">
+                  {online && (
+                    <span
+                      className="h-2 w-2 rounded-full bg-emerald-500 shrink-0 animate-pulse"
+                      role="img"
+                      title="Online now (has an active session)"
+                      aria-label="Online now"
+                    />
+                  )}
+                  <span>{invite.name}</span>
+                  <Badge
+                    variant="outline"
+                    className="text-[10px] font-normal"
+                    title={invite.auth_method === 'oauth' ? 'Signs in via SSO / OIDC' : 'Signs in with a passcode'}
+                  >
+                    {invite.auth_method === 'oauth'
+                      ? `SSO${invite.oauth_provider ? ` · ${invite.oauth_provider}` : ''}`
+                      : 'Passcode'}
+                  </Badge>
+                  {invite.allow_concurrent_sessions && (
+                    <Badge variant="outline" className="text-[10px] font-normal" title="Multiple people can use this link at the same time">
+                      Shared
+                    </Badge>
+                  )}
+                </div>
                 {onViewAuditLogs && (
                   <button
                     type="button"
@@ -194,12 +262,33 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                 )}
               </TableCell>
               <TableCell className="text-xs">{invite.email}</TableCell>
+              <TableCell className="text-xs whitespace-nowrap">
+                {invite.last_login_at ? (
+                  formatStamp(invite.last_login_at)
+                ) : (
+                  <span className="text-muted-foreground">Never</span>
+                )}
+              </TableCell>
               <TableCell className="text-xs">
-                {(invite.service_ids || []).map((s: string) => (
-                  <Badge key={s} variant="secondary" className="mr-1 text-[10px]">
-                    {s}
-                  </Badge>
-                ))}
+                {(invite.service_ids || []).map((s: string) => {
+                  const nm = svcNameById.get(s)
+                  return (
+                    <Badge
+                      key={s}
+                      variant="secondary"
+                      className="mr-1 mb-1 text-[10px]"
+                      title={nm ? `${nm} (${s})` : s}
+                    >
+                      {nm ? (
+                        <>
+                          {nm} <span className="opacity-60">({s})</span>
+                        </>
+                      ) : (
+                        s
+                      )}
+                    </Badge>
+                  )
+                })}
               </TableCell>
               <TableCell className="text-xs">{formatStamp(invite.expires_at)}</TableCell>
               <TableCell className="text-right space-x-1">
@@ -267,7 +356,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                         {...props}
                         size="sm"
                         variant="ghost"
-                        title="Edit invite (services + privacy)"
+                        title="Edit invite (services, privacy, shared logins)"
                       >
                         <Pencil className="h-3 w-3" />
                       </Button>
@@ -308,6 +397,13 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                       />
                       <span>Anonymize client IPs (mask PII)</span>
                     </label>
+                    <label className="flex items-center gap-2 text-sm cursor-pointer pt-2 mt-2 border-t">
+                      <Checkbox
+                        checked={editingAllowConcurrent}
+                        onCheckedChange={(v) => setEditingAllowConcurrent(!!v)}
+                      />
+                      <span>Allow shared logins (multiple people at once)</span>
+                    </label>
                     <div className="flex justify-end gap-1 pt-2 border-t">
                       <Button
                         size="sm"
@@ -328,6 +424,9 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                     </div>
                   </PopoverContent>
                 </Popover>
+                {/* Regenerate-passcode is meaningless for OAuth invites (they
+                    have no passcode) — hide it entirely, not just disable it. */}
+                {invite.auth_method !== 'oauth' && (
                 <Popover
                   open={editingPasscodeFor === invite.id}
                   onOpenChange={(o) =>
@@ -404,6 +503,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                     </div>
                   </PopoverContent>
                 </Popover>
+                )}
                 <Button
                   size="sm"
                   variant="ghost"
@@ -415,10 +515,11 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                 </Button>
               </TableCell>
             </TableRow>
-          ))}
+            )
+          })}
           {!invites.length && (
             <TableRow>
-              <TableCell colSpan={5} className="text-center text-xs text-muted-foreground">
+              <TableCell colSpan={6} className="text-center text-xs text-muted-foreground">
                 No invitations yet.
               </TableCell>
             </TableRow>

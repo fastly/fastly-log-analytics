@@ -586,21 +586,24 @@ def test_on_demand_session_rehydration(client):
 # ── L2 / L3: login-failure counter reset + audit-email sanitisation ──────────
 
 
-def test_login_success_clears_login_failures(client, monkeypatch):
-    """L2: a successful login resets the per-IP failure counter
-    (clear_login_failures previously had no caller → lockout-after-success)."""
+def test_login_success_does_not_clear_login_failures(client, monkeypatch):
+    """A successful login must NOT reset the per-IP failure counter —
+    otherwise an attacker with one valid credential can interleave valid
+    logins to keep the counter below the lockout threshold while brute-
+    forcing a victim's passcode indefinitely (finding 016)."""
     _activate_share()
     _seed_invite(email="l2@example.com")
     mgr = tunnel.get_tunnel_manager()
-    cleared: list[str] = []
-    monkeypatch.setattr(mgr, "clear_login_failures", lambda ip: cleared.append(ip))
+    rl = mgr._rate_limiter
+    ip = "127.0.0.1"
+    rl.record_failure(ip)
     r = client.post(
         "/api/share/login",
         json={"email": "l2@example.com", "passcode": "ocean-breeze-cabin-42"},
         headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
     )
     assert r.status_code == 200, r.text
-    assert cleared, "clear_login_failures should fire on a successful login"
+    assert rl._failures.get(ip), "failure counter must persist after a successful login"
 
 
 def test_safe_audit_email_sanitizes_and_bounds():

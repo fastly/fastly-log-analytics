@@ -21,7 +21,7 @@ function rangeLabelToHours(label: string): number | null {
 // Called from <UrlFilterHydrator> inside QueryProvider via a useState
 // lazy initializer, so the store reflects URL params BEFORE any page-
 // level hook reads from it on first paint. Without this, the URL→store
-// sync lives in useFilterUrlSync's useEffect — which fires AFTER first
+// sync lives in useFilterUrlWriteback's useEffect — which fires AFTER first
 // render — so the client's first React Query keys use store DEFAULTS
 // instead of URL params, causing any SSR'd cache keyed on URL params to
 // miss (and the cache hit only fires on the subsequent re-render).
@@ -33,7 +33,7 @@ function rangeLabelToHours(label: string): number | null {
 //   - ``?filter_<col>=<val>`` (legacy short form, dashboard CTA links)
 //
 // After applying, the URL params are STRIPPED from window.history so
-// the per-page ``useUrlFilterSync`` effect (which fires AFTER mount)
+// the per-page ``useViewMetricUrlSync`` effect (which fires AFTER mount)
 // doesn't re-apply them. Without the strip, that effect's
 // ``clearFilters()`` + re-add re-rendered the store and forced
 // every consumer's first React Query to re-key — the cancelled-
@@ -108,7 +108,7 @@ export function hydrateFilterStoreFromUrl(): void {
 
   if (touchedRange || touchedFilters) {
     // Strip the consumed params from the URL so the post-mount
-    // useUrlFilterSync effect doesn't re-apply them on top of the
+    // useViewMetricUrlSync effect doesn't re-apply them on top of the
     // store state we just populated.
     const url = new URL(window.location.href)
     url.searchParams.delete('range')

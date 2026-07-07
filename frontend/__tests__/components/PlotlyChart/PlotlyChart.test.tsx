@@ -12,6 +12,8 @@ import { act, render, screen } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import React from 'react'
 
+import { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
+
 // Capture every Plot render so each test can pull its most recent props.
 const plotCalls: any[] = []
 
@@ -60,14 +62,8 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', MockResizeObserver as any)
 })
 
-async function importPlotlyChart() {
-  const mod = await import('@/components/PlotlyChart/PlotlyChart')
-  return mod.PlotlyChart
-}
-
 describe('PlotlyChart', () => {
   it('withholds the Plot subtree until IntersectionObserver fires isIntersecting', async () => {
-    const PlotlyChart = await importPlotlyChart()
     render(<PlotlyChart data={[]} a11yTitle="x" />)
     expect(screen.queryByTestId('plot-stub')).toBeNull()
     // Simulate the observer callback flipping the gate.
@@ -79,7 +75,6 @@ describe('PlotlyChart', () => {
   })
 
   it('lets caller layout overrides win for legend and xaxis fields', async () => {
-    const PlotlyChart = await importPlotlyChart()
     render(
       <PlotlyChart
         data={[{ x: [1], y: [1] }]}
@@ -100,8 +95,7 @@ describe('PlotlyChart', () => {
     expect(props.layout.yaxis.title).toBe('count')
   })
 
-  it('always renders the ChartA11yTable companion alongside the chart', async () => {
-    const PlotlyChart = await importPlotlyChart()
+  it('always renders the ChartA11yTable companion alongside the chart', () => {
     const data = [{ x: ['a', 'b'], y: [1, 2], name: 'series' }]
     render(<PlotlyChart data={data} a11yTitle="My A11y Caption" />)
     // The table renders even before the chart visibility gate flips.
@@ -112,7 +106,6 @@ describe('PlotlyChart', () => {
   })
 
   it('forwards onRelayout via the graphDiv listener path when initialized', async () => {
-    const PlotlyChart = await importPlotlyChart()
     const onRelayout = vi.fn()
     render(<PlotlyChart data={[]} onRelayout={onRelayout} a11yTitle="x" />)
     await act(async () => { lastIOCallback!([{ isIntersecting: true }]) })
@@ -134,7 +127,6 @@ describe('PlotlyChart', () => {
   })
 
   it('applies default config and forwards onUpdate prop straight through', async () => {
-    const PlotlyChart = await importPlotlyChart()
     const onUpdate = vi.fn()
     render(<PlotlyChart data={[]} onUpdate={onUpdate} a11yTitle="x" />)
     await act(async () => { lastIOCallback!([{ isIntersecting: true }]) })

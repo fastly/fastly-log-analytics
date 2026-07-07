@@ -492,7 +492,41 @@ def get_top_bots(
     if ngwaf_attached and "waf_req_id" in actual_cols:
         cols_needed.append("waf_req_id")
 
-    if cols_needed:
+    if cols_needed == ["waf_req_id"]:
+        # The UA branch was rollup-served, so the NGWAF join would be the
+        # temp's ONLY consumer — materializing the window's waf_req_ids
+        # (318ms of the 2026-07-06 24h trace) to probe them once is pure
+        # overhead.
+        #
+        # Rollup fast path first: the per-hour ngwaf_bots parquets carry the
+        # write-time (waf_req_id ⨝ bot cache) aggregation, so eligible
+        # unfiltered windows skip even the single direct join (~115ms on
+        # prod 24h). Falls back to the direct base-table join on any miss —
+        # one scan, no materialization, same result (the IS NOT NULL floor
+        # in the template matches the INNER JOIN semantics).
+        rolled_ngwaf: list[dict] | None = None
+        if use_rollups:
+            _t = _time.perf_counter()
+            try:
+                rolled_ngwaf = runner.try_ngwaf_top_bots_from_rollup(
+                    start_time, end_time, has_filters=bool(filters), n=n
+                )
+            except Exception as e:
+                logging.getLogger(__name__).warning("[security] ngwaf_bots rollup read failed, falling back: %s", e)
+                rolled_ngwaf = None
+            timer.mark("top_bots:ngwaf_rollup", _t)
+        if rolled_ngwaf is not None:
+            ngwaf_bots = rolled_ngwaf
+        else:
+            try:
+                _t = _time.perf_counter()
+                q = SQL.NGWAF_TOP_BOTS_JOIN_DIRECT.format(table_name=table_name, where_clause=where_clause, n=n)
+                res = runner.execute(q, params).fetchall()
+                ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
+                timer.mark("top_bots:ngwaf_join_direct", _t)
+            except Exception as e:
+                logging.getLogger(__name__).error("[security] NGWAF top bots failed: %s", e)
+    elif cols_needed:
         _t = _time.perf_counter()
         with runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params) as temp_table:
             timer.mark("top_bots:temp_table_create", _t)

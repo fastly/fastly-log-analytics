@@ -39,6 +39,18 @@ Group IDs
     J     WAF / NGWAF
     K     QUIC / HTTP3
     L     Origin Metrics
+
+Opt-in (``default_off``) fields
+-------------------------------
+A field may carry ``"default_off": True`` in its catalog entry. Such a field
+is EXCLUDED from ``resolve_enabled_fields`` even when its group is enabled;
+it is emitted ONLY when explicitly turned on through the per-field override
+mechanism (``field_overrides[id] = True`` — the admin log-fields toggle or
+the provisioning ``--enable-field``). This is the deliberate-opt-in gate for
+sensitive captures such as ``cookie_session`` (a stable per-session client
+identifier): selecting the security/full preset must NOT silently start
+hashing+storing session cookies. The flag is general — add it to any future
+field that should require an explicit operator choice.
 """
 
 import hashlib
@@ -167,9 +179,25 @@ from backend.core._log_fields_data import (  # noqa: F401
     PRESETS,
 )
 
+# Opt-in field IDs: fields flagged ``default_off`` in the catalog are excluded
+# from ``resolve_enabled_fields`` even when their group is on, and emit only
+# when explicitly opted in via ``field_overrides``. Frozen at import time; the
+# catalog is a module-level literal so this never needs re-computing.
+DEFAULT_OFF_FIELD_IDS: frozenset[str] = frozenset(f["id"] for f in LOG_FIELD_CATALOG if f.get("default_off"))
+
 
 def resolve_enabled_fields(cfg: dict) -> set:
-    """Expand group selections and per-field overrides into a flat set of enabled field IDs."""
+    """Expand group selections and per-field overrides into a flat set of enabled field IDs.
+
+    Opt-in fields (``default_off``): a field flagged ``default_off`` in the
+    catalog is NOT auto-included by its group. It is emitted only when the
+    config explicitly opts it in via ``field_overrides[id] = True``. This is
+    the deliberate-opt-in gate for sensitive captures (e.g. ``cookie_session``,
+    a per-session client identifier) so that enabling a group / preset does
+    not silently start collecting them. Everything else is unchanged: normal
+    group fields are auto-enabled, and ``field_overrides`` can force any field
+    on (True) or off (False) regardless of its group.
+    """
     if cfg is None:
         # Default to standard groups if no config provided
         cfg = {"groups": PRESETS["standard"]["groups"], "field_overrides": {}}
@@ -190,10 +218,13 @@ def resolve_enabled_fields(cfg: dict) -> set:
                 changed = True
 
     for field in LOG_FIELD_CATALOG:
-        if field["group"] in enabled_groups:
+        # ``default_off`` fields are opt-in: skip them during group expansion.
+        # An explicit ``field_overrides[id] = True`` below still turns them on.
+        if field["group"] in enabled_groups and field["id"] not in DEFAULT_OFF_FIELD_IDS:
             enabled.add(field["id"])
 
-    # Apply per-field overrides
+    # Apply per-field overrides. This is the sole path that can enable a
+    # ``default_off`` field — an explicit opt-in wins over the skip above.
     for field_id, on in cfg.get("field_overrides", {}).items():
         if on:
             enabled.add(field_id)
@@ -266,7 +297,7 @@ def generate_log_format(log_fields_config: dict) -> str:
                 limit = max(0, min(limit, budget))
                 budget -= limit
                 # Overwrite the static substr limit in the built-in VCL
-                vcl = vcl.replace("substr(req.url, 0, 2000)", f"substr(req.url, 0, {limit})")
+                vcl = vcl.replace("substr(req.url, 0, 2000)", f"substr(req.url, 0, {limit // 6})")
             elif field["id"] == "ua":
                 # Security: keep the substr cap even when generating the
                 # alternative VCL variant. The edge-side substr (in vcl_recv)
@@ -281,7 +312,7 @@ def generate_log_format(log_fields_config: dict) -> str:
                 budget -= ua_limit
                 vcl = (
                     f'"ua":"%{{json.escape(substr(if(req.http.x-fos-edge-data:ua != "",'
-                    f' req.http.x-fos-edge-data:ua, req.http.User-Agent), 0, {ua_limit}))}}V"'
+                    f' req.http.x-fos-edge-data:ua, req.http.User-Agent), 0, {ua_limit // 6}))}}V"'
                 )
             elif field["id"] == "referer":
                 # Same reasoning as above — keep the substr cap.
@@ -290,7 +321,7 @@ def generate_log_format(log_fields_config: dict) -> str:
                 budget -= ref_limit
                 vcl = (
                     f'"referer":"%{{json.escape(substr(if(req.http.x-fos-edge-data:referer != "",'
-                    f' req.http.x-fos-edge-data:referer, req.http.Referer), 0, {ref_limit}))}}V"'
+                    f' req.http.x-fos-edge-data:referer, req.http.Referer), 0, {ref_limit // 6}))}}V"'
                 )
 
             parts.append(vcl)
@@ -347,7 +378,7 @@ def generate_log_format(log_fields_config: dict) -> str:
                 # whole entry. The substr is INSIDE json.escape so the
                 # encoded length stays bounded.
                 vcl_macro = (
-                    f'json.escape(if(fastly.ff.visits_this_service == 0, substr({raw_expr}, 0, {cf_limit}), ""))'
+                    f'json.escape(if(fastly.ff.visits_this_service == 0, substr({raw_expr}, 0, {cf_limit // 6}), ""))'
                 )
                 entry = f'"{name}":"%{{{vcl_macro}}}V"'
             parts.append(entry)
@@ -489,6 +520,10 @@ def get_catalog_for_api(field_limits: dict[str, int] | None = None) -> list:
         }
         if f.get("individually_toggleable"):
             entry["individually_toggleable"] = True
+        if f.get("default_off"):
+            # Opt-in field: the admin UI renders it OFF even when its group is
+            # enabled, requiring an explicit toggle to start collecting it.
+            entry["default_off"] = True
         if f.get("note"):
             entry["note"] = f["note"]
 

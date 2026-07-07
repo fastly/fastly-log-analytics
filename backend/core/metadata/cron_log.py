@@ -10,12 +10,13 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import statistics
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from backend.core.metadata.base import _ORPHAN_THRESHOLD_MINS, _TASK_ORPHAN_THRESHOLD_MINS, get_con
-from backend.utils.date_utils import iso_z, iso_z_now
+from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -595,6 +596,53 @@ def latest_cron_per_task(service_id: str) -> dict[str, dict]:
         }
         for r in rows
     }
+
+
+def adaptive_stale_minutes(
+    con: sqlite3.Connection,
+    *,
+    default_minutes: int,
+    min_samples: int = 10,
+    percentile: float = 0.95,
+    safety_multiplier: float = 2.0,
+    max_minutes: int = 1440,
+) -> int:
+    """SRE-22: widen (never narrow) ``default_minutes`` to this service's own
+    p95 gap between non-empty ingests, so a low-traffic service's organic
+    quiet periods don't trip ``/api/health``'s staleness probe. See
+    ``backend.main.health_check``.
+
+    Takes an already-open connection (rather than self-fetching via
+    ``get_con(service_id)`` like most of this module) because its only
+    caller, ``health_check``, already has one open for the same service —
+    and reusing it, rather than a second ``get_con`` call, is what lets a
+    test double the caller injects (e.g. an in-memory sqlite fixture) also
+    cover this query, instead of silently falling through to the real
+    per-service DB.
+
+    Computed from the gaps between consecutive successful ``sync`` runs with
+    ``files_downloaded > 0 OR rows_ingested > 0`` in ``cron_runs``. Falls
+    back to ``default_minutes`` unchanged when there are fewer than
+    ``min_samples`` gaps (new service, or ``cron_runs_days`` retention
+    hasn't accumulated enough history yet), or on any error — this must
+    never make the probe LESS reliable than the fixed check it widens.
+    """
+    try:
+        rows = con.execute(
+            "SELECT started_at FROM cron_runs "
+            "WHERE task = 'sync' AND status = 'success' "
+            "AND (files_downloaded > 0 OR rows_ingested > 0) "
+            "ORDER BY started_at"
+        ).fetchall()
+        timestamps = [t for t in (parse_iso_utc(r["started_at"]) for r in rows) if t is not None]
+        if len(timestamps) < min_samples + 1:
+            return default_minutes
+        gaps = sorted((b - a).total_seconds() / 60.0 for a, b in zip(timestamps, timestamps[1:]))
+        cut_points = statistics.quantiles(gaps, n=100, method="inclusive")
+        p_gap = cut_points[min(len(cut_points) - 1, max(0, int(percentile * 100) - 1))]
+        return int(min(max_minutes, max(default_minutes, round(p_gap * safety_multiplier))))
+    except Exception:
+        return default_minutes
 
 
 def reap_running_cron_runs(service_id: str, reason: str = "Process interrupted by server restart") -> int:

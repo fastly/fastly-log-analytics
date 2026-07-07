@@ -11,6 +11,44 @@ export function toService(s: components['schemas']['BootstrapService']): Service
  */
 export type ChartMetric = components['schemas']['AggregatesRequest']['chart_metric']
 
+// ── Wire-parity guards ────────────────────────────────────────────────────────
+//
+// The wire-safe backend response models (extra=allow + exclude_unset) generate
+// every field optional AND nullable, so several components keep deliberate
+// local row narrowings that encode what the producer actually always emits
+// (required fields, literal unions). These helpers pin such a narrowing to its
+// generated schema at compile time: a backend field rename/removal, or a value
+// type change, fails `tsc` on the `Expect<WireParity<...>>` line instead of
+// silently breaking at runtime. The local narrowing stays the ergonomic type
+// components consume; the generated schema stays the source of truth for keys.
+
+export type Expect<T extends true> = T
+
+/** Drop the `[key: string]: unknown` index signature the extra=allow models
+ *  generate, keeping only the declared keys. */
+type StripIndex<T> = { [K in keyof T as string extends K ? never : number extends K ? never : K]: T[K] }
+
+/** StripIndex applied through arrays and nested objects, so interface-typed
+ *  local fields stay assignable to their (index-signature-carrying) wire
+ *  counterparts in the value-compatibility check. Record<string, X> fields
+ *  collapse to {} on both sides — give X its own WireParity guard. */
+type DeepStripIndex<T> = T extends (infer E)[]
+  ? DeepStripIndex<E>[]
+  : T extends object
+    ? { [K in keyof T as string extends K ? never : number extends K ? never : K]: DeepStripIndex<T[K]> }
+    : T
+
+export type WireParity<Local, Wire, W = StripIndex<Wire>> =
+  Exclude<keyof W, keyof Local> extends never
+    ? Exclude<keyof Local, keyof W> extends never
+      ? DeepStripIndex<{ [K in keyof Local]-?: NonNullable<Local[K]> }> extends DeepStripIndex<{
+          [K in keyof Local]-?: NonNullable<W[K & keyof W]>
+        }>
+        ? true
+        : 'local field type is not assignable to its wire type'
+      : { keys_not_on_wire: Exclude<keyof Local, keyof W> }
+    : { wire_keys_missing_from_local: Exclude<keyof W, keyof Local> }
+
 // ── Shared request/response primitives ───────────────────────────────────────
 
 /** Sourced from the generated OpenAPI schema — includes the caller field. */

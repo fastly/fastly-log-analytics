@@ -96,15 +96,9 @@ def test_new_sid_varies():
 # ── _pack_payload / _unpack_payload ──────────────────────────────────────────
 
 
-def test_v1_pack_size_is_30_bytes():
-    """v1 cookies (legacy, no prev_route_path) pack to 30 bytes flat."""
-    state = _state(v=1)
-    assert len(_pack_payload(state)) == 30
-
-
-def test_v2_pack_size_is_30_plus_path_len_plus_one():
-    """v2 always emits the length-prefix byte (= 0 when path is empty),
-    so the wire is at least 31 bytes — 30 header + 1 length + N path."""
+def test_pack_size_is_30_plus_path_len_plus_one():
+    """The encoder always emits the length-prefix byte (= 0 when path is
+    empty), so the wire is at least 31 bytes — 30 head + 1 length + N path."""
     empty = _state()  # default v = SCHEMA_VERSION = 2, empty path
     assert len(_pack_payload(empty)) == 31
     with_path = _state(prev_route_path="/checkout")
@@ -167,13 +161,14 @@ def test_unpack_rejects_too_short():
         _unpack_payload(b"\x00" * 29)
 
 
-def test_unpack_accepts_v1_legacy_30_byte_plaintext():
-    """v1 decoder back-compat: 30-byte plaintext → empty prev_route_path."""
+def test_unpack_rejects_legacy_v1_30_byte_plaintext():
+    """The legacy v1 format (bare 30-byte head, no length byte) was removed
+    2026-07-06 — it was unreachable in production because the AAD binds the
+    schema version. A 30-byte plaintext now fails framing. Mirrors Rust's
+    ``unpack_rejects_legacy_v1_30_byte_plaintext``."""
     v1 = bytes.fromhex("011122334455663412403020100807060504030201000000655000000064")
-    s = _unpack_payload(v1)
-    assert s.v == 1
-    assert s.prev_route_path == ""
-    assert s.score == 80
+    with pytest.raises(CookieError, match="payload too short"):
+        _unpack_payload(v1)
 
 
 # ── SessionState bounds enforcement ──────────────────────────────────────────
@@ -309,7 +304,7 @@ def test_codec_fixed_nonce_byte_exact_wire_format():
     assert decoded == state
 
     raw = _b64url_decode(cookie)
-    # 12 nonce + 30 v1 header + 1 length byte + 5 path bytes + 16 GCM tag = 64
+    # 12 nonce + 30 head + 1 length byte + 5 path bytes + 16 GCM tag = 64
     assert len(raw) == NONCE_BYTES + 30 + 1 + 5 + 16
     assert raw.hex().startswith(NONCE_FIXED.hex())
 
@@ -347,9 +342,8 @@ def test_codec_decode_rejects_wrong_service_id():
 
 def test_codec_decode_rejects_wrong_schema_version():
     """AAD encodes schema version, so a cookie encoded under one version
-    cannot be re-authenticated as a different version. v1 is intentionally
-    accepted by the v2 decoder for back-compat, so we exercise mismatch
-    against a version neither side will ever use."""
+    cannot be re-authenticated as a different version — the AEAD failure
+    surfaces before the plaintext version check is ever reached."""
     codec_v1 = CookieCodec(key=KEY_A, service_id=SVC, schema_version=1)
     codec_v99 = CookieCodec(key=KEY_A, service_id=SVC, schema_version=99)
     cookie = codec_v1.encode(_state(v=1))
@@ -357,26 +351,18 @@ def test_codec_decode_rejects_wrong_schema_version():
         codec_v99.decode(cookie)
 
 
-def test_codec_v2_decoder_accepts_v1_cookie_for_back_compat():
-    """During the v1→v2 migration window, the v2 decoder must accept
-    v1 cookies that browsers still have stored. prev_route_path lands
-    empty, which makes L2 fall back to uniform prior for that one
-    request — acceptable, the next request rotates to a v2 cookie."""
-    codec_v1 = CookieCodec(key=KEY_A, service_id=SVC, schema_version=1)
-    codec_v2 = CookieCodec(key=KEY_A, service_id=SVC, schema_version=1)
-    # Encode under v1
-    s = _state(v=1)
-    cookie = codec_v1.encode(s)
-    # Decode under v2 codec is the trick: we have to use AAD v1 too,
-    # since AAD encodes the schema version. The "back-compat" here is
-    # really about the decoder accepting a v1 PAYLOAD when the AAD
-    # matches — i.e., the v2 decoder running with schema_version=1 AAD
-    # against a v1-encoded cookie. (Real production browsers will
-    # always have the matching AAD because the customer's VCL service
-    # id never changes between encode and decode.)
-    decoded = codec_v2.decode(cookie)
-    assert decoded.v == 1
-    assert decoded.prev_route_path == ""
+def test_codec_decode_rejects_v1_schema_version():
+    """Legacy v1 acceptance removed (2026-07-06): a payload tagged v=1 is
+    rejected even when AEAD verifies. Encrypting a v=1 payload under the
+    v2 AAD is only possible with the AES key (the public encoder refuses
+    v != schema_version), which is exactly why the old v1-accept path was
+    dead code in production. Mirrors Rust's
+    ``decode_rejects_v1_payload_under_matching_aad``."""
+    codec = CookieCodec(key=KEY_A, service_id=SVC)
+    plaintext = _pack_payload(_state(v=1))
+    forged = _b64url_encode(NONCE_FIXED + codec._aead.encrypt(NONCE_FIXED, plaintext, codec._aad))
+    with pytest.raises(CookieError, match="schema version"):
+        codec.decode(forged)
 
 
 def test_codec_decode_rejects_garbage_base64():

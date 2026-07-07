@@ -10,6 +10,8 @@ carries a real schema instead of an opaque ``dict``.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -328,3 +330,248 @@ class ScoringLabelRow(_ScoringRead):
 class ScoringLabelsListResponse(_ScoringRead):
     labels: list[ScoringLabelRow] = []
     counts: dict[str, int] = {}
+
+
+# ── Response models for the admin endpoints (session_scoring_admin.py) ───────
+#
+# Same wire-safety contract as the analyst-safe reads above: every model
+# extends ``_ScoringRead`` (extra="allow") so the ``_cached`` telemetry
+# envelope and any future producer key pass through verbatim, every route
+# applies ``response_model_exclude_unset=True`` so per-branch shapes (e.g.
+# the validate endpoint's success-vs-failure keys) don't sprout ``null``s,
+# and timestamp fields are ``str`` because the producers ``.isoformat()``
+# them (state_sync matrix history, rotate_aes_key, SQLite datetime('now')).
+# Field lists are derived from the PRODUCERS, not the frontend consumers.
+
+
+class ScoringRetrainRejected(_ScoringRead):
+    too_few_events: int | None = None
+    too_fast: int | None = None
+    kept: int | None = None
+    routes_seen: int | None = None
+
+
+class ScoringAucAgainstLabels(_ScoringRead):
+    auc: float | None = None
+    passed: bool | None = None
+    threshold: float | None = None
+    n_good: int | None = None
+    n_bad: int | None = None
+
+
+class ScoringRetrainResponse(_ScoringRead):
+    ok: bool | None = None
+    matrix_version: str | None = None
+    since_days: int | None = None
+    sessions_trained_on: int | None = None
+    transitions: int | None = None
+    vocab_size: int | None = None
+    rejected: ScoringRetrainRejected | None = None
+    # Always present; ``null`` until both label classes reach min-per-class.
+    auc_against_labels: ScoringAucAgainstLabels | None = None
+    default_min_auc: float | None = None
+    local_matrix_saved: bool | None = None
+    fos_matrix_published: bool | None = None
+    matrix_kv_written: bool | None = None
+    deploy_hint: str | None = None
+
+
+class ScoringSessionEvent(_ScoringRead):
+    # Shape from repositories/session_scoring.fetch_session_events. ``ip``
+    # stays declared — the analyst masking middleware's key-name pass runs
+    # after serialization; ``ua``/``url`` stay visible (analyst triage
+    # invariant).
+    ts: str | None = None
+    url: str | None = None
+    status: int | None = None
+    ip: str | None = None
+    ua: str | None = None
+    edge_score: int | None = None
+    edge_cookie_compliance: str | None = None
+    edge_score_reason: str | None = None
+
+
+class ScoringSessionEventsResponse(_ScoringRead):
+    sid: str | None = None
+    since_days: int | None = None
+    event_count: int | None = None
+    events: list[ScoringSessionEvent] = []
+
+
+class ScoringEnforceThresholdResponse(_ScoringRead):
+    threshold: int | None = None
+    enforced: bool | None = None
+    key: str | None = None
+
+
+class ScoringEnforceThresholdPutResponse(_ScoringRead):
+    ok: bool | None = None
+    threshold: int | None = None
+    enforced: bool | None = None
+    message: str | None = None
+
+
+class ScoringL2EnforceState(_ScoringRead):
+    """Shape from _build_l2_enforce_block / _l2_enforce_unavailable —
+    also nested as ``l2_enforce`` in ScoringHealthResponse (left ``dict``
+    there for wire-compat; this standalone GET carries the real schema)."""
+
+    available: bool | None = None
+    enabled: bool | None = None
+    l2_enabled_at: int | None = None
+    days_since_optin: float | None = None
+    ramp_progress: float | None = None
+    fully_ramped: bool | None = None
+    warmup_days_remaining: float | None = None
+    scoring_enabled_at: int | None = None
+    deployment_age_days: float | None = None
+    ready: bool | None = None
+    ramp_days: float | None = None
+    readiness_days: float | None = None
+
+
+class ScoringL2EnforcePutResponse(_ScoringRead):
+    ok: bool | None = None
+    enabled: bool | None = None
+    l2_enabled_at: int | None = None
+    message: str | None = None
+
+
+class ScoringExcludeRegexState(_ScoringRead):
+    current: str | None = None
+    is_default: bool | None = None
+    default: str | None = None
+    effective: str | None = None
+
+
+class ScoringExcludeRegexPutResponse(_ScoringRead):
+    ok: bool | None = None
+    # ``**result`` spread from update_recv_exclusion_regex.
+    effective_regex: str | None = None
+    is_default: bool | None = None
+    logging_service_active_version: int | None = None
+    lint_warnings: list[str] | None = None
+    message: str | None = None
+
+
+class ScoringExcludeRegexValidateResponse(_ScoringRead):
+    # Success branch: {ok, lint_warnings}; failure: {ok, error, reason}.
+    # exclude_unset keeps each branch's key set unchanged.
+    ok: bool | None = None
+    lint_warnings: list[str] | None = None
+    error: str | None = None
+    reason: str | None = None
+
+
+class ScoringEnforceStatusCodeState(_ScoringRead):
+    current: int | None = None
+    default: int | None = None
+    effective: int | None = None
+    min: int | None = None
+    max: int | None = None
+    is_default: bool | None = None
+
+
+class ScoringEnforceStatusCodePutResponse(_ScoringRead):
+    ok: bool | None = None
+    # ``**result`` spread from update_enforce_status_code.
+    effective_status_code: int | None = None
+    is_default: bool | None = None
+    logging_service_active_version: int | None = None
+    message: str | None = None
+
+
+class ScoringMatrixVersion(_ScoringRead):
+    version: str | None = None
+    key: str | None = None
+    size_bytes: int | None = None
+    last_modified: str | None = None
+
+
+class ScoringMatrixVersionsResponse(_ScoringRead):
+    versions: list[ScoringMatrixVersion] = []
+    current_version: str | None = None
+
+
+class ScoringMatrixRestoreResponse(_ScoringRead):
+    ok: bool | None = None
+    restored_version: str | None = None
+    restored_at: str | None = None
+    matrix_kv_written: bool | None = None
+    deploy_hint: str | None = None
+
+
+class ScoringRotateKeyResponse(_ScoringRead):
+    ok: bool | None = None
+    rotated_at: str | None = None
+    previous_key_grace: bool | None = None
+    message: str | None = None
+
+
+class ScoringAuditRow(_ScoringRead):
+    # SELECT id, timestamp, action, actor, details FROM scoring_audit.
+    # ``details`` is JSON-parsed to a dict, but stays the raw string when
+    # parsing fails — hence Any, not dict.
+    id: int | None = None
+    timestamp: str | None = None
+    action: str | None = None
+    actor: str | None = None
+    details: Any = None
+
+
+class ScoringAuditListResponse(_ScoringRead):
+    audit: list[ScoringAuditRow] = []
+    limit: int | None = None
+
+
+class ScoringThresholdState(_ScoringRead):
+    """GET and PUT /scoring/threshold both return this exact shape."""
+
+    threshold: int | None = None
+    set_at: str | None = None
+    enforced: bool | None = None
+
+
+class ScoringPerReasonBucket(_ScoringRead):
+    reason: str | None = None
+    n_good: int | None = None
+    n_bad: int | None = None
+    min_per_class: int | None = None
+    has_min_samples: bool | None = None
+    # Present only when has_min_samples (evaluate_per_reason adds them
+    # conditionally); exclude_unset keeps the gated branch byte-stable.
+    auc: float | None = None
+    passed: bool | None = None
+    threshold: float | None = None
+
+
+class ScoringPerReasonResponse(_ScoringRead):
+    buckets: list[ScoringPerReasonBucket] = []
+    min_per_class: int | None = None
+    known_reasons: list[str] | None = None
+    has_min_samples_overall: bool | None = None
+    n_good: int | None = None
+    n_bad: int | None = None
+
+
+class ScoringDashboardResponse(_ScoringRead):
+    """Composite of the per-endpoint producers — each sub-block is the
+    byte-identical dict its standalone endpoint returns, so each nests the
+    same model that endpoint declares. ``status`` stays a free dict: it's
+    the secret-filtered cfg.scoring block, whose keys vary by provisioning
+    history."""
+
+    since_hours: int | None = None
+    threshold: int | None = None
+    status: dict | None = None
+    evaluation: ScoringEvaluationResponse | None = None
+    evaluation_per_reason: ScoringPerReasonResponse | None = None
+    health: ScoringHealthResponse | None = None
+    top_flagged: ScoringTopFlaggedResponse | None = None
+    score_distribution: ScoringScoreDistributionResponse | None = None
+    compliance_breakdown: ScoringComplianceBreakdownResponse | None = None
+    curves: ScoringCurvesResponse | None = None
+    threshold_preview: ScoringThresholdPreviewResponse | None = None
+    config_threshold: ScoringThresholdState | None = None
+    exclude_regex: ScoringExcludeRegexState | None = None
+    enforce_status_code: ScoringEnforceStatusCodeState | None = None

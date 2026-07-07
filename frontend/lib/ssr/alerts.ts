@@ -27,7 +27,7 @@ export async function fetchAlertsServerSide(
   // null-on-any-failure (see app/alerts/page.tsx) is provided by the shared
   // parseSsrJson tail — non-2xx and malformed 2xx bodies degrade to client fetch.
   return parseSsrJson<AlertListResponse>(
-    await ssrUpstreamGet({ path, logPrefix: 'ssr/alerts', injectAdminToken: true }),
+    await ssrUpstreamGet({ path, logPrefix: 'ssr/alerts' }),
     'ssr/alerts',
   )
 }

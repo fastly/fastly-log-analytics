@@ -23,6 +23,55 @@ from backend.utils import vcl_utils
 
 # ── VCL Edge Data Mapping ───────────────────────────────────────────────────
 
+# Ordered allowlist of common framework session-cookie names. The edge captures
+# a SHA-256 hash of the FIRST cookie in this list that is actually present on
+# the request (privacy: the raw cookie value never leaves Fastly). There is no
+# single cross-framework session cookie name, so a curated allowlist is the most
+# defensible generic approach. ``subfield()`` does EXACT key matching (and
+# handles dotted names like ``connect.sid``), so it is safe against prefix
+# false-matches that a naive ``Cookie ~ "sid=(...)"`` regex would hit. Ordered
+# by framework popularity — first present wins.
+SESSION_COOKIE_ALLOWLIST: tuple[str, ...] = (
+    "sessionid",  # Django
+    "PHPSESSID",  # PHP
+    "JSESSIONID",  # Java / Spring / Tomcat
+    "ASP.NET_SessionId",  # ASP.NET
+    "connect.sid",  # Express / Node
+    "session",  # Flask (default), generic
+    "sid",  # generic
+)
+
+
+def _session_cookie_hash_vcl() -> str:
+    """Return the VCL expression that hashes the first-present session cookie.
+
+    Builds a right-folded nested ``if()`` over ``SESSION_COOKIE_ALLOWLIST``:
+    each branch tests one cookie and, when present, hashes THAT cookie in the
+    ``if()``'s VALUE (true) position — ``if(<cookie> != "", hash(<cookie>),
+    <next branch>)`` — falling through to ``""`` when none are present.
+
+    The hash MUST live in the value branch, not wrapped around the whole
+    selection. Fastly's VCL compiler rejects an ``if()`` function nested inside
+    another ``if()``'s CONDITION (``if`` is a reserved keyword there — real
+    ``/validate`` errors with "Syntax error in condition"; falco / ``make
+    vcl-test`` are more lenient and do NOT catch it). The old
+    ``if(<nested-if select chain> != "", hash(...), "")`` form did exactly that.
+    Same limitation is documented in ``backend/core/log_fields.py`` for the
+    deliver-stage numeric flattening.
+
+    An empty cookie is never hashed (a per-branch ``!= ""`` guard precedes each
+    hash), so a cookie-less request stays ``""`` rather than collapsing to the
+    constant SHA-256 of "" and poisoning the harvesting insight. The hash is
+    computed at the true edge (the ``x-fos-edge-data`` capture is edge-gated),
+    so the raw cookie is never logged and never forwarded past Fastly.
+    """
+    sel = '""'
+    for name in reversed(SESSION_COOKIE_ALLOWLIST):
+        sf = f'subfield(req.http.Cookie, "{name}", ";")'
+        sel = f'if({sf} != "", digest.hash_sha256({sf}), {sel})'
+    return sel
+
+
 # Maps x-fos-edge-data subfield keys to the VCL expressions used to capture them.
 # Only headers present in this mapping will be captured at the edge.
 EDGE_DATA_MAPPING = {
@@ -71,6 +120,9 @@ EDGE_DATA_MAPPING = {
     "data_segs": 'if(client.socket.tcpi_data_segs_out > 0, "" + client.socket.tcpi_data_segs_out, "null")',
     # Group H — Security: TLS Fingerprinting (TLS state only valid at true edge PoP)
     "tls_csha": "tls.client.ciphers_list_sha",
+    # Group H — Security: hashed session-cookie id (PRIVACY: hashed at edge; the
+    # raw cookie value is never logged or forwarded). See SESSION_COOKIE_ALLOWLIST.
+    "cookie_session": _session_cookie_hash_vcl(),
 }
 
 
@@ -164,7 +216,7 @@ def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool =
     # restarts clause so the post-restart edge pass captures; edge_detect alone
     # still scopes it to the edge hop, and the first-pass scrub already removed
     # any client-forged values so capturing on the later pass is safe.
-    capture_guard = edge_detect if scoring_enabled else f"req.restarts == 0 && {edge_detect}"
+    capture_guard = edge_detect
 
     scrub_lines = [
         "# [security] strip client-supplied internal-routing headers",
@@ -178,6 +230,7 @@ def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool =
             "  unset req.http.x-of-start;",
             "  unset req.http.x-of-ttfb;",
             "  unset req.http.x-of-ttlb;",
+            "  unset req.http.x-of-connect;",
             "  unset req.http.x-of-ost;",
             "  unset req.http.x-of-oip;",
             "  unset req.http.x-of-oretries;",
@@ -325,6 +378,11 @@ def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool =
                 "  set var.ttfb = std.atoi(time.elapsed.usec);\n"
                 "  set var.ttfb -= std.atoi(req.http.x-of-start);\n"
                 "  set req.http.x-of-ttfb = var.ttfb;\n"
+                # Backend connect/handshake latency (TCP+TLS) to origin/shield,
+                # distinct from TTFB. beresp.* is only readable in vcl_fetch, so
+                # this is the one place it can be captured; it stays null on the
+                # error path (vcl_error has no beresp) and on HITs.
+                "  set req.http.x-of-connect  = beresp.handshake_time_to_origin_ms;\n"
                 "  set req.http.x-of-status   = beresp.status;\n"
                 "  set req.http.x-of-oip      = beresp.backend.ip;\n"
                 "  set req.http.x-of-oretries = req.restarts;\n"
@@ -376,6 +434,7 @@ def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool =
                 "# Promote upstream metrics to req so this node can log them if it didn't generate its own\n"
                 'if (req.http.x-of-ttfb == "" && resp.http.x-of-ttfb != "") { set req.http.x-of-ttfb = resp.http.x-of-ttfb; }\n'
                 'if (req.http.x-of-ttlb == "" && resp.http.x-of-ttlb != "") { set req.http.x-of-ttlb = resp.http.x-of-ttlb; }\n'
+                'if (req.http.x-of-connect == "" && resp.http.x-of-connect != "") { set req.http.x-of-connect = resp.http.x-of-connect; }\n'
                 'if (req.http.x-of-status == "" && resp.http.x-of-status != "") { set req.http.x-of-status = resp.http.x-of-status; }\n'
                 'if (req.http.x-of-oip == "" && resp.http.x-of-oip != "") { set req.http.x-of-oip = resp.http.x-of-oip; }\n'
                 'if (req.http.x-of-oretries == "" && resp.http.x-of-oretries != "") { set req.http.x-of-oretries = req.restarts; }\n'
@@ -384,6 +443,7 @@ def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool =
                 "  # Returning to client: strip internal metrics from response\n"
                 "  unset resp.http.x-of-ttfb;\n"
                 "  unset resp.http.x-of-ttlb;\n"
+                "  unset resp.http.x-of-connect;\n"
                 "  unset resp.http.x-of-status;\n"
                 "  unset resp.http.x-of-oip;\n"
                 "  unset resp.http.x-of-oretries;\n"
@@ -391,6 +451,7 @@ def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool =
                 "  # Returning to internal cluster node: ensure metrics are attached to response\n"
                 '  if (req.http.x-of-ttfb != "") { set resp.http.x-of-ttfb = req.http.x-of-ttfb; }\n'
                 '  if (req.http.x-of-ttlb != "") { set resp.http.x-of-ttlb = req.http.x-of-ttlb; }\n'
+                '  if (req.http.x-of-connect != "") { set resp.http.x-of-connect = req.http.x-of-connect; }\n'
                 '  if (req.http.x-of-status != "") { set resp.http.x-of-status = req.http.x-of-status; }\n'
                 '  if (req.http.x-of-oip != "") { set resp.http.x-of-oip = req.http.x-of-oip; }\n'
                 '  if (req.http.x-of-oretries != "") { set resp.http.x-of-oretries = req.http.x-of-oretries; }\n'
@@ -937,9 +998,7 @@ def _log_sampling_edge_clause(scoring_enabled: bool) -> str:
     line → Fire Rate 0%). ``fastly.ff.visits_this_service == 0`` identifies the
     edge hop restart-invariantly, so the post-restart edge pass still logs.
     """
-    if scoring_enabled:
-        return "fastly.ff.visits_this_service == 0"
-    return "(req.restarts == 0 && fastly.ff.visits_this_service == 0)"
+    return "fastly.ff.visits_this_service == 0"
 
 
 def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str, token: str, status_cb=None) -> int:

@@ -9,7 +9,7 @@ from typing import Any
 
 import duckdb
 
-from backend.core.share_db.validation import mask_ip_values
+from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
 from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table
 from backend.repositories._sql import query as SQL
 from backend.utils.date_utils import parse_iso_utc
@@ -109,7 +109,20 @@ def execute_query(
     # validation (the validator sees clean ``logs`` / ``logs_<svc>`` table
     # refs, not the rewritten view name) and the created view is dropped in
     # the finally below so it never lingers on the pooled connection.
-    window_view = _rebind_table_to_window_view(con, table_name, time_filter)
+    #
+    # The SAME source view redacts per-client PII columns for a mask_ips
+    # analyst — session identifiers (SESSION_ID_KEYS, e.g. cookie_session) AND
+    # the client IP family (IP_FAMILY_KEYS, e.g. ip). Redacting at the DATA
+    # SOURCE is bypass-proof: no projection / alias / string-concat / CAST /
+    # GROUP BY can recover the raw value because the view never emits it. This
+    # is the ONLY robust control here — the value-shape masker (mask_ip_values,
+    # below) is defeated by string ops (``'x' || ip`` yields a non-IP-shaped
+    # cell) and a session hash has no IP shape at all. mask_ip_values is kept as
+    # defense-in-depth for IP-shaped values that surface in a non-redacted
+    # column. (adversarial audit 2026-07-06: closed a raw-IP enumeration leak
+    # via ``SELECT 'x'||ip, count(*) FROM logs GROUP BY ip``.)
+    redact_cols = _pii_redact_cols(con, table_name) if mask_ips else frozenset()
+    window_view = _rebind_table_to_window_view(con, table_name, time_filter, redact_cols)
     if window_view is not None and table_name is not None:
         sql = re.sub(rf"\b{re.escape(table_name)}\b", lambda _m: window_view, sql, flags=re.IGNORECASE)
 
@@ -135,16 +148,58 @@ def execute_query(
                 logger.debug("[query] failed to drop analyst window view", exc_info=True)
 
 
+def _pii_redact_cols(con: duckdb.DuckDBPyConnection, table_name: str | None) -> frozenset[str]:
+    """Per-client PII columns (SESSION_ID_KEYS ∪ IP_FAMILY_KEYS) that actually
+    exist on ``table_name``, for source-view redaction under mask_ips.
+
+    Both families are redacted at the SOURCE (not just value-masked output-side)
+    because value-shape masking is defeated by string ops: ``'x' || ip`` yields
+    a non-IP-shaped cell and a session hash has no IP shape at all, so a mask_ips
+    analyst could otherwise recover raw values via ``SELECT 'x'||ip`` /
+    ``split_part(ip,'.',4)`` / ``CAST(ip AS BLOB)`` / ``GROUP BY ip``. ``oip``
+    (origin IP) is intentionally NOT in IP_FAMILY_KEYS — it is not client PII and
+    stays visible.
+
+    Restricting to columns that genuinely exist keeps the ``SELECT * REPLACE
+    (...)`` legal — a REPLACE naming an absent column is a Binder error that
+    would fail the whole query. A DESCRIBE failure (e.g. a momentarily stale
+    view) returns the empty set rather than raising: the user query would fail
+    on the same stale view and the router's stale-view retry rebuilds it and
+    re-runs this, so there is no window where a raw value slips through.
+    """
+    keys = SESSION_ID_KEYS | IP_FAMILY_KEYS
+    if table_name is None or not keys:
+        return frozenset()
+    try:
+        cols = {row[0] for row in con.execute(f"DESCRIBE {table_name}").fetchall()}
+    except Exception:
+        return frozenset()
+    return frozenset(c for c in keys if c in cols)
+
+
 def _rebind_table_to_window_view(
     con: duckdb.DuckDBPyConnection,
     table_name: str | None,
     time_filter: tuple[str | None, str | None] | None,
+    redact_cols: frozenset[str] = frozenset(),
 ) -> str | None:
-    """Create the per-request window temp view, or return None when no filter.
+    """Create the per-request analyst source view, or None when nothing to bind.
+
+    Two independent source-side controls share ONE temp view so the analyst's
+    query reads from a single rebound table name:
+
+      * H1 time window — when ``time_filter`` carries both bounds the view is
+        filtered to ``[start, end)`` so the clamp holds regardless of the
+        user's projection / WHERE / aggregation.
+      * Phase-4 Track C session redaction — when ``redact_cols`` is non-empty
+        each named column is rewritten to ``'[redacted]'`` (empty / NULL
+        preserved) via ``SELECT * REPLACE (...)``, so a mask_ips analyst can
+        never recover a raw session identifier by aliasing it or building it
+        back out of the projection.
 
     Returns the view name to substitute the table reference with, or ``None``
-    for the admin / no-bounds path (caller leaves the SQL untouched = full
-    retained range).
+    when neither control applies (the admin / no-mask, no-bounds path — caller
+    leaves the SQL untouched = full retained range, raw columns).
 
     The window literals are re-parsed from the caller's ISO strings and
     re-emitted via ``isoformat()`` so the interpolation is injection-safe even
@@ -153,22 +208,43 @@ def _rebind_table_to_window_view(
     log table in this app (mirrors the predicate the analytics repos build in
     ``_base.py``).
     """
-    if time_filter is None or table_name is None:
+    if table_name is None:
         return None
-    start_iso, end_iso = time_filter
-    if not start_iso or not end_iso:
+    start_iso, end_iso = time_filter if time_filter is not None else (None, None)
+    has_window = bool(start_iso and end_iso)
+    if not has_window and not redact_cols:
         return None
-    # Fail closed: a bound that doesn't parse is a programming error, not a
-    # reason to run unfiltered — raise rather than silently widening the window.
-    start_dt = parse_iso_utc(start_iso)
-    end_dt = parse_iso_utc(end_iso)
-    if start_dt is None or end_dt is None:
-        raise ValueError(f"invalid analyst window bounds: {start_iso!r}..{end_iso!r}")
+
+    select_list = "*"
+    if redact_cols:
+        # Escape internal double-quotes so a hostile column name can't break out
+        # of the quoted identifier (SESSION_ID_KEYS are static literals today,
+        # but keep the guard for any future addition — mirrors optional_col in
+        # _base.py). Sorted for a deterministic, testable view definition.
+        replacements = ", ".join(
+            'CASE WHEN "{c}" IS NULL OR "{c}" = \'\' THEN "{c}" ELSE \'[redacted]\' END AS "{c}"'.format(
+                c=col.replace('"', '""')
+            )
+            for col in sorted(redact_cols)
+        )
+        select_list = f"* REPLACE ({replacements})"
+
+    where_sql = ""
+    if has_window:
+        # Fail closed: a bound that doesn't parse is a programming error, not a
+        # reason to run unfiltered — raise rather than silently widening the
+        # window.
+        start_dt = parse_iso_utc(start_iso)
+        end_dt = parse_iso_utc(end_iso)
+        if start_dt is None or end_dt is None:
+            raise ValueError(f"invalid analyst window bounds: {start_iso!r}..{end_iso!r}")
+        where_sql = (
+            f" WHERE timestamp >= TIMESTAMPTZ '{start_dt.isoformat()}' "
+            f"AND timestamp < TIMESTAMPTZ '{end_dt.isoformat()}'"
+        )
+
     con.execute(
-        f"CREATE OR REPLACE TEMP VIEW {_ANALYST_WINDOW_VIEW} AS "
-        f"SELECT * FROM {table_name} "
-        f"WHERE timestamp >= TIMESTAMPTZ '{start_dt.isoformat()}' "
-        f"AND timestamp < TIMESTAMPTZ '{end_dt.isoformat()}'"
+        f"CREATE OR REPLACE TEMP VIEW {_ANALYST_WINDOW_VIEW} AS SELECT {select_list} FROM {table_name}{where_sql}"
     )
     return _ANALYST_WINDOW_VIEW
 

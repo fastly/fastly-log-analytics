@@ -176,7 +176,7 @@ def test_destructive_teardown_with_global_token_proceeds(isolated_configs_dir):
         patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly),
         patch("backend.provision.perform_teardown", side_effect=_fake_teardown),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
     ):
         with TestClient(app) as client:
             r = client.post(
@@ -216,7 +216,7 @@ def test_destructive_teardown_service_in_bound_list_proceeds(isolated_configs_di
         patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly),
         patch("backend.provision.perform_teardown", side_effect=_fake_teardown),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
     ):
         with TestClient(app) as client:
             r = client.post(
@@ -309,7 +309,7 @@ def test_destructive_teardown_scope_as_list_accepted(isolated_configs_dir):
         patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly),
         patch("backend.provision.perform_teardown", side_effect=_fake_teardown),
         patch("backend.provision._sync_crontab"),
-        patch("backend.scheduler.get_scheduler"),
+        patch("backend.cron.scheduler.get_scheduler"),
     ):
         with TestClient(app) as client:
             r = client.post(

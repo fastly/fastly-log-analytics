@@ -13,6 +13,9 @@ const KNOWN_IDS = [
   'proxy_surge',
   'botnet_grouping',
   'low_and_slow',
+  'credential_enumeration',
+  'content_discovery',
+  'session_harvesting',
   'repeated_patterns',
 ] as const
 

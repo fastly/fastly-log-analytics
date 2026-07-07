@@ -5,7 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Info, LineChart } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
+import { CardErrorState } from '@/components/CardErrorState'
 import { RocPrCurvesHelp } from '@/components/SessionScoring/help-content'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { Skeleton } from '@/components/ui/skeleton'

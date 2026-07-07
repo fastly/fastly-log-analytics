@@ -8,9 +8,11 @@ import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2 } from 'lu
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/badge'
 import { client, extractApiError } from '@/lib/api'
+import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 import type { components } from '@/types/api.generated'
 
 type SqliteRecentResponse = components['schemas']['RecentSqliteResponse']
+type SqliteEntry = components['schemas']['SqliteProfilerEntry']
 
 export function DebugPanel() {
   const { enabled, apiCallsEnabled } = useDebugStore()
@@ -21,6 +23,13 @@ export function DebugPanel() {
   const queryClient = useQueryClient()
   const [queries, setQueries] = useState<any[]>([])
   const [calls, setCalls] = useState<any[]>([])
+  // SQLite scope: 'page' shows the statements embedded in this page's API
+  // responses (_debug_sqlite, request-scoped on the backend); 'buffer'
+  // shows the process-global ring buffer, which includes cron/background
+  // statements and is the right view for debugging sync/alerts — but NOT
+  // for "what did this page cost".
+  const [sqliteScope, setSqliteScope] = useState<'page' | 'buffer'>('page')
+  const [sqlitePage, setSqlitePage] = useState<SqliteEntry[]>([])
   // Mirror the latest state inside the subscribe callback so we can bail
   // out when the new extraction is semantically equal. Every cache event
   // (sqliteQuery's 5s poll + every API response) used to re-create the
@@ -29,12 +38,15 @@ export function DebugPanel() {
   // "Maximum update depth exceeded" in dev.
   const queriesRef = useRef<any[]>([])
   const callsRef = useRef<any[]>([])
+  const sqlitePageRef = useRef<SqliteEntry[]>([])
 
   // SQLite ring-buffer poll. Only active when SQL debug is on AND the
-  // browser tab is focused (skip when hidden). Refetched every 5s — was
-  // 2s but that's ~30 req/min of backend access-log noise per admin tab,
-  // dwarfing every other endpoint. 5s is still real-time enough for the
-  // panel and 2.5× quieter.
+  // process-wide view is selected AND the browser tab is focused (skip
+  // when hidden). Refetched every 5s — was 2s but that's ~30 req/min of
+  // backend access-log noise per admin tab, dwarfing every other
+  // endpoint. 5s is still real-time enough for the panel and 2.5×
+  // quieter. The default 'page' view reads _debug_sqlite off the page's
+  // own responses and needs no poll at all.
   const sqliteQuery = useQuery<SqliteRecentResponse>({
     queryKey: ['debug', 'recent-sqlite'],
     queryFn: async () => {
@@ -44,12 +56,12 @@ export function DebugPanel() {
       if (error) throw new Error(extractApiError(error) || 'recent-sqlite failed')
       return data as SqliteRecentResponse
     },
-    enabled,
+    enabled: enabled && sqliteScope === 'buffer',
     refetchInterval: 5000,
     refetchIntervalInBackground: false,
     staleTime: 0,
   })
-  const sqliteEntries = sqliteQuery.data?.queries ?? []
+  const sqliteEntries: SqliteEntry[] = sqliteScope === 'page' ? sqlitePage : (sqliteQuery.data?.queries ?? [])
   const totalSqliteTime = sqliteEntries.reduce((acc, q) => acc + q.time_ms, 0)
 
   const clearSqlite = async () => {
@@ -57,13 +69,35 @@ export function DebugPanel() {
     sqliteQuery.refetch()
   }
 
+  // Migration shim: the fla.debugResponses cookie (read by SSR's own fetch,
+  // lib/ssr/_transport.ts) is written when a DiagnosticsPanel toggle FLIPS —
+  // a browser whose toggle was already persisted on before the cookie
+  // mechanism shipped never wrote it, so every SSR-prefetched page hydrates
+  // without the debug envelope and this panel reads 0 queries / 0.00ms
+  // forever. Heal here: when a toggle is on but the cookie isn't, write it
+  // and invalidate the cache so the CURRENT page populates too. Invalidate
+  // (not refetchQueries({type:'active'})): the heavy data queries mount
+  // enabled:false until service/filter hydration resolves, so a point-in-time
+  // refetch misses them — invalidation also marks them stale, forcing a
+  // refetch the moment they switch on.
+  useEffect(() => {
+    if (!enabled && !apiCallsEnabled) return
+    const hasCookie = document.cookie.split('; ').some((c) => c === `${DEBUG_RESPONSES_COOKIE}=1`)
+    if (!hasCookie) {
+      document.cookie = `${DEBUG_RESPONSES_COOKIE}=1; path=/; max-age=31536000; samesite=lax`
+      queryClient.invalidateQueries()
+    }
+  }, [enabled, apiCallsEnabled, queryClient])
+
   useEffect(() => {
     if (!enabled && !apiCallsEnabled) {
-      if (queriesRef.current.length > 0 || callsRef.current.length > 0) {
+      if (queriesRef.current.length > 0 || callsRef.current.length > 0 || sqlitePageRef.current.length > 0) {
         queriesRef.current = []
         callsRef.current = []
+        sqlitePageRef.current = []
         setQueries([])
         setCalls([])
+        setSqlitePage([])
       }
       return
     }
@@ -82,12 +116,33 @@ export function DebugPanel() {
       }
       return true
     }
+    // seq is the profiler's process-global statement counter — unique per
+    // statement, so it's both the dedup key and a sufficient identity check.
+    const sameSqlite = (a: SqliteEntry[], b: SqliteEntry[]) => {
+      if (a.length !== b.length) return false
+      for (let i = 0; i < a.length; i++) {
+        if (a[i].seq !== b[i].seq) return false
+      }
+      return true
+    }
 
     const updateDebugInfo = () => {
       const extractedQueries: any[] = []
       const extractedCalls: any[] = []
+      const extractedSqlite: SqliteEntry[] = []
       const seenSql = new Set<string>()
       const seenCalls = new Set<string>()
+      const seenSqliteSeq = new Set<number>()
+
+      const extractSqlite = (data: Record<string, unknown>) => {
+        if (!enabled || !Array.isArray(data._debug_sqlite)) return
+        for (const sq of data._debug_sqlite as SqliteEntry[]) {
+          if (!seenSqliteSeq.has(sq.seq)) {
+            extractedSqlite.push(sq)
+            seenSqliteSeq.add(sq.seq)
+          }
+        }
+      }
 
       // 1. Find all data from active queries
       const activeQueries = queryClient.getQueryCache().findAll({ type: 'active' })
@@ -116,6 +171,8 @@ export function DebugPanel() {
             }
           }
         }
+
+        extractSqlite(data)
       }
 
       // 2. Also check mutations
@@ -142,16 +199,24 @@ export function DebugPanel() {
             }
           }
         }
+
+        extractSqlite(data)
       }
+
+      // Chronological — seq is assigned at execution time on the backend.
+      extractedSqlite.sort((a, b) => a.seq - b.seq)
 
       const queriesChanged = !sameQueries(extractedQueries, queriesRef.current)
       const callsChanged = !sameCalls(extractedCalls, callsRef.current)
-      if (!queriesChanged && !callsChanged) return
+      const sqliteChanged = !sameSqlite(extractedSqlite, sqlitePageRef.current)
+      if (!queriesChanged && !callsChanged && !sqliteChanged) return
       queriesRef.current = extractedQueries
       callsRef.current = extractedCalls
+      sqlitePageRef.current = extractedSqlite
       setTimeout(() => {
         if (queriesChanged) setQueries(extractedQueries)
         if (callsChanged) setCalls(extractedCalls)
+        if (sqliteChanged) setSqlitePage(extractedSqlite)
       }, 0)
     }
 
@@ -241,29 +306,51 @@ export function DebugPanel() {
                 {isSqliteOpen ? <ChevronUp className="h-3 w-3 mr-1" /> : <ChevronDown className="h-3 w-3 mr-1" />}
                 {isSqliteOpen ? 'Hide' : 'Show'} {sqliteEntries.length} statements
               </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-6 text-[10px] px-2 text-muted-foreground"
-                onClick={clearSqlite}
-                title="Clear the SQLite capture buffer"
-              >
-                <Trash2 className="h-3 w-3 mr-1" />
-                Clear
-              </Button>
+              <div className="flex items-center rounded-md border overflow-hidden" role="group" aria-label="SQLite statement scope">
+                <button
+                  type="button"
+                  className={`h-6 text-[10px] px-2 ${sqliteScope === 'page' ? 'bg-muted font-semibold text-foreground' : 'text-muted-foreground'}`}
+                  onClick={() => setSqliteScope('page')}
+                  title="Statements executed by this page's own API requests"
+                >
+                  This page
+                </button>
+                <button
+                  type="button"
+                  className={`h-6 text-[10px] px-2 border-l ${sqliteScope === 'buffer' ? 'bg-muted font-semibold text-foreground' : 'text-muted-foreground'}`}
+                  onClick={() => setSqliteScope('buffer')}
+                  title="Everything the backend process executed recently, including cron jobs"
+                >
+                  Process-wide
+                </button>
+              </div>
+              {sqliteScope === 'buffer' && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-[10px] px-2 text-muted-foreground"
+                  onClick={clearSqlite}
+                  title="Clear the SQLite capture buffer"
+                >
+                  <Trash2 className="h-3 w-3 mr-1" />
+                  Clear
+                </Button>
+              )}
             </div>
             <div className="flex items-center gap-3">
               <div className="text-xs font-mono bg-muted/50 border px-2.5 py-1.5 rounded-md text-muted-foreground flex items-center gap-2">
-                {sqliteQuery.data && sqliteQuery.data.dropped > 0 && (
+                {sqliteScope === 'buffer' && sqliteQuery.data && sqliteQuery.data.dropped > 0 && (
                   <span className="text-yellow-600 text-[10px] uppercase tracking-wider">
                     {sqliteQuery.data.dropped} dropped
                   </span>
                 )}
-                <span>
-                  Buffer: <span className="font-bold text-foreground">
-                    {sqliteQuery.data?.buffer_size ?? 0}/{sqliteQuery.data?.buffer_cap ?? 0}
+                {sqliteScope === 'buffer' && (
+                  <span>
+                    Buffer: <span className="font-bold text-foreground">
+                      {sqliteQuery.data?.buffer_size ?? 0}/{sqliteQuery.data?.buffer_cap ?? 0}
+                    </span>
                   </span>
-                </span>
+                )}
                 <span>
                   Total time: <span className="font-bold text-foreground">{totalSqliteTime.toFixed(2)}ms</span>
                 </span>
@@ -275,7 +362,9 @@ export function DebugPanel() {
             <div className="grid gap-2 max-h-[500px] overflow-auto pr-2 custom-scrollbar">
               {sqliteEntries.length === 0 ? (
                 <div className="text-muted-foreground text-xs italic p-4 text-center border rounded-md bg-muted/20">
-                  No SQLite statements captured yet. Statements appear here as cron jobs and metadata reads execute.
+                  {sqliteScope === 'page'
+                    ? 'No SQLite statements were executed by this page’s API requests. Switch to Process-wide to see cron/background activity.'
+                    : 'No SQLite statements captured yet. Statements appear here as cron jobs and metadata reads execute.'}
                 </div>
               ) : (
                 [...sqliteEntries].reverse().map((q) => (

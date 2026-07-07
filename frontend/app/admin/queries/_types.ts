@@ -1,11 +1,13 @@
 /**
  * Shared types for the Live Query Monitor admin page.
  *
- * Kept as a flat `.ts` (not generated from the OpenAPI types) so the
- * sub-section components can import a single canonical shape — the
- * generated `paths["/api/admin/queries"]["get"]["responses"][200]…` chain
- * is unergonomic when you need to reuse the row shape in 4 different
- * components.
+ * The row interfaces below are deliberate narrowings of the generated
+ * wire schemas (which are all-optional/nullable — the exclude_unset
+ * artifact): the query-registry producer always emits the full shape,
+ * and the literal unions (db_type, outcome, kind) drive UI switches.
+ * Each narrowing is pinned to its generated schema by the
+ * `Expect<WireParity<...>>` guards at the bottom of this file, so a
+ * backend field rename or type change fails typecheck here.
  */
 
 export type AttributionKind = 'analyst' | 'admin' | 'cron' | 'system'
@@ -56,9 +58,16 @@ export interface SnapshotResponse {
 }
 
 import type { components } from '@/types/api.generated'
+import type { Expect, WireParity } from '@/types/api'
 
 export type SummaryResponse = components['schemas']['SummaryResponse']
 export type CancelResponse = components['schemas']['CancelResponse']
+
+// Wire-parity guards for the hand-narrowed rows above (see types/api.ts).
+export type _AttributionParity = Expect<WireParity<Attribution, components['schemas']['QueryAttribution']>>
+export type _ActiveRowParity = Expect<WireParity<ActiveRow, components['schemas']['ActiveQueryRow']>>
+export type _CompletedRowParity = Expect<WireParity<CompletedRow, components['schemas']['CompletedQueryRow']>>
+export type _SnapshotParity = Expect<WireParity<SnapshotResponse, components['schemas']['SnapshotResponse']>>
 
 export interface MonitorConfig {
   enabled: boolean

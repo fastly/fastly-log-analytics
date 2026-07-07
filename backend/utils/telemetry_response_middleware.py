@@ -192,7 +192,7 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             # phase names without secrets and is the next perf audit's
             # primary signal.
             stripped = False
-            for k in ("_debug_queries", "_debug_calls", "_is_cached"):
+            for k in ("_debug_queries", "_debug_calls", "_debug_sqlite", "_is_cached"):
                 if k in parsed:
                     parsed.pop(k)
                     stripped = True
@@ -213,9 +213,13 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
         # Inject from the contextvar collectors. Errors here MUST NOT
         # block the response — telemetry is observability, not data.
         try:
-            from backend.utils.telemetry import get_queries, get_tracked_calls
+            from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
 
             parsed["_debug_queries"] = get_queries()
+            # Snapshot-copy BEFORE get_tracked_calls(): that call may run a
+            # SQLite SELECT (usage_log iothread augmentation) which would
+            # otherwise append itself to the live list mid-injection.
+            parsed["_debug_sqlite"] = list(get_sqlite_queries())
             parsed["_debug_calls"] = get_tracked_calls()
             parsed.setdefault("_is_cached", False)
             new_body = json.dumps(parsed, default=str).encode("utf-8")

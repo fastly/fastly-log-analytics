@@ -181,6 +181,15 @@ class InsightCard(BaseModel):
     severity: str
     summary: str
     items: list[InsightItem]
+    # Thematic section key ({security, origin, edge, traffic}); drives the
+    # sectioned Anomaly Detection page (frontend/lib/insight-sections.ts).
+    # Optional-with-default, NOT required: the /api/insights cache stores the
+    # raw pre-serialisation dict, so a stale pre-deploy entry that predates
+    # this field must serialise as ``null`` instead of raising a
+    # ValidationError for the whole TTL window. The field is load-bearing —
+    # a ``category`` key on the repo dict alone is silently dropped on the
+    # wire (Pydantic ``extra='ignore'``), the same way window_total_requests is.
+    category: str | None = None
 
 
 class InsightsResponse(BaseResponse):
@@ -198,6 +207,12 @@ class InsightAvailability(BaseModel):
     id: str
     title: str
     description: str
+    # Same thematic section key as InsightCard.category, mirrored here so the
+    # availability-derived skeleton cards group into the identical sections
+    # (CLS: the loading layout must match the loaded layout). Sourced from the
+    # INSIGHT_DEFINITIONS dicts in backend/core/_log_fields_data.py — a
+    # SEPARATE subsystem from the runtime registry, so category is set in both.
+    category: str | None = None
     missing_fields: list[str] | None = None
     missing_groups: list[str] | None = None
     enable_url: str | None = None

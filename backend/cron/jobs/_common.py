@@ -84,23 +84,3 @@ def finalize_cron_duration(
     except Exception as e:
         if not silent:
             logger.warning("Failed to update full cron duration: %s", e)
-
-
-def shim_attr(name: str, fallback):
-    """Return ``backend.scheduler.<name>`` (the flat-module shim) when
-    importable, else ``fallback``.
-
-    Used by cron modules whose tests do
-    ``monkeypatch.setattr(backend.scheduler, "_X", ...)``. The
-    backend.scheduler shim re-exports symbols from the carved scheduler
-    package; reading the attribute through the shim layer preserves
-    interception by tests written before the carve-up while still
-    falling back to the in-module value when the shim is unavailable
-    (early bootstrap, unit tests that don't load scheduler).
-    """
-    try:
-        import backend.scheduler as _shim
-
-        return getattr(_shim, name, fallback)
-    except Exception:
-        return fallback

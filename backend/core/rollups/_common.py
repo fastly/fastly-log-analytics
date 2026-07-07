@@ -586,6 +586,22 @@ SECURITY_COV_BUNDLE_FILENAME = "security_cov.parquet"
 # dropping an IP whose window-max lands outside any single hour's top-10.
 SECURITY_TOPIPS_BUNDLE_TOP_K = 500
 
+# Filename for the per-hour NGWAF-bots rollup feeding get_top_bots'
+# ``ngwaf_bots`` panel. One row per (bot_name, category) per closed hour —
+# the hour's waf_req_ids joined against the SQLite ngwaf_bot_cache at WRITE
+# time, so the reader SUMs tiny parquets instead of joining the raw window
+# per request. EXACT SUM across hours; no per-hour cap (bot cardinality is
+# tens, not thousands). Schema: (bot_name VARCHAR, category VARCHAR,
+# count BIGINT).
+#
+# Freshness note: the bot cache syncs every ~5 min, so an hour built right
+# at close can miss attributions for the final few minutes — bounded, tiny,
+# and one-sided (the panel is a top-10 by count over multi-hour windows).
+# Retention note: the cache trims old rows by synced_at; a rollup built
+# while the rows were live PRESERVES those counts after the cache forgets
+# them, so old windows read BETTER from the rollup than from a live join.
+NGWAF_BOTS_BUNDLE_FILENAME = "ngwaf_bots.parquet"
+
 # Filename for the per-hour performance-dimension TTL-distribution rollup
 # feeding /api/performance/aggregates' ``ttl_dist`` histogram panel (an
 # all-rows live scan today). One row per closed hour PER ttl bucket, matching
@@ -595,6 +611,27 @@ SECURITY_TOPIPS_BUNDLE_TOP_K = 500
 # query's ``ORDER BY min_ttl``), so the reader carries NO ``_approx`` flag.
 # Closed-hours-only reader (NO active-hour merge, matching slow_urls).
 PERF_TTL_DIST_BUNDLE_FILENAME = "perf_ttl_dist.parquet"
+
+# Filename for the per-hour per-ASN heatmap rollup feeding /api/network-health's
+# ``heatmap`` + ``leaderboard`` + ``summary`` + ``buckets`` sections (all of
+# which the 2–4 s ``create_filtered_temp_table`` on 30 d windows blocks).
+# Schema per (asn, hour): (asn, hour_ts, reqs, errors, resp_bytes_sum,
+# rtt_p50_us, rtt_min_p50_us, rtt_var_p50_us, rtt_count, ploss_sum,
+# ploss_count). Top-K=200 ASNs per hour ranked by reqs with HAVING >= 3.
+# The reader groups by (asn, hour_ts) — each row becomes ONE heatmap bucket
+# at hourly granularity, which is still meaningful for 30 d windows.
+NETWORK_HEATMAP_BUNDLE_FILENAME = "network_heatmap.parquet"
+NETWORK_HEATMAP_BUNDLE_TOP_K = 200
+NETWORK_HEATMAP_BUNDLE_MIN_REQUESTS_PER_HOUR = 3
+
+# Filename for the per-hour per-(country, city, lat, lon, metro) geo rollup
+# feeding /api/network-health's ``map_buckets`` + ``cities`` + ``metro_leaderboard``
+# sections. Schema per (geocell, hour): (country, city, lat, lon, metro,
+# hour_ts, reqs, errors, ploss_sum, ploss_count, rtt_sum, rtt_count).
+# No top-K cap (geo cardinality is bounded by distinct geocells, not open-ended
+# like ASNs). The reader serves both map_rows (per geocell, per hour_ts bucket)
+# and metro_rows (aggregated across all hours, no time dimension).
+NETWORK_GEO_BUNDLE_FILENAME = "network_geo.parquet"
 
 
 def _time_series_bundle_path(source: dict, hour: str) -> str:

@@ -102,3 +102,55 @@ def test_no_production_service_id_in_tracked_tree() -> None:
         "Scrub these before merging to main (and rotate/retire the pushed branch "
         "ref to un-publish them):\n  " + "\n  ".join(sorted(offenders))
     )
+
+
+def _configured_oauth_secrets() -> list[str]:
+    """Derive OAuth client_id / client_secret / flow-state secret from the
+    gitignored provider registry + env (the PRODUCER), so this guard never
+    hardcodes a secret (per the ``leak-sweep-producer-derived`` pattern). Returns
+    lowercased needles; empty when OAuth is not configured in this environment.
+    """
+    out: list[str] = []
+    try:
+        from backend.core.oauth import registry
+
+        registry.reset_cache_for_tests()
+        for p in registry.get_all_providers():
+            out.extend(v for v in (p.client_id, p.client_secret) if v)
+        fss = registry.flow_state_secret()
+        if fss:
+            out.append(fss)
+    except Exception:
+        return []
+    # Ignore trivially-short values that would produce noisy false positives.
+    return [v.lower() for v in out if len(v) >= 8]
+
+
+def test_no_oauth_client_credentials_in_tracked_tree() -> None:
+    """When OAuth is configured (gitignored registry + env), the real client_id /
+    client_secret / OAUTH_FLOW_STATE_SECRET must never appear in the tracked
+    tree. Dormant (skipped) where OAuth isn't configured, e.g. CI."""
+    needles = _configured_oauth_secrets()
+    if not needles:
+        pytest.skip("OAuth not configured in this environment — no credentials to scan for")
+
+    self_path = Path(__file__).resolve()
+    offenders: list[str] = []
+    for path in _tracked_files():
+        if path.resolve() == self_path:
+            continue
+        if path.suffix.lower() in _SKIP_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore").lower()
+        except (OSError, UnicodeError):
+            continue
+        for needle in needles:
+            if needle in text:
+                offenders.append(f"{path.relative_to(_REPO_ROOT)} (contains an OAuth credential)")
+                break
+
+    assert not offenders, (
+        "OAuth client credential(s) found in the tracked, world-readable tree.\n"
+        "Move them to the gitignored registry / env and rotate them:\n  " + "\n  ".join(sorted(offenders))
+    )

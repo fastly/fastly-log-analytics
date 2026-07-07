@@ -169,6 +169,73 @@ def bundle_hours(service_id: str, source: dict, hours: list[str]) -> int:
     return rebuilt
 
 
+def stamp_empty_hour_sentinels(service_id: str, source: dict, hours: list[str]) -> int:
+    """Write an EMPTY sentinel bundle for closed hours that have NO rows.
+
+    A zero-row closed hour can never acquire rollup coverage through the
+    data-driven writers: the per-field COPY's PARTITION_BY emits no file
+    for an empty partition, ``bundle_hours`` skips hours with no per-field
+    files, and ``backfill_missing_hour_bundles`` discovers candidate hours
+    via ``HAVING n > 0``. Without a marker, the reader's missing-hour live
+    heal classifies every quiet closed hour as a writer gap and live-scans
+    it on EVERY request — permanent hot-path cost on exactly the bursty /
+    low-traffic services the heal exists for, plus a misleading operator
+    warning. An empty ``all_fields.parquet`` (same field/value/count
+    schema as a real bundle) marks the hour as VERIFIED EMPTY: the reader
+    counts it as covered, and it contributes zero rows to the UNION ALL.
+
+    Late data is safe: if rows stamped in a sentinel'd hour arrive later,
+    the per-sync recompute writes newer per-field files and
+    ``bundle_hours``' mtime check rebuilds the real bundle over the
+    sentinel.
+
+    Returns the count of sentinels written. Idempotent — hours with any
+    existing bundle (real or sentinel) are skipped.
+    """
+    if not hours:
+        return 0
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from backend.core.iceberg.view import _get_service_lock
+
+    bundled_root = _hour_bundled_root(source)
+    os.makedirs(bundled_root, exist_ok=True)
+    lock_key = source.get("name", "default")
+    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    # Same column shape as a real bundle (value is CAST(... AS VARCHAR) in
+    # the per-field COPY), so the reader's UNION ALL types line up.
+    schema = pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())])
+    empty_table = pa.table({"field": [], "value": [], "count": []}, schema=schema)
+
+    stamped = 0
+    for hour in hours:
+        if hour >= active_hour:
+            # Active (or future) hour — still receiving writes; served live.
+            continue
+        if parse_hour_token(hour) is None:
+            continue
+        bundle_dir = os.path.join(bundled_root, f"hour={hour}")
+        bundle_path = os.path.join(bundle_dir, "all_fields.parquet")
+        if os.path.exists(bundle_path):
+            continue
+        os.makedirs(bundle_dir, exist_ok=True)
+        tmp_path = os.path.join(bundle_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
+        try:
+            pq.write_table(empty_table, tmp_path)
+            with _get_service_lock(lock_key):
+                os.replace(tmp_path, bundle_path)
+            stamped += 1
+        except OSError as e:
+            logger.warning("[rollups] %s: empty-hour sentinel write failed for hour=%s: %s", service_id, hour, e)
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    return stamped
+
+
 def bundle_hours_ip_spread(service_id: str, source: dict, hours: list[str]) -> int:
     """Combine per-field IP-spread hour parquets into one bundled parquet per hour.
 

@@ -5,6 +5,272 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-07-07
+
+### Added
+
+- **Analyst invites can be redeemed with OAuth/OIDC single sign-on as an
+  alternative to a passcode.** Operators can register an OpenID Connect
+  provider (Google works out of the box; others via standard discovery) and
+  choose passcode or SSO per invite; analysts then sign in through the
+  provider's own login on the share-login page. An OAuth login lands in
+  exactly the same analyst session as a passcode login — service scoping, IP
+  masking, terms acknowledgement, the concurrent-session cap, revocation, and
+  audit logging all apply unchanged — and the invite is pinned to the provider
+  identity on first login, with the auth method visible on the invitations,
+  sessions, and audit views. A fully-trusted, organization-restricted provider
+  can additionally be flagged to auto-provision an invite just-in-time for a
+  verified member of the org (with a preset service scope and masking policy),
+  so trusted teams don't need every user invited by hand; this is off unless
+  explicitly enabled. The whole feature is inert until a provider registry and
+  its credentials are configured — the production compose file passes the
+  relevant environment variables through from the host — and the existing
+  passcode flow is unchanged.
+
+- **Per-invite "Allow shared logins" toggle.** Analyst invites are single-seat
+  by default — each new login boots the invite's previous session — so a link
+  shared among several people kept kicking them off each other. An opt-in
+  toggle (set at creation or edited later, shown as a "Shared" badge) now lets
+  multiple analysts stay signed in under one invite at once, still bounded by
+  the global concurrent-session cap, and expiry, revocation, IP allowlisting,
+  and masking continue to apply per invite. Note that on a shared invite,
+  audit events can no longer attribute an action to one individual, since
+  everyone authenticates as the same name and email.
+
+- **Twelve new anomaly detections, and the Insights page is reorganized into
+  category tabs.** New insights flag content-discovery scanning (one IP
+  bursting 404s across many distinct URLs), low-and-slow probing of sensitive
+  paths, credential stuffing against login/auth endpoints, per-ASN
+  network-health degradation (packet loss, jitter, TCP retransmissions),
+  traffic from an ASN never seen in the baseline, a single Referer suddenly
+  driving an outsized share of traffic, write-method surges on a GET-dominated
+  service, US-metro delivery-rate drops, unusual connection-type mix shifts,
+  per-Fastly-PoP latency regressions, HTTP/3 clients falling back to TCP, and
+  service-wide cache-hit-ratio cliffs. The page's cards are now grouped into
+  Security & Threat Detection, Origin Health & Stability, Edge & Delivery
+  Performance, Network Path, and Traffic & Volumetrics tabs, each badged with
+  its critical/warning counts, and only the selected tab's cards are rendered.
+  Under the hood, related per-IP and per-dimension detections share coalesced
+  scans so the larger insight set doesn't slow the page, and security insights
+  honor an analyst invite's IP-masking policy.
+
+- **Three new insights backed by three new edge-captured log fields.** Payload
+  Compression Regression flags compressible responses that flipped from
+  gzip/brotli to uncompressed versus baseline; Session Harvesting flags a
+  single IP presenting many distinct session cookies — session-token brute
+  force or cookie replay; Origin Timeout Split separates origin slowness into
+  connect time versus read time and flags whichever regressed. Each is powered
+  by a new log field (response Content-Encoding, an edge-hashed session-cookie
+  id, and origin connect/TLS handshake time), so a service must redeploy its
+  logging configuration — and accrue some history — before these cards
+  populate. The session-cookie id is strictly opt-in (no preset or field group
+  enables it — enable the field explicitly to turn Session Harvesting on), is
+  SHA-256-hashed at the edge so the raw cookie never leaves Fastly, and is
+  redacted on every analyst-facing surface for invites with IP masking.
+
+- **The share dashboard now shows who is actually using shared access.** The
+  Active Invitations table gains a Last-login column and a live "online now"
+  indicator — derived from the existing login audit events, so it works
+  retroactively with no migration — and the Services column shows each
+  service's friendly name alongside its id. All three share tables
+  (invitations, sessions, audit log) are now sortable by clicking column
+  headers, and the audit log is rendered as a proper table.
+
+- **Active filters are pinned at the top of the field-value search dialog.**
+  Opening a top-N card's search (e.g. the Edge PoP card) now starts with a
+  "Selected" section listing the filters already applied for that field —
+  marked as include or exclude and removable in place without closing the
+  dialog. Selected values are deduplicated from the fetched list below and
+  follow the search text as you type.
+
+### Fixed
+
+- **The Debug Panel's SQLite section now shows what the current page
+  actually executed, not the whole backend's recent activity.** The
+  section previously rendered the process-global capture buffer — cron
+  and background statements included — so a dashboard load could report
+  seconds of "SQLite time" the page never spent. Each API response now
+  carries the SQLite statements that ran while serving it, the panel
+  defaults to this per-page view, and the process-wide buffer moved
+  behind an explicit "Process-wide" toggle (its 5-second polling now
+  only runs while that view is open).
+
+- **Active-hour panels no longer double-count the freshest few minutes of
+  traffic.** The fast direct read behind the dashboard's current-hour
+  merging also picked up buffer files whose rows had already been committed
+  to the hourly partitions (they linger briefly on disk for in-flight
+  queries), inflating the active hour's contribution to top-N cards, the
+  connection-reuse histogram, the traffic chart, and the NGWAF bots panel
+  by up to ~10 minutes of recent rows.
+
+- **Dashboard/Security/Origin/Performance no longer flash the wrong
+  service's data on a direct or hard-refresh load.** The server-rendered
+  first paint resolved the active service from the account's default only,
+  ignoring the page's own `?service=` link — so opening a direct link to a
+  non-default service briefly rendered the default service's numbers before
+  the client silently swapped in the right ones. The server render now
+  prefers the URL's `service` param, matching the client's own resolution.
+
+- **`/api/health?deep=1` no longer flags a healthy, low-traffic service as
+  degraded during a normal quiet spell.** The ingest-staleness check used
+  one fixed threshold for every service; a service's own historical ingest
+  cadence now widens that threshold when its typical quiet periods run
+  longer than the default, while services with steady traffic are
+  unaffected.
+
+- **The Insights page's default view is fast again on services with 30+ days
+  of history.** The background prewarmer still warmed a fixed one-week
+  baseline while the page's adaptive default (introduced in 2.0.0-beta.2) had
+  grown to a 30-day baseline once enough history accrued, so every default
+  Insights load on a long-history service missed the warm cache and paid the
+  multi-second cold computation. The prewarmer now derives the same
+  window/baseline pair the page itself will pick from the service's log
+  history, and warms it for both admin and analyst views.
+
+- **The Debug Panel's query-time readout no longer sits at 0 queries / 0.00ms
+  on server-rendered page loads.** Backend responses only include per-query
+  timings when the request opts in via a debug header, and the server render's
+  own fetch never sent it — so cold loads that the server render fully
+  satisfied left the panel with nothing to read. The debug toggle now also
+  sets a cookie the server render honors (admin sessions only, never analyst),
+  browsers that enabled the toggle before the cookie existed heal themselves
+  automatically, and flipping a toggle refreshes the open page's data so the
+  panel populates without a reload.
+
+- **Report pages no longer silently swap their charts moments after first
+  paint on services whose logs lag behind the clock.** The server-rendered
+  first paint of Dashboard, Security, Origin, and Performance anchored the
+  time window on the render-time "now", while the client immediately
+  re-snapped the window to the service's actual log range — changing the
+  query and replacing the just-painted data with no loading indicator. The
+  server render and the client now share the same snap-to-log-extents
+  decision, so the first paint already shows the window the page settles on.
+
+- **Top-N cards no longer silently under-count the current day on services
+  with bursty log delivery.** Precomputed hourly top-N rollups for a closed
+  hour were only written when a later ingest batch straddled the hour
+  boundary; on services whose traffic bursts end mid-hour, every closed hour
+  of the current day could be missing from the cards until the nightly
+  rebuild — visible as the exact "Total Logs" count disagreeing with every
+  card's total by the whole day's traffic. A new hourly heal pass now
+  backfills any missing closed hours within about an hour, verified-empty
+  quiet hours are stamped as covered so they cost nothing, and the reader
+  falls back to querying still-uncovered hours live — so a rollup-writer
+  outage now degrades to slower-but-correct cards instead of silent
+  under-counts.
+
+- **Short time-range presets no longer show all-time numbers.** The compact
+  range encoding used by the Dashboard, Security, Origin, Performance, and
+  Network pages only recognized the 24h / 7d / 30d / auto presets, so picking
+  1h, 3h, 6h, 12h, or 3d fell back to an unbounded scan and the top-N cards
+  reported all-time counts. Every quick preset is now recognized, an
+  unrecognized preset degrades to the displayed window instead of all-time,
+  and clicking a preset in a long-lived tab scans the window the chart
+  actually displays rather than one anchored at page load.
+
+- **Analyst IP and session-id masking closes its remaining side doors.** For
+  invites with client-IP masking enabled: filter keys and field-value
+  dimensions spelled as case or punctuation variants of a masked column
+  ("IP", "ip.") now resolve to the same masked column instead of slipping
+  past the policy while still querying the real data; the field-value picker
+  no longer returns raw distinct client IPs; and ad-hoc query expressions
+  that rebuild an identifier through string operations or grouping come back
+  redacted, because masking is applied at the query's source view.
+
+- **Switching services gives every panel a clean start.** The service
+  switcher now performs a full page reload instead of an in-place route
+  change, which could leave the traffic chart (and other panels) showing the
+  previous service's in-flight data. The newly selected service survives the
+  reload, so there's no bounce back.
+
+- **Session-detail clicks no longer sporadically fail with "Session reference
+  expired" after a backend restart.** Without an explicit
+  `SESSION_TOKEN_SECRET`, two simultaneous first requests after startup could
+  each mint a different ephemeral sealing key for the opaque session-detail
+  tokens, so sessions listed under the losing key could never be opened until
+  the next restart. Key initialization is now race-safe; deployments that
+  configure the secret were never affected.
+
+- **Invite creation recovers from share-database schema drift.** If the share
+  database's schema version stamp ever got ahead of its actual columns (a
+  skipped migration), the missing columns were never retried and creating an
+  invite failed with a server error from then on. Expected additive columns
+  are now reconciled automatically every time the database is opened — a
+  purely additive self-heal that never rewrites or drops existing data.
+
+- **Byte sizes just under a unit boundary now read in the next unit up.**
+  Size displays across the app (storage and usage totals, cache size, file
+  listings, per-line estimates) showed values like "1023.24 MB" right at the
+  edge of a gigabyte; formatting now promotes to the next unit once a value
+  would need four digits, so it reads "1 GB" instead.
+
+### Changed
+
+- **Dashboard and Top Bots load substantially faster.** The dashboard's
+  rollup path no longer materializes a per-request temp table; the
+  connection-reuse histogram is served from the existing per-hour
+  connection-reuse rollup; the current-hour slice of every panel is read
+  once per request (directly from buffer/hourly parquet, skipping files
+  that can't contain current-hour rows); and a new per-hour NGWAF-bots
+  rollup replaces the per-request join against the bot cache. Measured on a
+  busy 24h window: Top Bots ~0.57s → ~0.15s; the bot-UA matcher is also
+  pre-compiled at startup so the first Top Bots request after a restart no
+  longer pays a ~300ms compile.
+
+- **The Network page loads much faster on wide windows.** The latency heatmap
+  and geographic health sections are now served from precomputed per-hour
+  rollups when an unfiltered window of 48 hours or more is mostly closed
+  history, skipping the 2–4 second full scan the page previously paid on a
+  30-day view. Filtered and short windows keep the exact live path.
+
+- **Background housekeeping no longer stalls the app.** Metadata cleanup now
+  deletes in batches, so a large purge can't hold the metadata write lock for
+  tens of seconds and queue sync bookkeeping behind it; the storage-stats
+  sampler reads the database file size instead of scanning every page on each
+  metrics tick; concurrent Insights requests for the same service now share
+  one scan instead of running expensive duplicates; and the sessions API
+  defaults to the last 7 days when called without a time range instead of
+  scanning all history.
+
+- **Source installs now require Python 3.12 or newer.** The backend already
+  uses Python-3.12-only syntax, so installing on an older interpreter failed
+  midway with a bare `SyntaxError`; declaring the true floor turns that into
+  a clear, up-front pip error. Docker deployments already run Python 3.13 and
+  are unaffected.
+
+- **Tabs read more clearly.** The active tab is now filled with the primary
+  color instead of a subtle shade, tabs get a background lift on hover, and
+  the Insights tab's count badge keeps accessible contrast against the newly
+  colored active tab.
+
+- **The admin API surface is now fully typed.** Session-scoring, share-admin,
+  provisioning, service, query-monitor, usage, compaction, and saved-view
+  endpoints now declare typed response models in the OpenAPI schema
+  (previously untyped in the generated client). The wire shape is unchanged —
+  responses are byte-identical for both admin and analyst.
+
+### Security
+
+- **A broad hardening pass across the analyst surface, sign-in flow, and edge
+  log capture.** Analyst requests are path-normalized and service-scoped more
+  strictly before permission checks, and ad-hoc query validation inspects
+  what a table function actually is rather than just its name. The sign-in
+  flow leaks less: a successful login no longer resets the per-IP failure
+  counter, and invite verification takes the same time whether or not the
+  invite exists. Oversized or deeply nested telemetry payloads and
+  out-of-range alert-preview parameters are now rejected, custom log-field
+  names are escaped in ingest SQL, server-rendered pages no longer attach
+  admin credentials to their internal fetches, and edge capture bounds logged
+  values so a pathological header can't corrupt a log line.
+
+### Removed
+
+- Dropped three vestigial fields from the `/api/bootstrap` response:
+  `custom_fields_catalog` (always emitted empty), and `cron_schedule` /
+  `share_status` (always `null`). The log-fields catalog, cron schedule, and
+  share status are each served by their dedicated endpoints, and the bundled
+  frontend never read the bootstrap copies.
+
 ## [2.0.0-beta.2] - 2026-07-01
 
 ### Added
@@ -844,6 +1110,7 @@ deleted.
   admin tunnel use case is no longer supported; production has always
   been direct-mode against the Fastly+Caddy public URL.
 
+[2.1.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.1.0
 [2.0.0-beta.2]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.0.0-beta.2
 [2.0.0-beta.1]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.0.0-beta.1
 

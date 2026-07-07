@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { describe, expect, test } from 'vitest'
 
 import {
@@ -43,7 +46,12 @@ interface ParityCase {
 
 const PARITY_TABLE: ParityCase[] = [
   // ── Fixed tokens: [quantizedAnchor - delta, quantizedAnchor] ──
+  { token: '1h', anchor: '2026-06-29T12:00:37Z', earliest: null, start: '2026-06-29T11:00:00Z', end: '2026-06-29T12:00:00Z' },
+  { token: '3h', anchor: '2026-06-29T12:00:37Z', earliest: null, start: '2026-06-29T09:00:00Z', end: '2026-06-29T12:00:00Z' },
+  { token: '6h', anchor: '2026-06-29T12:00:37Z', earliest: null, start: '2026-06-29T06:00:00Z', end: '2026-06-29T12:00:00Z' },
+  { token: '12h', anchor: '2026-06-29T12:00:37Z', earliest: null, start: '2026-06-29T00:00:00Z', end: '2026-06-29T12:00:00Z' },
   { token: '24h', anchor: '2026-06-29T12:00:37Z', earliest: null, start: '2026-06-28T12:00:00Z', end: '2026-06-29T12:00:00Z' },
+  { token: '3d', anchor: '2026-06-29T12:00:37Z', earliest: null, start: '2026-06-26T12:00:00Z', end: '2026-06-29T12:00:00Z' },
   { token: '7d', anchor: '2026-06-29T12:00:37Z', earliest: null, start: '2026-06-22T12:00:00Z', end: '2026-06-29T12:00:00Z' },
   { token: '30d', anchor: '2026-06-29T12:00:00Z', earliest: null, start: '2026-05-30T12:00:00Z', end: '2026-06-29T12:00:00Z' },
   // Anchor floors to the 60s grid: :59 → :00 (same key as :00..:59).
@@ -130,14 +138,30 @@ describe('token vocabulary + constants mirror the backend', () => {
   test('ANCHOR_QUANTUM_SECONDS is 60', () => {
     expect(ANCHOR_QUANTUM_SECONDS).toBe(60)
   })
-  test('FIXED_TOKEN_DELTAS covers 24h/7d/30d', () => {
-    expect(Object.keys(FIXED_TOKEN_DELTAS).sort()).toEqual(['24h', '30d', '7d'])
+  test('FIXED_TOKEN_DELTAS covers every FilterBar quick-preset', () => {
+    // A preset missing here (or on the backend) once shipped as an all-time
+    // scan (the 12h huge-counts bug). The lockstep triangle is closed by two
+    // SOURCE-SCRAPING gates — tests/utils/test_time_window.py (FilterBar ⊆
+    // backend) and the 'FilterBar quick-presets ⊆ FE mirror' scrape below
+    // (FilterBar ⊆ this file's SUT) — which pin backend ≡ FE-mirror
+    // transitively; this literal list is just readable documentation of the
+    // current vocabulary.
+    expect(Object.keys(FIXED_TOKEN_DELTAS).sort()).toEqual(
+      ['1h', '3h', '6h', '12h', '24h', '3d', '7d', '30d'].sort(),
+    )
+    expect(FIXED_TOKEN_DELTAS['1h']).toBe(60 * 60 * 1000)
+    expect(FIXED_TOKEN_DELTAS['3h']).toBe(3 * 60 * 60 * 1000)
+    expect(FIXED_TOKEN_DELTAS['6h']).toBe(6 * 60 * 60 * 1000)
+    expect(FIXED_TOKEN_DELTAS['12h']).toBe(12 * 60 * 60 * 1000)
     expect(FIXED_TOKEN_DELTAS['24h']).toBe(24 * 60 * 60 * 1000)
+    expect(FIXED_TOKEN_DELTAS['3d']).toBe(3 * 24 * 60 * 60 * 1000)
     expect(FIXED_TOKEN_DELTAS['7d']).toBe(7 * 24 * 60 * 60 * 1000)
     expect(FIXED_TOKEN_DELTAS['30d']).toBe(30 * 24 * 60 * 60 * 1000)
   })
   test('VALID_RANGE_TOKENS = fixed tokens + auto', () => {
-    expect([...VALID_RANGE_TOKENS].sort()).toEqual(['24h', '30d', '7d', 'auto'])
+    expect([...VALID_RANGE_TOKENS].sort()).toEqual(
+      ['1h', '3h', '6h', '12h', '24h', '3d', '7d', '30d', 'auto'].sort(),
+    )
   })
   test('isValidRangeToken gates known tokens, rejects unknown/null', () => {
     expect(isValidRangeToken('24h')).toBe(true)
@@ -149,5 +173,37 @@ describe('token vocabulary + constants mirror the backend', () => {
   })
   test('resolveWindow throws on an unrecognized token (Python ValueError parity)', () => {
     expect(() => resolveWindow('90d', '2026-06-29T12:00:00Z', { now: NOW })).toThrow()
+  })
+})
+
+describe('FilterBar quick-presets ⊆ FE mirror vocabulary (lockstep scrape)', () => {
+  // Closes the FilterBar → FE-mirror leg of the lockstep triangle by scraping
+  // the SAME source the pytest gate scrapes (tests/utils/test_time_window.py
+  // pins FilterBar → backend); together they pin backend ≡ FE-mirror
+  // transitively. Without this, a new preset could ship with the backend
+  // updated but this file's SUT silently missing the token — resolveWindow
+  // would throw for that preset in its first future consumer.
+  test('every pickRelative preset is a FIXED_TOKEN_DELTAS key with the same delta', () => {
+    // vitest's root is frontend/ (vitest.config.ts), so cwd-relative is stable
+    // here the same way REPO_ROOT-relative is in the pytest twin.
+    const src = readFileSync(
+      resolve(process.cwd(), 'components/FilterBar/FilterBar.tsx'),
+      'utf8',
+    )
+    const presets = [...src.matchAll(/pickRelative\(\s*'([^']+)'\s*,\s*([\d.]+)\s*\)/g)]
+    expect(presets.length).toBeGreaterThan(0)
+    // Partial-drop guard (mirrors the pytest gate): every pickRelative CALL
+    // SITE must match the extraction regex, so a preset written in a shape the
+    // pattern doesn't cover fails loudly instead of silently skipping the
+    // vocabulary check. (The definition `const pickRelative = React.useCallback(`
+    // contains no `pickRelative(` substring, so the count is call sites only.)
+    expect(presets.length).toBe(src.split('pickRelative(').length - 1)
+    for (const [, label, hours] of presets) {
+      expect(
+        FIXED_TOKEN_DELTAS[label],
+        `FilterBar preset '${label}' missing from FIXED_TOKEN_DELTAS (or wrong delta)`,
+      ).toBe(Number(hours) * 60 * 60 * 1000)
+      expect(isValidRangeToken(label)).toBe(true)
+    }
   })
 })

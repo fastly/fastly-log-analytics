@@ -45,7 +45,7 @@ def iceberg_commit_endpoint(source: dict = Depends(get_source)):
     thread and the response body carries a ``run_id`` the caller can
     poll for completion. 200 (the prior status) misled clients that
     treated it as "done"."""
-    from backend.scheduler import _run_commit
+    from backend.cron.jobs.commit import _run_commit
     from backend.utils.router_utils import start_or_resume_cron
 
     return start_or_resume_cron(
@@ -79,8 +79,8 @@ def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
 
     from backend.core import iceberg as db_iceberg
     from backend.core.duckdb import _cache_dir, start_cron_run
+    from backend.cron.jobs.metadata import _run_metadata_sync
     from backend.cron_progress import start_progress
-    from backend.scheduler import _run_metadata_sync
 
     service_id = source["name"]
 

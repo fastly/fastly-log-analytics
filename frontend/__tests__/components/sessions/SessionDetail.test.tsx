@@ -18,6 +18,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import React from 'react'
 
+import { SessionDetail } from '@/app/sessions/_sections/SessionDetail'
 import type { components } from '@/types/api.generated'
 
 type SessionRow = components['schemas']['Session']
@@ -128,8 +129,7 @@ function withProviders(ui: React.ReactNode) {
 // --- tests --------------------------------------------------------------
 
 describe('SessionDetail', () => {
-  it('does not render the dialog when selectedSession is null', async () => {
-    const { SessionDetail } = await import('@/app/sessions/_sections/SessionDetail')
+  it('does not render the dialog when selectedSession is null', () => {
     render(
       withProviders(
         <SessionDetail
@@ -148,9 +148,8 @@ describe('SessionDetail', () => {
     expect(postMock).not.toHaveBeenCalled()
   })
 
-  it('renders the session header + metadata when a session is selected', async () => {
+  it('renders the session header + metadata when a session is selected', () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    const { SessionDetail } = await import('@/app/sessions/_sections/SessionDetail')
     render(
       withProviders(
         <SessionDetail
@@ -174,7 +173,6 @@ describe('SessionDetail', () => {
 
   it('issues a POST to /api/sessions/detail with the session window', async () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    const { SessionDetail } = await import('@/app/sessions/_sections/SessionDetail')
     const session = makeSession({
       ip: '10.0.0.50',
       ja4: 'abc_def_ghi',
@@ -207,7 +205,6 @@ describe('SessionDetail', () => {
 
   it('skips the fetch when activeServiceId is null (useQuery enabled=false)', async () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    const { SessionDetail } = await import('@/app/sessions/_sections/SessionDetail')
     render(
       withProviders(
         <SessionDetail
@@ -242,7 +239,6 @@ describe('SessionDetail', () => {
         ],
       },
     })
-    const { SessionDetail } = await import('@/app/sessions/_sections/SessionDetail')
     render(
       withProviders(
         <SessionDetail
@@ -265,9 +261,8 @@ describe('SessionDetail', () => {
     expect(screen.getByText('404')).toBeInTheDocument()
   })
 
-  it('shows the Edge-only switch only when data.has_edge=true', async () => {
+  it('shows the Edge-only switch only when data.has_edge=true', () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    const { SessionDetail } = await import('@/app/sessions/_sections/SessionDetail')
     const { rerender } = render(
       withProviders(
         <SessionDetail
@@ -299,9 +294,8 @@ describe('SessionDetail', () => {
     expect(screen.getByText(/Edge only/i)).toBeInTheDocument()
   })
 
-  it('renders the FlagSessionPopover in the header when edge_sid is present', async () => {
+  it('renders the FlagSessionPopover in the header when edge_sid is present', () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    const { SessionDetail } = await import('@/app/sessions/_sections/SessionDetail')
     render(
       withProviders(
         <SessionDetail

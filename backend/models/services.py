@@ -182,3 +182,66 @@ class CronRunsResponse(BaseModel):
     page: int | None = None
     per_page: int | None = None
     entries: list[CronRunEntry] = []
+
+
+# ── Wire-safe responses for the remaining services/core routes ─────────────
+#
+# Same contract as CronRunEntry above: ``extra="allow"`` + all-Optional +
+# ``response_model_exclude_unset=True`` at the decorator so branch-dependent
+# key sets stay byte-identical on the wire.
+
+
+class OkMessageResponse(BaseModel):
+    """``{ok, message}`` ack used by time-range clear and similar routes."""
+
+    model_config = ConfigDict(extra="allow")
+    ok: bool | None = None
+    message: str | None = None
+
+
+class CredentialsUpdateResponse(BaseModel):
+    """PATCH /services/{id}/credentials — ``access_key_id`` present only on
+    the Fastly-API rotation branch."""
+
+    model_config = ConfigDict(extra="allow")
+    ok: bool | None = None
+    message: str | None = None
+    access_key_id: str | None = None
+
+
+class CronScheduleEntry(BaseModel):
+    """One row of GET /api/cron-schedule (``build_cron_schedule_payload``).
+    ``disabled_reason`` appears only on synthesized disabled rows; the
+    last_run_* trio only when a run has been recorded."""
+
+    model_config = ConfigDict(extra="allow")
+    task: str | None = None
+    next_run_time: str | None = None
+    last_run_time: str | None = None
+    last_run_status: str | None = None
+    last_run_duration_s: float | None = None
+    last_run_summary: str | None = None
+    disabled_reason: str | None = None
+
+
+class CronScheduleResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    schedules: list[CronScheduleEntry] = []
+
+
+class LogFieldsUpdateResponse(BaseModel):
+    """POST /services/{id}/log-fields — no-change branch carries
+    ``message``; the applied branch carries ``estimate`` +
+    ``line_budget_warning`` (the ``waf_warning``-shaped dict, or null)."""
+
+    model_config = ConfigDict(extra="allow")
+    ok: bool | None = None
+    message: str | None = None
+    estimate: int | None = None
+    line_budget_warning: dict[str, Any] | None = None
+
+
+class CustomFieldsImportResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    ok: bool | None = None
+    imported_count: int | None = None

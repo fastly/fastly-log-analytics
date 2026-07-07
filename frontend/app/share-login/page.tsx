@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { Suspense } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { KeyRound } from 'lucide-react'
 import { ShareLoginForm } from './ShareLoginForm'
@@ -24,7 +25,13 @@ export default function ShareLoginPage() {
           </p>
         </CardHeader>
         <CardContent>
-          <ShareLoginForm />
+          {/* ShareLoginForm reads ?oauth_error / ?return via useSearchParams,
+              which forces a client bailout — boundary it so prefetch/loading.tsx
+              behavior is preserved (design §5.2). No fixed-height fallback →
+              avoid CLS while the search params resolve. */}
+          <Suspense fallback={null}>
+            <ShareLoginForm />
+          </Suspense>
         </CardContent>
       </Card>
     </div>

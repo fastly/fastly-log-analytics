@@ -203,3 +203,95 @@ class TestTryTimeSeriesFromRollup:
 
         assert rows is not None
         assert len(rows) == 24, f"UTC-offset path also expected 24 buckets, got {len(rows)}"
+
+
+class TestActiveHourDirectLiveSlice:
+    """The live active-hour slice must come from the direct buffer/hourly
+    read when the caller declares the window unfiltered — never the bound
+    view (which pays manifest/union overhead per load)."""
+
+    def test_crosses_active_serves_live_slice_from_buffer_not_view(self, rollup_layout):
+        """table_name deliberately does NOT exist: if the reader ever routes
+        the live slice through the view branch, the final query raises and
+        the reader returns None — failing this test loudly."""
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+
+        # Two fully-bundled closed hours before the active hour.
+        cursor = active_start - timedelta(hours=2)
+        while cursor < active_start:
+            hs = cursor.strftime("%Y-%m-%d-%H")
+            _write_bundle(bundled, hs, total_requests=600)
+            _write_per_field_marker(per_field, "requests", hs)
+            cursor += timedelta(hours=1)
+
+        # Buffer parquet carrying 3 active-hour rows.
+        buffer_dir = Path(cache_dir) / "buffer"
+        buffer_dir.mkdir(parents=True, exist_ok=True)
+        ts = (active_start + timedelta(minutes=5)).isoformat()
+        con = duckdb.connect()
+        try:
+            con.execute(
+                f"COPY (SELECT * FROM (VALUES (TIMESTAMPTZ '{ts}'), (TIMESTAMPTZ '{ts}'), "
+                f"(TIMESTAMPTZ '{ts}')) AS t(timestamp)) "
+                f"TO '{buffer_dir / 'live.parquet'}' (FORMAT PARQUET)"
+            )
+        finally:
+            con.close()
+
+        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        st = (active_start - timedelta(hours=2)).isoformat()
+        et = (active_start + timedelta(minutes=30)).isoformat()
+        rows = runner.try_time_series_from_rollup(
+            chart_metric="requests",
+            interval="1 hour",
+            start_time=st,
+            end_time=et,
+            table_name="this_view_does_not_exist",
+            where_clause="1=1",
+            params=[],
+            unfiltered_window=True,
+        )
+
+        assert rows is not None, "reader fell back to the (nonexistent) view for the live slice"
+        # Key by parsed datetime — safe_iso's exact string form (offset vs Z)
+        # is not part of this test's contract.
+        by_time = {datetime.fromisoformat(r["time"]).astimezone(UTC): r["value"] for r in rows}
+        assert sum(by_time.values()) == 600 + 600 + 3
+        assert by_time[active_start] == 3
+
+    def test_filtered_window_never_uses_direct_live_read(self, rollup_layout):
+        """Without unfiltered_window=True the live slice MUST go through the
+        table/where_clause branch (row filters would be silently dropped by
+        the direct read). Pinned the same way: a nonexistent table means the
+        reader must return None instead of serving a filter-ignoring result."""
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        hs = (active_start - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
+        _write_bundle(bundled, hs, total_requests=600)
+        _write_per_field_marker(per_field, "requests", hs)
+
+        buffer_dir = Path(cache_dir) / "buffer"
+        buffer_dir.mkdir(parents=True, exist_ok=True)
+        ts = (active_start + timedelta(minutes=5)).isoformat()
+        con = duckdb.connect()
+        try:
+            con.execute(
+                f"COPY (SELECT * FROM (VALUES (TIMESTAMPTZ '{ts}')) AS t(timestamp)) "
+                f"TO '{buffer_dir / 'live.parquet'}' (FORMAT PARQUET)"
+            )
+        finally:
+            con.close()
+
+        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        rows = runner.try_time_series_from_rollup(
+            chart_metric="requests",
+            interval="1 hour",
+            start_time=(active_start - timedelta(hours=1)).isoformat(),
+            end_time=(active_start + timedelta(minutes=30)).isoformat(),
+            table_name="this_view_does_not_exist",
+            where_clause="url = ?",
+            params=["/x"],
+        )
+
+        assert rows is None, "filtered window must not serve the live slice via the direct read"

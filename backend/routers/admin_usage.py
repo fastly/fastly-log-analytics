@@ -33,15 +33,21 @@ from backend.models.admin import (
     SystemJobsResponse,
     UsageLogAggregate,
     UsageLogEntry,
+    UsageLoggingConfigResponse,
     UsageLoggingUpdateBody,
     UsageLogResponse,
 )
+from backend.models.common import OkResponse
 from backend.routers import admin as _adm
 
 router: APIRouter = _adm.router  # type: ignore
 
 
-@router.get("/admin/usage-logging")
+@router.get(
+    "/admin/usage-logging",
+    response_model=UsageLoggingConfigResponse,
+    response_model_exclude_unset=True,
+)
 def get_usage_logging_settings():
     """Return the usage logging config (global defaults)."""
     from backend import config as svcconfig
@@ -49,7 +55,11 @@ def get_usage_logging_settings():
     return svcconfig.load_usage_logging_config()
 
 
-@router.patch("/admin/usage-logging")
+@router.patch(
+    "/admin/usage-logging",
+    response_model=UsageLoggingConfigResponse,
+    response_model_exclude_unset=True,
+)
 def update_usage_logging_settings(body: UsageLoggingUpdateBody):
     """Update the global usage logging config."""
     from backend import config as svcconfig
@@ -195,6 +205,8 @@ def usage_log_endpoint(
     )
 
 
+# response_model intentionally omitted: streams CSV (StreamingResponse),
+# not a JSON body.
 @router.get("/admin/usage-log/export")
 def usage_log_export(
     source: dict = Depends(get_source),
@@ -299,7 +311,7 @@ def usage_log_export(
     return _StreamingResponse(generate(), media_type="text/csv", headers=headers)
 
 
-@router.delete("/admin/usage-log")
+@router.delete("/admin/usage-log", response_model=OkResponse)
 def purge_usage_log_endpoint(source: dict = Depends(get_source)):
     """Delete all _usage_log entries for this service from metadata_db (SQLite)."""
     from backend.core import metadata as metadata_db
@@ -312,7 +324,7 @@ def purge_usage_log_endpoint(source: dict = Depends(get_source)):
 @router.get("/admin/system-jobs", response_model=SystemJobsResponse)
 def get_system_jobs_endpoint():
     """Return status and schedule info for global background jobs."""
-    from backend.scheduler import get_scheduler
+    from backend.cron.scheduler import get_scheduler
     from backend.utils.system_jobs import get_system_job_status
 
     statuses = get_system_job_status()

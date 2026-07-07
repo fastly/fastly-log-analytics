@@ -58,7 +58,10 @@ const SEVERITY_ICON_COLOR = {
   error: 'text-red-600',
 }
 
-const SEVERITY_BADGE_CLASS = {
+// Exported so the /insights section headers can reuse the exact same severity
+// palette for their per-section rollup chips (keeps card + chip colours in one
+// place). Keys match the backend severity ramp.
+export const SEVERITY_BADGE_CLASS = {
   clean: 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-800',
   info: 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-800',
   warning: 'bg-yellow-50 text-yellow-700 border-yellow-200 dark:bg-yellow-950/30 dark:text-yellow-400 dark:border-yellow-800',

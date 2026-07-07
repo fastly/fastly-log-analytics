@@ -103,7 +103,7 @@ def create_alert(alert: Alert, request: Request):
 def preview_alert(
     alert: Alert,
     request: Request,
-    lookback_hours: int = 24,
+    lookback_hours: int = Query(default=24, ge=1),
     con: duckdb.DuckDBPyConnection = Depends(get_con),
 ):
     import datetime

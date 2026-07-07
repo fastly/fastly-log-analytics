@@ -10,6 +10,7 @@ login (the ``needs_rehash`` check).
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -52,7 +53,7 @@ def create_remote_invite(
     *,
     name: str,
     email: str,
-    passcode: str,
+    passcode: str | None = None,
     expires_at_utc: str | None,
     ip_whitelist: str | None,
     service_ids: list[str],
@@ -60,15 +61,49 @@ def create_remote_invite(
     query_window_hours: int | None = None,
     query_start_time: str | None = None,
     query_end_time: str | None = None,
+    allow_concurrent_sessions: bool = False,
+    auth_method: str = "passcode",
+    oauth_provider: str | None = None,
     con: sqlite3.Connection | None = None,
 ) -> dict:
     """Insert a new invite with its service scope and return the row dict.
 
     Validates name / email / passcode / pii_policy / ip_whitelist before insert.
+
+    ``allow_concurrent_sessions`` opts the invite into shared logins: when set,
+    multiple analysts can be logged in under it at once instead of each login
+    booting the previous session.
+
+    ``auth_method`` selects the redemption path:
+
+    * ``'passcode'`` (default) — the caller supplies a ``passcode`` which is
+      strength-validated and argon2id-hashed. Unchanged legacy behavior.
+    * ``'oauth'`` — the analyst redeems the invite via the OIDC handshake
+      (§2.5 of the design). ``oauth_provider`` (a configured registry key) is
+      required; any ``passcode`` argument is ignored. The ``passcode`` column is
+      ``NOT NULL``, so we fill it with a machine-generated 256-bit secret that
+      is never returned or communicated. It can never be used to log in: the
+      positive ``auth_method`` gate rejects passcode login on an OAuth invite
+      (and vice-versa), so this is belt-and-suspenders, not the control.
     """
+    auth_method = (auth_method or "passcode").strip().lower()
+    if auth_method not in ("passcode", "oauth"):
+        raise ValueError(f"unknown auth_method: {auth_method!r}")
+
     name = validate_name(name)
     email = validate_email(email)
-    validate_passcode_strength(passcode)
+    if auth_method == "oauth":
+        if not oauth_provider or not oauth_provider.strip():
+            raise ValueError("oauth_provider is required for auth_method='oauth'")
+        oauth_provider = oauth_provider.strip()
+        # Unguessable placeholder — never communicated, never a valid login.
+        passcode_to_hash = secrets.token_urlsafe(32)
+    else:
+        if not passcode:
+            raise ValueError("passcode is required for auth_method='passcode'")
+        validate_passcode_strength(passcode)
+        passcode_to_hash = passcode
+        oauth_provider = None
     policy = validate_pii_policy(pii_policy)
     parse_ip_whitelist(ip_whitelist)  # raises on malformed entries
 
@@ -78,13 +113,14 @@ def create_remote_invite(
         con.execute(
             """INSERT INTO remote_invites
                 (id, name, email, passcode, expires_at, ip_whitelist, pii_policy,
-                 query_window_hours, query_start_time, query_end_time, created_at, revoked)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                 query_window_hours, query_start_time, query_end_time, created_at,
+                 revoked, allow_concurrent_sessions, auth_method, oauth_provider)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
             (
                 invite_id,
                 name,
                 email,
-                hash_passcode(passcode),
+                hash_passcode(passcode_to_hash),
                 expires_at_utc,
                 ip_whitelist or None,
                 json.dumps(policy, separators=(",", ":")),
@@ -92,6 +128,9 @@ def create_remote_invite(
                 query_start_time,
                 query_end_time,
                 iso_z_now(),
+                int(bool(allow_concurrent_sessions)),
+                auth_method,
+                oauth_provider,
             ),
         )
         for sid in service_ids or []:
@@ -112,6 +151,7 @@ def get_remote_invite(invite_id: str, *, con: sqlite3.Connection | None = None) 
     out = dict(row)
     out["pii_policy"] = json.loads(out.get("pii_policy") or '{"mask_ips": false}')
     out["service_ids"] = get_remote_invite_services(invite_id, con=con)
+    out["allow_concurrent_sessions"] = bool(out.get("allow_concurrent_sessions"))
     return out
 
 
@@ -147,6 +187,7 @@ def get_remote_invites(*, con: sqlite3.Connection | None = None) -> list[dict]:
         rec = dict(row)
         rec["pii_policy"] = json.loads(rec.get("pii_policy") or '{"mask_ips": false}')
         rec["service_ids"] = services_by_invite.get(rec["id"], [])
+        rec["allow_concurrent_sessions"] = bool(rec.get("allow_concurrent_sessions"))
         out.append(rec)
     return out
 
@@ -172,16 +213,24 @@ def get_remote_invite_by_email_passcode(
     """
     con = con or get_global_share_con()
     norm_email = (email or "").strip().lower()
+    # Positive auth-method gate (design §2.5): the passcode path only ever
+    # considers passcode invites. An OAuth invite carries a random placeholder
+    # in ``passcode`` that no one holds, so entropy alone would already reject
+    # it — but the explicit ``auth_method='passcode'`` filter makes the control
+    # positive (not entropy-dependent) and keeps the two auth methods disjoint.
     rows = con.execute(
-        "SELECT * FROM remote_invites WHERE lower(email)=? AND revoked=0",
+        "SELECT * FROM remote_invites WHERE lower(email)=? AND revoked=0 AND auth_method='passcode'",
         (norm_email,),
     ).fetchall()
     now = iso_z_now()
     match: dict | None = None
     matched_row_id: str | None = None
     matched_stored_hash: str | None = None
+    expensive_verify_run = False
     for row in rows:
         # always run the verify so timing is roughly constant across the rows
+        if row["passcode"] and row["passcode"].startswith("$argon2"):
+            expensive_verify_run = True
         if verify_passcode(passcode, row["passcode"]):
             if row["expires_at"] and row["expires_at"] < now:
                 continue
@@ -190,13 +239,13 @@ def get_remote_invite_by_email_passcode(
                 matched_row_id = row["id"]
                 matched_stored_hash = row["passcode"]
     if match is None:
-        # Equalize timing ONLY when the email has no invite at all. If
-        # rows existed (email present, passcode wrong) we already paid one
-        # verify per row inside the loop — running the dummy verification
-        # again would push the wrong-passcode branch to ``(N+1)×verify``
-        # while the no-email branch stays at ``1×verify``, recreating
-        # the 2× timing side-channel this function is meant to close.
-        if not rows:
+        # Equalize timing when no expensive argon2 verify ran. If rows
+        # existed and triggered a verify (email present, passcode wrong)
+        # we already paid one verify per row inside the loop — running the
+        # dummy verification again would push the wrong-passcode branch to
+        # ``(N+1)×verify`` while the no-email branch stays at ``1×verify``,
+        # recreating the 2× timing side-channel this function is meant to close.
+        if not expensive_verify_run:
             _equalize_passcode_timing(passcode)
         return None
 
@@ -220,6 +269,73 @@ def get_remote_invite_by_email_passcode(
     match["pii_policy"] = json.loads(match.get("pii_policy") or '{"mask_ips": false}')
     match["service_ids"] = get_remote_invite_services(match["id"], con=con)
     return match
+
+
+def get_remote_invite_oauth(email: str, provider: str, *, con: sqlite3.Connection | None = None) -> dict | None:
+    """Look up a live OAuth invite by ``(email, provider)`` — NO passcode check.
+
+    Deliberately NOT ``get_remote_invite_by_email_passcode``: for the OAuth path
+    identity is already established by the upstream ``id_token`` verification
+    (signature / iss / aud / nonce / email_verified), so there is no passcode to
+    verify and no argon2 timing surface to equalize. The positive ``auth_method``
+    gate (``auth_method='oauth'``) is what guarantees a passcode invite can never
+    be redeemed through the callback and vice-versa.
+
+    Filters to ``revoked=0``, the exact ``oauth_provider``, and drops rows past
+    ``expires_at`` in Python (mirrors the passcode path's expiry handling).
+    Returns the enriched invite dict (``pii_policy`` parsed, ``service_ids``
+    attached) for the first live match, else ``None``. Caller still re-applies
+    the IP-whitelist + capacity gates and pins ``oauth_subject`` (see
+    :func:`bind_invite_oauth_subject`).
+    """
+    con = con or get_global_share_con()
+    norm_email = (email or "").strip().lower()
+    norm_provider = (provider or "").strip()
+    if not norm_email or not norm_provider:
+        return None
+    rows = con.execute(
+        "SELECT * FROM remote_invites WHERE lower(email)=? AND revoked=0 AND auth_method='oauth' AND oauth_provider=?",
+        (norm_email, norm_provider),
+    ).fetchall()
+    now = iso_z_now()
+    for row in rows:
+        if row["expires_at"] and row["expires_at"] < now:
+            continue
+        match = dict(row)
+        match["pii_policy"] = json.loads(match.get("pii_policy") or '{"mask_ips": false}')
+        match["service_ids"] = get_remote_invite_services(match["id"], con=con)
+        match["allow_concurrent_sessions"] = bool(match.get("allow_concurrent_sessions"))
+        return match
+    return None
+
+
+def bind_invite_oauth_subject(invite_id: str, subject: str, *, con: sqlite3.Connection | None = None) -> bool:
+    """Pin the id_token ``sub`` on first OAuth login; enforce it thereafter.
+
+    Google's own guidance warns ``email`` can change over time, so identity is
+    bound on the stable ``(provider, sub)`` pair — email is display/lookup only
+    (§2.9). On the invite's first successful login ``oauth_subject`` is NULL and
+    gets set to ``subject``; on every later login it must equal the stored value.
+
+    The set is a single atomic ``UPDATE ... WHERE oauth_subject IS NULL`` so two
+    concurrent first-logins can't both win — whichever commits first pins the
+    subject, and the loser is then compared against it. Returns ``True`` iff the
+    stored subject now equals ``subject`` (constant-time compare); ``False`` on
+    mismatch (invite reused for a different account) — the caller treats a
+    ``False`` exactly like invite-not-found (generic 403, no enumeration).
+    """
+    con = con or get_global_share_con()
+    if not subject:
+        return False
+    with con:
+        con.execute(
+            "UPDATE remote_invites SET oauth_subject=? WHERE id=? AND oauth_subject IS NULL",
+            (subject, invite_id),
+        )
+        row = con.execute("SELECT oauth_subject FROM remote_invites WHERE id=?", (invite_id,)).fetchone()
+    if row is None or not row["oauth_subject"]:
+        return False
+    return hmac.compare_digest(str(row["oauth_subject"]), str(subject))
 
 
 def update_remote_invite_services(
@@ -267,6 +383,25 @@ def update_remote_invite_pii(invite_id: str, pii_policy: dict | None, *, con: sq
     cur = con.execute(
         "UPDATE remote_invites SET pii_policy=? WHERE id=?",
         (json.dumps(policy, separators=(",", ":")), invite_id),
+    )
+    con.commit()
+    return cur.rowcount > 0
+
+
+def set_invite_concurrent_sessions(invite_id: str, allow: bool, *, con: sqlite3.Connection | None = None) -> bool:
+    """Toggle the invite's shared-login (concurrent-session) opt-in.
+
+    When ``allow`` is True, later logins under this invite no longer boot the
+    previous session, so multiple analysts can share the link (bounded by the
+    global ``max_concurrent_analyst_sessions`` cap). Turning it back off only
+    affects *future* logins — already-live sessions are left to age out.
+
+    Returns True on success, False if no invite with that id exists.
+    """
+    con = con or get_global_share_con()
+    cur = con.execute(
+        "UPDATE remote_invites SET allow_concurrent_sessions=? WHERE id=?",
+        (int(bool(allow)), invite_id),
     )
     con.commit()
     return cur.rowcount > 0
@@ -475,8 +610,9 @@ def import_backup(
                 """INSERT INTO remote_invites
                     (id, name, email, passcode, expires_at, ip_whitelist, pii_policy,
                      query_window_hours, query_start_time, query_end_time, created_at,
-                     revoked, tos_accepted_at, tos_version)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     revoked, tos_accepted_at, tos_version, allow_concurrent_sessions,
+                     auth_method, oauth_provider, oauth_subject)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     inv["id"],
                     inv["name"],
@@ -492,6 +628,16 @@ def import_backup(
                     int(inv.get("revoked") or 0),
                     inv.get("tos_accepted_at"),
                     inv.get("tos_version"),
+                    # Carry columns the hardcoded list historically dropped:
+                    # allow_concurrent_sessions (added in migration 003) was
+                    # silently lost on restore, and auth_method/oauth_provider/
+                    # oauth_subject (migration 004) would convert every restored
+                    # OAuth invite into an unusable passcode invite (permanent
+                    # lockout) without this. auth_method defaults to 'passcode'.
+                    int(inv.get("allow_concurrent_sessions") or 0),
+                    inv.get("auth_method") or "passcode",
+                    inv.get("oauth_provider"),
+                    inv.get("oauth_subject"),
                 ),
             )
             for r in payload.get("invite_services", []):

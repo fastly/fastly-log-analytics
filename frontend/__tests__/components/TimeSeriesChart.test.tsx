@@ -12,6 +12,8 @@ import { render } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import React from 'react'
 
+import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
+
 const plotlyMock = vi.fn((_props: any) => <div data-testid="plotly-chart" />)
 vi.mock('@/components/PlotlyChart/PlotlyChart', () => ({
   PlotlyChart: (props: any) => plotlyMock(props),
@@ -30,8 +32,7 @@ describe('TimeSeriesChart', () => {
     plotlyMock.mockClear()
   })
 
-  it('passes through the data array verbatim', async () => {
-    const { TimeSeriesChart } = await import('@/components/charts/TimeSeriesChart')
+  it('passes through the data array verbatim', () => {
     const traces = [{ x: [1, 2, 3], y: [4, 5, 6] }]
     render(
       <TimeSeriesChart
@@ -45,8 +46,7 @@ describe('TimeSeriesChart', () => {
     expect(plotlyMock.mock.calls[0]![0].data).toBe(traces)
   })
 
-  it('merges TIME_HOVER_LAYOUT + makeTimeXAxis output + caller layout (caller wins on collisions)', async () => {
-    const { TimeSeriesChart } = await import('@/components/charts/TimeSeriesChart')
+  it('merges TIME_HOVER_LAYOUT + makeTimeXAxis output + caller layout (caller wins on collisions)', () => {
     render(
       <TimeSeriesChart
         data={[]}
@@ -66,8 +66,7 @@ describe('TimeSeriesChart', () => {
     expect(layout.yaxis).toEqual({ title: 'count' })
   })
 
-  it('forwards className, height, and onRelayout to PlotlyChart', async () => {
-    const { TimeSeriesChart } = await import('@/components/charts/TimeSeriesChart')
+  it('forwards className, height, and onRelayout to PlotlyChart', () => {
     const onRelayout = vi.fn()
     render(
       <TimeSeriesChart
@@ -84,8 +83,7 @@ describe('TimeSeriesChart', () => {
     expect(props.onRelayout).toBe(onRelayout)
   })
 
-  it('rebuilds the merged layout when the time range or timezone changes', async () => {
-    const { TimeSeriesChart } = await import('@/components/charts/TimeSeriesChart')
+  it('rebuilds the merged layout when the time range or timezone changes', () => {
     const { rerender } = render(
       <TimeSeriesChart
         data={[]}

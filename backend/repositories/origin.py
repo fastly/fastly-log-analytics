@@ -1418,11 +1418,19 @@ async def get_aggregates(
                 # internal mutex (leaked-active conns exhaust the pool → DoS)
                 # or corrupt in-process DuckDB state. Mirrors the F015 fix in
                 # backend/routers/dashboard.py (audit run 7ba15352).
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for part in results:
-                    if isinstance(part, BaseException):
-                        raise part
-                    merged.update(part)
+                _tasks = [asyncio.create_task(t) for t in tasks]
+                try:
+                    results = await asyncio.gather(*_tasks, return_exceptions=True)
+                    for part in results:
+                        if isinstance(part, BaseException):
+                            raise part
+                        merged.update(part)
+                except asyncio.CancelledError:
+                    # If gather itself is cancelled (e.g. client disconnect),
+                    # shield the wait so the workers still finish before we hit
+                    # the finally block and release the connections.
+                    await asyncio.shield(asyncio.gather(*_tasks, return_exceptions=True))
+                    raise
                 # Fold the extra runners' debug telemetry into the primary
                 # runner's so the response's ``_debug_queries`` /
                 # ``_debug_calls`` envelope still surfaces every query the

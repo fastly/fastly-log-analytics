@@ -780,10 +780,11 @@ def ingest(
                 for fid in catalog_field_ids:
                     if fid in ("backend", "_source_file"):
                         continue
-                    elif fid in _DECODE_EXPRS:
-                        field_selects.append(f'{_DECODE_EXPRS[fid]} AS "{fid}"')
+                    safe_fid = fid.replace('"', '""')
+                    if fid in _DECODE_EXPRS:
+                        field_selects.append(f'{_DECODE_EXPRS[fid]} AS "{safe_fid}"')
                     else:
-                        field_selects.append(f'"{fid}"')
+                        field_selects.append(f'"{safe_fid}"')
                 field_selects.append(f"{filename_expr} AS _source_file")
                 field_selects.append(backend_expr)
 

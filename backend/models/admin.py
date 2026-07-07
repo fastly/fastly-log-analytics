@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 from backend.models.common import BaseResponse, LogExtentsMixin
 
@@ -419,3 +419,122 @@ class UsageLoggingUpdateBody(BaseModel):
     cdn_egress_rate_per_gb: float | None = None
     storage_rate_per_gb_month: float | None = None
     min_billed_days: float | None = None
+
+
+# ── Wire-safe admin maintenance/config responses ───────────────────────────
+#
+# Same contract as the scoring read models (backend/models/session_scoring.py):
+# ``extra="allow"`` so undeclared/future producer keys pass through verbatim,
+# all-Optional fields so validation can never 500, and
+# ``response_model_exclude_unset=True`` at the decorator so branch-dependent
+# key sets (e.g. optimize-now's error branch) stay byte-identical on the wire.
+# Field lists derive from the producers, not from any frontend consumer.
+
+
+class _AdminMaintRead(BaseModel):
+    """Base for the maintenance read responses — passes undeclared keys
+    through instead of stripping them."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class UsageLoggingConfigResponse(_AdminMaintRead):
+    """Merged global usage-logging config (``_USAGE_LOGGING_DEFAULTS`` +
+    stored overrides). GET and PATCH both return this shape. The two
+    day-count fields are ``int | float`` because the defaults are ints but
+    a PATCH body stores floats — smart-union keeps whichever arrives."""
+
+    enabled: bool | None = None
+    retention_days: int | float | None = None
+    class_a_rate_per_1k: int | float | None = None
+    class_b_rate_per_10k: int | float | None = None
+    cdn_egress_rate_per_gb: int | float | None = None
+    storage_rate_per_gb_month: int | float | None = None
+    min_billed_days: int | float | None = None
+    track_duckdb_httpfs: bool | None = None
+
+
+class OptimizeNowResponse(_AdminMaintRead):
+    """``optimize_table`` result — success carries the rewrite counters,
+    the error branches carry ``error`` (+ ``files_rewritten: 0``)."""
+
+    files_rewritten: int | None = None
+    files_added: int | None = None
+    eligible_partitions: int | None = None
+    partition_errors: list[str] | None = None
+    error: str | None = None
+
+
+class BackfillBundleRollupsResponse(_AdminMaintRead):
+    """Per-kind bundle counts from ``POST /admin/backfill-bundle-rollups``."""
+
+    slow_urls: int | None = None
+    origin_summary: int | None = None
+    origin_summary_days: int | None = None
+    origin_dims: int | None = None
+    origin_dims_days: int | None = None
+    origin_latency_ts: int | None = None
+    origin_latency_ts_days: int | None = None
+    network_rtt: int | None = None
+    network_rtt_days: int | None = None
+    network_speed: int | None = None
+    network_speed_days: int | None = None
+    verified_bots_ts: int | None = None
+    verified_bots_ts_days: int | None = None
+    perf_latency: int | None = None
+    perf_latency_days: int | None = None
+    security_dims: int | None = None
+    security_dims_days: int | None = None
+    perf_ttl_dist: int | None = None
+    perf_ttl_dist_days: int | None = None
+    ngwaf_bots: int | None = None
+    ngwaf_bots_days: int | None = None
+    wellknown_bots: int | None = None
+
+
+class LocalCompactNowResponse(_AdminMaintRead):
+    """``compact_local_partitions`` result dict."""
+
+    partitions_scanned: int | None = None
+    partitions_compacted: int | None = None
+    files_merged: int | None = None
+    files_removed: int | None = None
+    bytes_before: int | None = None
+    bytes_after: int | None = None
+    daily_rollups: int | None = None
+    weekly_rollups: int | None = None
+    active_hour_skipped: bool | None = None
+    stale_tmp_removed: int | None = None
+    errors: list[str] | None = None
+    duration_ms: int | None = None
+    dry_run: bool | None = None
+
+
+class MetadataRetentionValues(_AdminMaintRead):
+    """Resolved retention days (defaults merged with per-service cfg)."""
+
+    usage_log_days: int | None = None
+    ingested_files_days: int | None = None
+    cron_runs_days: int | None = None
+
+
+class MetadataRetentionResponse(_AdminMaintRead):
+    retention: MetadataRetentionValues | None = None
+
+
+class MetadataTableStat(_AdminMaintRead):
+    """Per-table row count + estimated bytes (``None`` when SQLite lacks
+    the ``dbstat`` vtable)."""
+
+    rows: int | None = None
+    bytes: int | None = None
+
+
+class MetadataStorageResponse(_AdminMaintRead):
+    """``GET /admin/metadata-storage`` — feeds the Metadata Storage card."""
+
+    tables: dict[str, MetadataTableStat] | None = None
+    db_bytes: int | None = None
+    db_path: str | None = None
+    retention: MetadataRetentionValues | None = None
+    ingested_files_locked: bool | None = None

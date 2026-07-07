@@ -5,32 +5,15 @@ import { useQuery } from '@tanstack/react-query'
 import { ListChecks } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
+import { CardErrorState } from '@/components/CardErrorState'
 import { PerReasonAucHelp } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 import { Info } from 'lucide-react'
+import type { components } from '@/types/api.generated'
 
-interface ReasonBucket {
-  reason: string
-  n_good: number
-  n_bad: number
-  min_per_class: number
-  has_min_samples: boolean
-  auc?: number
-  passed?: boolean
-  threshold?: number
-}
-
-interface PerReasonResponse {
-  has_min_samples_overall: boolean
-  min_per_class: number
-  n_good: number
-  n_bad: number
-  buckets: ReasonBucket[]
-  known_reasons?: string[]
-}
+type PerReasonResponse = components['schemas']['ScoringPerReasonResponse']
 
 interface PerReasonAucCardProps {
   serviceId: string
@@ -55,7 +38,7 @@ export function PerReasonAucCard({ serviceId }: PerReasonAucCardProps) {
         { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as unknown as PerReasonResponse
+      return data as PerReasonResponse
     },
     staleTime: 30_000,
   })
@@ -100,7 +83,7 @@ export function PerReasonAucCard({ serviceId }: PerReasonAucCardProps) {
   )
 }
 
-function BucketRow({ bucket }: { bucket: ReasonBucket }) {
+function BucketRow({ bucket }: { bucket: components['schemas']['ScoringPerReasonBucket'] }) {
   if (!bucket.has_min_samples) {
     return (
       <div className="flex items-center justify-between gap-3 p-2 rounded-md border bg-muted/20 text-xs">

@@ -15,24 +15,10 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
+import type { components } from '@/types/api.generated'
 
-interface SessionEvent {
-  ts: string | null
-  url: string | null
-  status?: number | null
-  ip?: string | null
-  ua?: string | null
-  edge_score?: number | null
-  edge_cookie_compliance?: string | null
-  edge_score_reason?: string | null
-}
-
-interface SessionEventsResponse {
-  sid: string
-  since_days: number
-  event_count: number
-  events: SessionEvent[]
-}
+type SessionEvent = components['schemas']['ScoringSessionEvent']
+type SessionEventsResponse = components['schemas']['ScoringSessionEventsResponse']
 
 interface SessionEventsDialogProps {
   serviceId: string
@@ -144,7 +130,7 @@ export function SessionEventsDialog({
             </div>
           )}
 
-          {data && data.event_count > 0 && (
+          {data && (data.event_count ?? 0) > 0 && (
             <div className="space-y-1">
               <div className="text-xs text-muted-foreground mb-2">
                 {data.event_count} event{data.event_count === 1 ? '' : 's'} in last {data.since_days}d

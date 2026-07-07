@@ -265,6 +265,10 @@ class LogField:
     required_by: tuple[str, ...] = ()
     substr_cap: int | None = None
     individually_toggleable: bool = False
+    # Opt-in field: excluded from ``resolve_enabled_fields`` even when its
+    # group is enabled; emits only when explicitly turned on via
+    # ``field_overrides``. See ``log_fields.DEFAULT_OFF_FIELD_IDS``.
+    default_off: bool = False
     formatter: str | None = None
     unit: str | None = None
     precision: int | None = None
@@ -388,6 +392,7 @@ def _field_from_dict(d: Mapping[str, Any]) -> LogField:
         required_by=required_by,
         substr_cap=_detect_substr_cap(vcl),
         individually_toggleable=bool(d.get("individually_toggleable", False)),
+        default_off=bool(d.get("default_off", False)),
         formatter=_opt_str(d.get("formatter")),
         unit=_opt_str(d.get("unit")),
         precision=_opt_int(d.get("precision")),
@@ -454,6 +459,13 @@ SECURITY_HOOK_CODES: frozenset[str] = frozenset(f.code for f in REGISTRY if f.ha
 """Codes whose VCL expressions go through a security guard (json.escape /
 digit regex). Read by `test_no_trace_leakage_sweep.py`-style audits to
 confirm new fields don't bypass the convention."""
+
+
+DEFAULT_OFF_CODES: frozenset[str] = frozenset(f.code for f in REGISTRY if f.default_off)
+"""Codes flagged opt-in (``default_off``): excluded from
+``resolve_enabled_fields`` when their group is enabled, emitted only on an
+explicit ``field_overrides`` opt-in. Mirrors ``log_fields.DEFAULT_OFF_FIELD_IDS``
+(the two views must agree — parity guarded by the registry tests)."""
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +552,7 @@ __all__ = (
     "Agg",
     "BY_CODE",
     "BY_GROUP",
+    "DEFAULT_OFF_CODES",
     "DuckType",
     "FilterOp",
     "GROUP_INFO",

@@ -353,15 +353,20 @@ def test_deliver_stage_field_appears_in_log_format():
         ', substr(req.http.x-edge-score, 0, 20), "null")}V'
     ) in fmt
     # String field: json.escape wraps a single if() that gates on the
-    # shield-vs-edge check and substr-clamps the value (016) so an
+    # shield-vs-edge check and substr-clamps the value (016/017) so an
     # oversized custom field cannot push the line past Fastly's 16 KB
-    # log-line limit. Empty string at shield → JSON empty string.
-    assert (
-        '"edge_cookie_compliance":"%{json.escape('
-        "if(fastly.ff.visits_this_service == 0, "
-        'substr(req.http.x-edge-cookie-compliance, 0, 2000), "")'
-        ')}V"'
-    ) in fmt
+    # log-line limit. The substr limit is divided by 6 (worst-case
+    # json.escape expansion factor) to prevent post-escape overflow.
+    # Empty string at shield → JSON empty string.
+    import re
+
+    assert re.search(
+        r'"edge_cookie_compliance":"%\{json\.escape\('
+        r"if\(fastly\.ff\.visits_this_service == 0, "
+        r'substr\(req\.http\.x-edge-cookie-compliance, 0, \d+\), ""\)'
+        r'\)}V"',
+        fmt,
+    ), fmt
 
 
 def test_deliver_stage_does_not_fire_when_disabled():
@@ -471,3 +476,68 @@ def test_recv_reset_absent_when_ip_not_edge_captured():
     snippet is not emitted."""
     snippets = generate_capture_vcl({"groups": [], "field_overrides": {"ip": False}})
     assert "recv_reset" not in snippets
+
+
+def test_cookie_session_edge_hash_not_emitted_by_default():
+    """``cookie_session`` is opt-in (``default_off``): enabling its group (H)
+    must NOT emit the edge SHA-256 cookie-hash capture. The raw Cookie header
+    is never read/hashed at the edge unless the operator explicitly opts in."""
+    snippets = generate_capture_vcl({"groups": ["H"]})
+    assert "x-fos-edge-data:cookie_session" not in snippets["recv"]
+    assert "digest.hash_sha256" not in snippets["recv"]
+
+
+def test_cookie_session_edge_hash_emitted_on_explicit_opt_in():
+    """With an explicit ``field_overrides['cookie_session'] = True`` opt-in the
+    edge capture emits the first-present-cookie SHA-256 hashing expression into
+    the recv snippet (privacy: hashed AT the edge, raw cookie never forwarded)."""
+    snippets = generate_capture_vcl({"groups": ["H"], "field_overrides": {"cookie_session": True}})
+    assert "set req.http.x-fos-edge-data:cookie_session = " in snippets["recv"]
+    assert "digest.hash_sha256" in snippets["recv"]
+
+
+def _if_conditions(expr: str) -> list[str]:
+    """Return the CONDITION substring (first arg) of every ``if(`` in expr,
+    paren-aware. Used to assert no ``if(`` is nested inside a condition — the
+    Fastly-validate failure mode (``if`` is reserved in condition position)."""
+    conds = []
+    i = 0
+    while True:
+        j = expr.find("if(", i)
+        if j == -1:
+            break
+        # walk from just after "if(" to the top-level comma that ends the condition
+        depth = 1
+        k = j + 3
+        start = k
+        while k < len(expr) and depth > 0:
+            c = expr[k]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            elif c == "," and depth == 1:
+                break
+            k += 1
+        conds.append(expr[start:k])
+        i = j + 3
+    return conds
+
+
+def test_cookie_session_hash_has_no_if_nested_in_a_condition():
+    """Regression (2026-07-06): Fastly's compiler rejects an ``if()`` function
+    inside another ``if()``'s CONDITION. The cookie_session capture expression
+    must keep every condition a plain ``subfield(...) != ""`` — the hash goes in
+    the value branch. (falco / make vcl-test do NOT catch this; only real
+    Fastly /validate does, so this is a structural guard.)"""
+    from backend.provision.fastly_api import SESSION_COOKIE_ALLOWLIST, _session_cookie_hash_vcl
+
+    expr = _session_cookie_hash_vcl()
+    for cond in _if_conditions(expr):
+        assert "if(" not in cond, f"if() nested in an if()-condition (Fastly rejects): {cond!r}"
+    # empty is never hashed (no constant-hash poisoning) and one hash per cookie
+    assert 'digest.hash_sha256("")' not in expr
+    assert expr.count("digest.hash_sha256") == len(SESSION_COOKIE_ALLOWLIST)
+    # priority order preserved (first allowlist entry appears before the last)
+    first, last = SESSION_COOKIE_ALLOWLIST[0], SESSION_COOKIE_ALLOWLIST[-1]
+    assert expr.index(f'"{first}"') < expr.index(f'"{last}"')

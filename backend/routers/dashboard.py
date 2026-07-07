@@ -25,6 +25,7 @@ from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import dashboard as repo
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
+from backend.utils.telemetry import get_sqlite_queries
 from backend.utils.time_window import is_valid_range_token, resolve_window
 
 
@@ -224,6 +225,11 @@ async def dashboard_bundle(
             "section_timings": section_timings,
             "debug_queries": single_debug_queries,
             "debug_calls": single_debug_calls,
+            # SQLite statements funnel through the request-scoped collector
+            # (not per-sub-response), so a single top-level read covers both
+            # branches. The backstop middleware can't inject this for us —
+            # its dispatch context predates start_call_tracking's.
+            "debug_sqlite": list(get_sqlite_queries()),
         }
 
     # Two-branch path (preserves the F015-hardened gather + second_cm
@@ -235,9 +241,13 @@ async def dashboard_bundle(
     second_cm = None
     second_con = None
     parallel = False
+
+    def _checkout_second():
+        cm = checkout_connection(ctx.source, max_wait=0.2)
+        return cm, cm.__enter__()
+
     try:
-        second_cm = checkout_connection(ctx.source, max_wait=0.2)
-        second_con = second_cm.__enter__()
+        second_cm, second_con = await asyncio.to_thread(_checkout_second)
         parallel = True
     except _PoolBusy:
         second_cm = None
@@ -284,11 +294,16 @@ async def dashboard_bundle(
             # DUCKDB_POOL_MAX_SIZE → persistent DoS) or, if the mutex
             # were bypassed, corrupt the DuckDB process memory.
             # (F015, audit run 7ba15352)
-            results = await asyncio.gather(
+            task = asyncio.gather(
                 _aggregates_branch(),
                 _top_bots_branch(),
                 return_exceptions=True,
             )
+            try:
+                results = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
             aggregates, top_bots = results
             if isinstance(aggregates, BaseException):
                 raise aggregates
@@ -330,6 +345,10 @@ async def dashboard_bundle(
         "section_timings": section_timings,
         "debug_queries": all_debug_queries,
         "debug_calls": all_debug_calls,
+        # See the single-branch return above — one top-level collector read
+        # covers both branches (asyncio.to_thread copies the request
+        # context, so both appended to the same list).
+        "debug_sqlite": list(get_sqlite_queries()),
     }
 
 
@@ -356,13 +375,22 @@ def dashboard_raw_csv(
     # R-2: streaming CSV bypasses the middleware's _strip_analyst_envelope
     # PII pass (text/csv content-type). Apply mask_ips here so analyst
     # exports respect the per-invite policy. The same mask_ip helper the
-    # JSON path uses is reused here for shape parity.
+    # JSON path uses is reused here for shape parity. CSV projects the real
+    # stored column names (raw/csv can't alias them the way /api/query can),
+    # so masking by source-column name is complete here.
     if mask_ips_for(ctx.analyst_session):
-        from backend.core.share_db.validation import IP_FAMILY_KEYS, mask_ip
+        from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip
 
         for col in IP_FAMILY_KEYS:
             if col in df.columns:
                 df[col] = df[col].apply(lambda v: mask_ip(v) if isinstance(v, str) else v)
+        # Phase-4 Track C: session identifiers (e.g. cookie_session) are
+        # per-client PII with no reliable value shape — redact wholesale by
+        # column (empty / non-string cells left untouched), mirroring
+        # apply_pii_policy on the JSON surfaces.
+        for col in SESSION_ID_KEYS:
+            if col in df.columns:
+                df[col] = df[col].apply(lambda v: ("[redacted]" if v else v) if isinstance(v, str) else v)
 
     # Chunked serialization — avoids the StringIO double-buffer (the
     # whole CSV string in memory in addition to the DataFrame). For

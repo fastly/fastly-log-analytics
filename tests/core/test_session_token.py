@@ -100,3 +100,46 @@ def test_malformed_token_rejected(fixed_key):
         open_session_token("not-a-valid-token!!!", service_id="svcA")
     with pytest.raises(SessionTokenError):
         open_session_token("", service_id="svcA")
+
+
+def test_concurrent_first_resolve_yields_single_key(monkeypatch):
+    """Under the ephemeral default (no SESSION_TOKEN_SECRET), many threads all
+    hitting the very first key resolution at once must converge on ONE key.
+
+    Without the double-checked lock in ``_resolve_key`` each racing thread could
+    generate its own random key and clobber the module global, so a token sealed
+    by one thread would fail to open in another (a spurious SessionTokenError).
+    We seal in every thread and confirm each token opens under the finally
+    resolved key — i.e. all threads saw the same key.
+    """
+    import threading
+
+    monkeypatch.delenv("SESSION_TOKEN_SECRET", raising=False)
+    st._key = None
+
+    barrier = threading.Barrier(16)
+    tokens: list[str] = []
+    tokens_lock = threading.Lock()
+
+    def _worker() -> None:
+        barrier.wait()  # maximise the odds all threads race the None check together
+        tok = seal_session_token(
+            "203.0.113.7", "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
+        )
+        with tokens_lock:
+            tokens.append(tok)
+
+    threads = [threading.Thread(target=_worker) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Every token — regardless of which thread minted it — must open under the
+    # single surviving process key. A torn init would leave some unopenable.
+    assert len(tokens) == 16
+    for tok in tokens:
+        ip, _ja4, _start, _end = open_session_token(tok, service_id="svcA")
+        assert ip == "203.0.113.7"
+
+    st._key = None

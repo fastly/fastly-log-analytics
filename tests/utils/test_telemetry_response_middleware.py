@@ -53,8 +53,26 @@ def _build_app(*, with_gzip: bool = False) -> FastAPI:
             "foo": 1,
             "_debug_queries": [{"sql": "SELECT 1", "time_ms": 0.1}],
             "_debug_calls": [{"method": "GET", "path": "/x"}],
+            "_debug_sqlite": [{"seq": 7, "sql": "SELECT 1", "time_ms": 0.2}],
             "_is_cached": True,
         }
+
+    @app.get("/sqlite-work")
+    def sqlite_work():
+        # End-to-end page-scoping chain: profiler → per-request contextvar
+        # collector → BaseResponse.with_telemetry. start_call_tracking is
+        # called in-handler (same context) standing in for main.py's
+        # tracking middleware, whose collector the handler context inherits.
+        import sqlite3
+
+        from backend.models.common import BaseResponse
+        from backend.utils import sqlite_profiler
+        from backend.utils.telemetry import start_call_tracking
+
+        start_call_tracking()
+        con = sqlite3.connect(":memory:", factory=sqlite_profiler.InstrumentedConnection)
+        con.execute("CREATE TABLE page_scoped (x INTEGER)")
+        return BaseResponse.with_telemetry()
 
     @app.get("/list-response")
     def list_response():
@@ -126,9 +144,11 @@ def test_injects_debug_keys_into_plain_dict_response():
     assert body["bar"] == "two"
     assert "_debug_queries" in body
     assert "_debug_calls" in body
+    assert "_debug_sqlite" in body
     assert "_is_cached" in body
     assert isinstance(body["_debug_queries"], list)
     assert isinstance(body["_debug_calls"], list)
+    assert isinstance(body["_debug_sqlite"], list)
     assert body["_is_cached"] is False
 
 
@@ -156,6 +176,7 @@ def test_does_not_double_inject_when_endpoint_already_supplied_telemetry():
     body = r.json()
     assert body["_debug_queries"] == [{"sql": "SELECT 1", "time_ms": 0.1}]
     assert body["_debug_calls"] == [{"method": "GET", "path": "/x"}]
+    assert body["_debug_sqlite"] == [{"seq": 7, "sql": "SELECT 1", "time_ms": 0.2}]
     assert body["_is_cached"] is True
 
 
@@ -221,6 +242,44 @@ def test_ndjson_stream_passes_through_without_buffering():
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("application/x-ndjson")
     assert r.text == '{"row":1}\n{"row":2}\n'
+
+
+# ── page-scoped SQLite: profiler → collector → injection, end-to-end ───
+
+
+def test_sqlite_statements_executed_during_request_reach_debug_sqlite():
+    """The Debug Panel's 'This page' SQLite view depends on this chain:
+    the profiler's ``_record`` feeds the request-scoped contextvar
+    collector (``start_call_tracking`` initialised it), and
+    ``BaseResponse.with_telemetry`` serialises that collector as
+    ``_debug_sqlite`` (the middleware then passes the already-populated
+    body through untouched — no double-inject). Pin the whole path so a
+    regression in any link (profiler hook removed, collector not
+    initialised, field dropped) fails here."""
+    client = TestClient(_build_app())
+    r = client.get("/sqlite-work")
+    body = r.json()
+    sqls = [q["sql"] for q in body["_debug_sqlite"]]
+    assert "CREATE TABLE page_scoped (x INTEGER)" in sqls
+    entry = body["_debug_sqlite"][sqls.index("CREATE TABLE page_scoped (x INTEGER)")]
+    assert entry["op"] == "execute"
+    assert entry["time_ms"] >= 0
+    assert entry["seq"] >= 1
+
+
+def test_plain_request_does_not_inherit_other_requests_sqlite():
+    """A request that ran no SQLite of its own must carry an empty
+    ``_debug_sqlite`` — NOT statements from cron, the ring buffer, or a
+    previous request. This is the exact bug the page scoping fixes (7s
+    of background statements shown as if the dashboard load caused
+    them). The backstop injection reads its own per-request context, so
+    the prior request's collector must be invisible here."""
+    client = TestClient(_build_app())
+    # Seed the process-global ring buffer via a request that DID run SQL.
+    client.get("/sqlite-work")
+    # A fresh request with no SQLite work of its own.
+    r = client.get("/plain-dict")
+    assert r.json()["_debug_sqlite"] == []
 
 
 # ── gated on DEBUG_RESPONSES ────────────────────────────────────────────
@@ -488,9 +547,10 @@ def test_strips_telemetry_when_force_include_off_and_no_header(monkeypatch):
     body = r.json()
     # Non-telemetry keys survive.
     assert body["foo"] == 1
-    # The three telemetry keys are stripped.
+    # The telemetry keys are stripped.
     assert "_debug_queries" not in body
     assert "_debug_calls" not in body
+    assert "_debug_sqlite" not in body
     assert "_is_cached" not in body
 
 

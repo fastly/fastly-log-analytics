@@ -7,6 +7,49 @@ export type TunnelHistoryEntry = {
   reason: string
 }
 
+/**
+ * A share invite as returned by /api/admin/share/status. The endpoint returns
+ * a plain dict (no response_model), so this is a hand-authored mirror — keep it
+ * in sync with ``build_share_status`` / ``get_remote_invites`` in the backend.
+ * ``last_login_at`` is derived server-side from the login audit events (see
+ * backend ``get_last_login_by_email``).
+ */
+export type Invite = {
+  id: string
+  name: string
+  email: string
+  service_ids?: string[]
+  expires_at?: string | null
+  created_at?: string
+  revoked?: number | boolean
+  allow_concurrent_sessions?: boolean
+  auth_method?: 'passcode' | 'oauth'
+  oauth_provider?: string | null
+  pii_policy?: { mask_ips?: boolean } | null
+  last_login_at?: string | null
+}
+
+export type ShareSession = {
+  session_id: string
+  invite_id: string
+  name?: string
+  email: string
+  ip_address: string
+  auth_method?: 'passcode' | 'oauth'
+  oauth_provider?: string | null
+  login_time?: string
+  last_active_time?: string
+}
+
+export type AuditLog = {
+  id?: number
+  timestamp: string
+  event_type: string
+  email?: string | null
+  ip_address?: string
+  details?: string
+}
+
 export type ShareStatus = {
   sharing_active: boolean
   public_endpoint: string | null
@@ -16,9 +59,9 @@ export type ShareStatus = {
   max_concurrent_sessions: number
   active_session_count: number
   services: { service_id: string; name: string }[]
-  invites: any[]
-  sessions: any[]
-  audit_logs: any[]
+  invites: Invite[]
+  sessions: ShareSession[]
+  audit_logs: AuditLog[]
   rate_limits?: { failures: RateLimitFailure[]; lockouts: RateLimitLockout[] }
   telemetry?: {
     heartbeat_unauth_count: number

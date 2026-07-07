@@ -7,7 +7,9 @@
 // x-axis to startTime/endTime — if the scanned window is wider, the y-axis
 // auto-scales to off-screen data and squashes the visible bars):
 //
-//   1. Token mode — a server-reproducible relative token ('24h'/'7d'/'30d').
+//   1. Token mode — a server-reproducible relative token (any FilterBar
+//      quick-preset label, '1h'..'30d'; the vocabulary is pinned to the
+//      backend's VALID_RANGE_TOKENS by the lockstep tests).
 //      Used for an explicit quick-preset pill (filterStore.relativeRange) AND
 //      for the cold-load / reset default (isAutoRange), where the displayed
 //      window is the rolling 24h store default. The backend resolves the scan
@@ -51,10 +53,16 @@ export interface RangeWire {
    *  token mode; a stable "abs:<start>|<end>" identity in absolute mode so two
    *  distinct custom ranges never collide on one cache entry. */
   rangeKey: string
-  /** Body fragment spread into the POST. Token mode → {range_token, anchor};
-   *  absolute mode → {start_time, end_time} (no token → backend uses these). */
+  /** Body fragment spread into the POST. Token mode → {range_token, anchor}
+   *  PLUS the display bounds; absolute mode → {start_time, end_time} only.
+   *  The bounds ride along in token mode as defense-in-depth: the backend
+   *  ignores them when it recognizes the token (the keyed path resolves the
+   *  window server-side), but an UNRECOGNIZED token falls back to these
+   *  bounds — without them that fallback is clamp(None, None), i.e. an
+   *  all-time scan (the 12h-preset huge-counts bug). With them, a
+   *  vocabulary-drifted preset degrades to the anchor-faithful legacy path. */
   rangeBody:
-    | { range_token: string; anchor: string }
+    | { range_token: string; anchor: string; start_time: string | null; end_time: string | null }
     | { start_time: string | null; end_time: string | null }
 }
 
@@ -71,7 +79,11 @@ export function resolveRangeWire({
 }: RangeWireArgs): RangeWire {
   const rangeToken = relativeRange ?? (isAutoRange ? DEFAULT_RANGE_TOKEN : null)
   if (rangeToken !== null) {
-    return { rangeToken, rangeKey: rangeToken, rangeBody: { range_token: rangeToken, anchor } }
+    return {
+      rangeToken,
+      rangeKey: rangeToken,
+      rangeBody: { range_token: rangeToken, anchor, start_time: startTime, end_time: endTime },
+    }
   }
   return {
     rangeToken: null,

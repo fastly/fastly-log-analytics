@@ -355,7 +355,7 @@ def test_cron_schedule_returns_schedules_list(client):
 
     with (
         patch("backend.core.metadata.latest_cron_per_task", return_value=fake_per_task),
-        patch("backend.scheduler.get_scheduler") as mock_get_sched,
+        patch("backend.cron.scheduler.get_scheduler") as mock_get_sched,
     ):
         # Empty scheduler — no jobs registered. The route should still
         # surface the last-run history for tasks in _TASK_MAP.
@@ -382,7 +382,7 @@ def test_cron_schedule_swallows_metadata_db_exception(client):
     with (
         patch("backend.core.metadata.latest_cron_per_task", side_effect=RuntimeError("locked")),
         patch("backend.core.metadata.count_alerts", side_effect=RuntimeError("locked")),
-        patch("backend.scheduler.get_scheduler") as mock_get_sched,
+        patch("backend.cron.scheduler.get_scheduler") as mock_get_sched,
     ):
         fake_sched = type("S", (), {"_sched": type("X", (), {"get_jobs": lambda self: []})()})()
         mock_get_sched.return_value = fake_sched
@@ -401,7 +401,7 @@ def test_cron_schedule_synthesizes_alerts_placeholder_when_zero_alerts(client):
     with (
         patch("backend.core.metadata.latest_cron_per_task", return_value={}),
         patch("backend.core.metadata.count_alerts", return_value=0),
-        patch("backend.scheduler.get_scheduler") as mock_get_sched,
+        patch("backend.cron.scheduler.get_scheduler") as mock_get_sched,
     ):
         fake_sched = type("S", (), {"_sched": type("X", (), {"get_jobs": lambda self: []})()})()
         mock_get_sched.return_value = fake_sched
@@ -436,7 +436,7 @@ def test_cron_schedule_tags_historical_alerts_entry_with_disabled_reason(client)
             },
         ),
         patch("backend.core.metadata.count_alerts", return_value=0),
-        patch("backend.scheduler.get_scheduler") as mock_get_sched,
+        patch("backend.cron.scheduler.get_scheduler") as mock_get_sched,
     ):
         fake_sched = type("S", (), {"_sched": type("X", (), {"get_jobs": lambda self: []})()})()
         mock_get_sched.return_value = fake_sched

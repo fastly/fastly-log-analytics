@@ -56,8 +56,8 @@ def stub_cron_envelope(monkeypatch) -> dict[str, MagicMock]:
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
     monkeypatch.setattr("backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock())
-    # Post-commit metadata-sync is shimmed through backend.scheduler.
-    monkeypatch.setattr("backend.scheduler._run_metadata_sync", MagicMock())
+    # Post-commit metadata-sync resolves off backend.cron.jobs.metadata.
+    monkeypatch.setattr("backend.cron.jobs.metadata._run_metadata_sync", MagicMock())
     return {
         "start": start,
         "log": log,
@@ -149,7 +149,7 @@ def test_success_with_committed_files_logs_summary_and_refreshes_view(
     assert "8675309" in kwargs["summary"]
 
     from backend.cron.jobs import _common
-    from backend.scheduler import _run_metadata_sync as _sync_shim
+    from backend.cron.jobs.metadata import _run_metadata_sync as _sync_shim
 
     _common.refresh_view_and_warm_pool.assert_called_once()
     _sync_shim.assert_called_once_with("svc-1")
@@ -170,7 +170,7 @@ def test_success_no_files_committed_logs_no_new_data(monkeypatch, stub_load_conf
     assert args[3] == "success"
     assert "No new data" in kwargs["summary"]
 
-    from backend.scheduler import _run_metadata_sync as _sync_shim
+    from backend.cron.jobs.metadata import _run_metadata_sync as _sync_shim
 
     _sync_shim.assert_not_called()
 

@@ -1508,17 +1508,17 @@ def test_ensure_cdn_service_reports_created_id_before_later_failure():
     assert created_ids == ["cdn-new-123"]
 
 
-def test_log_sampling_edge_clause_is_restart_tolerant_when_scoring_enabled():
-    """The Log Sampling edge gate must drop ``req.restarts == 0`` once scoring is
-    enabled. Scoring restarts the request (0→1) to run the scorer sub-fetch, so
-    the final logged pass is req.restarts == 1; gating on 0 drops every scored
-    request from the logs (edge_score never logged → Fire Rate 0%)."""
+def test_log_sampling_edge_clause_never_gates_on_restarts():
+    """The Log Sampling edge gate must NEVER include ``req.restarts == 0``,
+    regardless of scoring state. Customer VCL may use restarts for application
+    logic (404 fallbacks, auth checks) — gating on restarts == 0 silently drops
+    restarted requests from the telemetry stream (finding 007)."""
     from backend.provision.fastly_api import _log_sampling_edge_clause
 
-    assert _log_sampling_edge_clause(False) == "(req.restarts == 0 && fastly.ff.visits_this_service == 0)"
-    scored = _log_sampling_edge_clause(True)
-    assert "req.restarts" not in scored
-    assert scored == "fastly.ff.visits_this_service == 0"
+    for scoring in (False, True):
+        clause = _log_sampling_edge_clause(scoring)
+        assert "req.restarts" not in clause
+        assert clause == "fastly.ff.visits_this_service == 0"
 
 
 def test_ensure_logging_endpoint_drops_restart_gate_when_scoring_enabled():
@@ -1562,12 +1562,11 @@ def test_ensure_logging_endpoint_drops_restart_gate_when_scoring_enabled():
     assert "fastly.ff.visits_this_service == 0" in captured["stmt"]
 
 
-def test_generate_capture_vcl_splits_scrub_and_capture_guards_when_scoring_enabled():
-    """With scoring enabled the CAPTURE block must drop req.restarts==0 (scoring
-    restarts the request → the logged pass is restarts==1; gating on 0 leaves
-    scored rows with no url/ua/geo and edge != true → Fire Rate 0%). The SCRUB
-    must STAY first-pass-only so it can't re-run post-restart and wipe the
-    captured score headers."""
+def test_generate_capture_vcl_capture_guard_never_gates_on_restarts():
+    """The CAPTURE block must NEVER gate on req.restarts==0 — customer VCL may
+    use restarts for application logic (finding 007), and scoring restarts the
+    request for the scorer sub-fetch. The SCRUB must STAY first-pass-only so it
+    can't re-run post-restart and wipe captured score headers."""
     from backend.provision.fastly_api import generate_capture_vcl
 
     cfg = {
@@ -1577,20 +1576,14 @@ def test_generate_capture_vcl_splits_scrub_and_capture_guards_when_scoring_enabl
         ],
     }
 
-    recv = generate_capture_vcl(cfg, scoring_enabled=True)["recv"]
-    lines = recv.splitlines()
-    cap_idx = next(i for i, ln in enumerate(lines) if "Capture edge data for logging" in ln)
-    capture_guard_line = lines[cap_idx - 1].strip()
-    # capture is restart-tolerant (the unforgeable edge check alone, no restarts==0)
-    assert capture_guard_line == "if (fastly.ff.visits_this_service == 0) {", capture_guard_line
-    # scrub stays first-pass-only
-    assert any("if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {" in ln for ln in lines)
-
-    # Without scoring: capture keeps the req.restarts==0 gate (unchanged).
-    recv2 = generate_capture_vcl(cfg, scoring_enabled=False)["recv"]
-    lines2 = recv2.splitlines()
-    cap_idx2 = next(i for i, ln in enumerate(lines2) if "Capture edge data for logging" in ln)
-    assert lines2[cap_idx2 - 1].strip() == "if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {"
+    for scoring in (True, False):
+        recv = generate_capture_vcl(cfg, scoring_enabled=scoring)["recv"]
+        lines = recv.splitlines()
+        cap_idx = next(i for i, ln in enumerate(lines) if "Capture edge data for logging" in ln)
+        capture_guard_line = lines[cap_idx - 1].strip()
+        assert capture_guard_line == "if (fastly.ff.visits_this_service == 0) {", (scoring, capture_guard_line)
+        # scrub stays first-pass-only
+        assert any("if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {" in ln for ln in lines)
 
 
 def test_load_log_format_keeps_standard_fields_when_only_custom_fields_present():

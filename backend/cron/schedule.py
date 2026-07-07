@@ -13,7 +13,7 @@ from __future__ import annotations
 def build_cron_schedule_payload(source: dict) -> dict:
     """Return ``{"schedules": [...]}`` for the given ``source``.
 
-    Pulls APScheduler jobs via ``backend.scheduler.get_scheduler``,
+    Pulls APScheduler jobs via ``backend.cron.scheduler.get_scheduler``,
     enriches each with ``latest_cron_per_task`` history from
     ``metadata_db``, and tags the alerts tile with ``disabled_reason``
     when no alerts are configured. Safe to call without a request
@@ -21,7 +21,7 @@ def build_cron_schedule_payload(source: dict) -> dict:
     resolves via ``_db.get_source_for_service``.
     """
     from backend.core import metadata as metadata_db
-    from backend.scheduler import get_scheduler
+    from backend.cron.scheduler import get_scheduler
 
     sched = get_scheduler()
     service_id = source["name"]

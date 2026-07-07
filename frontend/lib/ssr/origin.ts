@@ -29,12 +29,22 @@
 // degrades to the status-quo cold fetch for that one load; it never leaks and
 // never crashes — identical risk class to insights' band-boundary race.
 //
+// anchor also snaps to bootstrap.log_extents when the service's latest log is
+// >15min stale (lib/log-extents-snap.ts — shared with FilterBar's client-side
+// autoSetRange decision, so both sides land on the identical [latest-24h,
+// latest] window instead of the naive `now` window); otherwise unchanged. This
+// adds a second, analogous rare divergence: SSR and client disagreeing on
+// stale-vs-fresh right at the 15-minute boundary — same self-healing, one-
+// refetch, never-a-leak-or-crash characterization as the minute-boundary race
+// above.
+//
 // The body mirrors OriginReportContent's client POST EXACTLY (the section list,
 // limits, bucket, metric/percentile defaults) so the backend produces the same
 // response shape the client would request. range_token/anchor drive the scan
 // window; start_time/end_time are omitted (the keyed path ignores them).
 
 import { quantizeAnchor } from '@/lib/time-window'
+import { resolveSnappedWindow, narrowLogExtents } from '@/lib/log-extents-snap'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
@@ -89,7 +99,10 @@ export interface OriginSsrSeed {
  * paint. Exported so the unit test can pin the key-match without a network
  * round-trip. `now` is injectable for deterministic tests.
  */
-export function resolveOriginDefaultKey(now: Date = new Date()): {
+export function resolveOriginDefaultKey(
+  now: Date = new Date(),
+  logExtents?: unknown,
+): {
   rangeToken: string
   anchor: string
 } {
@@ -97,23 +110,28 @@ export function resolveOriginDefaultKey(now: Date = new Date()): {
   // rangeToken defaults to "24h", matching the 24h store-default display window
   // so the chart x-axis range and the scan window agree (the old "auto" resolved
   // to 30d for mature services, squashing the bars under an off-screen-spike
-  // y-axis). The anchor floors to the 60s quantum.
-  return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
+  // y-axis). The anchor floors to the 60s quantum, snapped to the service's real
+  // log extents when stale (see the module comment above).
+  const snapped = resolveSnappedWindow(narrowLogExtents(logExtents), now)
+  return { rangeToken: '24h', anchor: quantizeAnchor(snapped?.end ?? now.toISOString(), now) }
 }
 
 /**
  * SSR-prefetch the default origin aggregates selection for the active service.
  *
- * @param serviceId  Active service id (from the SSR'd bootstrap). Without it the
- *                   backend's context resolution 400s — bail to client fetch.
- * @param now        Render instant; floored to the anchor quantum. Injectable
- *                   for tests.
+ * @param serviceId   Active service id (from the SSR'd bootstrap). Without it the
+ *                    backend's context resolution 400s — bail to client fetch.
+ * @param now         Render instant; floored to the anchor quantum. Injectable
+ *                    for tests.
+ * @param logExtents  bootstrap.log_extents for serviceId, if available. See
+ *                    resolveOriginDefaultKey.
  */
 export async function fetchOriginServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
+  logExtents?: unknown,
 ): Promise<OriginSsrSeed | null> {
-  const { rangeToken, anchor } = resolveOriginDefaultKey(now)
+  const { rangeToken, anchor } = resolveOriginDefaultKey(now, logExtents)
 
   // Without a service id the backend 400s — bail so the page builds the client
   // key path and fetches once it has a service.

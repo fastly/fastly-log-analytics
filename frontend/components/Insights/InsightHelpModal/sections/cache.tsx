@@ -18,7 +18,7 @@ export function getCacheContent(id: string): InsightContent | null {
         fields: ['cache', 'url'],
         description: (
           <div className="space-y-4">
-            <p>Detects URLs where the Cache Hit Ratio (CHR) has dropped dramatically, potentially causing an "origin fire."</p>
+            <p>Detects URLs where the Cache Hit Ratio (CHR) has dropped dramatically, potentially causing an &quot;origin fire.&quot;</p>
             <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
               <li className="flex gap-3">
                 <TrendingDown className="h-5 w-5 shrink-0 text-red-500" />
@@ -74,11 +74,33 @@ export function getCacheContent(id: string): InsightContent | null {
             <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
               <li className="flex gap-3">
                 <Clock className="h-5 w-5 shrink-0 text-blue-500" />
-                <span><strong>Age vs TTL:</strong> We analyze cache misses and compare the object's expected TTL against the time since it was last fetched.</span>
+                <span><strong>Age vs TTL:</strong> We analyze cache misses and compare the object&apos;s expected TTL against the time since it was last fetched.</span>
               </li>
               <li className="flex gap-3">
                 <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
-                <span><strong>Capacity Warning:</strong> High rates of premature eviction mean your Fastly service is under "Cache Pressure" and objects are being pushed out of memory to make room for new ones. You may need to increase your Cache Reservation.</span>
+                <span><strong>Capacity Warning:</strong> High rates of premature eviction mean your Fastly service is under &quot;Cache Pressure&quot; and objects are being pushed out of memory to make room for new ones. You may need to increase your Cache Reservation.</span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'cache_hit_cliff':
+      return {
+        title: 'Cache HIT-Ratio Cliff',
+        icon: <TrendingDown className="h-5 w-5 text-primary" />,
+        fields: ['cache'],
+        description: (
+          <div className="space-y-4">
+            <p>A single headline card: your whole service&apos;s edge cache HIT ratio fell off a cliff vs baseline. This is the aggregate counterpart to the per-URL Cache Efficiency Collapse.</p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Database className="h-5 w-5 shrink-0 text-blue-500" />
+                <span><strong>Cacheable ratio:</strong> We measure HIT / (HIT + MISS) across all traffic — PASS is excluded because it was never eligible to cache — and compare the window to baseline.</span>
+              </li>
+              <li className="flex gap-3">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" />
+                <span><strong>What it catches:</strong> a purge storm, a global TTL change, an origin <code>Cache-Control</code> regression, or a VCL deploy that started passing traffic — each pushes load onto origin and slows delivery site-wide.</span>
               </li>
             </ul>
           </div>

@@ -36,7 +36,11 @@ _SCHEMA = [
         created_at TEXT NOT NULL,
         revoked INTEGER NOT NULL DEFAULT 0,
         tos_accepted_at TEXT,
-        tos_version TEXT
+        tos_version TEXT,
+        allow_concurrent_sessions INTEGER NOT NULL DEFAULT 0,
+        auth_method TEXT NOT NULL DEFAULT 'passcode',
+        oauth_provider TEXT,
+        oauth_subject TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS idx_remote_invites_email ON remote_invites(email)",
     """CREATE TABLE IF NOT EXISTS invite_services (
@@ -111,11 +115,83 @@ def _migration_002_seed_initial_tos(con: sqlite3.Connection) -> None:
         )
 
 
+def _migration_003_add_allow_concurrent_sessions(con: sqlite3.Connection) -> None:
+    """Add ``remote_invites.allow_concurrent_sessions`` (per-invite opt-in for
+    shared logins).
+
+    Default 0 preserves the historical single-seat behavior: without this flag
+    each login boots any existing session for the same invite. When set, the
+    tunnel manager lets multiple sessions coexist under one invite (bounded only
+    by the global ``max_concurrent_analyst_sessions`` cap).
+    """
+    from backend.core.sqlite_migrations import _has_column
+
+    if _has_column(con, "remote_invites", "allow_concurrent_sessions"):
+        return
+    con.execute("ALTER TABLE remote_invites ADD COLUMN allow_concurrent_sessions INTEGER NOT NULL DEFAULT 0")
+
+
+def _migration_004_add_oauth_columns(con: sqlite3.Connection) -> None:
+    """Add the OAuth/OIDC invite columns (``auth_method`` / ``oauth_provider``
+    / ``oauth_subject``).
+
+    Forward-only ``ALTER TABLE ADD COLUMN`` (O(1), non-rewriting). Existing rows
+    backfill to ``auth_method='passcode'`` via the DEFAULT, so every legacy
+    invite stays a passcode invite. ``oauth_provider`` names the registry key an
+    OAuth invite authenticates against; ``oauth_subject`` is NULL until the
+    invite's first successful OAuth login, at which point the id_token ``sub`` is
+    pinned into it and required to match thereafter (identity binds on
+    provider+sub, not the mutable email). Each ``ADD`` is guarded by
+    ``_has_column`` so a partially-applied migration is safe to re-run.
+    """
+    from backend.core.sqlite_migrations import _has_column
+
+    if not _has_column(con, "remote_invites", "auth_method"):
+        con.execute("ALTER TABLE remote_invites ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'passcode'")
+    if not _has_column(con, "remote_invites", "oauth_provider"):
+        con.execute("ALTER TABLE remote_invites ADD COLUMN oauth_provider TEXT")
+    if not _has_column(con, "remote_invites", "oauth_subject"):
+        con.execute("ALTER TABLE remote_invites ADD COLUMN oauth_subject TEXT")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migration_002_seed_initial_tos,
+    3: _migration_003_add_allow_concurrent_sessions,
+    4: _migration_004_add_oauth_columns,
 }
 
 LATEST_VERSION = max(MIGRATIONS) if MIGRATIONS else 0
+
+
+# Additive columns that MUST exist on the current schema, reconciled on every
+# open regardless of ``user_version``. This is a safety net for schema drift
+# the forward-only migration framework can't repair on its own: if a DB's
+# ``user_version`` is advanced past a column's migration WITHOUT the ``ALTER``
+# landing, the version gate means that migration never runs again and the
+# column stays missing forever. Observed in the field — a prod share DB stamped
+# ``user_version=3`` out-of-band but missing ``allow_concurrent_sessions``,
+# which then 500s ``create_remote_invite`` (it INSERTs that column). Purely
+# additive + idempotent (guarded by ``_has_column``); never drops or rewrites.
+_EXPECTED_COLUMNS: list[tuple[str, str, str]] = [
+    ("remote_invites", "allow_concurrent_sessions", "INTEGER NOT NULL DEFAULT 0"),
+    ("remote_invites", "auth_method", "TEXT NOT NULL DEFAULT 'passcode'"),
+    ("remote_invites", "oauth_provider", "TEXT"),
+    ("remote_invites", "oauth_subject", "TEXT"),
+]
+
+
+def _reconcile_additive_columns(con: sqlite3.Connection) -> None:
+    """Add any expected column missing from an existing table. Idempotent."""
+    from backend.core.sqlite_migrations import _has_column
+
+    changed = False
+    for table, column, ddl in _EXPECTED_COLUMNS:
+        if not _has_column(con, table, column):
+            logger.warning("[share_db] reconcile: adding missing column %s.%s", table, column)
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            changed = True
+    if changed:
+        con.commit()
 
 
 # Single-source: get_current_version is identical across all SQLite
@@ -146,6 +222,10 @@ def _init_db(con: sqlite3.Connection) -> None:
         con.execute(stmt)
     con.commit()
     apply_pending(con)
+    # Safety net for user_version drift (see _EXPECTED_COLUMNS): re-assert
+    # additive columns even when the migration that adds them was skipped
+    # because the version was already advanced.
+    _reconcile_additive_columns(con)
 
     # If the connection was rebuilt by ``get_safe_share_db_connection`` after
     # quarantining a corrupt file, write a single recovery audit row.

@@ -4,7 +4,7 @@ import { AlertTriangle, Activity, Gauge, Users, XCircle, Clock } from 'lucide-re
 
 import { Skeleton } from '@/components/ui/skeleton'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { CardErrorState } from '@/components/SessionScoring/CardErrorState'
+import { CardErrorState } from '@/components/CardErrorState'
 import { ScoringHealthHelp } from '@/components/SessionScoring/help-content'
 import type { components } from '@/types/api.generated'
 

@@ -20,8 +20,8 @@ vi.mock('next-themes', () => ({
   useTheme: vi.fn(() => ({ theme: 'light' })),
 }))
 
-vi.mock('@/hooks/useUrlFilterSync', () => ({
-  useUrlFilterSync: vi.fn(),
+vi.mock('@/hooks/useViewMetricUrlSync', () => ({
+  useViewMetricUrlSync: vi.fn(),
 }))
 
 vi.mock('@/hooks/useFilterPayload', () => ({

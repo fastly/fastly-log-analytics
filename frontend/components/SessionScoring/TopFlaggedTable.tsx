@@ -20,6 +20,8 @@ import { useScoringLabels } from '@/hooks/useScoringLabels'
 import { FlagSessionPopover, type LabelValue } from './FlagSessionPopover'
 import { SessionEventsDialog } from './SessionEventsDialog'
 import { useScoringQuery } from './useScoringQuery'
+import type { Expect, WireParity } from '@/types/api'
+import type { components } from '@/types/api.generated'
 
 interface TopFlaggedTableProps {
   serviceId: string
@@ -27,6 +29,10 @@ interface TopFlaggedTableProps {
   onSinceHoursChange?: (hours: number) => void
 }
 
+// Deliberate narrowing of the all-optional generated ScoringTopFlaggedRow:
+// the repository SQL always emits timestamp/edge_sid/edge_score (row
+// identity); the rest depend on masking + which log fields are enabled.
+// Key/type drift against the wire schema fails on the parity guard below.
 interface FlaggedRow {
   timestamp: string
   edge_sid: string
@@ -41,6 +47,7 @@ interface FlaggedRow {
   status?: number
   country?: string
 }
+export type _FlaggedRowParity = Expect<WireParity<FlaggedRow, components['schemas']['ScoringTopFlaggedRow']>>
 
 function scoreBadge(score: number) {
   if (score >= 75) return <Badge className="bg-rose-600 hover:bg-rose-600">{score}</Badge>

@@ -85,7 +85,7 @@ def test_ingest_endpoint_read_write_starts_sync_in_background_thread(client):
     with (
         patch("backend.core.duckdb.start_cron_run", side_effect=fake_start_cron_run),
         patch("backend.cron_progress.start_progress"),
-        patch("backend.scheduler._run_service_cron"),
+        patch("backend.cron.jobs.sync._run_service_cron"),
     ):
         resp = client.post(
             "/api/admin/ingest-logs",
@@ -120,7 +120,7 @@ def test_ingest_endpoint_read_only_starts_metadata_sync(client, test_service_sou
     with (
         patch("backend.core.duckdb.start_cron_run", side_effect=fake_start_cron_run),
         patch("backend.cron_progress.start_progress"),
-        patch("backend.scheduler._run_metadata_sync"),
+        patch("backend.cron.jobs.metadata._run_metadata_sync"),
     ):
         resp = client.post("/api/admin/ingest-logs", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
@@ -377,7 +377,7 @@ def test_commit_iceberg_starts_commit_in_background(client):
     with (
         patch("backend.core.duckdb.start_cron_run", side_effect=fake_start),
         patch("backend.cron_progress.start_progress"),
-        patch("backend.scheduler._run_commit"),
+        patch("backend.cron.jobs.commit._run_commit"),
     ):
         resp = client.post("/api/admin/commit-iceberg", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
@@ -444,7 +444,7 @@ def test_rebuild_local_view_clears_caches_and_spawns_sync(client, tmp_path):
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_dir)),
         patch("backend.core.duckdb.start_cron_run", return_value="rebuild-run-1"),
         patch("backend.cron_progress.start_progress"),
-        patch("backend.scheduler._run_metadata_sync", side_effect=fake_sync),
+        patch("backend.cron.jobs.metadata._run_metadata_sync", side_effect=fake_sync),
         patch("threading.Thread", return_value=fake_thread),
     ):
         resp = client.post("/api/admin/rebuild-local-view", headers={"x-fastly-service-id": MOCK_SERVICE_ID})

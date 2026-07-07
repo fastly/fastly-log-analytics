@@ -214,11 +214,10 @@ def _bootstrap_sync(
 
     # Per the perf audit (F6): bootstrap's custom_fields_catalog was a
     # ~10-15 KB duplicate of what every chart page already fetches
-    # separately from /api/log-fields/catalog. No frontend code reads
-    # bootstrap.custom_fields_catalog (the dashboard card hook only
-    # uses custom_dashboard_cards and active_log_field_ids — both
-    # derived from the catalog and shipped here). Keep the field on the
-    # response model for API back-compat but emit it empty.
+    # separately from /api/log-fields/catalog, so the field was dropped
+    # from the response (v2.1.0). The dashboard card hook only needs
+    # custom_dashboard_cards and active_log_field_ids — both derived
+    # from the catalog here.
     custom_dashboard_cards: list[dict] = []
     active_log_field_ids: list[str] = []
 
@@ -419,16 +418,12 @@ def _bootstrap_sync(
 
     timer.call("ops_overview", _resolve_ops_overview)
 
-    # P1#5 (perf audit): cron_schedule is NO LONGER folded into bootstrap.
+    # P1#5 (perf audit): cron_schedule is NOT folded into bootstrap.
     # build_cron_schedule_payload cost ~2.6s p50 / 3.2s p95 and sat on the
-    # admin SSR first-paint critical path. The field is now a lazy-load: the
+    # admin SSR first-paint critical path. It's a lazy-load instead: the
     # /logs cron tab refetches GET /api/cron-schedule on mount (see
-    # frontend/app/logs/_state.ts — enabled on activeTab==='cron'), so
-    # dropping the seed degrades to ONE round-trip on the only page that
-    # needs it, with no feature loss. The model field stays (emits None) for
-    # wire/OpenAPI back-compat.
-    cron_schedule_payload: dict | None = None
-
+    # frontend/app/logs/_state.ts — enabled on activeTab==='cron'), ONE
+    # round-trip on the only page that needs it, with no feature loss.
     cron_runs_first_page_payload: dict | None = None
 
     def _resolve_cron_runs_first_page() -> None:
@@ -497,18 +492,14 @@ def _bootstrap_sync(
 
     timer.call("scoring_labels", _resolve_scoring_labels)
 
-    # P1#5 (perf audit): share_status is NO LONGER folded into bootstrap.
+    # P1#5 (perf audit): share_status is NOT folded into bootstrap.
     # build_share_status cost ~2.1s and sat on the admin SSR first-paint
-    # critical path. The field is now a lazy-load: the /admin/share page
+    # critical path. It's a lazy-load instead: the /admin/share page
     # refetches GET /api/admin/share/status on mount (see
     # frontend/app/admin/share/page.tsx — unconditional mount-time useQuery
-    # on SHARE_STATUS_QUERY_KEY), so dropping the seed degrades to ONE
-    # round-trip on the only page that needs it, with no feature loss. The
-    # small global share_banner ({sharing_active, public_url}) is KEPT above
-    # for the header. The model field stays (emits None) for wire/OpenAPI
-    # back-compat.
-    share_status_payload: dict | None = None
-
+    # on SHARE_STATUS_QUERY_KEY), ONE round-trip on the only page that
+    # needs it, with no feature loss. The small global share_banner
+    # ({sharing_active, public_url}) is KEPT above for the header.
     views: list[dict] = []
 
     def _resolve_views() -> list[dict]:
@@ -542,7 +533,8 @@ def _bootstrap_sync(
     # the env unset (default) the field is None and the frontend interceptor
     # no-ops.
     admin_token: str | None = None
-    if analyst_session is None and not is_remote:
+    # 003: Only provide token to actual local connections, not unauthenticated remote ones.
+    if analyst_session is None and not getattr(request.state, "is_remote", False):
         from backend.utils.remote_access import _admin_shared_secret
 
         admin_token = _admin_shared_secret() or None
@@ -583,11 +575,9 @@ def _bootstrap_sync(
         log_extents=log_extents_payload,
         debug_state=debug_state_payload,
         ops_overview=ops_overview_payload,
-        cron_schedule=cron_schedule_payload,
         cron_runs_first_page=cron_runs_first_page_payload,
         last_sync=last_sync_payload,
         scoring_labels=scoring_labels_payload,
-        share_status=share_status_payload,
         section_timings=section_timings,
     )
 

@@ -36,7 +36,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
-import { useFilterUrlSync } from '@/hooks/useFilterUrlSync'
+import { useFilterUrlWriteback } from '@/hooks/useFilterUrlWriteback'
 import { TimezoneSwitcher } from '@/components/TimezoneSwitcher/TimezoneSwitcher'
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -334,7 +334,7 @@ export function AppLayout({
 
   // Persist filter state to URL so back-nav, refresh, and shared links
   // all round-trip the user's current dashboard view.
-  useFilterUrlSync()
+  useFilterUrlWriteback()
 
   // (Removed) Navigation cancel pattern was here. The intent was to
   // abort the previous route's in-flight polls on route change, but

@@ -28,7 +28,7 @@ import { useFilterPayload } from '@/hooks/useFilterPayload'
  * sub-trees). replaceState updates the URL silently — React state owns the
  * UI; the URL is just a mirror.
  */
-export function useFilterUrlSync(): void {
+export function useFilterUrlWriteback(): void {
   const pathname = usePathname()
   const { startTime, endTime, isAutoRange, relativeRange } = useFilterStore(
     useShallow(state => ({

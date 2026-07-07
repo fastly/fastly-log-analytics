@@ -16,16 +16,33 @@ from fastapi.responses import Response
 
 from backend import config as svcconfig
 from backend.core import share_db
+from backend.core.oauth import registry as oauth_registry
+from backend.models.common import OkResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.share_admin import (
     BackupExportPayload,
+    BackupImportResponse,
+    ClaimTokenResponse,
     GdprErasePayload,
+    GdprEraseResponse,
+    InviteMutationAck,
     InvitePayload,
+    InviteRecord,
+    OAuthProvidersResponse,
     PasscodePayload,
     PiiPolicyPayload,
     ServiceScopePayload,
     SettingsPayload,
+    ShareAuditLogsResponse,
+    ShareBannerResponse,
+    ShareLiveResponse,
+    SharePanicResponse,
+    ShareSettingsResponse,
     ShareStartPayload,
+    ShareStartResponse,
+    ShareStatusResponse,
+    SharingPolicyPayload,
+    WordphraseResponse,
 )
 from backend.utils.remote_access import client_ip
 from backend.utils.router_utils import make_error
@@ -37,7 +54,7 @@ router = APIRouter(prefix="/api/admin/share", tags=["share-admin"], responses=DE
 # ── Status ──────────────────────────────────────────────────────────────────
 
 
-@router.get("/banner")
+@router.get("/banner", response_model=ShareBannerResponse, response_model_exclude_unset=True)
 def share_banner():
     """Tiny payload (~80B) for the global share-status banner.
 
@@ -67,6 +84,13 @@ def build_share_status() -> dict:
     mgr = get_tunnel_manager()
     state = mgr.state
     invites = share_db.get_remote_invites()
+    # Attach each invite's last login (derived from the successful-login audit
+    # events) so the admin can see who is actually using the app at a glance.
+    # Joined on lowercased email (the only key audit rows carry); one invite per
+    # email in practice.
+    last_login_by_email = share_db.get_last_login_by_email()
+    for inv in invites:
+        inv["last_login_at"] = last_login_by_email.get((inv.get("email") or "").strip().lower())
     sessions = [s.to_dict() for s in mgr.list_sessions()]
     audit = share_db.get_share_audit_logs(limit=50)
     services = []
@@ -97,12 +121,12 @@ def build_share_status() -> dict:
     }
 
 
-@router.get("/status")
+@router.get("/status", response_model=ShareStatusResponse, response_model_exclude_unset=True)
 def share_status():
     return build_share_status()
 
 
-@router.get("/live")
+@router.get("/live", response_model=ShareLiveResponse, response_model_exclude_unset=True)
 def share_live():
     """Lean 10-s poll payload for the share dashboard. Returns only the
     fields that change in real time and are surfaced continuously by
@@ -125,7 +149,7 @@ def share_live():
 # ── Audit log (filterable) ─────────────────────────────────────────────────
 
 
-@router.get("/audit-logs")
+@router.get("/audit-logs", response_model=ShareAuditLogsResponse, response_model_exclude_unset=True)
 def audit_logs(
     # Out-of-band limit was 400-on-fail; FastAPI's Query(ge/le) emits a
     # structured 422 with the failing field path, which is what every
@@ -149,7 +173,7 @@ def audit_logs(
 # ── Tunnel lifecycle ───────────────────────────────────────────────────────
 
 
-@router.post("/start")
+@router.post("/start", response_model=ShareStartResponse, response_model_exclude_unset=True)
 def share_start(payload: ShareStartPayload):
     mgr = get_tunnel_manager()
     try:
@@ -162,14 +186,14 @@ def share_start(payload: ShareStartPayload):
     return result
 
 
-@router.post("/stop")
+@router.post("/stop", response_model=OkResponse)
 def share_stop():
     mgr = get_tunnel_manager()
     mgr.stop_sharing()
     return {"ok": True}
 
 
-@router.post("/panic")
+@router.post("/panic", response_model=SharePanicResponse, response_model_exclude_unset=True)
 def share_panic():
     return get_tunnel_manager().panic()
 
@@ -177,7 +201,7 @@ def share_panic():
 # ── Invites ────────────────────────────────────────────────────────────────
 
 
-@router.post("/invites")
+@router.post("/invites", response_model=InviteRecord, response_model_exclude_unset=True)
 def create_invite(payload: InvitePayload, request: Request):
     from datetime import UTC, datetime, timedelta
 
@@ -189,6 +213,24 @@ def create_invite(payload: InvitePayload, request: Request):
             status_code=400,
             detail={"error": "invalid_request", "message": "Select at least one service for the invite."},
         )
+
+    # OAuth invites must name a provider that is actually configured (a registry
+    # entry WITH env credentials). A disabled provider is allowed here so an
+    # admin can pre-create an invite for a temporarily-disabled IdP (§5.1).
+    if payload.auth_method == "oauth":
+        if not payload.oauth_provider:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "invalid_request", "message": "Choose an identity provider for an SSO invite."},
+            )
+        if oauth_registry.get_provider(payload.oauth_provider) is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_request",
+                    "message": f"Identity provider '{payload.oauth_provider}' is not configured.",
+                },
+            )
 
     expires_at = None
     if payload.duration_hours is not None and payload.duration_hours > 0:
@@ -205,6 +247,9 @@ def create_invite(payload: InvitePayload, request: Request):
             query_window_hours=payload.query_window_hours,
             query_start_time=payload.query_start_time,
             query_end_time=payload.query_end_time,
+            allow_concurrent_sessions=payload.allow_concurrent_sessions,
+            auth_method=payload.auth_method,
+            oauth_provider=payload.oauth_provider,
         )
     except share_db.WeakPasscodeError as exc:
         raise HTTPException(status_code=400, detail={"error": "weak_passcode", "message": str(exc)}) from exc
@@ -213,16 +258,23 @@ def create_invite(payload: InvitePayload, request: Request):
     except (share_db.InvalidPiiPolicyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail={"error": "invalid_request", "message": str(exc)}) from exc
 
+    auth_detail = (
+        f" auth={payload.auth_method} provider={payload.oauth_provider}" if payload.auth_method == "oauth" else ""
+    )
     share_db.log_share_audit_event(
         event_type="INVITE_CREATE",
         email=invite["email"],
         ip_address=client_ip(request, default="127.0.0.1"),
-        details=f"invite_id={invite['id']} services={','.join(payload.service_ids)}",
+        details=f"invite_id={invite['id']} services={','.join(payload.service_ids)}{auth_detail}",
     )
     return invite
 
 
-@router.patch("/invites/{invite_id}/services")
+@router.patch(
+    "/invites/{invite_id}/services",
+    response_model=InviteRecord,
+    response_model_exclude_unset=True,
+)
 def update_invite_services(invite_id: str, payload: ServiceScopePayload):
     if share_db.get_remote_invite(invite_id) is None:
         raise HTTPException(status_code=404, detail={"error": "not_found"})
@@ -235,7 +287,11 @@ def update_invite_services(invite_id: str, payload: ServiceScopePayload):
     return share_db.get_remote_invite(invite_id)
 
 
-@router.patch("/invites/{invite_id}/pii")
+@router.patch(
+    "/invites/{invite_id}/pii",
+    response_model=InviteRecord,
+    response_model_exclude_unset=True,
+)
 def update_invite_pii(invite_id: str, payload: PiiPolicyPayload, request: Request):
     """Toggle IP masking on an existing invite (no way to do this at create
     time only). The live analyst session re-syncs its policy from the invite
@@ -256,7 +312,34 @@ def update_invite_pii(invite_id: str, payload: PiiPolicyPayload, request: Reques
     return share_db.get_remote_invite(invite_id)
 
 
-@router.patch("/invites/{invite_id}/passcode")
+@router.patch(
+    "/invites/{invite_id}/sharing",
+    response_model=InviteRecord,
+    response_model_exclude_unset=True,
+)
+def update_invite_sharing(invite_id: str, payload: SharingPolicyPayload, request: Request):
+    """Toggle whether the invite allows shared (concurrent) analyst logins.
+
+    Turning it ON lets several analysts use the same link at once instead of
+    each login booting the previous session (still bounded by the global
+    max_concurrent_analyst_sessions cap). Turning it OFF only affects *future*
+    logins — any sessions already live under the invite are left to age out via
+    the idle/absolute timeout; revoke the invite to force them off immediately.
+    """
+    invite = share_db.get_remote_invite(invite_id)
+    if invite is None:
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+    share_db.set_invite_concurrent_sessions(invite_id, payload.allow_concurrent_sessions)
+    share_db.log_share_audit_event(
+        event_type="INVITE_UPDATE_SHARING",
+        email=invite["email"],
+        ip_address=client_ip(request, default="127.0.0.1"),
+        details=f"invite_id={invite_id} allow_concurrent_sessions={payload.allow_concurrent_sessions}",
+    )
+    return share_db.get_remote_invite(invite_id)
+
+
+@router.patch("/invites/{invite_id}/passcode", response_model=OkResponse)
 def update_invite_passcode(invite_id: str, payload: PasscodePayload, request: Request):
     """Rotate the passcode on an existing invite.
 
@@ -279,7 +362,11 @@ def update_invite_passcode(invite_id: str, payload: PasscodePayload, request: Re
     return {"ok": True}
 
 
-@router.post("/invites/{invite_id}/revoke")
+@router.post(
+    "/invites/{invite_id}/revoke",
+    response_model=InviteMutationAck,
+    response_model_exclude_unset=True,
+)
 def revoke_invite(invite_id: str, request: Request):
     if not share_db.revoke_remote_invite(invite_id):
         raise HTTPException(status_code=404, detail={"error": "not_found"})
@@ -293,7 +380,11 @@ def revoke_invite(invite_id: str, request: Request):
     return {"ok": True, "booted_sessions": booted}
 
 
-@router.delete("/invites/{invite_id}")
+@router.delete(
+    "/invites/{invite_id}",
+    response_model=InviteMutationAck,
+    response_model_exclude_unset=True,
+)
 def delete_invite(invite_id: str, request: Request):
     """Hard-delete an invite row. Boots any live sessions first (cascade would
     otherwise leave the TunnelManager holding a stale reference), then deletes.
@@ -312,7 +403,11 @@ def delete_invite(invite_id: str, request: Request):
     return {"ok": True, "booted_sessions": booted}
 
 
-@router.post("/invites/{invite_id}/claim-token")
+@router.post(
+    "/invites/{invite_id}/claim-token",
+    response_model=ClaimTokenResponse,
+    response_model_exclude_unset=True,
+)
 def issue_claim_token(invite_id: str):
     if share_db.get_remote_invite(invite_id) is None:
         raise HTTPException(status_code=404, detail={"error": "not_found"})
@@ -323,7 +418,7 @@ def issue_claim_token(invite_id: str):
 # ── Sessions ────────────────────────────────────────────────────────────────
 
 
-@router.post("/sessions/{session_id}/boot")
+@router.post("/sessions/{session_id}/boot", response_model=OkResponse)
 def boot_session(session_id: str, request: Request):
     ok = get_tunnel_manager().boot_session(session_id, reason="admin boot")
     if not ok:
@@ -334,6 +429,8 @@ def boot_session(session_id: str, request: Request):
 # ── Backup / Restore ────────────────────────────────────────────────────────
 
 
+# response_model intentionally omitted: returns the encrypted backup blob
+# (binary Response with Content-Disposition), not a JSON body.
 @router.post("/backup/export")
 def backup_export(payload: BackupExportPayload, request: Request):
     if len(payload.passphrase) < 12:
@@ -357,7 +454,7 @@ def backup_export(payload: BackupExportPayload, request: Request):
     )
 
 
-@router.post("/backup/import")
+@router.post("/backup/import", response_model=BackupImportResponse, response_model_exclude_unset=True)
 async def backup_import(
     request: Request,
     file: UploadFile = File(...),
@@ -383,7 +480,7 @@ async def backup_import(
 # ── GDPR right-to-be-forgotten ──────────────────────────────────────────────
 
 
-@router.post("/gdpr/erase")
+@router.post("/gdpr/erase", response_model=GdprEraseResponse, response_model_exclude_unset=True)
 def gdpr_erase(payload: GdprErasePayload, request: Request):
     try:
         result = share_db.gdpr_erase(payload.email, payload.reason)
@@ -396,7 +493,7 @@ def gdpr_erase(payload: GdprErasePayload, request: Request):
 # ── Settings ────────────────────────────────────────────────────────────────
 
 
-@router.patch("/settings")
+@router.patch("/settings", response_model=ShareSettingsResponse, response_model_exclude_unset=True)
 def update_settings(payload: SettingsPayload):
     if payload.max_concurrent_analyst_sessions is not None:
         if payload.max_concurrent_analyst_sessions < 1:
@@ -408,6 +505,22 @@ def update_settings(payload: SettingsPayload):
 # ── Wordphrase generator (used by admin invite form) ───────────────────────
 
 
-@router.get("/wordphrase")
+@router.get("/wordphrase", response_model=WordphraseResponse, response_model_exclude_unset=True)
 def wordphrase():
     return {"passcode": share_db.generate_wordphrase()}
+
+
+# ── OAuth provider registry (admin invite form) ─────────────────────────────
+
+
+@router.get("/oauth-providers", response_model=OAuthProvidersResponse)
+def oauth_providers():
+    """List the configured OIDC providers for the admin invite form.
+
+    Includes disabled providers (``enabled=false``) so an admin can pre-create
+    an invite for a temporarily-disabled IdP — distinct from the unauth analyst
+    ``/api/share/auth-config`` which exposes enabled providers only. Empty when
+    the feature switch (``OAUTH_FLOW_STATE_SECRET``) is off. Never returns
+    client_id/client_secret.
+    """
+    return OAuthProvidersResponse(providers=[p.admin_dict() for p in oauth_registry.get_all_providers()])

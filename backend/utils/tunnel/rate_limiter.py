@@ -90,8 +90,3 @@ class _LoginRateLimiter:
                     self._lockouts.pop(next(iter(self._lockouts)))
                 return True
             return False
-
-    def clear(self, ip: str) -> None:
-        with self._lock:
-            self._failures.pop(ip, None)
-            self._lockouts.pop(ip, None)

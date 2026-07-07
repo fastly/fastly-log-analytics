@@ -11,6 +11,7 @@ under ``<cache>/rollups/...``.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import time as _t
 from collections.abc import Callable
@@ -96,11 +97,10 @@ def _open_usage_log(service_id: str) -> sqlite3.Connection | None:
 def get_metadata_storage_stats(service_id: str) -> dict:
     """Per-table row count + estimated bytes for this service's metadata.db.
 
-    Bytes come from SQLite's ``dbstat`` virtual table (compiled into stock
-    Python sqlite3 ≥3.31). If a table doesn't exist (older schema), it's
-    omitted rather than erroring. Total ``db_bytes`` is the sum across the
-    whole file — including indexes, free pages, and tables not in
-    ``_STATS_TABLES``, so it won't equal sum-of-per-table-bytes.
+    Per-table bytes come from SQLite's ``dbstat`` virtual table. Total
+    ``db_bytes`` is the file size from the OS (``os.path.getsize``) rather than
+    summing all ``dbstat`` pages — the full-file dbstat scan was 600ms–3s on a
+    large DB and fires on every system-metrics tick.
     """
     con = get_con(service_id)
     out: dict[str, dict] = {}
@@ -135,9 +135,8 @@ def get_metadata_storage_stats(service_id: str) -> dict:
 
     db_bytes: int | None
     try:
-        row = con.execute("SELECT sum(pgsize) FROM dbstat").fetchone()
-        db_bytes = int(row[0]) if row and row[0] is not None else 0
-    except sqlite3.OperationalError:
+        db_bytes = os.path.getsize(db_path(service_id))
+    except OSError:
         db_bytes = None
 
     return {
@@ -275,24 +274,35 @@ def cleanup_metadata(
             continue
         _emit({"type": "status", "message": f"Trimming {table} (older than {days_int}d)…"})
         table_con = _con_for(table)
+        # Batch DELETE in 50k-row chunks so the SQLite write lock is released
+        # between commits. A single DELETE of 700k+ rows holds the lock for
+        # 30–35s, blocking concurrent cron starts (``start_cron_run`` →
+        # ``purge_cron_runs``). Each batch takes ~1–2s; other writers interleave
+        # between commits instead of queuing for the full duration.
+        _BATCH = 50_000
         try:
-            if table == _SLOW_QUERIES_TABLE:
-                # Unix-epoch REAL cutoff for slow_queries — see
-                # ``_SLOW_QUERIES_TABLE`` comment above. Uses the same
-                # window length as the others; the only difference is
-                # the column type / comparison.
-                cutoff_epoch = _t.time() - days_int * 86400
-                cur = table_con.execute(
-                    f"DELETE FROM {table} WHERE {ts_col} < ?",
-                    (cutoff_epoch,),
-                )
-            else:
-                cur = table_con.execute(
-                    f"DELETE FROM {table} WHERE {ts_col} < datetime('now', ?)",
-                    (f"-{days_int} days",),
-                )
-            deleted[table] = int(cur.rowcount or 0)
-            table_con.commit()
+            total_n = 0
+            while True:
+                if table == _SLOW_QUERIES_TABLE:
+                    # Unix-epoch REAL cutoff for slow_queries — see
+                    # ``_SLOW_QUERIES_TABLE`` comment above.
+                    cutoff_epoch = _t.time() - days_int * 86400
+                    cur = table_con.execute(
+                        f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
+                        (cutoff_epoch, _BATCH),
+                    )
+                else:
+                    cur = table_con.execute(
+                        f"DELETE FROM {table} WHERE rowid IN "
+                        f"(SELECT rowid FROM {table} WHERE {ts_col} < datetime('now', ?) LIMIT ?)",
+                        (f"-{days_int} days", _BATCH),
+                    )
+                n = int(cur.rowcount or 0)
+                total_n += n
+                table_con.commit()
+                if n < _BATCH:
+                    break
+            deleted[table] = total_n
             _emit(
                 {
                     "type": "progress",

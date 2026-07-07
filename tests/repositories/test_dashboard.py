@@ -1452,3 +1452,129 @@ def test_get_field_values_asn_search_falls_back_to_ilike_when_no_metadata_match(
 
     values = {v["value"] for v in out["values"]}
     assert 15169 in values
+
+
+def test_get_aggregates_rollup_path_builds_no_temp_and_serves_conn_requests_rollup(
+    in_memory_duckdb, test_service_source, monkeypatch
+):
+    """Rollup fast-path materializes NO per-request temp (the eager narrow
+    live-temp — 391ms on the 2026-07-06 trace — is gone) and the
+    conn_requests histogram serves from try_conn_requests_hist_from_rollup."""
+    import os
+
+    from backend.repositories import dashboard as dash
+    from backend.repositories._base import QueryRunner
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=20)
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    real_isdir = os.path.isdir
+
+    def fake_isdir(path: str) -> bool:
+        if path.endswith(os.path.join("rollups", "hour")):
+            return True
+        return real_isdir(path)
+
+    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+    monkeypatch.setattr(
+        QueryRunner,
+        "execute_top_n_rollups",
+        lambda self, fields, s, e, limit=10, per_field_limits=None, **kw: ([("url", "/p", 5)], ["url"]),
+    )
+
+    hist_calls: list[dict] = []
+    sentinel = {"top": [{"value": "1", "count": 5}, {"value": "21+", "count": 2}], "total": 7}
+
+    def _stub_hist(self, start_time, end_time, *, has_filters, actual_cols=None):
+        hist_calls.append({"has_filters": has_filters})
+        return dict(sentinel)
+
+    monkeypatch.setattr(QueryRunner, "try_conn_requests_hist_from_rollup", _stub_hist)
+
+    temp_creates: list[str] = []
+    orig_ctt = QueryRunner.create_temp_table
+
+    def _spy_ctt(self, sql, params=None):
+        temp_creates.append(sql)
+        return orig_ctt(self, sql, params)
+
+    monkeypatch.setattr(QueryRunner, "create_temp_table", _spy_ctt)
+
+    result = dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+    )
+
+    assert temp_creates == [], f"rollup path must not materialize any temp; got: {temp_creates}"
+    markers = {e["section"] for e in result["section_timings"]}
+    assert "wide_temp_create" not in markers and "live_temp_create" not in markers, markers
+    assert hist_calls == [{"has_filters": False}]
+    assert result["data"]["conn_requests"] == sentinel
+
+
+def test_get_aggregates_conn_requests_rollup_miss_falls_back_to_base_scan(
+    in_memory_duckdb, test_service_source, monkeypatch
+):
+    """When the histogram reader returns None on the rollup path, the live
+    CONN_REQUESTS_BUCKET scan runs against the BASE table with the real
+    where_clause/params (there is no temp to rewrite them to '1=1')."""
+    import os
+    from datetime import UTC, datetime, timedelta
+
+    from backend.repositories import dashboard as dash
+    from backend.repositories._base import QueryRunner
+
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=4)
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+    # 3 rows in the '1' bucket, 1 row in '6–20'.
+    in_memory_duckdb.execute(f"UPDATE {table_name} SET conn_requests = 1")
+    in_memory_duckdb.execute(
+        f"UPDATE {table_name} SET conn_requests = 7 WHERE rowid IN (SELECT rowid FROM {table_name} LIMIT 1)"
+    )
+
+    real_isdir = os.path.isdir
+
+    def fake_isdir(path: str) -> bool:
+        if path.endswith(os.path.join("rollups", "hour")):
+            return True
+        return real_isdir(path)
+
+    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+    monkeypatch.setattr(
+        QueryRunner,
+        "execute_top_n_rollups",
+        lambda self, fields, s, e, limit=10, per_field_limits=None, **kw: ([], []),
+    )
+    monkeypatch.setattr(
+        QueryRunner,
+        "try_conn_requests_hist_from_rollup",
+        lambda self, s, e, *, has_filters, actual_cols=None: None,
+    )
+
+    # Wide window: mock-log timestamps are NAIVE local times, so a tight
+    # UTC window can miss them by the tz offset. ±26h keeps the rows in
+    # regardless of the machine's timezone while still exercising the
+    # real where_clause/params on the base-table fallback.
+    st = (datetime.now(UTC) - timedelta(hours=26)).isoformat()
+    et = (datetime.now(UTC) + timedelta(hours=26)).isoformat()
+    result = dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=st,
+        end_time=et,
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+    )
+
+    assert result["data"]["conn_requests"] == {
+        "top": [{"value": "1", "count": 3}, {"value": "6–20", "count": 1}],
+        "total": 4,
+    }

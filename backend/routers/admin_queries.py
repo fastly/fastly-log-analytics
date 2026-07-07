@@ -27,7 +27,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from backend.core import metadata as _meta_mod
 from backend.core.query_registry import query_registry
 from backend.deps import get_service_id
-from backend.models.admin_queries import CancelResponse, SnapshotResponse, SummaryResponse
+from backend.models.admin_queries import (
+    ActiveQueryRow,
+    CancelResponse,
+    QueryMonitorConfigResponse,
+    SlowQueriesCountResponse,
+    SlowQueriesResponse,
+    SnapshotResponse,
+    SummaryResponse,
+)
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.utils.router_utils import make_error, not_found
 
@@ -120,7 +128,7 @@ def queries_summary() -> SummaryResponse:
     return SummaryResponse(**query_registry.summary())
 
 
-@router.get("/slow-queries/count")
+@router.get("/slow-queries/count", response_model=SlowQueriesCountResponse)
 def count_persisted_slow_queries(
     service_id: str = Depends(get_service_id),
     since_hours: int = Query(24, ge=1, le=24 * 30),
@@ -140,7 +148,11 @@ def count_persisted_slow_queries(
     }
 
 
-@router.get("/slow-queries")
+@router.get(
+    "/slow-queries",
+    response_model=SlowQueriesResponse,
+    response_model_exclude_unset=True,
+)
 def list_persisted_slow_queries(
     service_id: str = Depends(get_service_id),
     since_hours: int = Query(24, ge=1, le=24 * 30),
@@ -215,7 +227,11 @@ def list_persisted_slow_queries(
     return {"rows": out, "since_hours": since_hours, "threshold_ms": threshold_ms}
 
 
-@router.get("/queries/{qid}")
+@router.get(
+    "/queries/{qid}",
+    response_model=ActiveQueryRow,
+    response_model_exclude_unset=True,
+)
 def get_query(qid: int) -> dict[str, Any]:
     """Fetch the full SQL + attribution for a single in-flight query.
 
@@ -249,7 +265,7 @@ def cancel_query(qid: int, request: Request) -> CancelResponse:
 # ── App-config surface for frontend nav gating ──────────────────────────────
 
 
-@router.get("/app-config/query-monitor")
+@router.get("/app-config/query-monitor", response_model=QueryMonitorConfigResponse)
 def query_monitor_config() -> dict:
     """Tiny config endpoint the frontend hits on mount to decide whether to
     render the Live Query Monitor tab. Returns enabled=False (not 404) so
