@@ -80,7 +80,7 @@ test.describe('Control Room — Phase 0', () => {
 
     // The ConnectionBadge shows "Connected" with a success variant
     // once the SSE stream starts delivering metrics_tick events.
-    const connectedBadge = page.locator('text=Connected')
+    const connectedBadge = page.locator('[data-slot="badge"]:has-text("Connected")').first()
     await expect(connectedBadge).toBeVisible({ timeout: 10_000 })
   })
 
