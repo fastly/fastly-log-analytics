@@ -31,8 +31,18 @@ class TestTransformRtResponse:
                         "status_5xx": 3,
                         "hits": 80,
                         "miss": 20,
+                        "pass": 0,
+                        "synth": 0,
                         "resp_body_bytes": 1_000_000,
                         "resp_header_bytes": 10_000,
+                        "shield": 10,
+                        "shield_resp_body_bytes": 200_000,
+                        "shield_resp_header_bytes": 2000,
+                        "bereq_header_bytes": 5000,
+                        "bereq_body_bytes": 0,
+                        "waf_blocked": 1,
+                        "waf_logged": 2,
+                        "waf_passed": 97,
                     }
                 }
             ],
@@ -42,7 +52,7 @@ class TestTransformRtResponse:
         tick = transform_rt_response(rt)
 
         assert tick["event"] == "metrics_tick"
-        assert tick["event_schema_version"] == 1
+        assert tick["event_schema_version"] == 2
         assert tick["status"] == "ok"
         assert tick["aggregate_delay"] == 3
 
@@ -54,6 +64,11 @@ class TestTransformRtResponse:
         assert "status_4xx" in data["status_breakdown"]
         assert "status_5xx" in data["status_breakdown"]
         assert data["estimated_cost_usd"] >= 0
+        assert data["origin_requests_per_second"] == 20.0
+        assert data["shield_hit_ratio"] == pytest.approx(0.1, abs=0.001)
+        assert data["waf_blocked"] == 1
+        assert data["waf_logged"] == 2
+        assert data["pop_count"] == 0
 
     def test_multiple_data_points(self):
         rt = {
@@ -103,18 +118,30 @@ class TestTransformRtResponse:
                     "datacenter": {
                         "SJC": {
                             "requests": 200,
+                            "status_5xx": 0,
                             "hits": 180,
                             "miss": 20,
                             "resp_body_bytes": 2_000_000,
                             "resp_header_bytes": 20_000,
-                        }
+                        },
+                        "DCA": {
+                            "requests": 100,
+                            "status_5xx": 10,
+                            "hits": 80,
+                            "miss": 20,
+                            "resp_body_bytes": 1_000_000,
+                            "resp_header_bytes": 10_000,
+                        },
                     }
                 }
             ],
             "Timestamp": 1720000002,
         }
         tick = transform_rt_response(rt)
-        assert tick["data"]["requests_per_second"] == 200.0
+        data = tick["data"]
+        assert data["pop_count"] == 2
+        assert "DCA" in data["degraded_pops"]
+        assert "SJC" not in data["degraded_pops"]
 
 
 # ── error_tick_payload ──────────────────────────────────────────────────────

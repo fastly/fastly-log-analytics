@@ -235,7 +235,7 @@ async def test_sse_real_metrics_shape(monkeypatch):
         monkeypatch,
         {
             "event": "metrics_tick",
-            "event_schema_version": 1,
+            "event_schema_version": 2,
             "timestamp": "2026-07-07T00:00:00+00:00",
             "status": "ok",
             "data": {
@@ -245,13 +245,24 @@ async def test_sse_real_metrics_shape(monkeypatch):
                 "bandwidth_mbps": 1.5,
                 "status_breakdown": {"status_2xx": 100},
                 "estimated_cost_usd": 0.001,
+                "origin_requests_per_second": 5.0,
+                "origin_bandwidth_mbps": 0.2,
+                "shield_requests": 10,
+                "shield_hit_ratio": 0.05,
+                "pass_requests": 0,
+                "synth_requests": 0,
+                "waf_blocked": 0,
+                "waf_logged": 0,
+                "waf_passed": 42,
+                "pop_count": 2,
+                "degraded_pops": [],
             },
             "aggregate_delay": 3,
         },
     )
 
     assert frame["event"] == "metrics_tick"
-    assert frame["event_schema_version"] == 1
+    assert frame["event_schema_version"] == 2
     assert frame["status"] == "ok"
     assert frame["data"]["requests_per_second"] == 42.5
     assert "cache_hit_ratio" in frame["data"]

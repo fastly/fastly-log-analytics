@@ -44,6 +44,17 @@ interface MetricsData {
   bandwidth_mbps: number
   status_breakdown?: Record<string, number>
   estimated_cost_usd?: number
+  origin_requests_per_second?: number
+  origin_bandwidth_mbps?: number
+  shield_requests?: number
+  shield_hit_ratio?: number
+  pass_requests?: number
+  synth_requests?: number
+  waf_blocked?: number
+  waf_logged?: number
+  waf_passed?: number
+  pop_count?: number
+  degraded_pops?: string[]
 }
 
 interface MetricsTick {
@@ -261,14 +272,7 @@ function OverviewTab({
           dimmed={rtDown}
         />
       </div>
-      <div className="mt-4 flex justify-end">
-        <Link href={historicalHref}>
-          <Button variant="outline" size="sm">
-            View historical data
-            <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
-          </Button>
-        </Link>
-      </div>
+      <HistoricalLink href={historicalHref} label="overview" />
     </div>
   )
 }
@@ -311,23 +315,210 @@ function CostTab({
           dimmed={rtDown}
         />
       </div>
-      <div className="mt-4 flex justify-end">
-        <Link href={historicalHref}>
-          <Button variant="outline" size="sm">
-            View historical cost data
-            <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
-          </Button>
-        </Link>
-      </div>
+      <HistoricalLink href={historicalHref} label="cost" />
     </div>
   )
 }
 
 // ---------------------------------------------------------------------------
-// Placeholder tab content (unchanged tabs)
+// Performance tab
 // ---------------------------------------------------------------------------
 
-function TabPlaceholder({
+function PerformanceTab({
+  tick,
+  rtDown,
+  historicalHref,
+}: {
+  tick: MetricsTick | null
+  rtDown: boolean
+  historicalHref: string
+}) {
+  const data = tick?.data
+  return (
+    <div>
+      {rtDown && <RtDownBanner />}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <MetricCard
+          title="Cache Hit Ratio"
+          value={`${((data?.cache_hit_ratio ?? 0) * 100).toFixed(1)}%`}
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Origin Requests/s"
+          value={data?.origin_requests_per_second ?? 0}
+          unit="req/s"
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Pass-through"
+          value={data?.pass_requests ?? 0}
+          unit="req"
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Synth Responses"
+          value={data?.synth_requests ?? 0}
+          unit="req"
+          dimmed={rtDown}
+        />
+      </div>
+      <HistoricalLink href={historicalHref} label="performance" />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Origin tab
+// ---------------------------------------------------------------------------
+
+function OriginTab({
+  tick,
+  rtDown,
+  historicalHref,
+}: {
+  tick: MetricsTick | null
+  rtDown: boolean
+  historicalHref: string
+}) {
+  const data = tick?.data
+  return (
+    <div>
+      {rtDown && <RtDownBanner />}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <MetricCard
+          title="Origin Requests/s"
+          value={data?.origin_requests_per_second ?? 0}
+          unit="req/s"
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Origin Bandwidth"
+          value={(data?.origin_bandwidth_mbps ?? 0).toFixed(2)}
+          unit="Mbps"
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Shield Requests"
+          value={data?.shield_requests ?? 0}
+          unit="req"
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Shield Hit Ratio"
+          value={`${((data?.shield_hit_ratio ?? 0) * 100).toFixed(1)}%`}
+          dimmed={rtDown}
+        />
+      </div>
+      <HistoricalLink href={historicalHref} label="origin" />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Security tab
+// ---------------------------------------------------------------------------
+
+function SecurityTab({
+  tick,
+  rtDown,
+  historicalHref,
+}: {
+  tick: MetricsTick | null
+  rtDown: boolean
+  historicalHref: string
+}) {
+  const data = tick?.data
+  const s4xx = data?.status_breakdown?.status_4xx ?? 0
+  const s5xx = data?.status_breakdown?.status_5xx ?? 0
+  return (
+    <div>
+      {rtDown && <RtDownBanner />}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <MetricCard
+          title="WAF Blocked"
+          value={data?.waf_blocked ?? 0}
+          unit="req"
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="WAF Logged"
+          value={data?.waf_logged ?? 0}
+          unit="req"
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="4xx Responses"
+          value={s4xx}
+          unit="req"
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="5xx Responses"
+          value={s5xx}
+          unit="req"
+          dimmed={rtDown}
+        />
+      </div>
+      <HistoricalLink href={historicalHref} label="security" />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Network tab
+// ---------------------------------------------------------------------------
+
+function NetworkTab({
+  tick,
+  rtDown,
+  historicalHref,
+}: {
+  tick: MetricsTick | null
+  rtDown: boolean
+  historicalHref: string
+}) {
+  const data = tick?.data
+  const degradedCount = data?.degraded_pops?.length ?? 0
+  const popCount = data?.pop_count ?? 0
+  const healthyCount = popCount - degradedCount
+  return (
+    <div>
+      {rtDown && <RtDownBanner />}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <MetricCard
+          title="Active PoPs"
+          value={popCount}
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Healthy PoPs"
+          value={healthyCount}
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Degraded PoPs"
+          value={degradedCount}
+          dimmed={rtDown}
+        />
+      </div>
+      {degradedCount > 0 && !rtDown && (
+        <Alert variant="destructive" className="mt-4">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>
+            {degradedCount} PoP(s) showing elevated errors: {data?.degraded_pops?.join(', ')}
+          </AlertDescription>
+        </Alert>
+      )}
+      <HistoricalLink href={historicalHref} label="network" />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Tabs requiring historical (ingested) log data
+// ---------------------------------------------------------------------------
+
+function HistoricalDataRequired({
   label,
   historicalHref,
 }: {
@@ -335,47 +526,41 @@ function TabPlaceholder({
   historicalHref: string | null
 }) {
   return (
-    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+    <div className="grid gap-4 md:grid-cols-1">
       <Card>
-        <CardHeader>
-          <CardTitle>{label} - Requests/s</CardTitle>
-        </CardHeader>
-        <CardContent>
+        <CardContent className="pt-6">
           <p className="text-muted-foreground text-sm">
-            Real-time request rate will appear here once the backend stream is connected.
+            {label} requires ingested log data and is available in the historical view.
           </p>
+          {historicalHref && (
+            <div className="mt-4">
+              <Link href={historicalHref}>
+                <Button variant="outline" size="sm">
+                  View {label.toLowerCase()} data
+                  <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+                </Button>
+              </Link>
+            </div>
+          )}
         </CardContent>
       </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle>{label} - Error Rate</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-muted-foreground text-sm">
-            Live error rate metrics will render here in Phase 1.
-          </p>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle>{label} - Latency</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-muted-foreground text-sm">
-            Latency percentiles (p50/p95/p99) will populate in Phase 1.
-          </p>
-        </CardContent>
-      </Card>
-      {historicalHref && (
-        <div className="md:col-span-2 lg:col-span-3 flex justify-end">
-          <Link href={historicalHref}>
-            <Button variant="outline" size="sm">
-              View historical {label.toLowerCase()} data
-              <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
-            </Button>
-          </Link>
-        </div>
-      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Historical link helper
+// ---------------------------------------------------------------------------
+
+function HistoricalLink({ href, label }: { href: string; label: string }) {
+  return (
+    <div className="mt-4 flex justify-end">
+      <Link href={href}>
+        <Button variant="outline" size="sm">
+          View historical {label} data
+          <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+        </Button>
+      </Link>
     </div>
   )
 }
@@ -397,13 +582,26 @@ function TabContent({
   tick: MetricsTick | null
   rtDown: boolean
 }) {
-  if (tabId === 'overview') {
-    return <OverviewTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/dashboard'} />
+  switch (tabId) {
+    case 'overview':
+      return <OverviewTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/dashboard'} />
+    case 'performance':
+      return <PerformanceTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/performance'} />
+    case 'origin':
+      return <OriginTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/origin'} />
+    case 'security':
+      return <SecurityTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/security'} />
+    case 'network':
+      return <NetworkTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/network'} />
+    case 'cost':
+      return <CostTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/usage'} />
+    case 'sessions':
+    case 'insights':
+    case 'admin':
+      return <HistoricalDataRequired label={label} historicalHref={historicalHref} />
+    default:
+      return <HistoricalDataRequired label={label} historicalHref={historicalHref} />
   }
-  if (tabId === 'cost') {
-    return <CostTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/usage'} />
-  }
-  return <TabPlaceholder label={label} historicalHref={historicalHref} />
 }
 
 // ---------------------------------------------------------------------------
