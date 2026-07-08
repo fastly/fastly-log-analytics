@@ -158,4 +158,47 @@ test.describe('Control Room', () => {
     const histLink = page.locator('a[href="/dashboard"]').filter({ hasText: /historical/i }).first()
     await expect(histLink).toBeVisible({ timeout: 5_000 })
   })
+
+  test('Security tab shows WAF metrics', async ({ page }) => {
+    await page.goto('/control-room')
+    await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
+
+    const secTab = page.locator('[role="tablist"] button:text("Security")')
+    await secTab.click()
+
+    await expect(page.locator('text=WAF Blocked').first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('text=WAF Logged').first()).toBeVisible({ timeout: 5_000 })
+  })
+
+  test('Network tab shows PoP counts', async ({ page }) => {
+    await page.goto('/control-room')
+    await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
+
+    const netTab = page.locator('[role="tablist"] button:text("Network")')
+    await netTab.click()
+
+    await expect(page.locator('text=Active PoPs').first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('text=Healthy PoPs').first()).toBeVisible({ timeout: 5_000 })
+  })
+
+  test('Origin tab shows origin metrics', async ({ page }) => {
+    await page.goto('/control-room')
+    await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
+
+    const originTab = page.locator('[role="tablist"] button:text("Origin")')
+    await originTab.click()
+
+    await expect(page.locator('text=Origin Requests/s').first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('text=Shield Hit Ratio').first()).toBeVisible({ timeout: 5_000 })
+  })
+
+  test('Sessions tab shows historical data message', async ({ page }) => {
+    await page.goto('/control-room')
+    await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
+
+    const sessionsTab = page.locator('[role="tablist"] button:text("Sessions")')
+    await sessionsTab.click()
+
+    await expect(page.locator('text=requires ingested log data').first()).toBeVisible({ timeout: 5_000 })
+  })
 })

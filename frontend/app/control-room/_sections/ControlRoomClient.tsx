@@ -518,6 +518,56 @@ function NetworkTab({
 // Tabs requiring historical (ingested) log data
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Admin Health tab
+// ---------------------------------------------------------------------------
+
+function AdminHealthTab({
+  tick,
+  rtDown,
+  connected,
+}: {
+  tick: MetricsTick | null
+  rtDown: boolean
+  connected: boolean
+}) {
+  const data = tick?.data
+  return (
+    <div>
+      {rtDown && <RtDownBanner />}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <MetricCard
+          title="RT Stream"
+          value={connected ? (rtDown ? 'Degraded' : 'Healthy') : 'Disconnected'}
+          dimmed={!connected}
+        />
+        <MetricCard
+          title="Active PoPs"
+          value={data?.pop_count ?? 0}
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Degraded PoPs"
+          value={data?.degraded_pops?.length ?? 0}
+          dimmed={rtDown}
+        />
+      </div>
+      <div className="mt-4 flex justify-end">
+        <Link href="/admin/trends">
+          <Button variant="outline" size="sm">
+            View admin dashboard
+            <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+          </Button>
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Tabs requiring historical (ingested) log data
+// ---------------------------------------------------------------------------
+
 function HistoricalDataRequired({
   label,
   historicalHref,
@@ -575,12 +625,14 @@ function TabContent({
   label,
   tick,
   rtDown,
+  connected,
 }: {
   tabId: string
   historicalHref: string | null
   label: string
   tick: MetricsTick | null
   rtDown: boolean
+  connected: boolean
 }) {
   switch (tabId) {
     case 'overview':
@@ -595,9 +647,10 @@ function TabContent({
       return <NetworkTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/network'} />
     case 'cost':
       return <CostTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/usage'} />
+    case 'admin':
+      return <AdminHealthTab tick={tick} rtDown={rtDown} connected={connected} />
     case 'sessions':
     case 'insights':
-    case 'admin':
       return <HistoricalDataRequired label={label} historicalHref={historicalHref} />
     default:
       return <HistoricalDataRequired label={label} historicalHref={historicalHref} />
@@ -725,6 +778,7 @@ export default function ControlRoomClient() {
                 label={tab.label}
                 tick={latestTick}
                 rtDown={rtDown}
+                connected={connected}
               />
             </TabsContent>
           ))}
