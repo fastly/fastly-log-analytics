@@ -264,6 +264,7 @@ e2e:
 # The e2e step runs LAST so the cheaper backend/frontend/static gates fail fast
 # before the multi-minute browser matrix.
 ci:
+	$(MAKE) gen-types
 	$(MAKE) test-ci
 	$(MAKE) test-frontend-ci
 	@$(MAKE) -j2 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard security-regression openapi-drift perf-ci
