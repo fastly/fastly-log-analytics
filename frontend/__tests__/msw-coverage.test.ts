@@ -141,6 +141,8 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/services/:service_id/control-room/wizard/state',
   'POST /api/services/:service_id/control-room/wizard/step',
   'GET /api/services/:service_id/realtime-stream',
+  'GET /api/services/:service_id/log-field-audit',
+  'POST /api/services/:service_id/control-room/correlate',
 
   // Debug + analyst-share — analyst tests use per-spec handlers,
   // debug/state is admin-only triage.

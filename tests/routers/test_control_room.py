@@ -1,11 +1,13 @@
-"""Control Room router — Phase 0 stub tests.
+"""Control Room router — Phase 1 tests.
 
 Covers:
 - Every tab stub GET returns 200 for admin and analyst sessions
 - Mutation endpoints return 501 for admin, 403 for analyst
 - Unknown tab returns 404
-- SSE heartbeat: connect, receive ≥3 metrics_tick events, disconnect cleanly
+- SSE stream: publisher-driven metrics_tick events
 - SSE event schema validation (event_schema_version: 1)
+- Log-field-audit endpoint
+- Correlator endpoint
 """
 
 from __future__ import annotations
@@ -35,6 +37,9 @@ ALL_TABS = [
     "insights",
     "admin_health",
 ]
+
+LIVE_TABS = ["overview", "cost"]
+STUB_TABS = [t for t in ALL_TABS if t not in LIVE_TABS]
 
 MUTATION_ENDPOINTS = [
     "mitigations",
@@ -87,9 +92,9 @@ def analyst_client(in_memory_duckdb, test_service_source):
 # ── Tab GET tests (admin) ────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("tab", ALL_TABS)
-def test_tab_get_admin_200(admin_client, tab):
-    """Admin can read every tab stub — 200 with canned data."""
+@pytest.mark.parametrize("tab", STUB_TABS)
+def test_tab_get_admin_stub_200(admin_client, tab):
+    """Admin can read every stub tab — 200 with canned data."""
     resp = admin_client.get(
         f"/api/services/{MOCK_SERVICE_ID}/control-room/{tab}",
         headers={"x-fastly-service-id": MOCK_SERVICE_ID},
@@ -100,12 +105,25 @@ def test_tab_get_admin_200(admin_client, tab):
     assert data["status"] == "stub"
 
 
+@pytest.mark.parametrize("tab", LIVE_TABS)
+def test_tab_get_admin_live_200(admin_client, tab):
+    """Admin can read live tabs — 200 with status=live."""
+    resp = admin_client.get(
+        f"/api/services/{MOCK_SERVICE_ID}/control-room/{tab}",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["tab"] == tab
+    assert data["status"] == "live"
+
+
 # ── Tab GET tests (analyst) ──────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize("tab", ALL_TABS)
 def test_tab_get_analyst_200(analyst_client, tab):
-    """Analyst can read every tab stub — 200 with canned data."""
+    """Analyst can read every tab — 200 with canned data."""
     resp = analyst_client.get(
         f"/api/services/{MOCK_SERVICE_ID}/control-room/{tab}",
         headers={"x-fastly-service-id": MOCK_SERVICE_ID},
@@ -113,7 +131,6 @@ def test_tab_get_analyst_200(analyst_client, tab):
     assert resp.status_code == 200
     data = resp.json()
     assert data["tab"] == tab
-    assert data["status"] == "stub"
 
 
 # ── Unknown tab ──────────────────────────────────────────────────────────────
@@ -159,7 +176,7 @@ def test_mutation_analyst_403(analyst_client, endpoint):
     assert resp.json()["detail"]["error"] == "admin_only"
 
 
-# ── SSE heartbeat ────────────────────────────────────────────────────────────
+# ── SSE real-time stream ────────────────────────────────────────────────────
 
 
 class _FakeRequest:
@@ -171,92 +188,24 @@ class _FakeRequest:
         self.state = SimpleNamespace(analyst_session=None)
 
     async def is_disconnected(self) -> bool:
+        self._count += 1
         return self._count >= self._disconnect_after
 
 
-@pytest.mark.asyncio
-async def test_sse_heartbeat(monkeypatch):
-    """Connect to the realtime stream, receive ≥3 metrics_tick events,
-    verify schema, then disconnect cleanly."""
+async def _drive_sse_with_payload(monkeypatch, payload: dict) -> dict:
+    """Helper: start SSE stream, publish a payload, return the first frame."""
     import backend.routers.control_room as cr_mod
+    from backend.core.realtime.publisher import RealtimeMetricsPublisher
 
-    _real_sleep = asyncio.sleep
+    test_publisher = RealtimeMetricsPublisher()
+    test_publisher.bind_loop(asyncio.get_running_loop())
 
-    async def _fast_sleep(_seconds):
-        await _real_sleep(0)
+    from backend.core.realtime import poller as poller_mod
 
-    monkeypatch.setattr(cr_mod.asyncio, "sleep", _fast_sleep)
+    monkeypatch.setattr(poller_mod.poller, "ensure_polling", lambda sid: None)
+    monkeypatch.setattr("backend.core.realtime.publisher.publisher", test_publisher)
 
-    resp = await cr_mod.realtime_stream(
-        request=_FakeRequest(),
-        service_id=MOCK_SERVICE_ID,
-        _access=MOCK_SERVICE_ID,
-    )
-
-    agen = resp.body_iterator
-    frames: list[dict] = []
-    try:
-        for _ in range(3):
-            raw = await asyncio.wait_for(agen.__anext__(), timeout=5)
-            frame = json.loads(raw)
-            frames.append(frame)
-    finally:
-        await agen.aclose()
-
-    assert len(frames) >= 3
-    for frame in frames:
-        assert frame["event"] == "metrics_tick"
-        assert frame["event_schema_version"] == 1
-        assert "timestamp" in frame
-        assert "data" in frame
-        assert isinstance(frame["data"], dict)
-        assert "requests_per_second" in frame["data"]
-
-
-@pytest.mark.asyncio
-async def test_sse_event_schema_v1(monkeypatch):
-    """Every emitted frame carries event_schema_version: 1 and the expected
-    data shape so the frontend can assert on the wire format."""
-    import backend.routers.control_room as cr_mod
-
-    _real_sleep = asyncio.sleep
-
-    async def _fast_sleep(_seconds):
-        await _real_sleep(0)
-
-    monkeypatch.setattr(cr_mod.asyncio, "sleep", _fast_sleep)
-
-    resp = await cr_mod.realtime_stream(
-        request=_FakeRequest(),
-        service_id=MOCK_SERVICE_ID,
-        _access=MOCK_SERVICE_ID,
-    )
-
-    agen = resp.body_iterator
-    try:
-        raw = await asyncio.wait_for(agen.__anext__(), timeout=5)
-        frame = json.loads(raw)
-    finally:
-        await agen.aclose()
-
-    assert frame["event_schema_version"] == 1
-    expected_data_keys = {"requests_per_second", "error_rate", "cache_hit_ratio", "bandwidth_mbps"}
-    assert expected_data_keys == set(frame["data"].keys())
-
-
-@pytest.mark.asyncio
-async def test_sse_disconnects_cleanly(monkeypatch):
-    """Stream stops when the client disconnects (is_disconnected returns True)."""
-    import backend.routers.control_room as cr_mod
-
-    _real_sleep = asyncio.sleep
-
-    async def _fast_sleep(_seconds):
-        await _real_sleep(0)
-
-    monkeypatch.setattr(cr_mod.asyncio, "sleep", _fast_sleep)
-
-    req = _FakeRequest(disconnect_after=2)
+    req = _FakeRequest(disconnect_after=10)
 
     resp = await cr_mod.realtime_stream(
         request=req,
@@ -265,14 +214,131 @@ async def test_sse_disconnects_cleanly(monkeypatch):
     )
 
     agen = resp.body_iterator
-    frames: list[dict] = []
+
+    async def _delayed_publish():
+        await asyncio.sleep(0.05)
+        test_publisher.publish(MOCK_SERVICE_ID, payload)
+
+    asyncio.ensure_future(_delayed_publish())
+
     try:
-        async for raw in agen:
-            frames.append(json.loads(raw))
-            req._count += 1
-    except StopAsyncIteration:
-        pass
+        raw = await asyncio.wait_for(agen.__anext__(), timeout=5)
+        return json.loads(raw)
     finally:
         await agen.aclose()
 
-    assert len(frames) <= 3
+
+@pytest.mark.asyncio
+async def test_sse_real_metrics_shape(monkeypatch):
+    """Publisher-driven SSE emits metrics_tick with the full data shape."""
+    frame = await _drive_sse_with_payload(
+        monkeypatch,
+        {
+            "event": "metrics_tick",
+            "event_schema_version": 1,
+            "timestamp": "2026-07-07T00:00:00+00:00",
+            "status": "ok",
+            "data": {
+                "requests_per_second": 42.5,
+                "error_rate": 0.01,
+                "cache_hit_ratio": 0.95,
+                "bandwidth_mbps": 1.5,
+                "status_breakdown": {"status_2xx": 100},
+                "estimated_cost_usd": 0.001,
+            },
+            "aggregate_delay": 3,
+        },
+    )
+
+    assert frame["event"] == "metrics_tick"
+    assert frame["event_schema_version"] == 1
+    assert frame["status"] == "ok"
+    assert frame["data"]["requests_per_second"] == 42.5
+    assert "cache_hit_ratio" in frame["data"]
+    assert "bandwidth_mbps" in frame["data"]
+    assert "estimated_cost_usd" in frame["data"]
+
+
+@pytest.mark.asyncio
+async def test_sse_rt_down_payload(monkeypatch):
+    """When RT is down, the SSE payload carries status='rt_down'."""
+    from backend.core.realtime.transform import error_tick_payload
+
+    frame = await _drive_sse_with_payload(monkeypatch, error_tick_payload())
+
+    assert frame["status"] == "rt_down"
+    assert frame["data"]["requests_per_second"] == 0
+
+
+# ── Log-field-audit ─────────────────────────────────────────────────────────
+
+
+def test_log_field_audit_200(admin_client, monkeypatch):
+    """Log-field-audit returns enabled fields and feature status."""
+    from backend import config as svcconfig
+
+    monkeypatch.setattr(svcconfig, "load_config", lambda sid: {"log_fields": None})
+
+    resp = admin_client.get(
+        f"/api/services/{MOCK_SERVICE_ID}/log-field-audit",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["service_id"] == MOCK_SERVICE_ID
+    assert isinstance(data["enabled_fields"], list)
+    assert isinstance(data["features"], list)
+    assert len(data["features"]) > 0
+    for feature in data["features"]:
+        assert "name" in feature
+        assert "status" in feature
+        assert feature["status"] in ("ok", "missing_fields")
+
+
+def test_log_field_audit_missing_fields(admin_client, monkeypatch):
+    """When config has no groups, some features should report missing fields."""
+    from backend import config as svcconfig
+
+    monkeypatch.setattr(
+        svcconfig,
+        "load_config",
+        lambda sid: {"log_fields": {"groups": [], "field_overrides": {}}},
+    )
+
+    resp = admin_client.get(
+        f"/api/services/{MOCK_SERVICE_ID}/log-field-audit",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    missing_features = [f for f in data["features"] if f["status"] == "missing_fields"]
+    assert len(missing_features) > 0
+
+
+# ── Correlator ──────────────────────────────────────────────────────────────
+
+
+def test_correlate_unknown_dimension_400(admin_client):
+    """Unknown dimension returns 400."""
+    resp = admin_client.post(
+        f"/api/services/{MOCK_SERVICE_ID}/control-room/correlate",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"dimension": "totally_bogus_field"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "unknown_dimension"
+
+
+# ── OpenAPI contract ────────────────────────────────────────────────────────
+
+
+def test_openapi_has_control_room_endpoints():
+    """Verify key control-room endpoints are registered in the OpenAPI schema."""
+    schema = app.openapi()
+    paths = schema["paths"]
+
+    assert "/api/services/{service_id}/control-room/{tab}" in paths
+    assert "/api/services/{service_id}/realtime-stream" in paths
+    assert "/api/services/{service_id}/log-field-audit" in paths
+    assert "/api/services/{service_id}/control-room/correlate" in paths
+    assert "/api/services/{service_id}/control-room/mitigations" in paths

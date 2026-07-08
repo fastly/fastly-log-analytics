@@ -1,7 +1,8 @@
-"""Control Room router — Phase 0 stubs for the real-time control room.
+"""Control Room router — Phase 1: passive observation with real data.
 
-All tab endpoints return canned data; mutation endpoints return 501.
-The SSE endpoint emits synthetic heartbeat ticks every 5 seconds.
+Overview and Cost tabs are backed by the rt.fastly.com polling stream.
+Log-field-audit and correlator endpoints provide DuckDB-driven data.
+Mutation endpoints remain 501 stubs.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from backend.core.metadata.state import list_audit, record_audit
@@ -25,12 +26,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["control-room"], responses=DEFAULT_ERROR_RESPONSES)
 
-# ── Canned tab responses (Phase 0) ───────────────────────────────────────────
+# ── Canned tab responses ────────────────────────────────────────────────────
 
 TAB_STUBS: dict[str, dict] = {
     "overview": {
         "tab": "overview",
-        "status": "stub",
+        "status": "live",
         "summary": {
             "requests_per_second": 0,
             "error_rate": 0.0,
@@ -74,7 +75,7 @@ TAB_STUBS: dict[str, dict] = {
     },
     "cost": {
         "tab": "cost",
-        "status": "stub",
+        "status": "live",
         "estimated_cost_usd": 0.0,
         "requests_billed": 0,
         "bandwidth_billed_gb": 0.0,
@@ -105,7 +106,7 @@ def control_room_tab(
     service_id: ServiceId,
     _access: str | None = Depends(require_service_access),
 ):
-    """Return canned data for a control-room tab (Phase 0 stub)."""
+    """Return data for a control-room tab."""
     if tab not in TAB_STUBS:
         from fastapi import HTTPException
 
@@ -210,31 +211,145 @@ async def realtime_stream(
     service_id: ServiceId,
     _access: str | None = Depends(require_service_access),
 ) -> EventSourceResponse:
-    """Synthetic metrics heartbeat every 5 seconds (Phase 0 stub).
+    """Real-time metrics stream powered by rt.fastly.com polling.
 
-    Emits ``metrics_tick`` events with zeroed counters. Phase 1 will wire
-    this to rt.fastly.com for live data.
+    Emits ``metrics_tick`` events with live counters. The poller starts
+    on first subscriber connect and suspends when all subscribers disconnect.
     """
+    from backend.core.realtime.poller import poller
+    from backend.core.realtime.publisher import publisher as rt_publisher
+    from backend.utils.sse_subscription import iter_with_disconnect_ping
+
+    poller.ensure_polling(service_id)
 
     async def stream() -> AsyncIterator[str]:
-        while True:
-            if await request.is_disconnected():
-                break
-            tick = {
-                "event": "metrics_tick",
-                "event_schema_version": 1,
-                "timestamp": datetime.now(UTC).isoformat(),
-                "data": {
-                    "requests_per_second": 0,
-                    "error_rate": 0.0,
-                    "cache_hit_ratio": 0.0,
-                    "bandwidth_mbps": 0.0,
-                },
-            }
-            yield json.dumps(tick)
-            await asyncio.sleep(5)
+        async for payload in iter_with_disconnect_ping(rt_publisher.subscribe(service_id), request, ping_seconds=15):
+            yield json.dumps(payload)
 
     return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
+
+
+# ── Log-field-audit endpoint ────────────────────────────────────────────────
+
+FEATURE_REQUIRED_FIELDS: dict[str, list[str]] = {
+    "Dashboard": ["status", "cache_status", "url", "method"],
+    "Performance": ["time_elapsed", "time_to_first_byte"],
+    "Origin": ["is_cacheable", "origin_host"],
+    "Security": ["client_ip", "geo_country", "user_agent"],
+    "Sessions": ["session_id", "url"],
+    "Network": ["pop", "geo_country"],
+    "Insights": ["status", "url", "client_ip", "user_agent"],
+}
+
+
+@router.get("/services/{service_id}/log-field-audit")
+@query_errors()
+def log_field_audit(
+    service_id: ServiceId,
+    _access: str | None = Depends(require_service_access),
+):
+    """Check which log fields are enabled and which features they support."""
+    from backend import config as svcconfig
+    from backend.core.log_fields import resolve_enabled_fields
+
+    cfg = svcconfig.load_config(service_id)
+    log_fields_cfg: dict | None = cfg.get("log_fields") if cfg else None
+    enabled = resolve_enabled_fields(log_fields_cfg or {})
+    enabled_ids = {f if isinstance(f, str) else f.get("id", f) for f in enabled}
+
+    features = []
+    for feature_name, required in FEATURE_REQUIRED_FIELDS.items():
+        missing = [f for f in required if f not in enabled_ids]
+        features.append(
+            {
+                "name": feature_name,
+                "required_fields": required,
+                "status": "ok" if not missing else "missing_fields",
+                "missing_fields": missing,
+            }
+        )
+
+    return {
+        "service_id": service_id,
+        "enabled_fields": sorted(enabled_ids),
+        "features": features,
+    }
+
+
+# ── Correlator endpoint ─────────────────────────────────────────────────────
+
+
+class CorrelateRequest(BaseModel):
+    dimension: str
+    window_minutes: int = Field(default=5, ge=1, le=60)
+    limit: int = Field(default=10, ge=1, le=100)
+
+
+@router.post("/services/{service_id}/control-room/correlate")
+@query_errors()
+async def control_room_correlate(
+    body: CorrelateRequest,
+    service_id: ServiceId,
+    _access: str | None = Depends(require_service_access),
+):
+    """Top-N breakdown by a log field within a recent time window."""
+    from fastapi import HTTPException
+
+    from backend.core import duckdb as _db
+    from backend.core import field_registry
+
+    field_def = field_registry.try_get(body.dimension)
+    if field_def is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "unknown_dimension", "dimension": body.dimension},
+        )
+
+    source = _db.get_source_for_service(service_id)
+    if source is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "no_data_source", "service_id": service_id},
+        )
+
+    col = field_def.code
+    window_minutes = body.window_minutes
+    limit = body.limit
+
+    def _query():
+        con = _db.get_connection(source=source, read_only=True)
+        try:
+            view_name = f"logs_{service_id.replace('-', '_')}"
+            result = con.execute(
+                f"""
+                SELECT {col} AS value, COUNT(*) AS count
+                FROM {view_name}
+                WHERE timestamp >= NOW() - INTERVAL '{window_minutes} minutes'
+                GROUP BY 1
+                ORDER BY 2 DESC
+                LIMIT {limit}
+                """,
+            ).fetchall()
+            freshness_row = con.execute(f"SELECT MAX(timestamp) AS latest FROM {view_name}").fetchone()
+            return result, freshness_row
+        finally:
+            con.close()
+
+    rows, freshness_row = await asyncio.to_thread(_query)
+
+    latest_log_at = freshness_row[0] if freshness_row else None
+    lag_seconds = 0
+    if latest_log_at:
+        lag_seconds = max(0, int((datetime.now(UTC) - latest_log_at).total_seconds()))
+
+    return {
+        "dimension": body.dimension,
+        "top": [{"value": str(r[0]), "count": r[1]} for r in rows],
+        "freshness": {
+            "latest_log_at": latest_log_at.isoformat() if latest_log_at else None,
+            "lag_seconds": lag_seconds,
+        },
+    }
 
 
 # ── Onboarding wizard ────────────────────────────────────────────────────────

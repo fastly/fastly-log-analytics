@@ -384,18 +384,19 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     import asyncio
 
+    from backend.core.realtime.publisher import publisher as _rt_publisher
     from backend.cron.scheduler import get_scheduler
     from backend.cron_runs_publisher import publisher as _cron_runs_publisher
     from backend.sync_status_publisher import publisher as _sync_status_publisher
 
-    # Bind both in-process SSE publishers (badge + cron-runs) to this loop
-    # so cron worker threads can fan tick-updates out to connected
-    # /api/sync-status/stream and /api/cron-runs/stream subscribers via
+    # Bind all in-process SSE publishers to this loop so worker threads
+    # can fan tick-updates out to connected subscribers via
     # loop.call_soon_threadsafe. Must happen on the loop that will serve
     # requests; cheap and synchronous.
     _running_loop = asyncio.get_running_loop()
     _sync_status_publisher.bind_loop(_running_loop)
     _cron_runs_publisher.bind_loop(_running_loop)
+    _rt_publisher.bind_loop(_running_loop)
 
     # uvicorn has finished its own logging setup by now (it runs before
     # lifespan); re-point its loggers at the structlog root handler so access

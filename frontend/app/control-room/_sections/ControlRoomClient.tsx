@@ -1,13 +1,14 @@
 'use client'
 
 import { useState, useEffect, useMemo } from 'react'
-import { Radio, ArrowRight } from 'lucide-react'
+import { Radio, ArrowRight, AlertTriangle } from 'lucide-react'
 import Link from 'next/link'
 import { ReportShell } from '@/components/ReportShell'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
@@ -33,13 +34,52 @@ const TABS = [
 type TabId = (typeof TABS)[number]['id']
 
 // ---------------------------------------------------------------------------
+// Metrics tick data shape
+// ---------------------------------------------------------------------------
+
+interface MetricsData {
+  requests_per_second: number
+  error_rate: number
+  cache_hit_ratio: number
+  bandwidth_mbps: number
+  status_breakdown?: Record<string, number>
+  estimated_cost_usd?: number
+}
+
+interface MetricsTick {
+  event: string
+  event_schema_version: number
+  timestamp: string
+  status: 'ok' | 'rt_down'
+  data: MetricsData
+  aggregate_delay?: number
+}
+
+// ---------------------------------------------------------------------------
 // useRealtimeStream - wraps useSSE for the realtime endpoint
 // ---------------------------------------------------------------------------
 
 interface RealtimeStreamState {
   connected: boolean
   lastTickTime: Date | null
-  data: SSELine[]
+  latestTick: MetricsTick | null
+  rtDown: boolean
+}
+
+function parseMetricsTick(line: SSELine): MetricsTick | null {
+  if (line.event !== 'metrics_tick' && line.type !== 'metrics_tick') return null
+  const data = (line.data ?? line) as Record<string, unknown>
+  if (!data || typeof data !== 'object') return null
+  const metricsData = data.data as MetricsData | undefined
+  if (!metricsData) return null
+  return {
+    event: 'metrics_tick',
+    event_schema_version: (data.event_schema_version as number) ?? 1,
+    timestamp: (data.timestamp as string) ?? new Date().toISOString(),
+    status: (data.status as 'ok' | 'rt_down') ?? 'ok',
+    data: metricsData,
+    aggregate_delay: data.aggregate_delay as number | undefined,
+  }
 }
 
 function useRealtimeStream(): RealtimeStreamState {
@@ -54,16 +94,22 @@ function useRealtimeStream(): RealtimeStreamState {
     }
   }, [activeServiceId, start, stop])
 
-  const lastTickTime = useMemo(() => {
-    if (lines.length === 0) return null
+  const { latestTick, lastTickTime } = useMemo(() => {
+    if (lines.length === 0) return { latestTick: null, lastTickTime: null }
     const latest = lines[lines.length - 1]
-    return latest?.event === 'metrics_tick' ? new Date() : null
+    if (!latest) return { latestTick: null, lastTickTime: null }
+    const tick = parseMetricsTick(latest)
+    return {
+      latestTick: tick,
+      lastTickTime: tick ? new Date() : null,
+    }
   }, [lines])
 
   return {
     connected: status === 'streaming',
     lastTickTime,
-    data: lines,
+    latestTick,
+    rtDown: latestTick?.status === 'rt_down',
   }
 }
 
@@ -112,7 +158,6 @@ function ConnectionBadge({ connected }: { connected: boolean }) {
 function FreshnessBadge({ lastTickTime, timezone }: { lastTickTime: Date | null; timezone: string }) {
   const [, setTick] = useState(0)
 
-  // Force re-render every second to keep the age display current
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 1_000)
     return () => clearInterval(id)
@@ -131,7 +176,155 @@ function FreshnessBadge({ lastTickTime, timezone }: { lastTickTime: Date | null;
 }
 
 // ---------------------------------------------------------------------------
-// Placeholder tab content
+// RT Down banner
+// ---------------------------------------------------------------------------
+
+function RtDownBanner() {
+  return (
+    <Alert variant="destructive" className="mb-4">
+      <AlertTriangle className="h-4 w-4" />
+      <AlertDescription>
+        Fastly RT unavailable — showing last-known-good values.
+      </AlertDescription>
+    </Alert>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Metric card
+// ---------------------------------------------------------------------------
+
+function MetricCard({
+  title,
+  value,
+  unit,
+  dimmed,
+}: {
+  title: string
+  value: string | number
+  unit?: string
+  dimmed?: boolean
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium">{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className={`text-2xl font-bold tabular-nums ${dimmed ? 'opacity-50' : ''}`}>
+          {value}
+          {unit && <span className="text-muted-foreground ml-1 text-sm font-normal">{unit}</span>}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Overview tab (live data)
+// ---------------------------------------------------------------------------
+
+function OverviewTab({
+  tick,
+  rtDown,
+  historicalHref,
+}: {
+  tick: MetricsTick | null
+  rtDown: boolean
+  historicalHref: string
+}) {
+  const data = tick?.data
+  return (
+    <div>
+      {rtDown && <RtDownBanner />}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <MetricCard
+          title="Requests/s"
+          value={data?.requests_per_second ?? 0}
+          unit="req/s"
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Error Rate"
+          value={`${((data?.error_rate ?? 0) * 100).toFixed(2)}%`}
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Cache Hit Ratio"
+          value={`${((data?.cache_hit_ratio ?? 0) * 100).toFixed(1)}%`}
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Bandwidth"
+          value={(data?.bandwidth_mbps ?? 0).toFixed(2)}
+          unit="Mbps"
+          dimmed={rtDown}
+        />
+      </div>
+      <div className="mt-4 flex justify-end">
+        <Link href={historicalHref}>
+          <Button variant="outline" size="sm">
+            View historical data
+            <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+          </Button>
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Cost tab (live data)
+// ---------------------------------------------------------------------------
+
+function CostTab({
+  tick,
+  rtDown,
+  historicalHref,
+}: {
+  tick: MetricsTick | null
+  rtDown: boolean
+  historicalHref: string
+}) {
+  const data = tick?.data
+  const bwGb = (data?.bandwidth_mbps ?? 0) / 8 / 1000
+  return (
+    <div>
+      {rtDown && <RtDownBanner />}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <MetricCard
+          title="Estimated Cost"
+          value={`$${(data?.estimated_cost_usd ?? 0).toFixed(4)}`}
+          unit="/tick"
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Requests Billed"
+          value={data?.requests_per_second ?? 0}
+          unit="req/s"
+          dimmed={rtDown}
+        />
+        <MetricCard
+          title="Bandwidth"
+          value={bwGb.toFixed(4)}
+          unit="GB/s"
+          dimmed={rtDown}
+        />
+      </div>
+      <div className="mt-4 flex justify-end">
+        <Link href={historicalHref}>
+          <Button variant="outline" size="sm">
+            View historical cost data
+            <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+          </Button>
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Placeholder tab content (unchanged tabs)
 // ---------------------------------------------------------------------------
 
 function TabPlaceholder({
@@ -188,28 +381,79 @@ function TabPlaceholder({
 }
 
 // ---------------------------------------------------------------------------
+// Tab content router
+// ---------------------------------------------------------------------------
+
+function TabContent({
+  tabId,
+  historicalHref,
+  label,
+  tick,
+  rtDown,
+}: {
+  tabId: string
+  historicalHref: string | null
+  label: string
+  tick: MetricsTick | null
+  rtDown: boolean
+}) {
+  if (tabId === 'overview') {
+    return <OverviewTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/dashboard'} />
+  }
+  if (tabId === 'cost') {
+    return <CostTab tick={tick} rtDown={rtDown} historicalHref={historicalHref ?? '/usage'} />
+  }
+  return <TabPlaceholder label={label} historicalHref={historicalHref} />
+}
+
+// ---------------------------------------------------------------------------
 // Mobile overview (stripped-down for < 768px)
 // ---------------------------------------------------------------------------
 
-function MobileOverview({ connected, lastTickTime, timezone }: {
+function MobileOverview({ connected, lastTickTime, timezone, tick, rtDown }: {
   connected: boolean
   lastTickTime: Date | null
   timezone: string
+  tick: MetricsTick | null
+  rtDown: boolean
 }) {
+  const data = tick?.data
   return (
     <div className="space-y-4 md:hidden">
       <div className="flex items-center gap-2 flex-wrap">
         <ConnectionBadge connected={connected} />
         <FreshnessBadge lastTickTime={lastTickTime} timezone={timezone} />
       </div>
+      {rtDown && <RtDownBanner />}
       <Card>
         <CardHeader>
           <CardTitle>Live Overview</CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-muted-foreground text-sm">
-            Real-time service overview will appear here once the backend stream is connected.
-          </p>
+          {data ? (
+            <div className={`grid grid-cols-2 gap-3 ${rtDown ? 'opacity-50' : ''}`}>
+              <div>
+                <div className="text-muted-foreground text-xs">Requests/s</div>
+                <div className="text-lg font-bold tabular-nums">{data.requests_per_second}</div>
+              </div>
+              <div>
+                <div className="text-muted-foreground text-xs">Error Rate</div>
+                <div className="text-lg font-bold tabular-nums">{(data.error_rate * 100).toFixed(2)}%</div>
+              </div>
+              <div>
+                <div className="text-muted-foreground text-xs">Cache Hit</div>
+                <div className="text-lg font-bold tabular-nums">{(data.cache_hit_ratio * 100).toFixed(1)}%</div>
+              </div>
+              <div>
+                <div className="text-muted-foreground text-xs">Bandwidth</div>
+                <div className="text-lg font-bold tabular-nums">{data.bandwidth_mbps.toFixed(2)} Mbps</div>
+              </div>
+            </div>
+          ) : (
+            <p className="text-muted-foreground text-sm">
+              Waiting for metrics stream...
+            </p>
+          )}
         </CardContent>
       </Card>
       <Link href="/dashboard">
@@ -230,7 +474,7 @@ export default function ControlRoomClient() {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const isAnalyst = useIsAnalyst()
   const timezone = useTimezone()
-  const { connected, lastTickTime } = useRealtimeStream()
+  const { connected, lastTickTime, latestTick, rtDown } = useRealtimeStream()
 
   const visibleTabs = useMemo(
     () => TABS.filter((tab) => !('adminOnly' in tab && tab.adminOnly) || !isAnalyst),
@@ -256,6 +500,8 @@ export default function ControlRoomClient() {
         connected={connected}
         lastTickTime={lastTickTime}
         timezone={timezone}
+        tick={latestTick}
+        rtDown={rtDown}
       />
 
       {/* Desktop: full tabbed interface */}
@@ -275,9 +521,12 @@ export default function ControlRoomClient() {
 
           {visibleTabs.map((tab) => (
             <TabsContent key={tab.id} value={tab.id}>
-              <TabPlaceholder
-                label={tab.label}
+              <TabContent
+                tabId={tab.id}
                 historicalHref={tab.historicalHref}
+                label={tab.label}
+                tick={latestTick}
+                rtDown={rtDown}
               />
             </TabsContent>
           ))}
