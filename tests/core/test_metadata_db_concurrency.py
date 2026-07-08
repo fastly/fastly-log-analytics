@@ -35,6 +35,10 @@ def test_concurrent_inserts_no_lock_no_loss():
     n_threads = 8
     rows_per_thread = 50
 
+    # Warm the DB so the init lock isn't serialising all 8 cold-start threads
+    # (under CI load, 8 sequential connect+PRAGMA+schema > 10s timeout).
+    metadata_db.get_con(sid)
+
     def worker(thread_id: int) -> int:
         rows = [(f"thread-{thread_id}/file-{i}.gz", 100, 4096) for i in range(rows_per_thread)]
         # If WAL is dropped or the connection pool serialises poorly, this
