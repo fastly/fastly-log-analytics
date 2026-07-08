@@ -41,6 +41,9 @@ test.describe('Control Room', () => {
 
     const sidebarLink = page.getByRole('link', { name: 'Control Room' })
     await expect(sidebarLink).toBeVisible({ timeout: 10_000 })
+    // SSR renders links disabled (pointer-events-none) until hydration
+    // restores hasServices from localStorage — wait for that.
+    await expect(sidebarLink).not.toHaveAttribute('aria-disabled', 'true', { timeout: 10_000 })
 
     await sidebarLink.click()
     await expect(page).toHaveURL(/\/control-room/)
