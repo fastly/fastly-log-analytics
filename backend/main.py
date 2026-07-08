@@ -811,7 +811,19 @@ assert_middleware_order(app)
 # ── Routers ───────────────────────────────────────────────────────────────────
 
 from backend.models.errors import DEFAULT_ERROR_RESPONSES  # noqa: E402
-from backend.routers import alerts, dashboard, insights, network, origin, performance, query, security, sessions, views
+from backend.routers import (
+    alerts,
+    control_room,
+    dashboard,
+    insights,
+    network,
+    origin,
+    performance,
+    query,
+    security,
+    sessions,
+    views,
+)
 
 app.include_router(dashboard.router)
 app.include_router(insights.router)
@@ -823,6 +835,7 @@ app.include_router(security.router)
 app.include_router(views.router)
 app.include_router(alerts.router)
 app.include_router(origin.router)
+app.include_router(control_room.router)
 
 from backend.routers import (
     admin,

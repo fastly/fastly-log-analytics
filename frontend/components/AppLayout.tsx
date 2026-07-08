@@ -24,6 +24,7 @@ import {
   PanelLeftOpen,
   Loader2,
   LogOut,
+  Radio,
   X,
 } from 'lucide-react'
 
@@ -101,6 +102,7 @@ import { SIDEBAR_COLLAPSED_COOKIE } from '@/lib/sidebar-cookie'
 // analyst who runs their own ingestion, leak-y for an invited viewer.
 const SERVICE_NAVIGATION = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, analystVisible: true },
+  { name: 'Control Room', href: '/control-room', icon: Radio, analystVisible: true },
   { name: 'Performance', href: '/performance', icon: Timer, analystVisible: true },
   { name: 'Origin', href: '/origin', icon: Server, analystVisible: true },
   { name: 'Security', href: '/security', icon: Shield, analystVisible: true },
@@ -138,6 +140,7 @@ function UrlServiceSync() {
 // override any deep-link hash target or skip-to-content interaction.
 const ROUTE_FRIENDLY_NAMES: Record<string, string> = {
   '/dashboard': 'Dashboard',
+  '/control-room': 'Control Room',
   '/security': 'Security',
   '/network': 'Network',
   '/origin': 'Origin',
@@ -503,7 +506,7 @@ export function AppLayout({
   // own editor + filters and the global bar would only confuse the
   // SQL the user is hand-writing.
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
-  const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || !hasServices
+  const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || pathname.startsWith('/control-room') || !hasServices
 
   // E-2 fix: /api/bootstrap is the spine of every redirect + nav-visibility
   // decision below — without it, hasServices defaults to the persisted

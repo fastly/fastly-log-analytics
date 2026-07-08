@@ -49,6 +49,7 @@ const ROUTES = [
   '/query',
   '/charts',
   '/insights',
+  '/control-room',
 ]
 
 // Seeded by e2e/global-setup.ts (_seedDefaultServiceConfig).
