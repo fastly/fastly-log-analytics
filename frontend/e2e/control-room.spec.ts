@@ -1,12 +1,8 @@
 /**
- * Control Room — Phase 0 structural e2e tests.
+ * Control Room e2e tests.
  *
- * Verifies the walking-skeleton UI delivered by Phase 0:
- *   - Sidebar link present and navigable
- *   - All 9 tabs render (admin session)
- *   - SSE connection badge turns green within 5s
- *   - Mobile layout shows the condensed overview
- *   - axe-core WCAG 2.1 AA accessibility gate
+ * Phase 0: walking skeleton (sidebar, tabs, SSE badge, mobile, a11y)
+ * Phase 1: real metrics on Overview/Cost tabs
  */
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
@@ -34,7 +30,7 @@ async function seedLocalStorage(page: import('@playwright/test').Page) {
   }, SERVICE_ID)
 }
 
-test.describe('Control Room — Phase 0', () => {
+test.describe('Control Room', () => {
   test.beforeEach(async ({ page }) => {
     await seedLocalStorage(page)
   })
@@ -43,9 +39,8 @@ test.describe('Control Room — Phase 0', () => {
     await page.goto('/dashboard')
     await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
 
-    const sidebarLink = page.locator('nav a[href="/control-room"]')
+    const sidebarLink = page.getByRole('link', { name: 'Control Room' })
     await expect(sidebarLink).toBeVisible({ timeout: 10_000 })
-    await expect(sidebarLink).toContainText('Control Room')
 
     await sidebarLink.click()
     await expect(page).toHaveURL(/\/control-room/)
@@ -121,5 +116,46 @@ test.describe('Control Room — Phase 0', () => {
           )
           .join('\n'),
     ).toEqual([])
+  })
+
+  test('Overview tab shows metric cards with live data', async ({ page }) => {
+    await page.goto('/control-room')
+    await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
+
+    const reqCard = page.locator('text=Requests/s').first()
+    await expect(reqCard).toBeVisible({ timeout: 10_000 })
+
+    const errorCard = page.locator('text=Error Rate').first()
+    await expect(errorCard).toBeVisible({ timeout: 5_000 })
+
+    const cacheCard = page.locator('text=Cache Hit Ratio').first()
+    await expect(cacheCard).toBeVisible({ timeout: 5_000 })
+
+    const bwCard = page.locator('text=Bandwidth').first()
+    await expect(bwCard).toBeVisible({ timeout: 5_000 })
+  })
+
+  test('Cost tab renders cost metric cards', async ({ page }) => {
+    await page.goto('/control-room')
+    await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
+
+    const costTab = page.locator('[role="tablist"] button:text("Cost")')
+    await expect(costTab).toBeVisible({ timeout: 5_000 })
+    await costTab.click()
+
+    const costCard = page.locator('text=Estimated Cost').first()
+    await expect(costCard).toBeVisible({ timeout: 10_000 })
+
+    const billedCard = page.locator('text=Requests Billed').first()
+    await expect(billedCard).toBeVisible({ timeout: 5_000 })
+  })
+
+  test('historical data link on Overview navigates to /dashboard', async ({ page }) => {
+    await page.goto('/control-room')
+    await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
+    await page.waitForTimeout(2_000)
+
+    const histLink = page.locator('a[href="/dashboard"]').filter({ hasText: /historical/i }).first()
+    await expect(histLink).toBeVisible({ timeout: 5_000 })
   })
 })
