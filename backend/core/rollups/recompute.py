@@ -42,6 +42,7 @@ from .ngwaf_bots import build_ngwaf_bots_bundles
 from .origin_dims import build_origin_dims_bundles
 from .origin_latency_ts import build_origin_latency_ts_bundles
 from .origin_summary import build_origin_summary_bundles
+from .overview import build_overview_bundles
 from .perf_dims import build_perf_dims_bundles
 from .perf_latency import build_perf_latency_bundles
 from .security_dims import build_security_dims_bundles
@@ -328,6 +329,19 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
     except Exception as e:
         logger.warning(
             "[rollups] %s: ngwaf_bots bundle failed (direct join will serve): %s",
+            service_id,
+            e,
+        )
+
+    # Per-hour overview rollup for /api/value/summary's combined
+    # overview + caching sections. All SUM-aggregatable — no _approx.
+    # Same best-effort contract — a failure leaves the summary page
+    # on its raw GROUP BY scan for the affected hours.
+    try:
+        build_overview_bundles(service_id, source, touched_hours)
+    except Exception as e:
+        logger.warning(
+            "[rollups] %s: overview bundle failed (raw scan will serve): %s",
             service_id,
             e,
         )

@@ -28,7 +28,11 @@ from backend._in_process_publisher import _InProcessPublisher
 
 
 class CronRunsPublisher(_InProcessPublisher):
-    pass
+    def __init__(self) -> None:
+        # Cron events are distinct lifecycle notifications. The React cache
+        # is seeded on mount, so we only need to stream live/future events;
+        # replaying stale events would trigger a storm of redundant query refetches.
+        super().__init__(replay_size=0)
 
 
 publisher = CronRunsPublisher()

@@ -15,6 +15,7 @@ const KNOWN_IDS = [
   'referer_monoculture',
   'method_drift',
   'new_asn_traffic',
+  'asn_hosting_shift',
 ] as const
 
 describe('getTrafficContent', () => {

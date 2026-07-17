@@ -48,6 +48,7 @@ class CurrentStorageResponse(BaseResponse):
     live_bytes: int
     live_files: int
     deleted_bytes: int
+    quarantine_bytes: int = 0
     total_billed_bytes: int
     total_billed_gb_hours: float
     total_files: int

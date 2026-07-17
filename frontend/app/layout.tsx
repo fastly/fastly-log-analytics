@@ -98,24 +98,26 @@ export default async function RootLayout({
       if (b.log_fields_catalog) {
         client.setQueryData(["log-fields-catalog", sid], b.log_fields_catalog);
       }
-      if (b.sync_status) {
-        client.setQueryData(["sync-status", sid], b.sync_status);
-      }
+      client.setQueryData(["sync-status", sid], b.sync_status ?? null);
       if (b.log_extents) {
         client.setQueryData(["log-extents", sid], b.log_extents);
       }
-      // "Last Sync" header badge. Mirrors useBootstrap.queryFn's
-      // ['last-sync', sid] seed (hooks/useBootstrap.ts) — unreachable on the
-      // SSR-hydrated path because the pre-populated bootstrap cache short-
-      // circuits the queryFn. Without this seed, SyncStatusBadge's
-      // useLastSync() BUILDS ['last-sync', sid] during render, firing
-      // QueryCache.notify into the already-subscribed sibling useSyncStatus
-      // observer mid-render → React "Cannot update a component while rendering
-      // a different component". Admin-only; analyst sessions get
-      // last_sync=null.
-      if (b.last_sync) {
-        client.setQueryData(["last-sync", sid], b.last_sync);
+      client.setQueryData(["last-sync", sid], b.last_sync ?? null);
+      const schemaList = b.schema as unknown[] | undefined;
+      const tableName = b.table_name as string | undefined;
+      if (Array.isArray(schemaList) && schemaList.length > 0 && typeof tableName === "string") {
+        client.setQueryData(["admin", "schema", sid], { schema: schemaList, table_name: tableName });
       }
+      if (b.cron_runs_first_page) {
+        client.setQueryData(["admin", "cron-logs-recent", sid], b.cron_runs_first_page);
+      }
+      if (b.scoring_labels) {
+        client.setQueryData(["scoring-labels", sid], b.scoring_labels);
+      }
+    }
+    const services = (bootstrap as Record<string, unknown>)?.services;
+    if (Array.isArray(services)) {
+      client.setQueryData(["services"], { services, _section_timings: [] });
     }
     // P1#5 (perf audit): the SSR share_status seed is removed. Bootstrap no
     // longer carries share_status (build_share_status cost ~2.1s and sat on

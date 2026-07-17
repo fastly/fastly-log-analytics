@@ -1,4 +1,4 @@
-"""Integration tests for ingest.py's corrupt-row repair pipeline (lines 726-855).
+"""Integration tests for ingest.py's corrupt-row repair pipeline (lines 726-965).
 
 These tests exercise the full ingest() flow with real gzipped log files
 whose JSON content includes the specific malformations the repair
@@ -6,6 +6,10 @@ pipeline targets: empty-value fields (``"a": ,``) that the `_EMPTY_VALUE_RE`
 regex rewrites to `:null`. The test setup mirrors test_ingest_corruption.py
 (local-mock-S3 via boto3-shim) so the corrupt-row code path runs against
 real DuckDB read_csv + json_valid invocations rather than mocked seams.
+
+Also covers the network-failure rollback path (lines 924-965): when the
+corrupt-line re-read raises a network/disk error, affected files are
+rolled back from staging and added to ``failed_paths`` for retry.
 """
 
 from __future__ import annotations
@@ -143,3 +147,68 @@ def test_corrupt_row_pipeline_unfixable_lines_accumulate_in_corrupt_details(
 
     # The valid row is ingested; the broken row is noted as corrupt.
     assert done["rows_inserted"] >= 1
+
+
+def test_network_failure_during_corrupt_reread_rolls_back_affected_files(
+    fos_source, in_memory_duckdb, monkeypatch, tmp_path
+):
+    """When the corrupt-line re-read (``read_csv`` at line 856) raises a
+    network-class error, all staging rows for the affected files are
+    DELETEd so those files can be retried on the next sync tick.
+
+    The rollback path (lines 930-963) fires when the exception string
+    contains any of the network keywords (``"no such file"``,
+    ``"connection refused"``, etc.). After rollback:
+
+    - affected s3_paths are added to ``failed_paths``
+    - ``valid_rows`` is recalculated from what remains in staging
+    - the affected files are NOT marked as ingested in the metadata DB
+
+    Uses the raw ``in_memory_duckdb`` (no ``_Rewrite`` wrapper) because
+    the download-based flow handles s3→local mapping natively through
+    ``_download_chunk_to_local``, and the wrapper's bucket-prefix
+    rewriting corrupts the ``count_map`` / ``valid_counts`` lookup the
+    corrupt-detection code relies on.
+    """
+    import backend.core.duckdb as my_duckdb
+
+    log_dir = tmp_path / "mock_logs"
+    log_dir.mkdir(parents=True)
+
+    clean_key = "raw/2026-05-18/13/2026-05-18T13-00-00.v.gz"
+    corrupt_key = "raw/2026-05-18/13/2026-05-18T13-00-00.r.gz"
+    for k in (clean_key, corrupt_key):
+        (log_dir / k).parent.mkdir(parents=True, exist_ok=True)
+
+    with gzip.open(log_dir / clean_key, "wt") as f:
+        f.write(json.dumps({"timestamp": "2026-05-18T13:00:00Z", "status": 200, "url": "/ok"}) + "\n")
+
+    with gzip.open(log_dir / corrupt_key, "wt") as f:
+        f.write(json.dumps({"timestamp": "2026-05-18T13:01:00Z", "status": 200, "url": "/clean"}) + "\n")
+        f.write(json.dumps({"status": 200, "url": "/no-timestamp"}) + "\n")
+
+    monkeypatch.setattr(my_duckdb, "_configure_fos", lambda *a: None)
+    monkeypatch.setattr(my_duckdb, "get_memory_connection", lambda src: in_memory_duckdb)
+    monkeypatch.setattr(my_duckdb, "INGEST_CHUNK_SIZE", 50)
+    monkeypatch.setattr("time.sleep", lambda *a: None)
+    monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda *a: _mock_fos(log_dir, [clean_key, corrupt_key]))
+
+    real_execute = my_duckdb._execute_query_with_retry
+
+    def _failing_execute(con, query, **kwargs):
+        if "read_csv" in query and "column0" in query:
+            raise Exception("IO Error: No such file or directory: could not resolve hostname")
+        return real_execute(con, query, **kwargs)
+
+    monkeypatch.setattr("backend.core.ingest._execute_query_with_retry", _failing_execute)
+
+    events = _drain(ingest(source={**fos_source}))
+    done = next(e for e in events if e["type"] == "done")
+
+    assert done["rows_inserted"] >= 1
+
+    from backend.core import metadata as metadata_db
+
+    ingested = metadata_db.get_ingested_filenames(fos_source["name"])
+    corrupt_s3 = f"s3://{fos_source['bucket']}/{corrupt_key}"
+    assert corrupt_s3 not in ingested

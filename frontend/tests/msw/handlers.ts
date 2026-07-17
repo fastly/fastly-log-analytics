@@ -213,7 +213,11 @@ export const handlers = [
     HttpResponse.json({ rows: [], total: 0 }),
   ),
   http.get(`${API_BASE}/api/usage/current-storage`, () =>
-    HttpResponse.json({ bytes: 0, files: 0 }),
+    HttpResponse.json({
+      live_bytes: 0, live_files: 0, deleted_bytes: 0, quarantine_bytes: 0,
+      total_billed_bytes: 0, total_billed_gb_hours: 0, total_files: 0, total_bytes: 0,
+      start: '', end: '',
+    }),
   ),
 
   // ── Sessions ──────────────────────────────────────────────────────
@@ -366,6 +370,14 @@ export const handlers = [
     new HttpResponse('name,type,vcl\n', { headers: { 'content-type': 'text/csv' } }),
   ),
 
+  // ── Control Room ─────────────────────────────────────────────────
+  http.get(`${API_BASE}/api/services/:service_id/realtime-seed`, () =>
+    HttpResponse.json({ ticks: [] }),
+  ),
+  http.get(`${API_BASE}/api/services/:service_id/control-room/baseline`, () =>
+    HttpResponse.json({ baselines: {} }),
+  ),
+
   // ── Analytics POSTs that page-level tests routinely override ──────
   http.post(`${API_BASE}/api/dashboard/bundle`, () =>
     HttpResponse.json({ rows: [], total: 0 }),
@@ -440,6 +452,21 @@ export const handlers = [
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/sharing`, ok({ ok: true })),
   http.post(`${API_BASE}/api/admin/share/sessions/:session_id/boot`, ok({ ok: true })),
 
+  // ── Quarantine ───────────────────────────────────────────────────
+  http.get(`${API_BASE}/api/admin/quarantine`, () =>
+    HttpResponse.json({ files: [], total: 0, summary: { total_files: 0, total_corrupt_rows: 0 } }),
+  ),
+  http.get(`${API_BASE}/api/admin/quarantine/summary`, () =>
+    HttpResponse.json({ total_files: 0, total_corrupt_rows: 0 }),
+  ),
+  http.get(`${API_BASE}/api/admin/quarantine/export`, () =>
+    new HttpResponse('', { headers: { 'Content-Type': 'application/x-ndjson' } }),
+  ),
+  http.get(`${API_BASE}/api/admin/quarantine/:quarantine_id/download`, () =>
+    new HttpResponse('', { headers: { 'Content-Type': 'application/x-ndjson' } }),
+  ),
+  http.post(`${API_BASE}/api/admin/quarantine/purge`, ok({ ok: true, deleted: 0 })),
+
   // ── Share-login (analyst auth) ────────────────────────────────────
   // Default auth-config: passcode-only (the OAuth feature is off unless a test
   // overrides this). ShareLoginForm fetches this on mount to decide what to render.
@@ -486,6 +513,9 @@ export const handlers = [
   http.post(`${API_BASE}/api/network-quality`, () =>
     HttpResponse.json({ buckets: [], pop_breakdown: [] }),
   ),
+  http.post(`${API_BASE}/api/value/summary`, () =>
+    HttpResponse.json({}),
+  ),
   http.post(`${API_BASE}/api/origin/summary`, () =>
     HttpResponse.json({ stages: [], totals: {} }),
   ),
@@ -512,6 +542,24 @@ export const handlers = [
   ),
   http.post(`${API_BASE}/api/performance/origin-ts`, () =>
     HttpResponse.json({ series: [], has_data: false }),
+  ),
+
+  // ── CMCD / Streaming analytics ────────────────────────────────────
+  http.post(`${API_BASE}/api/cmcd/aggregates`, () =>
+    HttpResponse.json({
+      available: false,
+      has_data: false,
+      overview: null,
+      buffer_health_ts: [],
+      bitrate_ts: [],
+      throughput_ts: [],
+      top_content: [],
+      rebuffer_by_country: [],
+      rebuffer_by_asn: [],
+      object_type_dist: [],
+      streaming_format_dist: [],
+      startup_ts: [],
+    }),
   ),
 
   // ── Client telemetry collectors ───────────────────────────────────

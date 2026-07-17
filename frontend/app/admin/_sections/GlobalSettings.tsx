@@ -3,6 +3,8 @@ import React, { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
 import { client } from '@/lib/api'
+import { useServiceStore } from '@/stores/serviceStore'
+import { buildServiceHref } from '@/lib/navigation'
 import { AnalyticsCard } from "@/components/AnalyticsCard"
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -187,6 +189,7 @@ export const PricingSettings = () => {
 export function GlobalSettings() {
   const queryClient = useQueryClient()
   const router = useRouter()
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const [usageLoggingLoading, setUsageLoggingLoading] = useState(false)
   const [popLocationsOpen, setPopLocationsOpen] = useState(false)
 
@@ -254,7 +257,7 @@ export function GlobalSettings() {
                     variant="outline"
                     size="sm"
                     className="h-7 text-xs"
-                    onClick={() => router.push('/admin/usage-log')}
+                    onClick={() => router.push(buildServiceHref('/admin/usage-log', activeServiceId))}
                   >
                     View Usage Log
                   </Button>

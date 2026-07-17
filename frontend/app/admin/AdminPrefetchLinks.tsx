@@ -15,7 +15,7 @@ export function AdminPrefetchLinks() {
   return (
     <>
       <Link
-        href="/admin/share"
+        href={activeServiceId ? `/admin/share?service=${activeServiceId}` : '/admin/share'}
         prefetch={false}
         onMouseEnter={() => {
           queryClient.prefetchQuery({
@@ -33,7 +33,7 @@ export function AdminPrefetchLinks() {
         <UserPlus className="h-4 w-4 mr-1" /> Share Dashboard
       </Link>
       <Link
-        href="/admin/session-scoring"
+        href={activeServiceId ? `/admin/session-scoring?service=${activeServiceId}` : '/admin/session-scoring'}
         prefetch={false}
         onMouseEnter={() => {
           if (!activeServiceId) return
@@ -74,14 +74,14 @@ export function AdminPrefetchLinks() {
         <ShieldCheck className="h-4 w-4 mr-1" /> Session Scoring
       </Link>
       <Link
-        href="/admin/queries"
+        href={activeServiceId ? `/admin/queries?service=${activeServiceId}` : '/admin/queries'}
         prefetch={false}
         className={buttonVariants({ variant: 'secondary', size: 'sm' })}
       >
         <Activity className="h-4 w-4 mr-1" /> Live Queries
       </Link>
       <Link
-        href="/admin/trends"
+        href={activeServiceId ? `/admin/trends?service=${activeServiceId}` : '/admin/trends'}
         prefetch={false}
         onMouseEnter={() => {
           queryClient.prefetchQuery({

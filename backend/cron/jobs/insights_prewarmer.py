@@ -163,6 +163,7 @@ def _run_insights_prewarmer(service_id: str) -> None:
             src,
             window_hours=window_hours,
             baseline_hours=baseline_hours,
+            service_id=service_id,
             force_refresh=True,
         )
 
@@ -188,6 +189,7 @@ def _run_insights_prewarmer(service_id: str) -> None:
                     src,
                     window_hours=window_hours,
                     baseline_hours=baseline_hours,
+                    service_id=service_id,
                     clamp_start=cs,
                     clamp_end=ce,
                     mask_ips=mask,

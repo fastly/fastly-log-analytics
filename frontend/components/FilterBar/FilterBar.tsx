@@ -167,7 +167,8 @@ export const FilterBar = React.memo(function FilterBar() {
         return 3000;
       }
       return false; // Stop polling once we have data and have synced
-    }
+    },
+    refetchIntervalInBackground: false,
   })
 
   React.useEffect(() => {
@@ -343,18 +344,18 @@ export const FilterBar = React.memo(function FilterBar() {
             return (
               <Button
                 key={preset.label}
-                variant={isActive ? 'secondary' : 'ghost'}
+                variant={isActive ? 'default' : 'ghost'}
                 size="sm"
                 onClick={preset.value}
                 aria-pressed={isActive}
                 aria-busy={isActiveLoading || undefined}
-                className={cn("relative h-9 sm:h-6.5 px-2.5 sm:px-2 text-xs sm:text-[11px]", isActive ? "bg-background shadow-sm text-foreground" : "")}
+                className={cn("relative h-9 sm:h-6.5 px-2.5 sm:px-2 text-xs sm:text-[11px]", isActive ? "shadow-sm" : "")}
               >
                 {preset.label}
                 {isActiveLoading && (
                   <span
                     aria-hidden="true"
-                    className="ml-1 inline-flex h-1 w-1 rounded-full bg-primary animate-pulse"
+                    className="ml-1 inline-flex h-1 w-1 rounded-full bg-primary-foreground animate-pulse"
                   />
                 )}
               </Button>

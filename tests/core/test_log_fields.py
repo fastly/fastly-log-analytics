@@ -199,6 +199,40 @@ def test_numeric_custom_fields_do_not_starve_line_budget():
     assert tail and int(tail.group(1)) > 0, "trailing field was starved to substr(...,0,0)"
 
 
+def test_cmcd_string_fields_do_not_starve_scoring_budget():
+    """REGRESSION: CMCD string fields (cmcd_cid, cmcd_ot, cmcd_sf, cmcd_sid,
+    cmcd_st) defaulted to a 2000-byte substr reservation when no byte_limit
+    was set. Because custom fields are processed alphabetically, these five
+    cmcd_* fields consumed 10,000 bytes before the nine edge_* scoring fields,
+    which then got substr(..., 0, 0) → null.
+
+    With the bytes_estimate-aware default, a field declaring bytes_estimate=40
+    gets min(max(40*4, 40), 2000) = 160 instead of 2000. This mirrors the
+    numeric-field clamp but applies to string fields with a declared estimate.
+    """
+    import re
+
+    from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
+    from backend.provision.session_scoring_orchestrator import _SCORING_CUSTOM_FIELDS
+
+    cfg = {
+        "groups": PRESETS["standard"]["groups"],
+        "custom_fields": [dict(cf) for cf in _CMCD_CUSTOM_FIELDS] + [dict(cf) for cf in _SCORING_CUSTOM_FIELDS],
+    }
+    fmt = generate_log_format(cfg)
+
+    edge_sid_match = re.search(r"x-edge-score:sid, 0, (\d+)\)", fmt)
+    assert edge_sid_match and int(edge_sid_match.group(1)) > 0, "edge_sid was starved to substr(..., 0, 0)"
+
+    rtt_match = re.search(r"x-edge-score:rtt, 0, (\d+)\)", fmt)
+    assert rtt_match and int(rtt_match.group(1)) > 0, "edge_score_rtt_us was starved to substr(..., 0, 0)"
+
+    cmcd_sid_match = re.search(r"x-fos-edge-data:cmcd_sid, 0, (\d+)\)", fmt)
+    assert cmcd_sid_match, "cmcd_sid should appear in the format"
+    cmcd_sid_limit = int(cmcd_sid_match.group(1))
+    assert cmcd_sid_limit < 2000, f"cmcd_sid should use bytes_estimate-derived limit, not 2000 (got {cmcd_sid_limit})"
+
+
 def test_validate_group_deps():
     """Verify that dependent groups throw validation errors if not met."""
     # E requires D

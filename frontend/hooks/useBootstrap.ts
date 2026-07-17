@@ -63,11 +63,7 @@ export function useBootstrap() {
         if (seededCatalog) {
           queryClient.setQueryData(['log-fields-catalog', sid], seededCatalog)
         }
-        // Admin-only; analyst sessions get null from the backend.
-        const seededSyncStatus = (data as any).sync_status
-        if (seededSyncStatus) {
-          queryClient.setQueryData(['sync-status', sid], seededSyncStatus)
-        }
+        queryClient.setQueryData(['sync-status', sid], (data as any).sync_status ?? null)
         // Available to both admin and analyst.
         const seededLogExtents = (data as any).log_extents
         if (seededLogExtents) {
@@ -91,13 +87,10 @@ export function useBootstrap() {
         if (seededCronRunsFirstPage) {
           queryClient.setQueryData(['admin', 'cron-logs-recent', sid], seededCronRunsFirstPage)
         }
-        // "Last Sync" header badge. Without this seed every admin page
-        // load fires GET /api/cron-runs?task=sync&per_page=1 on mount
-        // PLUS 1-2 SSE-invalidation-driven refetches.
-        const seededLastSync = (data as any).last_sync
-        if (seededLastSync) {
-          queryClient.setQueryData(['last-sync', sid], seededLastSync)
-        }
+        // Always seed ['last-sync', sid] so the cache entry exists before
+        // SyncStatusBadge's useLastSync() subscribes (prevents mid-render
+        // QueryCache.build → notify race).
+        queryClient.setQueryData(['last-sync', sid], (data as any).last_sync ?? null)
         // /scoring/labels seed — TopFlaggedTable + admin Labels tab +
         // dashboard Flag column all read from ['scoring-labels', sid].
         // Skipping the standalone fetch on cold load.
@@ -156,6 +149,11 @@ export function useBootstrap() {
     // shown next to PoP codes everywhere). Parsed server-side from the
     // /datacenters cache; empty when the cache isn't populated.
     usePopGeoStore.getState().setMap((query.data.pop_geo ?? {}) as unknown as Record<string, PopGeo>)
+
+    const popsRaw = (query.data as unknown as Record<string, Record<string, [number, number]>>).pops
+    if (popsRaw) {
+      usePopGeoStore.getState().setLocations(popsRaw)
+    }
 
     // Phase Q + RSC race fix: the SSR HydrationBoundary pre-populates
     // the bootstrap cache, which means useBootstrap's queryFn does NOT

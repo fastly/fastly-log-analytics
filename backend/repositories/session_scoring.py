@@ -202,7 +202,12 @@ def fetch_session_events(
     return grouped
 
 
-def reconstruct_labeled_sessions(service_id: str, labels: list[dict]) -> list[tuple[dict, str]]:
+def reconstruct_labeled_sessions(
+    service_id: str,
+    labels: list[dict],
+    *,
+    ts_predicate: str | None = None,
+) -> list[tuple[dict, str]]:
     """Replay each labeled sid into the ``{session_id, events:[{ts,url}]}``
     shape that ``evaluate()`` expects.
 
@@ -216,7 +221,7 @@ def reconstruct_labeled_sessions(service_id: str, labels: list[dict]) -> list[tu
     sid_to_label = {row["sid"]: row["label"] for row in labels if row.get("sid")}
     if not sid_to_label:
         return []
-    grouped = fetch_session_events(service_id, list(sid_to_label.keys()), since_days=30)
+    grouped = fetch_session_events(service_id, list(sid_to_label.keys()), since_days=30, ts_predicate=ts_predicate)
     out: list[tuple[dict, str]] = []
     for sid, label in sid_to_label.items():
         events = grouped.get(sid, [])

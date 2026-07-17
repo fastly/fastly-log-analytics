@@ -146,6 +146,28 @@ export function getTrafficContent(id: string): InsightContent | null {
         )
       }
 
+    case 'asn_hosting_shift':
+      return {
+        title: 'ASN Hosting Shift',
+        icon: <Building2 className="h-5 w-5 text-primary" />,
+        fields: ['asn', 'p_type'],
+        description: (
+          <div className="space-y-4">
+            <p>Detects when an ASN&apos;s traffic composition shifts from consumer to datacenter/hosting — e.g., an ASN that was 5% hosting-flagged in baseline but 60% in the current window.</p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <BarChart className="h-5 w-5 shrink-0 text-blue-500" />
+                <span><strong>Hosting ratio:</strong> We compute each ASN&apos;s share of <code>hosting</code>-classified requests (via Fastly&apos;s proxy-type geo-IP classification) in the window vs baseline.</span>
+              </li>
+              <li className="flex gap-3">
+                <ShieldAlert className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span><strong>What it catches:</strong> bot pools or scrapers spinning up on hosting/datacenter infrastructure behind an ASN that normally carries consumer traffic.</span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
     default:
       return null
   }

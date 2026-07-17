@@ -14,7 +14,6 @@ import { InsightCardData } from '@/types/api'
 import { cn } from '@/lib/utils'
 import { AlertTriangle, Info, CheckCircle, AlertCircle, HelpCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { ImpossibleDistanceModal } from './ImpossibleDistanceModal'
 import { InsightDataModal } from './InsightDataModal'
 import { InsightItemRow } from './InsightItemRow'
 import { ImpossibleDistanceData, ScriptedTrafficData } from './types'
@@ -30,6 +29,11 @@ import { ScriptedTrafficModal } from './ScriptedTrafficModal'
 // the chunk off the cold-load critical path.
 const InsightHelpModal = dynamic(
   () => import('./InsightHelpModal').then((m) => m.InsightHelpModal),
+  { ssr: false },
+)
+
+const ImpossibleDistanceModal = dynamic(
+  () => import('./ImpossibleDistanceModal').then((m) => m.ImpossibleDistanceModal),
   { ssr: false },
 )
 

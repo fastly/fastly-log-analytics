@@ -133,12 +133,13 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   const effectiveHeight =
     typeof height === 'number' && narrow ? Math.round(height * 1.2) : height
 
+  const hasLegend = layout?.showlegend !== false && ((data && data.length > 1) || layout?.showlegend === true)
+  const defaultTopMargin = hasLegend && !narrow ? 32 : 8
+  const defaultBottomMargin = narrow ? 60 : 32
+
   const defaultLayout = {
     autosize: true,
     height: typeof effectiveHeight === 'number' ? effectiveHeight : undefined,
-    // Make room for the bottom legend on narrow viewports — Plotly's
-    // default bottom margin is too tight for an h-orientation legend.
-    margin: { l: 40, r: 20, t: 20, b: narrow ? 60 : undefined },
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
     font: {
@@ -153,6 +154,15 @@ export const PlotlyChart = React.memo(function PlotlyChart({
       namelength: -1
     },
     ...layout,
+    // Spaced after ...layout so caller overrides on individual margin keys (l, r, t, b)
+    // take precedence over the dynamic defaults.
+    margin: {
+      l: 40,
+      r: 20,
+      t: defaultTopMargin,
+      b: defaultBottomMargin,
+      ...(layout?.margin || {})
+    },
     // After the ...layout spread so callers can override individual
     // legend fields without losing the narrow-viewport defaults
     // entirely. Caller's full legend overrides take precedence here.
@@ -242,7 +252,7 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   const a11yShape = React.useMemo(() => tracesToTable(data, a11yTitle), [data, a11yTitle])
 
   return (
-    <div ref={containerRef} className={className} style={{ height: effectiveHeight }}>
+    <div ref={containerRef} className={className} style={{ height: effectiveHeight, position: 'relative', overflow: 'hidden' }}>
       {visible ? (
         <Plot
           data={data}

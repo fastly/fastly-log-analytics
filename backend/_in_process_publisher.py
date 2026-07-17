@@ -31,19 +31,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
+
+REPLAY_BUFFER_SIZE = 60
 
 
 class _InProcessPublisher:
     """Per-``service_id`` fan-out of dict payloads to async subscribers."""
 
-    def __init__(self) -> None:
+    def __init__(self, replay_size: int = REPLAY_BUFFER_SIZE) -> None:
         self._subscribers: dict[str, set[asyncio.Queue]] = defaultdict(set)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.Lock()
+        self._replay: dict[str, deque[dict]] = defaultdict(lambda: deque(maxlen=replay_size))
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind the publisher to the FastAPI asyncio loop.
@@ -65,17 +68,16 @@ class _InProcessPublisher:
         if loop is None:
             return
         with self._lock:
+            self._replay[service_id].append(payload)
             queues = list(self._subscribers.get(service_id, ()))
         for q in queues:
             try:
                 loop.call_soon_threadsafe(self._enqueue, q, payload)
             except RuntimeError:
-                # Loop is closed (shutdown path) — nothing useful to do.
                 return
 
     @staticmethod
     def _enqueue(q: asyncio.Queue, payload: dict) -> None:
-        # Bounded queue with drop-oldest so the newest payload always lands.
         if q.full():
             try:
                 q.get_nowait()
@@ -84,8 +86,6 @@ class _InProcessPublisher:
         try:
             q.put_nowait(payload)
         except asyncio.QueueFull:
-            # Concurrent put raced us — drop this payload silently. The
-            # in-flight one is newer anyway from the subscriber's POV.
             pass
 
     async def subscribe(self, service_id: str) -> AsyncIterator[dict]:
@@ -94,8 +94,11 @@ class _InProcessPublisher:
         endpoint generator is closed)."""
         q: asyncio.Queue = asyncio.Queue(maxsize=4)
         with self._lock:
+            replay = list(self._replay.get(service_id, ()))
             self._subscribers[service_id].add(q)
         try:
+            for item in replay:
+                yield item
             while True:
                 yield await q.get()
         finally:

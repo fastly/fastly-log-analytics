@@ -250,6 +250,8 @@ def _run_service_cron(
                         )
                         if done_event.get("corrupt_rows"):
                             summary += f" Skipped {done_event.get('corrupt_rows')} corrupted/invalid lines."
+                        if done_event.get("quarantined_files"):
+                            summary += f" Quarantined {done_event.get('quarantined_files')} files with errors."
                         if done_event.get("deleted_files"):
                             summary += f" Deleted {done_event.get('deleted_files')} raw files."
                         corrupt_details = done_event.get("corrupt_details", [])

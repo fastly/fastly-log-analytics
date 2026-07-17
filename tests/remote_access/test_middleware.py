@@ -1059,3 +1059,61 @@ def test_active_signal_touches(client, monkeypatch):
     )
     assert r.status_code == 200, r.text
     assert any("last_activity" in kw for kw in calls), "X-User-Active: 1 should touch the session"
+
+
+# ── Dispatch composition: idle timeout reaches the HTTP client ────────────
+
+
+@pytest.mark.security_regression
+def test_dispatch_idle_timeout_returns_401(client):
+    """End-to-end: an analyst whose session has been idle beyond
+    IDLE_TIMEOUT_S gets 401 unauthenticated from the middleware dispatch,
+    not a 500 or a pass-through. Verifies that the ``validate_session``
+    None return propagates correctly through the full dispatch path."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    sid = _login_analyst(client, invite)
+
+    mgr = tunnel.get_tunnel_manager()
+    session = mgr._sessions.get(sid)
+    assert session is not None
+    session.last_active_time = "2020-01-01T00:00:00Z"
+
+    r = client.get(
+        "/api/dashboard?service=svcA",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r.status_code == 401
+    assert r.json()["error"] == "unauthenticated"
+
+
+@pytest.mark.security_regression
+def test_dispatch_analyst_post_to_non_allowlisted_path_returns_403(client):
+    """Dispatch composition: an authenticated analyst POSTing to a path not
+    in ``_ANALYST_ALLOWED_WRITE_PREFIXES`` gets 403 read_only. The unit
+    tests on ``_is_blocked_path`` don't cover the full dispatch ordering
+    (host check → session → scope → read-only → handler)."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    r = client.post(
+        "/api/views",
+        headers={
+            "X-Remote-Analyst": "1",
+            "Host": "testserver",
+            "Origin": "https://testserver",
+        },
+    )
+    assert r.status_code == 403
+    assert r.json()["error"] == "read_only"
+
+
+@pytest.mark.security_regression
+def test_dispatch_admin_shared_secret_wrong_token_returns_401(client, monkeypatch):
+    """Dispatch composition: a local admin request with the wrong
+    X-Admin-Token gets 401 admin_token_invalid through the full
+    middleware path — not bypassed by any earlier/later gate."""
+    monkeypatch.setenv("ADMIN_SHARED_SECRET", "correct-token-value")
+    r = client.get("/api/dashboard", headers={"X-Admin-Token": "wrong-token"})
+    assert r.status_code == 401
+    assert r.json()["detail"]["error"] == "admin_token_invalid"

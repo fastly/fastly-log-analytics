@@ -140,6 +140,14 @@ jobs:
           terraform_version: "~1.9"
           terraform_wrapper: false
 
+      - name: Cache Terraform provider plugins
+        uses: actions/cache@v4
+        with:
+          path: cache/tf_provider_cache
+          key: ${{ runner.os }}-terraform-providers-${{ hashFiles('backend/utils/terraform_gen.py', 'tests/utils/test_terraform_gen.py', 'tests/utils/test_terraform_resource_graph.py') }}
+          restore-keys: |
+            ${{ runner.os }}-terraform-providers-
+
       - name: Verify falco is required and runnable
         env:
           FALCO_REQUIRED: "1"

@@ -361,3 +361,122 @@ def test_scoring_vcl_excludes_query_params():
     assert not pattern.search("/api/v1/login?file=.png")
     assert not pattern.search("/api/v1/user?bypass=.css")
     assert not pattern.search("/index.html?extension=.js")
+
+
+# ── Security: VCL injection vectors ──────────────────────────────────────────
+
+
+@pytest.mark.security_regression
+def test_validate_rejects_vcl_control_chars(seeded_service):
+    """Control characters (\\x00-\\x08, \\x0a-\\x1f, \\x7f) are disallowed
+    because they can break VCL string literals or confuse Fastly's VCL
+    compiler. The double-quote case is covered by the existing
+    ``test_validate_returns_error_for_disallowed_quote``; this test
+    covers the remaining metacharacters."""
+    with (
+        TestClient(app) as c,
+        patch.dict("os.environ", {"SCORING_REQUIRE_FALCO": "0"}),
+    ):
+        for ch, label in [
+            ("\x00", "null byte"),
+            ("\n", "newline"),
+            ("\x7f", "DEL"),
+        ]:
+            r = c.post(
+                f"/api/services/{_SERVICE_ID}/scoring/exclude-regex/validate",
+                json={"regex": f"foo{ch}bar"},
+            )
+            assert r.status_code == 200, f"{label}: unexpected status {r.status_code}"
+            body = r.json()
+            assert body["ok"] is False, f"{label}: should be rejected"
+            assert body["reason"] == "disallowed_char", f"{label}: wrong reason {body.get('reason')}"
+
+
+@pytest.mark.security_regression
+def test_put_rejects_vcl_control_char_injection(seeded_service):
+    """PUT rejects regex with embedded control chars — a complementary
+    vector to the double-quote test."""
+    with (
+        TestClient(app) as c,
+        patch.dict("os.environ", {"SCORING_REQUIRE_FALCO": "0"}),
+    ):
+        r = c.put(
+            f"/api/services/{_SERVICE_ID}/scoring/exclude-regex",
+            params={"token": "stored-test-key", "confirm": "true"},
+            json={"regex": "foo\nbar"},
+        )
+    assert r.status_code == 400
+    assert r.json()["detail"]["reason"] == "disallowed_char"
+
+
+@pytest.mark.security_regression
+def test_validate_rejects_catastrophic_backtracking_vector(seeded_service):
+    """Classic ReDoS patterns like ``(a+)+$`` compile fine under Python's
+    ``re`` module and pass the disallowed-char check. Currently the only
+    backstop is falco's 10 s timeout at lint time. This test documents
+    the gap: without falco, the regex passes validation.
+
+    When a dedicated ReDoS checker is added, this test should flip to
+    asserting ``ok=False`` with a ``redos`` reason."""
+    with (
+        TestClient(app) as c,
+        patch.dict("os.environ", {"SCORING_REQUIRE_FALCO": "0"}),
+    ):
+        r = c.post(
+            f"/api/services/{_SERVICE_ID}/scoring/exclude-regex/validate",
+            json={"regex": "(a+)+$"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    # Documents current behavior: the ReDoS vector passes input validation
+    # when falco is not available. When a dedicated checker is added,
+    # update this assertion to: assert body["ok"] is False
+    assert body["ok"] is True
+
+
+# ── rotate-key router ────────────────────────────────────────────────────────
+
+
+def test_rotate_key_happy_path(seeded_service):
+    """Stub the crypto layer and verify the router returns the expected
+    shape: ``ok``, ``rotated_at``, ``previous_key_grace``, ``message``."""
+    fake_result = {
+        "rotated_at": "2026-07-08T12:00:00Z",
+        "previous_key_hex": "deadbeef",
+    }
+    with (
+        TestClient(app) as c,
+        patch(
+            "backend.provision.session_scoring_setup.rotate_aes_key",
+            return_value=fake_result,
+        ) as stub_rotate,
+        patch("backend.core.metadata.record_scoring_audit") as stub_audit,
+    ):
+        r = c.post(
+            f"/api/services/{_SERVICE_ID}/scoring/rotate-key",
+            headers={"token": "stored-test-key"},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["rotated_at"] == "2026-07-08T12:00:00Z"
+    assert body["previous_key_grace"] is True
+    assert "message" in body
+    stub_rotate.assert_called_once()
+    stub_audit.assert_called_once()
+    assert stub_audit.call_args.args[1] == "key_rotated"
+
+
+def test_rotate_key_when_scoring_disabled(seeded_service):
+    """rotate-key requires scoring to be enabled — 400 when disabled."""
+    cfg = svcconfig.load_config(_SERVICE_ID)
+    cfg["scoring"]["enabled"] = False
+    svcconfig.save_config(_SERVICE_ID, cfg)
+
+    with TestClient(app) as c:
+        r = c.post(
+            f"/api/services/{_SERVICE_ID}/scoring/rotate-key",
+            headers={"token": "stored-test-key"},
+        )
+    assert r.status_code == 400
+    assert "not enabled" in r.json()["detail"]["error"]

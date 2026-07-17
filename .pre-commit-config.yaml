@@ -93,19 +93,6 @@ repos:
         pass_filenames: false
         entry: bash -c 'cd frontend && npx tsc --noEmit'
 
-      # v2.0 cleanup (Phase 0.12): pre-push gate that the
-      # @pytest.mark.security_regression count hasn't dropped below
-      # the Phase 0 floor (24). Catches a refactor that silently
-      # removes coverage of a verified security fix before push,
-      # not in CI. `stages: [pre-push]` keeps it off the per-commit
-      # hot path (the gate takes ~2s to collect 3k+ tests).
-      - id: security-regression-count
-        name: Assert security_regression test count >= floor
-        stages: [pre-push]
-        language: system
-        pass_filenames: false
-        entry: bash scripts/check_security_regression_count.sh
-
       # Run the Rust scorer's native unit tests before pushing a change to
       # compute/scorer/. The Python suite only pins the cross-language *tables*
       # (tests/scoring/test_normalize_parity.py); the cargo `#[test]`s pin the

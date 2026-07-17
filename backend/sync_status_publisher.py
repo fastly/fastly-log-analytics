@@ -20,7 +20,11 @@ from backend._in_process_publisher import _InProcessPublisher
 
 
 class SyncStatusPublisher(_InProcessPublisher):
-    pass
+    def __init__(self) -> None:
+        # State snapshot channel: last-write-wins is correct, and we never
+        # need to replay stale snapshots to new subscribers since the
+        # initial cached status is already offered on subscribe.
+        super().__init__(replay_size=0)
 
 
 publisher = SyncStatusPublisher()

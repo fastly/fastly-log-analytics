@@ -31,10 +31,12 @@ export const TIME_HOVER_LAYOUT = {
   hovermode: 'x unified' as const,
   legend: {
     orientation: 'h' as const,
-    y: 1.15,
-    x: 1,
-    xanchor: 'right' as const,
+    y: 1.05,
+    x: 0.5,
+    xanchor: 'center' as const,
     yanchor: 'bottom' as const,
+    font: { size: 9.5 },
+    bgcolor: 'transparent',
   },
 }
 

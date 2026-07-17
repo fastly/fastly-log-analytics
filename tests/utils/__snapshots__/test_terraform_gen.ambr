@@ -28,6 +28,10 @@
         unset req.http.x-of-oretries;
         unset req.http.x-of-status;
         unset req.http.x-edge-req-id;
+        unset req.http.x-fos-io-ifsz;
+        unset req.http.x-fos-io-ofsz;
+        unset req.http.x-fos-io-ifmt;
+        unset req.http.x-fos-io-ofmt;
         # Session-scoring internal markers. X-Edge-Scoring-Pass=1 from a
         # client would bypass scoring entirely; x-edge-score* / X-Edge-Sid
         # from a client could forge a clean score / sid that the deliver

@@ -37,7 +37,7 @@ const FosOperationsHelp = ({ note }: { note?: string }) => (
     <ul className="space-y-3 list-none pl-0">
       <li className="flex gap-3">
         <Zap className="h-5 w-5 shrink-0 text-blue-500 mt-0.5" />
-        <span><strong>Class A Operations:</strong> Includes state-changing operations like uploads (writes), list bucket requests, and deletes. Fastly's edge writes your raw logs here, and the backend lists the bucket to find them.</span>
+        <span><strong>Class A Operations:</strong> Includes state-changing operations like uploads (writes), list bucket requests, and deletes. Fastly&apos;s edge writes your raw logs here, and the backend lists the bucket to find them.</span>
       </li>
       <li className="flex gap-3">
         <Database className="h-5 w-5 shrink-0 text-green-500 mt-0.5" />
@@ -52,11 +52,14 @@ const FosOperationsHelp = ({ note }: { note?: string }) => (
   </div>
 )
 
+import { useRouter } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
+import { buildServiceHref } from '@/lib/navigation'
 
 export default function UsagePage() {
   const { theme } = useTheme()
   const isDark = theme === 'dark'
+  const router = useRouter()
 
   return (
     <ReportLayout
@@ -220,7 +223,10 @@ export default function UsagePage() {
   const accentB = isDark ? '#34d399' : '#10b981'
   const gridColor = isDark ? '#27272a' : '#e4e4e7'
 
-  const baseLayout = {}
+  const baseLayout = {
+    legend: { orientation: 'h' as const, x: 0, y: -0.18, yanchor: 'top' as const, xanchor: 'left' as const },
+    margin: { b: 55 },
+  }
 
   // ── Ops chart ──────────────────────────────────────────────────────────────
   const opsDates = ops?.data.map((d: any) => d.date) ?? []
@@ -249,39 +255,27 @@ export default function UsagePage() {
   const bwData = [
     { type: 'bar', name: `Bandwidth (${bwUnit})`, x: bwTimes, y: bwY, marker: { color: '#8b5cf6', opacity: 0.8 }, hovertemplate: `CDN: %{y:.2f} ${bwUnit}<extra></extra>` },
   ]
-  const bwLayout = { ...baseLayout, yaxis: { title: bwUnit, gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }
+  const bwLayout = { ...baseLayout, showlegend: true, yaxis: { title: bwUnit, gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }
 
   // ── Log generation chart ───────────────────────────────────────────────────
   const genTimes = logActivity?.data.map(p => p.time) ?? []
   const ingestCounts = logActivity?.data.map(p => p.row_count) ?? []
   const apiCounts = logActivity?.data.map(p => p.api_requests) ?? []
-  // Fastly's authoritative "log records emitted to FOS" count — same field
-  // backing /api/admin/log-accounting. Overlay on Processed so the user can
-  // eyeball emitted-vs-ingested without bouncing to the admin panel.
-  const fastlyLogCounts = logActivity?.data.map(p => p.fastly_log_records) ?? []
-
   const hasApiCounts = apiCounts.some(v => v != null && v > 0)
-  const hasFastlyLogCounts = fastlyLogCounts.some(v => v != null && v > 0)
-
-  const logGenData: any[] = []
-
-  if (hasApiCounts) {
-    logGenData.push({ type: 'bar', name: 'Logs Generated (API)', x: genTimes, y: apiCounts, marker: { color: accentB }, hovertemplate: '%{y:,}<extra></extra>' })
-  }
 
   const logProcData: any[] = [
-    { type: 'bar', name: 'Logs Processed', x: genTimes, y: ingestCounts, marker: { color: accent }, hovertemplate: '%{y:,}<extra></extra>' }
+    { type: 'bar', name: 'Log Lines Ingested', x: genTimes, y: ingestCounts, marker: { color: accent }, hovertemplate: 'Ingested: %{y:,}<extra></extra>' }
   ]
-  if (hasFastlyLogCounts) {
+  if (hasApiCounts) {
     logProcData.push({
       type: 'scatter',
       mode: 'lines+markers',
-      name: 'Fastly Emitted (Stats API)',
+      name: 'Fastly Requests',
       x: genTimes,
-      y: fastlyLogCounts,
+      y: apiCounts,
       line: { color: '#f59e0b', width: 2 },
       marker: { color: '#f59e0b', size: 6 },
-      hovertemplate: 'Emitted: %{y:,}<extra></extra>',
+      hovertemplate: 'Requests: %{y:,}<extra></extra>',
     })
   }
 
@@ -303,6 +297,18 @@ export default function UsagePage() {
   const roughBandwidth = totalBwGB * rateEgress
   const roughTotal = roughCostA + roughCostB + roughStorage + roughBandwidth
   const fmtUSD = (n: number) => n >= 1000 ? '$' + n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',') : '$' + n.toFixed(2)
+
+  // ── Cost chart ──────────────────────────────────────────────────────────────
+  const costOpsY = opsClassA.map((a: number, i: number) => ((a ?? 0) / 1000) * rateA + ((opsClassB[i] ?? 0) / 1000) * rateB)
+  const bwByTime: Record<string, number> = {}
+  bwTimes.forEach((t: string, i: number) => { bwByTime[t] = (bwBytes[i] / 1e9) * rateEgress })
+  const costEgressY = opsDates.map((t: string) => bwByTime[t] ?? 0)
+
+  const costChartData = [
+    { type: 'bar', name: 'Operations', x: opsDates, y: costOpsY, marker: { color: accent }, hovertemplate: '$%{y:.2f}<extra></extra>' },
+    { type: 'bar', name: 'CDN Egress', x: opsDates, y: costEgressY, marker: { color: '#f59e0b' }, hovertemplate: '$%{y:.2f}<extra></extra>' },
+  ]
+  const costLayout = { ...baseLayout, barmode: 'stack' as const, yaxis: { tickprefix: '$', tickformat: '.2f', gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }
 
   const prefillNote = prefill && !loadingPrefill
     ? 'Calculator pre-filled from your current service configuration.'
@@ -335,6 +341,12 @@ export default function UsagePage() {
                   <span>Live Storage:</span>
                   <strong className="text-foreground">{formatBytes(storage?.live_bytes ?? 0)}</strong>
                 </div>
+                {(storage?.quarantine_bytes ?? 0) > 0 && (
+                  <div className="flex justify-between">
+                    <span>Quarantine:</span>
+                    <strong className="text-foreground">{formatBytes(storage?.quarantine_bytes ?? 0)}</strong>
+                  </div>
+                )}
                 <div className="flex justify-between text-amber-700 dark:text-amber-500">
                   <TooltipProvider>
                     <Tooltip>
@@ -363,7 +375,7 @@ export default function UsagePage() {
               <div>Writes, lists, deletes</div>
               <div className="flex items-center justify-between">
                 <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Rate: ${rateA}/1k</span>
-                <Button variant="link" size="sm" className="h-auto p-0 text-[10px] font-bold text-primary" onClick={() => window.location.href = '/admin'}>Edit</Button>
+                <Button variant="link" size="sm" className="h-auto p-0 text-[10px] font-bold text-primary" onClick={() => router.push(buildServiceHref('/admin', activeServiceId))}>Edit</Button>
               </div>
             </div>
           }
@@ -379,7 +391,7 @@ export default function UsagePage() {
               <div>Reads / downloads</div>
               <div className="flex items-center justify-between">
                 <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Rate: ${prefill?.class_b_rate_per_10k ?? 0.01}/10k</span>
-                <Button variant="link" size="sm" className="h-auto p-0 text-[10px] font-bold text-primary" onClick={() => window.location.href = '/admin'}>Edit</Button>
+                <Button variant="link" size="sm" className="h-auto p-0 text-[10px] font-bold text-primary" onClick={() => router.push(buildServiceHref('/admin', activeServiceId))}>Edit</Button>
               </div>
             </div>
           }
@@ -410,7 +422,10 @@ export default function UsagePage() {
                 </div>
                 <div className="flex justify-between">
                   <span>Operations:</span>
-                  <strong className="text-foreground">{fmtUSD(roughCostA + roughCostB)}</strong>
+                  <div className="flex flex-col items-end">
+                    <strong className="text-foreground">{fmtUSD(roughCostA + roughCostB)}</strong>
+                    <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">A: ${rateA}/1K · B: ${prefill?.class_b_rate_per_10k ?? 0.01}/10K</span>
+                  </div>
                 </div>
                 <div className="flex justify-between">
                   <span>CDN Egress:</span>
@@ -463,21 +478,17 @@ export default function UsagePage() {
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Log Activity (Generated)"
-          description="API requests logged by Fastly"
-          headerAction={intervalButtons}
-          isLoading={loadingActivity}
-          isFetching={fetchingActivity}
-          error={errorActivity as AnalyticsCardError | null}
+          title="Estimated Cost"
+          description="Operations and CDN egress cost per period"
+          headerAction={fosOpsIntervalButtons}
+          isLoading={loadingOps || loadingBw}
+          isFetching={fetchingOps || fetchingBw}
+          error={(errorOps ?? errorBw) as AnalyticsCardError | null}
+          isEmpty={opsDates.length === 0}
           className="h-[360px]"
           contentClassName="p-2"
-          helpContent={<p>Number of requests generated by your Fastly service.</p>}
         >
-          {(!hasApiCounts || genTimes.length === 0) && !loadingActivity ? (
-            <div className="flex items-center justify-center h-full text-muted-foreground text-sm">No Fastly API stats available</div>
-          ) : (
-            <PlotlyChart data={logGenData as any[]} layout={baseLayout} height="100%" />
-          )}
+          <PlotlyChart data={costChartData as any[]} layout={costLayout} height="100%" />
         </AnalyticsCard>
 
         <AnalyticsCard

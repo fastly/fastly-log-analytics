@@ -48,6 +48,7 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
     enabled: !!activeServiceId,
     staleTime: 60_000,
     refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
   })
 
   if (!activeServiceId) return null

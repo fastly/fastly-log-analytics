@@ -88,7 +88,7 @@ export function CronLiveLog({
     return (
       <div className="flex flex-col text-[9px] font-mono text-muted-foreground truncate w-full h-full justify-center">
         {recentLines.map((line, i) => {
-          let text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : JSON.stringify(line))
+          let text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : line.type === 'done' ? 'Done.' : JSON.stringify(line))
           if (text.length > 80) text = text.substring(0, 80) + '...'
 
           return (
@@ -131,7 +131,7 @@ export function CronLiveLog({
         </div>
       )}
       {recentLines.map((line, i) => {
-        const text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : JSON.stringify(line))
+        const text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : line.type === 'done' ? 'Done.' : JSON.stringify(line))
 
         return (
           <div

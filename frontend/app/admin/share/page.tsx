@@ -79,6 +79,7 @@ export default function ShareDashboardPage() {
     },
     staleTime: 10_000,
     refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
   })
 
   // SSE push of /live changes rides the multiplexed admin event stream's

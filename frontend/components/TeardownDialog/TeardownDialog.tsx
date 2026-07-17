@@ -59,11 +59,12 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
   // Reset state when dialog closes
   useEffect(() => {
     if (!open) {
-      setTimeout(() => {
+      const id = setTimeout(() => {
         setIsExecuting(false)
         setApiToken('')
         reset()
       }, 300)
+      return () => clearTimeout(id)
     }
   }, [open, reset])
 

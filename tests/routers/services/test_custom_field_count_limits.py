@@ -111,9 +111,9 @@ def test_no_numeric_cap_field_count_still_accepted(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
     svc_id = "test_svc_count_cap"
-    # 80 seeded + 1 new = 81 → log_format ≈ 7900 chars, comfortably
+    # 78 seeded + 1 new = 79 → log_format ≈ 7700 chars, comfortably
     # under the 8000-char safe max even with the new substr wrappers.
-    config.save_config(svc_id, _make_cfg(svc_id, n_existing=80))
+    config.save_config(svc_id, _make_cfg(svc_id, n_existing=78))
 
     client = TestClient(app)
     # Patch shutil.which on the module that imports it so the Falco
@@ -122,21 +122,21 @@ def test_no_numeric_cap_field_count_still_accepted(tmp_path, monkeypatch):
     with patch("backend.provision.fastly_api.shutil.which", return_value=None):
         resp = client.post(
             f"/api/services/{svc_id}/custom-fields",
-            json=_post_payload("cf080"),
+            json=_post_payload("cf078"),
         )
     assert resp.status_code == 200, (
-        f"81st field should be accepted (no numeric cap exists); got {resp.status_code} body={resp.text}"
+        f"79th field should be accepted (no numeric cap exists); got {resp.status_code} body={resp.text}"
     )
     body = resp.json()
     # Response wraps the saved field as ``body['field']`` — peer tests
     # (test_custom_fields_validation.py) rely on the 200 status alone;
     # we additionally assert the saved name to catch a routing bug
     # where the 200 came from a different handler.
-    assert body["field"]["name"] == "cf080"
+    assert body["field"]["name"] == "cf078"
 
-    # And the saved config now holds 81 fields.
+    # And the saved config now holds 79 fields.
     saved = config.load_config(svc_id)
-    assert len(saved["log_fields"]["custom_fields"]) == 81
+    assert len(saved["log_fields"]["custom_fields"]) == 79
 
 
 def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypatch):
@@ -145,10 +145,11 @@ def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypa
     ``LOG_FORMAT_TOO_LONG`` in the errors list.
 
     The seeded count is calibrated to land just under the safe max so
-    a single additional field tips it over. 016 wrapped each string
-    field in ``substr(..., 0, 2000)`` (adding ~15 chars per field), so
-    the tipping point shifted from ~118 to ~95; adding the built-in
-    ``resp_header_content_encoding`` field to group A shifted it to ~93.
+    a single additional field tips it over. The bytes_estimate-aware
+    substr default (min(max(est*4, 40), 2000)) means every field with
+    a declared estimate gets a shorter VCL substr limit than the old
+    blanket 2000, but all fields now get nonzero limits (no more
+    budget starvation), so the tipping point shifted to ~92.
 
     Pins TWO things at once:
       a) The exact 422 status code (not 400, not silent acceptance).
@@ -158,9 +159,9 @@ def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypa
     """
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
     svc_id = "test_svc_logfmt_overflow"
-    # 93 seeded fields → log_format ≈ 7969 chars (just under safe max);
-    # adding cf093 tips the new format past 8000.
-    config.save_config(svc_id, _make_cfg(svc_id, n_existing=93))
+    # 92 seeded fields → log_format ≈ 7968 chars (just under safe max);
+    # adding cf092 tips the new format past 8000.
+    config.save_config(svc_id, _make_cfg(svc_id, n_existing=92))
 
     client = TestClient(app)
     # No shutil.which patch needed — the length check at
@@ -168,7 +169,7 @@ def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypa
     # invoked, so this branch is binary-independent.
     resp = client.post(
         f"/api/services/{svc_id}/custom-fields",
-        json=_post_payload("cf093"),
+        json=_post_payload("cf092"),
     )
     assert resp.status_code == 422, (
         f"field that overflows log_format should 422; got {resp.status_code} body={resp.text}"
@@ -178,9 +179,9 @@ def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypa
     errors: list[str] = body["detail"]["errors"]
     assert any("LOG_FORMAT_TOO_LONG" in e for e in errors), f"expected LOG_FORMAT_TOO_LONG in errors, got: {errors}"
 
-    # The blocked field is NOT persisted — saved cfg still has 93.
+    # The blocked field is NOT persisted — saved cfg still has 92.
     saved = config.load_config(svc_id)
-    assert len(saved["log_fields"]["custom_fields"]) == 93
+    assert len(saved["log_fields"]["custom_fields"]) == 92
 
 
 def test_log_format_overflow_error_reports_chars_and_safe_max(tmp_path, monkeypatch):
@@ -218,17 +219,17 @@ def test_drop_a_field_at_the_size_limit_then_re_add_succeeds(tmp_path, monkeypat
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
     svc_id = "test_svc_drop_readd"
     # Seed at the same just-under-limit count the overflow test uses.
-    config.save_config(svc_id, _make_cfg(svc_id, n_existing=93))
+    config.save_config(svc_id, _make_cfg(svc_id, n_existing=92))
 
     client = TestClient(app)
-    # Adding the 94th tips it over (matches the sibling overflow test).
+    # Adding the 93rd tips it over (matches the sibling overflow test).
     overflow = client.post(
         f"/api/services/{svc_id}/custom-fields",
-        json=_post_payload("cf093"),
+        json=_post_payload("cf092"),
     )
     assert overflow.status_code == 422, f"setup invariant: expected 422 at limit; got {overflow.status_code}"
 
-    # Drop one of the seeded fields → the saved config now has 92.
+    # Drop one of the seeded fields → the saved config now has 91.
     resp = client.delete(f"/api/services/{svc_id}/custom-fields/cf050")
     assert resp.status_code == 200, f"DELETE expected 200; got {resp.status_code} body={resp.text}"
     saved = config.load_config(svc_id)

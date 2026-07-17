@@ -13,7 +13,7 @@ from env vars or config, never hard-coded infra.
 | `refresh_api_types.js` | `frontend` `gen:types` (runs `openapi-typescript` after `generate_openapi.py`) |
 | `check_eslint_count.sh` | `make ci`, `ci.yml` — frontend ESLint ceiling ratchet (drive-to-zero) |
 | `check_no_console_otel.sh` | `make ci`, `ci.yml` — guards against `OTEL_EXPORTER=console` in deployed env (ADR-08) |
-| `check_security_regression_count.sh` | pre-push hook + `make ci` + `ci.yml` — floor on security-regression test count |
+| `check_security_regression_count.sh` | `make ci` + `ci.yml` — floor on security-regression test count |
 | `check_osv.py` | `make ci`, `ci.yml` — runs `osv-scanner`, derives severity, fails on threshold |
 | `perf_gate.sh` | `perf-nightly.yml`, `make` — compares `tests/perf/latest.json` against `baseline.json` |
 | `emit_perf_latest.py` | emits `tests/perf/latest.json` for the gate above (`--rows N` / `PERF_NUM_ROWS`) |

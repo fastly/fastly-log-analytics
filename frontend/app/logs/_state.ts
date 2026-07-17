@@ -89,6 +89,7 @@ export function useLogsPageState() {
     // Five minutes is well under "stale" for a history table and cuts
     // the steady-state request rate by 10× vs. the prior 30 s cadence.
     refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
     staleTime: 30_000,
   })
 
@@ -124,6 +125,7 @@ export function useLogsPageState() {
     // notifier reads this query key, so SSE invalidations propagate
     // automatically; this interval is now a safety net only.
     refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
     staleTime: 15_000,
   })
 
@@ -311,6 +313,7 @@ export function useLogsPageState() {
     // net for silently-dropped streams.
     staleTime: 10_000,
     refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
   })
 
   const orderedSchedules = React.useMemo(() => {

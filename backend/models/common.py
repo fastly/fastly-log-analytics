@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel
+from pydantic import AfterValidator, BaseModel, ConfigDict
 
 # ── Annotated clamping types (replaces repeated @field_validator boilerplate) ──
 
@@ -224,6 +224,7 @@ class BaseResponse(BaseModel):
 
 
 class BootstrapService(BaseModel):
+    model_config = ConfigDict(extra="allow")
     service_id: str
     name: str | None = None
     access_level: str | None = None

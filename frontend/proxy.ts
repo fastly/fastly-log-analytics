@@ -81,7 +81,8 @@ function buildCsp(nonce: string): string {
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
 
-  const isServerAction = request.headers.has('next-action')
+  const contentType = request.headers.get('content-type') || ''
+  const isServerAction = request.headers.has('next-action') || (request.method === 'POST' && contentType.toLowerCase().includes('multipart/form-data'))
   const isDataRequest = pathname.startsWith('/_next/data/') && ANALYST_BLOCKED_PREFIXES.some(p => pathname.endsWith(`${p}.json`) || pathname.includes(`${p}/`))
 
   const isGatedPath = ANALYST_BLOCKED_PREFIXES.some(p => pathname === p || pathname.startsWith(`${p}/`)) || isServerAction || isDataRequest

@@ -4,7 +4,7 @@ import React, { useState } from 'react'
 import Link from 'next/link'
 import { useQuery } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
-import { AlertTriangle, Clock, ExternalLink, Globe, Shield, Users } from 'lucide-react'
+import { AlertTriangle, Clock, ExternalLink, Film, Globe, Shield, Users } from 'lucide-react'
 
 import { client, extractApiError } from '@/lib/api'
 import { DataTable } from '@/components/DataTable'
@@ -29,7 +29,8 @@ import {
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
 import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
-import { buildSessionDashboardUrl } from '@/lib/session-urls'
+import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/session-urls'
+import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/streamingInfo'
 import type { components } from '@/types/api.generated'
 
 type SessionRow = components['schemas']['Session']
@@ -110,22 +111,31 @@ export function SessionDetail({
         if (col === 'resp_bytes' || col === 'elapsed') {
           return <span className="text-xs font-mono tabular-nums">{Number(value).toLocaleString()}</span>
         }
+        if (col === 'cmcd_ot') return <span className="text-xs">{cmcdLabel(OBJECT_TYPE_LABELS, value as string)}</span>
+        if (col === 'cmcd_sf') return <span className="text-xs">{cmcdLabel(STREAMING_FORMAT_LABELS, value as string)}</span>
+        if (col === 'cmcd_st') return <span className="text-xs">{cmcdLabel(STREAM_TYPE_LABELS, value as string)}</span>
         return <span className="text-xs truncate max-w-[220px] inline-block">{String(value ?? '')}</span>
       }
     }))
   }, [detailData?.columns, relative, full, abbr, getFieldLabel])
 
+  const cmcdDetailCols = ['cmcd_ot', 'cmcd_br', 'cmcd_bl', 'cmcd_sf', 'cmcd_st']
+
   const initialDetailVisibility = React.useMemo(() => {
     if (!detailData?.columns) return {}
     const defaultVisible = ['timestamp', 'host', 'url', 'method', 'edge', 'status', 'cache', 'ua', 'pop']
+    const streamingVisible = selectedSession?.is_streaming
+      ? cmcdDetailCols.filter(c => detailData.columns.includes(c))
+      : []
+    const allVisible = [...defaultVisible, ...streamingVisible]
     const visibility: Record<string, boolean> = {}
     detailData.columns.forEach(col => {
-      visibility[col] = defaultVisible.includes(col)
+      visibility[col] = allVisible.includes(col)
     })
     return visibility
-  }, [detailData?.columns])
+  }, [detailData?.columns, selectedSession?.is_streaming])
 
-  const initialDetailColumnOrder = ['timestamp', 'host', 'url', 'method', 'edge', 'status', 'cache', 'ua', 'pop']
+  const initialDetailColumnOrder = ['timestamp', 'host', 'url', 'method', 'edge', 'status', 'cache', 'ua', 'pop', ...cmcdDetailCols]
 
   const filteredDetailData = React.useMemo(() => {
     const arr = detailData?.data || []
@@ -138,6 +148,17 @@ export function SessionDetail({
         <DialogHeader className="shrink-0 mb-2">            <DialogTitle className="flex items-center gap-2 text-base">
             <Users className="h-4 w-4" />
             Session: {selectedSession?.ip}
+            {selectedSession?.is_streaming && <Film className="h-4 w-4 text-blue-500" />}
+            {selectedSession?.is_streaming && selectedSession.session_token && (
+              <Link
+                href={buildStreamDetailUrl(selectedSession.session_token)}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition-colors"
+              >
+                <Film className="h-3 w-3" />
+                Stream Details
+                <ExternalLink className="h-3 w-3" />
+              </Link>
+            )}
             {selectedSession?.flagged && <AlertTriangle className="h-4 w-4 text-yellow-500" />}
             {selectedSession?.edge_sid && (
               <FlagSessionPopover

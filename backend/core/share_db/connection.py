@@ -185,7 +185,6 @@ _pool = ThreadLocalPool(
     schema_fn=_share_db_init,
     connect_fn=get_safe_share_db_connection,
     on_borrow_fn=_share_db_on_borrow,
-    init_lock_provider=lambda: _module._init_lock,
     initialized_provider=lambda: _module._initialized,
     local_provider=lambda: _module._local,
 )

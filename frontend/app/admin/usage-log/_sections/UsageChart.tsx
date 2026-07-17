@@ -41,6 +41,7 @@ export function LogAccountingPanel() {
     },
     staleTime: 30_000,
     refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
   })
 
   const totals = data?.totals

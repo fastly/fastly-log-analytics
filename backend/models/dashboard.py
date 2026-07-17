@@ -281,6 +281,7 @@ class SessionsRequest(FilteredRequest, PaginationMixin):
     limit: Limit500 = 50
     sort_by: str = "session_start"
     flagged_only: bool = False
+    streaming_only: bool = False
     min_reqs_flag: int | None = None
     min_4xx_pct_flag: float | None = None
 
@@ -307,6 +308,7 @@ class Session(BaseModel):
     total_bytes: int | None = None
     median_rtt_ms: float | None = None
     edge_sid: str | None = None
+    is_streaming: bool | None = None
     flagged: bool
     # Opaque AES-GCM token sealing the real (ip, ja4, session_start,
     # session_end) tuple, minted server-side per row. The detail endpoint
@@ -332,6 +334,7 @@ class SessionsResponse(BaseResponse):
     has_ja4: bool
     has_edge: bool
     has_edge_sid: bool = False
+    has_cmcd: bool = False
     min_reqs_flag: int
     min_4xx_pct_flag: float
 

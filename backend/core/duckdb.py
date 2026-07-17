@@ -1036,6 +1036,23 @@ def get_connection(
         con.execute(f"SET memory_limit = '{_cached_mem_limit_gb}GB';")
     con.execute("SET checkpoint_threshold = '512MB';")
 
+    # Configure temp directory to be service-specific next to the database file
+    if db_path and db_path != ":memory:" and not db_path.startswith(":memory:"):
+        _service_temp_dir = os.path.join(os.path.dirname(db_path), ".tmp")
+        try:
+            os.makedirs(_service_temp_dir, exist_ok=True)
+            _escaped_dir = _service_temp_dir.replace("'", "''")
+            con.execute(f"SET temp_directory = '{_escaped_dir}';")
+        except Exception as e:
+            logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
+
+    # Configure max temp directory size with environment override or default to 10GB
+    try:
+        _max_temp_size = os.getenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "10GB")
+        con.execute(f"SET max_temp_directory_size = '{_max_temp_size}';")
+    except Exception as e:
+        logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
+
     # ALWAYS update the view to ensure local buffer files
     # are included. DuckDB views are session-scoped when they reference temp tables
     # or specific file lists, so we must ensure the view is fresh.

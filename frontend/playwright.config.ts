@@ -53,7 +53,7 @@ export default defineConfig({
   // on port 13002 (next dev refuses to start a second instance against
   // the same lock dir).
   webServer: {
-    command: `npx next dev -H 127.0.0.1 -p ${FRONTEND_PORT}`,
+    command: `npm run build && npx next start -H 127.0.0.1 -p ${FRONTEND_PORT}`,
     env: {
       NEXT_DIST_DIR: '.next-e2e',
       // NEXT_PUBLIC_API_URL pins the openapi-fetch base to the
@@ -71,7 +71,7 @@ export default defineConfig({
     },
     url: `http://127.0.0.1:${FRONTEND_PORT}`,
     reuseExistingServer: !isCI,
-    timeout: 120_000,
+    timeout: 180_000,
     cwd: join(__dirname),
   },
   globalSetup: require.resolve('./e2e/global-setup'),

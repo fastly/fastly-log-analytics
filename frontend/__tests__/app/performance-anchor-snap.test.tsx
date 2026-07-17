@@ -75,7 +75,7 @@ vi.mock('@/components/AnalyticsCard', () => ({
   ),
 }))
 
-test('first-paint core + distributions queries both anchor on the snapped (stale) log extents, not "now"', async () => {
+test('first-paint performance query anchors on the snapped (stale) log extents, not "now"', async () => {
   vi.mocked(apiLib.client.GET).mockResolvedValue({
     data: { fields: [{ id: 'status', label: 'HTTP Status' }], groups: [], presets: {} },
   } as any)
@@ -97,7 +97,7 @@ test('first-paint core + distributions queries both anchor on the snapped (stale
     const calls = vi
       .mocked(apiLib.client.POST)
       .mock.calls.filter(([url]: any[]) => String(url).includes('/api/performance/aggregates'))
-    expect(calls.length).toBeGreaterThanOrEqual(2)
+    expect(calls.length).toBe(1)
   })
 
   const calls = vi

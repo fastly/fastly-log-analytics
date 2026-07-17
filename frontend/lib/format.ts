@@ -81,6 +81,12 @@ export function formatValue(field: string | undefined, value: string | number | 
   return str
 }
 
+export function formatCurrency(amount: number): string {
+  if (amount >= 1000) return '$' + (amount / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+  if (amount >= 1) return '$' + amount.toFixed(2)
+  return '$' + amount.toFixed(4)
+}
+
 /**
  * Calculates the percentage delta between two numeric values.
  */

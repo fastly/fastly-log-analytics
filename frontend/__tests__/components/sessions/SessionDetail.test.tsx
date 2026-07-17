@@ -100,7 +100,7 @@ function makeSession(overrides: Partial<SessionRow> = {}): SessionRow {
 }
 
 function makeListResponse(
-  flags: Partial<Pick<SessionsResponse, 'has_rtt' | 'has_ja4' | 'has_edge' | 'has_edge_sid'>> = {},
+  flags: Partial<Pick<SessionsResponse, 'has_rtt' | 'has_ja4' | 'has_edge' | 'has_edge_sid' | 'has_cmcd'>> = {},
 ): SessionsResponse {
   return {
     sessions: [],
@@ -112,6 +112,7 @@ function makeListResponse(
     has_ja4: false,
     has_edge: false,
     has_edge_sid: false,
+    has_cmcd: false,
     min_reqs_flag: 0,
     min_4xx_pct_flag: 0,
     _is_cached: false,

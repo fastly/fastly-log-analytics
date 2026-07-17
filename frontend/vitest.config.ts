@@ -38,6 +38,30 @@ export default defineConfig({
     env: {
       NEXT_PUBLIC_API_URL: 'http://127.0.0.1:8000',
     },
+    css: false,
+    deps: {
+      optimizer: {
+        web: {
+          include: [
+            'plotly.js-dist-min',
+            'plotly.js',
+            'react-plotly.js',
+            'maplibre-gl',
+            'msw',
+            'msw/node',
+            '@testing-library/react',
+            '@testing-library/jest-dom',
+            '@testing-library/user-event',
+            'react-dom',
+            'react-dom/client',
+            '@tanstack/react-query',
+            'lucide-react',
+            'vitest-axe',
+            'vitest-axe/matchers',
+          ],
+        },
+      },
+    },
   },
   resolve: {
     alias: {

@@ -170,6 +170,7 @@ def recompute_wellknown_bots_rollup(
             hour_dir = os.path.join(bots_root, f"hour={hour}")
             os.makedirs(hour_dir, exist_ok=True)
             tmp_path = os.path.join(hour_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
+            tmp_path_sql = tmp_path.replace("'", "''")
             try:
                 con.execute(
                     f"COPY ("
@@ -183,7 +184,7 @@ def recompute_wellknown_bots_rollup(
                     f"  GROUP BY ua, ip "
                     f"  ORDER BY request_count DESC "
                     f"  LIMIT 50000"
-                    f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                    f") TO '{tmp_path_sql}' (FORMAT PARQUET, COMPRESSION ZSTD)"
                 )
             except duckdb.Error as e:
                 logger.warning("[rollups] %s: bot-rollup COPY failed for hour=%s: %s", service_id, hour, e)

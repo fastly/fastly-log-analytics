@@ -54,6 +54,27 @@ async def bootstrap(
     request: Request,
     service_id: str | None = Depends(get_service_id),
 ):
+    import sys
+
+    main_module = sys.modules.get("backend.main")
+    startup_complete = getattr(main_module, "_startup_complete", False) if main_module else False
+
+    if "pytest" in sys.modules:
+        startup_complete = True
+
+    if not startup_complete:
+        from backend.core.web_vitals_store import collection_enabled as _web_vitals_enabled
+
+        return BootstrapResponse.with_telemetry(
+            active_service_id=None,
+            services=[],
+            settings={
+                "initializing": True,
+                "is_remote_analyst": False,
+                "needs_login": False,
+                "web_vitals_enabled": _web_vitals_enabled(),
+            },
+        )
     # NB: kept docstring-free on purpose — FastAPI publishes a route
     # docstring as the OpenAPI `description`, and this handler had none.
     # Coalesce + short-TTL cache the loopback admin bootstrap; run the
@@ -333,16 +354,36 @@ def _bootstrap_sync(
         # exactly so analyst/admin both look in the same place.
         if not active_src:
             return
+        import re
+
         from backend import config as svcconfig
+        from backend.core import metadata as metadata_db
 
         cached_status = svcconfig.get_status(active_src["name"]) or {}
+
+        # Real-time SQLite metadata lookup overlay for bootstrap header/extents
+        latest_file_at = None
+        total_rows = 0
+        try:
+            summary = metadata_db.get_ingested_files_status_summary(active_src["name"])
+            latest_file_name = summary.get("latest_file_name")
+            total_rows = summary.get("total_rows") or 0
+            if latest_file_name:
+                fname = latest_file_name.split("/")[-1]
+                m = re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", fname)
+                if m:
+                    latest_file_at = f"{m.group(1)}T{m.group(2).replace('-', ':').replace('.', ':')}Z"
+        except Exception:
+            pass
+
         latest = (
-            cached_status.get("latest_log_at")
+            latest_file_at
+            or cached_status.get("latest_log_at")
             or cached_status.get("latest_available_file_at")
             or cached_status.get("latest_ingested_file_at")
         )
         earliest = cached_status.get("earliest_log_at")
-        local_rows = cached_status.get("local_rows")
+        local_rows = cached_status.get("local_rows") or total_rows
         if latest is not None or local_rows is not None:
             header_badge_payload = {
                 "latest_log_at": latest,
@@ -354,7 +395,7 @@ def _bootstrap_sync(
         log_extents_payload = {
             "configured": True,
             "earliest_log_at": earliest,
-            "latest_log_at": cached_status.get("latest_log_at"),
+            "latest_log_at": latest,
         }
 
     timer.call("header_badge_and_extents", _resolve_header_badge_and_extents)

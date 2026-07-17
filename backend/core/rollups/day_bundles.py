@@ -22,6 +22,7 @@ from ._common import (
     ORIGIN_PATH_BUNDLE_FILENAME,
     ORIGIN_POP_BUNDLE_FILENAME,
     ORIGIN_SUMMARY_BUNDLE_FILENAME,
+    OVERVIEW_BUNDLE_FILENAME,
     PERF_LATENCY_BUNDLE_TOP_K,
     PERF_TOP_ASNS_BUNDLE_FILENAME,
     PERF_TOP_URLS_BUNDLE_FILENAME,
@@ -967,5 +968,47 @@ def compact_perf_dims_closed_days_to_daily(service_id: str, source: dict) -> int
         service_id,
         source,
         jobs=[(PERF_TTL_DIST_BUNDLE_FILENAME, ".tmp_pd_", _copy_sql)],
+        logger=logger,
+    )
+
+
+def compact_overview_closed_days_to_daily(service_id: str, source: dict) -> int:
+    """Consolidate closed-day per-hour overview parquets into per-day files
+    at ``day_bundled/day=YYYY-MM-DD/overview.parquet``.
+
+    Preserves ``hour_start`` granularity (24 rows per day file) so the
+    reader can still re-bucket to sub-day chart intervals. All metric
+    columns are SUM-aggregatable — the ``GROUP BY hour_start`` is a no-op
+    merge (each hour lives in exactly one source file).
+    """
+
+    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT hour_start, "
+            f"    CAST(SUM(requests) AS BIGINT) AS requests, "
+            f"    CAST(SUM(hit_requests) AS BIGINT) AS hit_requests, "
+            f"    CAST(SUM(miss_requests) AS BIGINT) AS miss_requests, "
+            f"    CAST(SUM(pass_requests) AS BIGINT) AS pass_requests, "
+            f"    CAST(SUM(synth_requests) AS BIGINT) AS synth_requests, "
+            f"    CAST(SUM(origin_requests) AS BIGINT) AS origin_requests, "
+            f"    CAST(SUM(bandwidth_saved_bytes) AS BIGINT) AS bandwidth_saved_bytes, "
+            f"    CAST(SUM(total_bandwidth_bytes) AS BIGINT) AS total_bandwidth_bytes, "
+            f"    CAST(SUM(shield_hit_requests) AS BIGINT) AS shield_hit_requests, "
+            f"    CAST(SUM(shield_total_requests) AS BIGINT) AS shield_total_requests, "
+            f"    CAST(SUM(threats_blocked) AS BIGINT) AS threats_blocked, "
+            f"    CAST(SUM(hit_elapsed_sum) AS DOUBLE) AS hit_elapsed_sum, "
+            f"    CAST(SUM(hit_elapsed_count) AS BIGINT) AS hit_elapsed_count, "
+            f"    CAST(SUM(miss_elapsed_sum) AS DOUBLE) AS miss_elapsed_sum, "
+            f"    CAST(SUM(miss_elapsed_count) AS BIGINT) AS miss_elapsed_count "
+            f"  FROM read_parquet([{paths_sql}]) "
+            f"  GROUP BY hour_start"
+            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+
+    return compact_closed_days(
+        service_id,
+        source,
+        jobs=[(OVERVIEW_BUNDLE_FILENAME, ".tmp_ov_", _copy_sql)],
         logger=logger,
     )

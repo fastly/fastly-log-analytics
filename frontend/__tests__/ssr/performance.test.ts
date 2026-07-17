@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// performance.ts fetches TWO section groups (core + distributions) per cold
+// performance.ts fetches the unified /api/performance/aggregates selection per cold
 // load, sharing one (rangeToken, anchor) pair. These tests pin (1) the
 // security contract — the Caddy-marker trust gate must behave IDENTICALLY as
 // the other POST SSR callers (refuse no-marker + non-loopback Host;
 // analyst-clamp on the marker branch; admin token only on the loopback
 // branch) — and (2) the key-match contract: the (rangeToken, anchor) this
 // helper resolves equals what PerformanceClient computes on first paint for
-// BOTH keys, so the SSR seed byte-matches. A mismatch would double-fetch
+// the key, so the SSR seed byte-matches. A mismatch would double-fetch
 // (worse than no SSR).
 
 const mockCookies = vi.fn()
@@ -68,21 +68,17 @@ describe('resolvePerformanceDefaultKey (key-match contract)', () => {
   })
 })
 
-describe('SSR-seed keys ↔ client first-paint keys byte-match', () => {
-  it('both the core and distributions page.tsx seed keys === the client keys', async () => {
+describe('SSR-seed key ↔ client first-paint key byte-match', () => {
+  it('the page.tsx seed key === the client key', async () => {
     const { hashKey } = await import('@tanstack/react-query')
     const { resolvePerformanceDefaultKey, PERFORMANCE_SSR_DEFAULTS } = await import('@/lib/ssr/performance')
 
     const serviceId = 'svc-1'
     const { rangeToken, anchor } = resolvePerformanceDefaultKey(new Date('2026-06-29T12:00:30Z'))
 
-    const coreSeedKey = ['performance', 'aggregates', 'core', serviceId, rangeToken, anchor, {}, PERFORMANCE_SSR_DEFAULTS.sortBy]
-    const coreClientKey = ['performance', 'aggregates', 'core', serviceId, rangeToken, anchor, {}, 'p99']
-    expect(hashKey(coreSeedKey)).toBe(hashKey(coreClientKey))
-
-    const distSeedKey = ['performance', 'aggregates', 'distributions', serviceId, rangeToken, anchor, {}, PERFORMANCE_SSR_DEFAULTS.sortBy]
-    const distClientKey = ['performance', 'aggregates', 'distributions', serviceId, rangeToken, anchor, {}, 'p99']
-    expect(hashKey(distSeedKey)).toBe(hashKey(distClientKey))
+    const seedKey = ['performance', 'aggregates', serviceId, rangeToken, anchor, {}, PERFORMANCE_SSR_DEFAULTS.sortBy]
+    const clientKey = ['performance', 'aggregates', serviceId, rangeToken, anchor, {}, 'p99']
+    expect(hashKey(seedKey)).toBe(hashKey(clientKey))
   })
 })
 
@@ -117,7 +113,7 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
     }
   })
 
-  it('admin SSH-tunnel: POSTs both core + distributions keyed bodies as admin with X-Admin-Token + service id', async () => {
+  it('admin SSH-tunnel: POSTs unified aggregates as admin with X-Admin-Token + service id', async () => {
     const http = await import('node:http')
     const capturedBodies: string[] = []
     const capturedHeaders: Array<Record<string, string | string[] | undefined>> = []
@@ -141,33 +137,20 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
       const {
         fetchPerformanceServerSide,
         PERFORMANCE_SSR_DEFAULTS,
-        PERFORMANCE_CORE_SSR_SECTIONS,
-        PERFORMANCE_DISTRIBUTIONS_SSR_SECTIONS,
       } = await import('@/lib/ssr/performance')
       const now = new Date('2026-06-29T12:00:30Z')
       const out = await fetchPerformanceServerSide('svc-1', now)
 
       expect(out).not.toBeNull()
-      expect(out!.coreData).toEqual({ ok: true })
-      expect(out!.distributionsData).toEqual({ ok: true })
+      expect(out!.performanceData).toEqual({ ok: true })
       expect(out!.rangeToken).toBe('24h')
       expect(out!.anchor).toBe('2026-06-29T12:00:00Z')
 
-      expect(capturedBodies).toHaveLength(2)
-      const bodies = capturedBodies.map((b) => JSON.parse(b))
-      const coreBody = bodies.find((b) => b.sections[0] === PERFORMANCE_CORE_SSR_SECTIONS[0])
-      const distBody = bodies.find((b) => b.sections[0] === PERFORMANCE_DISTRIBUTIONS_SSR_SECTIONS[0])
-      expect(coreBody).toEqual({
+      expect(capturedBodies).toHaveLength(1)
+      const body = JSON.parse(capturedBodies[0])
+      expect(body).toEqual({
         filters: {},
         sort_by: PERFORMANCE_SSR_DEFAULTS.sortBy,
-        sections: [...PERFORMANCE_CORE_SSR_SECTIONS],
-        range_token: '24h',
-        anchor: '2026-06-29T12:00:00Z',
-      })
-      expect(distBody).toEqual({
-        filters: {},
-        sort_by: PERFORMANCE_SSR_DEFAULTS.sortBy,
-        sections: [...PERFORMANCE_DISTRIBUTIONS_SSR_SECTIONS],
         range_token: '24h',
         anchor: '2026-06-29T12:00:00Z',
       })
@@ -182,24 +165,11 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
     }
   })
 
-  it('all-or-nothing: if either sub-fetch fails, returns null (no partial seed)', async () => {
+  it('fails safely: if fetch fails, returns null', async () => {
     const http = await import('node:http')
-    let calls = 0
     const server = http.createServer((req, res) => {
-      calls += 1
-      const chunks: Buffer[] = []
-      req.on('data', (c: Buffer) => chunks.push(c))
-      req.on('end', () => {
-        // Fail the second request only.
-        if (calls === 2) {
-          res.statusCode = 500
-          res.end('boom')
-          return
-        }
-        res.statusCode = 200
-        res.setHeader('Content-Type', 'application/json')
-        res.end('{"ok":true}')
-      })
+      res.statusCode = 500
+      res.end('boom')
     })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port

@@ -80,8 +80,8 @@ export function AnalyticsCard({
 
   return (
     <>
-    <Card className={cn("flex flex-col overflow-hidden", className)}>
-      <CardHeader className="px-4 pt-0 pb-3 border-b space-y-0">
+    <Card className={cn("flex flex-col gap-0 py-0 overflow-hidden", className)}>
+      <CardHeader className="px-4 pt-4 pb-3 border-b space-y-0">
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-2">
             {icon && <div className="text-primary">{icon}</div>}
@@ -108,7 +108,7 @@ export function AnalyticsCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className={cn("p-4 flex-1 relative min-h-0", contentClassName)}>
+      <CardContent className={cn("px-4 pt-4 pb-4 flex-1 relative min-h-0", contentClassName)}>
         {showLoading ? (
           // bg-background (opaque) rather than bg-background/50: when data is
           // undefined the children render their unit suffixes anyway (e.g.

@@ -28,6 +28,7 @@ def test_sessions_cte_pipeline_renders_with_all_inputs():
         url_proj=', "url"',
         edge_proj=', "edge"',
         edge_sid_proj=', "edge_sid"',
+        cmcd_sid_proj=', "cmcd_sid"',
         table_name='"logs_xyz"',
         where_clause="timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)",
         part_key='"ip", "ja4"',
@@ -49,6 +50,7 @@ def test_sessions_cte_pipeline_renders_with_all_inputs():
     assert '"ja4"' in rendered
     assert '"ua"' in rendered
     assert '"edge_sid"' in rendered
+    assert '"cmcd_sid"' in rendered
     assert 'SUM("resp_bytes") AS total_bytes' in rendered
     assert 'MAX("edge_sid") AS edge_sid' in rendered
     # Table identifier substituted.
@@ -69,6 +71,7 @@ def test_sessions_cte_pipeline_renders_with_empty_optional_projections():
         url_proj="",
         edge_proj="",
         edge_sid_proj="",
+        cmcd_sid_proj="",
         table_name='"logs_xyz"',
         where_clause="1=1",
         part_key='"ip"',
@@ -97,6 +100,7 @@ def test_sessions_cte_pipeline_pins_all_expected_placeholders():
         "url_proj",
         "edge_proj",
         "edge_sid_proj",
+        "cmcd_sid_proj",
         "table_name",
         "where_clause",
         "part_key",  # used in gaps + sessions_raw window functions

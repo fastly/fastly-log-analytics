@@ -73,7 +73,10 @@ def get_db_path() -> str:
 
 
 def _init(con: sqlite3.Connection) -> None:
-    con.execute("PRAGMA journal_mode=WAL")
+    cur = con.execute("PRAGMA journal_mode")
+    row = cur.fetchone()
+    if not row or row[0].lower() != "wal":
+        con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
     con.execute("PRAGMA busy_timeout=10000")
     con.execute("PRAGMA cache_size=-8000")  # 8 MB — tiny table

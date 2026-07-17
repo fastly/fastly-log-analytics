@@ -28,6 +28,8 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof ScoringControl
   return {
     flaggedOnly: false,
     setFlaggedOnly: vi.fn(),
+    streamingOnly: false,
+    setStreamingOnly: vi.fn(),
     minReqs: '' as number | '',
     setMinReqs: vi.fn(),
     min4xxPct: '' as number | '',

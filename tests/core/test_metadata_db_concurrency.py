@@ -35,6 +35,10 @@ def test_concurrent_inserts_no_lock_no_loss():
     n_threads = 8
     rows_per_thread = 50
 
+    # Warm the DB so the init lock isn't serialising all 8 cold-start threads
+    # (under CI load, 8 sequential connect+PRAGMA+schema > 10s timeout).
+    metadata_db.get_con(sid)
+
     def worker(thread_id: int) -> int:
         rows = [(f"thread-{thread_id}/file-{i}.gz", 100, 4096) for i in range(rows_per_thread)]
         # If WAL is dropped or the connection pool serialises poorly, this
@@ -181,54 +185,43 @@ def test_threads_get_isolated_connections():
 
 
 def test_get_con_init_lock_times_out_when_held(monkeypatch):
-    """``_init_lock`` must NOT block forever — a stuck thread inside the
-    connect+PRAGMA window once wedged every other cron tick for 10+ minutes
-    (incident 2026-05-21). With a 10s acquire timeout, the caller now sees
-    a clean ``OperationalError`` and the swallowing try/except up the stack
-    keeps the rest of the cron alive.
+    """The per-key init lock must NOT block forever — a stuck thread inside
+    the connect+PRAGMA window once wedged every other cron tick for 10+
+    minutes (incident 2026-05-21). With the pool's acquire timeout, the
+    caller sees a clean ``OperationalError`` and the swallowing try/except
+    up the stack keeps the rest of the cron alive.
     """
     import sqlite3
     import threading
     import time
 
-    # Wrap the lock to fail fast on timeout=10
-    real_lock = metadata_db._init_lock
+    from backend.core.metadata.base import _pool as pool
 
-    class QuickTimeoutLock:
-        def acquire(self, blocking=True, timeout=-1):
-            if timeout == 10:
-                timeout = 0.05
-            return real_lock.acquire(blocking, timeout)
+    # Lower the pool's timeout so the test finishes fast.
+    monkeypatch.setattr(pool, "_init_lock_timeout", 0.05)
 
-        def release(self):
-            real_lock.release()
+    sid = "svc-init-lock-timeout"
 
-        def __enter__(self):
-            return real_lock.__enter__()
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            return real_lock.__exit__(exc_type, exc_val, exc_tb)
-
-    monkeypatch.setattr(metadata_db, "_init_lock", QuickTimeoutLock())
-
-    # Acquire _init_lock from another thread and hold it. A test-thread
-    # acquire+release of an RLock would simply pass through reentrantly.
+    # Pre-inject a held lock for this service ID into the pool's per-key
+    # dict. The contender thread will find this lock and block on it.
+    held = threading.Lock()
     holder_acquired = threading.Event()
     holder_release = threading.Event()
 
     def _hold_lock() -> None:
-        with real_lock:
-            holder_acquired.set()
-            holder_release.wait(timeout=30)
+        held.acquire()
+        holder_acquired.set()
+        holder_release.wait(timeout=30)
+        held.release()
 
     holder = threading.Thread(target=_hold_lock, name="init-lock-holder", daemon=True)
     holder.start()
     try:
-        assert holder_acquired.wait(timeout=5), "holder thread never acquired _init_lock"
+        assert holder_acquired.wait(timeout=5), "holder thread never acquired lock"
 
-        # New thread + brand-new service id => guaranteed to miss the
-        # thread-local pool and hit the _init_lock acquire path.
-        sid = "svc-init-lock-timeout"
+        with pool._key_locks_guard:
+            pool._key_locks[sid] = held
+
         result: dict = {}
 
         def _try_get() -> None:
@@ -245,18 +238,19 @@ def test_get_con_init_lock_times_out_when_held(monkeypatch):
         contender.start()
         contender.join(timeout=15)
 
-        assert not contender.is_alive(), "contender did not return within 15s — _init_lock acquire is unbounded"
+        assert not contender.is_alive(), "contender did not return within 15s — init lock acquire is unbounded"
         assert "err" in result, f"expected OperationalError; got result={result}"
         assert "_init_lock contended" in result["err"], (
             f"error message must name the lock for debuggability; got {result['err']!r}"
         )
-        # Must fire near the 0.05s timeout, not the SQLite 30s timeout or full 10s.
         assert result["elapsed"] <= 2.0, (
             f"acquire fired at {result['elapsed']:.2f}s — expected to be very fast under mock timeout."
         )
     finally:
         holder_release.set()
         holder.join(timeout=5)
+        with pool._key_locks_guard:
+            pool._key_locks.pop(sid, None)
 
 
 # ── journal-mode mismatch on legacy DB (audit follow-up) ────────────────────

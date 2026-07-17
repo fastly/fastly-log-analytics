@@ -5,6 +5,9 @@ const isStaticExport = process.env.STATIC_EXPORT === '1'
 const apiProxyUrl = process.env.API_PROXY_URL || 'http://127.0.0.1:8000'
 
 const nextConfig: NextConfig = {
+  experimental: {
+    optimizePackageImports: ['lucide-react'],
+  },
   output: isStaticExport ? 'export' : 'standalone',
   trailingSlash: false,
   // Allow the Playwright suite (R-3a) to point next dev at a separate

@@ -18,6 +18,9 @@ interface ReviewStepProps {
   edgeOnly: boolean
   customCondition: string
   estimatedBytes: number
+  cmcdEnabled?: boolean
+  cmcdMode?: string
+  cmcdVersion?: number
 }
 
 export function ReviewStep({
@@ -29,6 +32,9 @@ export function ReviewStep({
   edgeOnly,
   customCondition,
   estimatedBytes,
+  cmcdEnabled,
+  cmcdMode,
+  cmcdVersion,
 }: ReviewStepProps) {
   return (
     <div className="space-y-6">
@@ -45,6 +51,11 @@ export function ReviewStep({
                 Custom Condition: <code className="text-[10px] bg-background px-1 rounded border">{customCondition}</code>
               </p>
             )}
+            <p className="text-sm font-medium">
+              CMCD: {cmcdEnabled
+                ? `Enabled (v${cmcdVersion ?? 1}, ${cmcdMode === 'headers' ? 'Headers' : 'Query String'})`
+                : 'Disabled'}
+            </p>
           </div>
 
           <div className="p-4 border rounded-lg bg-muted/20 space-y-1">

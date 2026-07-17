@@ -457,7 +457,13 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"asn":%{if(req.http.x-fos-edge-data:asn ~ "^[0-9]+$", req.http.x-fos-edge-data:asn, if(client.as.number > 0, "" + client.as.number, "null"))}V',
         "duckdb_type": "UINTEGER",
         "typical_bytes": 11,
-        "required_by": ["asn_concentration", "new_asn_traffic", "network_asn_health", "region_latency"],
+        "required_by": [
+            "asn_concentration",
+            "asn_hosting_shift",
+            "new_asn_traffic",
+            "network_asn_health",
+            "region_latency",
+        ],
     },
     {
         "id": "tcp_rtt",
@@ -661,7 +667,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"p_type":"%{json.escape(if(req.http.x-fos-edge-data:p_type != "", req.http.x-fos-edge-data:p_type, if(client.geo.proxy_type == "?", "", client.geo.proxy_type)))}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 10,
-        "required_by": ["proxy_surge"],
+        "required_by": ["asn_hosting_shift", "proxy_surge"],
     },
     {
         "id": "p_desc",
@@ -897,6 +903,49 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
         "vcl": '"prid":"%{json.escape(req.http.x-edge-req-id)}V"',
         "duckdb_type": "VARCHAR",
         "typical_bytes": 16,
+        "required_by": [],
+    },
+    # ── Group M: Image Optimizer Metrics (from Fastly-Io-Transform-Stats header) ─────
+    {
+        "id": "io_input_bytes",
+        "group": "M",
+        "label": "IO Input Bytes",
+        "description": "Original image size in bytes before IO processing, from Fastly-Io-Transform-Stats ifsz field.",
+        "formatter": "bytes",
+        "vcl": '"io_input_bytes":%{if(req.http.x-fos-io-ifsz ~ "^[0-9]+$", req.http.x-fos-io-ifsz, "null")}V',
+        "duckdb_type": "UBIGINT",
+        "typical_bytes": 20,
+        "required_by": [],
+    },
+    {
+        "id": "io_output_bytes",
+        "group": "M",
+        "label": "IO Output Bytes",
+        "description": "Optimized image size in bytes after IO processing, from Fastly-Io-Transform-Stats ofsz field.",
+        "formatter": "bytes",
+        "vcl": '"io_output_bytes":%{if(req.http.x-fos-io-ofsz ~ "^[0-9]+$", req.http.x-fos-io-ofsz, "null")}V',
+        "duckdb_type": "UBIGINT",
+        "typical_bytes": 20,
+        "required_by": [],
+    },
+    {
+        "id": "io_input_format",
+        "group": "M",
+        "label": "IO Input Format",
+        "description": "Original image format before IO processing, from Fastly-Io-Transform-Stats ifmt field.",
+        "vcl": '"io_input_format":"%{json.escape(if(req.http.x-fos-io-ifmt != "", req.http.x-fos-io-ifmt, ""))}V"',
+        "duckdb_type": "VARCHAR",
+        "typical_bytes": 20,
+        "required_by": [],
+    },
+    {
+        "id": "io_output_format",
+        "group": "M",
+        "label": "IO Output Format",
+        "description": "Output image format after IO processing, from Fastly-Io-Transform-Stats ofmt field.",
+        "vcl": '"io_output_format":"%{json.escape(if(req.http.x-fos-io-ofmt != "", req.http.x-fos-io-ofmt, ""))}V"',
+        "duckdb_type": "VARCHAR",
+        "typical_bytes": 20,
         "required_by": [],
     },
     # ── Metrics ───────────────────────────────────────────────────────────
@@ -1166,6 +1215,14 @@ GROUP_INFO: dict[str | None, dict[str, Any]] = {
         "note": "Enabling this group deploys additional VCL timing snippets to your service automatically.",
         "recommended_with": ["C"],
     },
+    "M": {
+        "label": "Image Optimizer Metrics",
+        "description": "Per-request IO input/output sizes and formats from Fastly-Io-Transform-Stats. Enables actual compression ratio and format conversion analysis.",
+        "locked": False,
+        "requires": None,
+        "note": "Enabling this group deploys additional VCL snippets to your service. All fields are null for non-IO requests.",
+        "recommended_with": ["A"],
+    },
     "METRICS": {
         "label": "Aggregate Metrics",
         "description": "Computed aggregate metrics used for charts and dashboards.",
@@ -1217,7 +1274,7 @@ PRESETS: dict[str, dict[str, Any]] = {
     "full": {
         "label": "Full",
         "description": "All groups enabled. Maximum data collection.",
-        "groups": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"],
+        "groups": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"],
     },
 }
 
@@ -1404,6 +1461,14 @@ INSIGHT_DEFINITIONS = [
         "required_fields": ["ip"],
         "required_groups": [],
     },
+    {
+        "id": "repeated_patterns_fp",
+        "category": "security",
+        "title": "Scripted Traffic Patterns (by TLS Fingerprint)",
+        "description": "TLS fingerprints sending requests on a highly regular cadence — catches IP-rotating scrapers sharing a stable TLS stack",
+        "required_fields": ["ip"],
+        "required_groups": [],
+    },
     # ── 18-vs-30 catalog reconciliation (design plan §5.1 step 5) ───────────
     # The registry (definitions.py) computes 30 insights; this legacy catalog
     # historically listed only 16 of them (+ 2 stubs). The entries below add
@@ -1547,6 +1612,14 @@ INSIGHT_DEFINITIONS = [
         "description": "An ASN (ISP/datacenter) with zero baseline presence now sending meaningful traffic — a new botnet source, proxy pool, or datacenter range",
         "required_fields": ["asn"],
         "required_groups": ["F"],
+    },
+    {
+        "id": "asn_hosting_shift",
+        "category": "network",
+        "title": "ASN Hosting Shift",
+        "description": "An ASN's traffic composition shifting from consumer to datacenter/hosting — bot pools or scrapers spinning up on hosting infrastructure",
+        "required_fields": ["asn", "p_type"],
+        "required_groups": ["F", "I"],
     },
     # ── Phase-4 Track B2: standalone network + edge cards ───────────────────
     # Keep category + required_fields in lockstep with the registry (drift-guard).

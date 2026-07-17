@@ -29,6 +29,7 @@ Caveats:
 from __future__ import annotations
 
 import logging
+import time
 import weakref
 from collections.abc import Callable
 from typing import Any
@@ -36,6 +37,8 @@ from typing import Any
 import structlog
 
 logger = logging.getLogger(__name__)
+
+_MEMORY_PROBE_THRESHOLD_S = 0.5
 
 
 # Methods that return a streaming reader rather than a materialised result.
@@ -169,20 +172,22 @@ class _InstrumentedResult:
     that defers deregistration until the reader is exhausted.
     """
 
-    __slots__ = ("_raw", "_qid", "_done", "_con_ref")
+    __slots__ = ("_raw", "_qid", "_done", "_con_ref", "_start_mono")
 
     def __init__(self, raw: Any, qid: int, con_ref: Callable[[], Any] | None = None):
         self._raw = raw
         self._qid = qid
         self._done = False
         self._con_ref = con_ref
+        self._start_mono = time.monotonic()
 
     def _finish(self, error: BaseException | None = None, *, probe_memory: bool = True) -> None:
         if self._done:
             return
         self._done = True
         peak_mb: float | None = None
-        if probe_memory and self._con_ref is not None:
+        elapsed = time.monotonic() - self._start_mono
+        if probe_memory and elapsed >= _MEMORY_PROBE_THRESHOLD_S and self._con_ref is not None:
             con = self._con_ref()
             if con is not None:
                 peak_mb = _probe_duckdb_memory(con)
@@ -199,10 +204,12 @@ class _InstrumentedResult:
             mark_done = self._mark_done
             qid = self._qid
             con_ref = self._con_ref
+            start_mono = self._start_mono
 
             def _reader_finish(error: BaseException | None = None, *, probe_memory: bool = True) -> None:
                 peak_mb: float | None = None
-                if probe_memory and con_ref is not None:
+                elapsed = time.monotonic() - start_mono
+                if probe_memory and elapsed >= _MEMORY_PROBE_THRESHOLD_S and con_ref is not None:
                     con = con_ref()
                     if con is not None:
                         peak_mb = _probe_duckdb_memory(con)

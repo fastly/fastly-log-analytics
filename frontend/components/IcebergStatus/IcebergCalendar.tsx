@@ -35,6 +35,7 @@ export function IcebergCalendar() {
     enabled: !!activeServiceId,
     staleTime: 60_000,
     refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
   })
 
   // Generate last 90 days

@@ -106,13 +106,14 @@ class Group(StrEnum):
     J = "J"
     K = "K"
     L = "L"
+    M = "M"
     METRICS = "METRICS"
     VIRTUAL = "VIRTUAL"
     INTERNAL = "INTERNAL"
 
     @classmethod
     def from_legacy(cls, raw: str | None) -> Group:
-        """Translate the legacy `None | "A".."L" | "METRICS" | "VIRTUAL" | "INTERNAL"`."""
+        """Translate the legacy `None | "A".."M" | "METRICS" | "VIRTUAL" | "INTERNAL"`."""
         if raw is None:
             return cls.CORE
         return cls(raw)

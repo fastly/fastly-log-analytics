@@ -18,7 +18,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import duckdb
-from fastapi import Depends, Header, HTTPException, Path, Query
+from fastapi import Depends, Header, HTTPException, Path, Query, Request
 
 from backend import config as svcconfig
 
@@ -196,7 +196,7 @@ def get_con(source: dict = Depends(get_source)) -> Iterator[duckdb.DuckDBPyConne
 
 
 def require_service_access(
-    request,
+    request: Request,
     service_id: str | None = Depends(get_service_id),
 ) -> str | None:
     """Reject the request with 403 if the caller (analyst session) does not
@@ -225,4 +225,30 @@ def require_service_access(
             status_code=403,
             detail={"error": "service_not_authorized", "service": service_id},
         )
+
+    path_sid = request.path_params.get("service_id")
+    if path_sid:
+        res_path_sid = path_sid
+        if not svcconfig.load_config(path_sid):
+            res_path_sid = svcconfig.get_cdn_service_id_map().get(path_sid, path_sid)
+        if res_path_sid not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "service_not_authorized", "service": path_sid},
+            )
+
     return service_id
+
+
+def require_admin(request: Request) -> None:
+    """Reject analyst sessions with 403 — admin-only endpoints.
+
+    Use as a dependency on mutation endpoints that should never be
+    accessible to analysts regardless of service scope.
+    """
+    analyst_session = getattr(request.state, "analyst_session", None)
+    if analyst_session is not None:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "admin_only", "message": "This operation requires admin access."},
+        )

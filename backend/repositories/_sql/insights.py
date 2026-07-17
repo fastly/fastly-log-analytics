@@ -203,14 +203,22 @@ NEW_CITY_TRAFFIC = """
 # ── 9. User-Agent Monoculture ─────────────────────────────────────────────────
 
 UA_MONOCULTURE = """
-        SELECT "ua",
-            COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
-            COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt,
-            (SELECT COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) FROM {table_name}) AS b_total,
-            (SELECT COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) FROM {table_name}) AS w_total
-        FROM {table_name} GROUP BY "ua"
-        HAVING w_total > 0 AND w_cnt * 1.0 / w_total >= 0.25 AND (b_total = 0 OR w_cnt * 1.0 / w_total >= b_cnt * 1.0 / NULLIF(b_total, 0) * 3 + 0.10)
-        ORDER BY w_cnt DESC LIMIT 10
+        WITH totals AS (
+            SELECT
+                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_total,
+                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_total
+            FROM {table_name}
+        ),
+        grp AS (
+            SELECT "ua",
+                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
+                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
+            FROM {table_name} GROUP BY "ua"
+        )
+        SELECT g."ua", g.w_cnt, g.b_cnt, t.b_total, t.w_total
+        FROM grp g, totals t
+        WHERE t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= 0.25 AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / NULLIF(t.b_total, 0) * 3 + 0.10)
+        ORDER BY g.w_cnt DESC LIMIT 10
     """
 
 # ── 10. New Probe URLs ────────────────────────────────────────────────────────
@@ -268,14 +276,22 @@ PROXY_SURGE = """
 # ── 13. ASN Concentration ─────────────────────────────────────────────────────
 
 ASN_CONCENTRATION = """
-        SELECT "asn",
-            COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
-            COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt,
-            (SELECT COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) FROM {table_name}) AS b_total,
-            (SELECT COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) FROM {table_name}) AS w_total
-        FROM {table_name} WHERE "asn" IS NOT NULL GROUP BY "asn"
-        HAVING w_total > 0 AND w_cnt * 1.0 / w_total >= 0.20 AND (b_total = 0 OR w_cnt * 1.0 / w_total >= b_cnt * 1.0 / NULLIF(b_total, 0) * 3 + 0.10)
-        ORDER BY w_cnt DESC LIMIT 10
+        WITH totals AS (
+            SELECT
+                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_total,
+                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_total
+            FROM {table_name}
+        ),
+        grp AS (
+            SELECT "asn",
+                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
+                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
+            FROM {table_name} WHERE "asn" IS NOT NULL GROUP BY "asn"
+        )
+        SELECT g."asn", g.w_cnt, g.b_cnt, t.b_total, t.w_total
+        FROM grp g, totals t
+        WHERE t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= 0.20 AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / NULLIF(t.b_total, 0) * 3 + 0.10)
+        ORDER BY g.w_cnt DESC LIMIT 10
     """
 
 # ── 14. ASN/Metro Performance Regressions ─────────────────────────────────────
@@ -307,10 +323,10 @@ CACHE_COLLAPSE = """
             FROM {table_name}
         )
         SELECT "url",
-            SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) * 1.0 / NULLIF(SUM(CASE WHEN cache ILIKE 'HIT%' OR cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_w), 0) AS w_rate,
-            SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) * 1.0 / NULLIF(SUM(CASE WHEN cache ILIKE 'HIT%' OR cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_b), 0) AS b_rate,
-            SUM(CASE WHEN cache ILIKE 'HIT%' OR cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_total,
-            SUM(CASE WHEN cache ILIKE 'HIT%' OR cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_total
+            SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_w) * 1.0 / NULLIF(SUM(CASE WHEN starts_with(cache, 'HIT') OR starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_w), 0) AS w_rate,
+            SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_b) * 1.0 / NULLIF(SUM(CASE WHEN starts_with(cache, 'HIT') OR starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_b), 0) AS b_rate,
+            SUM(CASE WHEN starts_with(cache, 'HIT') OR starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_total,
+            SUM(CASE WHEN starts_with(cache, 'HIT') OR starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_total
         FROM base GROUP BY "url"
         HAVING w_total >= 5 AND b_total >= 20 AND b_rate >= 0.40 AND w_rate <= b_rate - 0.20 AND w_rate <= b_rate * 0.6
         ORDER BY (COALESCE(b_rate, 0) - w_rate) DESC LIMIT 15
@@ -338,8 +354,8 @@ CACHEABILITY_REGRESSION = """
             FROM {table_name}
         )
         SELECT "url",
-            SUM(CASE WHEN cache ILIKE 'PASS%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) * 1.0 / NULLIF(COUNT(*) FILTER (WHERE is_w), 0) AS w_rate,
-            SUM(CASE WHEN cache ILIKE 'PASS%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) * 1.0 / NULLIF(COUNT(*) FILTER (WHERE is_b), 0) AS b_rate,
+            SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) * 1.0 / NULLIF(COUNT(*) FILTER (WHERE is_w), 0) AS w_rate,
+            SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) * 1.0 / NULLIF(COUNT(*) FILTER (WHERE is_b), 0) AS b_rate,
             COUNT(*) FILTER (WHERE is_w) AS w_total,
             COUNT(*) FILTER (WHERE is_b) AS b_total
         FROM base GROUP BY "url"
@@ -715,6 +731,60 @@ REPEATED_PATTERNS = """
     LIMIT 15
 """
 
+# ── 30b. Scripted Traffic Patterns by TLS Fingerprint (repeated_patterns_fp) ──
+# Complementary variant of REPEATED_PATTERNS keyed on the TLS fingerprint
+# (JA3/JA4) instead of client IP. Catches IP-rotating scripts that keep the
+# same TLS stack. Diversity signal flips: distinct IPs per fingerprint (the IP
+# variant counts distinct UAs per IP). Same statistical algorithm, gates, and
+# scoring. Exactly ONE ``?`` (the window start).
+REPEATED_PATTERNS_FP = """
+    WITH kept AS (
+        SELECT COALESCE("{fp_col}", '') AS entity, epoch("timestamp")::BIGINT AS sec, "ip" AS ip
+        FROM {table_name}
+        WHERE "timestamp" >= CAST(? AS TIMESTAMPTZ)
+          AND "{fp_col}" IS NOT NULL AND "{fp_col}" != ''
+          AND ({ua_col} IS NULL OR NOT regexp_matches({ua_col}, '{bot_ua_regex}', 'i'))
+    ),
+    secs AS (
+        SELECT entity, sec FROM kept GROUP BY entity, sec
+    ),
+    meta AS (
+        SELECT entity, COUNT(DISTINCT ip) AS distinct_ip, COUNT(*) AS n_events,
+               (MAX(sec) - MIN(sec)) AS span_s
+        FROM kept GROUP BY entity
+    ),
+    gaps AS (
+        SELECT entity, sec - LAG(sec) OVER (PARTITION BY entity ORDER BY sec) AS gap FROM secs
+    ),
+    g AS (SELECT entity, gap FROM gaps WHERE gap IS NOT NULL),
+    agg AS (
+        SELECT entity, COUNT(*) AS n_gaps, AVG(gap) AS mean_gap, VAR_SAMP(gap) AS var_gap,
+               STDDEV_SAMP(gap) AS sd_gap, MEDIAN(gap) AS med, MODE(gap) AS mode_gap,
+               QUANTILE_CONT(gap,0.25) AS q1, QUANTILE_CONT(gap,0.75) AS q3
+        FROM g GROUP BY entity
+    ),
+    modal AS (
+        SELECT g.entity, AVG(CASE WHEN abs(g.gap - a.mode_gap) <= 1 THEN 1.0 ELSE 0.0 END) AS modal_frac
+        FROM g JOIN agg a USING(entity) GROUP BY g.entity
+    )
+    SELECT a.entity, a.n_gaps, d.n_events,
+           ROUND(a.mean_gap, 2)  AS avg_interval,
+           ROUND(a.sd_gap, 2)    AS stddev_interval,
+           ROUND(sqrt(GREATEST(a.var_gap - 1.0/12.0, 0)) / NULLIF(a.mean_gap, 0), 3) AS cv_corr,
+           ROUND(m.modal_frac, 3) AS modal_frac,
+           d.distinct_ip, d.span_s, a.mode_gap
+    FROM agg a JOIN modal m USING(entity) JOIN meta d USING(entity)
+    WHERE a.n_gaps >= 12
+      AND (d.n_events * 1.0 / NULLIF(d.span_s, 0)) < 2.0
+      AND (
+            (a.mean_gap >= 5  AND sqrt(GREATEST(a.var_gap - 1.0/12.0,0))/NULLIF(a.mean_gap,0) < 0.3
+                              AND m.modal_frac >= 0.6)
+         OR (a.mean_gap >= 1  AND a.mean_gap < 5 AND m.modal_frac >= 0.85)
+          )
+    ORDER BY m.modal_frac DESC, a.n_gaps DESC
+    LIMIT 15
+"""
+
 
 # ── 31. Low-and-Slow Scans (low_and_slow) ─────────────────────────────────────
 # Phase-3 promotion of the legacy ``low_and_slow`` stub. Flags a client IP that
@@ -892,14 +962,22 @@ CONTENT_DISCOVERY = """
 # referer flood. Mirrors UA_MONOCULTURE with a 20% share floor. Row:
 # [referer, w_cnt, b_cnt, b_total, w_total]. 4 ``?`` (all window start).
 REFERER_MONOCULTURE = """
-        SELECT "referer",
-            COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
-            COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt,
-            (SELECT COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) FROM {table_name}) AS b_total,
-            (SELECT COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) FROM {table_name}) AS w_total
-        FROM {table_name} WHERE "referer" IS NOT NULL AND "referer" != '' GROUP BY "referer"
-        HAVING w_total > 0 AND w_cnt * 1.0 / w_total >= 0.20 AND (b_total = 0 OR w_cnt * 1.0 / w_total >= b_cnt * 1.0 / NULLIF(b_total, 0) * 3 + 0.10)
-        ORDER BY w_cnt DESC LIMIT 10
+        WITH totals AS (
+            SELECT
+                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_total,
+                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_total
+            FROM {table_name}
+        ),
+        grp AS (
+            SELECT "referer",
+                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
+                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
+            FROM {table_name} WHERE "referer" IS NOT NULL AND "referer" != '' GROUP BY "referer"
+        )
+        SELECT g."referer", g.w_cnt, g.b_cnt, t.b_total, t.w_total
+        FROM grp g, totals t
+        WHERE t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= 0.20 AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / NULLIF(t.b_total, 0) * 3 + 0.10)
+        ORDER BY g.w_cnt DESC LIMIT 10
     """
 
 # ── 36. HTTP Method Drift (method_drift) ──────────────────────────────────────
@@ -932,6 +1010,26 @@ NEW_ASN_TRAFFIC = """
         FROM {table_name} WHERE "asn" IS NOT NULL GROUP BY "asn"
         HAVING w_cnt >= 20 AND b_cnt = 0
         ORDER BY w_cnt DESC LIMIT 20
+    """
+
+# ── 37b. ASN Hosting Shift (asn_hosting_shift) ──────────────────────────────────
+# Track B: per-ASN ratio of p_type='hosting' traffic shifting from consumer to
+# datacenter — bot pools / scrapers spinning up on hosting infra behind that ASN.
+# Row: [asn, w_hosting, w_total, b_hosting, b_total]. 2 ``?`` (window start).
+ASN_HOSTING_SHIFT = """
+        SELECT "asn",
+            COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND "p_type" = 'hosting') AS w_hosting,
+            COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_total,
+            COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ) AND "p_type" = 'hosting') AS b_hosting,
+            COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_total
+        FROM {table_name}
+        WHERE "asn" IS NOT NULL AND "p_type" IS NOT NULL AND "p_type" != ''
+        GROUP BY "asn"
+        HAVING w_total >= 50
+            AND w_total > 0
+            AND (CAST(w_hosting AS DOUBLE) / w_total) >= 0.3
+            AND (b_total = 0 OR (CAST(w_hosting AS DOUBLE) / w_total) >= (CAST(b_hosting AS DOUBLE) / NULLIF(b_total, 0)) * 3 + 0.10)
+        ORDER BY w_hosting DESC LIMIT 15
     """
 
 # ── 38. Metro Delivery-Rate Degradation (metro_delivery_degradation) ───────────
@@ -969,18 +1067,23 @@ CONNECTION_TYPE_MIX = """
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
             FROM {table_name}
             WHERE "c_type" IS NOT NULL AND "c_type" != ''
+        ),
+        totals AS (
+            SELECT
+                COUNT(*) FILTER (WHERE is_w) AS w_total,
+                COUNT(*) FILTER (WHERE is_b) AS b_total
+            FROM base
         )
-        SELECT c_type, c_speed,
-            COUNT(*) FILTER (WHERE is_w) AS w_cnt,
-            COUNT(*) FILTER (WHERE is_b) AS b_cnt,
-            (SELECT COUNT(*) FILTER (WHERE is_w) FROM base) AS w_total,
-            (SELECT COUNT(*) FILTER (WHERE is_b) FROM base) AS b_total
-        FROM base GROUP BY c_type, c_speed
-        HAVING w_cnt >= 20 AND (SELECT COUNT(*) FILTER (WHERE is_w) FROM base) > 0
-            AND w_cnt * 1.0 / (SELECT COUNT(*) FILTER (WHERE is_w) FROM base) >= 0.15
-            AND ((SELECT COUNT(*) FILTER (WHERE is_b) FROM base) = 0
-                 OR w_cnt * 1.0 / (SELECT COUNT(*) FILTER (WHERE is_w) FROM base)
-                    >= b_cnt * 1.0 / NULLIF((SELECT COUNT(*) FILTER (WHERE is_b) FROM base), 0) * 2 + 0.05)
+        SELECT g.c_type, g.c_speed,
+            COUNT(*) FILTER (WHERE g.is_w) AS w_cnt,
+            COUNT(*) FILTER (WHERE g.is_b) AS b_cnt,
+            t.w_total, t.b_total
+        FROM base g, totals t GROUP BY g.c_type, g.c_speed, t.w_total, t.b_total
+        HAVING w_cnt >= 20 AND t.w_total > 0
+            AND w_cnt * 1.0 / t.w_total >= 0.15
+            AND (t.b_total = 0
+                 OR w_cnt * 1.0 / t.w_total
+                    >= b_cnt * 1.0 / NULLIF(t.b_total, 0) * 2 + 0.05)
         ORDER BY w_cnt DESC LIMIT 15
     """
 
@@ -1045,10 +1148,10 @@ CACHE_HIT_CLIFF = """
         ),
         agg AS (
             SELECT
-                SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
-                SUM(CASE WHEN cache ILIKE 'HIT%' OR cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_cacheable,
-                SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,
-                SUM(CASE WHEN cache ILIKE 'HIT%' OR cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_cacheable
+                SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
+                SUM(CASE WHEN starts_with(cache, 'HIT') OR starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_cacheable,
+                SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,
+                SUM(CASE WHEN starts_with(cache, 'HIT') OR starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_cacheable
             FROM base
         )
         SELECT w_hits, w_cacheable, b_hits, b_cacheable
@@ -1230,13 +1333,13 @@ COALESCED_URL_AGGREGATES = """
         -- cache_collapse: cache-hit counters (HIT-only numerator; cacheable
         -- denominator = HIT+MISS, computed from w_miss/b_miss below — PASS is
         -- excluded because it was never eligible to cache)
-        SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
-        SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,
+        SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
+        SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,
         -- cache_collapse denominator + cacheability_regression: MISS / PASS counters
-        SUM(CASE WHEN cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_miss,
-        SUM(CASE WHEN cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_miss,
-        SUM(CASE WHEN cache ILIKE 'PASS%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_pass,
-        SUM(CASE WHEN cache ILIKE 'PASS%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_pass,
+        SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_miss,
+        SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_miss,
+        SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_pass,
+        SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_pass,
         -- latency_regression: elapsed-only counts + p95s in MILLISECONDS
         COUNT(*) FILTER (WHERE is_w AND elapsed IS NOT NULL) AS w_lat_total,
         COUNT(*) FILTER (WHERE is_b AND elapsed IS NOT NULL) AS b_lat_total,
@@ -1356,6 +1459,7 @@ __all__ = [
     "SHIELD_PATH_DEGRADATION",
     "REPEATED_BOT_UA_REGEX",
     "REPEATED_PATTERNS",
+    "REPEATED_PATTERNS_FP",
     "LOW_AND_SLOW",
     "AUTH_PATHS_REGEX",
     "CREDENTIAL_ENUMERATION",
@@ -1364,6 +1468,7 @@ __all__ = [
     "REFERER_MONOCULTURE",
     "METHOD_DRIFT",
     "NEW_ASN_TRAFFIC",
+    "ASN_HOSTING_SHIFT",
     "METRO_DELIVERY_DEGRADATION",
     "CONNECTION_TYPE_MIX",
     "POP_LATENCY_REGRESSION",

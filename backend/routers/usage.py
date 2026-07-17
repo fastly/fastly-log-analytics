@@ -477,18 +477,26 @@ def usage_current_storage(
 
                 logging.error(f"FOS Scan failed: {e}")
 
+        quarantine_bytes = 0
+        try:
+            from backend.core.metadata.quarantine import get_quarantine_storage_total
+
+            quarantine_bytes = get_quarantine_storage_total(src["name"])
+        except Exception:
+            pass
+
         if delete_after:
-            live_bytes = iceberg_bytes
+            live_bytes = iceberg_bytes + quarantine_bytes
             live_files = iceberg_files
             deleted_bytes = total_bytes
             deleted_files = total_files
         else:
-            live_bytes = total_bytes + iceberg_bytes
+            live_bytes = total_bytes + iceberg_bytes + quarantine_bytes
             live_files = total_files + iceberg_files
             deleted_bytes = 0
             deleted_files = 0
 
-        billed_bytes = total_bytes + iceberg_bytes
+        billed_bytes = total_bytes + iceberg_bytes + quarantine_bytes
         # GB-hours using the 720-hour (30-day) basis so the frontend can divide by 720
         # to get GB-months cost. This correctly applies the 30-day minimum billing
         # floor: files deleted in < 30 days are still billed for their full minimum period.
@@ -500,6 +508,7 @@ def usage_current_storage(
             live_bytes=live_bytes,
             live_files=live_files,
             deleted_bytes=deleted_bytes,
+            quarantine_bytes=quarantine_bytes,
             total_billed_bytes=billed_bytes,
             total_billed_gb_hours=gb_hours,
             total_files=total_files,

@@ -6,6 +6,8 @@ import { useQueryClient } from '@tanstack/react-query'
 
 import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
+import { useServiceStore } from '@/stores/serviceStore'
+import { buildServiceHref } from '@/lib/navigation'
 
 interface Options {
   enabled: boolean
@@ -21,6 +23,7 @@ const POLL_MS = 15_000
 export function useShareStatusBanner({ enabled }: Options) {
   const router = useRouter()
   const queryClient = useQueryClient()
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
   // Seed initial state from bootstrap's share_banner field if it has
   // landed already (perf audit Phase D-3). Skips the first poll +
   // RTT on cold load. Polling still runs on the 15s cadence below
@@ -90,7 +93,7 @@ export function useShareStatusBanner({ enabled }: Options) {
   const node = enabled && status?.sharing_active ? (
     <button
       type="button"
-      onClick={() => router.push('/admin/share')}
+      onClick={() => router.push(buildServiceHref('/admin/share', activeServiceId))}
       // M-13 (a11y): bg-amber-500 + text-amber-50 measured below WCAG AA
       // contrast (~3.1 ratio) on the 12px banner text — the single largest
       // contributor to the audit's 299-node admin color-contrast count.
@@ -109,6 +112,6 @@ export function useShareStatusBanner({ enabled }: Options) {
   return {
     node,
     sharingActive: !!status?.sharing_active,
-    openDashboard: () => router.push('/admin/share'),
+    openDashboard: () => router.push(buildServiceHref('/admin/share', activeServiceId)),
   }
 }

@@ -63,6 +63,7 @@ export function useLastSync() {
     // in the first second.
     staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
     retry: false,
   })

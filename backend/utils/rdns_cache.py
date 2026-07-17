@@ -339,7 +339,10 @@ async def _bulk_update_async(records: list[tuple[str | None, str, int, str, str]
     if not records:
         return
     async with aiosqlite.connect(str(_DB_PATH), timeout=10) as con:
-        await con.execute("PRAGMA journal_mode=WAL")
+        async with con.execute("PRAGMA journal_mode") as cur:
+            row = await cur.fetchone()
+            if not row or row[0].lower() != "wal":
+                await con.execute("PRAGMA journal_mode=WAL")
         await con.execute("PRAGMA busy_timeout=10000")
         await con.executemany(
             "UPDATE rdns SET hostname=?, status=?, fcrdns_verified=?, looked_up_at=? WHERE ip=?",

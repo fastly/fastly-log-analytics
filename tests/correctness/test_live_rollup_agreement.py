@@ -1130,6 +1130,7 @@ def test_sessions_seam_exact_aggregates_agree(tmp_path, frozen_clock):
         has_rtt=False,
         has_edge=False,
         has_edge_sid=False,
+        has_cmcd=False,
         section_timings=[],
         rollup_filters=None,
     )

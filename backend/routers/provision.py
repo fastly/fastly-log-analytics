@@ -592,6 +592,16 @@ def provision_execute(req: ProvisionExecuteRequest):
         except Exception:
             pass
 
+    if req.cmcd_enabled:
+        import datetime as _dt
+
+        cfg["cmcd"] = {
+            "enabled": True,
+            "mode": req.cmcd_mode or "query_string",
+            "version": req.cmcd_version if req.cmcd_version is not None else 1,
+            "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
+
     try:
         cfg["log_period"] = parse_period(cfg["log_period"])
     except ValueError as e:

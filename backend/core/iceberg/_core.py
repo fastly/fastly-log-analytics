@@ -236,6 +236,10 @@ _FIELD_ORDER = [
     # by NAME and mints fresh ids. Positional ids are consumed only by the
     # initial create_table for a brand-new table.
     "cookie_session",  # Group H — id 70; default_off + pii
+    "io_input_bytes",  # Group M — id 71
+    "io_output_bytes",  # Group M — id 72
+    "io_input_format",  # Group M — id 73
+    "io_output_format",  # Group M — id 74
 ]
 
 # No non-emitted positional slots remain — the reserved buffer was consumed by

@@ -221,6 +221,9 @@ export function runDeploy(args: DeployArgs) {
     commit_interval_mins: Number(config.commit_interval_mins),
     enable_cron_compact: config.enable_cron_compact,
     log_fields: config.log_fields ? JSON.stringify(config.log_fields) : null,
+    cmcd_enabled: config.cmcd_enabled,
+    cmcd_mode: config.cmcd_mode,
+    cmcd_version: config.cmcd_version,
   };
   if (config.cdn_prefix) {
     body.cdn_url = `https://${config.cdn_prefix}.global.ssl.fastly.net`;

@@ -175,7 +175,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
             {cron?.enabled ? (
               <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Enabled</Badge>
             ) : (
-              <Badge variant="secondary" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold opacity-40">Disabled</Badge>
+              <Badge variant="secondary" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold">Disabled</Badge>
             )}
             <Button
               variant="ghost"

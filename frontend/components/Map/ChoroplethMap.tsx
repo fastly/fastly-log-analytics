@@ -104,6 +104,11 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
       map.current.on('load', () => {
         if (!map.current) return
 
+        if (mapContainer.current) {
+          mapContainer.current.querySelectorAll<HTMLElement>('a, button, [tabindex], canvas')
+            .forEach(el => el.setAttribute('tabindex', '-1'))
+        }
+
         addCountryBaseLayer(map.current, { isDark: theme === 'dark' })
 
         // Hover events. Previously wrapped in a rAF-throttle helper, but

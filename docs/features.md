@@ -124,6 +124,9 @@ Sync, commit, optimization, and snapshot expiration all run in the background vi
 ### NGWAF integration
 If a Next-Gen WAF workspace is linked during provisioning, the app syncs verified-bot signal data from the Fastly NGWAF API into a shared local SQLite cache and enriches matching log rows for analysis.
 
+### Control Room
+Real-time operational dashboard at `/control-room` (admin-only). Nine tabs: Overview, Performance, Origin, Security, Network, Sessions, Cost, Insights, and Admin Health. Overview and Cost display live metrics from `rt.fastly.com` via SSE — requests/sec, error rate, cache hit ratio, bandwidth, and estimated cost. The Admin Health tab surfaces log-field audit results and ingest health. Correlator lets admins drill into any metric dimension against ingested logs. Remaining tabs and mutation endpoints (mitigations, rules, allowlist, cost-governor) are planned.
+
 ### Bring your own bucket (manual config)
 If you already have a bucket, you can configure the app by writing a JSON file in `configs/` instead of running the provisioning wizard. See `config.example.json` for the schema. Manual configuration supports the same `read_write` / `read_only` access levels as the wizard.
 

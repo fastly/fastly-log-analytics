@@ -79,15 +79,11 @@ def _init_schema(con: sqlite3.Connection) -> None:
     con.commit()
 
 
-# Resolve through ``sys.modules`` so a ``monkeypatch.setattr(usage_log_db,
-# "_init_lock", ...)`` (used by future concurrency tests, mirroring the
-# metadata.base side) takes effect on every cold-open.
 _module = sys.modules[__name__]
 _pool = ThreadLocalPool(
     name="usage_log_db",
     path_fn=db_path,
     schema_fn=_init_schema,
-    init_lock_provider=lambda: _module._init_lock,
     initialized_provider=lambda: _module._initialized,
     local_provider=lambda: _module._local,
     local_attr="usage_log_conns",

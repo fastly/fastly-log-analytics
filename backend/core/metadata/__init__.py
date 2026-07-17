@@ -122,6 +122,17 @@ from backend.core.metadata.ingest_log import (
     register_locally_compacted,
 )
 
+# Quarantined-file tracking (corrupt/invalid ingest files copied to errors/).
+from backend.core.metadata.quarantine import (
+    delete_quarantined_rows,
+    get_expired_quarantined_files,
+    get_quarantine_storage_total,
+    get_quarantine_summary,
+    get_quarantined_file_by_id,
+    insert_quarantined_file,
+    list_quarantined_files,
+)
+
 # Metadata cleanup + storage stats.
 from backend.core.metadata.reconciliation import (
     _CLEANUP_TABLES,
@@ -331,4 +342,12 @@ __all__ = [
     "_query_usage_log_aggregate_rollup",
     "_STATS_TABLES",
     "_CLEANUP_TABLES",
+    # Quarantine
+    "insert_quarantined_file",
+    "list_quarantined_files",
+    "get_quarantine_summary",
+    "get_quarantined_file_by_id",
+    "get_expired_quarantined_files",
+    "get_quarantine_storage_total",
+    "delete_quarantined_rows",
 ]

@@ -151,8 +151,8 @@ export function ScriptedTrafficModal({ isOpen, onOpenChange, data }: ScriptedTra
             />
             <StatCard
               icon={<Users className="h-3 w-3" />}
-              label="Distinct UAs"
-              value={data.distinct_ua.toLocaleString()}
+              label={data.distinct_ip != null ? 'Distinct IPs' : 'Distinct UAs'}
+              value={(data.distinct_ip ?? data.distinct_ua).toLocaleString()}
             />
           </div>
 
@@ -180,11 +180,22 @@ export function ScriptedTrafficModal({ isOpen, onOpenChange, data }: ScriptedTra
                 designed to catch.
               </li>
               <li>
-                <span className="font-semibold">Distinct user-agents ({data.distinct_ua.toLocaleString()}).</span>{' '}
-                Shown for context only — it is <span className="italic">not</span> a reason to dismiss
-                the flag. A high UA count combined with this regular timing usually signals a
-                UA-rotating scraper, which is <span className="font-semibold">more</span> suspicious,
-                not less.
+                {data.distinct_ip != null ? (
+                  <>
+                    <span className="font-semibold">Distinct IPs ({data.distinct_ip.toLocaleString()}).</span>{' '}
+                    This fingerprint appeared across multiple source addresses, which is why
+                    IP-based detection alone would miss it. IP rotation with a stable TLS fingerprint
+                    is a strong signal of coordinated scripted traffic.
+                  </>
+                ) : (
+                  <>
+                    <span className="font-semibold">Distinct user-agents ({data.distinct_ua.toLocaleString()}).</span>{' '}
+                    Shown for context only — it is <span className="italic">not</span> a reason to dismiss
+                    the flag. A high UA count combined with this regular timing usually signals a
+                    UA-rotating scraper, which is <span className="font-semibold">more</span> suspicious,
+                    not less.
+                  </>
+                )}
               </li>
             </ul>
           </div>

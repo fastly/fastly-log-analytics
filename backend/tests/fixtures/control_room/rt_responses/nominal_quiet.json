@@ -1,0 +1,41 @@
+{
+  "Timestamp": 1720000000,
+  "AggregateDelay": 3,
+  "Data": [
+    {
+      "datacenter": {
+        "SJC": {
+          "requests": 42,
+          "status_2xx": 40,
+          "status_3xx": 1,
+          "status_4xx": 1,
+          "status_5xx": 0,
+          "hits": 35,
+          "miss": 5,
+          "pass": 2,
+          "errors": 0,
+          "resp_body_bytes": 524288,
+          "resp_header_bytes": 12600,
+          "req_body_bytes": 2100,
+          "req_header_bytes": 8400
+        }
+      },
+      "aggregated": {
+        "requests": 42,
+        "status_2xx": 40,
+        "status_3xx": 1,
+        "status_4xx": 1,
+        "status_5xx": 0,
+        "hits": 35,
+        "miss": 5,
+        "pass": 2,
+        "errors": 0,
+        "resp_body_bytes": 524288,
+        "resp_header_bytes": 12600,
+        "req_body_bytes": 2100,
+        "req_header_bytes": 8400
+      },
+      "recorded": 1720000000
+    }
+  ]
+}

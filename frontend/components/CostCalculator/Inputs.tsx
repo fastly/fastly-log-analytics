@@ -2,6 +2,8 @@
 
 import React from 'react'
 import { Switch } from '@/components/ui/switch'
+import { useServiceStore } from '@/stores/serviceStore'
+import { buildServiceHref } from '@/lib/navigation'
 import { Row, NumInput, ReadOnlyValue } from './parts'
 import { fmtN } from './calc'
 import type { CalcState, CalcResults } from './calc'
@@ -13,6 +15,7 @@ interface InputsProps {
 }
 
 export function Inputs({ s, r, set }: InputsProps) {
+  const activeServiceId = useServiceStore((st) => st.activeServiceId)
   return (
     <section>
       <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>Your Traffic &amp; Config</h3>
@@ -81,7 +84,7 @@ export function Inputs({ s, r, set }: InputsProps) {
           <ReadOnlyValue value={s.minDays} />
         </Row>
         <div className='text-[11px] text-amber-700/80 dark:text-amber-500/80'>
-          Edit on the <a href='/admin' className='underline font-medium hover:text-amber-900 dark:hover:text-amber-300'>admin page</a>.
+          Edit on the <a href={buildServiceHref('/admin', activeServiceId)} className='underline font-medium hover:text-amber-900 dark:hover:text-amber-300'>admin page</a>.
         </div>
         <div className='text-xs text-amber-600 dark:text-amber-500 space-y-0.5'>
           <div>Objects created/day: <strong>{fmtN(Math.round(r.objectsPerDay))}</strong></div>

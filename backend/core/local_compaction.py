@@ -201,13 +201,23 @@ def compact_local_partitions(source: dict, min_files_per_partition: int = 1, dry
         result["duration_ms"] = int((time.time() - t0) * 1000)
         return result
 
+    # Acquire the per-service RLock around the file-system mutation
+    # phase so concurrent dashboard queries via the view-build path
+    # don't race with our delete-then-rename and hit FileNotFoundError /
+    # IO Error mid-glob. Architecture-review Finding #3.
+    from backend.core.iceberg.view import _get_service_lock
+
+    service_key = source.get("name", "default")
+    publish_lock = _get_service_lock(service_key)
+
     # ── Cleanup pass: remove orphaned .tmp_ files from previous crashed
     # runs. Safe because the publish step renames .tmp_<name> → <name>;
     # any leftover .tmp_ is by definition incomplete. The dashboard glob
     # matches *.parquet so leftovers don't pollute queries, but they
     # do waste disk and confuse the file-count metric.
     if not dry_run:
-        result["stale_tmp_removed"] = _cleanup_stale_tmp(data_dir)
+        with publish_lock:
+            result["stale_tmp_removed"] = _cleanup_stale_tmp(data_dir)
 
     # ── Active-hour guard: do NOT compact the current UTC hour. The sync
     # cron may be flushing buffer files into this partition mid-pass; our
@@ -221,15 +231,6 @@ def compact_local_partitions(source: dict, min_files_per_partition: int = 1, dry
     # Accumulate every basename we delete across all three tiers so we
     # can register them in one SQLite write at the end (vs N small writes).
     removed_basenames: list[str] = []
-
-    # Acquire the per-service RLock around the file-system mutation
-    # phase so concurrent dashboard queries via the view-build path
-    # don't race with our delete-then-rename and hit FileNotFoundError /
-    # IO Error mid-glob. Architecture-review Finding #3.
-    from backend.core.iceberg.view import _get_service_lock
-
-    service_key = source.get("name", "default")
-    publish_lock = _get_service_lock(service_key)
 
     # ── Hourly tier: walk each partition dir, merge if multi-file.
     for entry in sorted(os.listdir(data_dir)):

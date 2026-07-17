@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import pytest
 
-from backend.core.duckdb_pool import _Pool
+from backend.core.duckdb_pool import _Pool, _set_conn_state
 
 
 def test_pool_does_not_deadlock_on_checkout_exception():
@@ -343,17 +343,17 @@ def test_pool_conn_memory_limit_passthrough(monkeypatch):
 
 
 def test_pool_conn_threads_parsing(monkeypatch):
-    """_pool_conn_threads parses int env or returns None on absent/garbage."""
+    """_pool_conn_threads parses int env or returns 1 on absent/garbage."""
     from backend.core.duckdb_pool import _pool_conn_threads
 
     monkeypatch.delenv("DUCKDB_POOL_CONN_THREADS", raising=False)
-    assert _pool_conn_threads() is None
+    assert _pool_conn_threads() == 1  # default: 1 thread per conn
     monkeypatch.setenv("DUCKDB_POOL_CONN_THREADS", "4")
     assert _pool_conn_threads() == 4
     monkeypatch.setenv("DUCKDB_POOL_CONN_THREADS", "0")
     assert _pool_conn_threads() == 1  # clamped to >= 1
     monkeypatch.setenv("DUCKDB_POOL_CONN_THREADS", "garbage")
-    assert _pool_conn_threads() is None  # fallback
+    assert _pool_conn_threads() == 1  # fallback to default
 
 
 def test_pool_sweep_enabled_default_and_truthy(monkeypatch):
@@ -1268,3 +1268,81 @@ def test_pool_recovers_after_forced_discard():
     assert pool._in_use == 1
     # discarded counter still 1 — fresh acquire is not itself a discard.
     assert pool._discarded_total == 1
+
+
+# ── _prepare_checkout: stale view-fingerprint triggers rebind ─────────────
+
+
+def test_prepare_checkout_rebinds_on_stale_view_fingerprint():
+    """When the ``_view_cache`` tuple changes between checkouts (cron
+    committed new data), ``_prepare_checkout`` must call
+    ``update_iceberg_view`` to rebind the connection. The identity check
+    (``current is stamped_view``) on the cache tuple is the fast path;
+    this test verifies a different tuple triggers the rebind."""
+    pool = _Pool(service_key="test_stale_fp", max_size=1)
+    mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
+    pool._idle.put_nowait(mock_conn)
+    pool._in_use = 1
+
+    old_tuple = ("old_view_sql", "old_hash")
+    new_tuple = ("new_view_sql", "new_hash")
+
+    _set_conn_state(mock_conn, view_fingerprint=old_tuple, buffer_mtime=1.0)
+
+    with (
+        patch("backend.core.iceberg.view._view_cache", {"test_stale_fp": new_tuple}),
+        patch("backend.core.iceberg.view.update_iceberg_view") as mock_uiv,
+        patch("backend.core.duckdb_pool._safe_buffer_mtime", return_value=1.0),
+    ):
+        got = pool.acquire(src={"name": "test_stale_fp", "bucket": "b"}, max_wait=0.5)
+
+    assert got is mock_conn
+    mock_uiv.assert_called_once()
+    assert mock_uiv.call_args[0][0] is mock_conn
+
+
+def test_prepare_checkout_skips_rebind_when_fingerprint_matches():
+    """When the ``_view_cache`` tuple AND buffer mtime are identical to
+    what was stamped at last checkout, ``update_iceberg_view`` is NOT
+    called — the connection is returned as-is."""
+    pool = _Pool(service_key="test_fresh_fp", max_size=1)
+    mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
+    pool._idle.put_nowait(mock_conn)
+    pool._in_use = 1
+
+    same_tuple = ("same_sql", "same_hash")
+    _set_conn_state(mock_conn, view_fingerprint=same_tuple, buffer_mtime=42.0)
+
+    with (
+        patch("backend.core.iceberg.view._view_cache", {"test_fresh_fp": same_tuple}),
+        patch("backend.core.iceberg.view.update_iceberg_view") as mock_uiv,
+        patch("backend.core.duckdb_pool._safe_buffer_mtime", return_value=42.0),
+    ):
+        got = pool.acquire(src={"name": "test_fresh_fp", "bucket": "b"}, max_wait=0.5)
+
+    assert got is mock_conn
+    mock_uiv.assert_not_called()
+
+
+def test_prepare_checkout_rebinds_on_stale_buffer_mtime():
+    """When the ``_view_cache`` tuple is the same object but the buffer
+    directory mtime changed (cron deleted buffer files), the rebind must
+    still fire — the view SQL is the same but the files it references
+    are gone."""
+    pool = _Pool(service_key="test_stale_buf", max_size=1)
+    mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
+    pool._idle.put_nowait(mock_conn)
+    pool._in_use = 1
+
+    same_tuple = ("same_sql", "same_hash")
+    _set_conn_state(mock_conn, view_fingerprint=same_tuple, buffer_mtime=100.0)
+
+    with (
+        patch("backend.core.iceberg.view._view_cache", {"test_stale_buf": same_tuple}),
+        patch("backend.core.iceberg.view.update_iceberg_view") as mock_uiv,
+        patch("backend.core.duckdb_pool._safe_buffer_mtime", return_value=200.0),
+    ):
+        got = pool.acquire(src={"name": "test_stale_buf", "bucket": "b"}, max_wait=0.5)
+
+    assert got is mock_conn
+    mock_uiv.assert_called_once()

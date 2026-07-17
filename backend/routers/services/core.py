@@ -119,8 +119,10 @@ def get_service_lake_info(source: dict = Depends(get_source)):
 # response_model intentionally omitted: SSE progress stream
 # (EventSourceResponse), not a JSON body.
 @router.post("/services/{service_id}/cron-settings")
-def api_service_cron_settings(service_id: str, body: ServiceCronSettingsBody):
+def api_service_cron_settings(request: Request, service_id: str, body: ServiceCronSettingsBody):
     from backend import config as svcconfig
+
+    _require_service_scope(request, service_id)
 
     # Capture once for the audit-log line below + the per-block iteration.
     # ``exclude_unset`` preserves the existing partial-update semantics
@@ -516,6 +518,7 @@ def api_service_logging_settings(service_id: str):
         # debug_calls, section_timings, is_cached) is regenerated per
         # request so the Debug Panel keeps showing per-request data even
         # on cache hits.
+        cmcd_block = cfg.get("cmcd") or {}
         cacheable = {
             "prefix": prefix,
             "period": ep.get("period", 60),
@@ -524,6 +527,9 @@ def api_service_logging_settings(service_id: str):
             "custom_condition": custom_condition,
             "format_match": format_match,
             "version": active_ver,
+            "cmcd_enabled": bool(cmcd_block.get("enabled")),
+            "cmcd_mode": cmcd_block.get("mode"),
+            "cmcd_version": cmcd_block.get("version"),
         }
         _logging_settings_cache[service_id] = cacheable
 
@@ -544,7 +550,6 @@ from backend.models.services import LogFieldsResponse
 @router.get("/services/{service_id}/log-fields", response_model=LogFieldsResponse)
 def api_service_log_fields_get(service_id: str):
 
-    from backend.core import duckdb as _db
     from backend.core import field_registry as lf
 
     cfg = load_service_config(service_id)
@@ -554,10 +559,11 @@ def api_service_log_fields_get(service_id: str):
     waf_warning = False
     if "J" in log_fields_config.get("groups", []):
         try:
+            from backend.core import duckdb as _db
+
             src = _db.get_source_for_service(service_id)
             if src:
-                # read_only: schema lookup + one SELECT against the view.
-                c = _db.get_connection(source=src, read_only=True)
+                c = _db.get_connection(source=src, read_only=True, max_wait=5.0, skip_view_update=True)
                 try:
                     table_name = _db._safe_table_name(src["name"])
                     actual_cols = {col["name"] for col in _db.get_schema(c, src)}
@@ -591,6 +597,7 @@ def api_service_log_fields_get(service_id: str):
             )
     except Exception:
         pass
+
     from backend.utils.telemetry import get_tracked_calls
 
     return {
@@ -609,10 +616,12 @@ def api_service_log_fields_get(service_id: str):
     response_model=LogFieldsUpdateResponse,
     response_model_exclude_unset=True,
 )
-def api_service_log_fields_set(service_id: str, body: LogFieldsUpdateRequest):
+def api_service_log_fields_set(request: Request, service_id: str, body: LogFieldsUpdateRequest):
 
     from backend import config as svcconfig
     from backend.core import field_registry as lf
+
+    _require_service_scope(request, service_id)
 
     cfg = load_service_config(service_id)
     new_lf = body.log_fields
@@ -686,6 +695,9 @@ def api_service_update_logging_settings(
     edge_only: bool | None = Query(default=None),
     custom_condition: str | None = Query(default=None),
     update_format: bool = Query(default=False),
+    cmcd_enabled: bool | None = Query(default=None),
+    cmcd_mode: str | None = Query(default=None),
+    cmcd_version: int | None = Query(default=None),
 ):
     from backend import config as svcconfig
 
@@ -736,6 +748,9 @@ def api_service_update_logging_settings(
                 "edge_only": edge_only,
                 "custom_condition": custom_condition,
                 "update_format": update_format,
+                "cmcd_enabled": cmcd_enabled,
+                "cmcd_mode": cmcd_mode,
+                "cmcd_version": cmcd_version,
             }
             for event in update_logging_endpoint(update_cfg, token):
                 if event.get("type") == "done":
@@ -761,6 +776,15 @@ def api_service_update_logging_settings(
                                 "custom_condition": custom_condition,
                                 "format_match": True,
                                 "version": new_ver,
+                                "cmcd_enabled": bool(cmcd_enabled)
+                                if cmcd_enabled is not None
+                                else bool((cfg.get("cmcd") or {}).get("enabled")),
+                                "cmcd_mode": cmcd_mode
+                                if cmcd_mode is not None
+                                else (cfg.get("cmcd") or {}).get("mode"),
+                                "cmcd_version": cmcd_version
+                                if cmcd_version is not None
+                                else (cfg.get("cmcd") or {}).get("version"),
                             }
                         else:
                             _logging_settings_cache.pop(service_id, None)
@@ -792,6 +816,12 @@ def api_service_update_logging_settings(
                                 _details["edge_only"] = {"from": old_edge_only, "to": edge_only}
                             if old_custom_condition != custom_condition:
                                 _details["custom_condition"] = {"from": old_custom_condition, "to": custom_condition}
+                            if cmcd_enabled is not None:
+                                _details["cmcd_enabled"] = cmcd_enabled
+                            if cmcd_mode is not None:
+                                _details["cmcd_mode"] = cmcd_mode
+                            if cmcd_version is not None:
+                                _details["cmcd_version"] = cmcd_version
                             if update_format:
                                 _details["log_fields_deployed"] = True
 

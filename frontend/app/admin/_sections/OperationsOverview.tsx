@@ -28,6 +28,7 @@ import { useBootstrap } from '@/hooks/useBootstrap'
 import type { components } from '@/types/api.generated'
 import { adminFetch } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
+import { buildServiceHref } from '@/lib/navigation'
 
 const POLL_MS = 10_000
 
@@ -276,6 +277,7 @@ function OverviewCard({
    *  was built to prevent. */
   isStale?: boolean
 }) {
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
   // Tone-driven classes for the primary metric. Keep these as literal
   // strings so Tailwind's content-scanner can see them — building class
   // names dynamically (e.g. `text-${tone}-600`) would be invisible to
@@ -291,7 +293,7 @@ function OverviewCard({
             ? 'text-muted-foreground'
             : 'text-foreground'
   return (
-    <Link href={href} className="block group">
+    <Link href={buildServiceHref(href, activeServiceId)} prefetch={false} className="block group">
       <Card className="transition-colors group-hover:bg-muted/40 cursor-pointer">
         <CardContent className="p-4">
           <div className="flex items-center justify-between text-xs text-muted-foreground mb-2">

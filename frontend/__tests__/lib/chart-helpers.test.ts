@@ -12,7 +12,7 @@ describe('TIME_HOVER_LAYOUT', () => {
       hovermode: 'x unified',
       legend: expect.objectContaining({
         orientation: 'h',
-        xanchor: 'right',
+        xanchor: 'center',
         yanchor: 'bottom',
       }),
     })

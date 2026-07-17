@@ -173,11 +173,14 @@ def preview_alert(
         # retry storm) and re-run. A genuinely empty service won't have a
         # status-cache row count, so this won't fire there.
         if not rows and _status_cache_has_data(src):
-            from backend.repositories._base import force_rebuild_view
+            with track_query(con, f"SELECT 1 FROM {table_name} LIMIT 1", [], "alerts_preview_check") as cursor:
+                has_any = cursor.fetchone()
+            if not has_any:
+                from backend.repositories._base import force_rebuild_view
 
-            force_rebuild_view(con, src)
-            with track_query(con, q, [], "alerts_preview") as cursor:
-                rows = cursor.fetchall()
+                force_rebuild_view(con, src)
+                with track_query(con, q, [], "alerts_preview") as cursor:
+                    rows = cursor.fetchall()
 
         times = [safe_iso(r[0]) for r in rows]
         values = [float(r[1] or 0) for r in rows]

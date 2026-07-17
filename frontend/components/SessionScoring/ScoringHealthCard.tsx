@@ -47,7 +47,7 @@ function Metric({
         {label}
       </div>
       <div className={`text-lg font-mono tabular-nums ${valueClass}`}>{value}</div>
-      {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
+      {sub && <div className="text-[10px] text-muted-foreground whitespace-pre-line">{sub}</div>}
     </div>
   )
 }
@@ -171,11 +171,11 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
         />
         <Metric
           icon={Clock}
-          label="Scorer Latency"
+          label="Scorer Latency (p95 rtt)"
           value={rttP95Us != null ? fmtMs(rttP95Us) : '—'}
           sub={
             rttP95Us != null
-              ? `p95 rtt · p50 ${fmtMs(lat?.rtt_p50_us)} · exec ${fmtUs(lat?.exec_p95_us)}`
+              ? `rtt: p50 ${fmtMs(lat?.rtt_p50_us)} · p99 ${fmtMs(lat?.rtt_p99_us)} · max ${fmtMs(lat?.rtt_max_us)}\nexec: p50 ${fmtUs(lat?.exec_p50_us)} · p95 ${fmtUs(lat?.exec_p95_us)}`
               : 'awaiting re-provision'
           }
           tone={latencyTone}
