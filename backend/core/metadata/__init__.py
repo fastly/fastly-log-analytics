@@ -147,6 +147,7 @@ from backend.core.metadata.reconciliation import (
 # panel can show history beyond the 2000-entry / restart window).
 from backend.core.metadata.slow_queries import (
     count_slow_queries,
+    flush_slow_query_buffer,
     insert_slow_query,
     list_slow_queries,
     purge_old_slow_queries,
@@ -278,6 +279,7 @@ __all__ = [
     "get_log_activity",
     "get_node_count_avg",
     # Persistent slow-SQL history
+    "flush_slow_query_buffer",
     "insert_slow_query",
     "list_slow_queries",
     "count_slow_queries",

@@ -71,6 +71,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     from backend.core.rollups import (
         backfill_network_rtt_bundles,
         backfill_network_speed_bundles,
+        backfill_network_summary_bundles,
         backfill_ngwaf_bots_bundles,
         backfill_origin_dims_bundles,
         backfill_origin_latency_ts_bundles,
@@ -130,6 +131,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     # identical to what the live join returns for them today.
     n_nb = backfill_ngwaf_bots_bundles(sid, source)
     n_ov = backfill_overview_bundles(sid, source)
+    n_netsumm = backfill_network_summary_bundles(sid, source)
     n_os_day = compact_origin_summary_closed_days_to_daily(sid, source)
     n_od_day = compact_origin_dims_closed_days_to_daily(sid, source)
     n_olts_day = compact_origin_latency_ts_closed_days_to_daily(sid, source)
@@ -166,6 +168,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         "wellknown_bots": n_wk,
         "overview": n_ov,
         "overview_days": n_ov_day,
+        "network_summary": n_netsumm,
     }
 
 

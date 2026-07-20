@@ -52,6 +52,7 @@ from ._common import (
     _VIRTUAL_FIELD_BACKING,
     DAY_BUNDLE_FILENAME,
     DAY_BUNDLE_TOP_K,
+    NETWORK_SUMMARY_BUNDLE_FILENAME,
     NGWAF_BOTS_BUNDLE_FILENAME,
     ORIGIN_DIMS_BUNDLE_TOP_K,
     ORIGIN_IP_BUNDLE_FILENAME,
@@ -85,6 +86,7 @@ from ._common import (
     _is_safe_ident,
     _load_markers,
     _markers_path,
+    _network_summary_bundle_path,
     _origin_ip_bundle_path,
     _origin_latency_ts_bundle_path,
     _origin_path_bundle_path,
@@ -129,6 +131,7 @@ from .hour_bundles import (
 )
 from .network_rtt import backfill_network_rtt_bundles, build_network_rtt_bundles
 from .network_speed import backfill_network_speed_bundles, build_network_speed_bundles
+from .network_summary import backfill_network_summary_bundles, build_network_summary_bundles
 from .ngwaf_bots import backfill_ngwaf_bots_bundles, build_ngwaf_bots_bundles
 from .origin_dims import backfill_origin_dims_bundles, build_origin_dims_bundles
 from .origin_latency_ts import backfill_origin_latency_ts_bundles, build_origin_latency_ts_bundles
@@ -173,6 +176,8 @@ __all__ = [
     "backfill_origin_latency_ts_bundles",
     "build_network_rtt_bundles",
     "backfill_network_rtt_bundles",
+    "build_network_summary_bundles",
+    "backfill_network_summary_bundles",
     "build_network_speed_bundles",
     "backfill_network_speed_bundles",
     "build_ngwaf_bots_bundles",
@@ -217,6 +222,7 @@ __all__ = [
     "SLOW_URLS_BUNDLE_FILENAME",
     "SLOW_URLS_BUNDLE_TOP_K",
     "SLOW_URLS_BUNDLE_MIN_REQUESTS_PER_HOUR",
+    "NETWORK_SUMMARY_BUNDLE_FILENAME",
     "OVERVIEW_BUNDLE_FILENAME",
     "ORIGIN_SUMMARY_BUNDLE_FILENAME",
     "ORIGIN_POP_BUNDLE_FILENAME",
@@ -254,6 +260,7 @@ __all__ = [
     "_time_series_bundle_path",
     "_sessions_bundle_path",
     "_slow_urls_bundle_path",
+    "_network_summary_bundle_path",
     "_overview_bundle_path",
     "_origin_summary_bundle_path",
     "_origin_pop_bundle_path",

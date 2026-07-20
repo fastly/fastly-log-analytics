@@ -1145,24 +1145,11 @@ def start_cron_run(source: dict, task: str) -> int | None:
     """Begin a cron run; returns the run id. Raises RuntimeError if already running.
 
     Storage lives in per-service SQLite (``backend.core.metadata``). Retention
-    pruning happens here to keep the table bounded over time.
+    pruning is handled by the daily ``cleanup_metadata`` job.
     """
-    from backend import config as svcconfig
     from backend.core import metadata as metadata_db
 
     service_id = source["name"]
-    cfg = svcconfig.load_config(service_id) or {}
-    prov = cfg.get("provisioning", {})
-    cron_key = _TASK_TO_CRON_KEY.get(task)
-    cron_cfg = prov.get(cron_key, {}) if cron_key else {}
-    retention_days = int(cron_cfg.get("log_retention_days", 7))
-
-    if retention_days > 0:
-        try:
-            metadata_db.purge_cron_runs(service_id, task=task, days=retention_days)
-        except Exception:
-            pass
-
     return metadata_db.start_cron_run(service_id, task)
 
 

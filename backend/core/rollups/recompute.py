@@ -38,6 +38,7 @@ from .network_health_geo import build_network_geo_bundles
 from .network_health_heatmap import build_network_heatmap_bundles
 from .network_rtt import build_network_rtt_bundles
 from .network_speed import build_network_speed_bundles
+from .network_summary import build_network_summary_bundles
 from .ngwaf_bots import build_ngwaf_bots_bundles
 from .origin_dims import build_origin_dims_bundles
 from .origin_latency_ts import build_origin_latency_ts_bundles
@@ -342,6 +343,15 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
     except Exception as e:
         logger.warning(
             "[rollups] %s: overview bundle failed (raw scan will serve): %s",
+            service_id,
+            e,
+        )
+
+    try:
+        build_network_summary_bundles(service_id, source, touched_hours)
+    except Exception as e:
+        logger.warning(
+            "[rollups] %s: network_summary bundle failed (raw scan will serve): %s",
             service_id,
             e,
         )

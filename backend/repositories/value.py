@@ -507,6 +507,112 @@ def _try_overview_from_rollup(
     return out
 
 
+def _try_network_from_rollup(
+    runner: QueryRunner,
+    *,
+    start_time: str | None,
+    end_time: str | None,
+) -> dict[str, Any] | None:
+    """Serve the network section aggregates from pre-rolled hourly parquets.
+
+    Returns the ``net`` dict with percentage metrics when eligible, or
+    ``None`` to fall through to the raw scan. Does NOT include the
+    protocol time series (that still needs a raw scan per-protocol
+    per-bucket).
+    """
+    import os
+
+    from backend.core.rollups import NETWORK_SUMMARY_BUNDLE_FILENAME, _hour_bundled_root
+
+    if not start_time or not end_time:
+        return None
+    st = parse_iso_utc(start_time)
+    et = parse_iso_utc(end_time)
+    if st is None or et is None or et <= st:
+        return None
+    if (et - st) > timedelta(days=366):
+        return None
+
+    bundled_root = _hour_bundled_root(runner.src)
+    if not os.path.isdir(bundled_root):
+        return None
+
+    collected = collect_hourly_bundle_paths(
+        runner.src,
+        st,
+        et,
+        bundled_root,
+        NETWORK_SUMMARY_BUNDLE_FILENAME,
+    )
+    if collected is None:
+        return None
+    rollup_paths, crosses_active = collected
+
+    if not rollup_paths and not crosses_active:
+        return None
+
+    select_clauses: list[str] = []
+
+    if rollup_paths:
+        paths_sql = quote_path_list(rollup_paths)
+        st_tz = st.astimezone(UTC).isoformat()
+        et_tz = et.astimezone(UTC).isoformat()
+        select_clauses.append(
+            f"SELECT SUM(requests) AS total_requests, "
+            f"  SUM(http3_requests) AS http3, "
+            f"  SUM(h2_requests) AS h2, "
+            f"  SUM(tls_requests) AS tls, "
+            f"  SUM(ipv6_requests) AS ipv6 "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"WHERE hour_start >= TIMESTAMPTZ '{st_tz}' "
+            f"  AND hour_start < TIMESTAMPTZ '{et_tz}'"
+        )
+
+    if crosses_active:
+        active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        live_start = max(st, active_hour_dt)
+        live_st_tz = live_start.astimezone(UTC).isoformat()
+        live_et_tz = et.astimezone(UTC).isoformat()
+        table_name = _safe_table(runner.src["name"])
+        select_clauses.append(
+            f"SELECT COUNT(*) AS total_requests, "
+            f"  COUNT(*) FILTER (WHERE protocol = 'HTTP/3') AS http3, "
+            f"  COUNT(*) FILTER (WHERE protocol = 'HTTP/2') AS h2, "
+            f"  COUNT(*) FILTER (WHERE is_ssl = true) AS tls, "
+            f"  COUNT(*) FILTER (WHERE ipv6 = true) AS ipv6 "
+            f"FROM {table_name} "
+            f"WHERE timestamp >= TIMESTAMPTZ '{live_st_tz}' "
+            f"  AND timestamp < TIMESTAMPTZ '{live_et_tz}'"
+        )
+
+    combined_sql = (
+        "SELECT SUM(total_requests) AS total_requests, "
+        "SUM(http3) AS http3, SUM(h2) AS h2, "
+        "SUM(tls) AS tls, SUM(ipv6) AS ipv6 "
+        f"FROM ({' UNION ALL '.join(select_clauses)})"
+    )
+    row = runner.execute(combined_sql).fetchone()
+    if not row or not row[0]:
+        return None
+
+    total = int(row[0])
+    if total == 0:
+        return {"total_requests": 0, "http3_pct": None, "h2_pct": None, "tls_pct": None, "ipv6_pct": None}
+
+    def _pct(val: Any) -> float | None:
+        if val is None:
+            return None
+        return round(int(val) * 100.0 / total, 1)
+
+    return {
+        "total_requests": total,
+        "http3_pct": _pct(row[1]),
+        "h2_pct": _pct(row[2]),
+        "tls_pct": _pct(row[3]),
+        "ipv6_pct": _pct(row[4]),
+    }
+
+
 def get_summary(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -936,36 +1042,50 @@ def get_summary(
     # ── Network ──────────────────────────────────────────────────────────
     if _want("network"):
         _t = time.perf_counter()
-        net_parts = ["COUNT(*) AS total_requests"]
-        if has_protocol:
-            net_parts.append(
-                "ROUND(COUNT(*) FILTER (WHERE protocol = 'HTTP/3') * 100.0 / NULLIF(COUNT(*), 0), 1) AS http3_pct"
-            )
-            net_parts.append(
-                "ROUND(COUNT(*) FILTER (WHERE protocol = 'HTTP/2') * 100.0 / NULLIF(COUNT(*), 0), 1) AS h2_pct"
-            )
-        if has_is_ssl:
-            net_parts.append("ROUND(COUNT(*) FILTER (WHERE is_ssl = true) * 100.0 / NULLIF(COUNT(*), 0), 1) AS tls_pct")
-        if has_ipv6:
-            net_parts.append("ROUND(COUNT(*) FILTER (WHERE ipv6 = true) * 100.0 / NULLIF(COUNT(*), 0), 1) AS ipv6_pct")
 
-        sql = f"SELECT {', '.join(net_parts)} FROM {table_name} WHERE {where_clause}"
-        row = runner.execute(sql, params).fetchone()
-        timer.mark("network_agg_query", _t)
+        # Try rollup for aggregate stats (unfiltered only)
+        net: dict[str, Any] | None = None
+        if not filters:
+            net = _try_network_from_rollup(runner, start_time=start_time, end_time=end_time)
+            if net is not None:
+                timer.mark("network_rollup", _t)
 
-        net: dict[str, Any] = {"total_requests": 0}
-        if row:
-            cols = [d[0] for d in runner.con.description]
-            d = dict(zip(cols, row))
-            net = {
-                "http3_pct": d.get("http3_pct"),
-                "tls_pct": d.get("tls_pct"),
-                "ipv6_pct": d.get("ipv6_pct"),
-                "h2_pct": d.get("h2_pct"),
-                "total_requests": d.get("total_requests", 0),
-            }
+        # Raw scan fallback for aggregates
+        if net is None:
+            net_parts = ["COUNT(*) AS total_requests"]
+            if has_protocol:
+                net_parts.append(
+                    "ROUND(COUNT(*) FILTER (WHERE protocol = 'HTTP/3') * 100.0 / NULLIF(COUNT(*), 0), 1) AS http3_pct"
+                )
+                net_parts.append(
+                    "ROUND(COUNT(*) FILTER (WHERE protocol = 'HTTP/2') * 100.0 / NULLIF(COUNT(*), 0), 1) AS h2_pct"
+                )
+            if has_is_ssl:
+                net_parts.append(
+                    "ROUND(COUNT(*) FILTER (WHERE is_ssl = true) * 100.0 / NULLIF(COUNT(*), 0), 1) AS tls_pct"
+                )
+            if has_ipv6:
+                net_parts.append(
+                    "ROUND(COUNT(*) FILTER (WHERE ipv6 = true) * 100.0 / NULLIF(COUNT(*), 0), 1) AS ipv6_pct"
+                )
 
-        # Protocol adoption time series
+            sql = f"SELECT {', '.join(net_parts)} FROM {table_name} WHERE {where_clause}"
+            row = runner.execute(sql, params).fetchone()
+            timer.mark("network_agg_query", _t)
+
+            net = {"total_requests": 0}
+            if row:
+                cols = [d[0] for d in runner.con.description]
+                d = dict(zip(cols, row))
+                net = {
+                    "http3_pct": d.get("http3_pct"),
+                    "tls_pct": d.get("tls_pct"),
+                    "ipv6_pct": d.get("ipv6_pct"),
+                    "h2_pct": d.get("h2_pct"),
+                    "total_requests": d.get("total_requests", 0),
+                }
+
+        # Protocol adoption time series (always raw — per-protocol per-bucket)
         if has_protocol:
             _t = time.perf_counter()
             proto_sql = (

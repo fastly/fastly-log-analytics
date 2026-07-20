@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import Depends, HTTPException, Query, Response
 
@@ -119,16 +119,14 @@ def _duckdb_row_counts_per_bucket(source: dict, start: datetime, end: datetime, 
     truth that should drive the log-accounting comparison.
 
     Returns ``{bucket_string: count}`` where bucket_string matches the
-    SQLite metadata path's format (``YYYY-MM-DD-HH`` for hourly,
+    SQLite metadata path's format (``YYYY-MM-DDTHH`` for hourly,
     ``YYYY-MM-DD`` for daily) so the loop above can union the keys.
 
-    Opens its own short-lived read-only connection. Cheap on this query
-    (single aggregate, no joins) — ~50-150 ms on a 24h window on prod.
-    Errors collapse to an empty dict so the route still degrades to the
-    metadata-only path rather than 500ing.
+    Prefers reading from the overview rollup parquet (one tiny file per
+    closed hour) and only falls back to scanning raw parquet for the
+    in-flight hour. Errors collapse to an empty dict so the route still
+    degrades to the metadata-only path rather than 500ing.
     """
-    from backend.core import duckdb as _ddb
-    from backend.deps import _ConnectionHolder
 
     cache_key = (
         source.get("name", ""),
@@ -141,36 +139,121 @@ def _duckdb_row_counts_per_bucket(source: dict, start: datetime, end: datetime, 
     if cached is not None and (now_mono - cached[0]) < _DUCKDB_COUNTS_TTL:
         return cached[1]
 
-    table_name = _ddb._safe_table_name(source["name"])
     # Bucket key MUST match metadata_db.get_log_accounting_counts: hourly
     # uses ``YYYY-MM-DDTHH`` (T separator, from the .log.gz basename's
     # ISO prefix); daily uses ``YYYY-MM-DD``. Mismatch here makes the
     # union-by-key loop in compute_log_accounting produce ghost buckets
     # with our_rows but zero fastly_requests.
     fmt = "%Y-%m-%dT%H" if by == "hour" else "%Y-%m-%d"
-    start_iso = start.strftime("%Y-%m-%d %H:%M:%S")
-    end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
     try:
-        # read_only=True so this uses the pool (cheap, doesn't contend with
-        # the cron writer).
+        result = _try_row_counts_from_rollup(source, start, end, fmt)
+        if result is None:
+            result = _raw_row_counts(source, start, end, fmt)
+        _DUCKDB_COUNTS_CACHE[cache_key] = (now_mono, result)
+        return result
+    except Exception as e:
+        logger.warning("[log-accounting] DuckDB counts unavailable, falling back to metadata: %s", e)
+        return {}
+
+
+def _try_row_counts_from_rollup(
+    source: dict,
+    start: datetime,
+    end: datetime,
+    fmt: str,
+) -> dict[str, int] | None:
+    """Read hourly request counts from the overview rollup parquet.
+
+    Returns ``None`` when the rollup path isn't viable (missing files for
+    a closed hour that has data), causing the caller to fall back to raw.
+    """
+    import os
+
+    from backend.core.rollups import OVERVIEW_BUNDLE_FILENAME, _hour_bundled_root
+    from backend.deps import _ConnectionHolder
+    from backend.repositories._base import collect_hourly_bundle_paths
+
+    bundled_root = _hour_bundled_root(source)
+    if not os.path.isdir(bundled_root):
+        return None
+
+    collected = collect_hourly_bundle_paths(
+        source,
+        start,
+        end,
+        bundled_root,
+        OVERVIEW_BUNDLE_FILENAME,
+    )
+    if collected is None:
+        return None
+    rollup_paths, crosses_active = collected
+    if not rollup_paths and not crosses_active:
+        return None
+
+    result: dict[str, int] = {}
+
+    if rollup_paths:
+        from backend.repositories._base import quote_path_list
+
+        paths_sql = quote_path_list(rollup_paths)
+        st_tz = start.astimezone(UTC).isoformat()
+        et_tz = end.astimezone(UTC).isoformat()
+        with _ConnectionHolder(source, read_only=True) as con:
+            rows = con.execute(
+                f"SELECT strftime(hour_start, '{fmt}') AS bucket, "
+                f"  SUM(requests) AS n "
+                f"FROM read_parquet([{paths_sql}]) "
+                f"WHERE hour_start >= TIMESTAMPTZ '{st_tz}' "
+                f"  AND hour_start < TIMESTAMPTZ '{et_tz}' "
+                f"GROUP BY 1"
+            ).fetchall()
+        for b, n in rows:
+            result[b] = int(n)
+
+    if crosses_active:
+        from backend.core import duckdb as _ddb
+
+        active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        live_start = max(start, active_hour_dt)
+        live_start_iso = live_start.strftime("%Y-%m-%d %H:%M:%S")
+        end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
+        table_name = _ddb._safe_table_name(source["name"])
         with _ConnectionHolder(source, read_only=True) as con:
             rows = con.execute(
                 f"SELECT strftime(timestamp, '{fmt}') AS bucket, COUNT(*) AS n "
                 f"FROM {table_name} "
-                f"WHERE timestamp >= TIMESTAMP '{start_iso}' "
+                f"WHERE timestamp >= TIMESTAMP '{live_start_iso}' "
                 f"  AND timestamp <  TIMESTAMP '{end_iso}' "
                 f"GROUP BY 1"
             ).fetchall()
-        result = {b: int(n) for b, n in rows}
-        _DUCKDB_COUNTS_CACHE[cache_key] = (now_mono, result)
-        return result
-    except Exception as e:
-        import logging as _logging
+        for b, n in rows:
+            result[b] = result.get(b, 0) + int(n)
 
-        _logging.getLogger(__name__).warning(
-            "[log-accounting] DuckDB counts unavailable, falling back to metadata: %s", e
-        )
-        return {}
+    return result
+
+
+def _raw_row_counts(
+    source: dict,
+    start: datetime,
+    end: datetime,
+    fmt: str,
+) -> dict[str, int]:
+    """Full raw-parquet scan fallback for row counts."""
+    from backend.core import duckdb as _ddb
+    from backend.deps import _ConnectionHolder
+
+    table_name = _ddb._safe_table_name(source["name"])
+    start_iso = start.strftime("%Y-%m-%d %H:%M:%S")
+    end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
+    with _ConnectionHolder(source, read_only=True) as con:
+        rows = con.execute(
+            f"SELECT strftime(timestamp, '{fmt}') AS bucket, COUNT(*) AS n "
+            f"FROM {table_name} "
+            f"WHERE timestamp >= TIMESTAMP '{start_iso}' "
+            f"  AND timestamp <  TIMESTAMP '{end_iso}' "
+            f"GROUP BY 1"
+        ).fetchall()
+    return {b: int(n) for b, n in rows}
 
 
 def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> dict:
