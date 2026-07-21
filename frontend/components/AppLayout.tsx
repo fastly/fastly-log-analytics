@@ -548,14 +548,6 @@ export function AppLayout({
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
   const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || pathname.startsWith('/control-room') || !hasServices
 
-  if (isLoading && !bootstrapData && !isInitializing) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-background">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" aria-label="Loading" />
-      </div>
-    )
-  }
-
   if (isInitializing) {
     return (
       <div className="flex h-screen items-center justify-center bg-background p-6 relative overflow-hidden">
