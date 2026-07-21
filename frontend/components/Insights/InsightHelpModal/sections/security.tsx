@@ -323,6 +323,62 @@ export function getSecurityContent(id: string): InsightContent | null {
         )
       }
 
+    case 'repeated_patterns_fp':
+      return {
+        title: 'Scripted Traffic Patterns (by TLS Fingerprint)',
+        icon: <Bot className="h-5 w-5 text-primary" />,
+        fields: ['ip', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>Flags TLS fingerprints (JA3/JA4) sending requests on a near-constant cadence across multiple source IPs — automated scrapers, pollers, or cron-scheduled scripts that rotate IP addresses to evade per-IP detection.</p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Fingerprint className="h-5 w-5 shrink-0 text-blue-500" />
+                <span><strong>Fingerprint-keyed:</strong> instead of grouping by client IP, we group by TLS fingerprint. A scraper rotating through proxies or VPNs changes IP on every request, but its TLS stack (cipher suites, extensions, curves) stays the same.</span>
+              </li>
+              <li className="flex gap-3">
+                <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span><strong>Same statistical engine:</strong> the cadence regularity algorithm is identical to the IP variant — Sheppard-corrected coefficient of variation plus modal dominance — just applied to the fingerprint&apos;s aggregate traffic instead of a single IP&apos;s.</span>
+              </li>
+              <li className="flex gap-3">
+                <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
+                <span><strong>Catches IP rotation:</strong> a single IP sending periodic requests is caught by the standard insight. This variant catches the complementary case: the script rotates IPs, but keeps the same TLS fingerprint and cadence.</span>
+              </li>
+              <li className="flex gap-3">
+                <Search className="h-5 w-5 shrink-0 text-emerald-500" />
+                <span><strong>Per-fingerprint evidence:</strong> click the magnifier on any flagged row to see the regularity score, mean interval, jitter, modal gap, and the number of distinct source IPs behind that fingerprint.</span>
+              </li>
+            </ul>
+          </div>
+        ),
+        diagram: (
+          <div className="bg-muted/30 p-6 rounded-xl border space-y-5">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold flex items-center gap-1.5"><Bot className="h-3.5 w-3.5 text-red-500" /> Automated script</span>
+                <span className="text-[10px] text-muted-foreground font-mono">even gaps · ~0 jitter</span>
+              </div>
+              <div className="relative h-6 rounded-md bg-background border overflow-hidden" aria-hidden="true">
+                {[6, 19, 32, 45, 58, 71, 84, 94].map((l) => (
+                  <span key={l} className="absolute top-1 bottom-1 w-0.5 bg-red-500" style={{ left: `${l}%` }} />
+                ))}
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold flex items-center gap-1.5"><User className="h-3.5 w-3.5 text-blue-500" /> Human browsing</span>
+                <span className="text-[10px] text-muted-foreground font-mono">bursty · irregular</span>
+              </div>
+              <div className="relative h-6 rounded-md bg-background border overflow-hidden" aria-hidden="true">
+                {[4, 9, 12, 28, 33, 57, 79, 84, 92].map((l) => (
+                  <span key={l} className="absolute top-1 bottom-1 w-0.5 bg-blue-500/70" style={{ left: `${l}%` }} />
+                ))}
+              </div>
+            </div>
+          </div>
+        )
+      }
+
     case 'session_harvesting':
       return {
         title: 'Session-ID Harvesting',

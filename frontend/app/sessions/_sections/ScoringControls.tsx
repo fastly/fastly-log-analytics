@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { AlertTriangle, Clock } from 'lucide-react'
+import { AlertTriangle, Clock, Film } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
@@ -11,6 +11,8 @@ import { cn } from '@/lib/utils'
 interface ScoringControlsProps {
   flaggedOnly: boolean
   setFlaggedOnly: (v: boolean) => void
+  streamingOnly: boolean
+  setStreamingOnly: (v: boolean) => void
   minReqs: number | ''
   setMinReqs: (v: number | '') => void
   min4xxPct: number | ''
@@ -24,6 +26,8 @@ interface ScoringControlsProps {
 export function ScoringControls({
   flaggedOnly,
   setFlaggedOnly,
+  streamingOnly,
+  setStreamingOnly,
   minReqs,
   setMinReqs,
   min4xxPct,
@@ -45,6 +49,19 @@ export function ScoringControls({
           <AlertTriangle className="h-3.5 w-3.5 text-yellow-500" /> Flagged only
         </Label>
       </div>
+
+      {data?.has_cmcd && (
+        <div className="flex items-center gap-2">
+          <Switch
+            id="streaming-only"
+            checked={streamingOnly}
+            onCheckedChange={setStreamingOnly}
+          />
+          <Label htmlFor="streaming-only" className="text-sm cursor-pointer flex items-center gap-1">
+            <Film className="h-3.5 w-3.5 text-blue-500" /> Streaming sessions
+          </Label>
+        </div>
+      )}
 
       <div className="flex items-center gap-2">
         <Label className="text-xs text-muted-foreground whitespace-nowrap">Min. requests</Label>
@@ -75,12 +92,12 @@ export function ScoringControls({
         />
       </div>
 
-      {(flaggedOnly || minReqs !== '' || min4xxPct !== '') && (
+      {(flaggedOnly || streamingOnly || minReqs !== '' || min4xxPct !== '') && (
         <Button
           variant="ghost"
           size="sm"
           className="h-8 text-xs ml-auto"
-          onClick={() => { setFlaggedOnly(false); setMinReqs(''); setMin4xxPct('') }}
+          onClick={() => { setFlaggedOnly(false); setStreamingOnly(false); setMinReqs(''); setMin4xxPct('') }}
         >
           Clear filters
         </Button>

@@ -139,6 +139,7 @@ _ANALYST_BLOCKED_SUBPATH_REGEX: tuple[re.Pattern[str], ...] = (
         r"^/api/services/[^/]+/log-fields$"
     ),  # H-3: per-service field map (catalog at /api/log-fields/catalog stays open)
     re.compile(r"^/api/services/[^/]+/custom-fields(/.*)?$"),  # H-6 + N-7: VCL schema list + export
+    re.compile(r"^/api/services/[^/]+/log-field-audit$"),  # S-2: operator field-config disclosure
 )
 
 # Session-scoring sub-routes that are admin-only. The gate only fires for
@@ -189,6 +190,9 @@ _ANALYST_ALLOWED_WRITE_PREFIXES = (
     "/api/network-quality",  # POST /api/network-quality
     "/api/query",  # POST /api/query
     "/api/sessions",  # POST /api/sessions and /api/sessions/detail
+    "/api/cmcd/",  # POST /api/cmcd/aggregates — streaming read-only query
+    "/api/value/",  # POST /api/value/summary — service summary read-only query
+    "/api/web-vitals",  # POST /api/web-vitals — browser perf beacon (no PII)
     "/api/charts/",
     "/api/web-vitals",  # POST /api/web-vitals — client perf telemetry
     "/api/ux-events",  # POST /api/ux-events — DataTable column reorders + sibling UX signals
@@ -254,10 +258,9 @@ _ADMIN_TOKEN_EXEMPT_PATHS = {
     # physically cannot carry custom request headers (the Beacon spec
     # restricts the API to a request body + content type). The admin-
     # branch caller (WebVitalsReporter / reportUxEvent) would otherwise
-    # 401-loop on every page load. Both paths are still in
-    # ``_ANALYST_BLOCKED_PREFIXES`` so analyst traffic remains blocked
-    # on the wire; this exemption only relaxes the second-factor gate
-    # on the admin loopback branch.
+    # 401-loop on every page load. Analyst traffic passes via
+    # ``_ANALYST_ALLOWED_WRITE_PREFIXES``; this exemption relaxes the
+    # second-factor gate on the admin loopback branch.
     "/api/web-vitals",
     "/api/ux-events",
 }
@@ -1061,8 +1064,11 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             ):
                 return JSONResponse(status_code=429, content={"error": "rate_limited"})
 
-        # Origin gate for non-GET/HEAD writes.
-        if method not in ("GET", "HEAD"):
+        # Origin gate for non-GET/HEAD writes.  Telemetry beacons
+        # (sendBeacon) may arrive without an Origin header through CDN;
+        # they're fire-and-forget, no mutation, no data return — CSRF
+        # protection adds no value.
+        if method not in ("GET", "HEAD") and not any(path.startswith(p) for p in _TELEMETRY_IDLE_EXEMPT_PREFIXES):
             origin = request.headers.get("origin", "")
             if not _origin_allowed(origin):
                 return JSONResponse(
@@ -1151,7 +1157,8 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         if method == "POST" and not any(path.startswith(p) for p in _ANALYST_ALLOWED_WRITE_PREFIXES):
             return JSONResponse(status_code=403, content={"error": "read_only"})
 
-        # Service-scope gate (skipped for system/session paths starting with /api/share/).
+        # Service-scope gate (skipped for system/session paths and
+        # fire-and-forget telemetry beacons that carry no service context).
         # Collect every candidate the route handler might key off:
         #   - path params (/api/services/{sid}/..., /api/alerts/{sid}, /api/views/{sid})
         #   - query params (service, service_id)
@@ -1162,7 +1169,8 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         # with the analyst's allowed service in the query string and a different
         # service in the path was previously accepted because only the query
         # value was checked, and the route handler then used the path value.
-        if not path.startswith("/api/share/"):
+        _skip_scope = path.startswith("/api/share/") or any(path.startswith(p) for p in _TELEMETRY_IDLE_EXEMPT_PREFIXES)
+        if not _skip_scope:
             from backend import config as svcconfig
 
             raw_candidates: list[str] = list(_path_service_ids(request))

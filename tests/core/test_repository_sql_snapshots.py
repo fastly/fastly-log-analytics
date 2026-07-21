@@ -123,6 +123,7 @@ _DEFAULT_PLACEHOLDERS: dict[str, str] = {
     "cte_prefix": "",
     "edge_proj": "",
     "edge_sid_proj": "",
+    "cmcd_sid_proj": "",
     "extra_aggs": "",
     "flag_expr": "req_count >= 1000",
     "flagged_filter": "",

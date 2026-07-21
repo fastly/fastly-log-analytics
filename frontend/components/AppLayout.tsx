@@ -24,6 +24,9 @@ import {
   PanelLeftOpen,
   Loader2,
   LogOut,
+  Radio,
+  Play,
+  TrendingUp,
   X,
 } from 'lucide-react'
 
@@ -101,12 +104,15 @@ import { SIDEBAR_COLLAPSED_COOKIE } from '@/lib/sidebar-cookie'
 // analyst who runs their own ingestion, leak-y for an invited viewer.
 const SERVICE_NAVIGATION = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, analystVisible: true },
+  { name: 'Control Room', href: '/control-room', icon: Radio, analystVisible: true },
+  { name: 'Service Summary', href: '/fastly-value', icon: TrendingUp, analystVisible: true },
   { name: 'Performance', href: '/performance', icon: Timer, analystVisible: true },
   { name: 'Origin', href: '/origin', icon: Server, analystVisible: true },
   { name: 'Security', href: '/security', icon: Shield, analystVisible: true },
   { name: 'Charts', href: '/charts', icon: BarChart3, analystVisible: true },
   { name: 'Insights', href: '/insights', icon: Sparkles, analystVisible: true },
   { name: 'Network', href: '/network', icon: Network, analystVisible: true },
+  { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true, requiresCmcd: true },
   { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
   { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
@@ -138,8 +144,11 @@ function UrlServiceSync() {
 // override any deep-link hash target or skip-to-content interaction.
 const ROUTE_FRIENDLY_NAMES: Record<string, string> = {
   '/dashboard': 'Dashboard',
+  '/control-room': 'Control Room',
+  '/fastly-value': 'Service Summary',
   '/security': 'Security',
   '/network': 'Network',
+  '/streaming': 'Streaming',
   '/origin': 'Origin',
   '/performance': 'Performance',
   '/sessions': 'Sessions',
@@ -218,7 +227,7 @@ interface NavLinkProps {
 }
 
 function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, activeServiceId, router }: NavLinkProps & { activeServiceId?: string | null; router: ReturnType<typeof useRouter> }) {
-  const finalHref = activeServiceId && !href.startsWith('/admin')
+  const finalHref = activeServiceId
     ? `${href}?service=${activeServiceId}`
     : href
 
@@ -350,6 +359,16 @@ export function AppLayout({
   const services = useServiceStore(state => state.services)
   const debugEnabled = useDebugStore(state => state.enabled)
   const bootstrapSettings = bootstrapData?.settings as Record<string, unknown> | undefined
+  const isInitializing = bootstrapSettings?.initializing === true
+
+  React.useEffect(() => {
+    if (isInitializing) {
+      const interval = setInterval(() => {
+        void refetchBootstrap()
+      }, 2000)
+      return () => clearInterval(interval)
+    }
+  }, [isInitializing, refetchBootstrap])
   const isAnalyst = useIsAnalyst()
   // Strip any IP-family filter for masking analysts (e.g. a bookmarked
   // ?filters={ip:...} URL) so it never reaches the backend's IP-filter lock.
@@ -375,7 +394,12 @@ export function AppLayout({
   // expiry or be booted by an admin).
   const { logout, isLoggingOut } = useAnalystLogout()
 
+  const activeSvc = bootstrapData?.services?.find(s => s.service_id === activeServiceId)
+  const activeSvcStatus = (activeSvc as Record<string, unknown> | undefined)?.status as { schema?: { name: string }[] } | undefined
+  const hasCmcd = activeSvcStatus?.schema?.some(col => col.name === 'cmcd_sid') ?? false
+
   const visibleNav = SERVICE_NAVIGATION.filter(item => {
+    if (item.requiresCmcd && !hasCmcd) return false
     if (isShareAnalyst) {
       // share analysts see a tighter subset; default to analystVisible when
       // an item doesn't have a share-specific override.
@@ -455,6 +479,24 @@ export function AppLayout({
     }
   }, [isLoading, hasServices, isAnalyst, isShareAnalyst, needsLogin, pathname, router, activeServiceId])
 
+  // SECURITY GATE: never render the app shell (sidebar, header, service
+  // selector) for unauthenticated visitors. The /share-login page is a
+  // standalone surface; rendering it inside the shell leaks service names,
+  // nav structure, and operational metrics to anyone who hits the URL.
+  // When needsLogin on a non-login route, render nothing visible while
+  // the redirect useEffect above fires.
+  const isLoginPage = pathname.startsWith('/share-login')
+  if (isLoginPage || needsLogin) {
+    return (
+      <>
+        <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+          {redirectAnnouncement}
+        </div>
+        {isLoginPage ? children : null}
+      </>
+    )
+  }
+
   // Hint the browser to fetch world.geojson early on routes that actually
   // mount a map (dashboard's "Requests by Country" choropleth, /network's
   // choropleth). Previously this was a global <link rel="preload"> in
@@ -489,7 +531,8 @@ export function AppLayout({
     pathname.startsWith('/performance') ||
     pathname.startsWith('/security') ||
     pathname.startsWith('/charts') ||
-    pathname.startsWith('/insights')
+    pathname.startsWith('/insights') ||
+    pathname.startsWith('/fastly-value')
   )
   const needsMapPrewarm = (
     pathname.startsWith('/dashboard') ||
@@ -503,7 +546,45 @@ export function AppLayout({
   // own editor + filters and the global bar would only confuse the
   // SQL the user is hand-writing.
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
-  const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || !hasServices
+  const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || pathname.startsWith('/control-room') || !hasServices
+
+  if (isInitializing) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background p-6 relative overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-br from-background via-background to-card/10 z-0" />
+        <div className="absolute -top-40 -left-40 w-96 h-96 bg-primary/5 rounded-full blur-3xl" />
+        <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-primary/5 rounded-full blur-3xl" />
+
+        <div className="relative z-10 max-w-md text-center space-y-8 p-8 rounded-2xl border bg-card/60 backdrop-blur-md shadow-xl transition-all duration-500 hover:shadow-2xl hover:border-primary/20">
+          <div className="flex justify-center relative">
+            <div className="absolute inset-0 rounded-full bg-primary/10 animate-ping scale-75" />
+            <div className="p-4 bg-muted/60 backdrop-blur-sm rounded-full border border-border/60 relative">
+              <Server className="h-10 w-10 text-primary animate-pulse" />
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <h1 className="text-2xl font-bold tracking-tight bg-gradient-to-r from-foreground to-foreground/80 bg-clip-text text-transparent">
+              Initializing Analytics Engine
+            </h1>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              Fastly Log Analytics is pre-warming database views and compiling bot detection rules. This typically takes less than a minute.
+            </p>
+          </div>
+
+          <div className="flex flex-col items-center space-y-4 pt-4 border-t border-border/40">
+            <div className="flex items-center space-x-3 text-xs font-medium text-primary/90 bg-primary/10 px-4 py-2 rounded-full border border-primary/20 shadow-sm">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              <span>Optimizing database caches...</span>
+            </div>
+            <p className="text-xs text-muted-foreground/80 italic">
+              Dashboard will mount automatically when ready
+            </p>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   // E-2 fix: /api/bootstrap is the spine of every redirect + nav-visibility
   // decision below — without it, hasServices defaults to the persisted
@@ -601,6 +682,7 @@ export function AppLayout({
         <div className="flex h-14 items-center justify-center border-b px-2 py-2 shrink-0">
           <Link
             href={hasServices ? (activeServiceId ? `/dashboard?service=${activeServiceId}` : "/dashboard") : "/admin"}
+            prefetch={false}
             className="flex flex-col items-center justify-center hover:opacity-80 transition-opacity mt-1"
             aria-label="Fastly Log Analytics — home"
           >
@@ -839,7 +921,7 @@ export function AppLayout({
               <nav className="grid gap-1 p-2" aria-label="Primary">
                 {visibleNav.map((item) => {
                   const Icon = item.icon
-                  const finalHref = activeServiceId && !item.href.startsWith('/admin')
+                  const finalHref = activeServiceId
                     ? `${item.href}?service=${activeServiceId}`
                     : item.href
                   const isActive = pathname === item.href
@@ -873,7 +955,7 @@ export function AppLayout({
                 <nav className="grid gap-1" aria-label="System">
                   {visibleSystemNav.map((item) => {
                     const Icon = item.icon
-                    const finalHref = activeServiceId && !item.href.startsWith('/admin')
+                    const finalHref = activeServiceId
                       ? `${item.href}?service=${activeServiceId}`
                       : item.href
                     const isActive = pathname === item.href

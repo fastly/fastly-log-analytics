@@ -707,6 +707,29 @@ def _run_metadata_cleanup(service_id: str) -> None:
     except Exception as e:
         logger.debug("[metadata_cleanup] metric_snapshots purge failed: %s", e)
 
+    try:
+        from backend.core.metadata.quarantine import delete_quarantined_rows, get_expired_quarantined_files
+
+        expired = get_expired_quarantined_files(service_id, retention_days=14)
+        if expired:
+            from backend.core.duckdb import _get_fos_client
+            from backend.core.ingest import _delete_objects_robust
+
+            fos_client = _get_fos_client(src)
+            keys_to_delete = []
+            ids_to_delete = []
+            for row in expired:
+                keys_to_delete.append(row["error_key"])
+                keys_to_delete.append(row["meta_key"])
+                ids_to_delete.append(row["id"])
+            if keys_to_delete:
+                _delete_objects_robust(fos_client, src["bucket"], keys_to_delete)
+            if ids_to_delete:
+                delete_quarantined_rows(service_id, ids_to_delete)
+            logger.info("[metadata_cleanup] %s: purged %d expired quarantined files", service_id, len(expired))
+    except Exception as e:
+        logger.debug("[metadata_cleanup] quarantine purge failed: %s", e)
+
     log_cron_run(
         src,
         "metadata_cleanup",

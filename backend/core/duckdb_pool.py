@@ -174,26 +174,20 @@ def _pool_sweep_enabled() -> bool:
     return os.getenv("DUCKDB_POOL_SWEEP", "0").lower() in ("1", "true", "yes", "on")
 
 
-def _pool_conn_threads() -> int | None:
-    """Optional per-pool-connection DuckDB thread count.
+def _pool_conn_threads() -> int:
+    """Per-pool-connection DuckDB thread count.
 
-    Each pool connection defaults to ``min(cpu_count, 8)`` DuckDB threads.
-    With ``DUCKDB_POOL_MAX_SIZE=8`` concurrent queries that means
-    ``8 connections × 8 threads = 64 threads`` competing for ~8 physical
-    cores — context-switching dominates and per-query latency degrades
-    well past linear queueing. Set ``DUCKDB_POOL_CONN_THREADS`` to a smaller
-    value (commonly ``cpu_count // pool_max_size``) to trade single-query
-    throughput for better tail-latency under sustained load.
-
-    Returns the int value (>=1) or ``None`` to keep the default.
+    Defaults to 1 to prevent oversubscription on the 4-core VM
+    (8 conns × 4 threads = 32 threads). Override via
+    ``DUCKDB_POOL_CONN_THREADS`` env var.
     """
-    raw = os.getenv("DUCKDB_POOL_CONN_THREADS")
+    raw = os.getenv("DUCKDB_POOL_CONN_THREADS", "1")
     if not raw:
-        return None
+        return 1
     try:
         return max(1, int(raw))
     except (TypeError, ValueError):
-        return None
+        return 1
 
 
 # Per-connection state tracking. DuckDB connection objects are slotted

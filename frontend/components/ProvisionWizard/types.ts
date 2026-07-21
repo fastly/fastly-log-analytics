@@ -59,6 +59,9 @@ export interface ProvisionConfig {
   enable_cron_compact: boolean;
   log_fields: any;
   ngwaf_workspace_id: string;
+  cmcd_enabled: boolean;
+  cmcd_mode: string;
+  cmcd_version: number;
 }
 
 export const INITIAL_CONFIG: ProvisionConfig = {
@@ -84,6 +87,9 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   enable_cron_compact: true,
   log_fields: { groups: [], field_overrides: {} } as any,
   ngwaf_workspace_id: "",
+  cmcd_enabled: false,
+  cmcd_mode: "query_string",
+  cmcd_version: 1,
 };
 
 export type PersistedConfig = Omit<

@@ -5,6 +5,212 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-07-17
+
+### Added
+
+- **Real-time Control Room.** A new admin-only operational dashboard polls
+  Fastly's real-time analytics API at 1-second cadence and streams live metrics
+  via SSE to the browser. Nine tabs — Overview, Performance, Origin, Security,
+  Network, Sessions, Cost, Insights, and Admin Health — show rolling bar charts,
+  KPI metric cards, and a PoP traffic heatmap, all seeded with recent historical
+  data on page load so charts start full. Contextual help icons explain each
+  panel, drill-down tabs support configurable time windows, and the poller runs
+  on a dedicated thread with connection pooling to maintain reliable tick
+  delivery under event-loop load.
+
+- **CMCD streaming analytics.** Services that enable Common Media Client Data
+  (CMCD) logging — v1 (query-string) or v2 (request-header) — get a new
+  Streaming page with buffer-health distributions, bitrate and throughput time
+  series, content-type breakdowns, top streaming URLs, and concurrent-session
+  counts over time with auto-refresh. A per-session detail page shows a
+  timeline of buffer, bitrate, and quality events for a single stream. CMCD
+  field extraction is handled at the edge via generated VCL snippets, and an
+  admin settings UI selects the CMCD version and manages the field catalog.
+  Services without CMCD logging see the Streaming nav item hidden automatically.
+
+- **Fastly Value executive summary.** A new Service Summary page consolidates
+  the measurable value Fastly delivers into tabbed sections: Summary (with a
+  precomputed overview rollup for fast loads), CDN & Caching, Security, Bot
+  Management, Network & Performance, and Image Optimizer. Each tab rolls up
+  key metrics into hero stat cards with supporting charts — cache hit ratio,
+  offload percentage, WAF blocks, bot mitigation, TLS adoption, latency
+  percentiles, and IO transform savings — giving operators a single page to
+  quantify Fastly's impact.
+
+- **Image Optimizer analytics.** Services with Fastly IO enabled get a
+  dedicated IO tab on the Service Summary showing format distribution
+  (WebP/AVIF/JPEG/PNG breakdown), estimated bandwidth savings from format
+  conversion, per-request transform metrics from the `Fastly-Io-Transform-Stats`
+  header, and an optimization-opportunity table linking to URLs with the highest
+  potential savings. IO metrics also feed into the Usage & Cost calculations.
+
+- **Ingest error quarantine.** Corrupt or unparseable log lines that previously
+  caused silent row drops are now isolated into an `errors/` prefix in FOS,
+  classified by failure reason (malformed JSON, schema mismatch, encoding
+  error), and surfaced in a Quarantine section on the admin page with export
+  and download endpoints. Quarantine storage is included in usage cost
+  calculations. Purging deletes all quarantined files rather than only expired
+  ones.
+
+- **Estimated incurred cost chart.** The Usage page gains a cost chart that
+  overlays estimated FOS operations cost against CDN egress bandwidth cost over
+  time, with an operations-rate subtitle on the stat card. The chart uses amber
+  bars for CDN egress to visually distinguish it from operations cost.
+
+- **Backend startup state tracking.** The backend now broadcasts its startup
+  phase (initializing, loading metadata, warming caches, ready) via a global
+  state object. The frontend shows a branded initializing screen with status
+  text during bootstrap rather than rendering an empty shell, so the app feels
+  responsive even when the backend is still warming up.
+
+- **Custom Caddy reboot screen.** When the backend is restarting, Caddy serves
+  a branded 502/503 page that auto-refreshes every few seconds until the app is
+  back, replacing the browser's default connection-refused error.
+
+- **Repeated-patterns fingerprint insight.** A new Insights detection
+  (`repeated_patterns_fp`) identifies scripted traffic by fingerprinting
+  request cadence patterns per client, complementing the existing
+  regularity-based detection.
+
+- **ASN hosting-shift insight.** A new detection (`asn_hosting_shift`) flags
+  ASNs whose traffic shifts from consumer to datacenter IP space — a signal of
+  residential-proxy or VPN migration.
+
+- **Stream detail drill-down.** Session detail pages now include a visible pill
+  button linking to the CMCD stream detail page for sessions with streaming
+  data.
+
+### Changed
+
+- **Control Room tabs are fully live.** All nine tabs now render real data from
+  the RT API — the previous stub structures have been replaced with full
+  implementations including rolling-average smoothing, cache-hit-ratio charts on
+  the origin tab, and SI-suffix formatting (k, M, G) on Y axes.
+
+- **Usage chart labels are clearer.** The Usage page relabels "Log Activity
+  (Generated)" as "Estimated Incurred Cost", renames Fastly-side counts to
+  "Logs Sent" (with "Processed" hover prefix), and uses "Log Lines Ingested"
+  vs "Log Lines Emitted" for the ingestion chart. The Fastly overlay now uses
+  request counts rather than log counts to match Fastly's billing model.
+
+- **Log-activity row counts read from DuckDB rollups.** The log-activity
+  panel's row counts now come from a precomputed DuckDB rollup instead of
+  SQLite metadata, and the reader skips the writer-behind check for rollup
+  reads. Parquet reads use in-memory DuckDB, dropping the live-hour scan.
+
+- **Active Fastly version lookups are faster.** The backend now queries the
+  active-version endpoint directly instead of listing all versions, with
+  backward-compatible fallbacks for older API responses.
+
+- **Service context survives navigation.** All internal links now carry
+  `?service=` so switching pages doesn't lose the active service context.
+  Insights investigation links also carry service context to prevent
+  cross-service navigation.
+
+- **Date-range picker visibility.** The active preset button is now blue for
+  better visibility against inactive presets.
+
+- **Tab icons on Control Room** match the Service Summary style for visual
+  consistency.
+
+- **E2e tests run against production builds.** Playwright tests now run
+  against `next start` builds rather than dev server to eliminate dev-only
+  flakiness.
+
+- **CI caches Terraform provider plugins** in the GitHub Actions pipeline.
+
+### Fixed
+
+- **Bootstrap loading state shows the initializing screen** while the backend
+  is still loading, not just when `initializing=true` — fixing a flash of empty
+  content on slow startups.
+
+- **Log-fields 500 on model drift.** The log-fields endpoint no longer crashes
+  when a service config is missing `field_overrides` or when the Pydantic model
+  shape drifts from the stored config.
+
+- **Log settings modal infinite loading.** The modal now shows an error state
+  instead of spinning forever when the backend returns an error.
+
+- **Log format budget starvation.** Custom fields that used `bytes_estimate`
+  for `substr` defaults no longer starve the log-format byte budget.
+
+- **Cron console raw JSON.** The cron console no longer shows raw JSON for
+  completed events that lack a message field.
+
+- **Error extraction from middleware fallback.** `extractApiError` now handles
+  plain `{message}` objects from the middleware catch fallback.
+
+- **App shell auth gate.** The app shell is now gated behind authentication
+  so `/share-login` renders bare without leaking the admin layout.
+
+- **CMCD boolean VCL extraction.** Boolean CMCD fields use a comma-sandwich
+  pattern instead of `$` anchoring, and pre-pad into a temp variable to avoid
+  false matches on substring field names.
+
+- **Group M VCL log format.** JSON key prefixes are now included in log format
+  expressions for field group M.
+
+- **IO header name.** Corrected from `Fastly-Io-Info` to
+  `Fastly-Io-Transform-Stats` and guarded regsub extractions against missing
+  header fields.
+
+- **Single-point chart axes.** Time series with a single data point now pad
+  the axis and format the distribution empty state correctly.
+
+- **Control Room chart fixes.** Fixed chart legend toggle, chart clipping,
+  hover tooltips, uniform-width 60-slot X axes, correct baseline column names,
+  and replay-buffer skip for backfill ticks.
+
+- **Admin "No cache" on bootstrap.** The BootstrapService model no longer
+  strips enriched fields, and `extra="allow"` no longer leaks `custom_fields`
+  to the wire.
+
+- **New-sessions query.** Fixed the `first_ts` alias in the bucket expression.
+
+- **PoP traffic map.** Baseline dots now come from bootstrap data, the ocean
+  background renders correctly, and idle styling is applied.
+
+- **Link prefetch spam.** Disabled Next.js Link prefetch on remaining bare
+  Links to stop preload console spam.
+
+- **Control Room analyst access.** Analysts can now reach the streaming/CMCD
+  page and service summary value endpoint. Telemetry beacons are exempted from
+  the analyst service-scope gate. Origin gate and service-scope desync on
+  path-param routes are fixed.
+
+- **Flaky e2e tests.** Fixed control-room sidebar nav timing, admin contrast
+  accessibility, viewport card races, and sidebar link enable-wait.
+
+### Performance
+
+- **Control Room tick delivery.** The RT poller runs on a dedicated daemon
+  thread with httpx connection pooling, bypassing the event loop entirely for
+  sub-millisecond SSE delivery. Replay buffer and progressive chart rendering
+  keep initial loads fast. Plotly is lazy-loaded to reduce bundle size.
+
+- **DuckDB and SQLite tuning.** Optimized DuckDB temp-table configs, reduced
+  SQLite WAL contention under concurrent access, and deduped alert subqueries.
+  `ILIKE` filters are rewritten to `starts_with` where possible.
+
+- **Frontend aggregates.** Vitest pre-bundles heavy deps and skips CSS
+  processing. Backgrounded browser tabs stop polling queries.
+
+- **Overview rollup.** A precomputed overview rollup powers the Service Summary
+  page, and merged overview + caching queries into a single DuckDB scan.
+
+- **CMCD query optimization.** CMCD queries use a temp table with combined
+  time-series and eliminated self-joins.
+
+### Security
+
+- **Hardening across the analyst and admin surfaces.** Request validation
+  strengthened on analyst-facing endpoints, service-scope enforcement tightened
+  on path-parameter routes, pool oversubscription guards added, SSR seed
+  requests no longer carry admin credentials, and Insights SQL injection
+  surface reduced. Frontend accessibility and keyboard navigation improved.
+
 ## [2.1.0] - 2026-07-07
 
 ### Added
@@ -1110,6 +1316,7 @@ deleted.
   admin tunnel use case is no longer supported; production has always
   been direct-mode against the Fastly+Caddy public URL.
 
+[2.2.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.0
 [2.1.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.1.0
 [2.0.0-beta.2]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.0.0-beta.2
 [2.0.0-beta.1]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.0.0-beta.1

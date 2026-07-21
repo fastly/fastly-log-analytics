@@ -637,6 +637,7 @@ def test_rollup_returns_none_when_window_le_1h(rollup_source):
             has_rtt=False,
             has_edge=False,
             has_edge_sid=False,
+            has_cmcd=False,
             section_timings=timer.entries,
         )
         assert out is None
@@ -684,6 +685,7 @@ def test_rollup_returns_none_when_writer_behind(rollup_source):
             has_rtt=False,
             has_edge=False,
             has_edge_sid=False,
+            has_cmcd=False,
             section_timings=timer.entries,
         )
         assert out is None, "writer-behind hour must fall back to raw (return None)"
@@ -724,6 +726,7 @@ def test_rollup_returns_none_when_no_bundled_root(rollup_source):
             has_rtt=False,
             has_edge=False,
             has_edge_sid=False,
+            has_cmcd=False,
             section_timings=timer.entries,
         )
         assert out is None
@@ -877,6 +880,7 @@ def test_rollup_query_failure_returns_none_for_raw_fallback(in_memory_duckdb, ro
             has_rtt=False,
             has_edge=False,
             has_edge_sid=False,
+            has_cmcd=False,
             section_timings=timer.entries,
         )
         assert out is None
@@ -985,6 +989,7 @@ def test_active_hour_union_emits_live_sql_when_window_crosses_now(in_memory_duck
         has_rtt=False,
         has_edge=False,
         has_edge_sid=False,
+        has_cmcd=False,
         section_timings=timer.entries,
     )
     assert captured_sql, "Expected QueryRunner.execute to have been called"

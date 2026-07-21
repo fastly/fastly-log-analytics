@@ -71,6 +71,7 @@ export function useSyncStatus() {
     enabled: !!activeServiceId && !bootstrapPending && !isAnalyst,
     staleTime: 60_000,
     refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
     retry: false,
   })

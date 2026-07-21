@@ -90,6 +90,7 @@ export function SystemJobsStrip() {
     },
     staleTime: 30_000,
     refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
   })
 
   const ready = mounted && systemJobsData

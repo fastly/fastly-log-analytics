@@ -52,6 +52,7 @@ _STATS_TABLES = (
     ("local_compacted_files", "locally_compacted_files"),
     ("committed_buffers", "committed_buffers"),
     ("slow_queries", "slow_queries"),
+    ("quarantined_files", "quarantined_files"),
 )
 
 # (table, retention_key, timestamp_column) for each trimmable table.
@@ -68,6 +69,7 @@ _CLEANUP_TABLES = (
     ("ingested_files", "ingested_files_days", "ingested_at"),
     ("cron_runs", "cron_runs_days", "started_at"),
     ("slow_queries", "slow_queries_days", "started_at_utc"),
+    ("quarantined_files", "quarantine_days", "quarantined_at"),
 )
 # Table whose timestamp column is unix-epoch seconds, not an ISO string.
 # Handled with an epoch-cutoff DELETE instead of the standard

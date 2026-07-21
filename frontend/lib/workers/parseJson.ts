@@ -1,6 +1,8 @@
+const WORKER_THRESHOLD = 100_000
+
 export function parseJsonAsync<T>(jsonString: string): Promise<T> {
   return new Promise((resolve, reject) => {
-    if (typeof window === 'undefined' || process.env.NODE_ENV === 'test') {
+    if (typeof window === 'undefined' || process.env.NODE_ENV === 'test' || jsonString.length < WORKER_THRESHOLD) {
       try {
         resolve(JSON.parse(jsonString));
       } catch (e) {

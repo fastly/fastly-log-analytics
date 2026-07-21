@@ -81,6 +81,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 import weakref
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -137,12 +138,35 @@ def open_small_cache_db(
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(p), timeout=timeout, check_same_thread=check_same_thread)
-    for pragma in SMALL_CACHE_PRAGMAS:
-        con.execute(pragma)
-    con.executescript(ddl)
-    con.commit()
-    return con
+
+    # Use robust retry loop with exponential backoff to absorb concurrent cold-opens gracefully.
+    delay = 0.05
+    max_delay = 1.0
+    deadline = time.monotonic() + timeout
+
+    while True:
+        try:
+            con = sqlite3.connect(str(p), timeout=timeout, check_same_thread=check_same_thread)
+            for pragma in SMALL_CACHE_PRAGMAS:
+                if pragma.lower().startswith("pragma journal_mode="):
+                    cur = con.execute("PRAGMA journal_mode")
+                    row = cur.fetchone()
+                    if row and row[0].lower() == "wal":
+                        continue
+                con.execute(pragma)
+            con.executescript(ddl)
+            con.commit()
+            return con
+        except sqlite3.OperationalError as e:
+            err_msg = str(e).lower()
+            if "locked" in err_msg or "busy" in err_msg:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2.0, max_delay)
+            else:
+                raise
 
 
 def remove_sqlite_db_files(path: str, *, name: str = "sqlite_pool") -> None:
@@ -242,7 +266,16 @@ class ThreadLocalPool:
         self._owned_initialized: set[str] = set()
         self._owned_local = threading.local()
 
-        self._init_lock_provider = init_lock_provider or (lambda: self._owned_lock)
+        # Per-key locking: when no external init_lock_provider is supplied,
+        # the pool creates a separate lock per key so that cold-opens for
+        # different DB files (different service IDs) don't serialize against
+        # each other. The single-lock contention was the root cause of the
+        # "metadata_db._init_lock contended >10s" errors in production —
+        # a slow cold-open for one service blocked every other service.
+        self._init_lock_provider = init_lock_provider
+        self._key_locks: dict[Any, threading.Lock] = {}
+        self._key_locks_guard = threading.Lock()
+
         self._initialized_provider = initialized_provider or (lambda: self._owned_initialized)
         self._local_provider = local_provider or (lambda: self._owned_local)
 
@@ -259,6 +292,25 @@ class ThreadLocalPool:
         # See [[backend-oom-restart-loop]].
         self._all_connections: list[tuple[sqlite3.Connection, weakref.ref[threading.Thread]]] = []
         self._all_connections_lock = threading.Lock()
+
+    # ── Init lock ───────────────────────────────────────────────────────
+
+    def _get_init_lock(self, key: Any) -> threading.Lock:
+        """Return the init lock for ``key``.
+
+        When an external ``init_lock_provider`` was supplied (test fixtures
+        that need to monkeypatch a single global lock), delegate to it.
+        Otherwise create one lock per key so different DB files cold-open
+        concurrently.
+        """
+        if self._init_lock_provider is not None:
+            return self._init_lock_provider()
+        with self._key_locks_guard:
+            lock = self._key_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._key_locks[key] = lock
+            return lock
 
     # ── Per-thread cache ────────────────────────────────────────────────
 
@@ -304,7 +356,7 @@ class ThreadLocalPool:
 
         path = self._path_fn(key)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        init_lock = self._init_lock_provider()
+        init_lock = self._get_init_lock(key)
         if not init_lock.acquire(timeout=self._init_lock_timeout):
             raise sqlite3.OperationalError(
                 f"{self._name}._init_lock contended >{self._init_lock_timeout:g}s for {key}"
@@ -334,6 +386,11 @@ class ThreadLocalPool:
             try:
                 con.row_factory = sqlite3.Row
                 for pragma in self._pragmas:
+                    if pragma.lower().startswith("pragma journal_mode="):
+                        cur = con.execute("PRAGMA journal_mode")
+                        row = cur.fetchone()
+                        if row and row[0].lower() == "wal":
+                            continue
                     con.execute(pragma)
                 initialized = self._initialized_provider()
                 if path not in initialized:
@@ -462,6 +519,8 @@ class ThreadLocalPool:
         except Exception:
             return
         self._initialized_provider().discard(path)
+        with self._key_locks_guard:
+            self._key_locks.pop(key, None)
 
     def reset(self) -> None:
         """Drop the in-memory init cache and close all connections.
@@ -471,6 +530,8 @@ class ThreadLocalPool:
         """
         self.close_all()
         self._initialized_provider().clear()
+        with self._key_locks_guard:
+            self._key_locks.clear()
 
     # ── Internal helpers ───────────────────────────────────────────────
 

@@ -50,7 +50,7 @@ export function useDataWindowOverlap(): WindowOverlap {
       return data
     },
     enabled: !!activeServiceId,
-    staleTime: 30_000,
+    staleTime: 60_000,
   })
 
   const earliestLogAt = data?.earliest_log_at ?? null

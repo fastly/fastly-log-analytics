@@ -47,11 +47,14 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
   const [sampleRate, setSampleRate] = useState<number>(100)
   const [edgeOnly, setEdgeOnly] = useState<boolean>(true)
   const [customCondition, setCustomCondition] = useState<string>('')
+  const [cmcdEnabled, setCmcdEnabled] = useState<boolean>(false)
+  const [cmcdMode, setCmcdMode] = useState<string>('query_string')
+  const [cmcdVersion, setCmcdVersion] = useState<number>(1)
   const [step, setStep] = useState<number>(1)
 
   const { data: catalog } = useLogFieldsCatalog(service?.service_id)
 
-  const { data: lfResponse, isLoading: isLoadingFields } = useQuery({
+  const { data: lfResponse, isLoading: isLoadingFields, isError: isFieldsError, error: fieldsError } = useQuery({
     queryKey: ['services', service?.service_id, 'fields'],
     queryFn: async () => {
       const { data } = await client.GET('/api/services/{service_id}/log-fields', {
@@ -60,9 +63,10 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
       return data
     },
     enabled: !!service && open,
+    retry: false,
   })
 
-  const { data: loggingSettings, isLoading: isLoadingSettings } = useQuery({
+  const { data: loggingSettings, isLoading: isLoadingSettings, isError: isSettingsError, error: settingsError } = useQuery({
     queryKey: ['services', service?.service_id, 'logging-settings'],
     queryFn: async () => {
       const { data } = await client.GET('/api/services/{service_id}/logging-settings', {
@@ -71,6 +75,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
       return data
     },
     enabled: !!service && open,
+    retry: false,
   })
 
   const { lines, status, isDone, error, start, stop, reset } = useSSE()
@@ -92,7 +97,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
       // the SSE-style UX without the CSRF risk. Query params stay where
       // they are because the backend reads them via Query(...).
       const encodedCond = encodeURIComponent(customCondition)
-      const endpoint = `/api/services/${service!.service_id}/logging-settings/update?update_format=true&period=${period}&sample_rate=${sampleRate}&edge_only=${edgeOnly}&custom_condition=${encodedCond}`
+      const endpoint = `/api/services/${service!.service_id}/logging-settings/update?update_format=true&period=${period}&sample_rate=${sampleRate}&edge_only=${edgeOnly}&custom_condition=${encodedCond}&cmcd_enabled=${cmcdEnabled}&cmcd_mode=${cmcdMode}&cmcd_version=${cmcdVersion}`
       start(endpoint, {})
     }
   })
@@ -110,6 +115,9 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         setSampleRate(loggingSettings.sample_rate ?? 100)
         setEdgeOnly(loggingSettings.edge_only ?? true)
         setCustomCondition(loggingSettings.custom_condition || '')
+        setCmcdEnabled(loggingSettings.cmcd_enabled ?? false)
+        setCmcdMode(loggingSettings.cmcd_mode ?? 'query_string')
+        setCmcdVersion(loggingSettings.cmcd_version ?? 1)
       }
     }
   }, [lfResponse, loggingSettings, open]) // Using fieldsMutation.reset directly inside breaks exhaustive-deps since it's an object, we suppress or omit it, but wait! The issue says `react-hooks/set-state-in-effect`. That's usually fine, just a warning.
@@ -254,6 +262,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
   const isPending = fieldsMutation.isPending || status === 'streaming'
   const isSuccess = fieldsMutation.isPending || fieldsMutation.isSuccess || status === 'done' || status === 'error' || status === 'streaming'
   const isLoading = isLoadingFields || isLoadingSettings
+  const hasInitError = isFieldsError || isSettingsError
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -310,6 +319,17 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
                   <Loader2 className="h-8 w-8 animate-spin mb-4" />
                   <p className="text-sm">Loading active settings...</p>
                 </div>
+              ) : hasInitError ? (
+                <div className="flex flex-col items-center justify-center py-12 text-muted-foreground gap-3">
+                  <AlertTriangle className="h-8 w-8 text-destructive" />
+                  <p className="text-sm font-medium text-foreground">Failed to load log settings</p>
+                  <p className="text-xs text-center max-w-md">
+                    {(fieldsError || settingsError) instanceof Error
+                      ? (fieldsError || settingsError)!.message
+                      : 'The backend returned an error. Check the service configuration and try again.'}
+                  </p>
+                  <Button variant="outline" size="sm" onClick={() => onOpenChange(false)} className="mt-2">Close</Button>
+                </div>
               ) : (
                 <div className="w-full h-full">
                   {step === 1 && (
@@ -325,6 +345,12 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
                       setEdgeOnly={setEdgeOnly}
                       customCondition={customCondition}
                       setCustomCondition={setCustomCondition}
+                      cmcdEnabled={cmcdEnabled}
+                      setCmcdEnabled={setCmcdEnabled}
+                      cmcdMode={cmcdMode}
+                      setCmcdMode={setCmcdMode}
+                      cmcdVersion={cmcdVersion}
+                      setCmcdVersion={setCmcdVersion}
                       toggleGroup={toggleGroup}
                       toggleField={toggleField}
                       updateFieldLimit={updateFieldLimit}
@@ -347,6 +373,9 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
                       edgeOnly={edgeOnly}
                       customCondition={customCondition}
                       estimatedBytes={estimatedBytes}
+                      cmcdEnabled={cmcdEnabled}
+                      cmcdMode={cmcdMode}
+                      cmcdVersion={cmcdVersion}
                     />
                   )}
                 </div>

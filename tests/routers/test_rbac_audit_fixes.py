@@ -133,6 +133,14 @@ def app_with_blocklist():
     def _scoring_top(service_id: str):
         return {"ok": True, "service_id": service_id}
 
+    @app.get("/api/services/{service_id}/realtime-stream")
+    def _realtime_stream(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/services/{service_id}/log-field-audit")
+    def _log_field_audit(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
     return app
 
 
@@ -307,4 +315,52 @@ def test_subpath_blocks_resist_trailing_slash_bypass(app_with_blocklist, path):
     with TestClient(app_with_blocklist, follow_redirects=False) as c:
         r = c.get(path, headers={"x-test-session-services": "svc-A"})
     assert r.status_code == 403, f"{path}: {r.status_code} {r.text}"
+    assert r.json()["error"] == "admin_only"
+
+
+# ── S-1: /realtime-stream is analyst-visible (control room) ──────────────
+
+
+def test_realtime_stream_allowed_for_analyst(app_with_blocklist):
+    """S-1: realtime-stream powers the control room which is analyst-visible.
+    The endpoint exposes aggregate metrics (rps, error rate, cache ratio) —
+    no PII, no infra details — so it must not be blocked."""
+    with TestClient(app_with_blocklist) as c:
+        r = c.get(
+            "/api/services/svc-A/realtime-stream",
+            headers={"x-test-session-services": "svc-A"},
+        )
+    assert r.status_code == 200, f"expected 200 but got {r.status_code}: {r.text}"
+
+
+def test_realtime_stream_still_needs_service_scope(app_with_blocklist):
+    """Analyst without the target service in scope must still be rejected
+    at the service-scope gate (not the blocklist, which no longer blocks
+    this path)."""
+    assert not _is_blocked_path("/api/services/svc-B/realtime-stream")
+
+
+# ── S-2: /log-field-audit is admin-only ──────────────────────────────────
+
+
+def test_log_field_audit_blocked_for_analyst(app_with_blocklist):
+    """S-2: log-field-audit leaks operator's field configuration choices.
+    Must be admin-only."""
+    with TestClient(app_with_blocklist) as c:
+        r = c.get(
+            "/api/services/svc-A/log-field-audit",
+            headers={"x-test-session-services": "svc-A"},
+        )
+    assert r.status_code == 403, r.text
+    assert r.json()["error"] == "admin_only"
+
+
+def test_log_field_audit_trailing_slash_does_not_bypass(app_with_blocklist):
+    """Adversarial: trailing slash on log-field-audit must not bypass."""
+    with TestClient(app_with_blocklist, follow_redirects=False) as c:
+        r = c.get(
+            "/api/services/svc-A/log-field-audit/",
+            headers={"x-test-session-services": "svc-A"},
+        )
+    assert r.status_code == 403, f"{r.status_code} {r.text}"
     assert r.json()["error"] == "admin_only"

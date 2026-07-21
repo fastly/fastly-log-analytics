@@ -14,69 +14,135 @@ router, and a retention purge used by ``cleanup_metadata``.
 
 from __future__ import annotations
 
+import atexit
+import threading
 from typing import Any
 
 from backend.core.metadata.base import get_con
 
+_INSERT_SQL = """
+    INSERT INTO slow_queries (
+        query_id, db_type, service_id, started_at_utc, ended_at_utc,
+        duration_ms, outcome, sql_preview, sql_full, sql_len,
+        attr_kind, attr_label, attr_principal_id,
+        attr_caller_qualname, attr_caller_file,
+        attr_request_path, attr_request_id,
+        attr_cron_job, attr_cron_run_id, attr_pool_slot,
+        error_type, error_message, peak_memory_mb
+    ) VALUES (
+        :query_id, :db_type, :service_id, :started_at_utc, :ended_at_utc,
+        :duration_ms, :outcome, :sql_preview, :sql_full, :sql_len,
+        :attr_kind, :attr_label, :attr_principal_id,
+        :attr_caller_qualname, :attr_caller_file,
+        :attr_request_path, :attr_request_id,
+        :attr_cron_job, :attr_cron_run_id, :attr_pool_slot,
+        :error_type, :error_message, :peak_memory_mb
+    )
+"""
+
+_FLUSH_INTERVAL_S = 5.0
+_FLUSH_BATCH_SIZE = 50
+
+# Keyed by service_id → list of param dicts
+_buffer: dict[str, list[dict[str, Any]]] = {}
+_buffer_lock = threading.Lock()
+_flush_timer: threading.Timer | None = None
+
+
+def _normalise_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "query_id": row["query_id"],
+        "db_type": row["db_type"],
+        "service_id": row.get("service_id"),
+        "started_at_utc": row["started_at_utc"],
+        "ended_at_utc": row["ended_at_utc"],
+        "duration_ms": row["duration_ms"],
+        "outcome": row["outcome"],
+        "sql_preview": row.get("sql_preview") or "",
+        "sql_full": row.get("sql_full"),
+        "sql_len": row.get("sql_len") or 0,
+        "attr_kind": row.get("attr_kind") or "system",
+        "attr_label": row.get("attr_label") or "",
+        "attr_principal_id": row.get("attr_principal_id"),
+        "attr_caller_qualname": row.get("attr_caller_qualname") or "",
+        "attr_caller_file": row.get("attr_caller_file") or "",
+        "attr_request_path": row.get("attr_request_path"),
+        "attr_request_id": row.get("attr_request_id"),
+        "attr_cron_job": row.get("attr_cron_job"),
+        "attr_cron_run_id": row.get("attr_cron_run_id"),
+        "attr_pool_slot": row.get("attr_pool_slot"),
+        "error_type": row.get("error_type"),
+        "error_message": row.get("error_message"),
+        "peak_memory_mb": row.get("peak_memory_mb"),
+    }
+
+
+def _schedule_flush() -> None:
+    global _flush_timer
+    if _flush_timer is not None:
+        return
+    _flush_timer = threading.Timer(_FLUSH_INTERVAL_S, _flush_all)
+    _flush_timer.daemon = True
+    _flush_timer.start()
+
+
+def _flush_all(*, only_service: str | None = None) -> None:
+    """Flush buffered slow-query rows to SQLite.
+
+    If *only_service* is given, flush just that service's buffer (used by
+    read functions to ensure consistency). Otherwise flush everything.
+    """
+    global _flush_timer
+    with _buffer_lock:
+        if only_service is not None:
+            rows = _buffer.pop(only_service, None)
+            if rows is None:
+                return
+            pending = {only_service: rows}
+        else:
+            _flush_timer = None
+            if not _buffer:
+                return
+            pending = dict(_buffer)
+            _buffer.clear()
+
+    for service_id, rows in pending.items():
+        try:
+            con = get_con(service_id)
+            con.executemany(_INSERT_SQL, rows)
+            con.commit()
+        except Exception:
+            pass
+
 
 def insert_slow_query(service_id: str, row: dict[str, Any]) -> None:
-    """Insert one completed-query row. ``row`` shape mirrors the
-    ``slow_queries`` table columns; missing keys default to NULL.
+    """Buffer a completed-query row for batch insertion.
 
-    Called inline from ``query_registry.deregister`` on the hot path —
-    keep this fast and exception-safe. Caller already filters by
-    ``duration_ms >= persistence_threshold`` so most queries never get
-    here. A failure on the SQLite write must NEVER raise back into the
-    SQL hot path; callers wrap in try/except.
+    Called inline from ``query_registry.deregister`` on the hot path.
+    Rows are buffered in memory and flushed every few seconds or when
+    the buffer reaches a size threshold, replacing the prior synchronous
+    per-row INSERT+COMMIT that caused ~2,700 contention events/week.
     """
-    con = get_con(service_id)
-    con.execute(
-        """
-        INSERT INTO slow_queries (
-            query_id, db_type, service_id, started_at_utc, ended_at_utc,
-            duration_ms, outcome, sql_preview, sql_full, sql_len,
-            attr_kind, attr_label, attr_principal_id,
-            attr_caller_qualname, attr_caller_file,
-            attr_request_path, attr_request_id,
-            attr_cron_job, attr_cron_run_id, attr_pool_slot,
-            error_type, error_message, peak_memory_mb
-        ) VALUES (
-            :query_id, :db_type, :service_id, :started_at_utc, :ended_at_utc,
-            :duration_ms, :outcome, :sql_preview, :sql_full, :sql_len,
-            :attr_kind, :attr_label, :attr_principal_id,
-            :attr_caller_qualname, :attr_caller_file,
-            :attr_request_path, :attr_request_id,
-            :attr_cron_job, :attr_cron_run_id, :attr_pool_slot,
-            :error_type, :error_message, :peak_memory_mb
-        )
-        """,
-        {
-            "query_id": row["query_id"],
-            "db_type": row["db_type"],
-            "service_id": row.get("service_id"),
-            "started_at_utc": row["started_at_utc"],
-            "ended_at_utc": row["ended_at_utc"],
-            "duration_ms": row["duration_ms"],
-            "outcome": row["outcome"],
-            "sql_preview": row.get("sql_preview") or "",
-            "sql_full": row.get("sql_full"),
-            "sql_len": row.get("sql_len") or 0,
-            "attr_kind": row.get("attr_kind") or "system",
-            "attr_label": row.get("attr_label") or "",
-            "attr_principal_id": row.get("attr_principal_id"),
-            "attr_caller_qualname": row.get("attr_caller_qualname") or "",
-            "attr_caller_file": row.get("attr_caller_file") or "",
-            "attr_request_path": row.get("attr_request_path"),
-            "attr_request_id": row.get("attr_request_id"),
-            "attr_cron_job": row.get("attr_cron_job"),
-            "attr_cron_run_id": row.get("attr_cron_run_id"),
-            "attr_pool_slot": row.get("attr_pool_slot"),
-            "error_type": row.get("error_type"),
-            "error_message": row.get("error_message"),
-            "peak_memory_mb": row.get("peak_memory_mb"),
-        },
-    )
-    con.commit()
+    params = _normalise_row(row)
+    with _buffer_lock:
+        _buffer.setdefault(service_id, []).append(params)
+        total = sum(len(v) for v in _buffer.values())
+        if total >= _FLUSH_BATCH_SIZE:
+            needs_immediate = True
+        else:
+            needs_immediate = False
+            _schedule_flush()
+
+    if needs_immediate:
+        _flush_all()
+
+
+def flush_slow_query_buffer() -> None:
+    """Force-flush the buffer. Called at shutdown."""
+    _flush_all()
+
+
+atexit.register(flush_slow_query_buffer)
 
 
 def list_slow_queries(
@@ -102,6 +168,7 @@ def list_slow_queries(
     ``limit`` is capped at the call site — pass user input through a
     server-side clamp before reaching this function.
     """
+    _flush_all(only_service=service_id)
     con = get_con(service_id)
     sql = ["SELECT * FROM slow_queries WHERE started_at_utc >= ?"]
     args: list[Any] = [since_utc]
@@ -133,6 +200,7 @@ def count_slow_queries(
     """Cheap count of persisted slow queries in a window. Used by the
     operations-overview card to render an at-a-glance badge without
     pulling the full row set."""
+    _flush_all(only_service=service_id)
     con = get_con(service_id)
     row = con.execute(
         "SELECT COUNT(*) AS n FROM slow_queries WHERE started_at_utc >= ? AND duration_ms >= ?",
@@ -145,6 +213,7 @@ def purge_old_slow_queries(service_id: str, *, older_than_utc: float) -> int:
     """Delete rows whose ``started_at_utc`` is below the cutoff. Called
     from ``cleanup_metadata`` on the retention cadence. Returns the
     number of rows removed."""
+    _flush_all(only_service=service_id)
     con = get_con(service_id)
     cur = con.execute(
         "DELETE FROM slow_queries WHERE started_at_utc < ?",
@@ -157,6 +226,7 @@ def purge_old_slow_queries(service_id: str, *, older_than_utc: float) -> int:
 def slow_queries_storage_stats(service_id: str) -> dict[str, Any]:
     """Cheap row-count + oldest/newest timestamps for the storage
     inspection page. ``None`` timestamps mean the table is empty."""
+    _flush_all(only_service=service_id)
     con = get_con(service_id)
     row = con.execute(
         "SELECT COUNT(*) AS n, MIN(started_at_utc) AS oldest, MAX(started_at_utc) AS newest FROM slow_queries"

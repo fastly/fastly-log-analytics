@@ -96,8 +96,8 @@ def log_format_to_vcl_log(raw: str) -> str:
             # opens a new attacker-controlled subroutine. Legitimate
             # heredoc patterns like `strftime(\{"format"\}, ...)` use
             # `\{` / `\}` escapes and pass cleanly.
-            if ";" in part or re.search(r"(?<!\\)[{}]", part):
-                raise ValueError("VCL macro contains invalid characters (;, unescaped {, unescaped })")
+            if ";" in part or "/*" in part or "//" in part or re.search(r"(?<!\\)[{}]", part):
+                raise ValueError("VCL macro contains invalid characters (;, /*, //, unescaped {, unescaped })")
             var = part.replace("\\{", "{").replace("\\}", "}").strip().replace('\\"', '"')
             vcl_parts.append(var)
 

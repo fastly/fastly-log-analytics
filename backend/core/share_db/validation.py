@@ -276,7 +276,8 @@ def apply_pii_policy(obj, policy: dict):
                 # Carry the owning-field context (IP or session) down through
                 # intermediate keys (e.g. "top", "values") so the nested
                 # ``value`` cell still sees it.
-                next_ctx = k if (k in masked_keys or k in SESSION_ID_KEYS) else eff_ctx
+                canon_k = _NONWORD_RE.sub("", k).lower() if isinstance(k, str) else k
+                next_ctx = canon_k if (canon_k in masked_keys or canon_k in SESSION_ID_KEYS) else eff_ctx
                 out[k] = _walk(v, parent_key=k, field_ctx=next_ctx)
             return out
         if isinstance(node, list):

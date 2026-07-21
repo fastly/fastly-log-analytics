@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.models.common import BaseResponse
 
@@ -58,8 +58,9 @@ class ServicesListResponse(BaseResponse):
 
 
 class LogFieldsConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     groups: list[str]
-    field_overrides: dict[str, bool]
+    field_overrides: dict[str, bool] = Field(default_factory=dict)
     field_limits: dict[str, int] | None = None
 
 
@@ -84,6 +85,9 @@ class LoggingSettingsResponse(BaseResponse):
     custom_condition: str | None = None
     format_match: bool | None = None
     version: int | str | None = None
+    cmcd_enabled: bool = False
+    cmcd_mode: str | None = None
+    cmcd_version: int | None = None
 
 
 class AnalystInvite(BaseResponse):

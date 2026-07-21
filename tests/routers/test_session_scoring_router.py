@@ -2983,3 +2983,25 @@ def test_scoring_endpoints_degrade_when_scoring_never_enabled(_noscore_table):
     assert health["scorer_errors"] == 0
     assert health["top_reasons"] == []
     assert health["fail_open_breakdown"] == []
+
+
+# ── /scoring/evaluation/per-reason ──────────────────────────────────────────
+
+
+def test_per_reason_returns_min_samples_cta_when_under_threshold(client, with_config):
+    """With <3 labels of either class, the per-reason endpoint also returns
+    has_min_samples_overall=false and an empty buckets list — no point
+    bucketing when the headline AUC isn't even computable."""
+    with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
+
+    with (
+        patch("backend.scoring.labels.list_labels", return_value=[]),
+        patch("backend.scoring.labels.counts_by_label", return_value={"good": 2, "bad": 0, "neutral": 0}),
+    ):
+        r = client.get(f"/api/services/{LOG_SVC}/scoring/evaluation/per-reason")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["has_min_samples_overall"] is False
+    assert body["n_good"] == 2
+    assert body["n_bad"] == 0
+    assert body["buckets"] == []

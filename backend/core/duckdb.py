@@ -1036,6 +1036,23 @@ def get_connection(
         con.execute(f"SET memory_limit = '{_cached_mem_limit_gb}GB';")
     con.execute("SET checkpoint_threshold = '512MB';")
 
+    # Configure temp directory to be service-specific next to the database file
+    if db_path and db_path != ":memory:" and not db_path.startswith(":memory:"):
+        _service_temp_dir = os.path.join(os.path.dirname(db_path), ".tmp")
+        try:
+            os.makedirs(_service_temp_dir, exist_ok=True)
+            _escaped_dir = _service_temp_dir.replace("'", "''")
+            con.execute(f"SET temp_directory = '{_escaped_dir}';")
+        except Exception as e:
+            logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
+
+    # Configure max temp directory size with environment override or default to 10GB
+    try:
+        _max_temp_size = os.getenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "10GB")
+        con.execute(f"SET max_temp_directory_size = '{_max_temp_size}';")
+    except Exception as e:
+        logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
+
     # ALWAYS update the view to ensure local buffer files
     # are included. DuckDB views are session-scoped when they reference temp tables
     # or specific file lists, so we must ensure the view is fresh.
@@ -1128,24 +1145,11 @@ def start_cron_run(source: dict, task: str) -> int | None:
     """Begin a cron run; returns the run id. Raises RuntimeError if already running.
 
     Storage lives in per-service SQLite (``backend.core.metadata``). Retention
-    pruning happens here to keep the table bounded over time.
+    pruning is handled by the daily ``cleanup_metadata`` job.
     """
-    from backend import config as svcconfig
     from backend.core import metadata as metadata_db
 
     service_id = source["name"]
-    cfg = svcconfig.load_config(service_id) or {}
-    prov = cfg.get("provisioning", {})
-    cron_key = _TASK_TO_CRON_KEY.get(task)
-    cron_cfg = prov.get(cron_key, {}) if cron_key else {}
-    retention_days = int(cron_cfg.get("log_retention_days", 7))
-
-    if retention_days > 0:
-        try:
-            metadata_db.purge_cron_runs(service_id, task=task, days=retention_days)
-        except Exception:
-            pass
-
     return metadata_db.start_cron_run(service_id, task)
 
 

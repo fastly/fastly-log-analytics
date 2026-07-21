@@ -1,7 +1,10 @@
 'use client'
 
 import React from 'react'
+import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
+import { useServiceStore } from '@/stores/serviceStore'
+import { buildServiceHref } from '@/lib/navigation'
 import { Row, ReadOnlyValue } from './parts'
 import type { CalcState } from './calc'
 
@@ -10,6 +13,8 @@ interface PricingProps {
 }
 
 export function Pricing({ s }: PricingProps) {
+  const router = useRouter()
+  const activeServiceId = useServiceStore((st) => st.activeServiceId)
   return (
     <>
       <section>
@@ -19,7 +24,7 @@ export function Pricing({ s }: PricingProps) {
             variant="link"
             size="sm"
             className="h-7 p-0 text-[10px] uppercase font-bold text-primary"
-            onClick={() => window.location.href = '/admin'}
+            onClick={() => router.push(buildServiceHref('/admin', activeServiceId))}
           >
             Edit in Admin
           </Button>
@@ -39,7 +44,7 @@ export function Pricing({ s }: PricingProps) {
           </Row>
         </div>
         <div className='mt-2 text-[11px] text-muted-foreground'>
-          Rates are global defaults. Update them on the <a href='/admin' className='underline font-medium hover:text-foreground'>admin page</a>.
+          Rates are global defaults. Update them on the <a href={buildServiceHref('/admin', activeServiceId)} className='underline font-medium hover:text-foreground'>admin page</a>.
         </div>
       </section>
 

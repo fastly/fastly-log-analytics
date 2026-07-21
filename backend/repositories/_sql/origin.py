@@ -19,8 +19,8 @@ from __future__ import annotations
 SUMMARY_ROLLUP = """
         SELECT
           COUNT(*)                                                                            AS requests,
-          COUNT(*) FILTER (WHERE "cache" ILIKE 'MISS%')                                       AS total_misses,
-          COUNT(*) FILTER (WHERE "cache" ILIKE 'PASS%')                                       AS total_passes,
+          COUNT(*) FILTER (WHERE starts_with("cache", 'MISS'))                                       AS total_misses,
+          COUNT(*) FILTER (WHERE starts_with("cache", 'PASS'))                                       AS total_passes,
           MEDIAN({lat_val}) / 1000.0                                                          AS ottfb_p50_ms,
           APPROX_QUANTILE({lat_val}, 0.75) / 1000.0                                           AS ottfb_p75_ms,
           APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                                           AS ottfb_p95_ms,

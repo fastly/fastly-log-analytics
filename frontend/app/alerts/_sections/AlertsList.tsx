@@ -199,6 +199,7 @@ export function AlertsList({
           params.append('filter_edge', 'false')
         }
 
+        if (activeServiceId) params.set('service', activeServiceId)
         const dashboardLink = `/dashboard?${params.toString()}`
 
         return (

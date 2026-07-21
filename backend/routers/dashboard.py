@@ -205,11 +205,21 @@ async def dashboard_bundle(
     if not (want_aggregates and want_bots):
         if want_aggregates:
             t0 = time.perf_counter()
-            aggregates = await asyncio.to_thread(_run_aggregates, ctx.con)
+            task = asyncio.create_task(asyncio.to_thread(_run_aggregates, ctx.con))
+            try:
+                aggregates = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
             timer.mark("bundle:aggregates", t0)
         if want_bots:
             t1 = time.perf_counter()
-            top_bots = await asyncio.to_thread(_run_top_bots, ctx.con)
+            task = asyncio.create_task(asyncio.to_thread(_run_top_bots, ctx.con))
+            try:
+                top_bots = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
             timer.mark("bundle:top_bots", t1)
         single_debug_queries: list = []
         single_debug_calls: list = []
@@ -294,15 +304,15 @@ async def dashboard_bundle(
             # DUCKDB_POOL_MAX_SIZE → persistent DoS) or, if the mutex
             # were bypassed, corrupt the DuckDB process memory.
             # (F015, audit run 7ba15352)
-            task = asyncio.gather(
+            gather_task = asyncio.gather(
                 _aggregates_branch(),
                 _top_bots_branch(),
                 return_exceptions=True,
             )
             try:
-                results = await asyncio.shield(task)
+                results = await asyncio.shield(gather_task)
             except asyncio.CancelledError:
-                await task
+                await gather_task
                 raise
             aggregates, top_bots = results
             if isinstance(aggregates, BaseException):
@@ -316,10 +326,20 @@ async def dashboard_bundle(
                 pass
     else:
         t0 = time.perf_counter()
-        aggregates = await asyncio.to_thread(_run_aggregates, ctx.con)
+        task_agg = asyncio.create_task(asyncio.to_thread(_run_aggregates, ctx.con))
+        try:
+            aggregates = await asyncio.shield(task_agg)
+        except asyncio.CancelledError:
+            await task_agg
+            raise
         timer.mark("bundle:aggregates", t0)
         t1 = time.perf_counter()
-        top_bots = await asyncio.to_thread(_run_top_bots, ctx.con)
+        task_bots = asyncio.create_task(asyncio.to_thread(_run_top_bots, ctx.con))
+        try:
+            top_bots = await asyncio.shield(task_bots)
+        except asyncio.CancelledError:
+            await task_bots
+            raise
         timer.mark("bundle:top_bots", t1)
     # Lift `debug_queries` / `debug_calls` from each sub-response into
     # the top-level BundleResponse so the frontend DebugPanel (which

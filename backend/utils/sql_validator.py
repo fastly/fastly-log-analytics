@@ -491,31 +491,6 @@ def validate_user_sql(
     return ValidationResult(parse_tree=parsed, elapsed_ms=elapsed_ms)
 
 
-# ── CTE alias extraction (single node, NOT recursive) ───────────────────────
-
-
-def _local_cte_aliases(node: dict) -> set[str]:
-    """Return the CTE aliases declared directly on ``node`` (case-folded).
-
-    Only this node's own ``cte_map`` is read — NOT the whole subtree — so the
-    walker can apply lexical scoping (a CTE is in scope for the subtree that
-    declares it, never for its parents or siblings). CTE definitions land in
-    ``node.cte_map.map`` as ``[{"key": "alias_name", "value": {...}}, ...]``
-    per the json_serialize_sql shape (verified against DuckDB 1.5.x).
-    """
-    out: set[str] = set()
-    cte_map = node.get("cte_map")
-    if isinstance(cte_map, dict):
-        entries = cte_map.get("map")
-        if isinstance(entries, list):
-            for entry in entries:
-                if isinstance(entry, dict):
-                    key = entry.get("key")
-                    if isinstance(key, str) and key:
-                        out.add(key.strip().lower())
-    return out
-
-
 # ── Walker ──────────────────────────────────────────────────────────────────
 
 
@@ -537,11 +512,39 @@ def _walk_and_validate(
     shadowing escape).
     """
     if isinstance(node, dict):
-        # Bring this node's own CTE declarations into scope for its subtree.
-        if allowed_tables is not None:
-            local = _local_cte_aliases(node)
-            if local:
-                cte_aliases = cte_aliases | local
+        # Process cte_map explicitly: validate each CTE definition BEFORE
+        # adding its alias to scope, preventing self-referential bypasses.
+        # Exception: recursive CTEs (RECURSIVE_CTE_NODE) legitimately
+        # reference their own name inside the body, so we add the alias
+        # to scope before validating those.
+        if allowed_tables is not None and "cte_map" in node:
+            cte_map = node.get("cte_map")
+            if isinstance(cte_map, dict):
+                entries = cte_map.get("map")
+                if isinstance(entries, list):
+                    for entry in entries:
+                        if isinstance(entry, dict):
+                            key = entry.get("key")
+                            alias_fs = frozenset({key.strip().lower()}) if isinstance(key, str) and key else frozenset()
+                            val = entry.get("value")
+                            is_recursive = False
+                            if isinstance(val, dict):
+                                q = val.get("query")
+                                if isinstance(q, dict):
+                                    n = q.get("node")
+                                    if isinstance(n, dict) and n.get("type") == "RECURSIVE_CTE_NODE":
+                                        is_recursive = True
+                            if val is not None:
+                                body_aliases = cte_aliases | alias_fs if is_recursive else cte_aliases
+                                _walk_and_validate(
+                                    val,
+                                    original_sql,
+                                    session_id,
+                                    service_id,
+                                    allowed_tables=allowed_tables,
+                                    cte_aliases=body_aliases,
+                                )
+                            cte_aliases = cte_aliases | alias_fs
 
         # BASE_TABLE: table reference. Check name + schema + catalog.
         if node.get("type") == "BASE_TABLE" or "table_name" in node:
@@ -595,7 +598,9 @@ def _walk_and_validate(
                         service_id,
                     )
 
-        for value in node.values():
+        for key, value in node.items():
+            if key == "cte_map" and allowed_tables is not None:
+                continue
             _walk_and_validate(
                 value, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
             )

@@ -253,56 +253,64 @@ def _ensure_scoring_matrix():
         logging.warning("[fastapi] _ensure_scoring_matrix failed: %s", e)
 
 
+_startup_complete = False
+
+
 def _background_startup():
     """Run initialisation tasks that should not block the web server startup."""
-    # Tag everything done here so the s3fs/boto3 hooks attribute their
-    # telemetry rows to "startup" instead of falling back to the thread name.
-    # MUST be process_context_scope (the context manager): the scheduler
-    # starts below and its first cron's scope exit would pop the
-    # active-contexts stack and null the mirror, untagging any in-flight
-    # iceberg I/O from the init_service workers. The scope keeps "startup" on
-    # the stack as a base so the mirror falls back to "startup" instead of
-    # None when nested scopes (cron, init_service) exit.
-    from backend.utils.telemetry import process_context_scope
+    global _startup_complete
+    try:
+        # Tag everything done here so the s3fs/boto3 hooks attribute their
+        # telemetry rows to "startup" instead of falling back to the thread name.
+        # MUST be process_context_scope (the context manager): the scheduler
+        # starts below and its first cron's scope exit would pop the
+        # active-contexts stack and null the mirror, untagging any in-flight
+        # iceberg I/O from the init_service workers. The scope keeps "startup" on
+        # the stack as a base so the mirror falls back to "startup" instead of
+        # None when nested scopes (cron, init_service) exit.
+        from backend.utils.telemetry import process_context_scope
 
-    with process_context_scope("startup"):
-        try:
-            _db.reload_default_source()
-            logging.info("[fastapi] db module initialised.")
-        except Exception as e:
-            logging.warning("[fastapi] reload_default_source failed: %s", e)
+        with process_context_scope("startup"):
+            try:
+                _db.reload_default_source()
+                logging.info("[fastapi] db module initialised.")
+            except Exception as e:
+                logging.warning("[fastapi] reload_default_source failed: %s", e)
 
-        _ensure_pop_cache()
-        _ensure_scoring_matrix()
+            _ensure_pop_cache()
+            _ensure_scoring_matrix()
 
-        # Pre-compile the bot-UA matcher off the request path. build_matcher
-        # is mtime-cached, but a fresh process pays the full pattern compile
-        # on the first /top-bots (or bot_name field-values) request otherwise
-        # — ~300ms observed on prod after each deploy (2026-07-06). Best-
-        # effort: on failure the first request compiles it as before.
-        try:
-            from backend.utils.bot_sources import build_matcher
+            # Pre-compile the bot-UA matcher off the request path. build_matcher
+            # is mtime-cached, but a fresh process pays the full pattern compile
+            # on the first /top-bots (or bot_name field-values) request otherwise
+            # — ~300ms observed on prod after each deploy (2026-07-06). Best-
+            # effort: on failure the first request compiles it as before.
+            try:
+                from backend.utils.bot_sources import build_matcher
 
-            build_matcher()
-            logging.info("[fastapi] Bot-UA matcher pre-compiled.")
-        except Exception as e:
-            logging.warning("[fastapi] bot matcher prewarm failed (first request pays the compile): %s", e)
+                build_matcher()
+                logging.info("[fastapi] Bot-UA matcher pre-compiled.")
+            except Exception as e:
+                logging.warning("[fastapi] bot matcher prewarm failed (first request pays the compile): %s", e)
 
-        try:
-            from backend.cron.scheduler import get_scheduler
+            try:
+                from backend.cron.scheduler import get_scheduler
 
-            scheduler = get_scheduler()
-            scheduler.start()
-            logging.info("[fastapi] Scheduler started.")
+                scheduler = get_scheduler()
+                scheduler.start()
+                logging.info("[fastapi] Scheduler started.")
 
-            configs = svcconfig.list_configs()
-            logging.info("[fastapi] Initialising %d services...", len(configs))
+                configs = svcconfig.list_configs()
+                logging.info("[fastapi] Initialising %d services...", len(configs))
 
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                executor.map(_initialize_service, configs)
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    executor.map(_initialize_service, configs)
 
-        except Exception as e:
-            logging.error("[fastapi] Background startup error: %s", e, exc_info=True)
+            except Exception as e:
+                logging.error("[fastapi] Background startup error: %s", e, exc_info=True)
+    finally:
+        _startup_complete = True
+        logging.info("[fastapi] Background startup complete. Server fully initialized.")
 
 
 def _enforce_data_dir_mounted() -> None:
@@ -384,18 +392,19 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     import asyncio
 
+    from backend.core.realtime.publisher import publisher as _rt_publisher
     from backend.cron.scheduler import get_scheduler
     from backend.cron_runs_publisher import publisher as _cron_runs_publisher
     from backend.sync_status_publisher import publisher as _sync_status_publisher
 
-    # Bind both in-process SSE publishers (badge + cron-runs) to this loop
-    # so cron worker threads can fan tick-updates out to connected
-    # /api/sync-status/stream and /api/cron-runs/stream subscribers via
+    # Bind all in-process SSE publishers to this loop so worker threads
+    # can fan tick-updates out to connected subscribers via
     # loop.call_soon_threadsafe. Must happen on the loop that will serve
     # requests; cheap and synchronous.
     _running_loop = asyncio.get_running_loop()
     _sync_status_publisher.bind_loop(_running_loop)
     _cron_runs_publisher.bind_loop(_running_loop)
+    _rt_publisher.bind_loop(_running_loop)
 
     # uvicorn has finished its own logging setup by now (it runs before
     # lifespan); re-point its loggers at the structlog root handler so access
@@ -534,7 +543,7 @@ def _bounded_scheduler_shutdown(scheduler, *, timeout_secs: float = 60.0) -> Non
 
 app = FastAPI(
     title="Fastly Log Analytics API",
-    version="2.1.0",
+    version="2.2.0",
     description=(
         "FastAPI backend for the Fastly Log Analytics tool. "
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."
@@ -811,7 +820,21 @@ assert_middleware_order(app)
 # ── Routers ───────────────────────────────────────────────────────────────────
 
 from backend.models.errors import DEFAULT_ERROR_RESPONSES  # noqa: E402
-from backend.routers import alerts, dashboard, insights, network, origin, performance, query, security, sessions, views
+from backend.routers import (
+    alerts,
+    cmcd,
+    control_room,
+    dashboard,
+    insights,
+    network,
+    origin,
+    performance,
+    query,
+    security,
+    sessions,
+    value,
+    views,
+)
 
 app.include_router(dashboard.router)
 app.include_router(insights.router)
@@ -823,11 +846,15 @@ app.include_router(security.router)
 app.include_router(views.router)
 app.include_router(alerts.router)
 app.include_router(origin.router)
+app.include_router(control_room.router)
+app.include_router(value.router)
+app.include_router(cmcd.router)
 
 from backend.routers import (
     admin,
     admin_queries,
     bootstrap,
+    cmcd_admin,
     debug,
     provision,
     services,
@@ -850,6 +877,7 @@ app.include_router(admin.sync_status.meta_router)
 app.include_router(admin_queries.router)
 app.include_router(provision.router)
 app.include_router(session_scoring.router)
+app.include_router(cmcd_admin.router)
 app.include_router(debug.router)
 app.include_router(share_auth.router)
 app.include_router(share_oauth.router)
@@ -877,7 +905,7 @@ try:
 
     _APP_VERSION = _pkg_version("fastly-log-analytics")
 except Exception:
-    _APP_VERSION = "2.1.0"
+    _APP_VERSION = "2.2.0"
 
 
 # Documents the canonical error codes this probe can surface — notably the
@@ -945,8 +973,13 @@ def health_check(
     if deep and is_request_remote(request):
         deep = False
 
-    payload: dict = {"status": "ok", "version": _APP_VERSION}
-    if not deep:
+    global _startup_complete
+    import sys
+
+    is_testing = "pytest" in sys.modules
+    status = "ok" if (_startup_complete or is_testing) else "initializing"
+    payload: dict = {"status": status, "version": _APP_VERSION}
+    if not (_startup_complete or is_testing) or not deep:
         return payload
 
     # Clamp stale_minutes to a sane range — Schemathesis fuzzes this

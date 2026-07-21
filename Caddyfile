@@ -167,6 +167,177 @@ Policy: https://github.com/fastly/fastly-log-analytics/blob/main/SECURITY.md
 		flush_interval -1
 	}
 
+	# Handle 502/503 errors during server reboots with a beautiful, auto-refreshing page
+	handle_errors {
+		@502_503 {
+			expression {err.status_code} in [502, 503]
+		}
+		handle @502_503 {
+			header Content-Type "text/html; charset=utf-8"
+			respond `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Server Rebooting — Fastly Log Analytics</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #030712;
+            color: #f9fafb;
+            font-family: 'Outfit', sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+            position: relative;
+        }
+        /* Glowing background blobs */
+        .glowing-bg {
+            position: absolute;
+            inset: 0;
+            background: radial-gradient(circle at bottom right, rgba(99, 102, 241, 0.05), transparent 50%),
+                        radial-gradient(circle at top left, rgba(99, 102, 241, 0.05), transparent 50%);
+            z-index: 0;
+        }
+        .container {
+            text-align: center;
+            max-width: 440px;
+            padding: 2.5rem;
+            border-radius: 1.5rem;
+            background: rgba(17, 24, 39, 0.6);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+            animation: fadeIn 0.6s ease-out;
+        }
+        .icon-wrapper {
+            position: relative;
+            display: inline-flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+        .pulse-ring {
+            position: absolute;
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: rgba(99, 102, 241, 0.15);
+            animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+        }
+        .icon {
+            position: relative;
+            background: rgba(31, 41, 55, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 50%;
+            padding: 1.25rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .icon svg {
+            width: 32px;
+            height: 32px;
+            stroke: #6366f1;
+            fill: none;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin: 0 0 0.75rem 0;
+            background: linear-gradient(to right, #f9fafb, #d1d5db);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        p {
+            font-size: 0.875rem;
+            color: #9ca3af;
+            line-height: 1.6;
+            margin: 0 0 2rem 0;
+        }
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            color: #818cf8;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.5rem 1rem;
+            border-radius: 9999px;
+        }
+        .spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(129, 140, 248, 0.2);
+            border-top-color: #818cf8;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes ping {
+            75%, 100% { transform: scale(1.6); opacity: 0; }
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="glowing-bg"></div>
+    <div class="container">
+        <div class="icon-wrapper">
+            <div class="pulse-ring"></div>
+            <div class="icon">
+                <svg viewBox="0 0 24 24">
+                    <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                    <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                    <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                    <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                </svg>
+            </div>
+        </div>
+        <h1>Server Rebooting</h1>
+        <p>The Fastly Log Analytics containers are currently being updated. This normally takes about 5 to 10 seconds. This page will auto-refresh shortly.</p>
+        <div class="status-badge">
+            <div class="spinner"></div>
+            <span>Re-connecting to services...</span>
+        </div>
+    </div>
+    <script>
+        // Automatic retry loop to check when the frontend is back online
+        setInterval(() => {
+            fetch(window.location.href, { method: 'HEAD', cache: 'no-store' })
+                .then(res => {
+                    if (res.status < 500) {
+                        window.location.reload();
+                    }
+                })
+                .catch(() => {});
+        }, 2000);
+    </script>
+</body>
+</html>` 502
+		}
+	}
+
 	# Detailed access log: JSON format with every request's client IP, host,
 	# URL, status, latency, and user-agent. Tail with:
 	#   docker compose -f ... logs -f caddy

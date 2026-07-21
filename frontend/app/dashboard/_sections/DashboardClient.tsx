@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button'
 import { parseFromInput } from '@/lib/date'
 import { LayoutDashboard, ArrowRight } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
+import { buildServiceHref } from '@/lib/navigation'
 import { useShallow } from 'zustand/react/shallow'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useDashboardCards } from '@/hooks/useDashboardCards'
@@ -441,6 +442,7 @@ function DashboardBody({
           variant="outline"
           onClick={() => {
             const params = new URLSearchParams()
+            if (activeServiceId) params.set('service', activeServiceId)
             if (startTime) params.set('start_time', startTime)
             if (endTime) params.set('end_time', endTime)
             if (filterPayload) params.set('filters', JSON.stringify(filterPayload))

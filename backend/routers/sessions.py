@@ -56,6 +56,7 @@ def sessions_endpoint(
         flagged_only=req.flagged_only,
         min_reqs_flag=req.min_reqs_flag,
         min_4xx_pct_flag=req.min_4xx_pct_flag,
+        streaming_only=req.streaming_only,
     )
     # Mint an opaque token per row from the REAL ip/window — before the analyst
     # masking middleware rewrites ``ip`` on the way out. The detail endpoint

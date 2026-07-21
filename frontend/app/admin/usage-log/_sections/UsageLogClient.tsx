@@ -12,6 +12,7 @@ import { StatCard } from '@/components/ui/stat-card'
 import { ArrowLeft, Download, Database, Zap, Globe, DollarSign, Trash2, RefreshCw } from 'lucide-react'
 import { buttonVariants } from '@/components/ui/button'
 import { useRouter } from 'next/navigation'
+import { buildServiceHref } from '@/lib/navigation'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useMounted } from '@/hooks/useMounted'
 import { formatBytes } from '@/lib/format'
@@ -129,6 +130,7 @@ export default function UsageLogClient() {
     enabled: !!activeServiceId,
     staleTime: 30_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   })
 
   const fullQuery = useQuery({
@@ -145,6 +147,7 @@ export default function UsageLogClient() {
     enabled: !!activeServiceId && !!headQuery.data,
     staleTime: 30_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   })
 
   // Prefer the full backfill once it lands; fall back to the head for
@@ -211,7 +214,7 @@ export default function UsageLogClient() {
         title="FOS Usage Log"
         description="Fastly Object Storage and CDN operations captured for cost analysis."
       >
-        <Button variant="outline" size="sm" onClick={() => router.push('/admin')}>
+        <Button variant="outline" size="sm" onClick={() => router.push(buildServiceHref('/admin', activeServiceId))}>
           <ArrowLeft className="h-3.5 w-3.5 mr-1.5" /> Admin
         </Button>
         <Button
@@ -239,7 +242,7 @@ export default function UsageLogClient() {
           <DollarSign className="h-3.5 w-3.5" />
           <span>Pricing rates and log retention are managed globally in <strong>Admin Settings</strong>.</span>
         </div>
-        <Button variant="link" size="sm" className="h-auto p-0 text-xs font-bold" onClick={() => router.push('/admin')}>
+        <Button variant="link" size="sm" className="h-auto p-0 text-xs font-bold" onClick={() => router.push(buildServiceHref('/admin', activeServiceId))}>
           Go to Admin <ArrowLeft className="h-3 w-3 ml-1 rotate-180" />
         </Button>
       </div>

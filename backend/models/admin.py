@@ -212,6 +212,31 @@ class IngestedFilesResponse(BaseResponse):
     files: list[IngestedFile]
 
 
+class QuarantinedFile(BaseModel):
+    id: int
+    file_name: str
+    error_key: str
+    valid_rows: int = 0
+    corrupt_rows: int = 0
+    file_size_bytes: int | None = None
+    corrupt_samples: list[str] = Field(default_factory=list)
+    reason_counts: dict[str, int] = Field(default_factory=dict)
+    quarantined_at: str
+
+
+class QuarantineSummary(BaseModel):
+    total_files: int = 0
+    total_corrupt_rows: int = 0
+    oldest_at: str | None = None
+    newest_at: str | None = None
+
+
+class QuarantineListResponse(BaseResponse):
+    files: list[QuarantinedFile] = Field(default_factory=list)
+    total: int = 0
+    summary: QuarantineSummary = Field(default_factory=QuarantineSummary)
+
+
 class SyncStatus(LogExtentsMixin):
     configured: bool = True
     busy: bool = False
@@ -490,6 +515,8 @@ class BackfillBundleRollupsResponse(_AdminMaintRead):
     ngwaf_bots: int | None = None
     ngwaf_bots_days: int | None = None
     wellknown_bots: int | None = None
+    overview: int | None = None
+    overview_days: int | None = None
 
 
 class LocalCompactNowResponse(_AdminMaintRead):

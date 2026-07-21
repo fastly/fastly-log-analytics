@@ -238,6 +238,7 @@ def _run_rollup_compact_daily(service_id: str) -> None:
         compact_origin_dims_closed_days_to_daily,
         compact_origin_latency_ts_closed_days_to_daily,
         compact_origin_summary_closed_days_to_daily,
+        compact_overview_closed_days_to_daily,
         compact_perf_latency_closed_days_to_daily,
         compact_security_dims_closed_days_to_daily,
         compact_verified_bots_ts_closed_days_to_daily,
@@ -441,6 +442,19 @@ def _run_rollup_compact_daily(service_id: str) -> None:
                 e,
             )
             ngwaf_bots_compacted = 0
+
+        # overview per-day compaction: preserves hour_start granularity
+        # (24 rows) so the reader can re-bucket to sub-day intervals.
+        # All columns SUM-aggregatable. Same best-effort pattern.
+        try:
+            overview_compacted = compact_overview_closed_days_to_daily(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: overview day-compact failed (per-hour still serves): %s",
+                _display,
+                e,
+            )
+            overview_compacted = 0
         duration = time.time() - start_time
         # Pass run_id so log_cron_run UPDATEs the 'running' row that
         # start_cron_run inserted (instead of orphaning it and inserting
@@ -461,12 +475,13 @@ def _run_rollup_compact_daily(service_id: str) -> None:
         )
         sd_summary = f"; compacted {security_dims_compacted} security_dims day(s)" if security_dims_compacted else ""
         nb_summary = f"; compacted {ngwaf_bots_compacted} ngwaf_bots day(s)" if ngwaf_bots_compacted else ""
+        ov_summary = f"; compacted {overview_compacted} overview day(s)" if overview_compacted else ""
         log_cron_run(
             src,
             "rollup_compact_daily",
             duration,
             "success",
-            summary=f"Rebuilt {rebuilt} (field, day) file(s); bundled {bundled} day(s){os_summary}{nr_summary}{ns_summary}{vbts_summary}{perf_summary}{od_summary}{olts_summary}{sd_summary}{nb_summary}{heal_summary}.",
+            summary=f"Rebuilt {rebuilt} (field, day) file(s); bundled {bundled} day(s){os_summary}{nr_summary}{ns_summary}{vbts_summary}{perf_summary}{od_summary}{olts_summary}{sd_summary}{nb_summary}{ov_summary}{heal_summary}.",
             run_id=run_id,
         )
         logger.info(

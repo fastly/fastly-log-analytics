@@ -224,6 +224,63 @@ def _migration_006_slow_queries_count_covering_index(con: sqlite3.Connection) ->
     )
 
 
+def _migration_007_quarantined_files(con: sqlite3.Connection) -> None:
+    """Create ``quarantined_files`` — tracks raw .gz files copied to the
+    ``errors/`` FOS prefix because they contained corrupt/invalid lines.
+
+    Files with any corrupt lines are copied before deletion so operators
+    can diagnose patterns in log corruption (edge misconfig, encoding
+    issues, truncated writes). A sidecar ``.meta.json`` in FOS carries
+    the bad-line samples; this table indexes the quarantined files for
+    admin listing and 14-day auto-purge.
+    """
+    if _has_table(con, "quarantined_files"):
+        return
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quarantined_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_name TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            fos_key TEXT NOT NULL,
+            error_key TEXT NOT NULL,
+            meta_key TEXT NOT NULL,
+            valid_rows INTEGER NOT NULL DEFAULT 0,
+            corrupt_rows INTEGER NOT NULL DEFAULT 0,
+            file_size_bytes INTEGER,
+            corrupt_samples TEXT,
+            quarantined_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(file_name, source_name)
+        )
+        """
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_quarantined_at ON quarantined_files(source_name, quarantined_at)")
+
+
+def _migration_008_quarantined_reason_counts(con: sqlite3.Connection) -> None:
+    """Add ``reason_counts`` column to ``quarantined_files``.
+
+    JSON dict mapping corruption reason → count per file, e.g.
+    ``{"invalid_json": 3, "missing_timestamp": 1}``.
+    """
+    if not _has_table(con, "quarantined_files"):
+        return
+    cols = {row[1] for row in con.execute("PRAGMA table_info(quarantined_files)").fetchall()}
+    if "reason_counts" in cols:
+        return
+    con.execute("ALTER TABLE quarantined_files ADD COLUMN reason_counts TEXT DEFAULT '{}'")
+
+
+def _migration_009_quarantined_error_size(con: sqlite3.Connection) -> None:
+    """Add ``error_size_bytes`` to track actual FOS quarantine object size."""
+    if not _has_table(con, "quarantined_files"):
+        return
+    cols = {row[1] for row in con.execute("PRAGMA table_info(quarantined_files)").fetchall()}
+    if "error_size_bytes" in cols:
+        return
+    con.execute("ALTER TABLE quarantined_files ADD COLUMN error_size_bytes INTEGER")
+
+
 # Insertion order = application order. Use integer keys. The key=3 slot
 # (a rebuild of usage_log_hourly_summary) was retired alongside the
 # legacy usage_log schema; the gap is intentional and apply_pending
@@ -234,6 +291,9 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _migration_004_committed_buffers,
     5: _migration_005_slow_queries,
     6: _migration_006_slow_queries_count_covering_index,
+    7: _migration_007_quarantined_files,
+    8: _migration_008_quarantined_reason_counts,
+    9: _migration_009_quarantined_error_size,
 }
 
 LATEST_VERSION = max(MIGRATIONS) if MIGRATIONS else 0

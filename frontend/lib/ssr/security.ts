@@ -110,7 +110,6 @@ export async function fetchSecurityServerSide(
       path: '/api/security/aggregates',
       logPrefix: 'ssr/security',
       method: 'POST',
-      injectAdminToken: true,
       // Mirror SecurityBody's client request body EXACTLY. range_token + anchor
       // drive the scan window (the keyed path ignores start_time/end_time, so
       // they are omitted).

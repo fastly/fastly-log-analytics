@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from datetime import UTC, datetime, timedelta
 
@@ -26,14 +27,14 @@ router = APIRouter(prefix="/api", tags=["insights"], responses=DEFAULT_ERROR_RES
 # A second request for the same service parks here; when the first finishes
 # it writes the cache, and the second gets a cache hit → no duplicate scan.
 # Dict access is guarded by a lock so concurrent service-registrations are safe.
-_insights_sems: dict[str, threading.Semaphore] = {}
+_insights_sems: dict[str, asyncio.Semaphore] = {}
 _insights_sems_lock = threading.Lock()
 
 
-def _get_insights_sem(service_id: str) -> threading.Semaphore:
+def _get_insights_sem(service_id: str) -> asyncio.Semaphore:
     with _insights_sems_lock:
         if service_id not in _insights_sems:
-            _insights_sems[service_id] = threading.Semaphore(1)
+            _insights_sems[service_id] = asyncio.Semaphore(1)
         return _insights_sems[service_id]
 
 
@@ -72,7 +73,7 @@ def _analyst_lookback_clamp(
 
 @router.post("/insights", response_model=InsightsResponse)
 @query_errors()
-def insights_endpoint(
+async def insights_endpoint(
     req: InsightsRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
@@ -80,20 +81,19 @@ def insights_endpoint(
         ctx, req.baseline_hours, req.window_size_hrs
     )
     sem = _get_insights_sem(ctx.service_id)
-    sem.acquire()
-    try:
-        return repo.get_insights(
+    async with sem:
+        return await asyncio.to_thread(
+            repo.get_insights,
             con=ctx.con,
             src=ctx.source,
             window_hours=req.window_size_hrs,
             baseline_hours=req.baseline_hours,
+            service_id=ctx.service_id,
             clamp_start=clamp_start,
             clamp_end=clamp_end,
             mask_ips=mask_ips,
             clamp_cache_key=clamp_cache_key,
         )
-    finally:
-        sem.release()
 
 
 @router.post("/insights/cache-collapse-detail", response_model=CacheCollapseDetailResponse)

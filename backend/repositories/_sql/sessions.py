@@ -36,6 +36,7 @@ SESSIONS_CTE_PIPELINE = """
                {url_proj}
                {edge_proj}
                {edge_sid_proj}
+               {cmcd_sid_proj}
         FROM {table_name}
         WHERE {where_clause} AND timestamp IS NOT NULL
     ),
@@ -82,6 +83,8 @@ Inputs (all trusted-identifier substitutions):
   session id; present only after the session_scoring orchestrator has
   provisioned the field — see
   ``backend/provision/session_scoring_orchestrator.py``).
+- ``{cmcd_sid_proj}`` — empty string or ``, "cmcd_sid"`` (CMCD session id;
+  present when CMCD logging is enabled on the service).
 - ``{table_name}`` — output of ``_safe_table(src["name"])``.
 - ``{where_clause}`` — output of ``build_where_clause(...)`` (uses ``?`` for
   user values; the caller binds those via the ``params`` arg, not here).

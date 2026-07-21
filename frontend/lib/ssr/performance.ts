@@ -1,52 +1,23 @@
-// Server-only SSR fetcher for the /performance page. Pre-fetches BOTH default
-// /api/performance/aggregates selections (the "core" and "distributions"
-// section groups the page fires on cold load) so the cards render from cache on
-// first paint instead of paying two client round-trips + skeleton flashes.
+// Server-only SSR fetcher for the /performance page. Pre-fetches the unified
+// /api/performance/aggregates selection so the cards render from cache on
+// first paint instead of paying client round-trips + skeleton flashes.
 // Replicates the /origin SSR template (commit 319c1b0) — POST callers of the
 // shared transport, inheriting its Caddy-marker trust gate + analyst clamp.
-//
-// WHY two fetches: the performance page makes TWO useServiceQuery calls
-// (coreQuery + distributionsQuery) with DIFFERENT section lists, so it has two
-// first-paint keys. We seed both; each is byte-matched independently.
-//
-// KEY-MATCH CONTRACT (load-bearing): the (rangeToken, anchor) + sort this helper
-// seeds MUST equal what PerformancePage computes on first paint:
-//   ['performance','aggregates','core', sid, rangeToken, anchor, filterPayload, 'p99']
-//   ['performance','aggregates','distributions', sid, rangeToken, anchor, filterPayload, 'p99']
-// On a cold load: rangeToken='24h' (matches the 24h store-default display window
-// so the scan window and the chart x-axis range agree; the old 'auto' resolved to
-// 30d for mature services and squashed the bars), anchor=quantizeAnchor(now) on the 60s grid,
-// filterPayload={}, sort='p99' (the literal default in both query keys). The
-// performance page has NO bucket element in its keys (the request carries no
-// bucket field). anchor also snaps to bootstrap.log_extents when the service's
-// latest log is >15min stale (lib/log-extents-snap.ts — shared with FilterBar's
-// client-side autoSetRange decision), computed ONCE upstream of both section
-// fetches so core/distributions always share the identical anchor. Divergence:
-// the rare minute-boundary straddle, plus a rare 15-minute-staleness-boundary
-// straddle — both self-heal via one client refetch, never a leak/crash.
 
 import { quantizeAnchor } from '@/lib/time-window'
 import { resolveSnappedWindow, narrowLogExtents } from '@/lib/log-extents-snap'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
-// Mirror PERFORMANCE_CORE_SECTIONS / PERFORMANCE_DISTRIBUTIONS_SECTIONS in
-// app/performance/page.tsx. Kept in lockstep; a divergence changes the body
-// shape (these are part of each POST body, not the key).
-export const PERFORMANCE_CORE_SSR_SECTIONS = ['waterfall', 'scatter', 'top_urls', 'top_asns'] as const
-export const PERFORMANCE_DISTRIBUTIONS_SSR_SECTIONS = ['ttl_dist'] as const
-
-// 'p99' is the literal sort_by default in BOTH performance query keys (the page
+// 'p99' is the literal sort_by default in the performance query key (the page
 // hard-codes 'p99'); it is a key element, so it must match the seed.
 export const PERFORMANCE_SSR_DEFAULTS = {
   sortBy: 'p99' as const,
 } as const
 
 export interface PerformanceSsrSeed {
-  /** /api/performance/aggregates response for the "core" section group. */
-  coreData: unknown
-  /** /api/performance/aggregates response for the "distributions" group. */
-  distributionsData: unknown
+  /** /api/performance/aggregates response for all sections. */
+  performanceData: unknown
   /** Relative-range token (e.g. '24h') — must equal the client key element. */
   rangeToken: string
   /** Quantized anchor (ISO-Z, 60s grid) — must equal the client key element. */
@@ -64,11 +35,10 @@ export function resolvePerformanceDefaultKey(
   return { rangeToken: '24h', anchor: quantizeAnchor(snapped?.end ?? now.toISOString(), now) }
 }
 
-async function fetchSection(
+async function fetchPerformanceData(
   serviceId: string,
   rangeToken: string,
   anchor: string,
-  sections: readonly string[],
 ): Promise<unknown> {
   return parseSsrJson(
     await ssrUpstreamGet({
@@ -81,7 +51,8 @@ async function fetchSection(
       body: {
         filters: {},
         sort_by: PERFORMANCE_SSR_DEFAULTS.sortBy,
-        sections,
+        // Omit sections to fetch all sections in a single request
+        sections: undefined,
         range_token: rangeToken,
         anchor,
       },
@@ -92,10 +63,9 @@ async function fetchSection(
 }
 
 /**
- * SSR-prefetch BOTH default performance selections for the active service.
- * Returns null when serviceId is absent OR either sub-fetch fails — the page
- * then degrades to the client-fetch path for both cards (no partial seed, which
- * keeps the failure mode simple: all-or-nothing, identical to a cold load).
+ * SSR-prefetch unified performance selection for the active service.
+ * Returns null when serviceId is absent OR the fetch fails — the page
+ * then degrades to the client-fetch path (no partial seed).
  *
  * @param now         Render instant; floored to the anchor quantum. Injectable.
  * @param logExtents  bootstrap.log_extents for serviceId, if available. See
@@ -110,14 +80,8 @@ export async function fetchPerformanceServerSide(
 
   if (!serviceId) return null
 
-  const [coreData, distributionsData] = await Promise.all([
-    fetchSection(serviceId, rangeToken, anchor, PERFORMANCE_CORE_SSR_SECTIONS),
-    fetchSection(serviceId, rangeToken, anchor, PERFORMANCE_DISTRIBUTIONS_SSR_SECTIONS),
-  ])
+  const performanceData = await fetchPerformanceData(serviceId, rangeToken, anchor)
 
-  // All-or-nothing: if either sub-fetch failed (fail-closed → null), skip the
-  // whole seed so the page client-fetches both cleanly rather than seeding one
-  // key and double-fetching the other.
-  if (coreData == null || distributionsData == null) return null
-  return { coreData, distributionsData, rangeToken, anchor }
+  if (performanceData == null) return null
+  return { performanceData, rangeToken, anchor }
 }

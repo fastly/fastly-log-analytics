@@ -633,6 +633,16 @@ NETWORK_HEATMAP_BUNDLE_MIN_REQUESTS_PER_HOUR = 3
 # and metro_rows (aggregated across all hours, no time dimension).
 NETWORK_GEO_BUNDLE_FILENAME = "network_geo.parquet"
 
+# Filename for the per-hour overview rollup feeding /api/value/summary's
+# combined overview + caching sections. One row per closed hour with
+# SUM-aggregatable counts covering requests, cache states, bandwidth,
+# shield, WAF, and elapsed-time sums/counts. The reader re-buckets via
+# time_bucket(interval, hour_start) and computes derived metrics
+# (offload_pct, accel_factor) from the window-wide SUMs.
+OVERVIEW_BUNDLE_FILENAME = "overview.parquet"
+
+NETWORK_SUMMARY_BUNDLE_FILENAME = "network_summary.parquet"
+
 
 def _time_series_bundle_path(source: dict, hour: str) -> str:
     return os.path.join(_hour_bundled_root(source), f"hour={hour}", TIME_SERIES_BUNDLE_FILENAME)
@@ -696,6 +706,14 @@ def _security_cov_bundle_path(source: dict, hour: str) -> str:
 
 def _perf_ttl_dist_bundle_path(source: dict, hour: str) -> str:
     return os.path.join(_hour_bundled_root(source), f"hour={hour}", PERF_TTL_DIST_BUNDLE_FILENAME)
+
+
+def _overview_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", OVERVIEW_BUNDLE_FILENAME)
+
+
+def _network_summary_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", NETWORK_SUMMARY_BUNDLE_FILENAME)
 
 
 def quote_path_list(paths: Iterable[str]) -> str:

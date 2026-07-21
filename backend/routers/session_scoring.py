@@ -798,6 +798,9 @@ def scoring_labels_create(
 ) -> dict:
     """Create or update a label. Upserts on (service_id, sid)."""
     from backend.scoring import labels as _labels
+    from backend.utils.auth import require_service_in_scope
+
+    require_service_in_scope(request, service_id)
 
     _strip_pii_fields_for_analyst(request, body)
     sid = body.sid.strip()

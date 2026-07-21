@@ -32,9 +32,18 @@ export function deriveScorerSeries(data: LatencyResponse | undefined) {
 export function scorerHourlyLayout(perMinute: boolean, yTitle: string, showlegend: boolean) {
   return {
     showlegend,
-    margin: { l: 50, r: 20, t: 10, b: 40 },
+    margin: { l: 50, r: 20, t: showlegend ? 35 : 10, b: 40 },
     xaxis: { title: '', type: 'date', ...(perMinute ? { tickformat: '%H:%M' } : {}) },
     yaxis: { title: yTitle, rangemode: 'tozero' },
+    legend: {
+      orientation: 'h' as const,
+      y: 1.05,
+      x: 0.5,
+      xanchor: 'center' as const,
+      yanchor: 'bottom' as const,
+      font: { size: 9.5 },
+      bgcolor: 'transparent',
+    },
   }
 }
 

@@ -32,6 +32,7 @@ export function extractApiError(error: unknown): string {
     if (e.detail.error) return String(e.detail.error)
     return JSON.stringify(e.detail)
   }
+  if (typeof e.message === 'string' && e.message) return e.message
   if (e.error) return String(e.error)
   if (Array.isArray(e.errors)) return e.errors.join(', ')
   try { return JSON.stringify(error) } catch { return 'Unknown error' }

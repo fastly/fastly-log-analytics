@@ -54,9 +54,6 @@ const SCATTER_LAYOUT = {
 // MUST stay in lockstep with PERFORMANCE_*_SSR_SECTIONS in lib/ssr/performance.ts
 // — the section lists are part of each POST body, so a divergence would change
 // the response and miss the dehydrated cache on first paint.
-type PerformanceSections = NonNullable<components['schemas']['PerformanceRequest']['sections']>
-const PERFORMANCE_CORE_SECTIONS: PerformanceSections = ['waterfall', 'scatter', 'top_urls', 'top_asns']
-const PERFORMANCE_DISTRIBUTIONS_SECTIONS: PerformanceSections = ['ttl_dist']
 
 interface PerformanceBodyProps {
   activeServiceId: string | null
@@ -104,14 +101,14 @@ function PerformanceBody({
   // and sends the explicit bounds, so the tables/distributions reflect exactly the
   // selected window. Both queries share one wire so they stay on one cache key.
   const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
-  const coreQuery = useServiceQuery(
-    ['performance', 'aggregates', 'core', activeServiceId, rangeKey, anchor, filterPayload, 'p99'],
+  const performanceQuery = useServiceQuery(
+    ['performance', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload, 'p99'],
     async ({ signal }) => {
       const { data } = await client.POST("/api/performance/aggregates", { signal,
         body: {
           filters: filterPayload,
           sort_by: 'p99',
-          sections: PERFORMANCE_CORE_SECTIONS,
+          sections: undefined,
           ...rangeBody,
         }
       })
@@ -119,23 +116,8 @@ function PerformanceBody({
     }
   )
 
-  const distributionsQuery = useServiceQuery(
-    ['performance', 'aggregates', 'distributions', activeServiceId, rangeKey, anchor, filterPayload, 'p99'],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/performance/aggregates", { signal,
-        body: {
-          filters: filterPayload,
-          sort_by: 'p99',
-          sections: PERFORMANCE_DISTRIBUTIONS_SECTIONS,
-          ...rangeBody,
-        }
-      })
-      return data
-    }
-  )
-
-  const coreData = coreQuery.data
-  const distData = distributionsQuery.data
+  const coreData = performanceQuery.data
+  const distData = performanceQuery.data
 
   // ── Charts ──────────────────────────────────────────────────────────────
 
@@ -199,9 +181,9 @@ function PerformanceBody({
         <AnalyticsCard
           title="End-to-End Latency Waterfall (Average)"
           icon={<Network className="h-4 w-4" />}
-          isLoading={coreQuery.isLoading}
-          isFetching={coreQuery.isFetching}
-          error={coreQuery.error as AnalyticsCardError | null}
+          isLoading={performanceQuery.isLoading}
+          isFetching={performanceQuery.isFetching}
+          error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={!coreData?.waterfall?.avg}
           className="h-[360px]"
           contentClassName="p-2"
@@ -249,9 +231,9 @@ function PerformanceBody({
               <ColumnVisibilityDropdown columns={URL_COLUMN_IDS.map(id => ({ id, label: getFieldLabel(id) }))} visibility={urlVisibility} onChange={onUrlVisChange} />
             </div>
           }
-          isLoading={coreQuery.isLoading}
-          isFetching={coreQuery.isFetching}
-          error={coreQuery.error as AnalyticsCardError | null}
+          isLoading={performanceQuery.isLoading}
+          isFetching={performanceQuery.isFetching}
+          error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(coreData?.top_urls?.length ?? 0) === 0}
           className="min-h-[300px]"
           contentClassName="p-0"
@@ -278,9 +260,9 @@ function PerformanceBody({
               />
             </div>
           }
-          isLoading={coreQuery.isLoading}
-          isFetching={coreQuery.isFetching}
-          error={coreQuery.error as AnalyticsCardError | null}
+          isLoading={performanceQuery.isLoading}
+          isFetching={performanceQuery.isFetching}
+          error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(coreData?.top_asns?.length ?? 0) === 0}
           className="min-h-[300px]"
           contentClassName="p-0"
@@ -300,9 +282,9 @@ function PerformanceBody({
         <AnalyticsCard
           title="Cache TTL Distribution"
           icon={<Clock className="h-4 w-4" />}
-          isLoading={distributionsQuery.isLoading}
-          isFetching={distributionsQuery.isFetching}
-          error={distributionsQuery.error as AnalyticsCardError | null}
+          isLoading={performanceQuery.isLoading}
+          isFetching={performanceQuery.isFetching}
+          error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(distData?.ttl_dist?.length ?? 0) === 0}
           className="h-[360px]"
           contentClassName="p-2"
@@ -317,9 +299,9 @@ function PerformanceBody({
         <AnalyticsCard
           title="Origin vs Edge Processing (ms)"
           icon={<Zap className="h-4 w-4" />}
-          isLoading={coreQuery.isLoading}
-          isFetching={coreQuery.isFetching}
-          error={coreQuery.error as AnalyticsCardError | null}
+          isLoading={performanceQuery.isLoading}
+          isFetching={performanceQuery.isFetching}
+          error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(coreData?.scatter?.length ?? 0) === 0}
           className="h-[360px]"
           contentClassName="p-2"

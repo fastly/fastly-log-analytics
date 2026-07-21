@@ -76,7 +76,8 @@ def get_audit_logs(
     valid_sort_cols = {"timestamp", "event_type", "actor"}
     sort_col_safe = sort_col if sort_col in valid_sort_cols else "timestamp"
     sort_dir_safe = "ASC" if sort_dir.upper() == "ASC" else "DESC"
-    offset = (page - 1) * per_page
+    per_page = max(1, min(per_page, 100))
+    offset = max(0, page - 1) * per_page
 
     rows = con.execute(
         f"""SELECT id, timestamp, event_type, details, actor

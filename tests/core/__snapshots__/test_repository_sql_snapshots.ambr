@@ -45,14 +45,22 @@
 # name: test_insights_asn_concentration_sql
   '''
   
-          SELECT "asn",
-              COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
-              COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt,
-              (SELECT COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) FROM t_logs) AS b_total,
-              (SELECT COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) FROM t_logs) AS w_total
-          FROM t_logs WHERE "asn" IS NOT NULL GROUP BY "asn"
-          HAVING w_total > 0 AND w_cnt * 1.0 / w_total >= 0.20 AND (b_total = 0 OR w_cnt * 1.0 / w_total >= b_cnt * 1.0 / NULLIF(b_total, 0) * 3 + 0.10)
-          ORDER BY w_cnt DESC LIMIT 10
+          WITH totals AS (
+              SELECT
+                  COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_total,
+                  COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_total
+              FROM t_logs
+          ),
+          grp AS (
+              SELECT "asn",
+                  COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
+                  COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
+              FROM t_logs WHERE "asn" IS NOT NULL GROUP BY "asn"
+          )
+          SELECT g."asn", g.w_cnt, g.b_cnt, t.b_total, t.w_total
+          FROM grp g, totals t
+          WHERE t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= 0.20 AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / NULLIF(t.b_total, 0) * 3 + 0.10)
+          ORDER BY g.w_cnt DESC LIMIT 10
       
   '''
 # ---
@@ -452,8 +460,8 @@
   
           SELECT
             COUNT(*)                                                                            AS requests,
-            COUNT(*) FILTER (WHERE "cache" ILIKE 'MISS%')                                       AS total_misses,
-            COUNT(*) FILTER (WHERE "cache" ILIKE 'PASS%')                                       AS total_passes,
+            COUNT(*) FILTER (WHERE starts_with("cache", 'MISS'))                                       AS total_misses,
+            COUNT(*) FILTER (WHERE starts_with("cache", 'PASS'))                                       AS total_passes,
             MEDIAN(elapsed) / 1000.0                                                          AS ottfb_p50_ms,
             APPROX_QUANTILE(elapsed, 0.75) / 1000.0                                           AS ottfb_p75_ms,
             APPROX_QUANTILE(elapsed, 0.95) / 1000.0                                           AS ottfb_p95_ms,
@@ -673,6 +681,7 @@
           SELECT "ip"
                  
                  , timestamp AS ts
+                 
                  
                  
                  

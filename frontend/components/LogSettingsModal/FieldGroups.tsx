@@ -17,6 +17,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { AlertTriangle, ChevronRight, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { CmcdConfigSection } from '@/components/CmcdConfigSection'
 
 export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleField, updateFieldLimit }: any) {
   const [isOpen, setIsOpen] = useState(false)
@@ -190,6 +191,12 @@ interface StandardFieldsStepProps {
   setEdgeOnly: (v: boolean) => void
   customCondition: string
   setCustomCondition: (v: string) => void
+  cmcdEnabled?: boolean
+  setCmcdEnabled?: (v: boolean) => void
+  cmcdMode?: string
+  setCmcdMode?: (v: string) => void
+  cmcdVersion?: number
+  setCmcdVersion?: (v: number) => void
   toggleGroup: (groupId: string, checked: boolean) => void
   toggleField: (fieldId: string, checked: boolean, defaultEnabledByGroup: boolean) => void
   updateFieldLimit: (fieldId: string, limit?: number) => void
@@ -209,6 +216,12 @@ export function StandardFieldsStep({
   setEdgeOnly,
   customCondition,
   setCustomCondition,
+  cmcdEnabled,
+  setCmcdEnabled,
+  cmcdMode,
+  setCmcdMode,
+  cmcdVersion,
+  setCmcdVersion,
   toggleGroup,
   toggleField,
   updateFieldLimit,
@@ -365,6 +378,16 @@ export function StandardFieldsStep({
             updateFieldLimit={updateFieldLimit}
           />
         ))}
+        {setCmcdEnabled && setCmcdMode && setCmcdVersion && (
+          <CmcdConfigSection
+            enabled={cmcdEnabled ?? false}
+            onEnabledChange={setCmcdEnabled}
+            mode={cmcdMode ?? 'query_string'}
+            onModeChange={setCmcdMode}
+            version={cmcdVersion ?? 1}
+            onVersionChange={setCmcdVersion}
+          />
+        )}
       </div>
       </div>
       </div>

@@ -1064,6 +1064,75 @@ registry.register(
     )
 )
 
+# ── 30b. Scripted Traffic Patterns (by TLS Fingerprint) ─────────────────────
+
+
+def repeated_patterns_fp_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [entity, n_gaps, n_events, avg_interval, stddev_interval,
+    #              cv_corr, modal_frac, distinct_ip, span_s, mode_gap]
+    entity = row[0]
+    n_gaps = int(row[1] or 0)
+    n_events = int(row[2] or 0)
+    mean_interval = float(row[3] or 0)
+    stddev = float(row[4] or 0)
+    cv = float(row[5] or 0)
+    modal_frac = float(row[6] or 0)
+    distinct_ip = int(row[7] or 0)
+    span_s = int(row[8] or 0)
+    mode_gap = int(row[9]) if row[9] is not None else None
+    rps = round(n_events / span_s, 4) if span_s else 0.0
+
+    score = round(100 * (0.625 * (1 - min(cv, 1.0)) + 0.375 * modal_frac))
+
+    if score >= 90 and n_events >= 30:
+        severity = "critical"
+    elif score >= 70:
+        severity = "warning"
+    else:
+        severity = "info"
+
+    fp_col = context.get("fp_col", "ja4")
+    return {
+        "label": entity or "(unknown)",
+        "current_val": mean_interval,
+        "baseline_val": stddev,
+        "baseline_label": "jitter (σ)",
+        "unit": "s interval",
+        "meta": {
+            "score": score,
+            "cv": cv,
+            "modal_frac": modal_frac,
+            "mean_interval_s": mean_interval,
+            "stddev_s": stddev,
+            "mode_gap_s": mode_gap,
+            "n_gaps": n_gaps,
+            "n_events": n_events,
+            "span_s": span_s,
+            "rps": rps,
+            "distinct_ip": distinct_ip,
+            "filters": {fp_col: entity},
+        },
+        "severity": severity,
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="repeated_patterns_fp",
+        category=InsightCategory.security,
+        title="Scripted Traffic Patterns (by TLS Fingerprint)",
+        description=(
+            "TLS fingerprints sending requests on a highly regular cadence — catches "
+            "IP-rotating scrapers, pollers, or cron-scheduled scripts that share a "
+            "stable TLS stack across many source addresses"
+        ),
+        sql_template=SQL.REPEATED_PATTERNS_FP,
+        required_fields=["ip", "timestamp"],
+        row_processor=repeated_patterns_fp_processor,
+        severity_logic=repeated_patterns_severity,
+    )
+)
+
 # ── 31. Low-and-Slow Scans ────────────────────────────────────────────────────
 # Phase-3: promotes the legacy low_and_slow stub to a computed insight.
 
@@ -1347,6 +1416,46 @@ registry.register(
         sql_template=SQL.NEW_ASN_TRAFFIC,
         required_fields=["asn", "timestamp"],
         row_processor=new_asn_traffic_processor,
+    )
+)
+
+# ── 37b. ASN Hosting Shift ───────────────────────────────────────────────────
+# Track B: per-ASN consumer→datacenter hosting ratio shift.
+
+
+def asn_hosting_shift_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [asn, w_hosting, w_total, b_hosting, b_total]
+    asn, w_hosting, w_total, b_hosting, b_total = row
+    w_ratio = round(float(w_hosting * 100.0 / w_total), 1) if w_total else 0.0
+    b_ratio = round(float(b_hosting * 100.0 / b_total), 1) if b_total else 0.0
+    names_map = context.get("asn_names", {})
+    asn_label = f"AS{asn}"
+    if asn in names_map:
+        asn_label += f" ({names_map[asn]})"
+    return {
+        "label": asn_label,
+        "current_val": w_ratio,
+        "baseline_val": b_ratio,
+        "unit": "% hosting",
+        "meta": {
+            "window_hosting": w_hosting,
+            "window_total": w_total,
+            "asn": asn,
+            "filters": {"asn": asn},
+        },
+        "severity": "critical" if w_ratio >= 60 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="asn_hosting_shift",
+        category=InsightCategory.network,
+        title="ASN Hosting Shift",
+        description="An ASN's traffic composition shifting from consumer to datacenter/hosting — bot pools or scrapers spinning up on hosting infrastructure",
+        sql_template=SQL.ASN_HOSTING_SHIFT,
+        required_fields=["asn", "p_type", "timestamp"],
+        row_processor=asn_hosting_shift_processor,
     )
 )
 

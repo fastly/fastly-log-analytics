@@ -102,6 +102,14 @@ def evaluate_alert(
             if (now_utc - max_ts_aware) > timedelta(minutes=30):
                 return False, None, None, None
 
+        # Pre-compute the timestamp literal once so downstream window
+        # expressions use it directly instead of re-running the
+        # max(timestamp) subquery (up to 6x per alert).
+        max_ts_literal = f"'{max_ts}'::TIMESTAMPTZ"
+
+        def _window_offset(minutes_ago: float) -> str:
+            return f"{max_ts_literal} - INTERVAL '{minutes_ago} minutes'"
+
         def build_metric_query(window_start_expr: str, window_end_expr: str) -> str:
             agg_or_sel = get_metric_sql(metric, status_codes)
             where_clause = f"timestamp >= {window_start_expr} AND timestamp <= {window_end_expr}"
@@ -117,8 +125,8 @@ def evaluate_alert(
                 return f"{agg_or_sel} WHERE {where_clause}"
             return f"SELECT {agg_or_sel} FROM {table_name} WHERE {where_clause}"
 
-        current_start = SQL.WINDOW_OFFSET_EXPR.format(table=table_name, minutes_ago=window)
-        current_end = SQL.MAX_TIMESTAMP_SUBQUERY_EXPR.format(table=table_name)
+        current_start = _window_offset(window)
+        current_end = max_ts_literal
         q_current = build_metric_query(current_start, current_end)
 
         with track_query(con, q_current, [], "alerts") as cursor:
@@ -139,8 +147,8 @@ def evaluate_alert(
             if req_count < 10:
                 return False, None, None, None
 
-            hist_start = SQL.WINDOW_OFFSET_EXPR.format(table=table_name, minutes_ago=comp_period + window)
-            hist_end = SQL.WINDOW_OFFSET_EXPR.format(table=table_name, minutes_ago=comp_period)
+            hist_start = _window_offset(comp_period + window)
+            hist_end = _window_offset(comp_period)
             q_hist = build_metric_query(hist_start, hist_end)
 
             with track_query(con, q_hist, [], "alerts") as cursor:

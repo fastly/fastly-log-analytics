@@ -48,6 +48,8 @@ interface SessionsBodyProps {
   setSelectedSession: React.Dispatch<React.SetStateAction<SessionRow | null>>
   flaggedOnly: boolean
   setFlaggedOnly: React.Dispatch<React.SetStateAction<boolean>>
+  streamingOnly: boolean
+  setStreamingOnly: React.Dispatch<React.SetStateAction<boolean>>
   minReqs: number | ''
   setMinReqs: React.Dispatch<React.SetStateAction<number | ''>>
   min4xxPct: number | ''
@@ -63,6 +65,8 @@ function SessionsBody({
   setSelectedSession,
   flaggedOnly,
   setFlaggedOnly,
+  streamingOnly,
+  setStreamingOnly,
   minReqs,
   setMinReqs,
   min4xxPct,
@@ -92,7 +96,7 @@ function SessionsBody({
   }, [qc, activeServiceId])
 
   const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
-    queryKey: ['sessions', 'list', activeServiceId, startTime, endTime, filterPayload, flaggedOnly, minReqs, min4xxPct],
+    queryKey: ['sessions', 'list', activeServiceId, startTime, endTime, filterPayload, flaggedOnly, streamingOnly, minReqs, min4xxPct],
     queryFn: async ({ signal }) => {
       const { data } = await client.POST("/api/sessions", {
         signal,
@@ -105,6 +109,7 @@ function SessionsBody({
           sort_by: 'session_start',
           sort_dir: 'desc',
           flagged_only: flaggedOnly,
+          streaming_only: streamingOnly,
           min_reqs_flag: minReqs !== '' ? minReqs : undefined,
           min_4xx_pct_flag: min4xxPct !== '' ? min4xxPct : undefined,
         }
@@ -179,6 +184,8 @@ function SessionsBody({
       <ScoringControls
         flaggedOnly={flaggedOnly}
         setFlaggedOnly={setFlaggedOnly}
+        streamingOnly={streamingOnly}
+        setStreamingOnly={setStreamingOnly}
         minReqs={minReqs}
         setMinReqs={setMinReqs}
         min4xxPct={min4xxPct}
@@ -219,6 +226,7 @@ export default function SessionsPage() {
 
   // ── Filter state ─────────────────────────────────────────────────────────
   const [flaggedOnly, setFlaggedOnly] = useState(false)
+  const [streamingOnly, setStreamingOnly] = useState(false)
   const [minReqs, setMinReqs] = useState<number | ''>('')
   const [min4xxPct, setMin4xxPct] = useState<number | ''>('')
 
@@ -243,6 +251,8 @@ export default function SessionsPage() {
           setSelectedSession={setSelectedSession}
           flaggedOnly={flaggedOnly}
           setFlaggedOnly={setFlaggedOnly}
+          streamingOnly={streamingOnly}
+          setStreamingOnly={setStreamingOnly}
           minReqs={minReqs}
           setMinReqs={setMinReqs}
           min4xxPct={min4xxPct}

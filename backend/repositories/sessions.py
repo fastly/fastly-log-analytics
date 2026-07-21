@@ -225,6 +225,7 @@ def _get_sessions_from_rollup(
     has_rtt: bool,
     has_edge: bool,
     has_edge_sid: bool,
+    has_cmcd: bool,
     section_timings: list,
     rollup_filters: FiltersDict | None = None,
 ) -> dict | None:
@@ -415,6 +416,7 @@ def _get_sessions_from_rollup(
         "has_ja4": has_ja4,
         "has_edge": has_edge,
         "has_edge_sid": has_edge_sid,
+        "has_cmcd": has_cmcd,
         "min_reqs_flag": min_reqs_flag,
         "min_4xx_pct_flag": min_4xx_pct_flag,
         "section_timings": section_timings,
@@ -438,6 +440,7 @@ def get_sessions(
     flagged_only: bool,
     min_reqs_flag: int | None,
     min_4xx_pct_flag: float | None,
+    streaming_only: bool = False,
 ) -> dict:
     if min_reqs_flag is None:
         min_reqs_flag = 1000
@@ -483,6 +486,7 @@ def get_sessions(
             has_ja4=False,
             has_edge=False,
             has_edge_sid=False,
+            has_cmcd=False,
             **runner.telemetry(),
         )
 
@@ -500,6 +504,7 @@ def get_sessions(
     has_url = "url" in actual_cols
     has_edge = "edge" in actual_cols
     has_edge_sid = "edge_sid" in actual_cols
+    has_cmcd = "cmcd_sid" in actual_cols
 
     # Sessions-rollup fast path: serve from per-hour sessions.parquet
     # rollups (built by backend.core.rollups.build_session_bundles)
@@ -517,7 +522,7 @@ def get_sessions(
     # Returns None if the rollup can't serve (writer behind, no bundled
     # root, active-hour only, etc.); we fall back to the raw path below.
     _ROLLUP_FILTERABLE = {"country", "asn"}
-    if start_time and end_time and all(k in _ROLLUP_FILTERABLE for k in filters):
+    if start_time and end_time and not streaming_only and all(k in _ROLLUP_FILTERABLE for k in filters):
         try:
             from backend.utils.date_utils import parse_iso_utc
 
@@ -546,6 +551,7 @@ def get_sessions(
                 has_rtt=has_rtt,
                 has_edge=has_edge,
                 has_edge_sid=has_edge_sid,
+                has_cmcd=has_cmcd,
                 section_timings=section_timings,
                 rollup_filters=filters,
             )
@@ -561,6 +567,8 @@ def get_sessions(
     part_key = group_key
 
     extra_aggs = ""
+    if has_cmcd:
+        extra_aggs += """, COUNT(*) FILTER (WHERE "cmcd_sid" IS NOT NULL AND "cmcd_sid" != '') AS streaming_reqs"""
     if has_edge_sid:
         # Representative cookie session id per (ip[, ja4]) session.
         # MAX() across rows in the same session ensures a stable value;
@@ -593,7 +601,12 @@ def get_sessions(
         flag_parts.append(f"(reqs_4xx * 100.0 / NULLIF(req_count, 0)) >= {min_4xx_pct_flag}")
     flag_expr = " OR ".join(f"({p})" for p in flag_parts)
 
-    flagged_filter = "WHERE flagged = true" if flagged_only else ""
+    post_conditions: list[str] = []
+    if flagged_only:
+        post_conditions.append("flagged = true")
+    if streaming_only and has_cmcd:
+        post_conditions.append("streaming_reqs > 0")
+    flagged_filter = ("WHERE " + " AND ".join(post_conditions)) if post_conditions else ""
 
     valid_sorts = {
         "session_start",
@@ -624,6 +637,7 @@ def get_sessions(
         url_proj=', "url"' if has_url else "",
         edge_proj=', "edge"' if has_edge else "",
         edge_sid_proj=', "edge_sid"' if has_edge_sid else "",
+        cmcd_sid_proj=', "cmcd_sid"' if has_cmcd else "",
         table_name=table_name,
         where_clause=where_clause,
         part_key=part_key,
@@ -652,6 +666,7 @@ def get_sessions(
             has_ja4=has_ja4,
             has_edge=has_edge,
             has_edge_sid=has_edge_sid,
+            has_cmcd=has_cmcd,
             **runner.telemetry(),
         )
 
@@ -666,6 +681,8 @@ def get_sessions(
         for k in ("session_start", "session_end"):
             if d.get(k) is not None:
                 d[k] = str(d[k])
+        if has_cmcd:
+            d["is_streaming"] = (d.pop("streaming_reqs", 0) or 0) > 0
         sessions.append(d)
     total = len(sessions)
 
@@ -691,6 +708,7 @@ def get_sessions(
         "has_ja4": has_ja4,
         "has_edge": has_edge,
         "has_edge_sid": has_edge_sid,
+        "has_cmcd": has_cmcd,
         "min_reqs_flag": min_reqs_flag,
         "min_4xx_pct_flag": min_4xx_pct_flag,
         "section_timings": section_timings,

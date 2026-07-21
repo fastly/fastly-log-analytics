@@ -28,4 +28,5 @@ export interface ScriptedTrafficData {
   span_s: number
   rps: number
   distinct_ua: number
+  distinct_ip?: number
 }

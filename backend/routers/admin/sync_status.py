@@ -66,6 +66,30 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
     cached_status = svcconfig.get_status(src["name"])
     if not cached_status:
         return None  # fall through to dedicated endpoint
+
+    # Real-time SQLite metadata lookup overlay to bypass stale on-disk config cache
+    try:
+        import re
+
+        from backend.core import metadata as metadata_db
+
+        summary = metadata_db.get_ingested_files_status_summary(src["name"])
+        latest_file_name = summary.get("latest_file_name")
+        total_rows = summary.get("total_rows") or 0
+        if latest_file_name:
+            fname = latest_file_name.split("/")[-1]
+            m = re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", fname)
+            if m:
+                latest_ingested_file_at = f"{m.group(1)} {m.group(2).replace('-', ':').replace('.', ':')}"
+                cached_status["latest_ingested_file_at"] = latest_ingested_file_at
+                cached_status["latest_available_file_at"] = latest_ingested_file_at
+                cached_status["latest_log_at"] = f"{m.group(1)}T{m.group(2).replace('-', ':').replace('.', ':')}Z"
+
+        if total_rows > 0 and (not cached_status.get("local_rows") or cached_status.get("local_rows") == 0):
+            cached_status["local_rows"] = total_rows
+    except Exception as e:
+        logger.debug("[compute_sync_status_cached] failed to overlay real-time SQLite metadata: %s", e)
+
     cached_status["access_level"] = src.get("access_level", "read_write")
     cached_status["storage_mode"] = _db.STORAGE_MODE
     cached_status["configured"] = True

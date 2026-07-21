@@ -71,10 +71,12 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     from backend.core.rollups import (
         backfill_network_rtt_bundles,
         backfill_network_speed_bundles,
+        backfill_network_summary_bundles,
         backfill_ngwaf_bots_bundles,
         backfill_origin_dims_bundles,
         backfill_origin_latency_ts_bundles,
         backfill_origin_summary_bundles,
+        backfill_overview_bundles,
         backfill_perf_dims_bundles,
         backfill_perf_latency_bundles,
         backfill_security_dims_bundles,
@@ -87,6 +89,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         compact_origin_dims_closed_days_to_daily,
         compact_origin_latency_ts_closed_days_to_daily,
         compact_origin_summary_closed_days_to_daily,
+        compact_overview_closed_days_to_daily,
         compact_perf_dims_closed_days_to_daily,
         compact_perf_latency_closed_days_to_daily,
         compact_security_dims_closed_days_to_daily,
@@ -127,6 +130,8 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     # whose cache rows were already retention-trimmed aggregate to empty —
     # identical to what the live join returns for them today.
     n_nb = backfill_ngwaf_bots_bundles(sid, source)
+    n_ov = backfill_overview_bundles(sid, source)
+    n_netsumm = backfill_network_summary_bundles(sid, source)
     n_os_day = compact_origin_summary_closed_days_to_daily(sid, source)
     n_od_day = compact_origin_dims_closed_days_to_daily(sid, source)
     n_olts_day = compact_origin_latency_ts_closed_days_to_daily(sid, source)
@@ -137,6 +142,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     n_sd_day = compact_security_dims_closed_days_to_daily(sid, source)
     n_pd_day = compact_perf_dims_closed_days_to_daily(sid, source)
     n_nb_day = compact_ngwaf_bots_closed_days_to_daily(sid, source)
+    n_ov_day = compact_overview_closed_days_to_daily(sid, source)
     return {
         "slow_urls": n_su,
         "origin_summary": n_os,
@@ -160,6 +166,9 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         "ngwaf_bots": n_nb,
         "ngwaf_bots_days": n_nb_day,
         "wellknown_bots": n_wk,
+        "overview": n_ov,
+        "overview_days": n_ov_day,
+        "network_summary": n_netsumm,
     }
 
 
@@ -386,11 +395,16 @@ def metadata_cleanup_now(source: dict = Depends(get_source)):
 
     threading.Thread(target=worker, daemon=True, name=f"metadata-cleanup-{service_id}").start()
 
-    def stream():
+    async def stream():
+        import asyncio
+
         while True:
-            event = events.get()
-            if event is None:
-                break
-            yield _json.dumps(event)
+            try:
+                event = await asyncio.to_thread(events.get, timeout=1)
+                if event is None:
+                    break
+                yield _json.dumps(event)
+            except _queue.Empty:
+                pass
 
     return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)

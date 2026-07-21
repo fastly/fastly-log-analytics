@@ -10,9 +10,13 @@ import type { PopGeo } from '@/lib/pop'
 interface PopGeoState {
   map: Record<string, PopGeo>
   setMap: (map: Record<string, PopGeo>) => void
+  locations: Record<string, [number, number]>
+  setLocations: (locations: Record<string, [number, number]>) => void
 }
 
 export const usePopGeoStore = create<PopGeoState>((set) => ({
   map: {},
   setMap: (map) => set({ map }),
+  locations: {},
+  setLocations: (locations) => set({ locations }),
 }))

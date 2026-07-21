@@ -452,6 +452,7 @@ def get_insights(
     window_hours: float,
     baseline_hours: float,
     *,
+    service_id: str | None = None,
     clamp_start: str | None = None,
     clamp_end: str | None = None,
     mask_ips: bool = False,
@@ -729,7 +730,10 @@ def get_insights(
         table_name = temp_table
 
         def make_investigate_url(filters: dict | None = None) -> str:
-            p = [("start", window_start_s), ("end", now_s)]
+            p: list[tuple[str, str]] = []
+            if service_id:
+                p.append(("service", service_id))
+            p.extend([("start", window_start_s), ("end", now_s)])
             for col, val in (filters or {}).items():
                 if val is not None:
                     p.append((f"filter_{col}", str(val)))
@@ -1160,13 +1164,13 @@ def get_cache_collapse_detail(
             WHERE "url" = ? AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)
         )
         SELECT
-            SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
-            SUM(CASE WHEN cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_miss,
-            SUM(CASE WHEN cache ILIKE 'PASS%' THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_pass,
+            SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
+            SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_miss,
+            SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_pass,
             COUNT(*) FILTER (WHERE is_w) AS w_total,
-            SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,
-            SUM(CASE WHEN cache ILIKE 'MISS%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_miss,
-            SUM(CASE WHEN cache ILIKE 'PASS%' THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_pass,
+            SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,
+            SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_miss,
+            SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_pass,
             COUNT(*) FILTER (WHERE is_b) AS b_total
         FROM base
     """
@@ -1210,8 +1214,8 @@ def get_cache_collapse_detail(
         SELECT
             time_bucket(INTERVAL '{bucket_interval}', timestamp) AS bucket,
             COUNT(*) AS total_requests,
-            SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) AS real_hits,
-            SUM(CASE WHEN cache ILIKE 'MISS%' THEN 1 ELSE 0 END) AS misses
+            SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) AS real_hits,
+            SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) AS misses
         FROM {table_name}
         WHERE "url" = ? AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)
         GROUP BY bucket
@@ -1252,7 +1256,7 @@ def get_cache_collapse_detail(
             ip,
             status
         FROM {table_name}
-        WHERE "url" = ? AND cache ILIKE 'MISS%' AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)
+        WHERE "url" = ? AND starts_with(cache, 'MISS') AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)
         ORDER BY timestamp DESC
         LIMIT 50
     """

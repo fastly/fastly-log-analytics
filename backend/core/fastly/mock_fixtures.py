@@ -90,6 +90,9 @@ def mock_response(method: str, path: str, body: dict | None = None) -> Any:
         # the first `v["active"]` it finds.
         return [{"number": 1, "active": True}]
 
+    if method == "GET" and re.search(r"^/service/[^/]+/version/active$", path):
+        return {"number": 1, "active": True}
+
     if method == "GET" and "/version/" in path:
         if path.endswith("/logging/s3"):
             return []

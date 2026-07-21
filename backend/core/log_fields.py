@@ -334,7 +334,9 @@ def generate_log_format(log_fields_config: dict) -> str:
 
         # Cap per-field limit at remaining budget so the aggregate line
         # cannot exceed FASTLY_LOG_LINE_DELIVER_MAX.
-        cf_limit = int(cf.get("byte_limit") or limits.get(name) or 2000)
+        estimate = cf.get("bytes_estimate")
+        default_limit = min(max((estimate or 0) * 4, 40), 2000) if estimate else 2000
+        cf_limit = int(cf.get("byte_limit") or limits.get(name) or default_limit)
         # Numeric/boolean values are short (a u64 is ≤20 chars). Never let
         # them reserve the 2000-char string default: greedy allocation runs
         # in alphabetical order, so a handful of numeric fields each grabbing
@@ -404,7 +406,7 @@ def generate_log_format(log_fields_config: dict) -> str:
             # 016: substr-clamp the value before json.escape so an
             # oversized custom string field cannot push the line past
             # Fastly's 16 KB log-line limit.
-            vcl_macro = f"json.escape(substr({expr}, 0, {cf_limit}))"
+            vcl_macro = f"json.escape(substr({expr}, 0, {cf_limit // 6}))"
             entry = f'"{name}":"%{{{vcl_macro}}}V"'
 
         parts.append(entry)
@@ -544,7 +546,7 @@ def get_catalog_for_api(field_limits: dict[str, int] | None = None) -> list:
 def get_groups_for_api() -> list:
     """Return group metadata suitable for the /api/log-fields/catalog endpoint."""
     result = []
-    ordered_groups = [None, "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "METRICS"]
+    ordered_groups = [None, "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "METRICS"]
     for gid in ordered_groups:
         info = GROUP_INFO[gid]
         fields = [f for f in LOG_FIELD_CATALOG if f["group"] == gid]
@@ -557,6 +559,7 @@ def get_groups_for_api() -> list:
                 "locked": info.get("locked", False),
                 "requires": info.get("requires"),
                 "note": info.get("note"),
+                "recommended_with": info.get("recommended_with"),
                 "total_bytes": total_bytes,
                 "fields": [f["id"] for f in fields],
             }

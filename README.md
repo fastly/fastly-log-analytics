@@ -105,6 +105,10 @@ You run the application as a central web-accessible server on a dedicated VM (or
 - **Log field configuration** — built-in field groups (HTTP, network, geo, TLS, NGWAF) plus custom VCL expressions
 - **Alerts** — threshold-based, webhook-delivered
 - **Live dashboard sharing** — direct-mode via your own hostname or IP, with per-analyst invites (passcode or OAuth/OIDC single sign-on), IP allowlisting, optional client-IP anonymization, and instant revoke
+- **Control room** — real-time operational dashboard with live metrics from rt.fastly.com at 1-second cadence across nine tabs (overview, performance, origin, security, network, sessions, cost, insights, admin health), with rolling bar charts, KPI cards, PoP traffic heatmap, contextual help, and drill-down time windows
+- **Service summary** — executive view of the value Fastly delivers: cache hit ratio, offload, WAF blocks, bot mitigation, TLS adoption, latency percentiles, and Image Optimizer savings in a single tabbed page
+- **Streaming analytics** — CMCD (Common Media Client Data) dashboard for services with v1 or v2 streaming-log fields enabled, showing buffer health, bitrate, throughput, concurrent sessions, and per-session detail drill-down with auto-refresh
+- **Ingest error quarantine** — corrupt or unparseable log lines are isolated, classified, and surfaced in the admin UI with export/download, instead of silently dropped
 - **Session scoring** — edge-computed 0-100 risk score per request combining cookie/timing signals with a PageRank transition matrix, with live threshold enforcement, audit logging, key rotation, and matrix version history. See the [runbook](docs/session_scoring_runbook.md) and [feature reference](docs/features.md)
 
 See [docs/features.md](docs/features.md) for the full feature reference.

@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 from backend.core import iceberg
@@ -197,6 +198,100 @@ def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
                     break
                 logger.warning("Failed to delete object %s", k, exc_info=True)
         return deleted_count
+
+
+def _quarantine_corrupt_files(
+    fos_client,
+    bucket: str,
+    source: dict,
+    corrupt_s3_paths: list[str],
+    truly_corrupt: list[tuple[str, str, str]],
+    count_map: dict[str, int],
+    valid_counts: dict[str, int],
+    file_sizes: Mapping[str, int | None],
+    source_name: str,
+) -> int:
+    """Write corrupt lines to ``errors/`` prefix in FOS with a sidecar ``.meta.json``.
+
+    Only the bad lines are written — not the entire raw file (valid rows are
+    already ingested). Best-effort: per-file failures are logged but never
+    block the ingest pipeline. Returns the number of files successfully quarantined.
+    """
+    prefix_path = source.get("prefix", "").strip("/")
+    raw_prefix = f"{prefix_path}/raw/" if prefix_path else "raw/"
+    errors_prefix = f"{prefix_path}/errors/" if prefix_path else "errors/"
+    quarantined = 0
+
+    corrupt_by_file: dict[str, list[str]] = {}
+    reason_counts_by_file: dict[str, dict[str, int]] = {}
+    for fname, raw_line, reason in truly_corrupt:
+        corrupt_by_file.setdefault(fname, []).append(raw_line.strip())
+        rc = reason_counts_by_file.setdefault(fname, {})
+        rc[reason] = rc.get(reason, 0) + 1
+
+    for s3_path in corrupt_s3_paths:
+        bad_lines = corrupt_by_file.get(s3_path, [])
+        if not bad_lines:
+            continue
+        try:
+            original_key = s3_path[len(f"s3://{bucket}/") :]
+            if not original_key.startswith(raw_prefix):
+                continue
+            error_key = errors_prefix + original_key[len(raw_prefix) :].replace(".gz", ".bad.jsonl")
+            meta_key = error_key + ".meta.json"
+            file_name = original_key.rsplit("/", 1)[-1]
+
+            error_body = "\n".join(bad_lines).encode()
+            fos_client.put_object(
+                Bucket=bucket,
+                Key=error_key,
+                Body=error_body,
+                ContentType="application/x-ndjson",
+            )
+
+            file_valid = valid_counts.get(s3_path, 0)
+            file_total = count_map.get(s3_path, 0)
+            file_corrupt = len(bad_lines)
+            samples = [line[:2000] for line in bad_lines[:5]]
+            file_reason_counts = reason_counts_by_file.get(s3_path, {})
+
+            meta = {
+                "original_key": original_key,
+                "quarantined_at": datetime.now(UTC).isoformat(),
+                "valid_rows": file_valid,
+                "corrupt_rows": file_corrupt,
+                "total_rows": file_total,
+                "file_size_bytes": file_sizes.get(s3_path),
+                "corrupt_samples": samples,
+                "reason_counts": file_reason_counts,
+                "source_name": source_name,
+            }
+            fos_client.put_object(
+                Bucket=bucket,
+                Key=meta_key,
+                Body=json.dumps(meta).encode(),
+                ContentType="application/json",
+            )
+
+            metadata_db.insert_quarantined_file(
+                service_id=source.get("service_id") or source.get("name", ""),
+                file_name=file_name,
+                source_name=source_name,
+                fos_key=original_key,
+                error_key=error_key,
+                meta_key=meta_key,
+                valid_rows=file_valid,
+                corrupt_rows=file_corrupt,
+                file_size_bytes=file_sizes.get(s3_path),
+                corrupt_samples=samples,
+                reason_counts=file_reason_counts,
+                error_size_bytes=len(error_body),
+            )
+            quarantined += 1
+        except Exception as qe:
+            logger.warning("[ingest] %s: failed to quarantine %s: %s", source_name, s3_path, qe)
+
+    return quarantined
 
 
 def _download_chunk_to_local(fos_client, s3_paths: list[str], tmpdir: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -581,6 +676,7 @@ def ingest(
     total_inserted = 0
     total_corrupt = 0
     total_corrupt_details: list[str] = []
+    total_quarantined = 0
     processed_count = 0
     deleted = 0
     successfully_processed_files: list[str] = []
@@ -832,6 +928,9 @@ def ingest(
                 corrupt_in_batch = total_rows_batch - valid_rows
 
                 repairs_made = False
+                _chunk_corrupt_s3_paths: list[str] = []
+                _chunk_truly_corrupt: list = []
+                _chunk_valid_counts: dict[str, int] = {}
                 if corrupt_in_batch > 0:
                     try:
                         valid_counts = dict(
@@ -860,7 +959,7 @@ def ingest(
 
                             _EMPTY_VALUE_RE = re.compile(r":(?=[,}])")
                             repaired_by_fname: dict[str, list] = {}
-                            truly_corrupt: list = []
+                            truly_corrupt: list[tuple[str, str, str]] = []
                             for fname, raw_line in bad_rows:
                                 # DuckDB filenames here are local paths; translate
                                 # back so all downstream attribution stays s3://.
@@ -873,9 +972,9 @@ def ingest(
                                     if parsed.get("timestamp"):
                                         repaired_by_fname.setdefault(fname, []).append(repaired)
                                         continue
+                                    truly_corrupt.append((fname, raw_line, "missing_timestamp"))
                                 except (json.JSONDecodeError, ValueError):
-                                    pass
-                                truly_corrupt.append((fname, raw_line))
+                                    truly_corrupt.append((fname, raw_line, "invalid_json"))
 
                             if repaired_by_fname:
                                 repairs_made = True
@@ -918,9 +1017,13 @@ def ingest(
                                             pass
 
                             if len(total_corrupt_details) < 100:
-                                for fname, raw_line in truly_corrupt[: 100 - len(total_corrupt_details)]:
+                                for fname, raw_line, _reason in truly_corrupt[: 100 - len(total_corrupt_details)]:
                                     short_name = fname.split("?")[0].split("/")[-1]
                                     total_corrupt_details.append(f"[{short_name}] {raw_line.strip()[:2000]}")
+
+                            _chunk_corrupt_s3_paths = corrupt_s3_paths
+                            _chunk_truly_corrupt = truly_corrupt
+                            _chunk_valid_counts = valid_counts
                     except Exception as e:
                         err_str = str(e)
                         # Network/disk failures here mean the local re-read failed —
@@ -965,6 +1068,22 @@ def ingest(
                             total_corrupt_details.append(f"[Error extracting lines: {e}]")
 
                 total_corrupt += corrupt_in_batch
+
+                if _chunk_corrupt_s3_paths and delete_after:
+                    try:
+                        total_quarantined += _quarantine_corrupt_files(
+                            fos_client,
+                            src["bucket"],
+                            src,
+                            _chunk_corrupt_s3_paths,
+                            _chunk_truly_corrupt,
+                            count_map,
+                            _chunk_valid_counts,
+                            file_sizes,
+                            source_name,
+                        )
+                    except Exception as qe:
+                        logger.warning("[ingest] %s: quarantine failed: %s", source_name, qe)
             finally:
                 chunk_tmpdir_obj.cleanup()
 
@@ -1145,6 +1264,7 @@ def ingest(
         "corrupt_rows": total_corrupt,
         "corrupt_details": total_corrupt_details,
         "deleted_files": total_deleted,
+        "quarantined_files": total_quarantined,
         "message": (
             f"Successfully ingested {processed_count} new files ({total_inserted} rows) "
             f"and deleted {total_deleted} raw files{reclaimed_note}."

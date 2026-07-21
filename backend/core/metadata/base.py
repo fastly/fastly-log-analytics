@@ -149,15 +149,17 @@ def db_path(service_id: str) -> str:
 
 
 # Resolve through ``sys.modules`` so a ``monkeypatch.setattr(metadata_db,
-# "_init_lock", ...)`` (used by tests/core/test_metadata_db_concurrency.py
-# to force-time-out the cold path's lock) actually takes effect on every
-# subsequent call — the providers re-read the module attribute each time.
+# "_initialized", set())`` (used by conftest ``isolate_metadata_db``)
+# takes effect on every subsequent call — the providers re-read the module
+# attribute each time. init_lock_provider is NOT supplied: the pool uses
+# per-key locking internally so cold-opens for different service IDs don't
+# serialize against each other (the single-lock contention was the root
+# cause of "metadata_db._init_lock contended >10s" production errors).
 _module = sys.modules[__name__]
 _pool = ThreadLocalPool(
     name="metadata_db",
     path_fn=lambda sid: db_path(sid),
     schema_fn=lambda con: _init_schema(con),
-    init_lock_provider=lambda: _module._init_lock,
     initialized_provider=lambda: _module._initialized,
     local_provider=lambda: _module._local,
     local_attr="conns",
@@ -304,6 +306,9 @@ _SCHEMA = [
         log_output TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS idx_cron_task_started ON cron_runs(task, started_at)",
+    # Covers the every-5s running-check hot path in start_cron_run
+    # (`WHERE task = ? AND status = 'running'`).
+    "CREATE INDEX IF NOT EXISTS idx_cron_task_status ON cron_runs(task, status)",
     # Covers `/logs`'s unfiltered pagination
     # (`ORDER BY started_at DESC LIMIT ? OFFSET ?` with no `WHERE task`) and
     # `main.py`'s sync-status probe (`WHERE task='sync' AND status != 'running'
@@ -403,6 +408,22 @@ _SCHEMA = [
         file_name TEXT PRIMARY KEY,
         compacted_at TEXT DEFAULT (datetime('now'))
     )""",
+    """CREATE TABLE IF NOT EXISTS quarantined_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_name TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        fos_key TEXT NOT NULL,
+        error_key TEXT NOT NULL,
+        meta_key TEXT NOT NULL,
+        valid_rows INTEGER NOT NULL DEFAULT 0,
+        corrupt_rows INTEGER NOT NULL DEFAULT 0,
+        file_size_bytes INTEGER,
+        error_size_bytes INTEGER,
+        corrupt_samples TEXT,
+        quarantined_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(file_name, source_name)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_quarantined_at ON quarantined_files(source_name, quarantined_at)",
 ]
 
 

@@ -1420,7 +1420,7 @@ async def get_aggregates(
                 # backend/routers/dashboard.py (audit run 7ba15352).
                 _tasks = [asyncio.create_task(t) for t in tasks]
                 try:
-                    results = await asyncio.gather(*_tasks, return_exceptions=True)
+                    results = await asyncio.gather(*[asyncio.shield(t) for t in _tasks], return_exceptions=True)
                     for part in results:
                         if isinstance(part, BaseException):
                             raise part

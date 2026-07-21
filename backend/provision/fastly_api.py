@@ -160,6 +160,7 @@ def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool =
     log_fields_config = log_fields_config or {}
     required = lf.get_required_edge_headers(log_fields_config)
     group_l = "L" in (log_fields_config.get("groups") or [])
+    group_m = "M" in (log_fields_config.get("groups") or [])
     limits = log_fields_config.get("field_limits") or {}
 
     enabled_custom = sorted(
@@ -236,6 +237,10 @@ def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool =
             "  unset req.http.x-of-oretries;",
             "  unset req.http.x-of-status;",
             "  unset req.http.x-edge-req-id;",
+            "  unset req.http.x-fos-io-ifsz;",
+            "  unset req.http.x-fos-io-ofsz;",
+            "  unset req.http.x-fos-io-ifmt;",
+            "  unset req.http.x-fos-io-ofmt;",
             "  # Session-scoring internal markers. X-Edge-Scoring-Pass=1 from a",
             "  # client would bypass scoring entirely; x-edge-score* / X-Edge-Sid",
             "  # from a client could forge a clean score / sid that the deliver",
@@ -256,6 +261,7 @@ def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool =
             name = cf["name"]
             scrub_lines.append(f"  unset req.http.x-fos-edge-data:{name};")
             scrub_lines.append(f"  unset req.http.x-fos-origin-data:{name};")
+            scrub_lines.append(f"  unset req.http.x-edge-score:{name};")
     scrub_lines.append("}")
     edge_header_scrub = "\n".join(scrub_lines)
 
@@ -416,7 +422,7 @@ def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool =
             )
         snippets["error"] = "\n".join(error_lines)
 
-    if group_l or custom_origin or custom_deliver:
+    if group_l or group_m or custom_origin or custom_deliver:
         deliver_lines = []
         if group_l:
             deliver_lines.append(
@@ -457,6 +463,52 @@ def generate_capture_vcl(log_fields_config: dict | None, scoring_enabled: bool =
                 '  if (req.http.x-of-oretries != "") { set resp.http.x-of-oretries = req.http.x-of-oretries; }\n'
                 "}\n"
                 "unset resp.http.x-edge-req-id;"
+            )
+
+        if group_m:
+            deliver_lines.append(
+                "# [group-M] Extract IO metrics from Fastly-Io-Transform-Stats\n"
+                'if (req.http.x-fos-io-ifsz == "" && resp.http.x-fos-io-ifsz != "") '
+                "{ set req.http.x-fos-io-ifsz = resp.http.x-fos-io-ifsz; }\n"
+                'if (req.http.x-fos-io-ofsz == "" && resp.http.x-fos-io-ofsz != "") '
+                "{ set req.http.x-fos-io-ofsz = resp.http.x-fos-io-ofsz; }\n"
+                'if (req.http.x-fos-io-ifmt == "" && resp.http.x-fos-io-ifmt != "") '
+                "{ set req.http.x-fos-io-ifmt = resp.http.x-fos-io-ifmt; }\n"
+                'if (req.http.x-fos-io-ofmt == "" && resp.http.x-fos-io-ofmt != "") '
+                "{ set req.http.x-fos-io-ofmt = resp.http.x-fos-io-ofmt; }\n"
+                'if (resp.http.Fastly-Io-Transform-Stats != "") {\n'
+                '  if (resp.http.Fastly-Io-Transform-Stats ~ "ifsz=") {\n'
+                "    set req.http.x-fos-io-ifsz = regsub(resp.http.Fastly-Io-Transform-Stats, "
+                '".*ifsz=([0-9]+).*", "\\1");\n'
+                "  }\n"
+                '  if (resp.http.Fastly-Io-Transform-Stats ~ "ofsz=") {\n'
+                "    set req.http.x-fos-io-ofsz = regsub(resp.http.Fastly-Io-Transform-Stats, "
+                '".*ofsz=([0-9]+).*", "\\1");\n'
+                "  }\n"
+                '  if (resp.http.Fastly-Io-Transform-Stats ~ "ifmt=") {\n'
+                "    set req.http.x-fos-io-ifmt = regsub(resp.http.Fastly-Io-Transform-Stats, "
+                '".*ifmt=([a-zA-Z0-9]+).*", "\\1");\n'
+                "  }\n"
+                '  if (resp.http.Fastly-Io-Transform-Stats ~ "ofmt=") {\n'
+                "    set req.http.x-fos-io-ofmt = regsub(resp.http.Fastly-Io-Transform-Stats, "
+                '".*ofmt=([a-zA-Z0-9]+).*", "\\1");\n'
+                "  }\n"
+                "}\n"
+                'if (req.http.x-is-cluster-fetch != "1") {\n'
+                "  unset resp.http.x-fos-io-ifsz;\n"
+                "  unset resp.http.x-fos-io-ofsz;\n"
+                "  unset resp.http.x-fos-io-ifmt;\n"
+                "  unset resp.http.x-fos-io-ofmt;\n"
+                "} else {\n"
+                '  if (req.http.x-fos-io-ifsz != "") '
+                "{ set resp.http.x-fos-io-ifsz = req.http.x-fos-io-ifsz; }\n"
+                '  if (req.http.x-fos-io-ofsz != "") '
+                "{ set resp.http.x-fos-io-ofsz = req.http.x-fos-io-ofsz; }\n"
+                '  if (req.http.x-fos-io-ifmt != "") '
+                "{ set resp.http.x-fos-io-ifmt = req.http.x-fos-io-ifmt; }\n"
+                '  if (req.http.x-fos-io-ofmt != "") '
+                "{ set resp.http.x-fos-io-ofmt = req.http.x-fos-io-ofmt; }\n"
+                "}"
             )
 
         if custom_origin:
@@ -1101,6 +1153,28 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
             scoring_enabled=bool((cfg.get("scoring") or {}).get("enabled")),
         )
 
+        cmcd_block = cfg.get("cmcd") or {}
+        if cmcd_block.get("enabled"):
+            from backend.provision.cmcd_vcl import (
+                CMCD_SNIPPET_NAME,
+                CMCD_SNIPPET_PRIORITY,
+                generate_cmcd_vcl,
+            )
+
+            vcl_snips = generate_cmcd_vcl(
+                mode=cmcd_block.get("mode", "query_string"),
+                version=cmcd_block.get("version", 1),
+            )
+            ensure_vcl_snippet(
+                CMCD_SNIPPET_NAME,
+                "recv",
+                vcl_snips[CMCD_SNIPPET_NAME],
+                CMCD_SNIPPET_PRIORITY,
+                service_id,
+                new_ver,
+                token,
+            )
+
         ok("Logging endpoint and VCL snippets added to draft")
 
         info("Validating draft version…")
@@ -1229,6 +1303,51 @@ def update_logging_endpoint(cfg: dict, token: str):
         service_cfg = _svcconfig.load_config(service_id)
     except Exception:
         pass
+    cmcd_enabled_req = cfg.get("cmcd_enabled")
+    cmcd_mode_req = cfg.get("cmcd_mode")
+    cmcd_version_req = cfg.get("cmcd_version")
+    old_cmcd = (service_cfg or {}).get("cmcd") or {}
+    cmcd_was_enabled = bool(old_cmcd.get("enabled"))
+    cmcd_changed = False
+
+    if cmcd_enabled_req is not None and service_cfg is not None:
+        import datetime as _dt
+
+        from backend.provision.cmcd_fields import merge_cmcd_custom_fields
+        from backend.provision.cmcd_orchestrator import _remove_cmcd_custom_fields
+
+        want_enabled = bool(cmcd_enabled_req)
+        new_mode = cmcd_mode_req or old_cmcd.get("mode", "query_string")
+        new_version = int(cmcd_version_req) if cmcd_version_req is not None else old_cmcd.get("version", 1)
+
+        if want_enabled and not cmcd_was_enabled:
+            service_cfg["cmcd"] = {
+                "enabled": True,
+                "mode": new_mode,
+                "version": new_version,
+                "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+            }
+            lf = service_cfg.setdefault("log_fields", {})
+            lf["custom_fields"] = merge_cmcd_custom_fields(lf.get("custom_fields"))
+            cmcd_changed = True
+        elif not want_enabled and cmcd_was_enabled:
+            service_cfg.pop("cmcd", None)
+            _remove_cmcd_custom_fields(service_cfg)
+            cmcd_changed = True
+        elif want_enabled and cmcd_was_enabled:
+            if new_mode != old_cmcd.get("mode") or new_version != old_cmcd.get("version"):
+                service_cfg["cmcd"] = {
+                    **old_cmcd,
+                    "mode": new_mode,
+                    "version": new_version,
+                }
+                cmcd_changed = True
+
+        if cmcd_changed:
+            from backend import config as _svcconfig
+
+            _svcconfig.save_config(service_id, service_cfg)
+
     lf_config = (service_cfg or {}).get("log_fields") if service_cfg else None
     target_format = load_log_format(lf_config)
 
@@ -1354,7 +1473,15 @@ def update_logging_endpoint(cfg: dict, token: str):
         snippets_content_changed = True
 
     if not any(
-        [rate_changed, period_changed, path_changed, format_changed, snippets_changed, snippets_content_changed]
+        [
+            rate_changed,
+            period_changed,
+            path_changed,
+            format_changed,
+            snippets_changed,
+            snippets_content_changed,
+            cmcd_changed,
+        ]
     ):
         yield {"type": "progress", "current": 5, "total": total_steps}
         yield {
@@ -1436,6 +1563,42 @@ def update_logging_endpoint(cfg: dict, token: str):
                 if "404" not in str(exc):
                     raise
 
+        if cmcd_changed:
+            from backend.provision.cmcd_vcl import (
+                CMCD_SNIPPET_NAME,
+                CMCD_SNIPPET_PRIORITY,
+                cmcd_snippet_names,
+                generate_cmcd_vcl,
+            )
+
+            cmcd_block = (service_cfg or {}).get("cmcd") or {}
+            if cmcd_block.get("enabled"):
+                vcl_snips = generate_cmcd_vcl(
+                    mode=cmcd_block.get("mode", "query_string"),
+                    version=cmcd_block.get("version", 1),
+                )
+                ensure_vcl_snippet(
+                    CMCD_SNIPPET_NAME,
+                    "recv",
+                    vcl_snips[CMCD_SNIPPET_NAME],
+                    CMCD_SNIPPET_PRIORITY,
+                    service_id,
+                    new_ver,
+                    token,
+                )
+            else:
+                for name in cmcd_snippet_names():
+                    try:
+                        fastly(
+                            "DELETE",
+                            f"/service/{service_id}/version/{new_ver}/snippet/{urllib.parse.quote(name, safe='')}",
+                            token=token,
+                            expect_empty=True,
+                        )
+                    except RuntimeError as exc:
+                        if "404" not in str(exc):
+                            raise
+
         yield {"type": "progress", "current": 4, "total": total_steps}
         result = fastly("GET", f"/service/{service_id}/version/{new_ver}/validate", token=token)
         if result.get("status") != "ok":
@@ -1457,6 +1620,24 @@ def update_logging_endpoint(cfg: dict, token: str):
             fastly("PUT", f"/service/{service_id}/version/{active_ver}/activate", token=token)
         except RuntimeError:
             pass
+        if cmcd_changed and service_cfg is not None:
+            try:
+                from backend import config as _svcconfig
+                from backend.provision.cmcd_orchestrator import _remove_cmcd_custom_fields
+
+                fresh = _svcconfig.load_config(service_id) or service_cfg
+                if cmcd_was_enabled:
+                    fresh["cmcd"] = old_cmcd
+                    lf = fresh.setdefault("log_fields", {})
+                    from backend.provision.cmcd_fields import merge_cmcd_custom_fields
+
+                    lf["custom_fields"] = merge_cmcd_custom_fields(lf.get("custom_fields"))
+                else:
+                    fresh.pop("cmcd", None)
+                    _remove_cmcd_custom_fields(fresh)
+                _svcconfig.save_config(service_id, fresh)
+            except Exception:
+                pass
         yield {"type": "error", "message": str(exc)}
         raise
 

@@ -3,6 +3,7 @@ import Link from 'next/link'
 import { ArrowUpRight, MapIcon, LineChart, ScanSearch } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DeltaIndicator } from '@/components/DeltaIndicator'
+import { useServiceStore } from '@/stores/serviceStore'
 import { InsightItem } from '@/types/api'
 import { ImpossibleDistanceData, ScriptedTrafficData } from './types'
 
@@ -15,6 +16,17 @@ interface InsightItemRowProps {
 }
 
 export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseClick, onScriptedTrafficClick }: InsightItemRowProps) {
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
+
+  const investigateHref = React.useMemo(() => {
+    if (!item.investigate_url) return null
+    const url = new URL(item.investigate_url, 'http://localhost')
+    if (!url.searchParams.has('service') && activeServiceId) {
+      url.searchParams.set('service', activeServiceId)
+    }
+    return url.pathname + url.search
+  }, [item.investigate_url, activeServiceId])
+
   return (
     <div className="flex items-center justify-between text-xs p-2 rounded-md bg-muted/50 gap-2">
       <div className="flex flex-col min-w-0 flex-1">
@@ -65,7 +77,7 @@ export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseCli
               <LineChart className="h-3 w-3" aria-hidden="true" />
             </Button>
           )}
-          {insightId === 'repeated_patterns' && item.meta && onScriptedTrafficClick && (
+          {(insightId === 'repeated_patterns' || insightId === 'repeated_patterns_fp') && item.meta && onScriptedTrafficClick && (
             <Button
               variant="ghost"
               size="icon"
@@ -87,6 +99,7 @@ export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseCli
                   span_s: m.span_s ?? 0,
                   rps: m.rps ?? 0,
                   distinct_ua: m.distinct_ua ?? 0,
+                  distinct_ip: m.distinct_ip,
                 })
               }}
               title="Why we flagged this"
@@ -111,9 +124,9 @@ export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseCli
             {item.baseline_label || 'baseline'}: {item.baseline_val.toLocaleString(undefined, { maximumFractionDigits: 1 })} {item.unit}
           </span>
         )}
-        {item.investigate_url && (
+        {investigateHref && (
           <Link
-            href={item.investigate_url}
+            href={investigateHref}
             className="text-primary hover:underline flex items-center gap-0.5 text-[11px] sm:text-[10px] mt-0.5"
             target="_blank"
             rel="noopener noreferrer"

@@ -65,6 +65,7 @@ _EXPECTED_INSIGHT_IDS = {
     "referer_monoculture",
     "method_drift",
     "new_asn_traffic",
+    "asn_hosting_shift",
     "metro_delivery_degradation",
     "connection_type_mix",
     "pop_latency_regression",
@@ -852,6 +853,41 @@ def test_new_asn_traffic_attaches_name_and_severity_floor():
     assert with_name["label"] == "AS7922 (Example ISP)"
     assert with_name["severity"] == "warning"  # >= 100
     assert p((7922, 99, 0), None, {})["severity"] == "info"  # < 100
+
+
+# ── Phase-4 (Track B): asn_hosting_shift ──────────────────────────────────────
+
+
+def test_asn_hosting_shift_happy_path():
+    # row schema: [asn, w_hosting, w_total, b_hosting, b_total]
+    out = defs.asn_hosting_shift_processor((16509, 45, 100, 5, 200), None, {})
+    assert out["label"] == "AS16509"
+    assert out["current_val"] == 45.0  # 45/100 = 45%
+    assert out["baseline_val"] == 2.5  # 5/200 = 2.5%
+    assert out["unit"] == "% hosting"
+    assert out["meta"]["asn"] == 16509
+    assert out["meta"]["filters"] == {"asn": 16509}
+    assert out["meta"]["window_hosting"] == 45
+    assert out["meta"]["window_total"] == 100
+
+
+def test_asn_hosting_shift_attaches_name():
+    out = defs.asn_hosting_shift_processor((7922, 30, 60, 2, 100), None, {"asn_names": {7922: "Comcast"}})
+    assert out["label"] == "AS7922 (Comcast)"
+
+
+def test_asn_hosting_shift_severity_boundary():
+    p = defs.asn_hosting_shift_processor
+    # 60% → critical
+    assert p((1, 60, 100, 0, 100), None, {})["severity"] == "critical"
+    # 59.9% → warning
+    assert p((1, 599, 1000, 0, 100), None, {})["severity"] == "warning"
+
+
+def test_asn_hosting_shift_zero_total_safety():
+    out = defs.asn_hosting_shift_processor((1, 0, 0, 0, 0), None, {})
+    assert out["current_val"] == 0.0
+    assert out["baseline_val"] == 0.0
 
 
 # ── Phase-4 (Track B2): metro_delivery_degradation ───────────────────────────

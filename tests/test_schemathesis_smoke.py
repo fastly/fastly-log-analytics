@@ -53,11 +53,19 @@ hypothesis.settings.load_profile("schemathesis_smoke")
 
 
 # Zero-side-effect read endpoints safe to fuzz without DB / network setup.
+# Session-gated endpoints (share/tos, share/heartbeat) will 401 without a
+# cookie — schemathesis still validates the 401 conforms to the documented
+# ErrorEnvelope schema, which is the load-bearing contract.
 ALLOWED_PATHS = frozenset(
     {
         "/api/health",
         "/api/bootstrap",
         "/api/schema",
+        "/api/share/auth-config",
+        "/api/share/tos",
+        "/api/share/heartbeat",
+        "/api/admin/app-config/query-monitor",
+        "/api/log-fields/catalog",
     }
 )
 

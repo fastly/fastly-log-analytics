@@ -112,6 +112,11 @@ def write_service_config(state: dict):
         from backend.provision.session_scoring_orchestrator import merge_scoring_custom_fields
 
         incoming_lf["custom_fields"] = merge_scoring_custom_fields(incoming_lf.get("custom_fields"))
+    cmcd_block = state.get("cmcd") or existing_cfg.get("cmcd") or {}
+    if cmcd_block.get("enabled"):
+        from backend.provision.cmcd_fields import merge_cmcd_custom_fields
+
+        incoming_lf["custom_fields"] = merge_cmcd_custom_fields(incoming_lf.get("custom_fields"))
 
     cfg = {
         "service_id": service_id,
@@ -137,7 +142,7 @@ def write_service_config(state: dict):
     # carry — primarily ``scoring`` (set by enable_scoring) and
     # ``ngwaf_workspace_id`` (set by the NGWAF-config PATCH). Anything else
     # the existing cfg has that the wizard body lacks survives the rewrite.
-    for preserved_key in ("scoring", "ngwaf_workspace_id"):
+    for preserved_key in ("scoring", "cmcd", "ngwaf_workspace_id"):
         if preserved_key not in state and preserved_key in existing_cfg:
             cfg[preserved_key] = existing_cfg[preserved_key]
         elif preserved_key in state:
@@ -282,6 +287,17 @@ def provision(cfg: dict, _resume_from_state: bool = False):
     token = cfg["admin_token"]
     state = load_state() if _resume_from_state else {}
     state.update(cfg)
+
+    config_existed = False
+    _check_service_id = cfg.get("logging_service_id")
+    if _check_service_id:
+        try:
+            from backend import config as svcconfig
+
+            if os.path.exists(svcconfig.config_path(_check_service_id)):
+                config_existed = True
+        except Exception:
+            pass
 
     if cfg.get("fos_access_key_id") and cfg.get("fos_secret_access_key"):
         state.setdefault("fos_access_key", cfg["fos_access_key_id"])
@@ -539,7 +555,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         yield {"type": "status", "message": f"Provisioning failed: {str(e)}. Starting full cleanup rollback..."}
         yield from perform_teardown(state, token)
         service_id = state.get("logging_service_id")
-        if service_id:
+        if service_id and not config_existed:
             from backend import config as svcconfig
 
             cfg_path = svcconfig.config_path(service_id)

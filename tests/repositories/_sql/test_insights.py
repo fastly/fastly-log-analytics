@@ -221,7 +221,7 @@ def test_proxy_surge_renders_and_pins_placeholders():
 def test_asn_concentration_renders_and_pins_placeholders():
     rendered = SQL.ASN_CONCENTRATION.format(table_name="t_logs")
     assert 'GROUP BY "asn"' in rendered
-    assert "w_cnt * 1.0 / w_total >= 0.20" in rendered
+    assert "g.w_cnt * 1.0 / t.w_total >= 0.20" in rendered
     assert rendered.count("?") == 4
     assert _placeholders(SQL.ASN_CONCENTRATION) == ["table_name"]
 
@@ -236,7 +236,7 @@ def test_asn_metro_performance_renders_and_pins_placeholders():
 
 def test_cache_collapse_renders_and_pins_placeholders():
     rendered = SQL.CACHE_COLLAPSE.format(table_name="t_logs")
-    assert "cache ILIKE 'HIT%'" in rendered
+    assert "starts_with(cache, 'HIT')" in rendered
     assert "b_rate >= 0.40" in rendered
     assert rendered.count("?") == 2
     assert _placeholders(SQL.CACHE_COLLAPSE) == ["table_name"]

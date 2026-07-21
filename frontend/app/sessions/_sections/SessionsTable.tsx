@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { ColumnDef } from '@tanstack/react-table'
-import { AlertTriangle, ExternalLink } from 'lucide-react'
+import { AlertTriangle, ExternalLink, Film } from 'lucide-react'
 import { DataTable } from '@/components/DataTable'
 import { Button } from '@/components/ui/button'
 import { FlagSessionPopover } from '@/components/SessionScoring/FlagSessionPopover'
@@ -53,6 +53,11 @@ export function SessionsTable({
         cell: ({ row }) => (
           <div className="flex items-center gap-1.5">
             <span className="font-medium">{row.getValue('ip') as string}</span>
+            {row.original.is_streaming && (
+              <span title="Streaming Session">
+                <Film className="h-3.5 w-3.5 text-blue-500 shrink-0" />
+              </span>
+            )}
             {row.original.flagged && (
               <span title="Flagged Session">
                 <AlertTriangle className="h-3.5 w-3.5 text-yellow-500 shrink-0" />

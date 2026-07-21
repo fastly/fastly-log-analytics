@@ -129,6 +129,27 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/services/:service_id/scoring/evaluation/per-reason',
   'GET /api/services/:service_id/scoring/dashboard',
 
+  // CMCD admin — SSE-streamed enable/disable + status. Admin-only flows
+  // covered by Playwright E2E; same pattern as scoring admin endpoints.
+  'GET /api/services/:service_id/cmcd/status',
+  'POST /api/services/:service_id/cmcd/enable',
+  'POST /api/services/:service_id/cmcd/disable',
+
+  // Control Room — Phase 0 stubs. Tab GET returns canned data, mutation
+  // endpoints are 501 placeholders, SSE is a heartbeat. Covered by
+  // backend tests + Playwright E2E (e2e/control-room.spec.ts).
+  'GET /api/services/:service_id/control-room/:tab',
+  'POST /api/services/:service_id/control-room/mitigations',
+  'POST /api/services/:service_id/control-room/rules',
+  'POST /api/services/:service_id/control-room/allowlist',
+  'POST /api/services/:service_id/control-room/big-red-button',
+  'POST /api/services/:service_id/control-room/cost-governor',
+  'GET /api/services/:service_id/control-room/wizard/state',
+  'POST /api/services/:service_id/control-room/wizard/step',
+  'GET /api/services/:service_id/realtime-stream',
+  'GET /api/services/:service_id/log-field-audit',
+  'POST /api/services/:service_id/control-room/correlate',
+
   // Debug + analyst-share — analyst tests use per-spec handlers,
   // debug/state is admin-only triage.
   'GET /api/debug/state',

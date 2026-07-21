@@ -363,6 +363,11 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
       map.current.on('load', () => {
         if (!map.current) return
 
+        if (mapContainer.current) {
+          mapContainer.current.querySelectorAll<HTMLElement>('a, button, [tabindex], canvas')
+            .forEach(el => el.setAttribute('tabindex', '-1'))
+        }
+
         map.current.addSource('arcs', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
         map.current.addSource('dots', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
 

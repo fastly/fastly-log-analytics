@@ -535,98 +535,17 @@ def test_ensure_source_registered_passes_config_json_to_metadata_db():
     assert payload["cdn_secret"] == "shh"
 
 
-def test_start_cron_run_purges_old_runs_before_starting():
-    """Reads `log_retention_days` from cron_sync/cron_compact config
-    and purges runs older than that before starting the new one.
-    Pinned because the cron_runs table grows unbounded without
-    pruning."""
+def test_start_cron_run_delegates_to_metadata():
+    """start_cron_run delegates directly to metadata.start_cron_run
+    without per-tick purging. Retention is handled by the daily
+    cleanup_metadata job (reconciliation._CLEANUP_TABLES)."""
     from backend.core.duckdb import start_cron_run
 
-    purge_calls = []
-
-    with (
-        patch(
-            "backend.config.load_config",
-            return_value={"provisioning": {"cron_sync": {"log_retention_days": 14}}},
-        ),
-        patch(
-            "backend.core.metadata.purge_cron_runs",
-            side_effect=lambda sid, task, days: purge_calls.append((sid, task, days)),
-        ),
-        patch("backend.core.metadata.start_cron_run", return_value=99),
-    ):
+    with patch("backend.core.metadata.start_cron_run", return_value=99) as mock_start:
         run_id = start_cron_run({"name": "svc-1"}, "sync")
 
     assert run_id == 99
-    assert purge_calls == [("svc-1", "sync", 14)]
-
-
-def test_start_cron_run_uses_default_retention_for_non_mapped_tasks():
-    """Tasks not in ``_TASK_TO_CRON_KEY`` (commit / optimize / expire /
-    metadata_cleanup / alerts / ngwaf_sync / ...) fall back to the
-    7-day default rather than picking up cron_compact's setting.
-
-    The previous ``"cron_sync" if task == "sync" else "cron_compact"``
-    ternary silently coupled every non-sync task to cron_compact's
-    log_retention_days; this test pins the corrected behavior so the
-    coupling can't quietly come back."""
-    from backend.core.duckdb import start_cron_run
-
-    purge_calls = []
-
-    with (
-        patch(
-            "backend.config.load_config",
-            return_value={"provisioning": {"cron_compact": {"log_retention_days": 30}}},
-        ),
-        patch(
-            "backend.core.metadata.purge_cron_runs",
-            side_effect=lambda sid, task, days: purge_calls.append((sid, task, days)),
-        ),
-        patch("backend.core.metadata.start_cron_run", return_value=100),
-    ):
-        start_cron_run({"name": "svc-1"}, "commit")
-
-    # 7 (the default), NOT 30 (cron_compact's setting).
-    assert purge_calls == [("svc-1", "commit", 7)]
-
-
-def test_start_cron_run_skips_purge_when_retention_days_zero():
-    """`log_retention_days=0` → no purge. Pinned because customers
-    can disable retention pruning entirely by setting 0 (legal
-    hold), and pruning despite the setting would surprise them."""
-    from backend.core.duckdb import start_cron_run
-
-    with (
-        patch(
-            "backend.config.load_config",
-            return_value={"provisioning": {"cron_sync": {"log_retention_days": 0}}},
-        ),
-        patch("backend.core.metadata.purge_cron_runs") as mock_purge,
-        patch("backend.core.metadata.start_cron_run", return_value=101),
-    ):
-        start_cron_run({"name": "svc-1"}, "sync")
-
-    mock_purge.assert_not_called()
-
-
-def test_start_cron_run_swallows_purge_exception():
-    """If purge raises (DB locked), still start the new run. Pinned
-    because losing this would let a single locked-table error
-    prevent every cron run from starting."""
-    from backend.core.duckdb import start_cron_run
-
-    with (
-        patch(
-            "backend.config.load_config",
-            return_value={"provisioning": {"cron_sync": {"log_retention_days": 7}}},
-        ),
-        patch("backend.core.metadata.purge_cron_runs", side_effect=RuntimeError("locked")),
-        patch("backend.core.metadata.start_cron_run", return_value=200),
-    ):
-        run_id = start_cron_run({"name": "svc-1"}, "sync")
-
-    assert run_id == 200  # Started despite purge failure
+    mock_start.assert_called_once_with("svc-1", "sync")
 
 
 # ── _execute_query_with_retry (transient retry / fail-fast) ──────────────

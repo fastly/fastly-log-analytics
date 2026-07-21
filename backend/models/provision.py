@@ -61,6 +61,9 @@ class ProvisionExecuteRequest(BaseModel):
     enable_cron_compact: bool = True
     log_retention_days: int = 30
     log_fields: str | None = None
+    cmcd_enabled: bool = False
+    cmcd_mode: str | None = None
+    cmcd_version: int | None = None
 
 
 class ProvisionValidateRequest(BaseModel):

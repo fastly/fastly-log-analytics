@@ -207,22 +207,16 @@ def get_performance_aggregates(
         if "top_urls" in live_sections and temp_table:
             _t = _time.perf_counter()
             url_q = f"""
-                WITH url_counts AS (
-                    SELECT url, count(*) AS reqs
-                    FROM {temp_table}
-                    WHERE url IS NOT NULL AND elapsed IS NOT NULL
-                    GROUP BY 1 HAVING count(*) > 5
-                )
-                SELECT t.url,
-                       uc.reqs,
-                       AVG(CAST(t.elapsed AS DOUBLE)) / 1000.0 as avg,
-                       {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.5, approx=True)} as p50,
-                       {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.95, approx=True)} as p95,
-                       {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.99, approx=True)} as p99
-                FROM {temp_table} t
-                INNER JOIN url_counts uc USING (url)
-                WHERE t.elapsed IS NOT NULL
-                GROUP BY t.url, uc.reqs
+                SELECT url,
+                       count(*) AS reqs,
+                       AVG(CAST(elapsed AS DOUBLE)) / 1000.0 as avg,
+                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.5, approx=True)} as p50,
+                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.95, approx=True)} as p95,
+                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.99, approx=True)} as p99
+                FROM {temp_table}
+                WHERE url IS NOT NULL AND elapsed IS NOT NULL
+                GROUP BY url
+                HAVING count(*) > 5
                 ORDER BY {sort_idx} DESC LIMIT 20
             """
             url_res = runner.execute(url_q).fetchall()
@@ -234,22 +228,16 @@ def get_performance_aggregates(
         if "top_asns" in live_sections and temp_table:
             _t = _time.perf_counter()
             asn_q = f"""
-                WITH asn_counts AS (
-                    SELECT asn, count(*) AS reqs
-                    FROM {temp_table}
-                    WHERE asn IS NOT NULL AND elapsed IS NOT NULL
-                    GROUP BY 1 HAVING count(*) > 10
-                )
-                SELECT t.asn,
-                       ac.reqs,
-                       AVG(CAST(t.elapsed AS DOUBLE)) / 1000.0 as avg,
-                       {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.5, approx=True)} as p50,
-                       {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.95, approx=True)} as p95,
-                       {percentile_ms_expr("CAST(t.elapsed AS DOUBLE)", 0.99, approx=True)} as p99
-                FROM {temp_table} t
-                INNER JOIN asn_counts ac USING (asn)
-                WHERE t.elapsed IS NOT NULL
-                GROUP BY t.asn, ac.reqs
+                SELECT asn,
+                       count(*) AS reqs,
+                       AVG(CAST(elapsed AS DOUBLE)) / 1000.0 as avg,
+                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.5, approx=True)} as p50,
+                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.95, approx=True)} as p95,
+                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.99, approx=True)} as p99
+                FROM {temp_table}
+                WHERE asn IS NOT NULL AND elapsed IS NOT NULL
+                GROUP BY asn
+                HAVING count(*) > 10
                 ORDER BY {sort_idx} DESC LIMIT 20
             """
             asn_res = runner.execute(asn_q).fetchall()

@@ -48,6 +48,7 @@ from . import (  # noqa: F401
     log_accounting,
     metric_history,
     pop_locations,
+    quarantine,
     sync_status,
     trees,
 )

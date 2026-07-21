@@ -5,10 +5,19 @@ from backend.core.fastly.client import fastly
 
 def get_active_version(service_id: str, token: str) -> int | None:
     try:
+        active = fastly("GET", f"/service/{service_id}/version/active", token=token)
+        if isinstance(active, dict) and active.get("active"):
+            return int(active["number"])
+    except RuntimeError:
+        pass
+
+    # Fallback for backwards-compatibility / mock testing
+    try:
         versions = fastly("GET", f"/service/{service_id}/version", token=token)
-        for v in versions:
-            if v.get("active"):
-                return int(v["number"])
+        if isinstance(versions, list):
+            for v in versions:
+                if v.get("active"):
+                    return int(v["number"])
     except RuntimeError:
         pass
     return None
@@ -25,18 +34,33 @@ def get_active_version_info(service_id: str, token: str, *, timeout: int = 8, ma
     Returns ``None`` on any error or if no active version exists.
     """
     try:
-        versions = fastly(
-            "GET", f"/service/{service_id}/version", token=token, timeout=timeout, max_retries=max_retries
+        v = fastly(
+            "GET", f"/service/{service_id}/version/active", token=token, timeout=timeout, max_retries=max_retries
         )
-    except RuntimeError:
-        return None
-    for v in versions or []:
-        if v.get("active"):
+        if isinstance(v, dict) and v.get("active"):
             return {
                 "number": int(v["number"]),
                 "updated_at": v.get("updated_at"),
                 "created_at": v.get("created_at"),
             }
+    except RuntimeError:
+        pass
+
+    # Fallback for backwards-compatibility / mock testing
+    try:
+        versions = fastly(
+            "GET", f"/service/{service_id}/version", token=token, timeout=timeout, max_retries=max_retries
+        )
+        if isinstance(versions, list):
+            for v in versions:
+                if v.get("active"):
+                    return {
+                        "number": int(v["number"]),
+                        "updated_at": v.get("updated_at"),
+                        "created_at": v.get("created_at"),
+                    }
+    except RuntimeError:
+        pass
     return None
 
 

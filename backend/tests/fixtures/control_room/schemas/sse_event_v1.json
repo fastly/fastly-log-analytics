@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SSE Event v1",
+  "type": "object",
+  "required": ["event", "event_schema_version", "timestamp", "data"],
+  "properties": {
+    "event": { "type": "string" },
+    "event_schema_version": { "type": "integer", "const": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "data": { "type": "object" }
+  }
+}
