@@ -548,17 +548,23 @@ export function AppLayout({
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
   const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || pathname.startsWith('/control-room') || !hasServices
 
-  if (isInitializing || (isLoading && !bootstrapData)) {
+  if (isLoading && !bootstrapData && !isInitializing) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" aria-label="Loading" />
+      </div>
+    )
+  }
+
+  if (isInitializing) {
     return (
       <div className="flex h-screen items-center justify-center bg-background p-6 relative overflow-hidden">
-        {/* Soft, modern glowing background gradients */}
         <div className="absolute inset-0 bg-gradient-to-br from-background via-background to-card/10 z-0" />
         <div className="absolute -top-40 -left-40 w-96 h-96 bg-primary/5 rounded-full blur-3xl" />
         <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-primary/5 rounded-full blur-3xl" />
 
         <div className="relative z-10 max-w-md text-center space-y-8 p-8 rounded-2xl border bg-card/60 backdrop-blur-md shadow-xl transition-all duration-500 hover:shadow-2xl hover:border-primary/20">
           <div className="flex justify-center relative">
-            {/* Pulsing ring animation around the icon */}
             <div className="absolute inset-0 rounded-full bg-primary/10 animate-ping scale-75" />
             <div className="p-4 bg-muted/60 backdrop-blur-sm rounded-full border border-border/60 relative">
               <Server className="h-10 w-10 text-primary animate-pulse" />
