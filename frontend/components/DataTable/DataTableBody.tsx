@@ -16,6 +16,7 @@ interface DataTableBodyProps<TData, TValue> {
   rowVirtualizer: Virtualizer<HTMLDivElement, Element>
   columns: ColumnDef<TData, TValue>[]
   columnVisibility: VisibilityState
+  columnSizing?: Record<string, number>
   isLoading?: boolean
   onRowClick?: (row: TData) => void
   getRowClassName?: (row: TData) => string
@@ -38,6 +39,7 @@ export function DataTableBody<TData, TValue>({
   rowVirtualizer,
   columns,
   columnVisibility,
+  columnSizing,
   isLoading,
   onRowClick,
   getRowClassName,
@@ -75,6 +77,7 @@ export function DataTableBody<TData, TValue>({
                 onRowClick={onRowClick}
                 rowClassName={getRowClassName ? getRowClassName(row.original) : undefined}
                 columnVisibility={columnVisibility}
+                columnSizing={columnSizing}
                 columns={columns}
               />
             )

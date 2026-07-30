@@ -1069,6 +1069,25 @@ def get_connection(
             # to keep stderr clean during the dashboard's RO query path.
             logger.debug("[duckdb] update_iceberg_view skipped on RO connection: %s", e)
 
+    # Pre-attach NGWAF bot cache if configured and exists to eliminate request-time ATTACH latency (1.2s overhead)
+    try:
+        from backend import config as svcconfig
+
+        ngwaf_db = svcconfig.ngwaf_db_path()
+        if ngwaf_db and os.path.exists(ngwaf_db):
+            existing = con.execute(
+                "SELECT database_name FROM duckdb_databases() WHERE database_name IN ('ngwaf_top', 'ngwaf_cache')"
+            ).fetchall()
+            attached_aliases = {row[0] for row in existing}
+
+            ngwaf_db_escaped = ngwaf_db.replace("'", "''")
+            if "ngwaf_top" not in attached_aliases:
+                con.execute(f"ATTACH '{ngwaf_db_escaped}' AS ngwaf_top (TYPE SQLITE, READ_ONLY)")
+            if "ngwaf_cache" not in attached_aliases:
+                con.execute(f"ATTACH '{ngwaf_db_escaped}' AS ngwaf_cache (TYPE SQLITE, READ_ONLY)")
+    except Exception as e:
+        logger.warning("[duckdb] Failed to pre-attach NGWAF bot cache: %s", e)
+
     # Operational metadata (alerts, views, audit, cron, sources, ingested_files,
     # asn_names, usage_log) lives in per-service SQLite — see backend.core.metadata package.
     # DuckDB now holds nothing but session-scoped Iceberg views and temp tables.

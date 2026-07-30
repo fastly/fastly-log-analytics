@@ -220,6 +220,8 @@ function DataTableImpl<TData, TValue>({
     }
   }, [initialVisibility])
 
+  const [columnSizing, setColumnSizing] = React.useState<Record<string, number>>({})
+
   const table = useReactTable({
     data: tableData,
     columns: tableColumns,
@@ -235,6 +237,7 @@ function DataTableImpl<TData, TValue>({
     onColumnVisibilityChange: setColumnVisibility,
     onRowSelectionChange: setRowSelection,
     columnResizeMode: 'onChange',
+    onColumnSizingChange: setColumnSizing,
     state: {
       sorting,
       columnFilters,
@@ -242,6 +245,7 @@ function DataTableImpl<TData, TValue>({
       columnOrder,
       rowSelection,
       pagination,
+      columnSizing,
     },
   })
 
@@ -311,7 +315,7 @@ function DataTableImpl<TData, TValue>({
   // columnVisibility is a dep because TanStack Table's `table` ref is stable
   // across visibility changes — without it the header would show stale columns.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [table, columnOrder, columnVisibility])
+  ), [table, columnOrder, columnVisibility, columnSizing])
 
   return (
     <div className="w-full">
@@ -346,6 +350,7 @@ function DataTableImpl<TData, TValue>({
               rowVirtualizer={rowVirtualizer}
               columns={columns}
               columnVisibility={columnVisibility}
+              columnSizing={columnSizing}
               isLoading={isLoading}
               onRowClick={onRowClick}
               getRowClassName={getRowClassName}

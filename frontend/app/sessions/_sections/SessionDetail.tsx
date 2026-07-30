@@ -151,7 +151,7 @@ export function SessionDetail({
             {selectedSession?.is_streaming && <Film className="h-4 w-4 text-blue-500" />}
             {selectedSession?.is_streaming && selectedSession.session_token && (
               <Link
-                href={buildStreamDetailUrl(selectedSession.session_token)}
+                href={buildStreamDetailUrl(selectedSession.session_token, activeServiceId)}
                 className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition-colors"
               >
                 <Film className="h-3 w-3" />

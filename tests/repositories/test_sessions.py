@@ -402,6 +402,7 @@ _ROLLUP_PARQUET_COLUMNS = [
     "shield_count",
     "ua_min",
     "edge_sid_max",
+    "cmcd_count",
 ]
 
 
@@ -461,6 +462,7 @@ def _write_rollup_parquet(path: str, rows: list[dict]) -> None:
                     if row.get("edge_sid_max") is not None
                     else "CAST(NULL AS VARCHAR) AS edge_sid_max"
                 ),
+                f"CAST({row.get('cmcd_count', 0)} AS BIGINT) AS cmcd_count",
             ]
             selects.append("SELECT " + ", ".join(select_parts))
         query = " UNION ALL ".join(selects)
@@ -1000,3 +1002,72 @@ def test_active_hour_union_emits_live_sql_when_window_crosses_now(in_memory_duck
     assert table in stitch, f"Expected active-hour half of union to reference the raw table {table}; got SQL:\n{stitch}"
     # The UNION ALL keyword must be present (the two halves are joined).
     assert "UNION ALL" in stitch.upper()
+
+
+def test_rollup_sessions_correctly_identifies_streaming(in_memory_duckdb, rollup_source):
+    """When a parquet file contains cmcd_count and has_cmcd is True,
+    the session is returned with is_streaming=True."""
+    from backend.repositories._base import QueryRunner, SectionTimer
+    from backend.repositories.sessions import _get_sessions_from_rollup
+
+    cache_root = rollup_source["_cache_dir_override"]
+    closed = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=24)
+    token = closed.strftime("%Y-%m-%d-%H")
+    _seed_per_field_hour(cache_root, token)
+    bundle_path = os.path.join(cache_root, "rollups", "hour_bundled", f"hour={token}", "sessions.parquet")
+
+    _write_rollup_parquet(
+        bundle_path,
+        [
+            {
+                "bucket": closed,
+                "ip": "123.45.67.89",
+                "ja4": None,
+                "first_ts": closed + timedelta(minutes=1),
+                "last_ts": closed + timedelta(minutes=5),
+                "req_count": 10,
+                "country": "US",
+                "asn": 7922,
+                "reqs_4xx": 0,
+                "reqs_5xx": 0,
+                "total_bytes": 1000,
+                "rtt_sum": 100.0,
+                "rtt_count": 10,
+                "edge_count": 10,
+                "shield_count": 0,
+                "ua_min": "ua",
+                "edge_sid_max": "sid",
+                "cmcd_count": 5,
+            }
+        ],
+    )
+
+    runner = QueryRunner(in_memory_duckdb, rollup_source)
+    timer = SectionTimer()
+    out = _get_sessions_from_rollup(
+        runner=runner,
+        con=in_memory_duckdb,
+        src=rollup_source,
+        table_name=_safe_table(rollup_source["name"]),
+        actual_cols={"ip", "cmcd_sid"},
+        start_dt=closed,
+        end_dt=closed + timedelta(hours=2),
+        page=1,
+        limit=50,
+        sort_by="session_start",
+        sort_dir="desc",
+        flagged_only=False,
+        min_reqs_flag=1000,
+        min_4xx_pct_flag=20.0,
+        has_ja4=False,
+        has_rtt=False,
+        has_edge=False,
+        has_edge_sid=False,
+        has_cmcd=True,
+        section_timings=timer.entries,
+    )
+    assert out is not None
+    assert len(out["sessions"]) == 1
+    session = out["sessions"][0]
+    assert session["ip"] == "123.45.67.89"
+    assert session["is_streaming"] is True

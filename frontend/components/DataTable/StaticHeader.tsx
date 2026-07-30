@@ -5,12 +5,13 @@ import { flexRender } from '@tanstack/react-table'
 import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
 
 import { TableHead } from '@/components/ui/table'
+import { cn } from '@/lib/utils'
 
 // Read-only header — same sort affordance and aria-sort wiring as the
 // DraggableTableHeader in DataTable, minus the @dnd-kit/useSortable
-// hook (no column reorder) and the resize handle (callers using the
-// readonly variant don't need either). Sortable columns still expose
-// the toggle button + ArrowUp/Down/UpDown icon; non-sortable columns
+// hook (no column reorder) but with the TanStack resize handle enabled
+// to support column resizing in readonly tables. Sortable columns still
+// expose the toggle button + ArrowUp/Down/UpDown icon; non-sortable columns
 // render the label without a focusable target.
 export const StaticTableHeader = ({ header }: { header: any }) => {
   const ariaSort: 'ascending' | 'descending' | 'none' | undefined =
@@ -55,6 +56,18 @@ export const StaticTableHeader = ({ header }: { header: any }) => {
           </div>
         )}
       </div>
+      <div
+        onMouseDown={(e) => {
+          try { header.getResizeHandler()(e) } catch { /* stale header */ }
+        }}
+        onTouchStart={(e) => {
+          try { header.getResizeHandler()(e) } catch { /* stale header */ }
+        }}
+        className={cn(
+          "absolute right-0 top-0 h-full w-2 cursor-col-resize hover:bg-primary/30 transition-colors z-10 touch-none",
+          header.column.getIsResizing() ? "bg-primary opacity-100" : "opacity-0 group-hover:opacity-100"
+        )}
+      />
     </TableHead>
   )
 }

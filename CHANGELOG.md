@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-07-30
+
+### Added
+
+- **Secure loopback HTTPS for tunneled admin access.** The admin SSH-tunnel
+  path (port 8443) now terminates TLS with Caddy's internal certificate
+  authority and negotiates HTTP/2 over the tunnel, replacing a plain-HTTP
+  loopback listener whose HTTP/1.1 connection limit could starve the browser
+  and freeze admin tabs under load. The listener stays pinned to loopback
+  only.
+- **"Copy queries" export and a wider time range on Notable Slow Queries.**
+  The admin Query Monitor's historical slow-query view gains 1h/6h/12h
+  windows alongside the existing 24h/7d options, and a Copy button renders
+  the current window (with attribution, timing, and SQL text) as plain text
+  for pasting into an incident channel or ticket.
+- **Column resizing on read-only data tables**, with a fix so header and
+  memoized rows re-render live while a column is being dragged instead of
+  only after the drag ends.
+
+### Changed
+
+- **Dashboard performance.** SQLite-backed metadata reads (log accounting,
+  usage reconciliation, schema reflection, the query-monitor and NGWAF bot
+  caches) are faster under load — self-healing file-existence checks,
+  covering indexes, and reduced write contention — and DuckDB scan overhead
+  on log-accounting counts is lower.
+- **Session rollups** resolve the streaming-session indicator from the fast
+  rollup path instead of falling back to a raw scan, and stream-detail links
+  now carry the originating service id so deep-linking into a session from a
+  service-scoped view lands on the right service.
+
+### Fixed
+
+- **The Value/Summary page's cache-miss latency and bot-verification numbers
+  were silently wrong.** An unquoted `cache = MISS` comparison in the
+  rollup-backed query never matched any row, so miss-latency stats read as
+  zero; verified-bot counts are now computed instead of always reporting
+  "unknown." The network-summary rollup also falls back to a live scan
+  instead of erroring when a DuckDB read fails.
+- **Deep-linking to a service via URL no longer gets overridden by
+  localStorage.** Loading a page with `?service=` in the URL (e.g. a shared
+  stream-detail or dashboard link) previously had its service silently
+  replaced by whatever was last active in this browser; the URL parameter
+  now wins on load.
+- Removed a loading gate that could leave a warm server showing an infinite
+  spinner, in favor of a lightweight spinner instead of the full init splash.
+- Restored compatibility with ISO-string timestamps in the log-accounting
+  slow-query arm.
+
 ## [2.2.0] - 2026-07-17
 
 ### Added
@@ -1316,6 +1365,7 @@ deleted.
   admin tunnel use case is no longer supported; production has always
   been direct-mode against the Fastly+Caddy public URL.
 
+[2.2.1]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.1
 [2.2.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.0
 [2.1.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.1.0
 [2.0.0-beta.2]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.0.0-beta.2

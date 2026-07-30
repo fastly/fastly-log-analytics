@@ -16,6 +16,7 @@ from backend.core.metadata.base import (
     _ingested_filenames_cache_lock,
     _parse_file_date,
     get_con,
+    get_con_readonly,
 )
 
 
@@ -282,16 +283,53 @@ def get_log_accounting_counts(
     arm typically returns zero rows in production but keeps semantic
     equivalence with the pre-change behavior.
     """
-    con = get_con(service_id)
+    import contextlib
+
     start_date = sql_start[:10]
     end_date = sql_end[:10]
-    rows = con.execute(
+    sql_start_space = sql_start.replace("T", " ")
+    sql_end_space = sql_end.replace("T", " ")
+
+    # Optimize fast arm SELECT expression and parameters based on width
+    fast_params: tuple[int, ...]
+    if width == 10:
+        fast_bucket_expr = "file_date"
+        fast_params = ()
+    else:
+        fast_bucket_expr = "substr(file_name, instr(file_name, 'T') - 10, ?)"
+        fast_params = (width,)
+
+    # Optimize slow arm bucket CASE expression and parameters based on width
+    slow_params: tuple[int, ...]
+    if width == 10:
+        slow_bucket_expr = """
+              CASE
+                WHEN file_date IS NOT NULL THEN file_date
+                WHEN ingested_at IS NOT NULL THEN substr(replace(ingested_at, ' ', 'T'), 1, 10)
+                ELSE NULL
+              END
         """
+        slow_params = ()
+    else:
+        slow_bucket_expr = """
+              CASE
+                WHEN instr(file_name, 'T') >= 11
+                 AND substr(file_name, instr(file_name, 'T') - 10, 10)
+                     GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+                THEN substr(file_name, instr(file_name, 'T') - 10, ?)
+                WHEN ingested_at IS NOT NULL
+                THEN substr(replace(ingested_at, ' ', 'T'), 1, ?)
+                ELSE NULL
+              END
+        """
+        slow_params = (width, width)
+
+    query = f"""
         SELECT bucket, sum(rc) AS rows, sum(fc) AS files FROM (
             -- Fast arm: file_date index range scan. file_date IS NOT NULL
             -- implies the basename matches the canonical Fastly pattern
-            -- per _migration_002, so the bucket substr will always succeed.
-            SELECT substr(file_name, instr(file_name, 'T') - 10, ?) AS bucket,
+            -- per _migration_002, so the bucket substr/column will always succeed.
+            SELECT {fast_bucket_expr} AS bucket,
                    sum(row_count) AS rc,
                    count(*)       AS fc
             FROM ingested_files
@@ -304,43 +342,32 @@ def get_log_accounting_counts(
             -- Slow arm: rows without a parseable basename (file_date NULL).
             -- Keeps the full CASE so the ingested_at fallback continues
             -- to count test fixtures + legacy uploads.
+            -- Removing INDEXED BY allows SQLite to naturally use the optimal index on ingested_at.
             SELECT
-              CASE
-                WHEN instr(file_name, 'T') >= 11
-                 AND substr(file_name, instr(file_name, 'T') - 10, 10)
-                     GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
-                THEN substr(file_name, instr(file_name, 'T') - 10, ?)
-                WHEN ingested_at IS NOT NULL
-                THEN substr(replace(ingested_at, ' ', 'T'), 1, ?)
-                ELSE NULL
-              END AS bucket,
+              {slow_bucket_expr} AS bucket,
               sum(row_count) AS rc,
               count(*)       AS fc
             FROM ingested_files
             WHERE source_name = ?
               AND file_date IS NULL
-              AND datetime(ingested_at) >= datetime(?)
-              AND datetime(ingested_at) <= datetime(?)
+              AND ingested_at >= ?
+              AND ingested_at <= ?
               AND file_name != '__seeding_attempted__'
             GROUP BY 1
         )
         GROUP BY bucket
         HAVING bucket IS NOT NULL AND bucket >= ? AND bucket <= ?
-        """,
-        (
-            width,
-            service_id,
-            start_date,
-            end_date,
-            width,
-            width,
-            service_id,
-            sql_start,
-            sql_end,
-            start_bucket,
-            end_bucket,
-        ),
-    ).fetchall()
+    """
+
+    params = (
+        fast_params
+        + (service_id, start_date, end_date)
+        + slow_params
+        + (service_id, sql_start_space, sql_end_space, start_bucket, end_bucket)
+    )
+
+    with contextlib.closing(get_con_readonly(service_id)) as con:
+        rows = con.execute(query, params).fetchall()
     return {r["bucket"]: (int(r["rows"] or 0), int(r["files"] or 0)) for r in rows}
 
 
@@ -459,7 +486,7 @@ def get_latest_ingest_ts(service_id: str) -> str | None:
     con = get_con(service_id)
     row = con.execute(
         """
-        SELECT max(datetime(ingested_at)) AS latest
+        SELECT datetime(max(ingested_at)) AS latest
         FROM ingested_files
         WHERE source_name = ? AND file_name != '__seeding_attempted__'
         """,

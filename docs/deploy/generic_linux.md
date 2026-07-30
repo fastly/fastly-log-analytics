@@ -220,15 +220,18 @@ docker compose logs --tail 100 frontend
 docker compose logs --tail 100 caddy | jq 'select(.status >= 400)'
 ```
 
-To reach `/admin`, run on your laptop:
+To reach `/admin` securely with full HTTP/2 (multiplexing) support to prevent browser connection starvation when opening multiple tabs, forward the secure Caddy port `8443` from your laptop:
 
 ```sh
-ssh -L 8080:127.0.0.1:3000 <user>@<vm-ip>
-# then browse to http://localhost:8080/admin
+ssh -L 8443:127.0.0.1:8443 <user>@<vm-ip>
+# then browse to https://localhost:8443/admin
 ```
 
+> [!NOTE]
+> Since this uses Caddy's internal self-signed TLS certificates for local loopback verification, your browser will display a certificate warning when you first visit `https://localhost:8443`. It is completely safe to bypass this warning (click "Advanced" -> "Proceed to localhost"), as the connection is running entirely inside your encrypted SSH tunnel.
+
 The frontend middleware sees no `X-Proxied-By-Caddy` header on the tunneled
-connection and serves `/admin`.
+connection (which presents a loopback IP) and serves `/admin`.
 
 ### Provider-specific gotchas
 

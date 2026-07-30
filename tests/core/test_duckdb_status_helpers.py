@@ -996,7 +996,7 @@ def test_get_schema_returns_cached_within_ttl(in_memory_duckdb, fos_source):
     # Seed cache with a recent timestamp.
     import time as _t
 
-    _schema_cache[(fos_source["name"], table_name)] = (_t.time(), fake_schema)
+    _schema_cache[(fos_source["name"], table_name, True)] = (_t.time(), fake_schema)
 
     state = {"executes": 0}
 

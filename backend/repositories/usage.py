@@ -14,7 +14,7 @@ def get_edge_ratio(con: duckdb.DuckDBPyConnection, src: dict) -> tuple[float | N
     table = _safe_table(src["name"])
     from backend.core.duckdb import get_schema
 
-    actual_cols = [col["name"] for col in get_schema(con, src)]
+    actual_cols = [col["name"] for col in get_schema(con, src, stats=False)]
     if "edge" not in actual_cols:
         return None, runner.debug_queries
     result = runner.execute_with_retry(SQL.EDGE_RATIO_PCT.format(table=table))

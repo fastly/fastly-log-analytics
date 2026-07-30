@@ -584,7 +584,7 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
         "pop",
     ]
 
-    schema_cols = {f["name"] for f in get_schema(con, source)}
+    schema_cols = {f["name"] for f in get_schema(con, source, stats=False)}
     fields = [f for f in fields if f in schema_cols or (f == "waf_sig_ind" and "waf_sig" in schema_cols)]
 
     if not fields:
@@ -813,8 +813,8 @@ def delete_ingested_files(
     }
 
 
-_schema_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
-# (source_name, table_name) -> (timestamp, schema_list)
+_schema_cache: dict[tuple[str, str, bool], tuple[float, list[dict[str, Any]]]] = {}
+# (source_name, table_name, stats) -> (timestamp, schema_list)
 # The heavy refresh_config_status path fires SUMMARIZE every 60 s. With the
 # previous 60 s TTL the cache aged out at exactly the heavy-tick interval —
 # now-ts hit 60.0 right when the next call landed, so we missed every time
@@ -838,14 +838,18 @@ def _clear_schema_cache(source_name: str | None = None):
         _schema_cache = {}
 
 
-def get_schema(con: duckdb.DuckDBPyConnection, source: dict | None = None) -> list[dict]:
+def get_schema(
+    con: duckdb.DuckDBPyConnection,
+    source: dict | None = None,
+    stats: bool = True,
+) -> list[dict]:
     """Return column names and types for a source's table."""
     src = source or _db_main._DEFAULT_SOURCE
     source_name = src["name"]
     table_name = _safe_table_name(source_name)
 
     now = time.time()
-    cache_key = (source_name, table_name)
+    cache_key = (source_name, table_name, stats)
     if cache_key in _schema_cache:
         ts, schema = _schema_cache[cache_key]
         if now - ts < _SCHEMA_CACHE_TTL:
@@ -863,6 +867,13 @@ def get_schema(con: duckdb.DuckDBPyConnection, source: dict | None = None) -> li
         table_exists = row[0] > 0
         if not table_exists:
             return []
+
+        if not stats:
+            # SRE-22: Instant catalog schema reflection via DESCRIBE bypasses heavy data scans
+            result = con.execute(f"DESCRIBE {table_name}").fetchall()
+            schema = [{"name": r[0], "type": r[1]} for r in result]
+            _schema_cache[cache_key] = (now, schema)
+            return schema
 
         # Use SUMMARIZE to get rich metadata instead of just DESCRIBE.
         # 10_000 rows is enough sample for the precision the UI displays

@@ -738,7 +738,7 @@ def insight_availability(
         # within the first ~60s after backend boot). Do the live
         # lookup so first-load isn't a 503 — subsequent calls hit
         # the cron-populated cache.
-        actual_cols = {col["name"] for col in get_schema(con, source)}
+        actual_cols = {col["name"] for col in get_schema(con, source, stats=False)}
     from backend.core.field_registry import INSIGHT_DEFINITIONS
 
     result = []

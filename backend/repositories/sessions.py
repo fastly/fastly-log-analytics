@@ -97,6 +97,11 @@ def _build_active_hour_session_sql(
     )
     ua_min_expr = 'CAST(MIN("ua") AS VARCHAR)' if "ua" in actual_cols else "CAST(NULL AS VARCHAR)"
     edge_sid_expr = 'CAST(MAX("edge_sid") AS VARCHAR)' if "edge_sid" in actual_cols else "CAST(NULL AS VARCHAR)"
+    cmcd_cnt = (
+        'CAST(COUNT(*) FILTER (WHERE "cmcd_sid" IS NOT NULL AND "cmcd_sid" != \'\') AS BIGINT)'
+        if "cmcd_sid" in actual_cols
+        else "CAST(0 AS BIGINT)"
+    )
 
     live_start = max(active_hour_dt, user_start)
     live_end = min(active_hour_dt + timedelta(hours=1), user_end)
@@ -118,7 +123,8 @@ def _build_active_hour_session_sql(
             {edge_cnt} AS edge_count,
             {shield_cnt} AS shield_count,
             {ua_min_expr} AS ua_min,
-            {edge_sid_expr} AS edge_sid_max
+            {edge_sid_expr} AS edge_sid_max,
+            {cmcd_cnt} AS cmcd_count
         FROM {table_name}
         WHERE timestamp >= TIMESTAMPTZ '{live_start.isoformat()}'
           AND timestamp <  TIMESTAMPTZ '{live_end.isoformat()}'
@@ -272,8 +278,8 @@ def _get_sessions_from_rollup(
         union_parts.append(
             f"SELECT bucket, ip, ja4, first_ts, last_ts, req_count, country, asn, "
             f"reqs_4xx, reqs_5xx, total_bytes, rtt_sum, rtt_count, edge_count, shield_count, "
-            f"ua_min, edge_sid_max "
-            f"FROM read_parquet([{paths_sql}])"
+            f"ua_min, edge_sid_max, COALESCE(cmcd_count, 0) AS cmcd_count "
+            f"FROM read_parquet([{paths_sql}], union_by_name=true)"
         )
     if crosses_active:
         active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
@@ -358,7 +364,8 @@ def _get_sessions_from_rollup(
                    SUM(edge_count) AS edge_count,
                    SUM(shield_count) AS shield_count,
                    MIN(ua_min)   AS ua,
-                   MAX(edge_sid_max) AS edge_sid
+                   MAX(edge_sid_max) AS edge_sid,
+                   SUM(cmcd_count) AS cmcd_count
             FROM sids
             GROUP BY ip, ja4, sid
         ),
@@ -402,6 +409,7 @@ def _get_sessions_from_rollup(
         # Drop fields the front-end doesn't use from the rollup output.
         d.pop("rtt_sum", None)
         d.pop("rtt_count", None)
+        d["is_streaming"] = d.get("cmcd_count", 0) > 0
         sessions.append(d)
     total = len(sessions)
     asn_names = _build_asn_label_map(sessions, src)

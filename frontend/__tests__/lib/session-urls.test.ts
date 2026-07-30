@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildSessionDashboardUrl } from '@/lib/session-urls'
+import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/session-urls'
 
 describe('buildSessionDashboardUrl', () => {
   const START = '2026-05-10T13:06:52+00:00'
@@ -34,5 +34,27 @@ describe('buildSessionDashboardUrl', () => {
   it('routes to /dashboard', () => {
     const url = buildSessionDashboardUrl('svc', 'ip', '1.2.3.4', START, END)
     expect(url.startsWith('/dashboard?')).toBe(true)
+  })
+})
+
+describe('buildStreamDetailUrl', () => {
+  it('builds URL with only token when serviceId is omitted', () => {
+    const url = buildStreamDetailUrl('token123')
+    expect(url).toBe('/sessions/stream?token=token123')
+  })
+
+  it('encodes the token correctly', () => {
+    const url = buildStreamDetailUrl('token with spaces & symbols')
+    expect(url).toBe('/sessions/stream?token=token%20with%20spaces%20%26%20symbols')
+  })
+
+  it('appends service parameter when serviceId is provided', () => {
+    const url = buildStreamDetailUrl('token123', 'svc-abc')
+    expect(url).toBe('/sessions/stream?token=token123&service=svc-abc')
+  })
+
+  it('encodes the serviceId parameter correctly', () => {
+    const url = buildStreamDetailUrl('token123', 'svc with space')
+    expect(url).toBe('/sessions/stream?token=token123&service=svc%20with%20space')
   })
 })

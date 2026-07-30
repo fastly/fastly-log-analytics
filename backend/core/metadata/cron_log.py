@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
-from backend.core.metadata.base import _ORPHAN_THRESHOLD_MINS, _TASK_ORPHAN_THRESHOLD_MINS, get_con
+from backend.core.metadata.base import _ORPHAN_THRESHOLD_MINS, _TASK_ORPHAN_THRESHOLD_MINS, get_con, get_con_readonly
 from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 
 logger = logging.getLogger(__name__)
@@ -443,10 +443,12 @@ def get_cron_run_status(service_id: str, run_id: int) -> str | None:
     on any DB failure so list_active_runs falls back to the in-memory
     signal (we'd rather show a false in-flight than miss a real one).
     """
+    import contextlib
+
     try:
-        con = get_con(service_id)
-        row = con.execute("SELECT status FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
-        return row["status"] if row else None
+        with contextlib.closing(get_con_readonly(service_id)) as con:
+            row = con.execute("SELECT status FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
+            return row["status"] if row else None
     except sqlite3.Error as e:
         logger.debug("[metadata_db] get_cron_run_status(%s, %s) failed: %s", service_id, run_id, e)
         return None
@@ -459,12 +461,14 @@ def get_cron_run_result(service_id: str, run_id: int) -> dict | None:
 
     Distinct from ``get_cron_run_status`` because the SSE stream also
     needs the log_output to replay the run's terminal lines."""
+    import contextlib
+
     try:
-        con = get_con(service_id)
-        row = con.execute("SELECT status, log_output FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
-        if row is None:
-            return None
-        return {"status": row["status"], "log_output": row["log_output"]}
+        with contextlib.closing(get_con_readonly(service_id)) as con:
+            row = con.execute("SELECT status, log_output FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                return None
+            return {"status": row["status"], "log_output": row["log_output"]}
     except sqlite3.Error as e:
         logger.debug("[metadata_db] get_cron_run_result(%s, %s) failed: %s", service_id, run_id, e)
         return None

@@ -186,10 +186,14 @@ docker compose logs --tail 100 caddy | jq 'select(.status >= 400)'
 
 If `/api/health` returns 200 but `/admin` returns 403 via the public URL,
 that is correct — the admin surface only opens for SSH-port-forwarded
-connections (no `X-Proxied-By-Caddy` header). To reach `/admin`, run on your
-laptop:
+connections (which present loopback IPs and bypass the analyst proxy header).
+
+To reach `/admin` securely with full HTTP/2 (multiplexing) support to prevent browser connection starvation when opening multiple tabs, forward the secure Caddy port `8443` from your laptop:
 
 ```sh
-ssh -L 8080:127.0.0.1:3000 ec2-user@<instance-public-ip>
-# then browse to http://localhost:8080/admin
+ssh -L 8443:127.0.0.1:8443 ec2-user@<instance-public-ip>
+# then browse to https://localhost:8443/admin
 ```
+
+> [!NOTE]
+> Since this uses Caddy's internal self-signed TLS certificates for local loopback verification, your browser will display a certificate warning when you first visit `https://localhost:8443`. It is completely safe to bypass this warning (click "Advanced" -> "Proceed to localhost"), as the connection is running entirely inside your encrypted SSH tunnel.

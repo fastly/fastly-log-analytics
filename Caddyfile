@@ -26,8 +26,9 @@
 #   range, refresh this list. A stale list means legitimate traffic from a
 #   new POP is treated as direct (untrusted) until Caddy reloads.
 {
-	# No auto-HTTPS — Fastly handles TLS termination at the edge.
-	auto_https off
+	# Disable automatic HTTP-to-HTTPS redirects. We serve HTTP explicitly on port 80
+	# behind Fastly, but manage TLS for other explicit blocks (port 8443).
+	auto_https disable_redirects
 
 	# Rate limit module (provided by custom Caddy image, see caddy/Dockerfile).
 	# 5 share-login attempts / minute per Fastly client IP.
@@ -343,6 +344,54 @@ Policy: https://github.com/fastly/fastly-log-analytics/blob/main/SECURITY.md
 	#   docker compose -f ... logs -f caddy
 	# Filter to errors:
 	#   docker compose -f ... logs caddy | jq 'select(.status >= 400)'
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}
+
+# Loopback HTTPS block on port 8443 for secure direct SSH-tunnel admin connections.
+# This terminates TLS using Caddy's internal self-signed certificate authority,
+# enabling the browser to negotiate HTTP/2 (multiplexing) over the tunnel.
+# This prevents client-side TCP connection starvation (tab freezing) while keeping
+# admin access bound strictly to the local loopback/SSH boundary.
+https://localhost:8443, https://127.0.0.1:8443 {
+	# Caddy only restricts the listener's bind address when every address in
+	# a site block is a literal IP — "localhost" is a hostname, so without
+	# this directive Caddy binds :8443 on ALL interfaces (verified via
+	# `caddy adapt`), not just loopback, despite the comment above. Pin the
+	# listener itself to loopback so the X-Forwarded-For pin below can't be
+	# reached by anything but a genuine same-host connection.
+	bind 127.0.0.1 ::1
+
+	tls internal
+
+	encode zstd gzip
+	request_body {
+		max_size 25MB
+	}
+
+	import security_headers
+
+	# API → backend (preserve Host so backend's DNS-rebinding gate matches the
+	# registered public_endpoint). Pin X-Forwarded-For to 127.0.0.1 so the
+	# backend classifies the operator as the local admin.
+	@api path /api/*
+	reverse_proxy @api 127.0.0.1:8000 {
+		header_up X-Forwarded-For 127.0.0.1
+		flush_interval -1
+		transport http {
+			response_header_timeout 120s
+			read_timeout 120s
+		}
+	}
+
+	# Everything else → Next.js frontend.
+	reverse_proxy 127.0.0.1:3000 {
+		flush_interval -1
+	}
+
 	log {
 		output stdout
 		format json

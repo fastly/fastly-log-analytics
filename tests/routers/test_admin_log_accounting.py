@@ -91,13 +91,21 @@ def _seed_ingested(svc_id: str, rows: list[tuple[str, int]]):
 
     We bypass ``insert_ingested_files`` so we can pin ingested_at — the helper
     uses ``DEFAULT (datetime('now'))`` which would defeat bucket alignment tests.
+
+    ``ingested_at`` is stored space-separated in production (SQLite's
+    ``datetime('now')`` default — see ``backend/core/ingest.py``), never
+    with a ``T``. Normalize here so callers can keep passing readable
+    ISO-``T`` strings while the stored value matches what the real writer
+    produces — the accounting SQL compares ``ingested_at`` as a plain
+    string against space-separated bounds and won't match a ``T``.
     """
     con = metadata_db.get_con(svc_id)
     for i, (ts_iso, rc) in enumerate(rows):
+        ts = ts_iso.replace("T", " ")
         con.execute(
             "INSERT INTO ingested_files (file_name, source_name, ingested_at, row_count, file_size_bytes) "
             "VALUES (?, ?, ?, ?, ?)",
-            (f"raw/file-{i}.gz", svc_id, ts_iso, rc, 1000),
+            (f"raw/file-{i}.gz", svc_id, ts, rc, 1000),
         )
     con.commit()
 

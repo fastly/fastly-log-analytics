@@ -15,6 +15,7 @@ const TIMELINE_LAYOUT = {
     rangemode: 'tozero',
   },
   legend: { orientation: 'h' as const, y: -0.15 },
+  margin: { r: 60, t: 40 },
 }
 
 interface StreamTimelineProps {
@@ -71,8 +72,9 @@ export function StreamTimeline({ timeline, isLoading }: StreamTimelineProps) {
       .filter(p => p.isStartup)
       .map(p => ({
         x: p.timestamp,
-        y: 1,
+        y: 1.05,
         yref: 'paper' as const,
+        yanchor: 'bottom' as const,
         text: 'SU',
         showarrow: false,
         font: { size: 9, color: '#6366f1' },
