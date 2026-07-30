@@ -188,6 +188,16 @@ def get_con(service_id: str) -> sqlite3.Connection:
     return _pool.get(service_id)
 
 
+def get_con_readonly(service_id: str) -> sqlite3.Connection:
+    """Return a short-lived read-only SQLite connection for the given service.
+
+    This connection is not pooled and should be closed immediately.
+    """
+    if not os.path.exists(db_path(service_id)):
+        get_con(service_id)
+    return _pool.open_readonly(service_id)
+
+
 def close_all_connections() -> None:
     """Close every connection opened by ``get_con`` in any thread.
 
@@ -316,6 +326,8 @@ _SCHEMA = [
     # TEMP B-TREE sort over the full table because `idx_cron_task_started`
     # requires a leading-`task` predicate to satisfy the ORDER BY.
     "CREATE INDEX IF NOT EXISTS idx_cron_started ON cron_runs(started_at DESC)",
+    # Covers status polls and startup reap_running_cron_runs without a task filter
+    "CREATE INDEX IF NOT EXISTS idx_cron_status ON cron_runs(status)",
     """CREATE TABLE IF NOT EXISTS asn_names (
         asn INTEGER PRIMARY KEY,
         name TEXT NOT NULL,

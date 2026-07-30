@@ -384,6 +384,9 @@ def _try_overview_from_rollup(
         live_st_tz = live_start.astimezone(UTC).isoformat()
         live_et_tz = et.astimezone(UTC).isoformat()
 
+        sum_miss_elapsed = "COALESCE(SUM(elapsed) FILTER (WHERE cache = 'MISS'), 0.0)" if has_elapsed else "0.0"
+        cnt_miss_elapsed = "COUNT(elapsed) FILTER (WHERE cache = 'MISS')" if has_elapsed else "0"
+
         table_name = _safe_table(runner.src["name"])
         select_clauses.append(
             f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS bucket, "
@@ -400,8 +403,8 @@ def _try_overview_from_rollup(
             f"  {'COUNT(*) FILTER (WHERE waf = 1 AND waf_resp = 406)' if has_waf else '0'} AS threats_cnt, "
             f"  {'COALESCE(SUM(elapsed) FILTER (WHERE cache IN ' + _HIT_STATES + '), 0.0)' if has_elapsed else '0.0'} AS sum_hit_elapsed, "
             f"  {'COUNT(elapsed) FILTER (WHERE cache IN ' + _HIT_STATES + ')' if has_elapsed else '0'} AS cnt_hit_elapsed, "
-            f"  {'COALESCE(SUM(elapsed) FILTER (WHERE cache = MISS), 0.0)' if has_elapsed else '0.0'} AS sum_miss_elapsed, "
-            f"  {'COUNT(elapsed) FILTER (WHERE cache = MISS)' if has_elapsed else '0'} AS cnt_miss_elapsed "
+            f"  {sum_miss_elapsed} AS sum_miss_elapsed, "
+            f"  {cnt_miss_elapsed} AS cnt_miss_elapsed "
             f"FROM {table_name} "
             f"WHERE timestamp >= TIMESTAMPTZ '{live_st_tz}' "
             f"  AND timestamp < TIMESTAMPTZ '{live_et_tz}'"
@@ -512,6 +515,7 @@ def _try_network_from_rollup(
     *,
     start_time: str | None,
     end_time: str | None,
+    actual_cols: set[str],
 ) -> dict[str, Any] | None:
     """Serve the network section aggregates from pre-rolled hourly parquets.
 
@@ -551,6 +555,10 @@ def _try_network_from_rollup(
     if not rollup_paths and not crosses_active:
         return None
 
+    has_protocol = "protocol" in actual_cols
+    has_is_ssl = "is_ssl" in actual_cols
+    has_ipv6 = "ipv6" in actual_cols
+
     select_clauses: list[str] = []
 
     if rollup_paths:
@@ -573,13 +581,23 @@ def _try_network_from_rollup(
         live_start = max(st, active_hour_dt)
         live_st_tz = live_start.astimezone(UTC).isoformat()
         live_et_tz = et.astimezone(UTC).isoformat()
+
+        http3_clause = "COUNT(*) FILTER (WHERE protocol = 'HTTP/3')" if has_protocol else "NULL"
+        h2_clause = "COUNT(*) FILTER (WHERE protocol = 'HTTP/2')" if has_protocol else "NULL"
+        tls_clause = (
+            "COUNT(*) FILTER (WHERE is_ssl = true)"
+            if "is_ssl" in actual_cols
+            else ("COUNT(*) FILTER (WHERE tls IS NOT NULL AND tls != '')" if "tls" in actual_cols else "NULL")
+        )
+        ipv6_clause = "COUNT(*) FILTER (WHERE ipv6 = true)" if has_ipv6 else "NULL"
+
         table_name = _safe_table(runner.src["name"])
         select_clauses.append(
             f"SELECT COUNT(*) AS total_requests, "
-            f"  COUNT(*) FILTER (WHERE protocol = 'HTTP/3') AS http3, "
-            f"  COUNT(*) FILTER (WHERE protocol = 'HTTP/2') AS h2, "
-            f"  COUNT(*) FILTER (WHERE is_ssl = true) AS tls, "
-            f"  COUNT(*) FILTER (WHERE ipv6 = true) AS ipv6 "
+            f"  {http3_clause} AS http3, "
+            f"  {h2_clause} AS h2, "
+            f"  {tls_clause} AS tls, "
+            f"  {ipv6_clause} AS ipv6 "
             f"FROM {table_name} "
             f"WHERE timestamp >= TIMESTAMPTZ '{live_st_tz}' "
             f"  AND timestamp < TIMESTAMPTZ '{live_et_tz}'"
@@ -591,7 +609,12 @@ def _try_network_from_rollup(
         "SUM(tls) AS tls, SUM(ipv6) AS ipv6 "
         f"FROM ({' UNION ALL '.join(select_clauses)})"
     )
-    row = runner.execute(combined_sql).fetchone()
+    try:
+        row = runner.execute(combined_sql).fetchone()
+    except duckdb.Error as e:
+        logger.debug("[network_rollup] read failed, falling back to raw: %s", e)
+        return None
+
     if not row or not row[0]:
         return None
 
@@ -659,7 +682,7 @@ def get_summary(
     has_elapsed = "elapsed" in actual_cols
     has_status = "status" in actual_cols
     has_resp_bytes = "resp_bytes" in actual_cols
-    has_is_ssl = "is_ssl" in actual_cols
+    has_is_ssl = "is_ssl" in actual_cols or "tls" in actual_cols
     has_protocol = "protocol" in actual_cols
     has_ipv6 = "ipv6" in actual_cols
     has_waf = "waf" in actual_cols and "waf_resp" in actual_cols
@@ -909,10 +932,14 @@ def get_summary(
         bot_col = "_bot_name" if "_bot_name" in actual_cols else None
         has_ua = "ua" in actual_cols
 
+        has_waf_sig = "waf_sig" in actual_cols
+        verified_bots_expr = "COUNT(*) FILTER (WHERE waf_sig ILIKE '%VERIFIED-BOT.%')" if has_waf_sig else "NULL"
+
         if bot_col:
             bot_sql = (
                 f"SELECT COUNT(*) AS total_requests, "
-                f"COUNT(*) FILTER (WHERE {bot_col} IS NOT NULL AND {bot_col} != '') AS bot_requests "
+                f"COUNT(*) FILTER (WHERE {bot_col} IS NOT NULL AND {bot_col} != '') AS bot_requests, "
+                f"{verified_bots_expr} AS verified_bots "
                 f"FROM {table_name} WHERE {where_clause}"
             )
             row = runner.execute(bot_sql, params).fetchone()
@@ -921,7 +948,7 @@ def get_summary(
             bots: dict[str, Any] = {
                 "total_requests": row[0] if row else 0,
                 "bot_requests": row[1] if row else 0,
-                "verified_bots": None,
+                "verified_bots": row[2] if row else None,
             }
 
             _t = time.perf_counter()
@@ -949,7 +976,8 @@ def get_summary(
 
             bot_sql = (
                 f"SELECT COUNT(*) AS total_requests, "
-                f"COUNT(*) FILTER (WHERE ua IS NOT NULL AND ({bot_filter})) AS bot_requests "
+                f"COUNT(*) FILTER (WHERE ua IS NOT NULL AND ({bot_filter})) AS bot_requests, "
+                f"{verified_bots_expr} AS verified_bots "
                 f"FROM {table_name} WHERE {where_clause}"
             )
             row = runner.execute(bot_sql, params).fetchone()
@@ -958,7 +986,7 @@ def get_summary(
             bots_result: dict[str, Any] = {
                 "total_requests": row[0] if row else 0,
                 "bot_requests": row[1] if row else 0,
-                "verified_bots": None,
+                "verified_bots": row[2] if row else None,
                 "top_bots": [],
             }
 
@@ -1046,7 +1074,12 @@ def get_summary(
         # Try rollup for aggregate stats (unfiltered only)
         net: dict[str, Any] | None = None
         if not filters:
-            net = _try_network_from_rollup(runner, start_time=start_time, end_time=end_time)
+            net = _try_network_from_rollup(
+                runner,
+                start_time=start_time,
+                end_time=end_time,
+                actual_cols=actual_cols,
+            )
             if net is not None:
                 timer.mark("network_rollup", _t)
 
@@ -1060,9 +1093,13 @@ def get_summary(
                 net_parts.append(
                     "ROUND(COUNT(*) FILTER (WHERE protocol = 'HTTP/2') * 100.0 / NULLIF(COUNT(*), 0), 1) AS h2_pct"
                 )
-            if has_is_ssl:
+            if "is_ssl" in actual_cols:
                 net_parts.append(
                     "ROUND(COUNT(*) FILTER (WHERE is_ssl = true) * 100.0 / NULLIF(COUNT(*), 0), 1) AS tls_pct"
+                )
+            elif "tls" in actual_cols:
+                net_parts.append(
+                    "ROUND(COUNT(*) FILTER (WHERE tls IS NOT NULL AND tls != '') * 100.0 / NULLIF(COUNT(*), 0), 1) AS tls_pct"
                 )
             if has_ipv6:
                 net_parts.append(

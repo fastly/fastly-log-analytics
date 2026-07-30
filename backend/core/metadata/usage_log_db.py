@@ -74,6 +74,14 @@ def db_path(service_id: str) -> str:
 
 
 def _init_schema(con: sqlite3.Connection) -> None:
+    # SRE-22: Self-heal/upgrade existing index to covering version if needed
+    try:
+        cols = [row[2] for row in con.execute("PRAGMA index_info('idx_usage_reconcile')").fetchall()]
+        if cols and "function_name" not in cols:
+            con.execute("DROP INDEX IF EXISTS idx_usage_reconcile")
+    except Exception:
+        pass
+
     for stmt in _SCHEMA:
         con.execute(stmt)
     con.commit()
@@ -153,7 +161,7 @@ _SCHEMA = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_log(timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_usage_dedup ON usage_log(service_id, function_name, url)",
-    "CREATE INDEX IF NOT EXISTS idx_usage_reconcile ON usage_log(service_id, operation_class, timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_usage_reconcile ON usage_log(service_id, operation_class, timestamp, function_name, count)",
     "CREATE INDEX IF NOT EXISTS idx_usage_process_context_ts ON usage_log(process_context, timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_usage_service_ts ON usage_log(service_id, timestamp, operation_class, count, bytes)",
     """CREATE TABLE IF NOT EXISTS usage_log_hourly_summary (

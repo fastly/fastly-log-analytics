@@ -42,12 +42,14 @@ export const MemoizedTableRow = React.memo(({
   rowClassName,
   columns: _columns,
   columnVisibility: _columnVisibility,
+  columnSizing: _columnSizing,
 }: {
   row: any,
   onRowClick?: (data: any) => void
   rowClassName?: string
   columns: any[]
   columnVisibility?: VisibilityState
+  columnSizing?: Record<string, number>
 }) => {
   return (
     <TableRow

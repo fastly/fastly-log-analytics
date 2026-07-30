@@ -566,7 +566,7 @@ def api_service_log_fields_get(service_id: str):
                 c = _db.get_connection(source=src, read_only=True, max_wait=5.0, skip_view_update=True)
                 try:
                     table_name = _db._safe_table_name(src["name"])
-                    actual_cols = {col["name"] for col in _db.get_schema(c, src)}
+                    actual_cols = {col["name"] for col in _db.get_schema(c, src, stats=False)}
                     if "waf" in actual_cols:
                         result = c.execute(
                             f"\n                            SELECT SUM(CASE WHEN waf = true THEN 1 ELSE 0 END), COUNT(*)\n                            FROM {table_name}\n                            WHERE timestamp >= now() - INTERVAL '7 days'\n                        "

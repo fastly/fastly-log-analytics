@@ -21,7 +21,7 @@
 import * as React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { adminFetch } from '@/lib/api'
-import { AlertTriangle, Group, Keyboard, Pause, Play, Search } from 'lucide-react'
+import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, Search } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { BackToAdminLink } from '@/components/BackToAdminLink'
@@ -79,9 +79,9 @@ export default function QueryMonitorPage() {
   // persistent slow_queries SQLite table. Default to 'recent' because
   // it's the fastest path and what the operator usually wants ("what
   // just happened"); historical view is a deeper-dive toggle.
-  const [slowHistoryMode, setSlowHistoryMode] = React.useState<'recent' | 'past_24h' | 'past_7d'>(
-    'recent',
-  )
+  const [slowHistoryMode, setSlowHistoryMode] = React.useState<
+    'recent' | 'past_1h' | 'past_6h' | 'past_12h' | 'past_24h' | 'past_7d'
+  >('recent')
   // Cron-grouping collapses rows from the same cron run into a single
   // representative row with a ×N badge — default on because a single tick
   // can spawn dozens of identical queries that otherwise drown out the
@@ -109,7 +109,6 @@ export default function QueryMonitorPage() {
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
   const [detailRow, setDetailRow] = React.useState<DetailRow | null>(null)
   const searchInputRef = React.useRef<HTMLInputElement>(null)
-
   useQueryMonitorUrlSync(
     { search, kindFilter, dbFilter, viewMode, slowThresholdMs, groupCrons },
     { setSearch, setKindFilter, setDbFilter, setViewMode, setSlowThresholdMs, setGroupCrons },
@@ -292,7 +291,13 @@ export default function QueryMonitorPage() {
   const historicalQuery = useQuery<{ rows: CompletedRow[] }>({
     queryKey: ['admin', 'query-monitor', 'slow-history', slowHistoryMode, slowThresholdMs],
     queryFn: async ({ signal }) => {
-      const sinceHours = slowHistoryMode === 'past_7d' ? 168 : 24
+      let sinceHours = 24
+      if (slowHistoryMode === 'past_1h') sinceHours = 1
+      else if (slowHistoryMode === 'past_6h') sinceHours = 6
+      else if (slowHistoryMode === 'past_12h') sinceHours = 12
+      else if (slowHistoryMode === 'past_24h') sinceHours = 24
+      else if (slowHistoryMode === 'past_7d') sinceHours = 168
+
       const r = await adminFetch(
         `/api/admin/slow-queries?since_hours=${sinceHours}&threshold_ms=${slowThresholdMs}&sort=duration&limit=200`,
         { signal },
@@ -313,6 +318,78 @@ export default function QueryMonitorPage() {
     groupCrons,
     expandedRunIds,
   })
+
+  const [copiedQueries, setCopiedQueries] = React.useState(false)
+  React.useEffect(() => {
+    if (!copiedQueries) return
+    const t = setTimeout(() => setCopiedQueries(false), 1500)
+    return () => clearTimeout(t)
+  }, [copiedQueries])
+
+  const handleCopyQueries = React.useCallback(async () => {
+    const queries = slowHistoryMode === 'recent'
+      ? slowQueries
+      : (historicalQuery.data?.rows ?? [])
+
+    if (queries.length === 0) return
+
+    let modeText = 'Recent In-Memory Ring'
+    if (slowHistoryMode === 'past_1h') modeText = 'Past 1h'
+    else if (slowHistoryMode === 'past_6h') modeText = 'Past 6h'
+    else if (slowHistoryMode === 'past_12h') modeText = 'Past 12h'
+    else if (slowHistoryMode === 'past_24h') modeText = 'Past 24h'
+    else if (slowHistoryMode === 'past_7d') modeText = 'Past 7d'
+
+    let text = `==================================================\n`
+    text += `NOTABLE SLOW QUERIES REPORT\n`
+    text += `==================================================\n`
+    text += `Time Window:    ${modeText}\n`
+    text += `Threshold:      ≥ ${slowThresholdMs} ms\n`
+    text += `Total Queries:  ${queries.length}\n`
+    text += `Exported At:    ${new Date().toISOString()}\n\n`
+
+    queries.forEach((row, i) => {
+      text += `--------------------------------------------------\n`
+      text += `[Query #${i + 1}] ID: ${row.query_id} | DB: ${row.db_type} | Duration: ${row.duration_ms.toLocaleString()} ms | Outcome: ${row.outcome}\n`
+
+      const started = row.started_at_utc
+        ? new Date(row.started_at_utc < 10000000000 ? row.started_at_utc * 1000 : row.started_at_utc).toISOString()
+        : '—'
+      const ended = row.ended_at_utc
+        ? new Date(row.ended_at_utc < 10000000000 ? row.ended_at_utc * 1000 : row.ended_at_utc).toISOString()
+        : '—'
+      text += `Timestamp:      Started ${started} · Ended ${ended}\n`
+
+      const attr = row.attribution
+      text += `Attribution:    Kind: ${attr.kind} · Caller: ${attr.caller_qualname} (${attr.caller_file})\n`
+      if (attr.cron_job) {
+        text += `Cron:           ${attr.cron_job}${attr.cron_run_id ? ` (Run: ${attr.cron_run_id})` : ''}\n`
+      }
+      if (attr.request_path) {
+        text += `HTTP Request:   ${attr.request_path}${attr.request_id ? ` (ID: ${attr.request_id})` : ''}\n`
+      }
+      if (row.service_id) {
+        text += `Service:        ${row.service_id}\n`
+      }
+      if (row.peak_memory_mb != null) {
+        text += `Peak Memory:    ${row.peak_memory_mb.toFixed(1)} MB\n`
+      }
+      if (row.error_message) {
+        text += `Error:          ${row.error_message}\n`
+      }
+
+      text += `\nSQL:\n${row.sql || row.sql_preview}\n\n`
+    })
+
+    text += `==================================================\n`
+
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedQueries(true)
+    } catch {
+      // ignore
+    }
+  }, [slowHistoryMode, slowQueries, historicalQuery.data?.rows, slowThresholdMs])
 
   const requestKill = React.useCallback(
     (row: ActiveRow) => {
@@ -549,7 +626,7 @@ export default function QueryMonitorPage() {
                       the other two query the persistent slow_queries
                       SQLite table via /api/admin/slow-queries. */}
                   <div className="flex items-center gap-1 mr-2">
-                    {(['recent', 'past_24h', 'past_7d'] as const).map((m) => (
+                    {(['recent', 'past_1h', 'past_6h', 'past_12h', 'past_24h', 'past_7d'] as const).map((m) => (
                       <Button
                         key={m}
                         variant={slowHistoryMode === m ? 'default' : 'outline'}
@@ -559,12 +636,28 @@ export default function QueryMonitorPage() {
                         title={
                           m === 'recent'
                             ? 'Live in-memory ring (~10–30 min window, clears on restart)'
-                            : m === 'past_24h'
-                              ? 'Persistent history — last 24 h'
-                              : 'Persistent history — last 7 d'
+                            : m === 'past_1h'
+                              ? 'Persistent history — last 1 h'
+                              : m === 'past_6h'
+                                ? 'Persistent history — last 6 h'
+                                : m === 'past_12h'
+                                  ? 'Persistent history — last 12 h'
+                                  : m === 'past_24h'
+                                    ? 'Persistent history — last 24 h'
+                                    : 'Persistent history — last 7 d'
                         }
                       >
-                        {m === 'recent' ? 'Recent' : m === 'past_24h' ? '24 h' : '7 d'}
+                        {m === 'recent'
+                          ? 'Recent'
+                          : m === 'past_1h'
+                            ? '1 h'
+                            : m === 'past_6h'
+                              ? '6 h'
+                              : m === 'past_12h'
+                                ? '12 h'
+                                : m === 'past_24h'
+                                  ? '24 h'
+                                  : '7 d'}
                       </Button>
                     ))}
                   </div>
@@ -579,6 +672,31 @@ export default function QueryMonitorPage() {
                       {ms < 1000 ? `${ms}ms` : `${ms / 1000}s`}
                     </Button>
                   ))}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2 text-xs ml-2 font-medium shrink-0"
+                    disabled={
+                      (slowHistoryMode === 'recent'
+                        ? slowQueries
+                        : (historicalQuery.data?.rows ?? [])
+                      ).length === 0
+                    }
+                    onClick={handleCopyQueries}
+                    title="Copy slow queries report to clipboard"
+                  >
+                    {copiedQueries ? (
+                      <>
+                        <Check className="h-3 w-3 mr-1 text-emerald-500 animate-in fade-in zoom-in-95 duration-150" />
+                        Copied!
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3 w-3 mr-1" />
+                        Copy queries
+                      </>
+                    )}
+                  </Button>
                 </div>
               </CardHeader>
               <CardContent className="p-0">
@@ -594,7 +712,17 @@ export default function QueryMonitorPage() {
                       ? `No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`
                       : historicalQuery.isFetching
                         ? 'Loading…'
-                        : `No persisted queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in the last ${slowHistoryMode === 'past_7d' ? '7 days' : '24 hours'}.`
+                        : `No persisted queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in the last ${
+                            slowHistoryMode === 'past_1h'
+                              ? '1 hour'
+                              : slowHistoryMode === 'past_6h'
+                                ? '6 hours'
+                                : slowHistoryMode === 'past_12h'
+                                  ? '12 hours'
+                                  : slowHistoryMode === 'past_24h'
+                                    ? '24 hours'
+                                    : '7 days'
+                          }.`
                   }
                   initialSorting={[{ id: 'duration_ms', desc: true }]}
                   onToggleGroup={toggleGroup}

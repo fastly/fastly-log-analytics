@@ -117,6 +117,12 @@ def build_session_bundles(service_id: str, source: dict, hours: list[str]) -> in
             select_parts.append('CAST(MAX("edge_sid") AS VARCHAR) AS edge_sid_max')
         else:
             select_parts.append("CAST(NULL AS VARCHAR) AS edge_sid_max")
+        if "cmcd_sid" in cols:
+            select_parts.append(
+                'CAST(COUNT(*) FILTER (WHERE "cmcd_sid" IS NOT NULL AND "cmcd_sid" != \'\') AS BIGINT) AS cmcd_count'
+            )
+        else:
+            select_parts.append("CAST(0 AS BIGINT) AS cmcd_count")
 
         return ",\n               ".join(select_parts)
 

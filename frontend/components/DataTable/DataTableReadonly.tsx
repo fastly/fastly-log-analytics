@@ -114,13 +114,30 @@ function DataTableReadonlyImpl<TData, TValue>({
   })
 
   const tableColumns = React.useMemo(() => columns, [columns])
-  const tableData = React.useMemo(() => data, [data])
+
+  const prevDataRef = React.useRef(data)
+  const tableData = React.useMemo(() => {
+    const prev = prevDataRef.current
+    if (
+      Array.isArray(prev) &&
+      Array.isArray(data) &&
+      prev !== data &&
+      prev.length === data.length &&
+      prev.every((row, i) => row === data[i])
+    ) {
+      return prev
+    }
+    prevDataRef.current = data
+    return data
+  }, [data])
 
   React.useEffect(() => {
     if (Object.keys(initialVisibility).length > 0) {
       setColumnVisibility(initialVisibility)
     }
   }, [initialVisibility])
+
+  const [columnSizing, setColumnSizing] = React.useState<Record<string, number>>({})
 
   const table = useReactTable({
     data: tableData,
@@ -135,12 +152,15 @@ function DataTableReadonlyImpl<TData, TValue>({
     getFilteredRowModel: getFilteredRowModel(),
     onColumnVisibilityChange: setColumnVisibility,
     onRowSelectionChange: setRowSelection,
+    columnResizeMode: 'onChange',
+    onColumnSizingChange: setColumnSizing,
     state: {
       sorting,
       columnFilters,
       columnVisibility,
       rowSelection,
       pagination,
+      columnSizing,
     },
   })
 
@@ -166,7 +186,7 @@ function DataTableReadonlyImpl<TData, TValue>({
       ))}
     </TableHeader>
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [table, columnVisibility])
+  ), [table, columnVisibility, columnSizing])
 
   return (
     <div className="w-full">
@@ -194,6 +214,7 @@ function DataTableReadonlyImpl<TData, TValue>({
             rowVirtualizer={rowVirtualizer}
             columns={columns}
             columnVisibility={columnVisibility}
+            columnSizing={columnSizing}
             isLoading={isLoading}
             onRowClick={onRowClick}
             getRowClassName={getRowClassName}

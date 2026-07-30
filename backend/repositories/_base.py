@@ -361,7 +361,7 @@ def _get_schema(con: duckdb.DuckDBPyConnection, src: dict) -> list[dict]:
     """Return the schema for the given source's log table."""
     from backend.core.duckdb import get_schema
 
-    return get_schema(con, src)
+    return get_schema(con, src, stats=False)
 
 
 from backend.utils.date_utils import safe_iso  # noqa: E402, F401 — re-export

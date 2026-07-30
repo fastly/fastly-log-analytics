@@ -24,6 +24,18 @@ export function StoreHydrator() {
     useServiceStore.persist.rehydrate()
     useDebugStore.persist.rehydrate()
 
+    // URL parameter overrides localStorage activeServiceId if present.
+    // This fixes the bug where reloading or deep-linking to a page with
+    // a service in the query parameter (such as on stream detail or dashboard)
+    // would be incorrectly overwritten by the previously active service in localStorage.
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search)
+      const urlService = params.get('service')
+      if (urlService) {
+        useServiceStore.getState().setActiveServiceId(urlService)
+      }
+    }
+
     // Timezone: load the saved zone if the user picked one before;
     // otherwise adopt the browser's zone now. Doing this post-mount means
     // it never contradicts the server's deterministic 'UTC' default.

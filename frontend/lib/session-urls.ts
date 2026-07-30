@@ -1,5 +1,6 @@
-export function buildStreamDetailUrl(token: string): string {
-  return `/sessions/stream?token=${encodeURIComponent(token)}`
+export function buildStreamDetailUrl(token: string, serviceId?: string | null): string {
+  const base = `/sessions/stream?token=${encodeURIComponent(token)}`
+  return serviceId ? `${base}&service=${encodeURIComponent(serviceId)}` : base
 }
 
 export function buildSessionDashboardUrl(

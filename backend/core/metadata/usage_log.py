@@ -262,7 +262,8 @@ def reconcile_fastly_stats(
     # timestamp to its hour prefix; SQLite groups by string equality,
     # which works because we write all rows in the same "%Y-%m-%dT%H:%M:%SZ"
     # format. The supporting index is idx_usage_reconcile (service_id,
-    # operation_class, timestamp), so the IN-list still uses the index.
+    # operation_class, timestamp, function_name, count), which functions as a
+    # fully covering index for sub-millisecond query evaluation.
     local_sums: dict[tuple[str, str], int] = {}
     for r in con.execute(
         """

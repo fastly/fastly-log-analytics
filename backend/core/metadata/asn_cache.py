@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from backend.core.metadata.base import get_con
+from backend.core.metadata.base import get_con, get_con_readonly
 from backend.utils.date_utils import iso_z, iso_z_now
 
 
@@ -12,13 +12,15 @@ def lookup_asn_names(service_id: str, asns: list[int], max_age_days: int = 30) -
     """Return cached {asn: name} for the requested ASNs that are still fresh."""
     if not asns:
         return {}
-    con = get_con(service_id)
+    import contextlib
+
     fresh_cutoff = iso_z(datetime.now(UTC) - timedelta(days=max_age_days))
     placeholders = ",".join("?" * len(asns))
-    rows = con.execute(
-        f"SELECT asn, name FROM asn_names WHERE asn IN ({placeholders}) AND fetched_at >= ?",
-        list(asns) + [fresh_cutoff],
-    ).fetchall()
+    with contextlib.closing(get_con_readonly(service_id)) as con:
+        rows = con.execute(
+            f"SELECT asn, name FROM asn_names WHERE asn IN ({placeholders}) AND fetched_at >= ?",
+            list(asns) + [fresh_cutoff],
+        ).fetchall()
     return {int(r["asn"]): r["name"] for r in rows}
 
 
@@ -41,9 +43,11 @@ def asn_ints_for_search(service_id: str, name_ilike: str) -> list[int]:
     Used by the dashboard ASN search to pre-fetch matching ASNs and inline them
     into a DuckDB IN clause (avoids cross-engine JOINs).
     """
-    con = get_con(service_id)
-    rows = con.execute(
-        "SELECT asn FROM asn_names WHERE name LIKE ? COLLATE NOCASE",
-        (name_ilike,),
-    ).fetchall()
+    import contextlib
+
+    with contextlib.closing(get_con_readonly(service_id)) as con:
+        rows = con.execute(
+            "SELECT asn FROM asn_names WHERE name LIKE ? COLLATE NOCASE",
+            (name_ilike,),
+        ).fetchall()
     return [int(r["asn"]) for r in rows]

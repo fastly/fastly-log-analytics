@@ -17,7 +17,7 @@ import time as _t
 from collections.abc import Callable
 
 from backend.core.metadata import usage_log_db as _usage_log_db
-from backend.core.metadata.base import db_path, get_con
+from backend.core.metadata.base import db_path, get_con, get_con_readonly
 from backend.core.metadata.ingest_log import recompute_ingested_files_summary
 from backend.core.metadata.usage_log import DEFAULT_METADATA_RETENTION
 
@@ -96,7 +96,16 @@ def _open_usage_log(service_id: str) -> sqlite3.Connection | None:
         return None
 
 
-def get_metadata_storage_stats(service_id: str) -> dict:
+_storage_stats_cache: dict[str, tuple[float, dict]] = {}
+_STORAGE_STATS_CACHE_TTL = 60.0  # 60 seconds
+
+
+def invalidate_storage_stats_cache(service_id: str) -> None:
+    """Invalidate the storage stats cache for the given service."""
+    _storage_stats_cache.pop(service_id, None)
+
+
+def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
     """Per-table row count + estimated bytes for this service's metadata.db.
 
     Per-table bytes come from SQLite's ``dbstat`` virtual table. Total
@@ -104,36 +113,50 @@ def get_metadata_storage_stats(service_id: str) -> dict:
     summing all ``dbstat`` pages — the full-file dbstat scan was 600ms–3s on a
     large DB and fires on every system-metrics tick.
     """
-    con = get_con(service_id)
+    now = _t.monotonic()
+    if not force:
+        cached = _storage_stats_cache.get(service_id)
+        if cached is not None and now - cached[0] < _STORAGE_STATS_CACHE_TTL:
+            return cached[1]
+
+    # Ensure the DB file exists and schemas are initialized
+    if not os.path.exists(db_path(service_id)):
+        get_con(service_id)
+
+    import contextlib
+
     out: dict[str, dict] = {}
-    for sql_table, out_key in _STATS_TABLES:
-        if sql_table == _USAGE_LOG_TABLE:
-            # Lives in its own per-service file. Reported under the same
-            # key for UI continuity; a missing usage_log.db reads as 0/0.
-            usage_log_con = _open_usage_log(service_id)
-            if usage_log_con is None:
-                out[out_key] = {"rows": 0, "bytes": 0}
+    with contextlib.closing(get_con_readonly(service_id)) as con:
+        for sql_table, out_key in _STATS_TABLES:
+            if sql_table == _USAGE_LOG_TABLE:
+                # Lives in its own per-service file. Reported under the same
+                # key for UI continuity; a missing usage_log.db reads as 0/0.
+                usage_log_con = _open_usage_log(service_id)
+                if usage_log_con is None:
+                    out[out_key] = {"rows": 0, "bytes": 0}
+                    continue
+                try:
+                    rows = usage_log_con.execute("SELECT count(*) FROM usage_log").fetchone()[0]
+                    row = usage_log_con.execute(
+                        "SELECT sum(pgsize) FROM dbstat WHERE name = ?", ("usage_log",)
+                    ).fetchone()
+                    bytes_: int | None = int(row[0]) if row and row[0] is not None else 0
+                except sqlite3.OperationalError:
+                    rows, bytes_ = 0, None
+                finally:
+                    usage_log_con.close()
+                out[out_key] = {"rows": int(rows or 0), "bytes": bytes_}
                 continue
             try:
-                rows = usage_log_con.execute("SELECT count(*) FROM usage_log").fetchone()[0]
-                row = usage_log_con.execute("SELECT sum(pgsize) FROM dbstat WHERE name = ?", ("usage_log",)).fetchone()
-                bytes_: int | None = int(row[0]) if row and row[0] is not None else 0
+                rows = con.execute(f"SELECT count(*) FROM {sql_table}").fetchone()[0]
             except sqlite3.OperationalError:
-                rows, bytes_ = 0, None
-            finally:
-                usage_log_con.close()
+                continue
+            try:
+                row = con.execute("SELECT sum(pgsize) FROM dbstat WHERE name = ?", (sql_table,)).fetchone()
+                bytes_ = int(row[0]) if row and row[0] is not None else 0
+            except sqlite3.OperationalError:
+                bytes_ = None
             out[out_key] = {"rows": int(rows or 0), "bytes": bytes_}
-            continue
-        try:
-            rows = con.execute(f"SELECT count(*) FROM {sql_table}").fetchone()[0]
-        except sqlite3.OperationalError:
-            continue
-        try:
-            row = con.execute("SELECT sum(pgsize) FROM dbstat WHERE name = ?", (sql_table,)).fetchone()
-            bytes_ = int(row[0]) if row and row[0] is not None else 0
-        except sqlite3.OperationalError:
-            bytes_ = None
-        out[out_key] = {"rows": int(rows or 0), "bytes": bytes_}
 
     db_bytes: int | None
     try:
@@ -141,11 +164,13 @@ def get_metadata_storage_stats(service_id: str) -> dict:
     except OSError:
         db_bytes = None
 
-    return {
+    result = {
         "tables": out,
         "db_bytes": db_bytes,
         "db_path": db_path(service_id),
     }
+    _storage_stats_cache[service_id] = (now, result)
+    return result
 
 
 def is_ingested_files_dedup_active(service_id: str) -> bool:
@@ -432,6 +457,7 @@ def cleanup_metadata(
         except Exception as e:
             logger.warning("[metadata_cleanup] %s: rollups cleanup skipped — %s", service_id, e)
 
+    invalidate_storage_stats_cache(service_id)
     return {
         "deleted": deleted,
         "before": before,

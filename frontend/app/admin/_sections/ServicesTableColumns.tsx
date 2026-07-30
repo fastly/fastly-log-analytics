@@ -136,7 +136,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
             <span className="font-mono text-xs tabular-nums text-muted-foreground">{formatBytes(size)}</span>
             <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
               <span className="flex items-center gap-1">
-                {files} file{files === 1 ? '' : 's'}
+                {files.toLocaleString()} file{files === 1 ? '' : 's'}
                 {files > 0 && (
                   <Button
                     variant="ghost"

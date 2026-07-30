@@ -211,23 +211,47 @@ def _try_row_counts_from_rollup(
             result[b] = int(n)
 
     if crosses_active:
+        import glob
+        from datetime import timedelta
+
         from backend.core import duckdb as _ddb
+        from backend.core.iceberg.buffer import buffer_files
+        from backend.utils.sql_validator import escape_sql_literal
 
         active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         live_start = max(start, active_hour_dt)
         live_start_iso = live_start.strftime("%Y-%m-%d %H:%M:%S")
         end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
-        table_name = _ddb._safe_table_name(source["name"])
-        with _ConnectionHolder(source, read_only=True) as con:
-            rows = con.execute(
-                f"SELECT strftime(timestamp, '{fmt}') AS bucket, COUNT(*) AS n "
-                f"FROM {table_name} "
-                f"WHERE timestamp >= TIMESTAMP '{live_start_iso}' "
-                f"  AND timestamp <  TIMESTAMP '{end_iso}' "
-                f"GROUP BY 1"
-            ).fetchall()
-        for b, n in rows:
-            result[b] = result.get(b, 0) + int(n)
+
+        # Gather YYYY-MM-DD-HH string(s) crossing the active query range
+        hour_strs: set[str] = set()
+        cursor = live_start.replace(minute=0, second=0, microsecond=0)
+        while cursor < end:
+            hour_strs.add(cursor.strftime("%Y-%m-%d-%H"))
+            cursor += timedelta(hours=1)
+
+        # Locate committed partition subdirectory files & active uncommitted buffer files
+        cache_dir = _ddb._cache_dir(source)
+        committed_files: list[str] = []
+        for hour_str in hour_strs:
+            active_hour_glob = os.path.join(cache_dir, "data", f"timestamp_hour={hour_str}", "**", "*.parquet")
+            committed_files.extend(p for p in glob.glob(active_hour_glob, recursive=True) if os.path.isfile(p))
+        buf_files = buffer_files(source)
+        active_paths = committed_files + buf_files
+
+        # If there are no files for the active hour, the row count is exactly 0
+        if active_paths:
+            paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in active_paths)
+            with _ConnectionHolder(source, read_only=True) as con:
+                rows = con.execute(
+                    f"SELECT strftime(timestamp, '{fmt}') AS bucket, COUNT(*) AS n "
+                    f"FROM read_parquet([{paths_sql}], union_by_name=true) "
+                    f"WHERE timestamp >= TIMESTAMP '{live_start_iso}' "
+                    f"  AND timestamp <  TIMESTAMP '{end_iso}' "
+                    f"GROUP BY 1"
+                ).fetchall()
+            for b, n in rows:
+                result[b] = result.get(b, 0) + int(n)
 
     return result
 

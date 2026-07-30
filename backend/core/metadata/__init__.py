@@ -70,6 +70,7 @@ from backend.core.metadata.base import (
     close_all_connections,
     db_path,
     get_con,
+    get_con_readonly,
     teardown,
 )
 
@@ -232,6 +233,7 @@ __all__ = [
     # Connection / schema (public)
     "db_path",
     "get_con",
+    "get_con_readonly",
     "close_all_connections",
     "teardown",
     # Alerts

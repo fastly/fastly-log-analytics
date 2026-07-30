@@ -123,11 +123,17 @@ def sessions_detail(
     # there's no analyst session; we already required both inputs above,
     # so the clamp always returns concrete ISO strings here.
     assert start_time is not None and end_time is not None
-    return repo.get_session_detail(
-        con=ctx.con,
-        src=ctx.source,
-        ip=ip,
-        ja4=ja4,
-        session_start=start_time,
-        session_end=end_time,
-    )
+
+    from backend.core.iceberg import execute_with_stale_view_retry
+
+    def _run_detail(con):
+        return repo.get_session_detail(
+            con=con,
+            src=ctx.source,
+            ip=ip,
+            ja4=ja4,
+            session_start=start_time,
+            session_end=end_time,
+        )
+
+    return execute_with_stale_view_retry(ctx.con, ctx.source, _run_detail)
