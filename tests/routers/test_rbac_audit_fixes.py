@@ -137,6 +137,14 @@ def app_with_blocklist():
     def _realtime_stream(service_id: str):
         return {"ok": True, "service_id": service_id}
 
+    @app.get("/api/services/{service_id}/realtime-seed")
+    def _realtime_seed(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/services/{service_id}/control-room/{tab}")
+    def _control_room_tab(service_id: str, tab: str):
+        return {"ok": True, "service_id": service_id, "tab": tab}
+
     @app.get("/api/services/{service_id}/log-field-audit")
     def _log_field_audit(service_id: str):
         return {"ok": True, "service_id": service_id}
@@ -338,6 +346,60 @@ def test_realtime_stream_still_needs_service_scope(app_with_blocklist):
     at the service-scope gate (not the blocklist, which no longer blocks
     this path)."""
     assert not _is_blocked_path("/api/services/svc-B/realtime-stream")
+
+
+# ── S-1 parity: /realtime-seed is the REST twin of /realtime-stream ──────
+
+
+def test_realtime_seed_allowed_for_analyst(app_with_blocklist):
+    """S-1 parity: ``/realtime-seed`` (backend/routers/control_room.py
+    :246) is the REST seed-data twin of ``/realtime-stream`` — both pull
+    the same ``transform_single_second`` metric shape from rt.fastly.com,
+    and ``/realtime-seed`` is what the client calls on page load to hydrate
+    the chart with 60 historical bars BEFORE subscribing to the SSE stream.
+    The S-1 decision that made ``/realtime-stream`` analyst-visible
+    ("exposes aggregate metrics ... no PII, no infra details") applies
+    identically here. Pinned separately from S-1 because ``_is_blocked_path``
+    has no shared code path between the two routes — a future edit to the
+    blocklist could block one and not the other with nobody noticing
+    (an analyst's dashboard would 403 on first paint while the live
+    stream kept working)."""
+    with TestClient(app_with_blocklist) as c:
+        r = c.get(
+            "/api/services/svc-A/realtime-seed",
+            headers={"x-test-session-services": "svc-A"},
+        )
+    assert r.status_code == 200, f"expected 200 but got {r.status_code}: {r.text}"
+
+
+def test_control_room_tab_read_is_a_flagged_tripwire(app_with_blocklist):
+    """Control Room's REST tab endpoint (``GET .../control-room/{tab}``,
+    backend/routers/control_room.py:95) is NOT in any analyst blocklist
+    today. Unlike ``/realtime-stream`` (S-1), there is no recorded
+    security decision that it SHOULD be analyst-reachable — AGENTS.md
+    documents the whole Control Room feature as an "Admin-only
+    operational dashboard" and specifically says the "Admin Health" tab
+    is meant to "surface log-field audit state and ingest health", which
+    are data classes already admin-gated elsewhere (log-field-audit
+    itself: see S-2 below; ingest/cron health: H-5's ``/api/cron-runs``
+    + ``/api/audit-logs``; cost/usage: H-1's ``/api/usage/``).
+
+    It is harmless TODAY because ``TAB_STUBS`` returns hardcoded zeros
+    for every tab regardless of which one is requested. This test pins
+    CURRENT behavior (reachable) as a deliberate tripwire, not an
+    endorsement: it will keep passing right up until someone wires a real
+    query behind ``admin_health`` / ``cost`` / ``security``, at which
+    point this same 200 starts returning live operator-only data with no
+    additional gate in the way. Before that wiring lands, add an explicit
+    per-tab admin-only gate (e.g. a tab-name blocklist mirroring
+    ``_ANALYST_BLOCKED_SCORING_SUFFIXES``) and invert this test.
+    """
+    with TestClient(app_with_blocklist) as c:
+        r = c.get(
+            "/api/services/svc-A/control-room/admin_health",
+            headers={"x-test-session-services": "svc-A"},
+        )
+    assert r.status_code == 200, f"expected 200 but got {r.status_code}: {r.text}"
 
 
 # ── S-2: /log-field-audit is admin-only ──────────────────────────────────

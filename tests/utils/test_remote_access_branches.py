@@ -1455,6 +1455,45 @@ def test_is_sse_route_returns_false_for_unrelated():
     assert _is_sse_route("/api/dashboard") is False
 
 
+@pytest.mark.security_regression
+def test_is_sse_route_detects_hyphenated_stream_routes():
+    """The analyst SSE gate is documented as "default OFF; explicit allow
+    only" (see the `_ANALYST_SSE_ALLOWLIST` docstring in remote_access.py:
+    "New SSE routes default to *off* for analysts; an explicit add here is
+    the only way to expose one") — but that promise is only as strong as
+    `_is_sse_route`'s detection. The check is
+    ``"/sse" in path or path.endswith("/stream")``: a route whose final
+    path segment is hyphen-joined before "stream" (e.g.
+    ``/api/services/{id}/realtime-stream``, mounted in
+    backend/routers/control_room.py:269) does NOT end with the literal
+    substring "/stream" — the character immediately before "stream" is
+    "-", not "/" — so it is never classified as an SSE route at all. The
+    SSE-allowlist gate (remote_access.py's
+    ``if _is_sse_route(path) and path not in _ANALYST_SSE_ALLOWLIST``)
+    never even fires for it, regardless of whether it's listed in
+    ``_ANALYST_SSE_ALLOWLIST``.
+
+    Today that happens to line up with the S-1 decision that
+    ``/realtime-stream`` should be analyst-visible (see
+    tests/routers/test_rbac_audit_fixes.py) — but the MECHANISM securing
+    that decision is broken, not deliberate: the next hyphen-named SSE
+    route (e.g. a hypothetical ``cost-governor-stream``) would silently
+    inherit the same bypass whether or not anyone intended it to be
+    analyst-reachable, because the default-closed gate can't see it
+    either. Fix `_is_sse_route` to recognize any "*-stream"-suffixed
+    final path segment (not just an exact "/stream" boundary) so the
+    allowlist gate is actually consulted for every SSE-shaped route.
+    """
+    from backend.utils.remote_access import _is_sse_route
+
+    # Real production route — backend/routers/control_room.py:269.
+    assert _is_sse_route("/api/services/svc-A/realtime-stream") is True
+    # Generic canary: the NEXT hyphenated "*-stream" route must also be
+    # recognized, not just this one — otherwise each new one repeats the
+    # same silent bypass of the default-closed SSE policy.
+    assert _is_sse_route("/api/services/svc-A/cost-governor-stream") is True
+
+
 # ── L5: max date-range span cap ──────────────────────────────────────────────
 
 
