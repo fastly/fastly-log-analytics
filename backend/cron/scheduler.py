@@ -787,7 +787,7 @@ class Scheduler:
                         _run_full_sweep,
                         "cron",
                         hour=3,
-                        minute=30,  # 03:30 UTC — offset from optimize at 03:00 to avoid pile-up
+                        minute=30,  # 03:30 UTC — runs before optimize (04:00)
                         args=[service_id],
                         id=full_job_id,
                         max_instances=1,
@@ -839,8 +839,8 @@ class Scheduler:
                     self._sched.add_job(
                         _run_optimize,
                         "cron",
-                        hour=3,
-                        minute=0,  # 03:00 UTC daily — original low-traffic window
+                        hour=4,
+                        minute=0,  # 04:00 UTC daily
                         args=[service_id],
                         id=opt_job_id,
                         max_instances=1,
@@ -849,7 +849,7 @@ class Scheduler:
                     )
                     self._job_ids[opt_job_id] = opt_job_id
                     logger.info(
-                        "⚙️  [scheduler] Registered optimize job %s (daily 03:00 UTC). Local compact handles ongoing dashboard perf — this is just FOS-side housekeeping.",
+                        "⚙️  [scheduler] Registered optimize job %s (daily 04:00 UTC). Local compact handles ongoing dashboard perf — this is just FOS-side housekeeping.",
                         opt_job_id,
                     )
 
@@ -903,7 +903,7 @@ class Scheduler:
                 )
 
             # ── Daily rollup compaction (per-day parquet from per-hour) ────
-            # 02:00 UTC — runs before optimize (03:00) so per-day rollups
+            # 02:00 UTC — runs before optimize (04:00) so per-day rollups
             # are ready when the next day's queries start. Only for
             # read-write services that own the rollup data.
             if compact_cfg.get("enabled", True) and prov.get("access_level") != "read_only":
@@ -1006,7 +1006,7 @@ class Scheduler:
                     )
 
             # ── Metadata retention cleanup (per service) ──────────────────────
-            # Daily 03:15 UTC. Slots between optimize (03:00) and full_sweep
+            # Daily 03:15 UTC. Runs before optimize (04:00) and after full_sweep
             # (03:30) so the daily admin cron window stays single-threaded
             # across heavy phases. Trims usage_log + ingested_files
             # + cron_runs per cfg["metadata_retention"]; defaults to 1d for
@@ -1066,7 +1066,7 @@ class Scheduler:
             logger.info("🌐 \x1b[34m[rdns]\x1b[0m Registered rDNS enrichment job (every 5m).")
 
         # ── Remote-share audit log purge ─────────────────────────────────────
-        # 03:45 UTC — sits after per-service optimize (03:00) and full_sweep
+        # 03:45 UTC — sits after full_sweep (03:30) and before optimize (04:00)
         # (03:30) so the daily admin cron window stays single-threaded across
         # heavy phases. Retention configurable via the
         # `share_audit_retention_days` share_setting (default 90).
