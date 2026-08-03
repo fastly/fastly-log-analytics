@@ -45,6 +45,14 @@ _CRON_SCHEDULE_TTL = 5.0
 _cron_schedule_cache: dict[str, tuple[float, dict]] = {}
 
 
+def clear_cron_schedule_cache(service_id: str | None = None) -> None:
+    """Bust the /api/cron-schedule cache for a service (or all services)."""
+    if service_id:
+        _cron_schedule_cache.pop(service_id, None)
+    else:
+        _cron_schedule_cache.clear()
+
+
 # N-2: fields safe to surface to a remote analyst on ``GET /api/services``.
 # The full enriched dict contains operator infra strings (cdn_url,
 # cdn_service_id, fos_bucket, fos_region, ngwaf_workspace_id) plus DuckDB

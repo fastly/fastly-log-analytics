@@ -301,12 +301,12 @@ def cleanup_metadata(
             continue
         _emit({"type": "status", "message": f"Trimming {table} (older than {days_int}d)…"})
         table_con = _con_for(table)
-        # Batch DELETE in 50k-row chunks so the SQLite write lock is released
+        # Batch DELETE in 5k-row chunks so the SQLite write lock is released
         # between commits. A single DELETE of 700k+ rows holds the lock for
         # 30–35s, blocking concurrent cron starts (``start_cron_run`` →
-        # ``purge_cron_runs``). Each batch takes ~1–2s; other writers interleave
+        # ``purge_cron_runs``). Each batch takes ~10-50ms; other writers interleave
         # between commits instead of queuing for the full duration.
-        _BATCH = 50_000
+        _BATCH = 5_000
         try:
             total_n = 0
             while True:

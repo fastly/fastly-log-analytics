@@ -437,6 +437,29 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         return
 
     source = svcconfig.config_to_source(src)
+    # ── 1. Non-DuckDB I/O (runs outside / before the exclusive WAL lock) ─────
+    buf_bytes = None
+    try:
+        import os as _os
+
+        buf_dir = _cache_dir(source)
+        if _os.path.isdir(buf_dir):
+            buf_bytes = sum(_os.path.getsize(_os.path.join(r, f)) for r, _, files in _os.walk(buf_dir) for f in files)
+    except Exception:
+        pass
+
+    iceberg_bytes = None
+    iceberg_files = None
+    try:
+        from backend.core import iceberg as _db_iceberg
+
+        info = _db_iceberg.get_table_info(source)
+        if not info.get("error"):
+            iceberg_bytes = int(info.get("size_bytes", 0) or 0)
+            iceberg_files = int(info.get("data_files", 0) or 0)
+    except Exception:
+        pass
+
     con = None
     try:
         # Connect in read-only mode to avoid locking. (Comment was here but the
@@ -451,35 +474,12 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         # and timestamps. force=True bypasses any stale config-file cache.
         status = get_sync_status(con, source, skip_fos=False, force=True)
 
-        # Add storage size from the buffer directory + any local parquet cache
-        try:
-            import os as _os
-
-            buf_dir = _cache_dir(source)
-            buf_bytes = (
-                sum(_os.path.getsize(_os.path.join(r, f)) for r, _, files in _os.walk(buf_dir) for f in files)
-                if _os.path.isdir(buf_dir)
-                else 0
-            )
+        if buf_bytes is not None:
             status["buffer_size_bytes"] = buf_bytes
-        except Exception:
-            pass
-
-        # Cache iceberg size + file count so /api/usage/current-storage can
-        # short-circuit the get_table_info() round-trip. ``get_table_info``
-        # already reads manifest summaries via the multi-layer local cache,
-        # but populating the value into the status dict makes the cost panel
-        # consistently fast even on a cold-cache process — the cron tick has
-        # already paid the manifest read.
-        try:
-            from backend.core import iceberg as _db_iceberg
-
-            info = _db_iceberg.get_table_info(source)
-            if not info.get("error"):
-                status["iceberg_bytes"] = int(info.get("size_bytes", 0) or 0)
-                status["iceberg_files"] = int(info.get("data_files", 0) or 0)
-        except Exception:
-            pass
+        if iceberg_bytes is not None:
+            status["iceberg_bytes"] = iceberg_bytes
+        if iceberg_files is not None:
+            status["iceberg_files"] = iceberg_files
 
         # Cache edge_ratio so /api/usage/prefill's fast-path branch can
         # short-circuit the 3.6 s cold query. The router already reads

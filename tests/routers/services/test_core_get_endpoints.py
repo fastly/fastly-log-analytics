@@ -1309,3 +1309,65 @@ def test_update_custom_field_422s_on_type_change_when_field_in_iceberg_schema(cl
     assert resp.status_code == 422
     errors = resp.json()["detail"]["errors"]
     assert any("Cannot change" in e for e in errors)
+
+
+# ── GET /cron-schedule cache busting ──────────────────────────────────────
+
+
+def test_clear_cron_schedule_cache_service_specific():
+    """clear_cron_schedule_cache with a service_id pops only that key."""
+    from backend.routers.services.core import _cron_schedule_cache, clear_cron_schedule_cache
+
+    _cron_schedule_cache["svc-1"] = (123.45, {"data": "foo"})
+    _cron_schedule_cache["svc-2"] = (678.90, {"data": "bar"})
+
+    clear_cron_schedule_cache("svc-1")
+
+    assert "svc-1" not in _cron_schedule_cache
+    assert "svc-2" in _cron_schedule_cache
+
+
+def test_clear_cron_schedule_cache_all():
+    """clear_cron_schedule_cache without a service_id clears all keys."""
+    from backend.routers.services.core import _cron_schedule_cache, clear_cron_schedule_cache
+
+    _cron_schedule_cache["svc-1"] = (123.45, {"data": "foo"})
+    _cron_schedule_cache["svc-2"] = (678.90, {"data": "bar"})
+
+    clear_cron_schedule_cache()
+
+    assert len(_cron_schedule_cache) == 0
+
+
+def test_cron_log_hooks_bust_cache(monkeypatch):
+    """start_cron_run, log_cron_run, and finalize_cron_run_if_running bust the cache."""
+    from backend.routers.services.core import _cron_schedule_cache
+
+    _cron_schedule_cache["svc-1"] = (123.45, {"data": "foo"})
+
+    # We mock out database and publisher side-effects so we can test the cron_log hooks
+    # in complete isolation.
+    with (
+        patch("backend.core.metadata.cron_log.get_con"),
+        patch("backend.core.metadata.cron_log._retry_on_locked", return_value=123),
+        patch("backend.cron_runs_publisher.publisher.publish"),
+    ):
+        from backend.core.metadata.cron_log import finalize_cron_run_if_running, log_cron_run, start_cron_run
+
+        # start_cron_run
+        start_cron_run("svc-1", "sync")
+        assert "svc-1" not in _cron_schedule_cache
+
+        # Re-populate
+        _cron_schedule_cache["svc-1"] = (123.45, {"data": "foo"})
+
+        # log_cron_run
+        log_cron_run("svc-1", "sync", 10.0, "success")
+        assert "svc-1" not in _cron_schedule_cache
+
+        # Re-populate
+        _cron_schedule_cache["svc-1"] = (123.45, {"data": "foo"})
+
+        # finalize_cron_run_if_running
+        finalize_cron_run_if_running("svc-1", "sync", 123)
+        assert "svc-1" not in _cron_schedule_cache

@@ -28,6 +28,16 @@ You'll need:
 
 ---
 
+## Server Specifications
+
+When running as a shared server (Path B), the host machine should meet these minimums:
+
+- **RAM:** 16 GB
+- **CPU:** 2 vCPUs
+- **Swap:** 4 GB minimum, 8 GB preferred — the backend holds large DuckDB query buffers in memory; swap prevents OOM kills during peak analytical load
+
+---
+
 ## Quick Start
 
 > 📺 Prefer to watch? See the [video walkthrough](https://youtu.be/7-3XWzesuAY).

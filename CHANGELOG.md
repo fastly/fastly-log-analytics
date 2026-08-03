@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] - 2026-08-03
+
+### Added
+
+- **Live System Time as the default timezone**, with manual override still
+  available; the trigger now shows a short abbreviation instead of the full
+  IANA zone name.
+- **Server Specifications** section in the README for self-hosted
+  deployments (16 GB RAM, 2 vCPU, 4–8 GB swap).
+
+### Changed
+
+- **Daily Iceberg optimize cron** moved from 03:00 to 04:00 UTC, giving the
+  03:30 full-sweep and 03:45 audit-purge jobs a clear window before it fires;
+  the displayed schedule in the cron settings modal and provisioning wizard
+  stays in sync.
+- **Reconciliation performance.** SQLite usage-log chunking is more
+  efficient, with self-healing recovery for the metadata DB and cleanup of
+  stale usage-log rows during purging.
+- Iceberg manifest scans skip the thread pool once already cached.
+
+### Fixed
+
+- The sync-status SSE now publishes before the slower config-status rescan
+  runs, instead of after — the "latest log" badge no longer lags behind a
+  slow refresh.
+- NGWAF bot-cache reads go through a real in-memory DuckDB catalog instead of
+  a same-named schema, and no longer read the SQLite file directly.
+- `/api/cron-schedule` cache now busts instantly when a cron job's status
+  changes, instead of waiting for the next poll.
+
 ## [2.2.1] - 2026-07-30
 
 ### Added
@@ -1365,6 +1396,7 @@ deleted.
   admin tunnel use case is no longer supported; production has always
   been direct-mode against the Fastly+Caddy public URL.
 
+[2.2.2]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.2
 [2.2.1]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.1
 [2.2.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.0
 [2.1.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.1.0

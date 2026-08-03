@@ -82,6 +82,16 @@ def _init_schema(con: sqlite3.Connection) -> None:
     except Exception:
         pass
 
+    # Self-heal/upgrade existing trigger to only run on reconciliation deletes
+    try:
+        row = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_usage_log_summary_delete'"
+        ).fetchone()
+        if row and row[0] and "fastly.reconciliation" not in row[0]:
+            con.execute("DROP TRIGGER IF EXISTS trg_usage_log_summary_delete")
+    except Exception:
+        pass
+
     for stmt in _SCHEMA:
         con.execute(stmt)
     con.commit()
@@ -192,6 +202,7 @@ _SCHEMA = [
     """CREATE TRIGGER IF NOT EXISTS trg_usage_log_summary_delete
     AFTER DELETE ON usage_log
     WHEN OLD.timestamp IS NOT NULL AND length(OLD.timestamp) >= 13 AND OLD.service_id IS NOT NULL
+      AND OLD.function_name = 'fastly.reconciliation'
     BEGIN
         UPDATE usage_log_hourly_summary
         SET count = count - COALESCE(OLD.count, 1),

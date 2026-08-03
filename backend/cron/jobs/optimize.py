@@ -1,7 +1,7 @@
 """Iceberg optimize cron — daily small-file compaction.
 
 Distinct from :mod:`backend.cron.jobs.compaction`'s local-only compactor: this
-job writes through PyIceberg and DOES update FOS. Pinned to 03:00 UTC by
+job writes through PyIceberg and DOES update FOS. Pinned to 04:00 UTC by
 :meth:`backend.cron.scheduler.Scheduler._sync_jobs`.
 """
 

@@ -5,10 +5,14 @@ import {
   Select,
   SelectContent,
   SelectItem,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
 import { useTimezoneStore } from '@/stores/timezoneStore'
+import { getTimezoneAbbr } from '@/lib/date'
+
+const SYSTEM_TIME_VALUE = '__system__'
 
 const COMMON_TIMEZONES = [
   { label: 'UTC', value: 'UTC' },
@@ -24,7 +28,7 @@ const COMMON_TIMEZONES = [
 
 export function TimezoneSwitcher() {
   const [mounted, setMounted] = React.useState(false)
-  const { timezone, setTimezone } = useTimezoneStore()
+  const { mode, timezone, setTimezone, setSystemTimezone } = useTimezoneStore()
 
   React.useEffect(() => {
     setMounted(true)
@@ -34,18 +38,38 @@ export function TimezoneSwitcher() {
     return <div className="w-[180px] h-10 border rounded-md" />
   }
 
+  const selectValue = mode === 'system' ? SYSTEM_TIME_VALUE : timezone
+
   return (
-    <Select value={timezone} onValueChange={(value) => { if (value) setTimezone(value) }}>
+    <Select
+      value={selectValue}
+      onValueChange={(value) => {
+        if (!value) return
+        if (value === SYSTEM_TIME_VALUE) {
+          try {
+            setSystemTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone)
+          } catch {
+            /* leave the current zone in place */
+          }
+        } else {
+          setTimezone(value)
+        }
+      }}
+    >
       <SelectTrigger className="w-[180px]" aria-label="Display timezone">
-        <SelectValue placeholder="Select timezone" />
+        <SelectValue placeholder="Select timezone">
+          {mode === 'system' ? `System Time (${getTimezoneAbbr(new Date(), timezone)})` : undefined}
+        </SelectValue>
       </SelectTrigger>
       <SelectContent>
+        <SelectItem value={SYSTEM_TIME_VALUE}>System Time</SelectItem>
+        <SelectSeparator />
         {COMMON_TIMEZONES.map((tz) => (
           <SelectItem key={tz.value} value={tz.value}>
             {tz.label}
           </SelectItem>
         ))}
-        {!COMMON_TIMEZONES.find(t => t.value === timezone) && (
+        {mode === 'manual' && !COMMON_TIMEZONES.find(t => t.value === timezone) && (
           <SelectItem value={timezone}>{timezone}</SelectItem>
         )}
       </SelectContent>

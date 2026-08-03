@@ -291,6 +291,62 @@ def test_sync_no_new_files_surfaces_reclaimed_count(
     assert "reclaim" in kwargs.get("summary", "").lower()
 
 
+def test_sync_status_published_before_slow_refresh_config_status(
+    monkeypatch,
+    stub_load_config,
+    stub_progress,
+    stub_post_ingest,
+    stub_usage_log_phase,
+):
+    """The live SSE snapshot must publish BEFORE refresh_config_status runs.
+
+    refresh_config_status does an uncached full-parquet rescan
+    (skip_fos=False, force=True) that can take 10-25s+ on a busy service;
+    compute_sync_status_cached's SQLite overlay already has a fresh
+    latest_log_at/local_rows without it. Publishing first keeps the header
+    badge's live update from being delayed behind (or lost during) that
+    slow rescan. See backend/cron/jobs/sync.py section-2 ordering."""
+    from backend.cron.jobs import sync as sync_mod
+
+    calls: list[str] = []
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_source_for_service",
+        MagicMock(return_value=_fake_src()),
+    )
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=42))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    monkeypatch.setattr(
+        "backend.core.ingest.ingest",
+        _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
+    )
+
+    def _fake_refresh_config_status(*args, **kwargs):
+        calls.append("refresh_config_status")
+
+    monkeypatch.setattr("backend.core.duckdb.refresh_config_status", _fake_refresh_config_status)
+
+    def _fake_compute_snapshot(service_id):
+        calls.append("compute_sync_status_cached")
+        return {"latest_log_at": "2026-01-01T00:00:00Z"}
+
+    monkeypatch.setattr(
+        "backend.routers.admin.sync_status.compute_sync_status_cached",
+        _fake_compute_snapshot,
+    )
+
+    fake_publisher = MagicMock()
+    fake_publisher.publish.side_effect = lambda *a, **k: calls.append("publish")
+    monkeypatch.setattr("backend.sync_status_publisher.publisher", fake_publisher)
+
+    sync_mod._run_service_cron.__wrapped__("svc-1", force=True)
+
+    assert calls == ["compute_sync_status_cached", "publish", "refresh_config_status"], (
+        f"sync-status must publish before the slow refresh_config_status rescan, got {calls}"
+    )
+
+
 def test_manual_sync_all_clears_time_range(
     monkeypatch,
     stub_progress,

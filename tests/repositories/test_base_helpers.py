@@ -418,8 +418,8 @@ def test_attach_ngwaf_cache_yields_false_when_waf_req_id_absent():
 
 def test_attach_ngwaf_cache_passes_through_to_sqlite_attach(monkeypatch, tmp_path):
     """When ``waf_req_id`` is in the schema, the helper looks up
-    ``svcconfig.ngwaf_db_path()`` and ATTACHes it. Missing file →
-    yields False."""
+    ``svcconfig.ngwaf_db_path()`` and tries to materialize it. Missing
+    file → yields False."""
     monkeypatch.setattr(
         "backend.config.ngwaf_db_path",
         lambda: str(tmp_path / "missing_ngwaf.db"),
@@ -428,6 +428,48 @@ def test_attach_ngwaf_cache_passes_through_to_sqlite_attach(monkeypatch, tmp_pat
     try:
         with attach_ngwaf_cache(con, schema_cols=["waf_req_id"]) as attached:
             assert attached is False
+    finally:
+        con.close()
+
+
+def test_attach_ngwaf_cache_materializes_without_sqlite_scan_or_attach(monkeypatch, tmp_path):
+    """When the cache file exists, the helper reads it via plain sqlite3
+    and materializes it into a real, distinctly-named in-memory DuckDB
+    catalog (``ATTACH ':memory:' AS {alias}``) — it must NOT ATTACH the
+    SQLite file directly or use sqlite_scan against it. Cross-engine reads
+    against this globally-shared, frequently-written cache corrupted it in
+    production (2026-07-30); reading it into memory instead sidesteps the
+    hazard entirely. A same-named DuckDB SCHEMA (instead of a separate
+    catalog) was tried first and regressed with "Ambiguous reference to
+    catalog or schema" once a per-service connection had other catalogs
+    attached (also prod, 2026-07-30) — pinned here so that regression
+    doesn't come back."""
+    import sqlite3
+
+    db_path = tmp_path / "ngwaf.db"
+    sconn = sqlite3.connect(str(db_path))
+    sconn.execute(
+        "CREATE TABLE ngwaf_bots (waf_req_id TEXT PRIMARY KEY, bot_name TEXT, category TEXT,"
+        " wellknown_bot_id TEXT, wellknown_bot_name TEXT, synced_at TEXT)"
+    )
+    sconn.execute(
+        "INSERT INTO ngwaf_bots VALUES ('w1', 'GoogleBot', 'SEARCH-ENGINE', NULL, NULL, '2026-01-01T00:00:00Z')"
+    )
+    sconn.commit()
+    sconn.close()
+
+    monkeypatch.setattr("backend.config.ngwaf_db_path", lambda: str(db_path))
+    # A second attached catalog is what exposed the schema-collision bug —
+    # keep it in the fixture so a regression back to CREATE SCHEMA fails loudly.
+    con = duckdb.connect(":memory:")
+    con.execute("ATTACH ':memory:' AS other_catalog")
+    try:
+        with attach_ngwaf_cache(con, schema_cols=["waf_req_id"], alias="ngwaf_test") as attached:
+            assert attached is True
+            row = con.execute("SELECT bot_name, category FROM ngwaf_test.ngwaf_bots WHERE waf_req_id = 'w1'").fetchone()
+            assert row == ("GoogleBot", "SEARCH-ENGINE")
+            attached_dbs = [r[0] for r in con.execute("SELECT database_name FROM duckdb_databases()").fetchall()]
+            assert "ngwaf_test" in attached_dbs
     finally:
         con.close()
 

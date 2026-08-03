@@ -2,14 +2,21 @@
 
 Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB + Next.js + FastAPI.
 
+## Before any non-trivial change
+
+Read [AGENTS.md](AGENTS.md) end-to-end. Most regressions in this codebase are re-discoveries of a documented trap. Re-read the Traps & Gotchas section before every change. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for system design.
+
 ## Commands
 
 - `make dev` — start full stack (backend + frontend) with hot reload via `./run.sh --dev`
 - `make ci` — full CI pipeline locally (lint, typecheck, test, security, e2e)
-- `make test` — backend tests: `uv run pytest`
+- `make test` — backend tests quick loop: `uv run pytest`
+- `make test-ci` — backend tests as CI runs them (`-n auto`, coverage floor 86%, includes terraform tests)
 - `make test-frontend` — frontend tests: vitest
-- `make e2e` — Playwright end-to-end tests
+- `make test-frontend-ci` — frontend tests with coverage floors (CI gate)
+- `make e2e` — Playwright end-to-end tests (chromium + firefox + webkit)
 - `make lint` — ruff check + ruff format --check
+- `make import-contracts` — enforce no cross-router imports + core ↛ routers (import-linter)
 - `make typecheck` — mypy on backend
 - `make gen-types` — regenerate OpenAPI spec + frontend TypeScript types
 - `make openapi-drift` — verify frontend openapi.json matches backend
@@ -17,6 +24,8 @@ Interactive log analytics for Fastly logs stored in Fastly Object Storage, power
 - `make scorer-test` — `cargo test` on the scorer
 - `make security-regression` — security regression suite (floor=206, never lower)
 - `make verify` — full CI + ratchet checks
+
+Single test: `uv run pytest tests/path/to/test_file.py::test_name -v`
 
 ## Architecture
 

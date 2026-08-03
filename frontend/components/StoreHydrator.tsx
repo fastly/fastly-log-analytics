@@ -36,20 +36,19 @@ export function StoreHydrator() {
       }
     }
 
-    // Timezone: load the saved zone if the user picked one before;
-    // otherwise adopt the browser's zone now. Doing this post-mount means
-    // it never contradicts the server's deterministic 'UTC' default.
-    const hadPersistedTz =
-      typeof localStorage !== 'undefined' &&
-      localStorage.getItem('timezone-storage') !== null
+    // Timezone: rehydrate the persisted mode/zone, then re-resolve the
+    // live system zone on every mount while mode is 'system'. Doing this
+    // post-mount means it never contradicts the server's deterministic
+    // 'UTC' default. A user who picked an explicit zone (mode: 'manual')
+    // keeps exactly that zone — this never overwrites it.
     useTimezoneStore.persist.rehydrate()
-    if (!hadPersistedTz) {
+    if (useTimezoneStore.getState().mode === 'system') {
       try {
         useTimezoneStore
           .getState()
-          .setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone)
+          .setSystemTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone)
       } catch {
-        /* keep the 'UTC' default */
+        /* keep whatever's already in state */
       }
     }
   }, [])

@@ -407,6 +407,29 @@ def _run_service_cron(
                 error_message="orphaned run auto-finalized (no terminal ingest event)",
             )
 
+    # Push a fresh snapshot to any connected SSE subscribers (admin browsers
+    # watching the header badge) BEFORE the slow full-table refresh below.
+    # compute_sync_status_cached's SQLite overlay already has the latest
+    # ingested-file timestamp + row count cheaply, so the live "Latest Log"
+    # badge shouldn't wait on refresh_config_status's uncached parquet
+    # rescan (skip_fos=False, force=True), which runs 10-25+s on a busy
+    # service and is serialized behind max_instances=1 — badge updates were
+    # arriving a full tick or more after the sync that produced them, well
+    # after "Last Sync" (fed by the fast cron-runs event) had already
+    # flipped. Same payload shape as GET /api/sync-status?skip_fos=true so
+    # the React Query cache update is byte-compatible with a polled
+    # response. Broad except so a publish failure NEVER breaks the
+    # ingestion cron.
+    try:
+        from backend.routers.admin.sync_status import compute_sync_status_cached
+        from backend.sync_status_publisher import publisher as _sync_status_publisher
+
+        _snapshot = compute_sync_status_cached(service_id)
+        if _snapshot is not None:
+            _sync_status_publisher.publish(service_id, _snapshot)
+    except Exception:
+        logger.exception("[scheduler] %s: sync-status SSE publish failed", service_id)
+
     # ── 2. Refresh cached status ──────────────────────────────────────────────
     # Single 60s window covers both the heavy refresh (top_values cache) and
     # the heavy usage-log phase (reconcile_fastly_stats) — claim once per tick
@@ -439,21 +462,6 @@ def _run_service_cron(
                 "message": f"{elapsed()} refresh_config_status{_heavy}: {int((time.time() - _t0) * 1000)}ms",
             },
         )
-
-    # Push the freshly-refreshed snapshot to any connected SSE subscribers
-    # (admin browsers watching the header badge). Same payload shape as
-    # GET /api/sync-status?skip_fos=true so the React Query cache update
-    # is byte-compatible with a polled response. Broad except so a publish
-    # failure NEVER breaks the ingestion cron.
-    try:
-        from backend.routers.admin.sync_status import compute_sync_status_cached
-        from backend.sync_status_publisher import publisher as _sync_status_publisher
-
-        _snapshot = compute_sync_status_cached(service_id)
-        if _snapshot is not None:
-            _sync_status_publisher.publish(service_id, _snapshot)
-    except Exception:
-        logger.exception("[scheduler] %s: sync-status SSE publish failed", service_id)
 
     # ── 3. Invalidate dashboard cache ─────────────────────────────────────────
     # Gate on DASHBOARD_CACHE_TTL > 0: when the TTL is 0 (the current

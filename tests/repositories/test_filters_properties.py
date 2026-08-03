@@ -372,13 +372,32 @@ def test_ngwaf_bot_name_filter_skipped_when_waf_req_id_absent():
     assert sql == "1=1"
 
 
-def test_ngwaf_bot_name_filter_builds_sqlite_scan_subquery(tmp_path, monkeypatch):
-    """When ``waf_req_id`` is in schema and the ngwaf DB exists, the
-    filter compiles to a ``waf_req_id IN (SELECT ... FROM
-    sqlite_scan(...))`` subquery. Pinned because the sqlite_scan
-    pattern is the canonical DuckDB↔SQLite cross-engine join."""
+def _create_ngwaf_cache_db(db_path: str, entries: list[tuple[str, str]]) -> None:
+    """Populate a minimal ngwaf_bot_cache SQLite file. entries: (waf_req_id, bot_name)."""
+    import sqlite3
+
+    con = sqlite3.connect(db_path)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS ngwaf_bots ("
+        " waf_req_id TEXT PRIMARY KEY, bot_name TEXT, category TEXT,"
+        " wellknown_bot_id TEXT, wellknown_bot_name TEXT, synced_at TEXT)"
+    )
+    for wid, name in entries:
+        con.execute("INSERT INTO ngwaf_bots VALUES (?, ?, NULL, NULL, NULL, '2026-01-01T00:00:00Z')", (wid, name))
+    con.commit()
+    con.close()
+
+
+def test_ngwaf_bot_name_filter_resolves_ids_via_sqlite_not_duckdb(tmp_path, monkeypatch):
+    """When ``waf_req_id`` is in schema and the ngwaf DB has a matching bot
+    name, the filter compiles to a plain ``waf_req_id IN (...)`` literal
+    list resolved via a direct sqlite3 lookup — NOT DuckDB's sqlite_scan.
+    sqlite_scan doesn't reliably coordinate with SQLite's own WAL/locking
+    protocol; cross-engine reads against this globally-shared,
+    frequently-written cache corrupted it in production (2026-07-30)."""
     fake_db = tmp_path / "ngwaf.db"
-    fake_db.touch()
+    _create_ngwaf_cache_db(str(fake_db), [("w1", "GoogleBot"), ("w2", "GoogleBot")])
     monkeypatch.setattr("backend.config.ngwaf_db_path", lambda: str(fake_db))
 
     _, sql = build_where_clause(
@@ -388,14 +407,14 @@ def test_ngwaf_bot_name_filter_builds_sqlite_scan_subquery(tmp_path, monkeypatch
         actual_cols=["waf_req_id"],
     )
 
-    assert "sqlite_scan" in sql
-    assert "ngwaf_bots" in sql
+    assert "sqlite_scan" not in sql
+    assert "ngwaf_bots" not in sql
     assert "waf_req_id IN" in sql
 
 
 def test_ngwaf_bot_name_filter_emits_not_in_for_exclude(tmp_path, monkeypatch):
     fake_db = tmp_path / "ngwaf.db"
-    fake_db.touch()
+    _create_ngwaf_cache_db(str(fake_db), [("w1", "GoogleBot")])
     monkeypatch.setattr("backend.config.ngwaf_db_path", lambda: str(fake_db))
 
     _, sql = build_where_clause(
@@ -406,6 +425,42 @@ def test_ngwaf_bot_name_filter_emits_not_in_for_exclude(tmp_path, monkeypatch):
     )
 
     assert "waf_req_id NOT IN" in sql
+
+
+def test_ngwaf_bot_name_filter_include_with_no_cache_matches_is_false(tmp_path, monkeypatch):
+    """An include filter whose bot name matches nothing in the cache must
+    match nothing (not everything) — mirrors the empty-subquery IN-clause
+    behavior of the sqlite_scan-based implementation it replaced."""
+    fake_db = tmp_path / "ngwaf.db"
+    _create_ngwaf_cache_db(str(fake_db), [("w1", "SomeOtherBot")])
+    monkeypatch.setattr("backend.config.ngwaf_db_path", lambda: str(fake_db))
+
+    _, sql = build_where_clause(
+        None,
+        None,
+        {"_ngwaf_bot_name": FilterSpec(mode="include", values=["GoogleBot"])},
+        actual_cols=["waf_req_id"],
+    )
+
+    assert sql == "(FALSE)"
+
+
+def test_ngwaf_bot_name_filter_exclude_with_no_cache_matches_is_vacuous(tmp_path, monkeypatch):
+    """An exclude filter whose bot name matches nothing in the cache is a
+    no-op (nothing to exclude) — not a bug, matches prior NOT IN (empty
+    set) semantics."""
+    fake_db = tmp_path / "ngwaf.db"
+    _create_ngwaf_cache_db(str(fake_db), [("w1", "SomeOtherBot")])
+    monkeypatch.setattr("backend.config.ngwaf_db_path", lambda: str(fake_db))
+
+    _, sql = build_where_clause(
+        None,
+        None,
+        {"_ngwaf_bot_name": FilterSpec(mode="exclude", values=["GoogleBot"])},
+        actual_cols=["waf_req_id"],
+    )
+
+    assert sql == "1=1"
 
 
 def test_ngwaf_bot_name_filter_silently_skipped_when_db_missing(tmp_path, monkeypatch):

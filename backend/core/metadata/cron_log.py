@@ -105,6 +105,13 @@ def start_cron_run(service_id: str, task: str) -> int:
     # converging cron minute can't crash the tick (see _retry_on_locked).
     new_id = _retry_on_locked(con, _write)
 
+    try:
+        from backend.utils.cache_registry import CacheRegistry
+
+        CacheRegistry.clear("services.core._cron_schedule_cache")
+    except Exception:
+        pass
+
     # Tickle any connected /api/cron-runs/stream subscribers that a run
     # just started. Same defensive contract as the sync-status publish
     # hook (backend/cron/jobs/sync.py): broad except so a publish
@@ -211,6 +218,13 @@ def log_cron_run(
     # incident), so retry the terminal write on a transient lock too.
     _retry_on_locked(con, _write)
 
+    try:
+        from backend.utils.cache_registry import CacheRegistry
+
+        CacheRegistry.clear("services.core._cron_schedule_cache")
+    except Exception:
+        pass
+
     # Tickle subscribers that this run reached a terminal status.
     # Broad except so an SSE-channel failure never breaks cron
     # bookkeeping.
@@ -276,6 +290,13 @@ def finalize_cron_run_if_running(
 
     if not _retry_on_locked(con, _write):
         return False
+
+    try:
+        from backend.utils.cache_registry import CacheRegistry
+
+        CacheRegistry.clear("services.core._cron_schedule_cache")
+    except Exception:
+        pass
 
     # Tickle subscribers that this run reached a terminal status — same
     # contract (and broad except) as log_cron_run's publish hook.

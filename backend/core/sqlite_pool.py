@@ -143,6 +143,7 @@ def open_small_cache_db(
     delay = 0.05
     max_delay = 1.0
     deadline = time.monotonic() + timeout
+    has_recovered = False
 
     while True:
         try:
@@ -157,8 +158,29 @@ def open_small_cache_db(
             con.executescript(ddl)
             con.commit()
             return con
-        except sqlite3.OperationalError as e:
+        except sqlite3.DatabaseError as e:
             err_msg = str(e).lower()
+            is_corruption = (
+                "malformed" in err_msg
+                or "not a database" in err_msg
+                or "unsupported file format" in err_msg
+                or "disk image is malformed" in err_msg
+            )
+            if is_corruption and not has_recovered:
+                logger.warning(
+                    "[sqlite_pool] corrupt small cache DB at %s detected: %s. Quarantining/recreating...",
+                    path,
+                    e,
+                )
+                has_recovered = True
+                try:
+                    remove_sqlite_db_files(str(p), name="sqlite_pool")
+                except Exception as rm_err:
+                    logger.error("[sqlite_pool] failed to delete corrupt small cache files: %s", rm_err)
+                delay = 0.05
+                deadline = time.monotonic() + timeout
+                continue
+
             if "locked" in err_msg or "busy" in err_msg:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
