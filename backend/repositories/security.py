@@ -13,6 +13,7 @@ from backend.repositories._base import (
     SectionTimer,
     _safe_table,
     empty_schema_response,
+    ensure_ngwaf_bots_materialized,
     safe_iso,
     time_bucket_select,
 )
@@ -463,27 +464,9 @@ def get_top_bots(
     ngwaf_attached = False
     if "waf_req_id" in actual_cols:
         try:
-            from backend import config as svcconfig
-
-            ngwaf_db = svcconfig.ngwaf_db_path()
-            if ngwaf_db:
-                existing = con.execute(
-                    "SELECT path FROM duckdb_databases() WHERE database_name='ngwaf_top' LIMIT 1"
-                ).fetchone()
-                already_path = existing[0] if existing else None
-                if already_path == ngwaf_db:
-                    ngwaf_attached = True
-                elif os.path.exists(ngwaf_db):
-                    if already_path is not None:
-                        try:
-                            con.execute("DETACH ngwaf_top")
-                        except Exception:
-                            pass
-                    ngwaf_db_escaped = ngwaf_db.replace("'", "''")
-                    con.execute(f"ATTACH '{ngwaf_db_escaped}' AS ngwaf_top (TYPE SQLITE, READ_ONLY)")
-                    ngwaf_attached = True
+            ngwaf_attached = ensure_ngwaf_bots_materialized(con, "ngwaf_top")
         except Exception:
-            pass  # ATTACH failed — fall back gracefully
+            pass  # materialization failed — fall back gracefully
 
     needs_filtered_ua_scan = ua_rollup_rows is None and "ua" in actual_cols
     cols_needed: list[str] = []
@@ -700,36 +683,18 @@ def _build_security_response(
         except Exception:
             results["ngwaf_configured"] = False
 
-    # Attach the NGWAF bot cache once per connection if it exists and
-    # waf_req_id is in schema. The attach (~22ms) is independent of the
-    # temp; skip it if this connection already has the cache bound to the
-    # exact same path (a config switch triggers DETACH + re-ATTACH). The
-    # bot JOIN needs raw waf_req_id (high-cardinality UUID, never rolled
-    # up), so the NGWAF pair always live-scans a (tiny) temp when attached.
+    # Materialize the NGWAF bot cache once per connection if it exists and
+    # waf_req_id is in schema (see ensure_ngwaf_bots_materialized — reuses
+    # an already-materialized alias on this connection, so this is cheap
+    # after the first call). The bot JOIN needs raw waf_req_id
+    # (high-cardinality UUID, never rolled up), so the NGWAF pair always
+    # live-scans a (tiny) temp when materialized.
     _ngwaf_attached = False
     if _want_ngwaf_bots and "waf_req_id" in actual_cols:
         try:
-            from backend import config as svcconfig
-
-            ngwaf_db = svcconfig.ngwaf_db_path()
-            if ngwaf_db:
-                existing = con.execute(
-                    "SELECT path FROM duckdb_databases() WHERE database_name='ngwaf_cache' LIMIT 1"
-                ).fetchone()
-                already_path = existing[0] if existing else None
-                if already_path == ngwaf_db:
-                    _ngwaf_attached = True
-                elif os.path.exists(ngwaf_db):
-                    if already_path is not None:
-                        try:
-                            con.execute("DETACH ngwaf_cache")
-                        except Exception:
-                            pass
-                    ngwaf_db_escaped = ngwaf_db.replace("'", "''")
-                    con.execute(f"ATTACH '{ngwaf_db_escaped}' AS ngwaf_cache (TYPE SQLITE, READ_ONLY)")
-                    _ngwaf_attached = True
+            _ngwaf_attached = ensure_ngwaf_bots_materialized(con, "ngwaf_cache")
         except Exception:
-            pass  # ATTACH failed (e.g. DuckDB SQLite extension not loaded) — fall back gracefully
+            pass  # materialization failed — fall back gracefully
     if _ngwaf_attached:
         # The pair runs together (shared ATTACH); both need the temp.
         _need("ngwaf_verified_bots", {"waf_req_id"})

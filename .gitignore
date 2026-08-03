@@ -21,6 +21,8 @@ dist/
 .claude/*
 gemini.md
 SYSTEM.md
+DEPLOYMENT.md
+local-docs/*
 docs/superpowers/
 docs/plans/
 node_modules/

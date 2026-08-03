@@ -13,6 +13,34 @@ _SAFE_COL_RE = re.compile(r"[^\w]")
 from backend.utils.date_utils import parse_iso_utc
 
 
+def _lookup_ngwaf_waf_req_ids(db_path: str, bot_names: list[str]) -> list[str]:
+    """Return cached ``waf_req_id``s whose ``bot_name`` is in ``bot_names``.
+
+    Reads ``ngwaf_bot_cache.db`` via plain ``sqlite3`` instead of DuckDB's
+    ``sqlite_scan`` — see the ``_ngwaf_bot_name`` branch of
+    :func:`build_where_clause` for why. Best-effort: returns ``[]`` on any
+    sqlite error so a cache hiccup degrades the filter to "no matches"
+    rather than failing the whole query.
+    """
+    import logging
+    import sqlite3
+
+    try:
+        con = sqlite3.connect(db_path, timeout=5)
+        try:
+            placeholders = ", ".join("?" for _ in bot_names)
+            rows = con.execute(
+                f"SELECT waf_req_id FROM ngwaf_bots WHERE bot_name IN ({placeholders})",
+                bot_names,
+            ).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        logging.getLogger(__name__).warning("[build_where_clause] ngwaf_bots cache lookup failed: %s", e)
+        return []
+    return [r[0] for r in rows]
+
+
 def filter_spec_attr(spec: Any, attr: str) -> Any:
     """Read ``attr`` from a filter spec that may be a FilterSpec object or a
     plain dict.
@@ -191,8 +219,13 @@ def build_where_clause(
                 else:
                     parts.append(f"regexp_matches(ua, '(?i){safe_regex}')")
         elif is_ngwaf_bot_name:
-            # Virtual filter using DuckDB sqlite_scan on the local bot cache.
-            # Skipped if waf_req_id isn't in schema.
+            # Virtual filter over the local NGWAF bot cache. Resolved via a
+            # direct sqlite3 lookup (see _lookup_ngwaf_waf_req_ids) rather
+            # than DuckDB's sqlite_scan — sqlite_scan doesn't reliably
+            # coordinate with SQLite's own WAL/locking protocol, and reading
+            # ngwaf_bot_cache.db through it while the sync job concurrently
+            # writes the same (globally shared) file corrupted it in
+            # production (2026-07-30). Skipped if waf_req_id isn't in schema.
             if actual_cols is not None and "waf_req_id" not in actual_cols:
                 import logging
 
@@ -206,17 +239,20 @@ def build_where_clause(
             from backend import config as svcconfig
 
             ngwaf_db = svcconfig.ngwaf_db_path()
-            if os.path.exists(ngwaf_db):
-                ngwaf_db_escaped = ngwaf_db.replace("'", "''")
-                # Group exact names
+            if ngwaf_db and os.path.exists(ngwaf_db):
                 bot_names = [str(v) for v in non_none if v]
                 if bot_names:
-                    placeholders = ", ".join(_add_param(v) for v in bot_names)
+                    waf_req_ids = _lookup_ngwaf_waf_req_ids(ngwaf_db, bot_names)
                     op = "NOT IN" if mode == "exclude" else "IN"
-                    # We ensure waf_req_id is not null and exists in the subquery
-                    parts.append(
-                        f"waf_req_id {op} (SELECT waf_req_id FROM sqlite_scan('{ngwaf_db_escaped}', 'ngwaf_bots') WHERE bot_name IN ({placeholders}))"
-                    )
+                    if waf_req_ids:
+                        placeholders = ", ".join(_add_param(v) for v in waf_req_ids)
+                        parts.append(f"waf_req_id {op} ({placeholders})")
+                    elif mode != "exclude":
+                        # No cached rows match these bot names — an include
+                        # filter must match nothing (mirrors the empty-subquery
+                        # IN-clause behavior this replaces). An exclude filter
+                        # over an empty set is vacuously true, so no condition.
+                        parts.append("FALSE")
         elif is_signals_individual:
             for v in non_none:
                 val_str = str(v).strip()

@@ -341,6 +341,7 @@ def purge_usage_log(service_id: str, retention_days: int) -> None:
 def clear_usage_log(service_id: str) -> None:
     con = _ul(service_id)
     con.execute("DELETE FROM usage_log WHERE service_id = ?", (service_id,))
+    con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (service_id,))
     con.commit()
 
 

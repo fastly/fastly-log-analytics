@@ -324,16 +324,96 @@ def _attach_sqlite(con: duckdb.DuckDBPyConnection, sqlite_path: str, alias: str)
                 pass
 
 
+def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -> bool:
+    """Ensure ``{alias}.ngwaf_bots`` is queryable on ``con``, materialized
+    from the NGWAF bot-cache SQLite file via plain ``sqlite3`` — NOT via
+    DuckDB's own SQLite reader (``ATTACH ... TYPE SQLITE`` / ``sqlite_scan``).
+
+    DuckDB's SQLite reader doesn't reliably coordinate with SQLite's own
+    WAL/locking protocol; ATTACHing ``ngwaf_bot_cache.db`` directly while
+    ``_run_ngwaf_bot_sync`` concurrently writes the same (globally shared)
+    file corrupted it in production (2026-07-30) — ``PRAGMA integrity_check``
+    failed and every subsequent read/write kept failing until the file was
+    rebuilt from the NGWAF API. Reading the (small) cache into memory and
+    handing DuckDB an in-memory table sidesteps the cross-engine hazard
+    entirely.
+
+    Idempotent per connection: reuses an already-materialized ``{alias}``
+    catalog rather than re-reading the cache on every call — same "attach
+    once per connection" cost profile the ATTACH-based code this replaces
+    had. ``ngwaf_db_path()`` is a single fixed path for the whole
+    deployment (never per-service), so there's no "path changed, must
+    rebuild" case to handle. Returns ``True`` if ``{alias}.ngwaf_bots`` is
+    queryable (empty table counts as queryable), ``False`` if the cache
+    file doesn't exist or couldn't be read.
+
+    Uses ``ATTACH ':memory:' AS {alias}`` (a real, distinctly-named
+    in-memory DuckDB catalog) rather than ``CREATE SCHEMA {alias}`` in the
+    connection's current catalog — a per-service ``con`` from
+    ``get_connection()`` has its OWN catalog named after the service, and
+    an unqualified ``CREATE SCHEMA {alias}`` there made ``{alias}.ngwaf_bots``
+    references ambiguous once other catalogs were attached ("Ambiguous
+    reference to catalog or schema", prod 2026-07-30). A separate catalog
+    has no such collision.
+    """
+    existing = con.execute("SELECT 1 FROM duckdb_databases() WHERE database_name = ?", [alias]).fetchone()
+    if existing:
+        return True
+
+    import os
+
+    from backend import config as svcconfig
+
+    db_path = svcconfig.ngwaf_db_path()
+    if not db_path or not os.path.exists(db_path):
+        return False
+
+    import sqlite3
+
+    try:
+        sconn = sqlite3.connect(db_path, timeout=5)
+        try:
+            rows = sconn.execute(
+                "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
+            ).fetchall()
+        finally:
+            sconn.close()
+    except sqlite3.Error as e:
+        _logger.warning("[ngwaf_bots] cache read failed for %s: %s", alias, e)
+        return False
+
+    import pyarrow as pa
+
+    tbl = pa.table(
+        {
+            "waf_req_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "bot_name": pa.array([r[1] for r in rows], type=pa.string()),
+            "category": pa.array([r[2] for r in rows], type=pa.string()),
+            "wellknown_bot_name": pa.array([r[3] for r in rows], type=pa.string()),
+        }
+    )
+    try:
+        con.execute(f"ATTACH ':memory:' AS {alias}")
+        con.from_arrow(tbl).create(f"{alias}.ngwaf_bots")
+    except Exception as e:
+        _logger.warning("[ngwaf_bots] materializing %s.ngwaf_bots failed: %s", alias, e)
+        try:
+            con.execute(f"DETACH {alias}")
+        except Exception:
+            pass
+        return False
+    return True
+
+
 @contextlib.contextmanager
 def attach_ngwaf_cache(con: duckdb.DuckDBPyConnection, schema_cols: list[str], alias: str = "ngwaf_cache"):
-    """Attach the NGWAF bot cache SQLite database when the schema warrants it."""
+    """Materialize the NGWAF bot cache as ``{alias}.ngwaf_bots`` on ``con``
+    when the schema warrants it. See :func:`ensure_ngwaf_bots_materialized`.
+    """
     if "waf_req_id" not in schema_cols:
         yield False
         return
-    from backend import config as svcconfig
-
-    with _attach_sqlite(con, svcconfig.ngwaf_db_path(), alias) as attached:
-        yield attached
+    yield ensure_ngwaf_bots_materialized(con, alias)
 
 
 @contextlib.contextmanager

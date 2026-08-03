@@ -251,11 +251,37 @@ def _get_cached_or_scan_metadata(source: dict, table) -> tuple[int, int, dict, s
                 manifests = [m for m in current_snap.manifests(io) if m.has_added_files or m.has_existing_files]
                 live_manifest_paths = [getattr(m, "manifest_path", None) or repr(m) for m in manifests]
 
+                # Split cached vs uncached BEFORE touching the thread pool.
+                # The top-level scan cache above is keyed on the exact
+                # metadata_location, so it invalidates on every commit —
+                # fanning ALL manifests (even pure cache hits) through
+                # ThreadPoolExecutor(max_workers=16) on every post-commit
+                # scan oversubscribes this 4-core VM: thread-scheduling
+                # overhead for ~3400 near-instant dict lookups cost 40-60s+
+                # per scan despite a 99%-warm per-manifest cache (prod
+                # 2026-07-30). Only genuinely new manifests need a real
+                # network fetch and benefit from parallelism; resolve
+                # cached ones with a plain sequential lookup instead.
+                cached_results = []
+                uncached_manifests = []
+                with _manifest_metadata_cache_lock:
+                    for m in manifests:
+                        key = getattr(m, "manifest_path", None) or repr(m)
+                        agg = _manifest_metadata_cache.get(key)
+                        if agg is not None:
+                            cached_results.append(agg)
+                        else:
+                            uncached_manifests.append(m)
+
                 # Use parallel execution to speed up S3/CDN manifest fetches
                 from concurrent.futures import ThreadPoolExecutor
 
-                with ThreadPoolExecutor(max_workers=16) as executor:
-                    results = list(executor.map(scan_manifest, manifests))
+                if uncached_manifests:
+                    with ThreadPoolExecutor(max_workers=16) as executor:
+                        fetched_results = list(executor.map(scan_manifest, uncached_manifests))
+                else:
+                    fetched_results = []
+                results = cached_results + fetched_results
 
                 # Merge results
                 total_scanned_files = 0

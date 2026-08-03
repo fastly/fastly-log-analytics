@@ -19,8 +19,16 @@ Freshness / retention posture (also documented on
   were live PRESERVES those counts, so old windows read BETTER from the
   rollup than from a live join against the since-trimmed cache.
 
-The join reads the cache via ``sqlite_scan`` (no ATTACH — the shared driver
-owns the connection lifecycle and an ATTACH would leak into it).
+The join reads the cache by fetching it via plain ``sqlite3`` and inlining
+the rows as a DuckDB ``VALUES`` literal (see ``_read_ngwaf_bots_as_values_sql``)
+rather than letting DuckDB's ``sqlite_scan`` open the live file directly.
+``sqlite_scan`` doesn't reliably coordinate with SQLite's own WAL/locking
+protocol; reading ``ngwaf_bot_cache.db`` through it while
+``_run_ngwaf_bot_sync`` concurrently writes the same (globally shared) file
+corrupted it in production (2026-07-30) — ``PRAGMA integrity_check`` failed
+and every subsequent read/write against the file kept failing until it was
+rebuilt from the NGWAF API. No ATTACH either — the shared driver owns the
+connection lifecycle and an ATTACH would leak into it.
 
 Output: ``rollups/hour_bundled/hour=H/ngwaf_bots.parquet``. Schema:
 
@@ -48,6 +56,51 @@ from ._common import (
 
 logger = logging.getLogger(__name__)
 
+# Empty-but-valid relation: same shape as the VALUES literal below, zero rows.
+# Keeps the JOIN a no-op (not a skip) when the cache exists but has no
+# bot-tagged rows yet — the caller still writes the load-bearing empty
+# parquet that marks a bot-quiet hour as covered.
+_EMPTY_NGWAF_VALUES_SQL = (
+    "(SELECT NULL::VARCHAR AS waf_req_id, NULL::VARCHAR AS bot_name, NULL::VARCHAR AS category WHERE FALSE) AS nb"
+)
+
+
+def _read_ngwaf_bots_as_values_sql(db_path: str) -> str | None:
+    """Fetch the ``ngwaf_bots`` cache table via plain ``sqlite3`` and render
+    it as a DuckDB ``VALUES`` literal aliased ``nb(waf_req_id, bot_name,
+    category)``, instead of handing DuckDB the live file path via
+    ``sqlite_scan`` (see module docstring for why). The cache is small
+    (bot-name cardinality is tens per hour, trimmed by retention), so
+    fetching it whole and inlining it is cheap — done once per
+    ``build_ngwaf_bots_bundles`` call, reused across every closed hour.
+
+    Returns ``None`` on a read failure (mirrors the prior "file missing"
+    skip); returns :data:`_EMPTY_NGWAF_VALUES_SQL` for a valid-but-empty
+    cache so callers still write the load-bearing empty-hour parquet.
+    """
+    import sqlite3
+
+    try:
+        con = sqlite3.connect(db_path, timeout=5)
+        try:
+            rows = con.execute(
+                "SELECT waf_req_id, bot_name, category FROM ngwaf_bots WHERE bot_name IS NOT NULL"
+            ).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        logger.warning("[rollups] failed reading ngwaf_bots cache at %s: %s", db_path, e)
+        return None
+
+    if not rows:
+        return _EMPTY_NGWAF_VALUES_SQL
+
+    def esc(v: object) -> str:
+        return "NULL" if v is None else "'" + str(v).replace("'", "''") + "'"
+
+    values = ", ".join(f"({esc(r[0])}, {esc(r[1])}, {esc(r[2])})" for r in rows)
+    return f"(VALUES {values}) AS nb(waf_req_id, bot_name, category)"
+
 
 def build_ngwaf_bots_bundles(service_id: str, source: dict, hours: list[str]) -> int:
     """Write a per-hour ngwaf_bots rollup for each closed hour.
@@ -71,19 +124,19 @@ def build_ngwaf_bots_bundles(service_id: str, source: dict, hours: list[str]) ->
             # No NGWAF cache on this deployment — the live join would find
             # nothing either; skip quietly.
             return None
-        return {"ngwaf_db": db_path}
+        values_sql = _read_ngwaf_bots_as_values_sql(db_path)
+        if values_sql is None:
+            return None
+        return {"ngwaf_values_sql": values_sql}
 
     def build_copy_sql(ctx, table_ident, start_iso, end_iso, tmp_path):
-        # Single quotes escaped for the SQL string literal; the path comes
-        # from our own config, never user input.
-        db = str(ctx["ngwaf_db"]).replace("'", "''")
         return (
             f"COPY ("
             f"  SELECT CAST(nb.bot_name AS VARCHAR) AS bot_name, "
             f"         CAST(nb.category AS VARCHAR) AS category, "
             f"         CAST(COUNT(*) AS BIGINT) AS count "
             f"  FROM {table_ident} t "
-            f"  INNER JOIN sqlite_scan('{db}', 'ngwaf_bots') nb "
+            f"  INNER JOIN {ctx['ngwaf_values_sql']} "
             f"          ON t.waf_req_id = nb.waf_req_id "
             f"  WHERE t.timestamp >= TIMESTAMPTZ '{start_iso}' "
             f"    AND t.timestamp <  TIMESTAMPTZ '{end_iso}' "

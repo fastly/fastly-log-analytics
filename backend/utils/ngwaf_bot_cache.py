@@ -1,6 +1,15 @@
 """SQLite cache for NGWAF verified-bot requests.
 
-WAL mode is required so DuckDB can hold a READ_ONLY attach while we write concurrently.
+WAL mode lets multiple sqlite3 writers (per-service ``_run_ngwaf_bot_sync``
+ticks) touch this file concurrently without blocking each other.
+
+Readers (``backend.repositories._base.ensure_ngwaf_bots_materialized`` and
+``backend.core.rollups.ngwaf_bots``) deliberately do NOT let DuckDB open
+this file directly (no ``ATTACH ... TYPE SQLITE``, no ``sqlite_scan``) —
+DuckDB's SQLite reader doesn't reliably coordinate with SQLite's own
+WAL/locking protocol, and reading this globally-shared, frequently-written
+file that way corrupted it in production (2026-07-30). They read it via
+plain ``sqlite3`` instead and hand DuckDB the already-fetched rows.
 """
 
 from __future__ import annotations

@@ -112,7 +112,7 @@ export function IcebergOptimizationSection({
         <div className="space-y-0.5 pr-4">
           <Label className="text-xs font-semibold cursor-pointer" htmlFor="enable-compact">Enable Daily Optimization</Label>
           <p className="text-[10px] text-muted-foreground leading-tight">
-            Rewrites many small Iceberg snapshot files into larger, optimized Parquet files at 03:00 UTC.
+            Rewrites many small Iceberg snapshot files into larger, optimized Parquet files at 04:00 UTC.
             Strongly recommended when using frequent commit intervals.
           </p>
         </div>

@@ -2369,6 +2369,117 @@ def test_buffer_backlog_stats_reports_count_bytes_age(tmp_path):
     assert stats["oldest_path"] == str(f1)
 
 
+# ── _get_cached_or_scan_metadata: cached vs uncached manifest fan-out ────
+
+
+def test_scan_metadata_skips_thread_pool_entirely_when_all_manifests_cached(monkeypatch):
+    """When every manifest is already in the per-manifest cache,
+    ThreadPoolExecutor must not be instantiated at all — not "instantiated
+    but every task is a fast cache hit".
+
+    The top-level scan cache is keyed on the exact metadata_location, so
+    it invalidates on every commit; the OLD code unconditionally fanned
+    ALL manifests through ThreadPoolExecutor(max_workers=16) regardless of
+    cache state (each task still paid a lock acquisition + thread-pool
+    scheduling round-trip even on a cache hit). On a 4-core prod VM with
+    ~3400 manifests that cost 40-60s+ per scan despite a 99%-warm cache
+    (2026-07-30), because thread-scheduling overhead — not the per-item
+    work — dominated. This test would have passed on the old code too if
+    it only checked fetch_manifest_entry (the per-manifest cache check
+    inside scan_manifest already skipped the fetch); asserting the
+    executor class itself is never constructed is what actually pins the
+    fix."""
+    from backend.core.iceberg import _core as ib_core
+    from backend.core.iceberg import manifest as ib_manifest
+
+    monkeypatch.setattr(ib_manifest, "_load_manifest_metadata_cache", lambda source: None)
+    monkeypatch.setattr(ib_manifest, "_save_manifest_metadata_cache", lambda source, paths: None)
+    monkeypatch.setattr(ib_manifest, "_manifest_metadata_cache", {}, raising=False)
+    monkeypatch.setattr(ib_core, "_ui_metadata_cache", {}, raising=False)
+    monkeypatch.setattr(ib_core, "_ui_metadata_scan_locks", {}, raising=False)
+
+    def _make_manifest(path):
+        m = MagicMock()
+        m.manifest_path = path
+        m.has_added_files = True
+        m.has_existing_files = False
+        return m
+
+    manifests = [_make_manifest(f"m-{i}") for i in range(5)]
+    for i, m in enumerate(manifests):
+        ib_manifest._manifest_metadata_cache[m.manifest_path] = ({}, None, None, i + 1, (i + 1) * 100)
+
+    table = MagicMock()
+    table.metadata_location = "loc-v1"
+    table.io = MagicMock()
+    snap = MagicMock()
+    snap.summary = {"total-data-files": "0", "total-files-size": "0"}
+    snap.manifests.return_value = manifests
+    table.current_snapshot.return_value = snap
+
+    with patch("concurrent.futures.ThreadPoolExecutor") as mock_executor_cls:
+        data_files, size_bytes, _calendar, _min_ts, _max_ts = ib_manifest._get_cached_or_scan_metadata(
+            {"name": "svc-scan-test"}, table
+        )
+
+    mock_executor_cls.assert_not_called()
+    for m in manifests:
+        m.fetch_manifest_entry.assert_not_called()
+    assert data_files == sum(i + 1 for i in range(5))  # 1+2+3+4+5
+    assert size_bytes == sum((i + 1) * 100 for i in range(5))
+
+
+def test_scan_metadata_thread_pool_receives_only_uncached_manifests(monkeypatch):
+    """When some manifests are cached and some aren't, the thread pool
+    must be handed ONLY the uncached ones — the cached ones are resolved
+    by a plain dict lookup outside the executor entirely."""
+    from datetime import UTC, datetime
+
+    from backend.core.iceberg import _core as ib_core
+    from backend.core.iceberg import manifest as ib_manifest
+
+    monkeypatch.setattr(ib_manifest, "_load_manifest_metadata_cache", lambda source: None)
+    monkeypatch.setattr(ib_manifest, "_save_manifest_metadata_cache", lambda source, paths: None)
+    monkeypatch.setattr(ib_manifest, "_manifest_metadata_cache", {}, raising=False)
+    monkeypatch.setattr(ib_core, "_ui_metadata_cache", {}, raising=False)
+    monkeypatch.setattr(ib_core, "_ui_metadata_scan_locks", {}, raising=False)
+
+    def _make_manifest(path):
+        m = MagicMock()
+        m.manifest_path = path
+        m.has_added_files = True
+        m.has_existing_files = False
+        entry = MagicMock()
+        entry.status.name = "ADDED"
+        data_file = MagicMock()
+        data_file.file_size_in_bytes = 100
+        data_file.partition = [int(datetime(2026, 1, 1, tzinfo=UTC).timestamp() // 3600)]
+        entry.data_file = data_file
+        m.fetch_manifest_entry.return_value = [entry]
+        return m
+
+    cached_manifest = _make_manifest("m-cached")
+    uncached_manifest = _make_manifest("m-uncached")
+    ib_manifest._manifest_metadata_cache["m-cached"] = ({}, None, None, 5, 500)
+
+    table = MagicMock()
+    table.metadata_location = "loc-v1"
+    table.io = MagicMock()
+    snap = MagicMock()
+    snap.summary = {"total-data-files": "0", "total-files-size": "0"}
+    snap.manifests.return_value = [cached_manifest, uncached_manifest]
+    table.current_snapshot.return_value = snap
+
+    data_files, size_bytes, _calendar, _min_ts, _max_ts = ib_manifest._get_cached_or_scan_metadata(
+        {"name": "svc-scan-test"}, table
+    )
+
+    cached_manifest.fetch_manifest_entry.assert_not_called()
+    uncached_manifest.fetch_manifest_entry.assert_called_once()
+    assert data_files == 6  # 5 from the cached aggregate + 1 freshly fetched
+    assert size_bytes == 600
+
+
 # Silence ruff unused-imports
 
 _ = MagicMock
