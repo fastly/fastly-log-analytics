@@ -177,6 +177,42 @@ def test_enqueue_empty_list_is_noop():
     assert rdns_cache.enqueue([]) == 0
 
 
+@pytest.mark.security_regression
+def test_enqueue_drops_new_ips_once_pending_backlog_at_cap(monkeypatch):
+    """Audit finding 008: without a backlog cap, a client rotating through
+    many source IPs (or spoofing a bot User-Agent to hit the
+    classification enqueue path) can grow the pending backlog without
+    bound. Once at cap, new IPs are dropped rather than inserted."""
+    rdns_cache._init()
+    monkeypatch.setattr(rdns_cache, "_MAX_PENDING_BACKLOG", 2)
+    assert rdns_cache.enqueue(["1.1.1.1", "2.2.2.2"]) == 2
+    # At cap now — the next enqueue must be a no-op, not a partial insert.
+    n = rdns_cache.enqueue(["3.3.3.3", "4.4.4.4"])
+    assert n == 0
+    stats = rdns_cache.get_stats()
+    assert stats["total"] == 2
+    assert stats["pending"] == 2
+
+
+def test_enqueue_resumes_once_backlog_drains_below_cap(monkeypatch):
+    """Once pending IPs get resolved (backlog drains), enqueue must accept
+    new IPs again — the cap gates the instantaneous backlog, not a
+    lifetime total."""
+    rdns_cache._init()
+    monkeypatch.setattr(rdns_cache, "_MAX_PENDING_BACKLOG", 1)
+    rdns_cache.enqueue(["1.1.1.1"])
+    assert rdns_cache.enqueue(["2.2.2.2"]) == 0  # at cap
+
+    con = rdns_cache._write_con()
+    try:
+        con.execute("UPDATE rdns SET status='resolved', looked_up_at=datetime('now') WHERE ip='1.1.1.1'")
+        con.commit()
+    finally:
+        con.close()
+
+    assert rdns_cache.enqueue(["2.2.2.2"]) == 1
+
+
 def test_get_hostnames_batch_returns_cached_and_enqueues_missing():
     """``get_hostnames`` should fold N per-IP SELECTs into one call: rows
     already in the cache come back via the dict, IPs we've never seen are
@@ -388,6 +424,100 @@ def test_enrich_batch_no_op_when_nothing_pending():
         summary = rdns_cache.enrich_batch(limit=10)
 
     assert summary == {"resolved": 0, "errors": 0, "discovered": 0}
+
+
+# ── reap (audit finding 008) ─────────────────────────────────────────────────
+
+
+def test_reap_deletes_stale_nxdomain_rows_past_retention(monkeypatch):
+    rdns_cache._init()
+    monkeypatch.setattr(rdns_cache, "_STALE_ROW_RETENTION_DAYS", 30)
+    con = rdns_cache._write_con()
+    try:
+        con.execute(
+            "INSERT INTO rdns (ip, status, fcrdns_verified, looked_up_at) "
+            "VALUES ('1.1.1.1', 'nxdomain', 0, datetime('now', '-31 days'))"
+        )
+        con.execute(
+            "INSERT INTO rdns (ip, status, fcrdns_verified, looked_up_at) "
+            "VALUES ('2.2.2.2', 'nxdomain', 0, datetime('now', '-1 days'))"
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    result = rdns_cache._reap_stale_rows()
+
+    assert result["stale_deleted"] == 1
+    stats = rdns_cache.get_stats()
+    assert stats["total"] == 1  # the 1-day-old row survives
+
+
+def test_reap_never_deletes_pending_rows_regardless_of_age():
+    """A row can only be pending if enrich_batch hasn't gotten to it yet —
+    reaping it would silently drop a real, unresolved backlog entry
+    instead of just bounding disk growth."""
+    rdns_cache._init()
+    con = rdns_cache._write_con()
+    try:
+        con.execute("INSERT INTO rdns (ip, status, fcrdns_verified) VALUES ('1.1.1.1', 'pending', 0)")
+        con.commit()
+    finally:
+        con.close()
+
+    rdns_cache._reap_stale_rows()
+
+    assert rdns_cache.get_stats()["pending"] == 1
+
+
+@pytest.mark.security_regression
+def test_reap_trims_oldest_non_pending_rows_once_over_total_cap(monkeypatch):
+    """Audit finding 008: even resolved rows must not accumulate forever —
+    once past the hard cap, the oldest-looked-up rows go first."""
+    rdns_cache._init()
+    monkeypatch.setattr(rdns_cache, "_MAX_TOTAL_ROWS", 2)
+    con = rdns_cache._write_con()
+    try:
+        con.executemany(
+            "INSERT INTO rdns (ip, status, fcrdns_verified, looked_up_at) VALUES (?, 'resolved', 1, datetime('now', ?))",
+            [("1.1.1.0", "-3 days"), ("1.1.1.1", "-2 days"), ("1.1.1.2", "-1 days")],
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    result = rdns_cache._reap_stale_rows()
+
+    assert result["overflow_deleted"] == 1
+    con = rdns_cache._write_con()
+    try:
+        remaining = {row[0] for row in con.execute("SELECT ip FROM rdns").fetchall()}
+    finally:
+        con.close()
+    assert remaining == {"1.1.1.1", "1.1.1.2"}  # oldest (1.1.1.0) evicted first
+
+
+def test_maybe_reap_is_gated_to_run_at_most_once_per_interval(monkeypatch):
+    rdns_cache._init()
+    calls = []
+    monkeypatch.setattr(
+        rdns_cache, "_reap_stale_rows", lambda: calls.append(1) or {"stale_deleted": 0, "overflow_deleted": 0}
+    )
+    rdns_cache._last_reap_monotonic = None
+
+    rdns_cache._maybe_reap_stale_rows()
+    rdns_cache._maybe_reap_stale_rows()  # second call within the interval — must be a no-op
+
+    assert len(calls) == 1
+
+
+def test_maybe_reap_swallows_exceptions():
+    """A reap failure must never take down the every-5-min enrichment
+    cron — same swallow-and-log posture as the discovery pass."""
+    rdns_cache._init()
+    rdns_cache._last_reap_monotonic = None
+    with patch("backend.utils.rdns_cache._reap_stale_rows", side_effect=RuntimeError("db locked")):
+        rdns_cache._maybe_reap_stale_rows()  # must not raise
 
 
 # ── _now ────────────────────────────────────────────────────────────────────

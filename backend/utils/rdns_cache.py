@@ -36,6 +36,7 @@ import socket
 import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -61,6 +62,19 @@ _last_enrichment_at: str | None = None
 # without blocking the loop.
 _CONCURRENCY_LIMIT = 50
 _RESOLVER_TIMEOUT = 2.0
+
+# Hard caps bounding the cache's growth. Discovery/enqueue is driven by
+# whatever source IPs show up in ingested logs — traffic to the monitored
+# Fastly service, not anything this app authenticates — so without these,
+# a client rotating through many source IPs (a botnet is the natural
+# vector; the bot-classification enqueue path at repositories/security.py
+# additionally keys off a spoofable User-Agent) can grow the pending
+# backlog and the on-disk table without bound. Audit finding 008.
+_MAX_PENDING_BACKLOG = 50_000
+_MAX_TOTAL_ROWS = 250_000
+_STALE_ROW_RETENTION_DAYS = 30
+_REAP_INTERVAL_S = 24 * 3600
+_last_reap_monotonic: float | None = None
 
 
 def _is_ip_in_cidrs(ip: str, cidrs: list[str]) -> bool:
@@ -90,7 +104,8 @@ CREATE TABLE IF NOT EXISTS rdns (
     status          TEXT,
     fcrdns_verified INTEGER DEFAULT 0,
     looked_up_at    TEXT
-)
+);
+CREATE INDEX IF NOT EXISTS idx_rdns_status_looked_up_at ON rdns (status, looked_up_at);
 """
 
 
@@ -203,6 +218,16 @@ def enqueue(ips: list[str]) -> int:
     with _write_lock:
         con = _write_con()
         try:
+            pending = con.execute("SELECT count(*) FROM rdns WHERE status='pending'").fetchone()[0]
+            if pending >= _MAX_PENDING_BACKLOG:
+                logger.warning(
+                    "🌐 [rdns] pending backlog at cap (%d >= %d) — dropping %d new IP(s) instead of "
+                    "enqueueing; enrichment is falling behind actual traffic volume.",
+                    pending,
+                    _MAX_PENDING_BACKLOG,
+                    len(ips),
+                )
+                return 0
             before = con.total_changes
             con.executemany(
                 "INSERT OR IGNORE INTO rdns (ip, status, fcrdns_verified) VALUES (?, 'pending', 0)",
@@ -420,6 +445,67 @@ def _run_async_resolve(ips: list[str]) -> dict[str, int]:
 # ── Enrichment loop ───────────────────────────────────────────────────────────
 
 
+def _reap_stale_rows() -> dict:
+    """Bound the cache's on-disk footprint. Two idempotent passes:
+
+    1. Drop nxdomain/error rows older than the retention window — they'll
+       never resolve to anything useful, and are cheap to re-enqueue if the
+       IP shows up again.
+    2. If the table is still over the hard cap (e.g. the backlog cap in
+       :func:`enqueue` was itself raised, or a burst outpaced retention),
+       delete the oldest-looked-up non-pending rows until back under it.
+       Pending rows are excluded — that backlog is bounded separately by
+       :data:`_MAX_PENDING_BACKLOG` in :func:`enqueue`, not by this reaper.
+
+    Runs under the same writer lock as every other mutation.
+    """
+    with _write_lock:
+        con = _write_con()
+        try:
+            cur = con.execute(
+                "DELETE FROM rdns WHERE status IN ('nxdomain', 'error') AND looked_up_at < datetime('now', ?)",
+                (f"-{_STALE_ROW_RETENTION_DAYS} days",),
+            )
+            stale_deleted = cur.rowcount
+
+            total = con.execute("SELECT count(*) FROM rdns").fetchone()[0]
+            overflow_deleted = 0
+            if total > _MAX_TOTAL_ROWS:
+                overflow = total - _MAX_TOTAL_ROWS
+                cur = con.execute(
+                    """DELETE FROM rdns WHERE ip IN (
+                        SELECT ip FROM rdns WHERE status != 'pending' ORDER BY looked_up_at ASC LIMIT ?
+                    )""",
+                    (overflow,),
+                )
+                overflow_deleted = cur.rowcount
+            con.commit()
+        finally:
+            con.close()
+    return {"stale_deleted": stale_deleted, "overflow_deleted": overflow_deleted}
+
+
+def _maybe_reap_stale_rows() -> None:
+    """Run :func:`_reap_stale_rows` at most once per :data:`_REAP_INTERVAL_S`.
+
+    Gated on an in-memory monotonic timestamp rather than a persisted one —
+    worst case a process restart makes it run a bit more often than once a
+    day, which is harmless (each pass is a cheap indexed DELETE, a no-op in
+    steady state).
+    """
+    global _last_reap_monotonic
+    now = time.monotonic()
+    if _last_reap_monotonic is not None and (now - _last_reap_monotonic) < _REAP_INTERVAL_S:
+        return
+    _last_reap_monotonic = now
+    try:
+        result = _reap_stale_rows()
+        if result["stale_deleted"] or result["overflow_deleted"]:
+            logger.info("🌐 \x1b[34m[rdns]\x1b[0m reap complete: %s", result)
+    except Exception as e:
+        logger.error("[rdns_cache] Reap pass failed: %s", e)
+
+
 def enrich_batch(limit: int = 200) -> dict:
     """Resolve pending IPs with FCrDNS validation, then discover new IPs from
     DuckDB sources.
@@ -448,6 +534,8 @@ def enrich_batch(limit: int = 200) -> dict:
         discovered = _discover_new_ips(max_new=500)
     except Exception as e:
         logger.error("[rdns_cache] Discovery pass failed: %s", e)
+
+    _maybe_reap_stale_rows()
 
     _last_enrichment_at = iso_z_now()
     summary_out = {"resolved": resolved, "errors": errors, "discovered": discovered}

@@ -271,6 +271,74 @@ def test_cleanup_rollups_skipped_when_rollups_days_zero():
     assert result["rollups_deleted"] == 0
 
 
+def test_cleanup_first_run_switches_db_to_incremental_vacuum_mode():
+    """First-ever cleanup on a fresh DB (auto_vacuum defaults to NONE) must
+    flip the file into INCREMENTAL mode via the one-time full VACUUM —
+    every subsequent cleanup then takes the cheap chunked path instead of
+    repeating a full-file exclusive-lock rewrite."""
+    sid = "svc-cleanup-vacuum-mode"
+    _seed_usage_log(sid, 5, days_ago=10)
+
+    result = reconciliation.cleanup_metadata(sid, retention={"usage_log_days": 7})
+    assert result["vacuumed"] is True
+
+    con = _con(sid)
+    mode = con.execute("PRAGMA auto_vacuum").fetchone()[0]
+    assert mode == 2  # INCREMENTAL
+
+
+def _seed_padded_cron_runs(service_id: str, rows: int, days_ago: int) -> None:
+    """Like ``_seed_cron_run`` but with a large ``log_output`` blob so the
+    rows span multiple SQLite pages — deleting them must free enough pages
+    for ``PRAGMA freelist_count`` to register nonzero, which a handful of
+    tiny rows (as in ``_seed_cron_run``) would not reliably do."""
+    con = _con(service_id)
+    blob = "x" * 2000
+    con.executemany(
+        "INSERT INTO cron_runs (task, started_at, duration_s, status, parquet_keys, log_output) "
+        f"VALUES ('sync', datetime('now', '-{days_ago} days'), 1.0, 'success', '[]', ?)",
+        [(blob,) for _ in range(rows)],
+    )
+    con.commit()
+
+
+def test_cleanup_second_run_uses_chunked_incremental_vacuum_not_full_vacuum():
+    """Once a DB is already in INCREMENTAL mode, cleanup must reclaim space
+    via ``PRAGMA incremental_vacuum(N)`` chunks — NOT another bare VACUUM,
+    which holds an exclusive lock for the whole file rewrite and starves
+    concurrent writers (slow_queries insert, ingested_files upsert) even
+    past the 30s busy_timeout.
+
+    Seeds ``cron_runs`` (lives in metadata.db, the file the vacuum step
+    actually operates on) rather than ``usage_log`` (a separate per-service
+    file) so the DELETE genuinely frees pages in metadata.db and exercises
+    the incremental_vacuum loop rather than short-circuiting on
+    ``freelist_count == 0``.
+    """
+    sid = "svc-cleanup-vacuum-chunked"
+    _seed_padded_cron_runs(sid, 200, days_ago=400)
+    reconciliation.cleanup_metadata(sid, retention={"cron_runs_days": 7})  # pays the one-time mode switch
+
+    con = _con(sid)
+    assert con.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
+
+    _seed_padded_cron_runs(sid, 200, days_ago=400)
+    executed: list[str] = []
+    con.set_trace_callback(lambda sql: executed.append(sql))
+    try:
+        result = reconciliation.cleanup_metadata(sid, retention={"cron_runs_days": 7})
+    finally:
+        con.set_trace_callback(None)
+
+    assert result["vacuumed"] is True
+    assert not any(sql.strip().upper() == "VACUUM" for sql in executed), (
+        f"second cleanup re-ran a full VACUUM instead of incremental_vacuum: {executed}"
+    )
+    assert any("incremental_vacuum" in sql.lower() for sql in executed), (
+        f"expected PRAGMA incremental_vacuum to run on steady-state cleanup: {executed}"
+    )
+
+
 def test_cleanup_rollups_skipped_when_source_missing(monkeypatch):
     sid = "svc-cleanup-no-src"
     _seed_usage_log(sid, 1, days_ago=400)

@@ -15,6 +15,7 @@ import {
   Settings,
   Settings2,
   Trash2,
+  Eraser,
   ExternalLink,
   Play,
   CloudDownload,
@@ -39,6 +40,7 @@ export interface ServiceColumnDeps {
   servicesLength: number
   setCronService: (s: ServiceConfig) => void
   setSettingsService: (s: ServiceConfig) => void
+  setDeleteDataService: (s: ServiceConfig) => void
   setTeardownService: (s: ServiceConfig) => void
   setInviteService: (s: ServiceConfig) => void
   openNgwaf: (s: ServiceConfig) => void
@@ -52,6 +54,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
     servicesLength,
     setCronService,
     setSettingsService,
+    setDeleteDataService,
     setTeardownService,
     setInviteService,
     openNgwaf,
@@ -194,113 +197,67 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
     {
       id: 'actions',
       header: 'Actions',
-      size: servicesLength > 0 ? 780 : 120,
+      size: servicesLength > 0 ? 220 : 120,
       cell: ({ row }) => {
         const service = row.original
         const isActive = service.service_id === activeServiceId
 
         return (
           <div className="flex items-center gap-2">
-            {/* Desktop View */}
-            <div className="hidden xl:flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8 w-32 text-[11px] font-bold uppercase tracking-tight"
-                onClick={() => setSettingsService(service)}
-              >
-                <Settings2 className="h-3 w-3 mr-1.5" /> Log Settings
-              </Button>
-
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8 w-24 text-[11px] font-bold uppercase tracking-tight"
-                onClick={() => openNgwaf(service)}
-                title={service.ngwaf_workspace_id ? `NGWAF: ${service.ngwaf_workspace_id}` : 'Configure NGWAF workspace'}
-              >
-                <Bot className="h-3 w-3 mr-1.5" /> NGWAF
-              </Button>
-
-              {service.access_level === 'read_write' && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 w-24 text-[11px] font-bold uppercase tracking-tight"
-                  onClick={() => setInviteService(service)}
-                >
-                  <UserPlus className="h-3 w-3 mr-1.5" /> Invite
+            <DropdownMenu>
+              <DropdownMenuTrigger render={
+                <Button variant="outline" size="sm" className="h-8 gap-1.5 px-3 font-bold uppercase text-[10px] tracking-wider">
+                  Manage <ChevronDown className="h-3.5 w-3.5" />
                 </Button>
-              )}
-
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8 w-28 text-[11px] font-bold uppercase tracking-tight"
-                onClick={() => openCredentials(service)}
-                title="Update FOS access credentials"
-              >
-                <KeyRound className="h-3 w-3 mr-1.5" /> Rotate Key
-              </Button>
-
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8 w-28 text-[11px] font-bold uppercase tracking-tight border-destructive/50 text-destructive hover:bg-destructive hover:text-white"
-                onClick={() => setTeardownService(service)}
-              >
-                <Trash2 className="h-3 w-3 mr-1.5" /> Teardown
-              </Button>
-              {!isActive && (
-                <Button
-                  variant="default"
-                  size="sm"
-                  className="h-8 w-[105px] text-[11px] font-bold uppercase tracking-tight bg-primary hover:bg-primary/90"
-                  onClick={() => switchToService(service.service_id)}
-                >
-                  <Play className="h-3 w-3 mr-1.5 fill-current" /> Switch to
-                </Button>
-              )}
-            </div>
-
-            {/* Mobile / Tablet View (Dropdown) */}
-            <div className="xl:hidden">
-              <DropdownMenu>
-                <DropdownMenuTrigger render={
-                  <Button variant="outline" size="sm" className="h-8 gap-1.5 px-3 font-bold uppercase text-[10px] tracking-wider">
-                    Actions <ChevronDown className="h-3.5 w-3.5" />
-                  </Button>
-                } />
-                <DropdownMenuContent align="end" className="w-52">
-                  {!isActive && (
-                    <DropdownMenuItem onClick={() => switchToService(service.service_id)}>
-                      <Play className="mr-2 h-4 w-4" /> Switch to Service
-                    </DropdownMenuItem>
-                  )}
-                  <DropdownMenuItem onClick={() => setSettingsService(service)}>
-                    <Settings2 className="mr-2 h-4 w-4" /> Log Settings
+              } />
+              <DropdownMenuContent align="end" className="w-52">
+                {isActive && (
+                  <DropdownMenuItem disabled>
+                    <Play className="mr-2 h-4 w-4" /> Active Service
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => openNgwaf(service)}>
-                    <Bot className="mr-2 h-4 w-4" /> NGWAF Config
+                )}
+                <DropdownMenuItem onClick={() => setSettingsService(service)}>
+                  <Settings2 className="mr-2 h-4 w-4" /> Log Settings
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => openNgwaf(service)}>
+                  <Bot className="mr-2 h-4 w-4" /> NGWAF Config
+                </DropdownMenuItem>
+                {service.access_level === 'read_write' && (
+                  <DropdownMenuItem onClick={() => setInviteService(service)}>
+                    <UserPlus className="mr-2 h-4 w-4" /> Invite User
                   </DropdownMenuItem>
-                  {service.access_level === 'read_write' && (
-                    <DropdownMenuItem onClick={() => setInviteService(service)}>
-                      <UserPlus className="mr-2 h-4 w-4" /> Invite User
-                    </DropdownMenuItem>
-                  )}
-                  <DropdownMenuItem onClick={() => openCredentials(service)}>
-                    <KeyRound className="mr-2 h-4 w-4" /> Rotate Key
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
+                )}
+                <DropdownMenuItem onClick={() => openCredentials(service)}>
+                  <KeyRound className="mr-2 h-4 w-4" /> Rotate Key
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                {service.access_level === 'read_write' && (
                   <DropdownMenuItem
                     className="text-destructive focus:text-destructive focus:bg-destructive/10"
-                    onClick={() => setTeardownService(service)}
+                    onClick={() => setDeleteDataService(service)}
                   >
-                    <Trash2 className="mr-2 h-4 w-4" /> Teardown Service
+                    <Eraser className="mr-2 h-4 w-4" /> Delete Data
                   </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
+                )}
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive focus:bg-destructive/10"
+                  onClick={() => setTeardownService(service)}
+                >
+                  <Trash2 className="mr-2 h-4 w-4" /> Teardown Service
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            {!isActive && (
+              <Button
+                variant="default"
+                size="sm"
+                className="h-8 px-3 text-[11px] font-bold uppercase tracking-tight bg-primary hover:bg-primary/90"
+                onClick={() => switchToService(service.service_id)}
+              >
+                <Play className="h-3 w-3 mr-1.5 fill-current" /> Switch to
+              </Button>
+            )}
           </div>
         )
       }

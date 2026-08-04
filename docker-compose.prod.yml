@@ -228,8 +228,43 @@ services:
       - /mnt/app-data/configs:/app/configs
       - /mnt/app-data/data:/app/data
       - /mnt/app-data/cache:/app/cache
+    # Plain /api/health (deep=0) returns HTTP 200 unconditionally, even while
+    # _startup_complete is still false (backend/main.py ~line 980) — it only
+    # confirms the HTTP server answers, not that the per-service warm-up loop
+    # (backend/main.py:_background_startup) finished. That warm-up can take
+    # 15-20 min on this VM, so the old `curl -f .../api/health` check flipped
+    # "Healthy" within seconds of container start while the app was still
+    # 15-20 min from real readiness (2026-08 false-positive readiness
+    # incident). ?deep=1 is exempt from the admin-token gate (path-only match
+    # in remote_access.py, query string doesn't affect it) and its docstring
+    # says the cost is SQLite-only — no FOS/CDN/Fastly API — so it's cheap
+    # enough to poll every interval. Checking HTTP status alone still isn't
+    # enough: deep=1 ALSO returns plain 200 while status is "initializing"
+    # (only flips to a real 503 once _startup_complete is true and a service
+    # is degraded), so this greps the response body for the top-level
+    # "status":"ok" (anchored on `^{` so a per-service "status":"ok" inside
+    # the nested services[] array can't false-positive-match while the
+    # overall status is "degraded").
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS 'http://127.0.0.1:8000/api/health?deep=1' | grep -q '^{\"status\":\"ok\"'",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Long enough to cover the documented 15-20 min per-service warm-up
+      # loop (_background_startup) with margin. Failures during start_period
+      # show as "starting", not "unhealthy" — Docker does NOT restart a
+      # container on a failed healthcheck by itself (restart:unless-stopped
+      # only reacts to process exit), but a generous start_period still
+      # avoids the container ever being labeled unhealthy mid-warm-up for
+      # anything (dashboards, `docker ps`, future orchestration) that reads
+      # that status. The check flips to "healthy" as soon as _startup_complete
+      # is true and every service is ok — no need to wait out the full
+      # budget in the common case.
+      start_period: 25m
 
   frontend:
     network_mode: host

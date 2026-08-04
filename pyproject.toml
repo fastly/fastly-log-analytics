@@ -1,6 +1,6 @@
 [project]
 name = "fastly-log-analytics"
-version = "2.2.2"
+version = "2.3.0"
 description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB"
 # The codebase uses PEP 695 type-parameter syntax (``def foo[T]``) and
 # ``from datetime import UTC``, which require 3.12 and 3.11 respectively; the

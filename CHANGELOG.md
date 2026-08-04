@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-08-04
+
+### Added
+
+- **Project Log Reset ("Delete Data")** in the admin Services table's Manage
+  menu — wipes a service's log history back to a 0-state (cloud Iceberg
+  table, local cache, ingestion ledgers) while preserving its saved views,
+  alerts, and audit history, with a type-to-confirm safety step and live
+  progress over SSE.
+
+### Changed
+
+- **Insights** runs its four coalesced aggregate scans in parallel instead
+  of sequentially.
+- Network-health temp-table builds are coalesced across concurrent
+  identical requests instead of racing duplicate builds.
+- Top-N field limits are applied per-field instead of a single collapsed
+  global max, so overriding one field's limit no longer silently raises
+  every other field's cutoff too.
+- The local-cache directory walk on bootstrap no longer blocks startup for
+  minutes after a restart.
+- The backend healthcheck (and `restart.sh`'s polling loop) now checks the
+  deep readiness signal instead of the always-200 liveness endpoint, so a
+  restart no longer reports "Healthy" while still 15-20 minutes from ready.
+- `/api/bootstrap` no longer withholds the admin token during per-service
+  startup warm-up — admin auth and per-service data readiness are now
+  tracked independently.
+
+### Fixed
+
+- The rDNS cache now bounds its pending backlog and periodically sweeps
+  stale/overflow rows instead of growing without limit.
+- A concurrent-login race that could transiently exceed the configured
+  session cap is now closed.
+- Cloud Iceberg writers (commit, optimize, cloud maintenance) now serialize
+  against a Project Log Reset in progress instead of racing it, which could
+  otherwise corrupt the freshly-reset table.
+- A view refresh no longer falls back to a crash-prone read path once it
+  already knows the underlying table is broken.
+- `metadata.db` VACUUM now runs in chunks instead of holding an exclusive
+  lock for the full rewrite, which was starving other SQLite writers.
+- Slow-query batch flushing moved off the request hot path so a disk stall
+  while flushing can't block the query that just finished.
+
 ## [2.2.2] - 2026-08-03
 
 ### Added
@@ -1396,6 +1440,7 @@ deleted.
   admin tunnel use case is no longer supported; production has always
   been direct-mode against the Fastly+Caddy public URL.
 
+[2.3.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.3.0
 [2.2.2]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.2
 [2.2.1]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.1
 [2.2.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.0

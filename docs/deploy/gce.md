@@ -102,8 +102,25 @@ set -euo pipefail
 cd /mnt/app-data/fastly-log-analytics
 git pull
 docker compose up -d --build
-sleep 10
-curl -fsS http://localhost:8000/api/health
+
+# Poll the SAME readiness signal as the Docker healthcheck in
+# docker-compose.prod.yml — NOT the old `sleep 10; curl .../api/health`,
+# which reported "ready" within seconds because plain /api/health (and even
+# ?deep=1) return HTTP 200 unconditionally while the backend is still
+# `initializing`. The per-service warm-up loop
+# (backend/main.py:_background_startup) can take 15-20 min on this VM, so
+# check the response BODY for the top-level "status":"ok", not just the
+# HTTP status code, and budget the wait accordingly.
+echo "waiting for backend to report real readiness (can take 15-20 min)..."
+for i in $(seq 1 100); do  # 100 * 15s = 25 min budget, matches compose start_period
+  if curl -fsS 'http://localhost:8000/api/health?deep=1' 2>/dev/null | grep -q '^{"status":"ok"'; then
+    echo "backend ready after $((i * 15))s"
+    exit 0
+  fi
+  sleep 15
+done
+echo "backend did not report ready within 25 min — check: curl -s 'http://localhost:8000/api/health?deep=1'" >&2
+exit 1
 ```
 
 **After a force-push** to the deploy branch:

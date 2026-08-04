@@ -3,7 +3,7 @@
   "info": {
     "title": "Fastly Log Analytics API",
     "description": "FastAPI backend for the Fastly Log Analytics tool. Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json.",
-    "version": "2.2.2"
+    "version": "2.3.0"
   },
   "paths": {
     "/api/dashboard/aggregates": {
@@ -17412,6 +17412,192 @@
         ],
         "responses": {
           "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/reset-logs": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Reset Logs Endpoint",
+        "description": "Permanently delete this service's log data (cloud + local) over SSE.\n\nWipes the cloud Iceberg log table, the local DuckDB file + cache, and\nthe SQLite ingestion ledgers, then re-initializes an empty, queryable\n0-state. Preserves the service's configuration: saved views, alerts,\nsource registration, audit history, and scoring labels/audit. See\n``backend.core.reset.reset_service_logs`` for the full sequence.\n\nFails closed before any work starts: 403 if this service isn't\nread_write (defense-in-depth \u2014 ``RemoteAccessMiddleware`` already blocks\n``/api/admin/*`` for remote analysts), and 400 if ``confirm`` doesn't\nmatch the resolved service id.",
+        "operationId": "reset_logs_endpoint_api_admin_reset_logs_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetLogsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
@@ -45078,6 +45264,33 @@
         ],
         "title": "RefreshPopLocationsRequest",
         "description": "Body for ``POST /api/admin/pop-locations/refresh`` \u2014 the Fastly API\nkey used to pull the live POP catalog. Token can also arrive as a\n``?token=`` query param for backward compat with older clients."
+      },
+      "ResetLogsRequest": {
+        "properties": {
+          "confirm": {
+            "type": "string",
+            "title": "Confirm",
+            "description": "Must equal the target service_id."
+          },
+          "delete_raw_logs": {
+            "type": "boolean",
+            "title": "Delete Raw Logs",
+            "description": "Also delete not-yet-ingested raw .gz logs in cloud storage. Default off \u2014 see the re-ingestion-storm warning in the design doc.",
+            "default": false
+          },
+          "preserve_usage_history": {
+            "type": "boolean",
+            "title": "Preserve Usage History",
+            "description": "Keep Class A/B usage-log (billing) history.",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "confirm"
+        ],
+        "title": "ResetLogsRequest",
+        "description": "Body for ``POST /api/admin/reset-logs`` \u2014 a destructive wipe of one\nservice's log data. ``confirm`` must equal the resolved service id\n(belt-and-suspenders alongside the ``x-service-id``/``?service_id``\nresolution) so a stale/mistargeted request fails loud instead of\nsilently wiping the wrong service."
       },
       "SavedView": {
         "properties": {

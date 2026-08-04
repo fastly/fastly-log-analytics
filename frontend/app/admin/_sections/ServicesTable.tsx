@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
 import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
+import { cronCacheBust } from '@/lib/cron-cache-bust'
 import type { components } from '@/types/api.generated'
 import { useServiceStore } from '@/stores/serviceStore'
 // Direct import (not via the barrel) so the page bundle drops the
@@ -11,6 +12,7 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { DataTableReadonly as DataTable } from '@/components/DataTable/DataTableReadonly'
 import { ProvisionWizard } from '@/components/ProvisionWizard/ProvisionWizard'
 import { TeardownDialog } from '@/components/TeardownDialog'
+import { DeleteDataDialog } from '@/components/DeleteDataDialog'
 import { CronSettingsModal } from '@/components/CronSettingsModal/CronSettingsModal'
 import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'
 import { InviteAnalystDialog } from '@/components/InviteAnalystDialog'
@@ -34,6 +36,7 @@ export function ServicesTable() {
   const [cronService, setCronService] = useState<ServiceConfig | null>(null)
   const [settingsService, setSettingsService] = useState<ServiceConfig | null>(null)
   const [teardownService, setTeardownService] = useState<ServiceConfig | null>(null)
+  const [deleteDataService, setDeleteDataService] = useState<ServiceConfig | null>(null)
   const [inviteService, setInviteService] = useState<ServiceConfig | null>(null)
   const [credentialsService, setCredentialsService] = useState<ServiceConfig | null>(null)
   // Cached "initial mode" for the credentials dialog — picked when the
@@ -78,6 +81,7 @@ export function ServicesTable() {
       servicesLength: services?.services?.length || 0,
       setCronService,
       setSettingsService,
+      setDeleteDataService,
       setTeardownService,
       setInviteService,
       openNgwaf: setNgwafService,
@@ -153,6 +157,17 @@ export function ServicesTable() {
           queryClient.invalidateQueries({ queryKey: ['services'] })
           queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
           setTeardownService(null)
+        }}
+      />
+
+      <DeleteDataDialog
+        service={deleteDataService}
+        open={!!deleteDataService}
+        onOpenChange={(open) => !open && setDeleteDataService(null)}
+        onComplete={() => {
+          cronCacheBust(queryClient, deleteDataService?.service_id)
+          queryClient.invalidateQueries({ queryKey: ['services'] })
+          setDeleteDataService(null)
         }}
       />
 

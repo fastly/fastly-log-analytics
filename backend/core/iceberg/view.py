@@ -775,6 +775,17 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
 
     iceberg_loc = None
     local_iceberg_files = []
+    # Set when plan_files() proves the CURRENT snapshot's manifest closure
+    # references a file that no longer exists in cloud storage (as opposed
+    # to a transient network/rate-limit blip) — see the FileNotFoundError
+    # check below. Gates the iceberg_scan() fallback further down: falling
+    # back to it here would just re-attempt the same doomed read via
+    # DuckDB's native iceberg extension instead of pyiceberg's, and that
+    # path throws an uncatchable duckdb::Exception on an internal worker
+    # thread that crashes the ENTIRE process, not just this request
+    # (2026-08-04 incident — a corrupted table took the whole backend, and
+    # every other service on it, down on every restart).
+    iceberg_unreadable = False
 
     # We can skip reading from S3 entirely if ONLY the buffer changed.
     cached_files = _snapshot_files_cache.get(source_key)
@@ -862,6 +873,15 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
                 _save_persistent_cache(source)
             except Exception as e:
                 logger.warning("[iceberg] plan_files() failed for %s: %s", source_key, e)
+                if isinstance(e, FileNotFoundError):
+                    # pyiceberg raises FileNotFoundError specifically when a
+                    # manifest/manifest-list referenced by the manifest
+                    # closure it just walked doesn't exist in cloud storage
+                    # — a genuine corruption, not the transient network/rate-
+                    # limit errors (ClientError, TimeoutError, ...) a blip
+                    # would raise. Skip the iceberg_scan() fallback below;
+                    # deliberately verified via a real corrupted table.
+                    iceberg_unreadable = True
 
     if not iceberg_loc and not buf_files and not local_iceberg_files:
         # All three "data source" channels are empty. There are two reasons
@@ -1030,11 +1050,19 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
     # Use iceberg_scan when:
     # (a) plan_files() returned S3 URIs and no local files are cached yet, OR
     # (b) plan_files() failed silently but iceberg_loc is known (avoids WHERE false view)
+    #
+    # EXCEPT when plan_files() already proved (via FileNotFoundError, see
+    # above) that the current snapshot references a missing file —
+    # iceberg_scan() would hit the exact same missing file through DuckDB's
+    # native iceberg extension, which crashes the whole process rather than
+    # raising a catchable Python exception. Falls through to the "no
+    # parts" empty-view branch below instead.
     if (
         iceberg_loc
         and not local_paths
         and (s3_paths or not local_iceberg_files)
         and source.get("access_level") != "read_only"
+        and not iceberg_unreadable
     ):
         parts.append(_strip_computed(f"iceberg_scan('{escape_sql_literal(iceberg_loc)}', allow_moved_paths=true)"))
         logger.info(
@@ -1043,6 +1071,14 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
             source_key,
             len(s3_paths),
             len(local_iceberg_files),
+        )
+    elif iceberg_unreadable:
+        logger.warning(
+            "%s %s: current snapshot's manifest closure references a missing cloud file — "
+            "serving an empty view instead of iceberg_scan (which would crash the process). "
+            "Run a Delete Data reset on this service to recover.",
+            _core_mod._ICE,
+            source_key,
         )
     elif s3_paths:
         # Demoted from INFO to DEBUG (2026-06-01): this fires on every

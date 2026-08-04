@@ -251,6 +251,64 @@ def handle_teardown(args):
         sys.exit(1)
 
 
+def handle_reset_logs(args):
+    banner("Fastly Log Analysis — Delete Data")
+    from backend import config as svcconfig
+    from backend.core.metadata.reconciliation import is_ingested_files_dedup_active
+    from backend.core.reset import reset_service_logs
+    from backend.cron.scheduler import get_scheduler
+
+    service_id = getattr(args, "service_id", None)
+    cfg = svcconfig.load_config(service_id) if service_id else None
+    if not cfg:
+        fail(f"No service config found for {service_id!r}.")
+        sys.exit(1)
+
+    if not args.yes:
+        blank()
+        print(f"  {_c(YLW + BOLD, 'The following will be permanently deleted:')}")
+        print(f"  {_c(DIM, 'Cloud Iceberg log table (iceberg/, except iceberg/meta/)')}")
+        print(f"  {_c(DIM, 'Quarantined-file copies (errors/)')}")
+        print(f"  {_c(DIM, 'Local DuckDB analytical database + cache')}")
+        print(f"  {_c(DIM, 'Local ingestion dedup indexes')}")
+        if args.delete_raw:
+            print(f"  {_c(YLW + BOLD, 'Raw .gz logs in cloud storage (raw/)')}")
+        if args.wipe_usage:
+            print(f"  {_c(DIM, 'Usage-log (Class A/B) billing history')}")
+        blank()
+        print(
+            f"  {_c(BLU, 'Preserved:')} saved views, alerts, source registration, audit history, scoring labels/audit."
+        )
+        if args.delete_raw and not is_ingested_files_dedup_active(service_id):
+            blank()
+            warn(
+                "This source keeps raw logs after ingest (delete_after=False). Deleting raw/ now "
+                "means the next full sync has no dedup record left and will re-ingest this "
+                "service's ENTIRE history."
+            )
+        blank()
+        if not ask_yes(_c(YLW + BOLD, "This cannot be undone. Continue?"), default=False):
+            sys.exit(0)
+
+    try:
+        for event in reset_service_logs(
+            service_id,
+            delete_raw_logs=args.delete_raw,
+            preserve_usage_history=not args.wipe_usage,
+            actor="cli",
+            reload_scheduler=lambda: get_scheduler().reload(),
+        ):
+            if event["type"] == "status":
+                info(event["message"])
+            elif event["type"] == "done":
+                ok(event["message"])
+            elif event["type"] == "error":
+                fail(event["message"])
+    except Exception as exc:
+        fail(f"Log deletion failed: {exc}")
+        sys.exit(1)
+
+
 def handle_invite_analyst(args):
     banner("Fastly Log Analysis — Invite Analyst")
     from backend import config as svcconfig
@@ -615,6 +673,21 @@ def cmd_teardown(
         no_remove_scoring=no_remove_scoring,
     )
     handle_teardown(args)
+
+
+@app.command("reset-logs", help="Delete a service's log data and reset it to a 0-state.")
+def cmd_reset_logs(
+    service_id: str = typer.Option(..., "--service-id", help="The Fastly service ID to reset."),
+    delete_raw: bool = typer.Option(
+        False,
+        "--delete-raw/--no-delete-raw",
+        help="Also delete raw .gz logs in cloud storage (default off; re-ingestion risk on delete_after=False sources).",
+    ),
+    wipe_usage: bool = typer.Option(False, "--wipe-usage/--preserve-usage", help="Delete Class A/B usage-log history."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the destructive-action confirmation prompt."),
+):
+    args = SimpleNamespace(service_id=service_id, delete_raw=delete_raw, wipe_usage=wipe_usage, yes=yes)
+    handle_reset_logs(args)
 
 
 @app.command("invite-analyst", help="Generate a read-only analyst invite.")

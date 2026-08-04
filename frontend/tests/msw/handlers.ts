@@ -406,6 +406,10 @@ export const handlers = [
     HttpResponse.json({ series: [] }),
   ),
   http.post(`${API_BASE}/api/admin/rebuild-local-view`, ok({ ok: true })),
+  // Real handler is an SSE stream (EventSourceResponse); components under
+  // test mock useSSE directly (see DeleteDataDialog.test.tsx), so this only
+  // needs to exist for the MSW-coverage-vs-openapi.json gate.
+  http.post(`${API_BASE}/api/admin/reset-logs`, ok({ type: 'done', message: 'ok' })),
   http.get(`${API_BASE}/api/admin/usage-log`, () =>
     HttpResponse.json({ rows: [] }),
   ),

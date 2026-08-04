@@ -5,7 +5,7 @@
 
 ## 1. Context & Motivation
 
-The HTTP surface is `/api/*` with no `/api/v1/` prefix. Semantic versioning lives on the app object (`app.version='2.2.2'` in [backend/main.py](../../backend/main.py)). The typed frontend client is openapi-typescript-generated from FastAPI's OpenAPI schema, with the pre-commit `regen-openapi` hook gating drift.
+The HTTP surface is `/api/*` with no `/api/v1/` prefix. Semantic versioning lives on the app object (`app.version='2.3.0'` in [backend/main.py](../../backend/main.py)). The typed frontend client is openapi-typescript-generated from FastAPI's OpenAPI schema, with the pre-commit `regen-openapi` hook gating drift.
 
 The system is internally self-consistent but has no written rule for what counts as breaking. The 2026-06-10 sessions surfaced two related signals: (a) `/api/sync-status?skip_fos=true` was used as a soft-versioning mechanism (query-param "give me less"), and it failed because the underlying middleware 403'd analysts entirely regardless of the param; (b) the chosen fix was a sibling endpoint `/api/log-extents` rather than a versioned variant of `/api/sync-status`. That decision is the doctrine, but it lives in a session note rather than an ADR.
 

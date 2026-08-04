@@ -716,18 +716,37 @@ def test_get_dir_stats_returns_zero_for_missing_path(tmp_path):
     assert (size, count) == (0, 0)
 
 
+def _poll_dir_stats(path: str, expected: tuple[int, int], timeout: float = 2.0) -> tuple[int, int]:
+    """Call `_get_dir_stats` until it settles on `expected` or `timeout` elapses.
+
+    `_get_dir_stats` never blocks the caller, even on the very first call
+    for a path — a cold/expired entry returns a best-effort value
+    immediately (stale, or `(0, 0)`) and populates the real value on a
+    background thread. Tests must poll for that thread to land rather
+    than asserting on the single synchronous return.
+    """
+    import time
+
+    from backend.services.service_manager import _get_dir_stats
+
+    deadline = time.monotonic() + timeout
+    result = _get_dir_stats(path)
+    while result != expected and time.monotonic() < deadline:
+        time.sleep(0.02)
+        result = _get_dir_stats(path)
+    return result
+
+
 def test_get_dir_stats_walks_recursively_and_sums_file_sizes(tmp_path):
     """Recursive walk summing file sizes + count. Pinned because
     the Settings panel shows the per-service cache footprint and a
     refactor that broke the recursion would under-report."""
-    from backend.services.service_manager import _get_dir_stats
-
     (tmp_path / "a.txt").write_bytes(b"x" * 100)
     sub = tmp_path / "sub"
     sub.mkdir()
     (sub / "b.txt").write_bytes(b"y" * 200)
 
-    size, count = _get_dir_stats(str(tmp_path))
+    size, count = _poll_dir_stats(str(tmp_path), (300, 2))
     assert size == 300
     assert count == 2
 
@@ -738,17 +757,47 @@ def test_get_dir_stats_skips_symlinks(tmp_path):
     parquet files; following them would inflate the size estimate."""
     import os
 
-    from backend.services.service_manager import _get_dir_stats
-
     real = tmp_path / "real.txt"
     real.write_bytes(b"x" * 50)
     link = tmp_path / "link.txt"
     os.symlink(real, link)
 
-    size, count = _get_dir_stats(str(tmp_path))
     # Only the real file counts (50 bytes); the symlink is skipped
+    size, count = _poll_dir_stats(str(tmp_path), (50, 1))
     assert size == 50
     assert count == 1
+
+
+def test_get_dir_stats_never_blocks_on_a_cold_path(tmp_path, monkeypatch):
+    """The very first call for a never-seen path must return immediately
+    (the `(0, 0)` placeholder) rather than walking synchronously — a slow
+    walk (thousands of files) previously blocked /api/bootstrap +
+    /api/services for as long as the walk took, taking /admin down after
+    every restart for services with a large local cache."""
+    import time
+
+    from backend.services import service_manager
+    from backend.services.service_manager import _get_dir_stats
+
+    (tmp_path / "a.txt").write_bytes(b"x" * 100)
+
+    # Make the walk itself artificially slow so a blocking implementation
+    # would fail this test's timing assertion; a non-blocking one won't
+    # notice since the walk runs on a background thread.
+    real_walk = service_manager._walk_dir_stats
+
+    def slow_walk(path: str) -> tuple[int, int]:
+        time.sleep(0.5)
+        return real_walk(path)
+
+    monkeypatch.setattr(service_manager, "_walk_dir_stats", slow_walk)
+
+    started = time.monotonic()
+    size, count = _get_dir_stats(str(tmp_path))
+    elapsed = time.monotonic() - started
+
+    assert (size, count) == (0, 0)
+    assert elapsed < 0.4, f"_get_dir_stats blocked for {elapsed:.2f}s on a cold path"
 
 
 # ── GET /services/{id}/custom-fields/export ───────────────────────────────

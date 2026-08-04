@@ -38,6 +38,35 @@ _insights_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=500, ttl_seconds=IN
 _insights_cache_lock = threading.Lock()
 
 
+def _execute_on_cursor(
+    runner: QueryRunner,
+    debug_lock: threading.Lock,
+    cur: duckdb.DuckDBPyConnection,
+    sql: str,
+    params: list | None = None,
+):
+    """Execute ``sql`` on ``cur`` — a ``runner.con.cursor()`` shadow connection —
+    and append its timing to the REQUEST-scoped ``runner.debug_queries`` under
+    ``debug_lock``.
+
+    Shared by the pre-per-insight coalesced-aggregate parallel dispatch (city/
+    url/ip-security/WAF-unnest, all launched together via a ThreadPoolExecutor
+    in ``get_insights``) and the later per-insight ThreadPoolExecutor dispatch.
+    Cursors returned by ``con.cursor()`` are separate shadow connections on the
+    same parent — thread-safe to call concurrently from different threads,
+    unlike calling ``runner.execute`` (which serialises on the single parent
+    cursor). ``debug_lock`` is the caller's request-scoped lock, NOT a module-
+    global one, so concurrent unrelated requests never contend on each other's
+    append.
+    """
+    t0 = time.time()
+    res = cur.execute(sql, params or [])
+    elapsed_ms = round((time.time() - t0) * 1000, 2)
+    with debug_lock:
+        runner.debug_queries.append({"sql": _compact_sql_for_debug(sql), "time_ms": elapsed_ms})
+    return res
+
+
 def _coalesced_city_aggregates(
     runner: QueryRunner,
     table_name: str,
@@ -47,6 +76,9 @@ def _coalesced_city_aggregates(
     country_sel: str,
     window_hours: float,
     baseline_hours: float,
+    *,
+    shadow_cursor: duckdb.DuckDBPyConnection | None = None,
+    debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
     """Run ONE pass over `table_name` to compute every aggregate the four
     city-based insights need, then demux into per-insight result lists
@@ -75,7 +107,10 @@ def _coalesced_city_aggregates(
         region_sel=region_sel,
         country_sel=country_sel,
     )
-    rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
+    if shadow_cursor is not None and debug_lock is not None:
+        rows = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]).fetchall()
+    else:
+        rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
 
     surges: list[tuple] = []
     error_spikes: list[tuple] = []
@@ -150,6 +185,9 @@ def _coalesced_url_aggregates(
     runner: QueryRunner,
     table_name: str,
     window_start_s: str,
+    *,
+    shadow_cursor: duckdb.DuckDBPyConnection | None = None,
+    debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
     """Coalesce 5 URL-keyed insights (error_spikes, cache_collapse,
     cacheability_regression, latency_regression, tail_latency) into ONE
@@ -184,7 +222,10 @@ def _coalesced_url_aggregates(
     - tail_latency:             [url, p99_ms, p50_ms, ratio, total]
     """
     sql = COALESCED_URL_AGGREGATES.format(table_name=table_name)
-    cursor = runner.execute(sql, [window_start_s, window_start_s])
+    if shadow_cursor is not None and debug_lock is not None:
+        result_cursor = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s])
+    else:
+        result_cursor = runner.execute(sql, [window_start_s, window_start_s])
 
     # Bounded top-K via min-heap on score: each insight only ever holds
     # at most _TOP_K entries in memory regardless of how many unique
@@ -211,7 +252,7 @@ def _coalesced_url_aggregates(
     counter = 0
 
     while True:
-        rows = cursor.fetchmany(10000)
+        rows = result_cursor.fetchmany(10000)
         if not rows:
             break
         for r in rows:
@@ -329,6 +370,9 @@ def _coalesced_ip_security_aggregates(
     window_start_s: str,
     window_hours: float,
     baseline_hours: float,
+    *,
+    shadow_cursor: duckdb.DuckDBPyConnection | None = None,
+    debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
     """Coalesce the 3 IP-keyed security scans (low_and_slow,
     credential_enumeration, content_discovery) into ONE ``GROUP BY ip`` pass
@@ -351,7 +395,10 @@ def _coalesced_ip_security_aggregates(
     - content_discovery:       [ip, w_404, w_total, distinct_404, b_404]
     """
     sql = COALESCED_IP_SECURITY_AGGREGATES.format(table_name=table_name)
-    cursor = runner.execute(sql, [window_start_s, window_start_s])
+    if shadow_cursor is not None and debug_lock is not None:
+        result_cursor = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s])
+    else:
+        result_cursor = runner.execute(sql, [window_start_s, window_start_s])
 
     # Bounded top-K via min-heap on a per-insight sort key — each insight holds
     # at most _TOP_K entries regardless of IP cardinality, so an attacker
@@ -375,7 +422,7 @@ def _coalesced_ip_security_aggregates(
     counter = 0
 
     while True:
-        rows = cursor.fetchmany(10000)
+        rows = result_cursor.fetchmany(10000)
         if not rows:
             break
         for r in rows:
@@ -643,25 +690,9 @@ def get_insights(
     if not temp_created:
         temp_table = table_name  # Fallback to the iceberg view directly
 
-    # Materialise the unnested WAF signal stream once so waf_signal_spikes
-    # reads from a pre-trimmed table instead of re-running the
-    # unnest+string_split+trim inline on every call. Cheap when "waf_sig"
-    # is present; skipped when the column is missing or when the parent
-    # temp create failed (the WAF insight is gated below so it doesn't
-    # run with a stale ``waf_table`` reference).
-    waf_table: str | None = None
-    if temp_created and "waf_sig" in actual_cols:
-        waf_temp = f"{scratch_alias}.insights_waf_{uuid.uuid4().hex[:12]}"
-        waf_create_q = (
-            f"CREATE TABLE {waf_temp} AS "
-            f"SELECT timestamp, trim(signal) AS signal "
-            f"FROM (SELECT timestamp, unnest(string_split(\"waf_sig\", ',')) AS signal "
-            f"      FROM {temp_table} "
-            f'      WHERE "waf_sig" IS NOT NULL AND "waf_sig" != \'\') '
-            f"WHERE trim(signal) != '' AND trim(signal) != 'BOT-ANALYSIS'"
-        )
-        if runner.create_temp_table(waf_create_q):
-            waf_table = waf_temp
+    # WAF unnest temp creation moved into the parallel coalesced-aggregates
+    # dispatch below (``_task_waf``) — it runs concurrently with the city/url/
+    # ip-security aggregate scans instead of sequentially before them.
 
     try:
         # Available history
@@ -749,34 +780,16 @@ def get_insights(
         tasks: list[Callable[[], dict | None]] = []
 
         # Per-task lock that guards parallel appends to ``runner.debug_queries``.
-        # Each per-insight task below runs in its own thread with its own
-        # DuckDB cursor (cursors are separate shadow connections — thread-safe),
-        # but the debug-queries list is the request-scoped one consumed by
+        # Every per-insight task below AND the coalesced-aggregates dispatch
+        # above run in their own thread with their own DuckDB cursor (cursors
+        # are separate shadow connections — thread-safe), but the debug-
+        # queries list is the request-scoped one consumed by
         # ``runner.telemetry()`` at the bottom of this function and ultimately
         # serialised into the response's debug panel. Without the lock,
         # concurrent ``list.append`` is technically safe under CPython's GIL
         # but the SQL/time pairing through ``_compact_sql_for_debug`` is not
         # — interleaved appends could swap sql with the wrong elapsed_ms.
         _debug_lock = threading.Lock()
-
-        def _execute_on_cursor(cur: duckdb.DuckDBPyConnection, sql: str, params: list | None = None):
-            """Mirror of ``runner.execute`` for use from worker threads.
-
-            Calling ``runner.execute`` from a worker would serialise every
-            per-insight scan on the parent connection — exactly what we're
-            trying to avoid. ``cur`` is a per-task ``runner.con.cursor()``
-            shadow connection; the parent-DB-level ATTACH ':memory:' AS
-            scratch_<uuid> is visible to every cursor on the same parent.
-            Telemetry is still appended to the parent runner's debug_queries
-            (lock-guarded) so the response's debug panel sees every per-
-            insight scan, matching the serial-path contract.
-            """
-            t0 = time.time()
-            res = cur.execute(sql, params or [])
-            elapsed_ms = round((time.time() - t0) * 1000, 2)
-            with _debug_lock:
-                runner.debug_queries.append({"sql": _compact_sql_for_debug(sql), "time_ms": elapsed_ms})
-            return res
 
         # ── Registered Dynamic Insights ───────────────────────────────────────────
         from backend.repositories.utils.filters import build_geo_select_clause
@@ -798,29 +811,74 @@ def get_insights(
         ua_col = '"ua"' if "ua" in actual_cols else "NULL"
         bot_ua_regex = REPEATED_BOT_UA_REGEX
 
-        # ── Coalesced city aggregates (O2 bypass) ─────────────────────────────────
-        # The 4 city-based insights (city_surges, city_error_spikes,
-        # city_latency_regressions, new_city_traffic) each issued their own
-        # GROUP BY (city, region, country) scan of the temp table. On prod
-        # 2026-06-05 those four scans were 177+205+219+181 = 782 ms of pure
-        # duplication — every row read four times to compute counts/rates/p95s
-        # that fit naturally in a single SELECT. Run one pass here and reuse
-        # the per-(city, region, country) aggregate rows below; each insight
-        # task short-circuits via `city_precomputed` instead of issuing its
-        # own SELECT.
+        # ── Coalesced aggregates + WAF unnest — PARALLEL dispatch ─────────────────
+        # These 4 queries (WAF unnest temp create, city/url/ip-security
+        # coalesced GROUP BYs) used to run sequentially, one after another,
+        # BEFORE the per-insight ThreadPoolExecutor dispatch below. Prod
+        # 2026-08-03 measured city=10.4s + url=6.9s + ip=3.2s + waf=2.7s =
+        # ~23s of pure serialization — each is an independent read (or, for
+        # WAF, a write into a brand-new uniquely-named scratch table) over
+        # the SAME materialized ``temp_table``, so there's no data dependency
+        # between them and they parallelize cleanly.
         #
-        # Only fires when ALL 4 are eligible (city + status + elapsed + timestamp
-        # all in schema). When a service is missing one of those columns the
-        # per-insight scans still run for the eligible subset.
-        city_precomputed: dict[str, list[tuple]] = {}
-        if (
-            "city" in actual_cols
-            and "status" in actual_cols
-            and "elapsed" in actual_cols
-            and "timestamp" in actual_cols
-        ):
+        # Dispatched via the identical ``runner.con.cursor()`` shadow-
+        # connection pattern the per-insight dispatch below already uses
+        # safely: DuckDB releases the GIL during query execution, and cursors
+        # on the same parent connection are thread-safe to use concurrently
+        # from different threads. With ``DUCKDB_POOL_CONN_THREADS=1`` (each
+        # pool connection single-threaded — see backend/core/duckdb_pool.py)
+        # up to 4 concurrent cursors here exactly saturates the 4-core prod
+        # VM with no oversubscription. The WAF task is the only WRITE (a
+        # CREATE TABLE into the scratch ``:memory:`` DB) among the three
+        # read-only aggregate SELECTs; it writes a brand-new, uniquely-named
+        # catalog object that none of the three reads touch, so there's no
+        # write-write conflict with the concurrent SELECTs (verified locally:
+        # concurrent CREATE TABLE + 3 SELECTs via cursors on one parent
+        # connection completes cleanly with correct, independent results).
+        #
+        # Each task independently gates on its own required columns and
+        # swallows its own exception exactly as the sequential code did —
+        # falling back to ``{}`` / ``None`` never breaks the other 3 tasks or
+        # the page.
+        def _task_waf() -> str | None:
+            if not (temp_created and "waf_sig" in actual_cols):
+                return None
+            waf_temp = f"{scratch_alias}.insights_waf_{uuid.uuid4().hex[:12]}"
+            waf_create_q = (
+                f"CREATE TABLE {waf_temp} AS "
+                f"SELECT timestamp, trim(signal) AS signal "
+                f"FROM (SELECT timestamp, unnest(string_split(\"waf_sig\", ',')) AS signal "
+                f"      FROM {temp_table} "
+                f'      WHERE "waf_sig" IS NOT NULL AND "waf_sig" != \'\') '
+                f"WHERE trim(signal) != '' AND trim(signal) != 'BOT-ANALYSIS'"
+            )
             try:
-                city_precomputed = _coalesced_city_aggregates(
+                cur = runner.con.cursor()
+                _execute_on_cursor(runner, _debug_lock, cur, waf_create_q)
+                return waf_temp
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "[insights] WAF unnest temp create failed, skipping waf_signal_spikes: %s", e
+                )
+                return None
+
+        def _task_city() -> dict[str, list[tuple]]:
+            # Only fires when ALL 4 city-based insights are eligible (city +
+            # status + elapsed + timestamp all in schema). When a service is
+            # missing one of those columns the per-insight scans still run
+            # for the eligible subset (handled in the per-insight loop below).
+            if not (
+                "city" in actual_cols
+                and "status" in actual_cols
+                and "elapsed" in actual_cols
+                and "timestamp" in actual_cols
+            ):
+                return {}
+            try:
+                cur = runner.con.cursor()
+                return _coalesced_city_aggregates(
                     runner,
                     table_name,
                     window_start_s,
@@ -829,6 +887,8 @@ def get_insights(
                     country_sel,
                     window_hours,
                     baseline_hours,
+                    shadow_cursor=cur,
+                    debug_lock=_debug_lock,
                 )
             except Exception as e:
                 # Fall back transparently to per-insight scans; never break
@@ -836,56 +896,47 @@ def get_insights(
                 import logging
 
                 logging.getLogger(__name__).warning("[insights] coalesced city aggregates failed, falling back: %s", e)
-                city_precomputed = {}
+                return {}
 
-        # ── Coalesced URL aggregates (Step 2 / Option C, 2026-06-06) ─────────────
-        # 4 URL-keyed insights (error_spikes, cache_collapse, latency_regression,
-        # tail_latency) all GROUP BY url over the same WHERE clause with the same
-        # is_w/is_b baseline-vs-window split. Pre-coalesce, each ran its own scan
-        # of the temp table; the audit showed they totalled ~400-600 ms. Coalescing
-        # them mirrors O2's city pattern (proven ~520 ms save on prod).
-        #
-        # origin_latency_spike is the 5th url-keyed insight but its SQL has an
-        # overall_stats CTE that normalizes against the entire population's p95
-        # — different shape, kept on its own template.
-        #
-        # Fires only when all the columns the CTE touches are present (url,
-        # status, cache, elapsed, timestamp). When a service is missing any of
-        # them the per-insight scans run normally for whichever subset is
-        # eligible. Failure transparently falls back to per-insight scans —
-        # never blocks the page.
-        url_precomputed: dict[str, list[tuple]] = {}
-        if (
-            "url" in actual_cols
-            and "status" in actual_cols
-            and "cache" in actual_cols
-            and "elapsed" in actual_cols
-            and "timestamp" in actual_cols
-        ):
+        def _task_url() -> dict[str, list[tuple]]:
+            # Fires only when all the columns the CTE touches are present
+            # (url, status, cache, elapsed, timestamp).
+            if not (
+                "url" in actual_cols
+                and "status" in actual_cols
+                and "cache" in actual_cols
+                and "elapsed" in actual_cols
+                and "timestamp" in actual_cols
+            ):
+                return {}
             try:
-                url_precomputed = _coalesced_url_aggregates(runner, table_name, window_start_s)
+                cur = runner.con.cursor()
+                return _coalesced_url_aggregates(
+                    runner, table_name, window_start_s, shadow_cursor=cur, debug_lock=_debug_lock
+                )
             except Exception as e:
                 import logging
 
                 logging.getLogger(__name__).warning("[insights] coalesced URL aggregates failed, falling back: %s", e)
-                url_precomputed = {}
+                return {}
 
-        # ── Coalesced IP-security aggregates (Track A / §9.7) ─────────────────────
-        # The 3 IP-keyed security insights (low_and_slow, credential_enumeration,
-        # content_discovery) each GROUP BY ip over the same temp. Coalescing them
-        # into ONE pass mirrors the city/url coalesced pattern so the cold-path
-        # cost doesn't grow linearly as more IP-scans are added.
-        #
-        # Fires only when all the columns the CTE touches are present (ip, url,
-        # status, timestamp). When a service is missing any of them the eligible
-        # subset runs its standalone scan (low_and_slow only needs ip+url, so it
-        # still runs when status is absent). Failure transparently falls back to
-        # the per-insight scans — never blocks the page.
-        ip_security_precomputed: dict[str, list[tuple]] = {}
-        if "ip" in actual_cols and "url" in actual_cols and "status" in actual_cols and "timestamp" in actual_cols:
+        def _task_ip() -> dict[str, list[tuple]]:
+            # Fires only when all the columns the CTE touches are present
+            # (ip, url, status, timestamp).
+            if not (
+                "ip" in actual_cols and "url" in actual_cols and "status" in actual_cols and "timestamp" in actual_cols
+            ):
+                return {}
             try:
-                ip_security_precomputed = _coalesced_ip_security_aggregates(
-                    runner, table_name, window_start_s, window_hours, baseline_hours
+                cur = runner.con.cursor()
+                return _coalesced_ip_security_aggregates(
+                    runner,
+                    table_name,
+                    window_start_s,
+                    window_hours,
+                    baseline_hours,
+                    shadow_cursor=cur,
+                    debug_lock=_debug_lock,
                 )
             except Exception as e:
                 import logging
@@ -893,7 +944,17 @@ def get_insights(
                 logging.getLogger(__name__).warning(
                     "[insights] coalesced IP-security aggregates failed, falling back: %s", e
                 )
-                ip_security_precomputed = {}
+                return {}
+
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="insights-coalesce") as _coalesce_pool:
+            _fut_waf = _coalesce_pool.submit(_task_waf)
+            _fut_city = _coalesce_pool.submit(_task_city)
+            _fut_url = _coalesce_pool.submit(_task_url)
+            _fut_ip = _coalesce_pool.submit(_task_ip)
+            waf_table = _fut_waf.result()
+            city_precomputed = _fut_city.result()
+            url_precomputed = _fut_url.result()
+            ip_security_precomputed = _fut_ip.result()
 
         for definition in registry.get_all():
             # Check if all required fields are present
@@ -975,7 +1036,7 @@ def get_insights(
                         # without the implicit single-cursor serialisation
                         # that ``runner.execute`` enforces.
                         task_cur = runner.con.cursor()
-                        rows = _execute_on_cursor(task_cur, sql, params).fetchall()
+                        rows = _execute_on_cursor(runner, _debug_lock, task_cur, sql, params).fetchall()
                     items = []
                     if d.row_processor:
                         # Build context for processors

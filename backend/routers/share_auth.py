@@ -26,7 +26,7 @@ from backend.utils.analyst_session import (
     safe_audit_email,
 )
 from backend.utils.remote_access import client_ip
-from backend.utils.tunnel import get_tunnel_manager
+from backend.utils.tunnel import TunnelCapacityError, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
 
@@ -110,9 +110,13 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         )
         raise HTTPException(status_code=403, detail={"error": "ip_not_whitelisted"})
 
-    # Capacity cap (default 10 — set in share_settings via migration).
+    # Capacity cap (default 10 — set in share_settings via migration). Checked
+    # atomically with the insert inside create_session (cap=) — a separate
+    # check-then-act here would race concurrent logins past the cap.
     cap = share_db.get_max_concurrent_sessions()
-    if mgr.active_session_count() >= cap:
+    try:
+        session = mgr.create_session(invite=invite, ip_address=ip, user_agent=user_agent, headers=headers, cap=cap)
+    except TunnelCapacityError as e:
         share_db.log_share_audit_event(
             event_type="LOGIN_FAIL",
             email=invite["email"],
@@ -121,11 +125,8 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         )
         raise HTTPException(
             status_code=503,
-            detail={"error": "capacity_exceeded", "current": mgr.active_session_count(), "cap": cap},
-        )
-
-    # Success.
-    session = mgr.create_session(invite=invite, ip_address=ip, user_agent=user_agent, headers=headers)
+            detail={"error": "capacity_exceeded", "current": e.current, "cap": e.cap},
+        ) from e
     share_db.log_share_audit_event(
         event_type="LOGIN_SUCCESS",
         email=invite["email"],

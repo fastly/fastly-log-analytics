@@ -42,7 +42,7 @@ from backend.utils.analyst_session import (
     safe_audit_email as _safe_audit_email,
 )
 from backend.utils.remote_access import client_ip
-from backend.utils.tunnel import get_tunnel_manager
+from backend.utils.tunnel import TunnelCapacityError, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
 
@@ -332,15 +332,10 @@ def oauth_callback(
         )
 
     mgr = get_tunnel_manager()
+    # Capacity check happens atomically with the insert inside create_session
+    # (cap=) — a separate check-then-act here would race concurrent OAuth
+    # callbacks (or a callback racing a passcode login) past the cap.
     cap = share_db.get_max_concurrent_sessions()
-    if mgr.active_session_count() >= cap:
-        return _fail(
-            ip,
-            event="OAUTH_CALLBACK_FAIL",
-            user_code="auth_failed",
-            reason=f"capacity_exceeded ({cap})",
-            email=invite["email"],
-        )
 
     # 6. Success — create the session (inherits scope/mask/fingerprint) and set
     #    the analyst cookie via the SAME two-cookie TOS protocol as passcode
@@ -348,7 +343,16 @@ def oauth_callback(
     #    /share-login/acknowledge (§5.5).
     user_agent = request.headers.get("user-agent", "")
     headers = {k.lower(): v for k, v in request.headers.items()}
-    session = mgr.create_session(invite=invite, ip_address=ip, user_agent=user_agent, headers=headers)
+    try:
+        session = mgr.create_session(invite=invite, ip_address=ip, user_agent=user_agent, headers=headers, cap=cap)
+    except TunnelCapacityError:
+        return _fail(
+            ip,
+            event="OAUTH_CALLBACK_FAIL",
+            user_code="auth_failed",
+            reason=f"capacity_exceeded ({cap})",
+            email=invite["email"],
+        )
 
     tos = share_db.get_latest_tos()
     tos_pending = bool(

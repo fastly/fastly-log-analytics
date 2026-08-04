@@ -115,6 +115,80 @@ def test_create_session_persists_and_returns_fingerprint():
     assert len(rows) == 1
 
 
+@pytest.mark.security_regression
+def test_create_session_cap_raises_when_at_capacity():
+    mgr = tunnel.get_tunnel_manager()
+    invite_a = _seed_invite(allow_concurrent_sessions=True)
+    invite_b = share_db.create_remote_invite(
+        name="Bea",
+        email="bea@example.com",
+        passcode="seagull-mountain-river-77",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+        allow_concurrent_sessions=True,
+    )
+    mgr.create_session(invite=invite_a, ip_address="1.2.3.4", user_agent="ua", headers={}, cap=1)
+    with pytest.raises(tunnel.TunnelCapacityError) as exc_info:
+        mgr.create_session(invite=invite_b, ip_address="5.6.7.8", user_agent="ua", headers={}, cap=1)
+    assert exc_info.value.current == 1
+    assert exc_info.value.cap == 1
+    # The rejected attempt must not have been inserted.
+    assert mgr.active_session_count() == 1
+
+
+def test_create_session_cap_none_preserves_uncapped_behavior():
+    """Callers that don't pass ``cap`` (or pass None) keep the old
+    unconditional-insert behavior — cap is opt-in, not a breaking change."""
+    mgr = tunnel.get_tunnel_manager()
+    invite = _seed_invite(allow_concurrent_sessions=True)
+    for i in range(5):
+        mgr.create_session(invite=invite, ip_address=f"1.2.3.{i}", user_agent="ua", headers={})
+    assert mgr.active_session_count() == 5
+
+
+@pytest.mark.security_regression
+def test_create_session_cap_is_atomic_under_concurrent_logins():
+    """Regression for finding 016: concurrent logins racing the capacity
+    check must not both observe count < cap and both insert. Before the
+    fix, active_session_count() and create_session() were two separate
+    lock acquisitions in the caller (share_auth.py / share_oauth.py); now
+    the check-and-insert happens under ONE acquisition inside
+    create_session(cap=...), so the cap is never transiently exceeded no
+    matter how many threads race it."""
+    import concurrent.futures
+
+    mgr = tunnel.get_tunnel_manager()
+    cap = 3
+    n_workers = 20
+    invites = [
+        share_db.create_remote_invite(
+            name=f"Analyst{i}",
+            email=f"analyst{i}@example.com",
+            passcode="ocean-breeze-cabin-42",
+            expires_at_utc=None,
+            ip_whitelist=None,
+            service_ids=["svcA"],
+            allow_concurrent_sessions=True,
+        )
+        for i in range(n_workers)
+    ]
+
+    def attempt(invite):
+        try:
+            mgr.create_session(invite=invite, ip_address="1.2.3.4", user_agent="ua", headers={}, cap=cap)
+            return "ok"
+        except tunnel.TunnelCapacityError:
+            return "rejected"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+        outcomes = list(pool.map(attempt, invites))
+
+    assert outcomes.count("ok") == cap
+    assert outcomes.count("rejected") == n_workers - cap
+    assert mgr.active_session_count() == cap
+
+
 def test_validate_session_returns_session_when_fresh():
     mgr = tunnel.get_tunnel_manager()
     invite = _seed_invite()

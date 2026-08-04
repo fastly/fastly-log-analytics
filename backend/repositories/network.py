@@ -18,8 +18,16 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
+from backend.repositories.utils.single_flight import coalesce
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.geo import format_city_label
+
+
+class _TempTableUnavailable(Exception):
+    """Raised inside the single-flight builder when the network temp-table
+    build fails, so every waiter (leader and followers alike) takes the same
+    "available: False" branch instead of only the leader seeing it."""
+
 
 # ── Response memo cache ───────────────────────────────────────────────────────
 # /api/network-health does a per-request TEMP TABLE build (19 cols, multi-second
@@ -380,7 +388,7 @@ def get_health(
         w = "1=1"
         p: list[Any] = []
     else:
-        # ── Temp table path ───────────────────────────────────────────────
+        # ── Temp table path (single-flight coalesced) ─────────────────────
         # Drop ``dt`` and ``resp_state`` from the temp projection — neither is
         # read by any downstream SQL template in backend/repositories/_sql/network.py
         # (verified via grep). Materialising them on every 30d window was 5-15%
@@ -404,43 +412,77 @@ def get_health(
             "resp_bytes",
             "c_speed",
         ]
-        _t = _time.perf_counter()
-        temp_table = runner.create_filtered_temp_table(
-            all_net_cols, list(actual_cols), table_name, where_clause, params
+
+        # /network fires 3 parallel POSTs (core/map/shielding — see
+        # frontend/app/network/page.tsx:108-119) for the SAME window+filters.
+        # ``core`` and ``map`` both land here on a rollup miss and, absent a
+        # guard, each independently pays the ~3s CREATE TEMP TABLE build (the
+        # slow-queries report showed two near-simultaneous builds at
+        # 3450ms/2960ms for the same 24h window). DuckDB temp tables are
+        # connection-scoped and every HTTP request gets its own pooled
+        # connection (backend/core/duckdb_pool.py, up to
+        # DUCKDB_POOL_MAX_SIZE=8 per service) — core and map genuinely run
+        # concurrently, so a second request cannot see a temp table built on
+        # a different connection. ``coalesce`` therefore shares plain Python
+        # ROW LISTS (process-shareable) between the two requests instead of
+        # the temp table itself; the follower never touches its own
+        # connection for this section at all — the temp table it would have
+        # built is simply never created.
+        #
+        # The key folds in everything that determines the query results:
+        # ``where_clause``/``params`` already encode start/end/filters,
+        # ``actual_cols`` drives the has_*/SELECT-projection gating,
+        # ``bucket_ms``/``top_n``/``map_asn`` drive the downstream SQL shape.
+        # metro_rows is computed UNCONDITIONALLY here (dropping the
+        # ``_want_metro_query`` gate down to just ``has_country``) so
+        # whichever of core/map wins the race produces the union both
+        # sections need — core is the only one of the two live callers that
+        # reads metro_leaderboard, so a map-led build must compute it too.
+        # The added cost is one extra GROUP BY against the already-built
+        # in-memory temp table, negligible next to the ~3s CREATE.
+        temp_key = digest_cache_key(
+            {
+                "table": table_name,
+                "where": where_clause,
+                "params": [str(x) for x in params],
+                "cols": sorted(actual_cols),
+                "bucket_ms": bucket_ms,
+                "map_asn": map_asn,
+                "top_n": top_n,
+            },
+            src,
         )
-        timer.mark("temp_table_create", _t)
-        if temp_table is None:
-            return {
-                "available": False,
-                "reason": "Data temporarily unavailable — view refresh failed. Retry in a moment.",
-                **runner.telemetry(),
-            }
 
-        # All further queries hit the temp table
-        t = temp_table
-        w = "1=1"
-        p = []
+        # Only the LEADER actually builds a temp table on ITS OWN connection —
+        # stash its name here (nonlocal-via-closure) so it stays alive for the
+        # speed_distribution/rtt_percentiles fallback queries further down
+        # (which also query the temp table directly via ``t``/``w``/``p``) and
+        # gets dropped by the existing outer ``finally`` at the natural end of
+        # the request, exactly as before this change. A follower's ``t`` stays
+        # None — it never has a temp table on its own connection to query, so
+        # it takes the same graceful "no fallback" branch already coded for
+        # the rollup-hit skip-temp path (see ``elif t is not None`` below).
+        _leader_temp_name: list[str | None] = [None]
 
-    try:
-        # ── Queries against the temp table ────────────────────────────────
-        # These blocks run only on the temp-table path (temp_table is not
-        # None). On the rollup fast path countries/heatmap_rows/map_rows/
-        # metro_rows are already set above and must NOT be overwritten.
-
-        # ── Countries list ─────────────────────────────────────────────────
-        if temp_table is not None:
-            countries = []
+        def _build_temp_results() -> tuple[list[str], list[Any], list[Any], list[Any]]:
+            _t0 = _time.perf_counter()
+            temp_name = runner.create_filtered_temp_table(
+                all_net_cols, list(actual_cols), table_name, where_clause, params
+            )
+            timer.mark("temp_table_create", _t0)
+            if temp_name is None:
+                raise _TempTableUnavailable()
+            _leader_temp_name[0] = temp_name
+            countries_b: list[str] = []
             if has_country:
                 rows = runner.execute(
-                    f"SELECT DISTINCT country FROM {t} WHERE {w}"
+                    f"SELECT DISTINCT country FROM {temp_name} WHERE 1=1"
                     f" AND country IS NOT NULL AND country != '' ORDER BY country",
-                    p,
+                    [],
                 ).fetchall()
-                countries = [r[0] for r in rows]
+                countries_b = [r[0] for r in rows]
 
-        # ── Heatmap (ASN × bucket) ─────────────────────────────────────────
-        if temp_table is not None:
-            heatmap_rows = []
+            heatmap_rows_b: list[Any] = []
             if _want_heatmap_query:
                 heatmap_sql = SQL.HEATMAP_BY_ASN_BUCKET.format(
                     bucket_ms=bucket_ms,
@@ -448,17 +490,15 @@ def get_health(
                     congestion_expr=congestion_expr,
                     ploss_expr=ploss_expr,
                     rtt_var_expr=rtt_var_expr,
-                    table=t,
-                    where=w,
+                    table=temp_name,
+                    where="1=1",
                     row_limit=top_n * 200,
                 )
-                _t = _time.perf_counter()
-                heatmap_rows = runner.execute(heatmap_sql, p).fetchall()
-                timer.mark("heatmap_query", _t)
+                _t1 = _time.perf_counter()
+                heatmap_rows_b = runner.execute(heatmap_sql, []).fetchall()
+                timer.mark("heatmap_query", _t1)
 
-        # ── Map (country × bucket) ─────────────────────────────────────────
-        if temp_table is not None:
-            map_rows = []
+            map_rows_b: list[Any] = []
             if _want_map_query and has_country:
                 lat_col = "lat" if has_lat else "NULL"
                 lon_col = "lon" if has_lat else "NULL"
@@ -469,13 +509,13 @@ def get_health(
                 # bare ``city`` / ``lat`` etc. are ambiguous to DuckDB's
                 # binder. Prefix with the temp-table name when the column
                 # really exists; keep the NULL / '' literal otherwise.
-                join_city_col = f"{t}.city" if "city" in actual_cols else "''"
-                join_lat_col = f"{t}.lat" if has_lat else "NULL"
-                join_lon_col = f"{t}.lon" if has_lat else "NULL"
-                join_metro_col = f"{t}.metro" if has_metro else "NULL"
+                join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
+                join_lat_col = f"{temp_name}.lat" if has_lat else "NULL"
+                join_lon_col = f"{temp_name}.lon" if has_lat else "NULL"
+                join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
 
-                map_where = w
-                map_params = list(p)
+                map_where = "1=1"
+                map_params: list[Any] = []
                 if map_asn != "all":
                     map_where += " AND asn = ?"
                     map_params.append(int(map_asn))
@@ -498,30 +538,28 @@ def get_health(
                     join_metro_col=join_metro_col,
                     bucket_ms=bucket_ms,
                     ploss_expr=ploss_expr,
-                    table=t,
+                    table=temp_name,
                     where=map_where,
                 )
-                _t = _time.perf_counter()
+                _t2 = _time.perf_counter()
                 # {where} appears twice in the 2-pass CTE shape (CTE WHERE +
                 # outer WHERE), so the asn filter placeholder must be bound
                 # twice. ``map_params`` is at most one element (the asn int)
                 # when ``map_asn != "all"``, empty otherwise.
-                map_rows = runner.execute(map_sql, map_params + map_params).fetchall()
-                timer.mark("map_query", _t)
+                map_rows_b = runner.execute(map_sql, map_params + map_params).fetchall()
+                timer.mark("map_query", _t2)
 
-        # ── Metro leaderboard ──────────────────────────────────────────────
-        if temp_table is not None:
-            metro_rows = []
-            if _want_metro_query and has_country:
+            metro_rows_b: list[Any] = []
+            if has_country:
                 metro_col_m = "metro" if has_metro else "NULL"
                 city_col = "city" if "city" in actual_cols else "''"
                 region_col = "region" if "region" in actual_cols else "''"
                 # Qualified-for-JOIN variants — same disambiguation pattern
                 # as map_query. The 2-pass CTE re-aliases these names on the
                 # top_cells side, so the JOIN ON needs table-qualified refs.
-                join_metro_col = f"{t}.metro" if has_metro else "NULL"
-                join_city_col = f"{t}.city" if "city" in actual_cols else "''"
-                join_region_col = f"{t}.region" if "region" in actual_cols else "''"
+                join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
+                join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
+                join_region_col = f"{temp_name}.region" if "region" in actual_cols else "''"
                 metro_sql = SQL.METRO_LEADERBOARD.format(
                     city_col=city_col,
                     region_col=region_col,
@@ -530,13 +568,41 @@ def get_health(
                     join_region_col=join_region_col,
                     join_metro_col=join_metro_col,
                     ploss_expr=ploss_expr,
-                    table=t,
-                    where=w,
+                    table=temp_name,
+                    where="1=1",
                 )
-                _t = _time.perf_counter()
-                metro_rows = runner.execute(metro_sql, p).fetchall()
-                timer.mark("metro_query", _t)
+                _t3 = _time.perf_counter()
+                metro_rows_b = runner.execute(metro_sql, []).fetchall()
+                timer.mark("metro_query", _t3)
 
+            return countries_b, heatmap_rows_b, map_rows_b, metro_rows_b
+
+        try:
+            (countries, heatmap_rows, map_rows, metro_rows), is_leader = coalesce(temp_key, _build_temp_results)
+        except _TempTableUnavailable:
+            return {
+                "available": False,
+                "reason": "Data temporarily unavailable — view refresh failed. Retry in a moment.",
+                **runner.telemetry(),
+            }
+        if not is_leader:
+            # This request never acquired its own temp table — it borrowed
+            # the leader's already-computed rows. Mirrors "network:temp_skipped"
+            # above so the perf harness can attribute the coalesced case too.
+            section_timings.append({"section": "network:temp_coalesced", "time_ms": 0.0})
+
+        # Leader: real temp-table name — stays alive for the speed/rtt
+        # fallback queries below and is dropped by the outer ``finally`` at
+        # the natural end of the request (unchanged from before this fix).
+        # Follower: None — it built no temp table on its own connection, so
+        # it takes the same graceful "no fallback" branch already coded for
+        # the rollup-hit skip-temp path.
+        temp_table = _leader_temp_name[0]
+        t = temp_table
+        w = "1=1"
+        p = []
+
+    try:
         # ── Derive top ASNs ────────────────────────────────────────────────
         all_asns_seen: dict[int, int] = {}
         all_buckets_set: set[str] = set()

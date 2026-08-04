@@ -13,6 +13,7 @@
  * contract without depending on the RSC boundary.
  */
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
@@ -85,4 +86,44 @@ test('ServicesTable renders services flowed through MSW + openapi-fetch', async 
     },
     { timeout: 3000 },
   )
+})
+
+test('the row Manage menu offers Delete Data (left of/above Teardown) and opens its confirmation dialog', async () => {
+  server.use(
+    http.get(`${API_BASE}/api/services`, () =>
+      HttpResponse.json({
+        services: [
+          {
+            service_id: 'test-svc',
+            name: 'Test Service',
+            fos_bucket: 'test-bucket',
+            access_level: 'read_write',
+          },
+        ],
+      }),
+    ),
+  )
+
+  const user = userEvent.setup()
+  const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
+  render(
+    <QueryClientProvider client={queryClient}>
+      <ServicesTable />
+    </QueryClientProvider>,
+  )
+
+  await waitFor(() => expect(screen.getByText('Test Service')).toBeInTheDocument())
+
+  await user.click(screen.getByRole('button', { name: /manage/i }))
+
+  const deleteDataItem = await screen.findByText('Delete Data')
+  const teardownItem = screen.getByText('Teardown Service')
+  // Delete Data must be the less-destructive-first option, ahead of the
+  // full-service Teardown, in DOM order (menu is rendered top-to-bottom).
+  expect(
+    deleteDataItem.compareDocumentPosition(teardownItem) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy()
+
+  await user.click(deleteDataItem)
+  expect(await screen.findByText('Delete Data: Test Service')).toBeInTheDocument()
 })

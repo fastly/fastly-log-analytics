@@ -166,6 +166,98 @@ def test_bootstrap_omits_admin_token_for_authenticated_analyst(client, tmp_path,
         tunnel.reset_for_tests()
 
 
+def test_startup_stub_exposes_admin_token_to_loopback_admin(monkeypatch):
+    """During ``not startup_complete`` (the ~15-20 min post-restart warm-up
+    window on a multi-service VM), a loopback admin request must still get
+    ``settings.admin_token`` — it's a static ``os.getenv()`` read with zero
+    dependency on per-service warm-up. Pinned regression for the bug where
+    the stub omitted the key entirely, 401-looping every admin mutation
+    until warm-up finished.
+
+    Exercises ``_startup_stub_response`` directly (mirrors
+    ``test_bootstrap_remote_unauth_stub_omits_section_timings``'s pattern of
+    calling the sync helper directly) because the route wrapper forces
+    ``startup_complete=True`` whenever ``"pytest" in sys.modules``, so the
+    stub branch is otherwise unreachable through ``client.get(...)``.
+    """
+    from unittest.mock import MagicMock
+
+    from backend.routers.bootstrap import _startup_stub_response
+
+    monkeypatch.setenv("ADMIN_SHARED_SECRET", "s3cret-value")
+
+    fake_request = MagicMock()
+    fake_request.state.is_remote = False
+
+    response = _startup_stub_response(fake_request)
+    payload = response.model_dump(by_alias=True)
+
+    assert payload["settings"]["admin_token"] == "s3cret-value"
+
+
+def test_startup_stub_omits_admin_token_when_env_unset(monkeypatch):
+    """Same stub path, env unset (the default) → ``admin_token`` stays
+    None, matching the fully-warm contract in
+    ``test_bootstrap_omits_admin_token_when_env_unset``."""
+    from unittest.mock import MagicMock
+
+    from backend.routers.bootstrap import _startup_stub_response
+
+    monkeypatch.delenv("ADMIN_SHARED_SECRET", raising=False)
+
+    fake_request = MagicMock()
+    fake_request.state.is_remote = False
+
+    response = _startup_stub_response(fake_request)
+    payload = response.model_dump(by_alias=True)
+
+    assert payload["settings"]["admin_token"] is None
+
+
+def test_startup_stub_withholds_admin_token_for_remote_caller(monkeypatch):
+    """A remote (analyst/anonymous) caller hitting the stub during warm-up
+    must NOT receive the admin token — mirrors the access-control boundary
+    already enforced on the fully-warm path
+    (``test_bootstrap_omits_admin_token_for_authenticated_analyst``)."""
+    from unittest.mock import MagicMock
+
+    from backend.routers.bootstrap import _startup_stub_response
+
+    monkeypatch.setenv("ADMIN_SHARED_SECRET", "s3cret-value")
+
+    fake_request = MagicMock()
+    fake_request.state.is_remote = True
+
+    response = _startup_stub_response(fake_request)
+    payload = response.model_dump(by_alias=True)
+
+    assert payload["settings"]["admin_token"] is None
+
+
+def test_startup_stub_still_withholds_warmup_dependent_fields(monkeypatch):
+    """The fix only frees ``admin_token``. The real per-service data — the
+    ``services`` list, ``active_service_id``, ``schema`` — must stay gated
+    on ``startup_complete`` exactly as before, for both loopback and remote
+    callers."""
+    from unittest.mock import MagicMock
+
+    from backend.routers.bootstrap import _startup_stub_response
+
+    monkeypatch.setenv("ADMIN_SHARED_SECRET", "s3cret-value")
+
+    for is_remote in (False, True):
+        fake_request = MagicMock()
+        fake_request.state.is_remote = is_remote
+
+        response = _startup_stub_response(fake_request)
+        payload = response.model_dump(by_alias=True)
+
+        assert payload["active_service_id"] is None
+        assert payload["services"] == []
+        assert payload["schema"] is None
+        assert payload["settings"]["initializing"] is True
+
+
 def _login_analyst_and_bootstrap(client, tmp_path, monkeypatch, *, pii_policy):
     """Seed a masking/non-masking analyst invite, log in, and return the
     /api/bootstrap response body for assertions about ``settings``."""
