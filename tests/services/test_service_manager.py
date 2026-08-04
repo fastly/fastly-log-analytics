@@ -17,18 +17,20 @@ def _wait_for(condition_fn, timeout: float = 2.0, interval: float = 0.01) -> boo
 
 
 def test_get_dir_stats_returns_zero_for_missing_path(tmp_path, monkeypatch):
-    """Nonexistent paths return (0, 0). The cache stores this so we don't
-    re-stat on every subsequent call (a deleted cache dir would otherwise
-    cost a syscall on every bootstrap)."""
+    """Nonexistent paths settle on (0, 0). The cache stores this so we
+    don't re-walk on every subsequent call (a deleted cache dir would
+    otherwise cost a background walk on every TTL expiry)."""
     from backend.services import service_manager as sm
 
     monkeypatch.setattr(sm, "_dir_stats_cache", {})
     monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
 
     missing = str(tmp_path / "does-not-exist")
+    # Cold call: (0, 0) placeholder immediately, real (missing-path) walk
+    # result lands on the background thread — which also happens to be
+    # (0, 0), so this assertion holds on the very first call too.
     assert sm._get_dir_stats(missing) == (0, 0)
-    # Cache populated so the second call is the cached path.
-    assert missing in sm._dir_stats_cache
+    assert _wait_for(lambda: missing in sm._dir_stats_cache)
 
 
 def test_get_dir_stats_counts_files_recursively(tmp_path, monkeypatch):
@@ -46,9 +48,10 @@ def test_get_dir_stats_counts_files_recursively(tmp_path, monkeypatch):
     (sub / "b.parquet").write_bytes(b"y" * 200)
     (sub / "c.parquet").write_bytes(b"z" * 50)
 
-    total_size, file_count = sm._get_dir_stats(str(tmp_path))
-    assert file_count == 3
-    assert total_size == 350
+    path = str(tmp_path)
+    # Cold call returns the (0, 0) placeholder immediately; the real
+    # count lands once the background walk finishes.
+    assert _wait_for(lambda: sm._get_dir_stats(path) == (350, 3))
 
 
 def test_get_dir_stats_returns_cached_value_within_ttl(tmp_path, monkeypatch):
@@ -60,14 +63,17 @@ def test_get_dir_stats_returns_cached_value_within_ttl(tmp_path, monkeypatch):
     monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
 
     (tmp_path / "a.parquet").write_bytes(b"x" * 100)
+    path = str(tmp_path)
 
-    # First call populates the cache.
-    sm._get_dir_stats(str(tmp_path))
+    # First call is cold (returns (0, 0) immediately); wait for the
+    # background walk to populate the real value before proceeding.
+    sm._get_dir_stats(path)
+    assert _wait_for(lambda: sm._get_dir_stats(path) == (100, 1))
 
     # Add a file AFTER caching. If the cache is used the new file should
     # NOT appear in the result.
     (tmp_path / "b.parquet").write_bytes(b"y" * 200)
-    size, count = sm._get_dir_stats(str(tmp_path))
+    size, count = sm._get_dir_stats(path)
     assert count == 1, "cached value should ignore the newly-added file within TTL"
     assert size == 100
 
@@ -120,22 +126,37 @@ def test_get_dir_stats_returns_stale_value_and_refreshes_in_background(tmp_path,
     )
 
 
-def test_get_dir_stats_first_ever_call_is_synchronous(tmp_path, monkeypatch):
-    """No cache entry yet → walk synchronously. The user pays the cost
-    on first request, then never again (modulo process restart).
-    Pinned because the SWR branch only fires when an entry exists;
-    a buggy refactor that always returned stale on miss would always
-    return 0/0 on first call."""
+def test_get_dir_stats_first_ever_call_is_non_blocking(tmp_path, monkeypatch):
+    """No cache entry yet → return the (0, 0) placeholder immediately
+    (never block on the walk) and populate the real value on a
+    background thread.
+
+    This inverts the original contract on purpose: walking synchronously
+    on first call was "fine" for a few thousand files, but for a service
+    with 100k+ cache files it turned the very first post-restart
+    /api/bootstrap or /api/services call into a multi-minute block —
+    see the 2026-08-03 incident where a 162k-file cache dir made
+    /admin unreachable for ~3 minutes after every deploy. The cost is
+    now paid off the request path, every time, including the first."""
+    import time as _time
+
     from backend.services import service_manager as sm
 
     monkeypatch.setattr(sm, "_dir_stats_cache", {})
     monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
 
     (tmp_path / "a.parquet").write_bytes(b"x" * 42)
+    path = str(tmp_path)
 
-    size, count = sm._get_dir_stats(str(tmp_path))
-    assert (size, count) == (42, 1), (
-        "first-ever call (no cache entry) must walk synchronously and return real data, not stale (0,0)"
+    t0 = _time.monotonic()
+    size, count = sm._get_dir_stats(path)
+    elapsed = _time.monotonic() - t0
+
+    assert (size, count) == (0, 0), "first-ever call must return the placeholder, not block on the walk"
+    assert elapsed < 0.5, f"first-ever call must not block on the walk; took {elapsed:.3f}s"
+
+    assert _wait_for(lambda: sm._get_dir_stats(path) == (42, 1)), (
+        "background walk did not populate the real value within the timeout"
     )
 
 
@@ -188,19 +209,23 @@ def test_get_dir_stats_coalesces_concurrent_refreshes(tmp_path, monkeypatch):
 
 def test_get_dir_stats_coalesces_cold_first_arrivals(tmp_path, monkeypatch):
     """When the cache is empty and N threads call _get_dir_stats(path)
-    simultaneously, only ONE walk should execute — the others wait on
-    the per-path cold lock and read the populated cache.
+    simultaneously, only ONE background walk should fire — the same
+    `_dir_stats_refresh_in_flight` guard used for stale-refresh
+    coalescing also covers this case, since the cold path no longer has
+    a separate blocking code path of its own.
 
     Pinned because on a fleet cold-start (backend just rebooted, 50
     /api/bootstrap calls land in the first second), without this
-    coalescing we'd fire 50 parallel walks for the same dir."""
+    coalescing we'd fire 50 parallel walks for the same dir. Every
+    caller gets the (0, 0) placeholder immediately now (none of them
+    block), so this only asserts the walk count + eventual convergence,
+    not that every caller's return value is already populated."""
     import threading
 
     from backend.services import service_manager as sm
 
     monkeypatch.setattr(sm, "_dir_stats_cache", {})
     monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
-    monkeypatch.setattr(sm, "_dir_stats_cold_locks", {})
 
     (tmp_path / "a.parquet").write_bytes(b"x" * 100)
     path = str(tmp_path)
@@ -231,12 +256,12 @@ def test_get_dir_stats_coalesces_cold_first_arrivals(tmp_path, monkeypatch):
 
     assert walk_count["n"] == 1, (
         f"cold-path coalescing failed: {walk_count['n']} walks fired for 10 concurrent first-arrivals "
-        f"(expected exactly 1). The per-path cold-lock is broken."
+        f"(expected exactly 1). The _dir_stats_refresh_in_flight guard is broken."
     )
-    # All callers got the same correct result.
-    assert all(r == (100, 1) for r in results), (
-        f"all coalesced callers must return the SAME populated value, not (0,0). Got {results}"
-    )
+    # None of the concurrent callers blocked, so (0, 0) placeholders are
+    # expected here — the real assertion is that the walk converges.
+    assert all(r == (0, 0) for r in results), f"cold callers must get the placeholder, not block. Got {results}"
+    assert _wait_for(lambda: sm._get_dir_stats(path) == (100, 1)), "background walk never converged on the real value"
 
 
 def test_get_dir_stats_recovers_from_thread_start_failure(tmp_path, monkeypatch):

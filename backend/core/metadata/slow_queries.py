@@ -122,6 +122,12 @@ def insert_slow_query(service_id: str, row: dict[str, Any]) -> None:
     Rows are buffered in memory and flushed every few seconds or when
     the buffer reaches a size threshold, replacing the prior synchronous
     per-row INSERT+COMMIT that caused ~2,700 contention events/week.
+
+    The batch-threshold flush runs on a background thread rather than
+    inline: a disk/fsync stall on the flush would otherwise block
+    whatever just finished the query being recorded — and since flushing
+    a slow-query batch is itself now a slow query, an inline call risked
+    a feedback loop (recording slow queries makes more of them slow).
     """
     params = _normalise_row(row)
     with _buffer_lock:
@@ -134,7 +140,7 @@ def insert_slow_query(service_id: str, row: dict[str, Any]) -> None:
             _schedule_flush()
 
     if needs_immediate:
-        _flush_all()
+        threading.Thread(target=_flush_all, daemon=True).start()
 
 
 def flush_slow_query_buffer() -> None:

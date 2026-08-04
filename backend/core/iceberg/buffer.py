@@ -456,7 +456,39 @@ def write_to_buffer(source: dict, arrow_table: pa.Table, filename: str) -> str:
 _BUFFER_COMMIT_CHUNK_SIZE = int(os.environ.get("BUFFER_COMMIT_CHUNK_SIZE", "50") or "50")
 
 
+_CLOUD_WRITE_LOCK_TIMEOUT_S = 30.0
+
+
 def commit_buffer(source: dict, progress_callback=None) -> dict:
+    """Append all local buffer files to the Iceberg table.
+
+    Acquires the per-service lock (the same one ``reset_service_logs``
+    holds for its whole run) before touching FOS. Without this, a commit
+    already past ``reset_service_logs``'s one-time ``cron_busy()`` check
+    could append a new snapshot while the reset's ``iceberg/`` purge is
+    concurrently deleting under the same prefix — corrupting the
+    freshly-recreated table with dangling manifest references (even the
+    post-reset CURRENT snapshot became unreadable in a production
+    incident). If the lock is held by a reset, this cycle is skipped
+    cleanly — the next commit tick retries, same as any other transient
+    commit skip.
+    """
+    from backend.core.iceberg.view import _get_service_lock
+
+    lock = _get_service_lock(source.get("name", "default"))
+    if not lock.acquire(timeout=_CLOUD_WRITE_LOCK_TIMEOUT_S):
+        logger.warning(
+            "%s commit_buffer: service lock held (reset or another writer in progress) — skipping this cycle",
+            _core_mod._ICE,
+        )
+        return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
+    try:
+        return _commit_buffer_impl(source, progress_callback)
+    finally:
+        lock.release()
+
+
+def _commit_buffer_impl(source: dict, progress_callback=None) -> dict:
     """Append all local buffer files to the Iceberg table.
 
     Splits the buffer into chunks of ``_core_mod._BUFFER_COMMIT_CHUNK_SIZE`` files,
@@ -766,6 +798,31 @@ def commit_buffer(source: dict, progress_callback=None) -> dict:
 def optimize_table(source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None) -> dict:
     """Compact small Iceberg data files into larger ones using rewrite_data_files.
 
+    Acquires the per-service lock (see :func:`commit_buffer`) before
+    touching FOS — rewrite_data_files commits a new snapshot, and racing
+    that against a concurrent ``reset_service_logs`` purge has the same
+    dangling-manifest corruption risk.
+    """
+    from backend.core.iceberg.view import _get_service_lock
+
+    lock = _get_service_lock(source.get("name", "default"))
+    if not lock.acquire(timeout=_CLOUD_WRITE_LOCK_TIMEOUT_S):
+        logger.warning(
+            "%s optimize_table: service lock held (reset or another writer in progress) — skipping this cycle",
+            _core_mod._ICE,
+        )
+        return {"error": "service busy (reset or another writer in progress)", "files_rewritten": 0}
+    try:
+        return _optimize_table_impl(source, target_file_size_mb, min_files_per_partition)
+    finally:
+        lock.release()
+
+
+def _optimize_table_impl(
+    source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None
+) -> dict:
+    """Compact small Iceberg data files into larger ones using rewrite_data_files.
+
     Identifies partitions with too many small files and rewrites them into
     single larger files to maintain metadata health and query performance.
 
@@ -980,6 +1037,28 @@ def optimize_table(source: dict, target_file_size_mb: int = 128, min_files_per_p
 
 
 def run_cloud_maintenance(source: dict) -> dict:
+    """Run weekly maintenance: expire old metadata, delete old data, and purge old local cache.
+
+    Acquires the per-service lock (see :func:`commit_buffer`) before
+    touching FOS — both the retention delete and expire_snapshots commit
+    against the table, with the same reset-race risk.
+    """
+    from backend.core.iceberg.view import _get_service_lock
+
+    lock = _get_service_lock(source.get("name", "default"))
+    if not lock.acquire(timeout=_CLOUD_WRITE_LOCK_TIMEOUT_S):
+        logger.warning(
+            "%s run_cloud_maintenance: service lock held (reset or another writer in progress) — skipping this cycle",
+            _core_mod._ICE,
+        )
+        return {"error": "service busy (reset or another writer in progress)"}
+    try:
+        return _run_cloud_maintenance_impl(source)
+    finally:
+        lock.release()
+
+
+def _run_cloud_maintenance_impl(source: dict) -> dict:
     """Run weekly maintenance: expire old metadata, delete old data, and purge old local cache.
 
     1. Deletes log data from Iceberg older than `data_retention_days` (default 30).

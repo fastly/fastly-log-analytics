@@ -43,6 +43,19 @@ from .state import (
 logger = logging.getLogger(__name__)
 
 
+class TunnelCapacityError(Exception):
+    """Raised by :meth:`TunnelManager.create_session` when ``cap`` is at capacity.
+
+    Carries the observed count so the caller can build the same
+    ``capacity_exceeded`` error body it used before this was atomic.
+    """
+
+    def __init__(self, current: int, cap: int) -> None:
+        super().__init__(f"session capacity exceeded: {current} >= {cap}")
+        self.current = current
+        self.cap = cap
+
+
 class TunnelManager:
     """Process-wide singleton. Use ``get_tunnel_manager()`` to access."""
 
@@ -131,13 +144,24 @@ class TunnelManager:
         ip_address: str,
         user_agent: str,
         headers: dict[str, str],
+        cap: int | None = None,
     ) -> AnalystSession:
         """Register a new session, booting any existing one for the same invite.
 
-        Caller is responsible for enforcing capacity cap before calling.
+        If ``cap`` is given, the capacity check and the session insert happen
+        under the SAME lock acquisition, closing a TOCTOU window where two
+        concurrent logins (valid credentials, an invite with
+        ``allow_concurrent_sessions``, or two distinct invites) could both
+        observe ``active_session_count() < cap`` and both proceed, transiently
+        overshooting the configured cap (audit finding 016). Raises
+        :class:`TunnelCapacityError` instead of inserting when at capacity —
+        callers that previously pre-checked ``active_session_count() >= cap``
+        themselves should pass ``cap`` here instead and drop that check.
         """
         invite_id = invite["id"]
         with self._lock:
+            if cap is not None and len(self._sessions) >= cap:
+                raise TunnelCapacityError(len(self._sessions), cap)
             # Multi-device boot — single-seat invites only. When the invite opts
             # into shared logins (allow_concurrent_sessions), skip the boot so
             # several analysts can be active under one invite at once (still

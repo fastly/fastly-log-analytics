@@ -49,6 +49,50 @@ _CacheRegistry.register("routers.bootstrap._bootstrap_inflight", _bootstrap_infl
 # registry rather than importing this router keeps them import-independent.
 
 
+def _startup_stub_response(request: Request) -> BootstrapResponse:
+    """Minimal response served while the per-service background warm-up
+    (``backend.main._background_startup``) is still draining.
+
+    Only fields that genuinely depend on that warm-up (the real ``services``
+    list, per-service ``schema``/``settings``, anything sourced from
+    Iceberg/DuckDB) are withheld here — they stay `[]`/`None` until
+    ``startup_complete`` flips, exactly as before.
+
+    ``admin_token`` is the one exception: it's a static ``os.getenv()`` read
+    (see ``remote_access._admin_shared_secret``) with zero dependency on
+    per-service warm-up, so withholding it during the ~15-20 min this VM's
+    startup loop takes to drain (several services × per-service init) forced
+    every admin-branch request to run without ``X-Admin-Token`` and 401 for
+    the whole window. Freeing it here does not touch the analyst/admin
+    boundary: same ``analyst_session is None and not is_remote`` gate the
+    fully-warm path uses below (``_bootstrap_sync``) — and at this point in
+    the request lifecycle ``analyst_session`` is always ``None`` whenever
+    ``is_remote`` is ``False`` (neither ``RemoteAccessMiddleware`` nor
+    ``_bootstrap_sync``'s cookie validation ever populate it on the loopback
+    branch), so checking ``is_remote`` alone is equivalent to the full gate.
+    """
+    from backend.core.web_vitals_store import collection_enabled as _web_vitals_enabled
+
+    is_remote = getattr(request.state, "is_remote", False)
+    admin_token: str | None = None
+    if not is_remote:
+        from backend.utils.remote_access import _admin_shared_secret
+
+        admin_token = _admin_shared_secret() or None
+
+    return BootstrapResponse.with_telemetry(
+        active_service_id=None,
+        services=[],
+        settings={
+            "initializing": True,
+            "is_remote_analyst": False,
+            "needs_login": False,
+            "web_vitals_enabled": _web_vitals_enabled(),
+            "admin_token": admin_token,
+        },
+    )
+
+
 @router.get("/bootstrap", response_model=BootstrapResponse)
 async def bootstrap(
     request: Request,
@@ -63,18 +107,7 @@ async def bootstrap(
         startup_complete = True
 
     if not startup_complete:
-        from backend.core.web_vitals_store import collection_enabled as _web_vitals_enabled
-
-        return BootstrapResponse.with_telemetry(
-            active_service_id=None,
-            services=[],
-            settings={
-                "initializing": True,
-                "is_remote_analyst": False,
-                "needs_login": False,
-                "web_vitals_enabled": _web_vitals_enabled(),
-            },
-        )
+        return _startup_stub_response(request)
     # NB: kept docstring-free on purpose — FastAPI publishes a route
     # docstring as the OpenAPI `description`, and this handler had none.
     # Coalesce + short-TTL cache the loopback admin bootstrap; run the

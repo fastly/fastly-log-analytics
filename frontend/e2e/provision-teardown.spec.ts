@@ -107,8 +107,12 @@ test('teardown CTA opens a confirm dialog and removes the service from /api/boot
     .first()
   await expect(row).toBeVisible({ timeout: 30_000 })
 
-  const teardownBtn = row.getByRole('button', { name: /teardown/i }).first()
-  await teardownBtn.click()
+  // Row actions collapsed into a single "Manage" dropdown (Delete Data +
+  // Teardown Service live inside it). The menu content is portaled to
+  // document.body by base-ui's Menu primitive, so only the trigger is
+  // scoped to the row — the opened item is queried from `page`.
+  await row.getByRole('button', { name: /manage/i }).click()
+  await page.getByRole('menuitem', { name: /teardown service/i }).click()
 
   // TeardownDialog opens with "Teardown: <name>" title.
   await expect(page.getByRole('dialog')).toBeVisible({ timeout: 15_000 })

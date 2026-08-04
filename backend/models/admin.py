@@ -426,6 +426,22 @@ class RefreshPopLocationsRequest(BaseModel):
     token: str = Field(..., description="Fastly API key")
 
 
+class ResetLogsRequest(BaseModel):
+    """Body for ``POST /api/admin/reset-logs`` — a destructive wipe of one
+    service's log data. ``confirm`` must equal the resolved service id
+    (belt-and-suspenders alongside the ``x-service-id``/``?service_id``
+    resolution) so a stale/mistargeted request fails loud instead of
+    silently wiping the wrong service."""
+
+    confirm: str = Field(..., description="Must equal the target service_id.")
+    delete_raw_logs: bool = Field(
+        False,
+        description="Also delete not-yet-ingested raw .gz logs in cloud storage. "
+        "Default off — see the re-ingestion-storm warning in the design doc.",
+    )
+    preserve_usage_history: bool = Field(True, description="Keep Class A/B usage-log (billing) history.")
+
+
 # ── /api/admin/usage-logging POST/PATCH body ───────────────────────────────
 
 

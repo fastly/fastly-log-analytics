@@ -17,9 +17,29 @@ from functools import wraps
 from logging import Logger
 from typing import Any, NoReturn, get_args
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 logger = logging.getLogger(__name__)
+
+
+def require_json_content_type(req: Request) -> None:
+    """Reject any request whose Content-Type isn't application/json.
+
+    CSRF defense for destructive POST routes: an HTML form with
+    ``enctype=text/plain`` can POST a body that LOOKS like JSON without
+    triggering a CORS preflight. Requiring ``Content-Type: application/json``
+    forces the browser to preflight any cross-origin call (text/plain is
+    "simple"; application/json is not), blocking the silent-invocation
+    vector. Runs as a ``Depends()`` so it fires before FastAPI's body
+    parser — otherwise a malformed text/plain body returns 422 from the
+    parser and the explicit 415 never executes. Mirrors
+    ``routers.provision._require_json_content_type`` (kept separate there
+    to avoid a cross-router import; this copy is for other routers)."""
+    if not (req.headers.get("content-type") or "").startswith("application/json"):
+        raise HTTPException(
+            status_code=415,
+            detail=make_error("unsupported_media_type", "Content-Type must be application/json"),
+        )
 
 
 # ── SSE pass-through headers ────────────────────────────────────────────────

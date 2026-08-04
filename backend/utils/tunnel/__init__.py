@@ -17,6 +17,7 @@ import time  # noqa: F401  — re-exported for monkeypatch compat
 
 from .fingerprint import compute_fingerprint
 from .manager import (
+    TunnelCapacityError,
     TunnelManager,
     build_share_live_payload,
     get_tunnel_manager,
@@ -42,6 +43,7 @@ __all__ = [
     "LOGIN_FAILURE_THRESHOLD",
     "LOGIN_FAILURE_WINDOW_S",
     "LOGIN_LOCKOUT_S",
+    "TunnelCapacityError",
     "TunnelManager",
     "TunnelState",
     "_LoginRateLimiter",

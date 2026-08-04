@@ -1191,9 +1191,15 @@ class QueryRunner:
         per_field_limits lets a caller request a wider top-N for specific
         fields without bloating the others — e.g. ``{"country": 500}`` to
         get up to 500 countries for a choropleth while keeping other
-        panels at the default top-10. Internally the live-active-hour
-        branch fetches max(all_limits) rows so the merge has enough data
-        to satisfy the widest field's truncation.
+        panels at the default top-10. Both the rollup-parquet branch and
+        the live-active-hour / missing-hour-heal branches apply each
+        field's own limit to its own QUALIFY cutoff (a per-field CASE in
+        the rolled-parquet SQL; a per-field branch limit in
+        ``execute_top_n_batch``) — NOT ``max(all_limits)`` applied
+        uniformly to every field. The collapsed-max behavior was a real
+        bug (fixed 2026-08-03): a single ``{"country": 500}`` override
+        was making every other field's QUALIFY <= 500 too, since the SQL
+        only had one scalar limit to work with.
 
         Freshness contract: the rollup file enumeration explicitly skips
         any hour >= the current UTC hour (the active hour is still
@@ -1589,11 +1595,29 @@ class QueryRunner:
                     f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
                     f"WHERE field IN ({field_in_list})"
                 )
-            _max_limit = max([limit] + list((per_field_limits or {}).values()))
+            # Per-field QUALIFY cutoff: a CASE keyed on `field` so a caller's
+            # per_field_limits override (e.g. {"country": 500} for the
+            # choropleth) only widens the ONE field it targets. Collapsing
+            # to a single max(limit, *per_field_limits.values()) applied to
+            # every branch — the prior behavior — made every other field's
+            # QUALIFY <= 500 too, tripling this query's cost for no reason
+            # (2026-08-03 perf investigation: 19KB SQL, 3.4s, QUALIFY <= 500
+            # on ~20 fields that should have stayed at the default top-10).
+            # Field names are drawn from safe_fields (_is_safe_ident-
+            # validated above); quotes escaped anyway, defense-in-depth.
+            _pfl_rolled = {f: v for f, v in (per_field_limits or {}).items() if f in safe_fields}
+            if _pfl_rolled:
+                _case_whens = " ".join(
+                    f"WHEN '{f.replace(chr(39), chr(39) * 2)}' THEN {int(v)}" for f, v in _pfl_rolled.items()
+                )
+                _qualify_limit_expr = f"CASE field {_case_whens} ELSE {int(limit)} END"
+            else:
+                _qualify_limit_expr = str(int(limit))
             q = (
                 "SELECT field, value, SUM(count) AS c FROM ("
                 + " UNION ALL ".join(branches)
-                + f") GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= {_max_limit}"
+                + f") GROUP BY field, value QUALIFY ROW_NUMBER() OVER "
+                f"(PARTITION BY field ORDER BY c DESC) <= {_qualify_limit_expr}"
             )
             try:
                 rolled_res = self.execute(q).fetchall()
@@ -1651,10 +1675,11 @@ class QueryRunner:
                     schema_types = {col["name"]: col["type"] for col in _get_schema(self.con, self.src)}
 
                 # To prevent creating a massive UNION, we'll create a temp table for just the live hour.
-                # Live branch must fetch up to the WIDEST per-field limit so the
-                # final per-field truncation has enough data — fetching only
-                # `limit` here would under-count any field whose per_field_limit > limit.
-                _live_limit = max([limit] + list((per_field_limits or {}).values()))
+                # execute_top_n_batch below applies per_field_limits per its
+                # own per-field branch now, so each field fetches only what
+                # ITS truncation needs — not max(all limits) for every field
+                # (that collapse used to make e.g. a country=500 override
+                # widen every other field's live-hour QUALIFY to 500 too).
                 # Fast path: read buffer + active hourly partition directly,
                 # skipping the iceberg view (~700ms saved per request on the
                 # 2026-06-08 baseline). Falls back to the view-based path if
@@ -1699,7 +1724,12 @@ class QueryRunner:
                         if live_fields:
                             _t_lb = time.perf_counter()
                             live_res, _ = self.execute_top_n_batch(
-                                live_fields, tmp_name, actual_cols, schema_types, limit=_live_limit
+                                live_fields,
+                                tmp_name,
+                                actual_cols,
+                                schema_types,
+                                limit=limit,
+                                per_field_limits=per_field_limits,
                             )
                             _phase("live_active_hour:batch", (time.perf_counter() - _t_lb) * 1000)
                     finally:
@@ -1820,14 +1850,18 @@ class QueryRunner:
                     f"AND timestamp < '{heal_end_dt.isoformat()}' "
                     f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
                 )
-                _heal_limit = max([limit] + list((per_field_limits or {}).values()))
                 heal_tmp = self.create_filtered_temp_table(heal_topn_fields, actual_cols, base_table, heal_where)
                 if heal_tmp:
                     try:
                         heal_fields = [f for f in heal_topn_fields if f in actual_cols]
                         if heal_fields:
                             heal_res, _ = self.execute_top_n_batch(
-                                heal_fields, heal_tmp, actual_cols, schema_types, limit=_heal_limit
+                                heal_fields,
+                                heal_tmp,
+                                actual_cols,
+                                schema_types,
+                                limit=limit,
+                                per_field_limits=per_field_limits,
                             )
                     finally:
                         try:
@@ -4227,7 +4261,13 @@ class QueryRunner:
         return result_counts, per_field_meta
 
     def execute_top_n_batch(
-        self, fields: list[str], table_name: str, actual_cols: list[str], schema_types: dict[str, str], limit: int = 10
+        self,
+        fields: list[str],
+        table_name: str,
+        actual_cols: list[str],
+        schema_types: dict[str, str],
+        limit: int = 10,
+        per_field_limits: dict[str, int] | None = None,
     ) -> tuple[list[tuple], list[str]]:
         """
         Per-field top-N batch over multiple fields. Returns
@@ -4236,6 +4276,15 @@ class QueryRunner:
         Shape: one ``GROUP BY value ... QUALIFY ROW_NUMBER()`` branch per
         field, stitched together with ``UNION ALL`` and a final
         ``ORDER BY field, c DESC``.
+
+        ``per_field_limits`` overrides ``limit`` for specific fields (e.g.
+        ``{"country": 500}``) — each field's own branch gets its own QUALIFY
+        cutoff since this function already builds one branch per field.
+        There is no reason to widen every OTHER field's branch to the max
+        of all overrides just because one field wants more rows; that
+        collapse was the 2026-08-03 dashboard over-fetch bug (a single
+        country=500 override was applying QUALIFY <= 500 to all ~20
+        fields in the batch).
 
         Why not UNPIVOT: a prior shape projected every field into one CTE and
         ``UNPIVOT``ed it into (field, value) pairs so the source was scanned
@@ -4270,12 +4319,14 @@ class QueryRunner:
 
         branches: list[str] = []
         field_order: list[str] = []
+        _pfl = per_field_limits or {}
 
         for field in fields:
             if not _is_safe_ident(field):
                 continue
             sql_col = field
             col_type = schema_types.get(sql_col, "VARCHAR")
+            field_limit = int(_pfl.get(field, limit))
 
             # Normalized VARCHAR value expression for this field. Empty-string
             # folding for VARCHAR cols is done via NULLIF so the
@@ -4299,7 +4350,7 @@ class QueryRunner:
                 f"FROM (SELECT {value_expr} AS value FROM {table_name}) "
                 f"WHERE value IS NOT NULL "
                 f"GROUP BY value "
-                f"QUALIFY ROW_NUMBER() OVER (ORDER BY c DESC) <= {limit})"
+                f"QUALIFY ROW_NUMBER() OVER (ORDER BY c DESC) <= {field_limit})"
             )
             field_order.append(field)
 

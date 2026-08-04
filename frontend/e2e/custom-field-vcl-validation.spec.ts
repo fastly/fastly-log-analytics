@@ -36,11 +36,16 @@ test('VCL editor debounce → validate-vcl fires after 500 ms in a real browser'
 
   await page.goto('/admin')
 
-  // Open Log Settings on the seeded service. The button text is
-  // "Log Settings" (per ServicesTableColumns.tsx).
-  const logSettingsBtn = page.getByRole('button', { name: /log settings/i }).first()
-  await expect(logSettingsBtn).toBeVisible({ timeout: 30_000 })
-  await logSettingsBtn.click()
+  // Open Log Settings on the seeded service. Row actions live behind the
+  // "Manage" dropdown (per ServicesTableColumns.tsx) — the item is
+  // portaled to document.body by base-ui's Menu primitive, so it's
+  // queried from `page`, not scoped to the row.
+  const manageBtn = page.getByRole('button', { name: /manage/i }).first()
+  await expect(manageBtn).toBeVisible({ timeout: 30_000 })
+  await manageBtn.click()
+  const logSettingsItem = page.getByRole('menuitem', { name: /log settings/i })
+  await expect(logSettingsItem).toBeVisible({ timeout: 15_000 })
+  await logSettingsItem.click()
 
   // The modal has three steps: Standard Fields → Custom Fields →
   // Review. Walk to step 2 (Custom Fields). The "Next Step" button

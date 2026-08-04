@@ -1942,6 +1942,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/reset-logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reset Logs Endpoint
+         * @description Permanently delete this service's log data (cloud + local) over SSE.
+         *
+         *     Wipes the cloud Iceberg log table, the local DuckDB file + cache, and
+         *     the SQLite ingestion ledgers, then re-initializes an empty, queryable
+         *     0-state. Preserves the service's configuration: saved views, alerts,
+         *     source registration, audit history, and scoring labels/audit. See
+         *     ``backend.core.reset.reset_service_logs`` for the full sequence.
+         *
+         *     Fails closed before any work starts: 403 if this service isn't
+         *     read_write (defense-in-depth — ``RemoteAccessMiddleware`` already blocks
+         *     ``/api/admin/*`` for remote analysts), and 400 if ``confirm`` doesn't
+         *     match the resolved service id.
+         */
+        post: operations["reset_logs_endpoint_api_admin_reset_logs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/ingest-logs": {
         parameters: {
             query?: never;
@@ -9014,6 +9045,33 @@ export interface components {
              * @description Fastly API key
              */
             token: string;
+        };
+        /**
+         * ResetLogsRequest
+         * @description Body for ``POST /api/admin/reset-logs`` — a destructive wipe of one
+         *     service's log data. ``confirm`` must equal the resolved service id
+         *     (belt-and-suspenders alongside the ``x-service-id``/``?service_id``
+         *     resolution) so a stale/mistargeted request fails loud instead of
+         *     silently wiping the wrong service.
+         */
+        ResetLogsRequest: {
+            /**
+             * Confirm
+             * @description Must equal the target service_id.
+             */
+            confirm: string;
+            /**
+             * Delete Raw Logs
+             * @description Also delete not-yet-ingested raw .gz logs in cloud storage. Default off — see the re-ingestion-storm warning in the design doc.
+             * @default false
+             */
+            delete_raw_logs: boolean;
+            /**
+             * Preserve Usage History
+             * @description Keep Class A/B usage-log (billing) history.
+             * @default true
+             */
+            preserve_usage_history: boolean;
         };
         /** SavedView */
         SavedView: {
@@ -22413,6 +22471,117 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    reset_logs_endpoint_api_admin_reset_logs_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResetLogsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };

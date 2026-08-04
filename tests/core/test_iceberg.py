@@ -1329,17 +1329,26 @@ def test_update_iceberg_view_skips_rebuild_when_persistent_view_exists(monkeypat
 
 
 def test_update_iceberg_view_locked_creates_empty_view_for_fresh_service(monkeypatch):
-    """Counterpart to the no-downgrade test: a service with NO prior cache
-    entry (genuinely fresh, never seen) DOES get the empty view as
-    expected. This is correct behavior for the case-(a) "no data yet" path."""
+    """A genuinely fresh service (no local catalog db yet, so metadata_loc
+    resolves to None) gets the empty view, per the case-(a) "no data yet"
+    path. metadata_loc here comes from a LOCAL SQLITE FILE
+    (cache_dir/iceberg_catalog.db), not _read_metadata_pointer — patching
+    the latter (an earlier version of this test did, plus patched
+    `_get_catalog`/`_load_persistent_cache`/etc. on the `iceberg` package
+    rather than the `_core`/`view` submodules _update_iceberg_view_locked
+    actually reads from at call time) has no effect on this code path at
+    all. That version's mocks were never invoked; the test passed only
+    because a genuinely-missing local catalog db ALSO short-circuits to
+    the same empty view before any of them would ever be reached — a
+    false-positive that wouldn't have caught a regression in this branch.
+    Left with no mocks below that matter, since none are needed: the
+    short-circuit fires before _get_catalog or _read_metadata_pointer
+    would ever run."""
     from backend.core import iceberg as _ice
 
     source_key = "fresh-svc-no-prior-cache"
     _ice._view_cache.pop(source_key, None)
     _ice._snapshot_files_cache.pop(source_key, None)
-
-    fake_catalog = MagicMock()
-    fake_catalog.load_table.side_effect = RuntimeError("no table yet")
 
     source = {
         "name": source_key,
@@ -1351,11 +1360,6 @@ def test_update_iceberg_view_locked_creates_empty_view_for_fresh_service(monkeyp
         "region": "us-east-1",
     }
 
-    monkeypatch.setattr(_ice, "_get_catalog", lambda src: fake_catalog)
-    monkeypatch.setattr(_ice, "buffer_files", lambda src: [])
-    monkeypatch.setattr(_ice, "_read_metadata_pointer", lambda src, ident: None)
-    monkeypatch.setattr(_ice, "_load_persistent_cache", lambda src: None)
-    monkeypatch.setattr(_ice, "configure_duckdb_s3", lambda con: None)
     monkeypatch.setattr("os.path.exists", lambda p: False)
 
     # Fresh service: no ingested files in sqlite metadata either.
@@ -1378,12 +1382,252 @@ def test_update_iceberg_view_locked_creates_empty_view_for_fresh_service(monkeyp
     _ice._update_iceberg_view_locked(fake_con, source)
 
     create_view_calls = [
-        c for c in fake_con.execute.call_args_list if c.args and "CREATE OR REPLACE VIEW" in str(c.args[0])
+        c
+        for c in fake_con.execute.call_args_list
+        if c.args and "CREATE OR REPLACE" in str(c.args[0]) and "VIEW" in str(c.args[0])
     ]
     assert create_view_calls, "fresh service should get the empty view created"
     assert "WHERE false" in str(create_view_calls[0].args[0])
 
     _ice._view_cache.pop(source_key, None)
+
+
+def test_update_iceberg_view_locked_creates_empty_view_when_catalog_load_raises(monkeypatch, tmp_path):
+    """Companion to the fresh-service test above, covering the DIFFERENT
+    case the old (broken-mock) version of that test claimed to cover: a
+    service WITH a resolvable local catalog pointer (so the cold-load
+    branch actually runs, not the metadata_loc-is-None short-circuit)
+    whose catalog.load_table() call raises — e.g. a transient FOS
+    rate-limit / network blip. Must still produce a safe empty view
+    rather than propagating the exception. Uses the same real-sqlite-
+    catalog + _core/view submodule patch targets as the plan_files()
+    tests above, so the mocks are provably exercised rather than
+    silently skipped."""
+    import sqlite3
+
+    from backend.core import iceberg as _ice
+    from backend.core.iceberg import _core as _core_mod
+    from backend.core.iceberg import view as view_mod
+
+    source_key = "catalog-load-raises-svc"
+    _ice._view_cache.pop(source_key, None)
+    _ice._snapshot_files_cache.pop(source_key, None)
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    with sqlite3.connect(str(cache_dir / "iceberg_catalog.db")) as cat_con:
+        cat_con.execute("CREATE TABLE iceberg_tables (table_namespace TEXT, table_name TEXT, metadata_location TEXT)")
+        cat_con.execute(
+            "INSERT INTO iceberg_tables VALUES ('default', 'logs', 's3://bucket/iceberg/default/logs/metadata/x.json')"
+        )
+        cat_con.commit()
+
+    source = {
+        "name": source_key,
+        "bucket": "b",
+        "prefix": "p",
+        "endpoint": "ep",
+        "access_key_id": "k",
+        "secret_access_key": "s",
+        "region": "us-east-1",
+        "_cache_dir_override": str(cache_dir),
+    }
+
+    fake_catalog = MagicMock()
+    load_table_calls = MagicMock(side_effect=RuntimeError("FOS rate limited"))
+    monkeypatch.setattr(_core_mod, "_get_catalog", lambda src: fake_catalog)
+    monkeypatch.setattr(_core_mod, "_load_table_cached", lambda src, ident, cat: load_table_calls(src, ident, cat))
+    monkeypatch.setattr(_core_mod, "buffer_files", lambda src: [])
+    monkeypatch.setattr(view_mod, "_load_persistent_cache", lambda src: None)
+    monkeypatch.setattr(view_mod, "configure_duckdb_s3", lambda con: None)
+
+    from backend.core import metadata as _meta
+
+    monkeypatch.setattr(
+        _meta,
+        "get_ingested_files_status_summary",
+        lambda svc: {
+            "file_count": 0,
+            "total_rows": 0,
+            "total_bytes": 0,
+            "count_with_bytes": 0,
+            "last_ingested": None,
+            "latest_file_name": None,
+        },
+    )
+
+    fake_con = MagicMock()
+    fake_con.execute.return_value.fetchone.return_value = None
+    _ice._update_iceberg_view_locked(fake_con, source)
+
+    load_table_calls.assert_called_once()
+
+    create_view_calls = [
+        c
+        for c in fake_con.execute.call_args_list
+        if c.args and "CREATE OR REPLACE" in str(c.args[0]) and "VIEW" in str(c.args[0])
+    ]
+    assert create_view_calls, "catalog-load failure should still produce an empty view, not propagate"
+    assert "WHERE false" in str(create_view_calls[0].args[0])
+
+    _ice._view_cache.pop(source_key, None)
+    _ice._snapshot_files_cache.pop(source_key, None)
+
+
+def _setup_cold_load_view_test(monkeypatch, tmp_path, source_key, *, plan_files_side_effect):
+    """Shared scaffolding for the two tests below: a service with a
+    resolvable metadata pointer (so the cold catalog-load branch runs,
+    not the "never-committed" short-circuit), a loadable table + current
+    snapshot, and a controllable scan().plan_files() outcome.
+
+    _update_iceberg_view_locked resolves metadata_loc from a LOCAL SQLite
+    catalog file (cache_dir/iceberg_catalog.db, table iceberg_tables) —
+    NOT via _read_metadata_pointer (that's a different code path). A real
+    tmp_path-backed catalog db is required; a blanket `os.path.exists ->
+    False` patch (as an earlier draft of this test used) makes that file
+    "not exist", so the function takes the metadata_loc-is-None
+    "never-committed" short-circuit and skips the cold-load branch this
+    test means to exercise entirely — silently passing for the wrong
+    reason (the real fake_table is simply never touched).
+    """
+    import sqlite3
+
+    from backend.core import iceberg as _ice
+
+    _ice._view_cache.pop(source_key, None)
+    _ice._snapshot_files_cache.pop(source_key, None)
+
+    fake_snapshot = MagicMock()
+    fake_snapshot.snapshot_id = 999
+
+    fake_scan = MagicMock()
+    fake_scan.plan_files.side_effect = plan_files_side_effect
+    fake_scan.filter.return_value = fake_scan
+
+    fake_table = MagicMock()
+    fake_table.current_snapshot.return_value = fake_snapshot
+    fake_table.location.return_value = "s3://bucket/iceberg/default/logs"
+    fake_table.scan.return_value = fake_scan
+
+    fake_catalog = MagicMock()
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    catalog_db_path = cache_dir / "iceberg_catalog.db"
+    with sqlite3.connect(str(catalog_db_path)) as cat_con:
+        cat_con.execute("CREATE TABLE iceberg_tables (table_namespace TEXT, table_name TEXT, metadata_location TEXT)")
+        cat_con.execute(
+            "INSERT INTO iceberg_tables VALUES ('default', 'logs', 's3://bucket/iceberg/default/logs/metadata/x.json')"
+        )
+        cat_con.commit()
+
+    source = {
+        "name": source_key,
+        "bucket": "b",
+        "prefix": "p",
+        "endpoint": "ep",
+        "access_key_id": "k",
+        "secret_access_key": "s",
+        "region": "us-east-1",
+        "_cache_dir_override": str(cache_dir),
+    }
+
+    # IMPORTANT: _update_iceberg_view_locked (defined in view.py) calls these
+    # as `_core_mod.xxx(...)` — an attribute lookup on the backend.core.iceberg
+    # ._core submodule at call time — NOT through the `iceberg` package's
+    # one-time `from ._core import *` re-export. Patching `_ice.xxx` (as the
+    # sibling "fresh service" test above does) rebinds a copy on the PACKAGE
+    # namespace and never reaches view.py's call site; only patching `_core`
+    # itself (or view.py's own module for the two names view.py defines
+    # locally) actually intercepts the call.
+    from backend.core.iceberg import _core as _core_mod
+    from backend.core.iceberg import view as view_mod
+
+    monkeypatch.setattr(_core_mod, "_get_catalog", lambda src: fake_catalog)
+    monkeypatch.setattr(_core_mod, "_load_table_cached", lambda src, ident, cat: fake_table)
+    monkeypatch.setattr(_core_mod, "buffer_files", lambda src: [])
+    # view.py defines these two itself (not in _core), so they must be
+    # patched on view_mod directly.
+    monkeypatch.setattr(view_mod, "_load_persistent_cache", lambda src: None)
+    monkeypatch.setattr(view_mod, "configure_duckdb_s3", lambda con: None)
+
+    from backend.core import metadata as _meta
+
+    monkeypatch.setattr(
+        _meta,
+        "get_ingested_files_status_summary",
+        lambda svc: {
+            "file_count": 0,
+            "total_rows": 0,
+            "total_bytes": 0,
+            "count_with_bytes": 0,
+            "last_ingested": None,
+            "latest_file_name": None,
+        },
+    )
+
+    fake_con = MagicMock()
+    # A bare MagicMock's execute(...).fetchone() auto-resolves to a
+    # (truthy) MagicMock, so the is-this-connection-read-only probe query
+    # inside _update_iceberg_view_locked would otherwise see a truthy
+    # res[0] and take the CREATE OR REPLACE TEMP VIEW branch instead of
+    # CREATE OR REPLACE VIEW — an artifact of the mock, not the code
+    # under test. Force it to the real "not read-only" outcome.
+    fake_con.execute.return_value.fetchone.return_value = None
+
+    _ice._update_iceberg_view_locked(fake_con, source)
+
+    # Prove the mocks actually intercepted the real calls — without this,
+    # a patch-target mistake (see comment above) would silently fall
+    # through to the real _get_catalog/_load_table_cached against garbage
+    # credentials, which ALSO produces an empty view, making the test
+    # pass for the wrong reason.
+    assert fake_table.scan.called, "fake_table was never used — the _get_catalog/_load_table_cached patch missed"
+    fake_scan.plan_files.assert_called()
+
+    create_view_calls = [
+        c
+        for c in fake_con.execute.call_args_list
+        if c.args and "CREATE OR REPLACE" in str(c.args[0]) and "VIEW" in str(c.args[0])
+    ]
+    _ice._view_cache.pop(source_key, None)
+    _ice._snapshot_files_cache.pop(source_key, None)
+    assert create_view_calls, "a view should always be created, empty or not"
+    return str(create_view_calls[0].args[0])
+
+
+def test_update_iceberg_view_skips_iceberg_scan_when_plan_files_finds_missing_manifest(monkeypatch, tmp_path):
+    """Audit finding: when pyiceberg's plan_files() proves the current
+    snapshot's manifest closure references a file that no longer exists
+    (FileNotFoundError — reproduced against a real corrupted production
+    table), falling back to iceberg_scan() would hit the SAME missing
+    file through DuckDB's native iceberg extension, which throws an
+    uncatchable duckdb::Exception on an internal worker thread and
+    crashes the ENTIRE backend process rather than just this request.
+    The view must fall through to the safe empty view instead."""
+    view_sql = _setup_cold_load_view_test(
+        monkeypatch,
+        tmp_path,
+        "broken-manifest-svc",
+        plan_files_side_effect=FileNotFoundError("s3://bucket/iceberg/default/logs/metadata/abc-m0.avro"),
+    )
+    assert "iceberg_scan(" not in view_sql, f"must not fall back to iceberg_scan on a proven-missing file: {view_sql}"
+    assert "WHERE false" in view_sql
+
+
+def test_update_iceberg_view_still_falls_back_to_iceberg_scan_on_transient_plan_files_error(monkeypatch, tmp_path):
+    """Counterpart: a TRANSIENT plan_files() failure (network blip, rate
+    limit — anything that ISN'T FileNotFoundError) must still fall back
+    to iceberg_scan() as before, so the dashboard doesn't show an empty
+    view just because one poll hit a blip. Only a proven missing-file
+    error skips the fallback."""
+    view_sql = _setup_cold_load_view_test(
+        monkeypatch,
+        tmp_path,
+        "transient-blip-svc",
+        plan_files_side_effect=TimeoutError("connection timed out"),
+    )
+    assert "iceberg_scan(" in view_sql, f"transient errors must still use the iceberg_scan fallback: {view_sql}"
 
 
 # ── DO NOT load from cloud when local files exist (cost regression guard) ─

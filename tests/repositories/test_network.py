@@ -1,3 +1,6 @@
+import threading
+import time
+
 import duckdb
 import pytest
 
@@ -781,6 +784,192 @@ def test_keyed_path_cache_hit_round_trip(in_memory_duckdb, test_service_source):
         quantized_anchor=anchor,
     )
     assert second.get("is_cached") is True
+
+
+# ── Temp-table single-flight coalescing ──────────────────────────────────────
+#
+# /network fires core/map/shielding as separate concurrent HTTP requests for
+# the identical window+filters (frontend/app/network/page.tsx:108-119). On a
+# rollup miss, core and map both used to independently pay the ~3s
+# CREATE TEMP TABLE build (slow-queries report: two near-simultaneous builds
+# at 3450ms/2960ms for the same window). These pin the fix: a genuinely
+# concurrent, identical-key pair shares ONE build; a differing-key pair does
+# not; and a build failure surfaces to every waiter, not just the leader.
+#
+# Each test opens TWO SEPARATE DuckDB connections against a shared on-disk
+# file rather than reusing one connection across threads — this mirrors the
+# real topology (every HTTP request gets its own pooled connection, see
+# backend/core/duckdb_pool.py) and is not optional: DuckDB connections are
+# not safe for concurrent multi-threaded ``execute()`` calls, so sharing one
+# connection across genuinely-overlapping threads corrupts query state
+# (verified: it produced a spurious BinderException in an earlier draft of
+# this test). Two read-only connections against the same file coexist safely
+# (tests/core/test_duckdb_concurrency.py::test_concurrent_readers_against_held_writer),
+# and CREATE TEMP TABLE works fine on a read-only connection (temp tables are
+# a separate in-memory catalog, not part of the read-only persisted file).
+
+
+def _open_two_network_connections(tmp_path, source, logs):
+    """Seed one on-disk DuckDB file, then return two independent read-only
+    connections to it — the same data, genuinely separate connections."""
+    db_path = str(tmp_path / "network_health.duckdb")
+    setup = duckdb.connect(db_path)
+    table = _safe_table(source["name"])
+    insert_mock_logs(setup, table, logs)
+    setup.close()
+    return duckdb.connect(db_path, read_only=True), duckdb.connect(db_path, read_only=True)
+
+
+def test_get_health_coalesces_concurrent_core_and_map_temp_table_builds(monkeypatch, tmp_path, test_service_source):
+    """core (summary/leaderboard/metro_leaderboard) and map (heatmap/buckets/
+    cities/map_buckets) racing on the SAME window+filters must build the temp
+    table exactly once — the second caller borrows the first's rows instead
+    of re-running CREATE TEMP TABLE AS SELECT."""
+    con_core, con_map = _open_two_network_connections(
+        tmp_path, test_service_source, _net_logs(test_service_source, n=30)
+    )
+
+    from backend.repositories._base import QueryRunner
+
+    original_build = QueryRunner.create_filtered_temp_table
+    call_count = 0
+    count_lock = threading.Lock()
+    build_started = threading.Event()
+    release_leader = threading.Event()
+
+    def slow_build(self, *args, **kwargs):
+        nonlocal call_count
+        with count_lock:
+            call_count += 1
+        build_started.set()
+        assert release_leader.wait(timeout=5), "test deadlocked waiting for release"
+        return original_build(self, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "create_filtered_temp_table", slow_build)
+
+    results: dict[str, dict] = {}
+    errors: list[BaseException] = []
+
+    def run(label, con, sections):
+        try:
+            results[label] = get_health(con, test_service_source, None, None, {}, sections=sections)
+        except BaseException as e:  # noqa: BLE001 - surfaced via assertion below
+            errors.append(e)
+
+    try:
+        core_thread = threading.Thread(
+            target=run, args=("core", con_core, {"summary", "leaderboard", "metro_leaderboard"})
+        )
+        core_thread.start()
+        assert build_started.wait(timeout=5), "leader never reached create_filtered_temp_table"
+
+        map_thread = threading.Thread(
+            target=run, args=("map", con_map, {"heatmap", "buckets", "cities", "map_buckets"})
+        )
+        map_thread.start()
+        # See tests/repositories/utils/test_single_flight.py for why this handshake
+        # is safe: build_started firing proves the leader's registry slot already
+        # exists, so map_thread is guaranteed to see it once scheduled — this only
+        # bounds that (sub-millisecond) scheduling gap before releasing the leader.
+        time.sleep(0.2)
+        release_leader.set()
+
+        core_thread.join(timeout=5)
+        map_thread.join(timeout=5)
+    finally:
+        con_core.close()
+        con_map.close()
+
+    assert not errors, f"get_health raised: {errors}"
+    assert call_count == 1, "core and map each built their own temp table — coalescing did not dedupe"
+    assert results["core"]["leaderboard"], "core's own section produced no leaderboard data"
+    assert results["core"]["metro_leaderboard"], "core's own section produced no metro_leaderboard data"
+    assert results["map"]["heatmap"], "map's own section produced no heatmap data"
+    assert results["map"]["map_buckets"], "map's own section produced no map_buckets data"
+
+
+def test_get_health_does_not_coalesce_requests_with_different_top_n(monkeypatch, tmp_path, test_service_source):
+    """Two concurrent requests that differ in ``top_n`` (which changes the
+    heatmap SQL's row_limit) must NOT share a build — a mismatch on any input
+    that affects the query must fall through to independent builds."""
+    con_a, con_b = _open_two_network_connections(tmp_path, test_service_source, _net_logs(test_service_source, n=30))
+
+    from backend.repositories._base import QueryRunner
+
+    original_build = QueryRunner.create_filtered_temp_table
+    call_count = 0
+    count_lock = threading.Lock()
+
+    def counting_build(self, *args, **kwargs):
+        nonlocal call_count
+        with count_lock:
+            call_count += 1
+        return original_build(self, *args, **kwargs)
+
+    monkeypatch.setattr(QueryRunner, "create_filtered_temp_table", counting_build)
+
+    results: dict[str, dict] = {}
+
+    def run(label, con, top_n):
+        results[label] = get_health(con, test_service_source, None, None, {}, sections={"heatmap"}, top_n=top_n)
+
+    try:
+        t1 = threading.Thread(target=run, args=("a", con_a, 10))
+        t2 = threading.Thread(target=run, args=("b", con_b, 50))
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+    finally:
+        con_a.close()
+        con_b.close()
+
+    assert call_count == 2, "requests with different top_n incorrectly shared a temp-table build"
+
+
+def test_get_health_coalesced_temp_table_failure_surfaces_to_both_waiters(monkeypatch, tmp_path, test_service_source):
+    """If the leader's CREATE TEMP TABLE fails, every waiter on that key must
+    get the same 'available: False' response — a follower must never
+    silently get an empty-but-'available: True' payload instead."""
+    con_core, con_map = _open_two_network_connections(
+        tmp_path, test_service_source, _net_logs(test_service_source, n=10)
+    )
+
+    from backend.repositories._base import QueryRunner
+
+    build_started = threading.Event()
+    release_leader = threading.Event()
+
+    def failing_build(self, *args, **kwargs):
+        build_started.set()
+        assert release_leader.wait(timeout=5)
+        return None  # simulate create_filtered_temp_table failure
+
+    monkeypatch.setattr(QueryRunner, "create_filtered_temp_table", failing_build)
+
+    results: dict[str, dict] = {}
+
+    def run(label, con, sections):
+        results[label] = get_health(con, test_service_source, None, None, {}, sections=sections)
+
+    try:
+        t1 = threading.Thread(target=run, args=("core", con_core, {"summary", "leaderboard", "metro_leaderboard"}))
+        t1.start()
+        assert build_started.wait(timeout=5)
+
+        t2 = threading.Thread(target=run, args=("map", con_map, {"heatmap", "buckets", "cities", "map_buckets"}))
+        t2.start()
+        time.sleep(0.2)
+        release_leader.set()
+
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+    finally:
+        con_core.close()
+        con_map.close()
+
+    assert results["core"]["available"] is False
+    assert results["map"]["available"] is False
 
 
 # silence ruff unused imports — duckdb + pytest are used by the new tests

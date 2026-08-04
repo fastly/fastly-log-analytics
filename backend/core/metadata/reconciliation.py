@@ -371,41 +371,90 @@ def cleanup_metadata(
 
     vacuumed = False
     if any(deleted.values()):
-        # VACUUM cannot run inside an open transaction. Commit + drop the
-        # Python wrapper's auto-BEGIN so the next execute() autocommits.
-        _emit(
-            {
-                "type": "status",
-                "message": "VACUUMing — rewrites the whole file, may take minutes on large DBs…",
-            }
-        )
+        # A bare VACUUM rewrites the whole file under an exclusive lock —
+        # measured at 9.5s on a populated metadata.db, during which every
+        # other writer to the SAME file (slow_queries batched insert,
+        # ingested_files upsert) queues behind it even with the 30s
+        # busy_timeout. Switch to auto_vacuum=INCREMENTAL so steady-state
+        # cleanups reclaim space via chunked ``PRAGMA incremental_vacuum(N)``
+        # calls instead — same interleaving trick as the batched DELETE loop
+        # above (commit between chunks so other writers get a turn).
+        #
+        # auto_vacuum can only move off "none" by running one full VACUUM
+        # right after setting the pragma (SQLite applies the mode change on
+        # a full-file rewrite) — see sqlite.org/pragma.html#pragma_auto_vacuum.
+        # That happens ONCE per DB file (the mode persists in the file
+        # header), so this is a one-time cost, never a recurring one: every
+        # cleanup after this run's file takes the cheap chunked path below.
         con.commit()
-        old_iso = con.isolation_level
-        con.isolation_level = None
         try:
-            con.execute("VACUUM")
+            mode_row = con.execute("PRAGMA auto_vacuum").fetchone()
+            mode = int(mode_row[0]) if mode_row is not None else 0
+        except sqlite3.OperationalError:
+            mode = 0
+        try:
+            if mode != 2:  # 0=NONE, 1=FULL, 2=INCREMENTAL
+                _emit(
+                    {
+                        "type": "status",
+                        "message": (
+                            "Enabling incremental_vacuum mode — one-time full "
+                            "VACUUM (never again after this run), may take "
+                            "minutes on large DBs…"
+                        ),
+                    }
+                )
+                # VACUUM (and the mode-changing PRAGMA before it) cannot run
+                # inside an open transaction. Drop the Python wrapper's
+                # auto-BEGIN so the next execute() autocommits.
+                old_iso = con.isolation_level
+                con.isolation_level = None
+                try:
+                    con.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                    con.execute("VACUUM")
+                finally:
+                    con.isolation_level = old_iso
+            else:
+                _emit(
+                    {
+                        "type": "status",
+                        "message": "Reclaiming space via incremental_vacuum (chunked)…",
+                    }
+                )
+                # Mirrors the DELETE loop's _BATCH=5,000-row chunking above:
+                # commit between calls so the write lock is released and
+                # other writers can interleave instead of queuing for one
+                # long exclusive rewrite.
+                _VACUUM_BATCH_PAGES = 5_000
+                while True:
+                    pending = con.execute("PRAGMA freelist_count").fetchone()[0]
+                    if not pending:
+                        break
+                    con.execute(f"PRAGMA incremental_vacuum({_VACUUM_BATCH_PAGES})")
+                    con.commit()
+                    remaining = con.execute("PRAGMA freelist_count").fetchone()[0]
+                    if remaining >= pending:
+                        break  # no progress this round — avoid spinning forever
             vacuumed = True
             _emit(
                 {
                     "type": "progress",
                     "current": len(_CLEANUP_TABLES) + 1,
                     "total": total_steps,
-                    "message": "VACUUM complete — file shrunk to reflect deletions",
+                    "message": "Vacuum complete — space reclaimed",
                 }
             )
         except sqlite3.OperationalError as e:
             # Locked / busy — not fatal, the delete already shrank the row count.
-            logger.warning("[metadata_cleanup] %s: VACUUM skipped — %s", service_id, e)
+            logger.warning("[metadata_cleanup] %s: vacuum skipped — %s", service_id, e)
             _emit(
                 {
                     "type": "progress",
                     "current": len(_CLEANUP_TABLES) + 1,
                     "total": total_steps,
-                    "message": f"VACUUM skipped ({e}) — row counts already reduced",
+                    "message": f"Vacuum skipped ({e}) — row counts already reduced",
                 }
             )
-        finally:
-            con.isolation_level = old_iso
     else:
         _emit(
             {

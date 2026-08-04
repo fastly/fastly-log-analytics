@@ -446,6 +446,67 @@ class TestExecuteTopNBatchIntegerAggregation:
         assert "." in next(iter(buckets))
         assert buckets.get("0.013") == 2
 
+
+class TestExecuteTopNBatchPerFieldLimits:
+    """2026-08-03 perf bug: the dashboard bundle's per-field top-N batch
+    (this method, run against the live active-hour temp — the exact `19KB
+    SQL string with QUALIFY <= 500 on every branch` from the perf trace)
+    used to have no `per_field_limits` param at all — every field's QUALIFY
+    branch got the SAME scalar `limit`, and callers upstream widened that
+    scalar to max(limit, *per_field_limits.values()) so ONE field's override
+    (e.g. country=500 for the choropleth) silently widened all ~20 other
+    fields' cutoffs too. Now each field's own branch uses its own limit."""
+
+    def test_per_field_limit_overrides_only_the_named_field(self, in_memory_duckdb, test_service_source):
+        in_memory_duckdb.execute("CREATE TABLE logs_pfl (country VARCHAR, ua VARCHAR)")
+        # 10 distinct values each, so both the base limit (2) and the
+        # override (5) are strictly smaller than what's available —
+        # any row-count difference is attributable to the limit, not
+        # running out of distinct values.
+        rows_sql = ", ".join(f"('c{i}', 'u{i}')" for i in range(10))
+        in_memory_duckdb.execute(f"INSERT INTO logs_pfl VALUES {rows_sql}")
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+
+        rows, order = runner.execute_top_n_batch(
+            fields=["country", "ua"],
+            table_name="logs_pfl",
+            actual_cols=["country", "ua"],
+            schema_types={"country": "VARCHAR", "ua": "VARCHAR"},
+            limit=2,
+            per_field_limits={"country": 5},
+        )
+        in_memory_duckdb.execute("DROP TABLE logs_pfl")
+
+        assert order == ["country", "ua"]
+        country_rows = [r for r in rows if r[0] == "country"]
+        ua_rows = [r for r in rows if r[0] == "ua"]
+        assert len(country_rows) == 5, (
+            f"country has an explicit per_field_limits override of 5 — must get 5 rows, got {len(country_rows)}"
+        )
+        assert len(ua_rows) == 2, (
+            "ua has NO override and must stay at the base limit (2), not be widened to country's 5 — "
+            f"the pre-fix code collapsed both to max(2, 5)=5. Got {len(ua_rows)}."
+        )
+
+    def test_no_per_field_limits_falls_back_to_base_limit_for_every_field(self, in_memory_duckdb, test_service_source):
+        """Default (no override) behavior is unchanged: every field uses the scalar `limit`."""
+        in_memory_duckdb.execute("CREATE TABLE logs_pfl2 (country VARCHAR, ua VARCHAR)")
+        rows_sql = ", ".join(f"('c{i}', 'u{i}')" for i in range(10))
+        in_memory_duckdb.execute(f"INSERT INTO logs_pfl2 VALUES {rows_sql}")
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+
+        rows, _ = runner.execute_top_n_batch(
+            fields=["country", "ua"],
+            table_name="logs_pfl2",
+            actual_cols=["country", "ua"],
+            schema_types={"country": "VARCHAR", "ua": "VARCHAR"},
+            limit=3,
+        )
+        in_memory_duckdb.execute("DROP TABLE logs_pfl2")
+
+        assert len([r for r in rows if r[0] == "country"]) == 3
+        assert len([r for r in rows if r[0] == "ua"]) == 3
+
     def test_execute_top_n_rollups_uses_direct_active_hour_fast_path(
         self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
     ):
@@ -1370,6 +1431,85 @@ class TestExecuteTopNBatchIntegerAggregation:
             f"field_b has no day file — must fall back to per-field per-hour (24 hours × 3 = 72). "
             f"Got {by_field.get('field_b')}."
         )
+
+    def test_rolled_res_qualify_uses_per_field_case_not_collapsed_max(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """2026-08-03 perf bug: the rolled-parquet branch's QUALIFY cutoff
+        used to be a single scalar `max(limit, *per_field_limits.values())`
+        applied to every field's partition in the combined UNION ALL —
+        so a caller widening ONE field (country=500) silently widened the
+        QUALIFY for every other field too. It must now be a per-field CASE
+        keyed on `field` so only the overridden field gets a wider cutoff.
+        Asserted on the actual SQL text (not just final row counts) because
+        the Python-side merge/truncate downstream already re-slices to the
+        correct per-field count regardless of how many rows the SQL over-
+        fetched — the bug was pure wasted work, not a wrong final answer,
+        so only the query shape itself can prove the fix landed."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from backend.repositories._base import QueryRunner
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+        from datetime import UTC, datetime, timedelta
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        day_d = (active_dt - timedelta(days=2)).date()
+        day_d_str = day_d.isoformat()
+
+        (cache_root / "rollups" / "hour").mkdir(parents=True, exist_ok=True)
+        bd = cache_root / "rollups" / "hour_bundled" / f"hour={day_d_str}-05"
+        bd.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "field": ["country", "ua"],
+                    "value": ["US", "bot-a"],
+                    "count": pa.array([99, 7], type=pa.int64()),
+                }
+            ),
+            str(bd / "all_fields.parquet"),
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "ua", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "ua", "type": "VARCHAR"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        captured_queries: list[str] = []
+        orig_execute = runner.execute
+
+        def _spy_execute(q, *a, **kw):
+            captured_queries.append(q)
+            return orig_execute(q, *a, **kw)
+
+        monkeypatch.setattr(runner, "execute", _spy_execute)
+
+        st = f"{day_d_str}T05:00:00+00:00"
+        et = f"{day_d_str}T06:00:00+00:00"
+        runner.execute_top_n_rollups(["country", "ua"], st, et, limit=10, per_field_limits={"country": 500})
+
+        rolled_queries = [q for q in captured_queries if "GROUP BY field, value QUALIFY" in q]
+        assert rolled_queries, f"expected the rolled-parquet QUALIFY query to run. Captured: {captured_queries}"
+        q = rolled_queries[0]
+        assert "CASE field" in q, f"expected a per-field CASE cutoff, got: {q}"
+        assert "THEN 500" in q and "ELSE 10 END" in q, (
+            f"country's override (500) and the base limit (10) must both appear, distinctly scoped: {q}"
+        )
+        # The old bug applied a single collapsed scalar with no CASE at all —
+        # guard against a regression that keeps the CASE keyword but still
+        # only ever has ONE THEN branch equal to the max.
+        assert q.count("THEN") == 1, f"only the overridden field (country) should get a THEN branch: {q}"
 
     # ── execute_ip_spread_rollups ────────────────────────────────────────────
 

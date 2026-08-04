@@ -6,10 +6,17 @@ import logging
 import os
 
 from fastapi import Depends, HTTPException
+from sse_starlette.sse import EventSourceResponse
 
 from backend.deps import get_source
-from backend.models.admin import IcebergTableInfoResponse
-from backend.utils.router_utils import make_error, query_errors, raise_internal
+from backend.models.admin import IcebergTableInfoResponse, ResetLogsRequest
+from backend.utils.router_utils import (
+    SSE_PASSTHROUGH_HEADERS,
+    make_error,
+    query_errors,
+    raise_internal,
+    require_json_content_type,
+)
 
 from ._router import router
 
@@ -110,3 +117,72 @@ def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
     t = threading.Thread(target=_run_metadata_sync, args=(service_id,), kwargs={"run_id": run_id}, daemon=True)
     t.start()
     return {"ok": True, "message": "Local view rebuild started.", "run_id": run_id}
+
+
+# response_model intentionally omitted: SSE progress stream (EventSourceResponse),
+# not a JSON body — event shapes are documented in reset_service_logs's docstring.
+@router.post("/admin/reset-logs", dependencies=[Depends(require_json_content_type)])
+def reset_logs_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source)):
+    """Permanently delete this service's log data (cloud + local) over SSE.
+
+    Wipes the cloud Iceberg log table, the local DuckDB file + cache, and
+    the SQLite ingestion ledgers, then re-initializes an empty, queryable
+    0-state. Preserves the service's configuration: saved views, alerts,
+    source registration, audit history, and scoring labels/audit. See
+    ``backend.core.reset.reset_service_logs`` for the full sequence.
+
+    Fails closed before any work starts: 403 if this service isn't
+    read_write (defense-in-depth — ``RemoteAccessMiddleware`` already blocks
+    ``/api/admin/*`` for remote analysts), and 400 if ``confirm`` doesn't
+    match the resolved service id.
+    """
+    import json as _json
+    import queue as _queue
+    import threading
+
+    from backend.core.reset import reset_service_logs
+
+    service_id = source["name"]
+
+    if source.get("access_level") != "read_write":
+        raise HTTPException(status_code=403, detail=make_error("read_only", "This service is read-only."))
+    if body.confirm != service_id:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("confirm_mismatch", "`confirm` must equal the service id being deleted."),
+        )
+
+    events: _queue.Queue = _queue.Queue()
+
+    def worker():
+        from backend.cron.scheduler import get_scheduler
+
+        try:
+            for event in reset_service_logs(
+                service_id,
+                delete_raw_logs=body.delete_raw_logs,
+                preserve_usage_history=body.preserve_usage_history,
+                reload_scheduler=lambda: get_scheduler().reload(),
+            ):
+                events.put(event)
+        except Exception as e:
+            logger.exception("reset_logs_endpoint(%s) failed", service_id)
+            events.put({"type": "error", "message": f"Log deletion failed: {e}"})
+        finally:
+            events.put(None)
+
+    threading.Thread(target=worker, daemon=True, name=f"reset-logs-{service_id}").start()
+
+    async def stream():
+        import asyncio
+
+        while True:
+            try:
+                event = await asyncio.to_thread(events.get, timeout=1)
+                if event is None:
+                    break
+                yield _json.dumps(event)
+            except _queue.Empty:
+                pass
+
+    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
