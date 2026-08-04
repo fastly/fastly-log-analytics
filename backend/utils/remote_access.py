@@ -218,6 +218,16 @@ _ANALYST_SSE_ALLOWLIST: set[str] = {
     # two badge fields. Lets analysts see real-time "Latest Log: Xs ago"
     # updates matching the admin view.
     "/api/log-extents/stream",
+    # Control Room's live metrics feed (backend/routers/control_room.py,
+    # /api/services/{service_id}/realtime-stream — service_id makes this
+    # one path-suffix, not an exact match; see the endswith check below).
+    # S-1 decision: exposes aggregate metrics (rps, error rate, cache
+    # ratio) — no PII, no infra details — so Control Room can be
+    # analyst-visible. Before the _is_sse_route hyphenated-suffix fix,
+    # this route silently bypassed the SSE gate entirely rather than
+    # being deliberately allowed; this entry makes that allowance
+    # explicit instead of accidental.
+    "/realtime-stream",
 }
 
 # Local "is this a real LAN hostname" allowlist; admins can extend via env.
@@ -533,7 +543,17 @@ def _path_service_ids(request: Request) -> list[str]:
 
 
 def _is_sse_route(path: str) -> bool:
-    return "/sse" in path or path.endswith("/stream")
+    if "/sse" in path:
+        return True
+    # Match the final path segment being exactly "stream" (the original
+    # `endswith("/stream")` case) OR hyphen-suffixed with "-stream" (e.g.
+    # "realtime-stream") — a route whose last segment is hyphen-joined
+    # before "stream" doesn't end with the literal substring "/stream"
+    # (the character before "stream" is "-", not "/"), so it was
+    # previously never classified as SSE at all and silently bypassed
+    # the analyst SSE allowlist's default-closed gate.
+    last_segment = path.rsplit("/", 1)[-1]
+    return last_segment == "stream" or last_segment.endswith("-stream")
 
 
 def apply_response_hardening(response: Response) -> Response:
@@ -1144,8 +1164,14 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         if _is_blocked_path(path):
             return JSONResponse(status_code=403, content={"error": "admin_only"})
 
-        # SSE allowlist gate.
-        if _is_sse_route(path) and path not in _ANALYST_SSE_ALLOWLIST:
+        # SSE allowlist gate. Entries match either an exact path
+        # (non-parameterized routes, e.g. "/api/log-extents/stream") or a
+        # path suffix (a leading "/"-prefixed segment, for routes
+        # parameterized by service_id, e.g. "/realtime-stream" matching
+        # "/api/services/{service_id}/realtime-stream").
+        if _is_sse_route(path) and not any(
+            path == allowed or path.endswith(allowed) for allowed in _ANALYST_SSE_ALLOWLIST
+        ):
             return JSONResponse(status_code=403, content={"error": "sse_blocked"})
 
         # Read-only gate: refuse mutating verbs except on routes confirmed to

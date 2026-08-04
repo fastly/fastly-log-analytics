@@ -65,6 +65,19 @@ def _build_test_app() -> FastAPI:
     def _scoring_status(service_id: str):
         return {"ok": True, "service_id": service_id}
 
+    # S-1: Control Room's live metrics feed. Parameterized by service_id,
+    # so it's a suffix (not exact-string) allowlist match — see
+    # _ANALYST_SSE_ALLOWLIST's "/realtime-stream" entry.
+    @app.get("/api/services/{service_id}/realtime-stream")
+    def _realtime_stream(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    # A hypothetical hyphenated stream route NOT on the allowlist — must
+    # stay blocked even though it's shaped just like realtime-stream.
+    @app.get("/api/services/{service_id}/cost-governor-stream")
+    def _cost_governor_stream(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
     @app.get("/api/alerts/{service_id}")
     def _alerts_for_service(service_id: str):
         return {"ok": True, "service_id": service_id}
@@ -376,6 +389,39 @@ def test_analyst_blocked_from_sse_route(client):
     )
     assert r2.status_code == 403
     assert r2.json()["error"] == "sse_blocked"
+
+
+def test_analyst_allowed_on_realtime_stream(client):
+    """S-1: /realtime-stream is a hyphenated *-stream route (not an exact
+    "/stream" suffix) — _is_sse_route now correctly classifies it as SSE
+    (closing the hyphenated-route detection gap), so it must be listed on
+    _ANALYST_SSE_ALLOWLIST as a suffix match (it's parameterized by
+    service_id, not an exact path) to keep passing the gate it was
+    previously bypassing by accident rather than by design."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    r = client.get(
+        "/api/services/svcA/realtime-stream",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r.status_code == 200, f"expected 200 but got {r.status_code}: {r.text}"
+
+
+def test_analyst_blocked_from_unlisted_hyphenated_stream_route(client):
+    """Counterpart: a hyphenated *-stream route that ISN'T on the
+    allowlist must still be blocked — the fix closes the detection gap
+    for _is_sse_route generally, not just for realtime-stream
+    specifically. Default-closed, explicit-allow-only stays intact."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    r = client.get(
+        "/api/services/svcA/cost-governor-stream",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r.status_code == 403
+    assert r.json()["error"] == "sse_blocked"
 
 
 def test_analyst_blocked_from_admin_events_stream(client):
