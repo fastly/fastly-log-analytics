@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import xml.etree.ElementTree as ET
 from typing import Any
+from urllib.parse import quote
 
 import certifi
 import httpx
 
 from backend import config as svcconfig
+from backend.core.faro_versions import fetch_faro_bundle
 from backend.core.fastly.utils import region_endpoint
 from backend.utils.fos_signing import sign_fos_request
 
 logger = logging.getLogger(__name__)
+
+# Faro bundles are stored per-version so a mid-upgrade failure never leaves
+# the currently-served bundle half-overwritten; cleanup sweeps this prefix.
+FARO_KEY_PREFIX = "rum/faro-web-sdk-v"
+FARO_KEY_SUFFIX = ".iife.js"
+
+_S3_LIST_XMLNS = "http://s3.amazonaws.com/doc/2006-03-01/"
+
+
+def _faro_fos_key(version: str) -> str:
+    return f"{FARO_KEY_PREFIX}{version}{FARO_KEY_SUFFIX}"
 
 
 def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon") -> str:
@@ -308,3 +323,204 @@ def delete_rum_tracker_js(
         warn(f"Failed to delete RUM tracker JS: {exc}")
         if status_cb:
             status_cb(f"⚠️  Could not delete JS: {exc}")
+
+
+async def download_and_upload_faro(
+    service_id: str,
+    version: str,
+    token: str,
+    *,
+    status_cb=None,
+) -> dict[str, Any]:
+    """Download a pinned Faro Web SDK version and upload it to the service's FOS bucket.
+
+    Persists the version + content hash to ``cfg["rum"]`` so later reconcile
+    passes can detect drift (upstream re-release, admin-requested upgrade)
+    without re-downloading on every check.
+
+    Returns:
+        {
+            "version": str,
+            "path": "rum/faro-web-sdk-v{version}.iife.js",
+            "bytes_uploaded": int,
+            "content_hash": str (MD5 hex digest),
+            "fos_key": str (s3://bucket/path),
+        }
+    """
+    from backend.provision.utils import info, ok, warn
+
+    cfg = svcconfig.load_config(service_id)
+    if not cfg:
+        raise RuntimeError(f"No config for service {service_id}")
+
+    access_key = cfg.get("fos_access_key_id")
+    secret_key = cfg.get("fos_secret_access_key")
+    bucket = cfg.get("fos_bucket")
+    region = cfg.get("fos_region", "us-east-1")
+
+    if not all([access_key, secret_key, bucket]):
+        raise RuntimeError(f"Service {service_id} missing FOS credentials (access_key, secret_key, bucket)")
+
+    assert access_key is not None and secret_key is not None
+
+    info(f"Downloading Faro Web SDK v{version}")
+    if status_cb:
+        status_cb(f"⏳ Downloading Faro Web SDK v{version}…")
+
+    bundle = await fetch_faro_bundle(version)
+    content_hash = hashlib.md5(bundle).hexdigest()
+
+    fos_key = _faro_fos_key(version)
+    fos_host = region_endpoint(region)
+    fos_url = f"https://{fos_host}/{bucket}/{fos_key}"
+
+    headers = {
+        "Content-Type": "application/javascript",
+        "Content-Length": str(len(bundle)),
+    }
+
+    info(f"Uploading Faro Web SDK v{version} to FOS bucket {bucket}")
+    if status_cb:
+        status_cb(f"⏳ Uploading Faro Web SDK v{version}…")
+
+    try:
+        signed_headers = sign_fos_request(
+            method="PUT",
+            url=fos_url,
+            headers=headers,
+            body=bundle,
+            access_key_id=access_key,
+            secret_access_key=secret_key,
+            region=region,
+        )
+
+        with httpx.Client(verify=certifi.where()) as client:
+            response = client.put(
+                fos_url,
+                content=bundle,
+                headers=signed_headers,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+
+        ok(f"Uploaded Faro Web SDK v{version} ({len(bundle)} bytes) to {fos_key}")
+        if status_cb:
+            status_cb(f"✅ Faro Web SDK v{version} uploaded ({len(bundle)} bytes)")
+
+    except Exception as exc:
+        fail_msg = f"Failed to upload Faro Web SDK v{version}: {exc}"
+        warn(fail_msg)
+        if status_cb:
+            status_cb(f"❌ {fail_msg}")
+        raise RuntimeError(fail_msg) from exc
+
+    rum_cfg = dict(cfg.get("rum") or {})
+    rum_cfg["faro_version"] = version
+    rum_cfg["faro_content_hash"] = content_hash
+    cfg["rum"] = rum_cfg
+    svcconfig.save_config(service_id, cfg)
+
+    return {
+        "version": version,
+        "path": fos_key,
+        "bytes_uploaded": len(bundle),
+        "content_hash": content_hash,
+        "fos_key": f"s3://{bucket}/{fos_key}",
+    }
+
+
+async def detect_faro_version_change(service_id: str, version: str) -> bool:
+    """True if ``version`` (or its upstream bundle content) differs from what's stored.
+
+    Covers three drift cases: never provisioned, an explicit version bump,
+    and an upstream re-release of the *same* version string (security patch
+    pushed without a version bump) — the last one requires re-downloading
+    the bundle to compare hashes.
+    """
+    cfg = svcconfig.load_config(service_id) or {}
+    rum_cfg = cfg.get("rum")
+    if not rum_cfg:
+        return True
+
+    stored_version = rum_cfg.get("faro_version")
+    stored_hash = rum_cfg.get("faro_content_hash")
+
+    if stored_version != version or not stored_hash:
+        return True
+
+    bundle = await fetch_faro_bundle(version)
+    current_hash = hashlib.md5(bundle).hexdigest()
+    return current_hash != stored_hash
+
+
+async def cleanup_old_faro_versions(service_id: str, *, keep_current: bool = True) -> None:
+    """Delete stale ``rum/faro-web-sdk-v*.iife.js`` objects from FOS.
+
+    Best-effort: this runs after a successful upgrade, so a cleanup failure
+    (listing error, transient FOS blip) must never surface to the caller —
+    it would otherwise turn a successful upgrade into a reported failure.
+    """
+    from backend.provision.utils import info, ok, warn
+
+    try:
+        cfg = svcconfig.load_config(service_id)
+        if not cfg:
+            return
+
+        access_key = cfg.get("fos_access_key_id")
+        secret_key = cfg.get("fos_secret_access_key")
+        bucket = cfg.get("fos_bucket")
+        region = cfg.get("fos_region", "us-east-1")
+
+        if not all([access_key, secret_key, bucket]):
+            return
+
+        assert access_key is not None and secret_key is not None
+
+        keep_version = (cfg.get("rum") or {}).get("faro_version") if keep_current else None
+        keep_key = _faro_fos_key(keep_version) if keep_version else None
+
+        fos_host = region_endpoint(region)
+        list_url = f"https://{fos_host}/{bucket}?list-type=2&prefix={quote(FARO_KEY_PREFIX, safe='')}"
+
+        with httpx.Client(verify=certifi.where()) as client:
+            list_headers = sign_fos_request(
+                method="GET",
+                url=list_url,
+                headers={},
+                body=b"",
+                access_key_id=access_key,
+                secret_access_key=secret_key,
+                region=region,
+            )
+            list_response = client.get(list_url, headers=list_headers, timeout=10.0)
+            list_response.raise_for_status()
+
+            root = ET.fromstring(list_response.content)
+            keys = [
+                el.text for el in root.findall(f".//{{{_S3_LIST_XMLNS}}}Contents/{{{_S3_LIST_XMLNS}}}Key") if el.text
+            ]
+
+            for key in keys:
+                if key == keep_key:
+                    continue
+
+                obj_url = f"https://{fos_host}/{bucket}/{key}"
+                del_headers = sign_fos_request(
+                    method="DELETE",
+                    url=obj_url,
+                    headers={},
+                    body=b"",
+                    access_key_id=access_key,
+                    secret_access_key=secret_key,
+                    region=region,
+                )
+                del_response = client.delete(obj_url, headers=del_headers, timeout=10.0)
+                if del_response.status_code not in (204, 404):
+                    del_response.raise_for_status()
+                info(f"Deleted old Faro bundle {key}")
+
+        ok("Cleaned up old Faro Web SDK versions")
+
+    except Exception as exc:
+        warn(f"Failed to clean up old Faro versions: {exc}")
