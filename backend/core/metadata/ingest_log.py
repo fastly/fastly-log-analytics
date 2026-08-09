@@ -162,8 +162,10 @@ def _bootstrap_ingested_files_summary(con: sqlite3.Connection, service_id: str) 
         """,
         (service_id,),
     ).fetchone()
+    # Order chronologically by extracting the timestamp following '.gz' in the filename
     latest_fn_row = con.execute(
-        "SELECT file_name FROM ingested_files WHERE source_name = ? ORDER BY ingested_at DESC LIMIT 1",
+        "SELECT file_name FROM ingested_files WHERE source_name = ? "
+        "ORDER BY substr(file_name, instr(file_name, '.gz') + 3, 19) DESC, file_name DESC LIMIT 1",
         (service_id,),
     ).fetchone()
     summary = {
@@ -238,6 +240,23 @@ def get_ingested_files_status_summary(service_id: str) -> dict:
     ).fetchone()
     if row is None:
         return _bootstrap_ingested_files_summary(con, service_id)
+
+    # Self-healing check for the lexicographical raw/rum vs raw/2026 bug:
+    # If the rollup's latest_file_name contains 'raw/rum' but there are standard raw logs
+    # that are chronologically newer, we heal the rollup once in O(1) via _bootstrap.
+    latest_file_name = row["latest_file_name"]
+    if latest_file_name and "/raw/rum/" in latest_file_name:
+        has_newer_non_rum = (
+            con.execute(
+                "SELECT 1 FROM ingested_files WHERE source_name = ? AND file_name NOT LIKE '%/raw/rum/%' "
+                "AND substr(file_name, instr(file_name, '.gz') + 3, 19) > "
+                "    substr(?, instr(?, '.gz') + 3, 19) LIMIT 1",
+                (service_id, latest_file_name, latest_file_name),
+            ).fetchone()
+            is not None
+        )
+        if has_newer_non_rum:
+            return _bootstrap_ingested_files_summary(con, service_id)
     return {
         "file_count": row["file_count"] or 0,
         "total_rows": row["total_rows"] or 0,
@@ -600,7 +619,21 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
     rows_delta = 0
     bytes_delta = 0
     count_with_bytes_delta = 0
-    latest_file_name = max(file_names)  # lexicographic; filenames embed timestamp
+    # Find the file with the maximum chronological timestamp embedded after '.gz'
+    latest_file_name = None
+    max_ts = ""
+    import re
+
+    pat = re.compile(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})")
+    for fn in file_names:
+        m = pat.search(fn.split("/")[-1])
+        if m:
+            ts = f"{m.group(1)}T{m.group(2).replace('-', ':').replace('.', ':')}"
+            if ts > max_ts:
+                max_ts = ts
+                latest_file_name = fn
+    if latest_file_name is None:
+        latest_file_name = max(file_names)
     for fn, rc, sz in rows:
         if fn in existing:
             old_rc, old_sz = existing[fn]
@@ -642,7 +675,9 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
                total_bytes      = total_bytes + excluded.total_bytes,
                count_with_bytes = count_with_bytes + excluded.count_with_bytes,
                latest_file_name = CASE
-                   WHEN latest_file_name IS NULL OR excluded.latest_file_name > latest_file_name
+                   WHEN latest_file_name IS NULL OR
+                        substr(excluded.latest_file_name, instr(excluded.latest_file_name, '.gz') + 3, 19) >
+                        substr(latest_file_name, instr(latest_file_name, '.gz') + 3, 19)
                        THEN excluded.latest_file_name
                    ELSE latest_file_name
                END,

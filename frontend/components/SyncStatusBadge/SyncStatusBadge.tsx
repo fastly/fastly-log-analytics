@@ -286,14 +286,18 @@ function SyncStatusBadgeInner() {
         {/* Column 1: Label (fixed w-[58px]) */}
         <span className="w-[58px] flex-shrink-0 font-semibold text-muted-foreground whitespace-nowrap">{label}</span>
 
-        {/* Column 2: Latest Log TimeAgo (fixed w-[84px] + tabular-nums) */}
+        {/* Column 2: Latest Log TimeAgo (fixed w-[124px] + tabular-nums) */}
         {latestTs ? (
-          <span className="w-[84px] flex-shrink-0 text-muted-foreground whitespace-nowrap tabular-nums inline-flex items-center">
+          <span className="w-[124px] flex-shrink-0 text-muted-foreground whitespace-nowrap tabular-nums inline-flex items-center gap-1">
+            <span className="text-muted-foreground/80 font-normal">latest:</span>
             <TimeAgo timestamp={latestTs} />
             {showStaleness && <StalenessDot timestamp={latestTs} />}
           </span>
         ) : (
-          <span className="w-[84px] flex-shrink-0 text-muted-foreground whitespace-nowrap">Never</span>
+          <span className="w-[124px] flex-shrink-0 text-muted-foreground whitespace-nowrap inline-flex items-center gap-1">
+            <span className="text-muted-foreground/80 font-normal">latest:</span>
+            <span>Never</span>
+          </span>
         )}
 
         {/* Column 3: Row Count (fixed w-[76px] + tabular-nums + text-right + pr-2) */}
