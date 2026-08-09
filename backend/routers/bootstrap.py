@@ -420,7 +420,7 @@ def _bootstrap_sync(
             # RUM files: count and latest timestamp (from rum/ directory path)
             rum_cur = con.execute(
                 "SELECT COUNT(*), SUM(row_count), MAX(file_name) FROM ingested_files "
-                "WHERE service_id = ? AND (file_name LIKE '%/rum/%' OR file_name LIKE '%rum%')",
+                "WHERE source_name = ? AND (file_name LIKE '%/rum/%' OR file_name LIKE '%rum%')",
                 (active_src["name"],),
             )
             rum_row = rum_cur.fetchone()
@@ -431,7 +431,7 @@ def _bootstrap_sync(
             # REQUEST files: count and latest timestamp (non-RUM files)
             req_cur = con.execute(
                 "SELECT COUNT(*), SUM(row_count), MAX(file_name) FROM ingested_files "
-                "WHERE service_id = ? AND file_name NOT LIKE '%/rum/%' AND file_name NOT LIKE '%rum%'",
+                "WHERE source_name = ? AND file_name NOT LIKE '%/rum/%' AND file_name NOT LIKE '%rum%'",
                 (active_src["name"],),
             )
             req_row = req_cur.fetchone()
