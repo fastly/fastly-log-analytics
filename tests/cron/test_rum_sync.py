@@ -234,6 +234,84 @@ def test_etag_mismatch_triggers_restore(config_store, frozen_now, mock_fos, mock
     assert download_calls == [(SERVICE_ID, "2.9.0", "fake-fastly-token")]
 
 
+def test_head_network_error_treated_as_needs_restore(
+    config_store, frozen_now, mock_fos, mock_download, mock_detect, mock_purge
+):
+    """A HEAD that fails outright (connection error) must be treated the
+    same as "not intact" — never raise out of the integrity check."""
+    download_calls, _ = mock_download
+    config_store[SERVICE_ID] = _cfg(faro_last_upstream_check=NOW - 10)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("FOS unreachable", request=request)
+
+    mock_fos(handler)
+
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)  # must not raise
+
+    assert download_calls == [(SERVICE_ID, "2.9.0", "fake-fastly-token")]
+
+
+def test_missing_fos_credentials_treated_as_needs_restore(
+    config_store, frozen_now, mock_fos, mock_download, mock_detect, mock_purge
+):
+    """No FOS credentials configured — integrity check can't verify, so it
+    reports "not intact" (the subsequent restore attempt will itself fail
+    for the same reason, but that failure is swallowed independently)."""
+    download_calls, install_download = mock_download
+    install_download(raises=RuntimeError("missing FOS credentials"))
+    cfg = _cfg(faro_last_upstream_check=NOW - 10)
+    del cfg["fos_access_key_id"]
+    config_store[SERVICE_ID] = cfg
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no FOS call should be attempted without credentials")
+
+    mock_fos(handler)
+
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)  # must not raise
+
+    assert download_calls == [(SERVICE_ID, "2.9.0", "fake-fastly-token")]
+
+
+def test_purge_failure_is_swallowed(config_store, frozen_now, mock_fos, mock_download, mock_detect, monkeypatch):
+    """A CDN purge failure after a successful restore must not raise or
+    undo the restore — it's fire-and-forget."""
+    download_calls, _ = mock_download
+    config_store[SERVICE_ID] = _cfg(faro_last_upstream_check=NOW - 10)
+
+    def failing_purge(method, path, *, token, expect_empty=False, **kwargs):
+        raise RuntimeError("Fastly API unreachable")
+
+    monkeypatch.setattr("backend.core.fastly.client.fastly", failing_purge)
+    mock_fos(lambda request: httpx.Response(404))
+
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)  # must not raise
+
+    assert download_calls == [(SERVICE_ID, "2.9.0", "fake-fastly-token")]
+
+
+def test_progress_reported_when_run_id_set(
+    config_store, frozen_now, mock_fos, mock_download, mock_detect, mock_purge, monkeypatch
+):
+    """When a run_id is available (ingest is already tracking a cron run),
+    reconcile progress messages are attached to it via add_progress."""
+    config_store[SERVICE_ID] = _cfg(faro_last_upstream_check=NOW - 10)
+    mock_fos(lambda request: httpx.Response(404))
+
+    add_progress_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "backend.cron_progress.add_progress",
+        lambda run_id, event: add_progress_calls.append((run_id, event)),
+    )
+
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, 99)
+
+    assert add_progress_calls
+    assert all(run_id == 99 for run_id, _ in add_progress_calls)
+    assert any("restored" in event["message"] for _, event in add_progress_calls)
+
+
 # ── 4 & 5. throttled upstream drift check ───────────────────────────────
 
 
