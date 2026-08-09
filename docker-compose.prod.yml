@@ -83,6 +83,17 @@ services:
     # recovery) instead of wedging the whole VM.
     mem_limit: 12g
     memswap_limit: 12g
+    # Without an explicit ulimit, Docker inherits the daemon default (often
+    # 1024 soft). DuckDB parallel Iceberg scans open one fd per parquet file;
+    # a populated service with 1k+ files hits the limit and throws
+    # "Too many open files". main.py bumps the soft limit at startup via
+    # resource.setrlimit, but that call silently no-ops when Docker's hard
+    # limit is already at or below the target. Setting both here ensures the
+    # hard limit is reachable so the startup bump actually takes effect.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     environment:
       # DuckDB sees this via os.getenv at connection-open. backend/core/
       # duckdb.py:760-768 issues ``SET max_memory = <env>`` per-session;
@@ -300,6 +311,12 @@ services:
     ports: !reset []
     networks: !reset []
     logging: *prod-logging
+    # Docker's default SIGKILL window is 10s. The Caddyfile sets a 120s
+    # read_timeout on /api/* to cover slow DuckDB queries. Without a grace
+    # period, a rolling deploy SIGKILLs Caddy while it's still proxying an
+    # in-flight request. 15s covers the vast majority of non-streaming
+    # responses and lets Caddy drain cleanly before the new container starts.
+    stop_grace_period: 15s
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

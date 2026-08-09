@@ -766,7 +766,7 @@ class Scheduler:
                     id=commit_job_id,
                     max_instances=1,
                     coalesce=True,
-                    misfire_grace_time=60,
+                    misfire_grace_time=commit_interval_mins * 60,
                 )
                 self._job_ids[commit_job_id] = commit_job_id
                 logger.info(
@@ -958,7 +958,7 @@ class Scheduler:
                     id=ip_job_id,
                     max_instances=1,
                     coalesce=True,
-                    misfire_grace_time=240,
+                    misfire_grace_time=360,
                 )
                 self._job_ids[ip_job_id] = ip_job_id
                 logger.info(
