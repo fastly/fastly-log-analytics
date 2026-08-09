@@ -28,7 +28,7 @@ from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import RumDisableRequest, RumEnableRequest
 from backend.provision.orchestrator import run_with_events
 from backend.provision.rum_orchestrator_v2 import disable_rum, enable_rum, rum_vcl_fingerprint
-from backend.utils.date_utils import iso_z, parse_iso_utc
+from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
 
 logger = logging.getLogger(__name__)
@@ -210,11 +210,14 @@ async def rum_beacon_health(service_id: str = Path(...)) -> dict[str, Any]:
             "message": "RUM not enabled for this service",
         }
 
-    # Query beacon receipt log from metadata DB (last hour)
     try:
         db = get_con(service_id)
+        normalize_rum_beacons_timestamps(db)
+        one_hour_ago = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
+        threshold = iso_z(one_hour_ago)
         cur = db.execute(
-            "SELECT COUNT(*) as count, MAX(received_at) as last_beacon FROM rum_beacons WHERE received_at > datetime('now', '-1 hour')"
+            "SELECT COUNT(*) as count, MAX(received_at) as last_beacon FROM rum_beacons WHERE received_at > ?",
+            (threshold,),
         )
         row = cur.fetchone()
         beacon_count = row[0] if row and row[0] else 0
@@ -298,7 +301,7 @@ async def rum_beacon_ingest(
         db = get_con(service_id)
         db.execute(
             "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
-            (service_id, datetime.datetime.now(datetime.UTC).isoformat(), json.dumps(beacon_data)),
+            (service_id, iso_z_now(), json.dumps(beacon_data)),
         )
         db.commit()
     except Exception:
@@ -307,6 +310,40 @@ async def rum_beacon_ingest(
 
     # Always return 204 to avoid breaking page interactions
     return Response(status_code=204)
+
+
+def normalize_rum_beacons_timestamps(db) -> None:
+    """Normalize received_at timestamps in rum_beacons to standardized ISO Z format (%Y-%m-%dT%H:%M:%SZ)."""
+    try:
+        cur = db.execute("SELECT id, received_at FROM rum_beacons WHERE received_at NOT LIKE '%Z'")
+        rows = cur.fetchall()
+        if not rows:
+            return
+
+        updates = []
+        for row_id, ts in rows:
+            # Try parsing with parse_iso_utc
+            dt = parse_iso_utc(ts)
+            if not dt:
+                # Fall back to try parsing space-separated or standard formats
+                try:
+                    # e.g. "2026-08-09 23:33:48" or similar
+                    dt = datetime.datetime.fromisoformat(ts.replace(" ", "T"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=datetime.UTC)
+                except Exception:
+                    pass
+
+            if dt:
+                normalized = iso_z(dt)
+                if normalized != ts:
+                    updates.append((normalized, row_id))
+
+        if updates:
+            db.executemany("UPDATE rum_beacons SET received_at = ? WHERE id = ?", updates)
+            db.commit()
+    except Exception as e:
+        logger.error(f"[rum] Failed to normalize timestamps: {e}")
 
 
 @router.get("/{service_id}/rum/analytics")
@@ -348,6 +385,7 @@ async def rum_analytics(
 
     try:
         db = get_con(service_id)
+        normalize_rum_beacons_timestamps(db)
         cur = db.execute("SELECT COUNT(*) FROM rum_beacons WHERE service_id = ?", (service_id,))
         total_service_beacons = cur.fetchone()[0]
     except Exception:

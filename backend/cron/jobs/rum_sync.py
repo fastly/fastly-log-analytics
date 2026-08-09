@@ -6,11 +6,172 @@ Registered in scheduler as cron_rum_sync. Runs periodically (configurable interv
 from __future__ import annotations
 
 import logging
+import time
 
 from backend.core.rum_ingest import ingest_rum_logs
 from backend.cron.decorators import cron_task
 
 logger = logging.getLogger(__name__)
+
+
+def _faro_purge_surrogate_key(cfg: dict, token: str) -> None:
+    """Fire-and-forget CDN surrogate-key purge after a Faro bundle (re)upload.
+
+    Mirrors the fire-and-forget convention of ``_purge_surrogate_key`` in
+    ``backend.core.iceberg._core``: a missing CDN service/token or a purge
+    failure must never surface — the FOS upload it follows already
+    succeeded.
+    """
+    cdn_service_id = cfg.get("cdn_service_id", "")
+    if not cdn_service_id or not token:
+        return
+    try:
+        from backend.core.fastly.client import fastly
+
+        fastly("POST", f"/service/{cdn_service_id}/purge/rum-faro-sdk", token=token, expect_empty=True)
+    except Exception:
+        logger.warning("Faro surrogate-key purge failed for %s (non-fatal)", cfg.get("service_id"), exc_info=True)
+
+
+def _faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
+    """Cheap SigV4 HEAD check: True only if FOS already holds the pinned
+    bundle with an ETag matching the stored content hash.
+
+    Any failure (missing FOS creds, no stored hash, 404/non-200, mismatched
+    ETag, network error) returns False so the caller re-uploads. This is the
+    every-tick integrity check — it must stay cheap (no unpkg traffic on the
+    steady-state path) and must never raise.
+    """
+    import certifi
+    import httpx
+
+    from backend.core.fastly.utils import region_endpoint
+    from backend.provision.rum_assets import FARO_KEY_PREFIX, FARO_KEY_SUFFIX
+    from backend.utils.fos_signing import sign_fos_request
+
+    access_key = cfg.get("fos_access_key_id")
+    secret_key = cfg.get("fos_secret_access_key")
+    bucket = cfg.get("fos_bucket")
+    region = cfg.get("fos_region", "us-east-1")
+    stored_hash = (cfg.get("rum") or {}).get("faro_content_hash")
+
+    if not all([access_key, secret_key, bucket]) or not stored_hash:
+        return False
+
+    assert access_key is not None and secret_key is not None
+
+    fos_key = f"{FARO_KEY_PREFIX}{pinned_version}{FARO_KEY_SUFFIX}"
+    fos_host = region_endpoint(region)
+    fos_url = f"https://{fos_host}/{bucket}/{fos_key}"
+
+    try:
+        headers = sign_fos_request(
+            method="HEAD",
+            url=fos_url,
+            headers={},
+            body=b"",
+            access_key_id=access_key,
+            secret_access_key=secret_key,
+            region=region,
+        )
+        with httpx.Client(verify=certifi.where()) as client:
+            response = client.head(fos_url, headers=headers, timeout=10.0)
+        if response.status_code != 200:
+            return False
+        etag = response.headers.get("ETag", "").strip('"')
+        return etag == stored_hash
+    except Exception:
+        logger.warning("Faro FOS integrity HEAD check failed (treating as needs-restore)", exc_info=True)
+        return False
+
+
+def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
+    """Keep the operator's pinned Faro bundle present and intact in FOS.
+
+    Two deliberately different cadences: a cheap FOS HEAD every tick (catches
+    a wiped bucket or an upload interrupted mid-write), and an upstream drift
+    check throttled to once per ``faro_upstream_check_hours`` (catches unpkg
+    re-releasing the same version string under the same tag) — the latter
+    downloads a bundle from unpkg on every call, so running it every tick
+    would mean an unpkg round trip per service per cron tick.
+
+    This never bumps ``faro_version`` — upgrades are an explicit operator
+    action (later tasks). It only re-syncs the *pinned* version's content.
+
+    Must never raise: wrapped end to end so a transient unpkg/FOS outage
+    degrades to "bundle not refreshed this tick", never to "beacon ingest
+    stopped." Not itself a cron run — it borrows the ingest run's run_id
+    (if any) purely to surface progress messages; it starts no cron_runs
+    row of its own.
+    """
+    import asyncio
+
+    from backend import config as svcconfig
+    from backend.cron_progress import add_progress
+    from backend.provision.rum_assets import detect_faro_version_change, download_and_upload_faro
+
+    def report(msg: str) -> None:
+        logger.info(msg)
+        if run_id:
+            add_progress(run_id, {"type": "status", "message": msg})
+
+    try:
+        cfg = svcconfig.load_config(service_id)
+        if not cfg:
+            return
+        rum_cfg = cfg.get("rum")
+        if not isinstance(rum_cfg, dict) or not rum_cfg.get("enabled"):
+            return
+        pinned_version = rum_cfg.get("faro_version")
+        if not pinned_version:
+            return
+        token = cfg.get("fastly_api_key", "")
+
+        # 1. Cheap integrity check — every tick.
+        if not _faro_bundle_intact(cfg, pinned_version):
+            report(f"Faro bundle v{pinned_version} missing/corrupt in FOS, restoring")
+            try:
+                asyncio.run(download_and_upload_faro(service_id, pinned_version, token))
+                _faro_purge_surrogate_key(cfg, token)
+                report(f"Faro bundle v{pinned_version} restored to FOS")
+            except Exception:
+                logger.warning("Faro bundle restore failed for %s", service_id, exc_info=True)
+
+        # 2. Throttled upstream drift check. Reload cfg first in case the
+        # restore above just rewrote faro_content_hash, so the timestamp
+        # write below doesn't clobber it with a stale in-memory copy.
+        cfg = svcconfig.load_config(service_id) or cfg
+        rum_cfg = dict(cfg.get("rum") or {})
+        last_check = rum_cfg.get("faro_last_upstream_check") or 0
+        check_interval_s = rum_cfg.get("faro_upstream_check_hours", 24) * 3600
+        now = time.time()
+
+        if now - last_check >= check_interval_s:
+            drift = False
+            try:
+                drift = asyncio.run(detect_faro_version_change(service_id, pinned_version))
+            except Exception:
+                logger.warning("Faro upstream drift check failed for %s", service_id, exc_info=True)
+            finally:
+                # Write the attempt timestamp even on failure — otherwise a
+                # persistently failing upstream turns into a per-tick
+                # download storm instead of once per window.
+                cfg = svcconfig.load_config(service_id) or cfg
+                rum_cfg = dict(cfg.get("rum") or {})
+                rum_cfg["faro_last_upstream_check"] = now
+                cfg["rum"] = rum_cfg
+                svcconfig.save_config(service_id, cfg)
+
+            if drift:
+                report(f"Faro upstream drift detected for v{pinned_version}, re-syncing")
+                try:
+                    asyncio.run(download_and_upload_faro(service_id, pinned_version, token))
+                    _faro_purge_surrogate_key(cfg, token)
+                    report(f"Faro bundle v{pinned_version} re-synced from upstream")
+                except Exception:
+                    logger.warning("Faro upstream re-sync failed for %s", service_id, exc_info=True)
+    except Exception:
+        logger.warning("Faro reconcile failed for %s", service_id, exc_info=True)
 
 
 @cron_task("cron_rum_sync")
@@ -30,6 +191,7 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
                 run_id = event[1]
                 start_progress(run_id, service_id=service_id, task="rum_sync")
                 add_progress(run_id, {"type": "status", "message": f"RUM sync starting for {service_id}"})
+                _reconcile_faro_bundle(service_id, run_id)
             elif event[0] == "file_done":
                 _, filename, count = event
                 msg = f"{filename}: {count} rows"
