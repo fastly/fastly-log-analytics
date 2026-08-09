@@ -7,9 +7,14 @@ Phase 1 snippets:
 
 Phase 3 (deferred):
   - Asset fetch (/js/rum.js from FOS with SigV4) — see generate_rum_asset_fetch_vcl()
+  - Self-hosted Faro Web SDK bundle (/js/faro-sdk.js), optional via faro_version — same
+    FOS backend + SigV4 signing as /js/rum.js, plus a purgeable cache snippet keyed off
+    Surrogate-Key "rum-faro-sdk" (matches the cron purge in backend/cron/jobs/rum_sync.py)
 """
 
 from __future__ import annotations
+
+import re
 
 # Phase 1 snippet name constants — must match what the orchestrator expects.
 RUM_RECV_NAME = "RUM - Recv"
@@ -18,9 +23,32 @@ RUM_DELIVER_SET_COOKIE_NAME = "RUM - Set cookies"
 # Phase 3 snippet names (deferred) — not installed in Phase 1
 RUM_ASSET_FETCH_NAME = "RUM - Asset fetch FOS"
 RUM_SIGV4_SIGN_NAME = "RUM - Asset fetch SigV4 signing"
+RUM_FARO_FETCH_NAME = "RUM - Faro SDK fetch caching"
+
+# faro_version originates from a user-facing version picker (Task 7/8) and is
+# interpolated into both a VCL string literal (the object-path rewrite in
+# _generate_sigv4_sign_vcl) and an FOS object path (backend/provision/rum_assets.py's
+# FARO_KEY_PREFIX). It must never carry a quote, newline, or path-traversal segment.
+# Stable Faro releases are always plain X.Y.Z (see _is_stable_numeric in
+# backend/core/faro_versions.py) so this is deliberately narrower than a general
+# VCL-string-safety check (like _assert_vcl_string_safe in session_scoring_vcl.py) —
+# digits and dots only, nothing else is a legitimate version.
+_FARO_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
-def generate_rum_vcl(logging_service_id: str) -> dict[str, str]:
+def _assert_faro_version_safe(version: str) -> str:
+    """Raise ``ValueError`` unless ``version`` is a plain ``X.Y.Z`` string.
+
+    Returns ``version`` unchanged on success. This is the sole gate between a
+    user-facing version picker and VCL/object-path interpolation for the Faro
+    bundle — see the module note above.
+    """
+    if not isinstance(version, str) or not _FARO_VERSION_RE.fullmatch(version):
+        raise ValueError(f"faro_version must be a plain X.Y.Z version string; got {version!r}")
+    return version
+
+
+def generate_rum_vcl(logging_service_id: str, faro_version: str | None = None) -> dict[str, str]:
     """Generate Phase 1 RUM VCL snippets for the logging service.
 
     Returns a dict mapping snippet names to VCL source code (Phase 1 only):
@@ -29,8 +57,16 @@ def generate_rum_vcl(logging_service_id: str) -> dict[str, str]:
         "RUM - Set cookies": "vcl ...",
       }
 
+    ``faro_version``, when provided, is validated (see ``_assert_faro_version_safe``)
+    but does not change Phase 1 output — the Faro asset-serving snippets live in
+    ``generate_rum_asset_fetch_vcl()``. Validating here too means a caller that
+    threads an operator-controlled version through this function fails loudly
+    instead of silently dropping it.
+
     Phase 3 asset fetch snippets: see generate_rum_asset_fetch_vcl()
     """
+    if faro_version is not None:
+        _assert_faro_version_safe(faro_version)
     return {
         RUM_RECV_NAME: _generate_recv_vcl(),
         RUM_DELIVER_SET_COOKIE_NAME: _generate_deliver_set_cookie_vcl(logging_service_id),
@@ -60,11 +96,14 @@ if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
 }"""
 
 
-def _generate_asset_fetch_vcl(shield_pop: str = "iad-va-us") -> str:
-    """Fetch /js/rum.js from FOS with SigV4 signing.
+def _generate_asset_fetch_vcl(shield_pop: str = "iad-va-us", faro_version: str | None = None) -> str:
+    """Fetch /js/rum.js (and optionally /js/faro-sdk.js) from FOS with SigV4 signing.
 
     Routes GET /js/rum.js to FOS origin. Signing is handled in miss/pass
-    VCL snippet (same pattern as CDN service).
+    VCL snippet (same pattern as CDN service). When ``faro_version`` is
+    given, an identical GET route is added for /js/faro-sdk.js — same
+    backend selection, same X-FOS-Request flag; the actual FOS object path
+    rewrite happens in ``_generate_sigv4_sign_vcl``.
     """
     if shield_pop and shield_pop.lower() != "none":
         shield_var = f"ssl_shield_{shield_pop.replace('-', '_')}"
@@ -72,7 +111,7 @@ def _generate_asset_fetch_vcl(shield_pop: str = "iad-va-us") -> str:
     else:
         backend_str = "F_fos_origin"
 
-    return f"""# Fetch RUM tracker JS from FOS with SigV4 signing
+    base = f"""# Fetch RUM tracker JS from FOS with SigV4 signing
 if (req.url.path == "/js/rum.js" && req.method == "GET") {{
     # Backend points to FOS endpoint (shared with logging)
     set req.backend = {backend_str};
@@ -81,14 +120,34 @@ if (req.url.path == "/js/rum.js" && req.method == "GET") {{
     return(lookup);
 }}"""
 
+    if faro_version is None:
+        return base
 
-def _generate_sigv4_sign_vcl() -> str:
+    _assert_faro_version_safe(faro_version)
+    faro_block = f"""# Fetch the self-hosted Faro Web SDK bundle from FOS (same backend + signing as rum.js)
+if (req.url.path == "/js/faro-sdk.js" && req.method == "GET") {{
+    set req.backend = {backend_str};
+    set req.http.X-FOS-Request = "1";
+    return(lookup);
+}}"""
+    return base + "\n\n" + faro_block
+
+
+def _generate_sigv4_sign_vcl(faro_version: str | None = None) -> str:
     """SigV4 signing for FOS requests in miss/pass stages.
 
     Reuses the pattern from the CDN log-fronting service.
     Signs GET/HEAD requests to FOS with AWS SigV4 using credentials from edge dictionary.
+
+    When ``faro_version`` is given, an extra rewrite is spliced in right after
+    the existing /js/rum.js one so /js/faro-sdk.js resolves to the pinned FOS
+    object path (``rum/faro-web-sdk-v{version}.iife.js`` — must match
+    ``FARO_KEY_PREFIX``/``FARO_KEY_SUFFIX`` in backend/provision/rum_assets.py).
+    Splicing via ``str.replace`` on the existing anchor (rather than turning
+    this whole body into an f-string) keeps the faro_version=None output
+    byte-for-byte identical to before this parameter existed.
     """
-    return """# FOS SigV4 signing
+    body = """# FOS SigV4 signing
 if (req.http.X-FOS-Request == "1" && !req.backend.is_shield) {
     declare local var.fosAccessKey STRING;
     declare local var.fosSecretKey STRING;
@@ -175,6 +234,42 @@ if (req.http.X-FOS-Request == "1" && !req.backend.is_shield) {
     unset bereq.http.User-Agent;
 }"""
 
+    if faro_version is None:
+        return body
+
+    _assert_faro_version_safe(faro_version)
+    anchor = """    if (bereq.url.path == "/js/rum.js") {
+        set bereq.url = "/rum/rum-tracker.js";
+    }"""
+    faro_rewrite = (
+        anchor
+        + f"""
+
+    # If the user-facing path is /js/faro-sdk.js, point to the pinned Faro Web SDK object in FOS
+    if (bereq.url.path == "/js/faro-sdk.js") {{
+        set bereq.url = "/rum/faro-web-sdk-v{faro_version}.iife.js";
+    }}"""
+    )
+    return body.replace(anchor, faro_rewrite, 1)
+
+
+def _generate_faro_fetch_vcl() -> str:
+    """Cache + purge policy for the self-hosted Faro Web SDK bundle (vcl_fetch).
+
+    Immutable per-version content: a long TTL plus a matching Cache-Control so
+    browsers cache it too. Surrogate-Key MUST be exactly "rum-faro-sdk" — the
+    FOS-sync cron (backend/cron/jobs/rum_sync.py::_faro_purge_surrogate_key)
+    purges this exact key after re-uploading a version, so the cache and the
+    purge path stay pinned together.
+    """
+    return """# Cache the self-hosted Faro Web SDK bundle (immutable, versioned content)
+if (req.url.path == "/js/faro-sdk.js" && req.http.X-FOS-Request == "1") {
+    set beresp.ttl = 604800s;
+    set beresp.cacheable = true;
+    set beresp.http.Surrogate-Key = "rum-faro-sdk";
+    set beresp.http.Cache-Control = "public, max-age=604800, immutable";
+}"""
+
 
 def _generate_deliver_set_cookie_vcl(logging_service_id: str) -> str:
     """Set the rum_cid cookie in deliver stage (post-scoring if enabled)."""
@@ -204,7 +299,7 @@ if (obj.status == 611) {
 }"""
 
 
-def generate_rum_asset_fetch_vcl(shield_pop: str = "iad-va-us") -> dict[str, str]:
+def generate_rum_asset_fetch_vcl(shield_pop: str = "iad-va-us", faro_version: str | None = None) -> dict[str, str]:
     """Generate Phase 3 RUM asset fetch VCL snippets (deferred, not yet deployed).
 
     Returns a dict mapping snippet names to VCL source code:
@@ -216,8 +311,26 @@ def generate_rum_asset_fetch_vcl(shield_pop: str = "iad-va-us") -> dict[str, str
     These snippets are NOT part of Phase 1 deployment. Phase 1 includes only:
     - Request ID minting + beacon handling (recv)
     - Session ID cookie setting (deliver)
+
+    ``faro_version``, when given (validated via ``_assert_faro_version_safe``),
+    adds the self-hosted Faro Web SDK bundle route to the two existing snippets
+    plus a third, purgeable, vcl_fetch-stage caching snippet:
+      {
+        ...,
+        "RUM - Faro SDK fetch caching": "vcl ...",
+      }
+    When ``faro_version`` is None (the default), the returned dict and both
+    existing snippet bodies are byte-for-byte identical to before this
+    parameter existed — services that haven't pinned a Faro version are
+    unaffected.
     """
-    return {
-        RUM_ASSET_FETCH_NAME: _generate_asset_fetch_vcl(shield_pop),
-        RUM_SIGV4_SIGN_NAME: _generate_sigv4_sign_vcl(),
+    if faro_version is not None:
+        _assert_faro_version_safe(faro_version)
+
+    snippets = {
+        RUM_ASSET_FETCH_NAME: _generate_asset_fetch_vcl(shield_pop, faro_version),
+        RUM_SIGV4_SIGN_NAME: _generate_sigv4_sign_vcl(faro_version),
     }
+    if faro_version is not None:
+        snippets[RUM_FARO_FETCH_NAME] = _generate_faro_fetch_vcl()
+    return snippets
