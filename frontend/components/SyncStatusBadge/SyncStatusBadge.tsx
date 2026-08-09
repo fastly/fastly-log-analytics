@@ -225,8 +225,9 @@ function SyncStatusBadgeInner() {
   const hasRumData = rumMetrics?.latest_log_at || (rumMetrics?.total_rows != null && rumMetrics.total_rows > 0)
   const hasRequestData = requestMetrics?.latest_log_at || (requestMetrics?.total_rows != null && requestMetrics.total_rows > 0)
 
-  const renderStreamBadge = (
+  const renderStreamRow = (
     label: string,
+    showDot: boolean,
     latestTs: string | null | undefined,
     totalRows: number | null | undefined,
     lastSyncTs: string | null | undefined,
@@ -235,34 +236,50 @@ function SyncStatusBadgeInner() {
     if (!hasData) return null
 
     return (
-      <div key={label} className="flex items-center gap-1 min-w-0">
-        <span className="text-[11px] font-semibold text-muted-foreground whitespace-nowrap">{label}</span>
-        {latestTs ? (
+      <div key={label} className="flex items-center gap-0.5 min-w-0 text-[10px]">
+        {showDot && (
           <Tooltip>
             <TooltipTrigger render={
-              <Badge
-                variant="secondary"
+              <span
                 tabIndex={0}
-                role="button"
-                aria-label={`${label} latest log details`}
-                className="px-1.5 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors text-[11px] tabular-nums flex-shrink-0"
+                role="status"
+                aria-label={liveDotTitle ?? ''}
+                className="inline-flex items-center justify-center h-2.5 w-2.5 rounded-full hover:bg-muted/60 flex-shrink-0"
               >
-                <TimeAgo timestamp={latestTs} />
-                {latestTs && <StalenessDot timestamp={latestTs} />}
-              </Badge>
+                <span className="relative flex h-1 w-1">
+                  {liveStreamState === 'open' ? (
+                    <>
+                      <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-60 animate-ping" />
+                      <span className="relative inline-flex h-1 w-1 rounded-full bg-emerald-500" />
+                    </>
+                  ) : (
+                    <>
+                      <span className="absolute inline-flex h-full w-full rounded-full bg-amber-500 opacity-60 animate-ping" />
+                      <span className="relative inline-flex h-1 w-1 rounded-full bg-amber-500" />
+                    </>
+                  )}
+                </span>
+              </span>
             } />
-            <TooltipContent className="text-xs">
-              Latest: {full(latestTs)} {abbr()}
-              {lastSyncTs && <div className="mt-1">Last sync: {full(lastSyncTs)} {abbr()}</div>}
-            </TooltipContent>
+            <TooltipContent className="text-xs">{liveDotTitle}</TooltipContent>
           </Tooltip>
+        )}
+        <span className="font-semibold text-muted-foreground whitespace-nowrap flex-shrink-0">{label}</span>
+        {latestTs ? (
+          <span className="text-muted-foreground whitespace-nowrap flex-shrink-0">
+            <TimeAgo timestamp={latestTs} />
+            <StalenessDot timestamp={latestTs} />
+          </span>
         ) : (
-          <Badge variant="secondary" className="px-1.5 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 text-[11px] flex-shrink-0">
-            Never
-          </Badge>
+          <span className="text-muted-foreground whitespace-nowrap flex-shrink-0">Never</span>
         )}
         {totalRows != null && totalRows > 0 && (
-          <span className="text-[11px] text-muted-foreground whitespace-nowrap flex-shrink-0">({totalRows.toLocaleString()})</span>
+          <span className="text-muted-foreground whitespace-nowrap flex-shrink-0">({totalRows.toLocaleString()})</span>
+        )}
+        {lastSyncTs && (
+          <span className="text-muted-foreground whitespace-nowrap flex-shrink-0 text-[9px]">
+            sync: <TimeAgo timestamp={lastSyncTs} />
+          </span>
         )}
       </div>
     )
@@ -276,45 +293,18 @@ function SyncStatusBadgeInner() {
       {showSeparateStreams ? (
         <div className="flex flex-col gap-0.5">
           {/* REQUEST logs row with live dot */}
-          <div className="flex items-center gap-1">
-            {showLiveDot && (
-              <Tooltip>
-                <TooltipTrigger render={
-                  <span
-                    tabIndex={0}
-                    role="status"
-                    aria-label={liveDotTitle ?? ''}
-                    className="inline-flex items-center justify-center h-3 w-3 rounded-full hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring flex-shrink-0"
-                  >
-                    <span className="relative flex h-1.5 w-1.5">
-                      {liveStreamState === 'open' ? (
-                        <>
-                          <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-60 animate-ping" />
-                          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                        </>
-                      ) : (
-                        <>
-                          <span className="absolute inline-flex h-full w-full rounded-full bg-amber-500 opacity-60 animate-ping" />
-                          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-500" />
-                        </>
-                      )}
-                    </span>
-                  </span>
-                } />
-                <TooltipContent className="text-xs">{liveDotTitle}</TooltipContent>
-              </Tooltip>
-            )}
-            {renderStreamBadge(
-              'REQUEST',
-              requestMetrics?.latest_log_at,
-              requestMetrics?.total_rows,
-              requestMetrics?.last_sync_at,
-            )}
-          </div>
+          {renderStreamRow(
+            'REQUEST',
+            showLiveDot,
+            requestMetrics?.latest_log_at,
+            requestMetrics?.total_rows,
+            requestMetrics?.last_sync_at,
+          )}
 
-          {/* RUM logs row */}
-          {renderStreamBadge(
+          {/* RUM logs row with live dot */}
+          {renderStreamRow(
             'RUM',
+            showLiveDot,
             rumMetrics?.latest_log_at,
             rumMetrics?.total_rows,
             rumMetrics?.last_sync_at,
