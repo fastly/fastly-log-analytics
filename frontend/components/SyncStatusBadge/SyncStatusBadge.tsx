@@ -313,11 +313,11 @@ function SyncStatusBadgeInner() {
           </span>
         )}
 
-        {/* Column 3: Row Count (fixed w-[76px] + tabular-nums + text-right + pr-2) */}
+        {/* Column 3: Row Count (fixed w-[110px] + tabular-nums + text-right + pr-2) */}
         {totalRows != null && totalRows > 0 ? (
-          <span className="w-[76px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-right pr-2 tabular-nums">({totalRows.toLocaleString()})</span>
+          <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-right pr-2 tabular-nums">total: {totalRows.toLocaleString()}</span>
         ) : (
-          <span className="w-[76px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-right pr-2">—</span>
+          <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-right pr-2">—</span>
         )}
 
         {/* Column 4: Last Sync (fixed w-[105px] + tabular-nums + text-right) */}
