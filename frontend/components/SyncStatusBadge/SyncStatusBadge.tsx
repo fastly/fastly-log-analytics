@@ -234,6 +234,7 @@ function SyncStatusBadgeInner() {
     latestTs: string | null | undefined,
     totalRows: number | null | undefined,
     lastSyncTs: string | null | undefined,
+    showStaleness: boolean = true,
   ) => {
     const hasData = latestTs || totalRows != null
     if (!hasData) return null
@@ -271,7 +272,7 @@ function SyncStatusBadgeInner() {
         {latestTs ? (
           <span className="text-muted-foreground whitespace-nowrap flex-shrink-0">
             <TimeAgo timestamp={latestTs} />
-            <StalenessDot timestamp={latestTs} />
+            {showStaleness && <StalenessDot timestamp={latestTs} />}
           </span>
         ) : (
           <span className="text-muted-foreground whitespace-nowrap flex-shrink-0">Never</span>
@@ -311,6 +312,7 @@ function SyncStatusBadgeInner() {
             rumMetrics?.latest_log_at,
             rumMetrics?.total_rows,
             rumMetrics?.last_sync_at,
+            false,
           )}
         </div>
       ) : (
