@@ -78,6 +78,9 @@ jobs:
       - name: Install frontend deps
         run: cd frontend && npm ci
 
+      - name: Clean Playwright cache
+        run: rm -rf ~/.cache/ms-playwright
+
       - name: Install Playwright browser (${{ matrix.browser }}) + system deps
         run: cd frontend && npx playwright install --with-deps ${{ matrix.browser }}
 
