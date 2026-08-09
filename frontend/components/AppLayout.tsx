@@ -519,11 +519,8 @@ export function AppLayout({
   // was contributing FCP latency for nothing. Trends uses a pure-SVG
   // Sparkline; admin tables don't use Plotly at all.
   //
-  // /sessions, /usage, /query also do NOT render Plotly today (table-only
-  // surfaces; /query's chart panel lives in the Plot mode which is route-
-  // gated separately). Including them in the prewarm spent ~453 KB of
-  // cartesian-dist parse cost per cold load on routes that never paint a
-  // chart. If a Plotly surface lands on one of those pages, add it back.
+  // /query does NOT render Plotly (chart panel is route-gated to Plot mode).
+  // /sessions (list) is table-only; /sessions/stream DOES render Plotly.
   const needsPlotlyPrewarm = (
     pathname.startsWith('/dashboard') ||
     pathname.startsWith('/network') ||
@@ -532,7 +529,11 @@ export function AppLayout({
     pathname.startsWith('/security') ||
     pathname.startsWith('/charts') ||
     pathname.startsWith('/insights') ||
-    pathname.startsWith('/fastly-value')
+    pathname.startsWith('/fastly-value') ||
+    pathname.startsWith('/usage') ||
+    pathname.startsWith('/streaming') ||
+    pathname.startsWith('/control-room') ||
+    pathname.startsWith('/sessions/stream')
   )
   const needsMapPrewarm = (
     pathname.startsWith('/dashboard') ||

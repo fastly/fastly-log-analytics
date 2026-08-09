@@ -164,9 +164,9 @@ Policy: https://github.com/fastly/fastly-log-analytics/blob/main/SECURITY.md
 	}
 
 	# Everything else → Next.js frontend.
-	reverse_proxy 127.0.0.1:3000 {
-		flush_interval -1
-	}
+	# No flush_interval here: -1 forces a syscall per write, which fragments
+	# HTML/JS/CSS bundles into many small TCP segments. SSE lives on /api/* above.
+	reverse_proxy 127.0.0.1:3000
 
 	# Handle 502/503 errors during server reboots with a beautiful, auto-refreshing page
 	handle_errors {
@@ -387,10 +387,8 @@ https://localhost:8443, https://127.0.0.1:8443 {
 		}
 	}
 
-	# Everything else → Next.js frontend.
-	reverse_proxy 127.0.0.1:3000 {
-		flush_interval -1
-	}
+	# Everything else → Next.js frontend. No flush_interval: see main block comment.
+	reverse_proxy 127.0.0.1:3000
 
 	log {
 		output stdout

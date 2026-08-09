@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
@@ -223,21 +223,21 @@ export default function UsagePage() {
   const accentB = isDark ? '#34d399' : '#10b981'
   const gridColor = isDark ? '#27272a' : '#e4e4e7'
 
-  const baseLayout = {
+  const baseLayout = useMemo(() => ({
     legend: { orientation: 'h' as const, x: 0, y: -0.18, yanchor: 'top' as const, xanchor: 'left' as const },
     margin: { b: 55 },
-  }
+  }), [])
 
   // ── Ops chart ──────────────────────────────────────────────────────────────
   const opsDates = ops?.data.map((d: any) => d.date) ?? []
   const opsClassA = ops?.data.map((d: any) => d.class_a) ?? []
   const opsClassB = ops?.data.map((d: any) => d.class_b) ?? []
 
-  const opsData = [
+  const opsData = useMemo(() => [
     { type: 'bar', name: 'Class A', x: opsDates, y: opsClassA, marker: { color: accent }, hovertemplate: 'Class A: %{y:,}<extra></extra>' },
     { type: 'bar', name: 'Class B', x: opsDates, y: opsClassB, marker: { color: accentB }, hovertemplate: 'Class B: %{y:,}<extra></extra>' },
-  ]
-  const opsLayout = { ...baseLayout, barmode: 'stack' as const }
+  ], [opsDates, opsClassA, opsClassB, accent, accentB])
+  const opsLayout = useMemo(() => ({ ...baseLayout, barmode: 'stack' as const }), [baseLayout])
 
   // ── Bandwidth chart ────────────────────────────────────────────────────────
   const bwTimes = bw?.data.map((p: any) => p.time) ?? []
@@ -252,10 +252,10 @@ export default function UsagePage() {
 
   const bwY = bwBytes.map((b: number) => b / bwDiv)
 
-  const bwData = [
+  const bwData = useMemo(() => [
     { type: 'bar', name: `Bandwidth (${bwUnit})`, x: bwTimes, y: bwY, marker: { color: '#8b5cf6', opacity: 0.8 }, hovertemplate: `CDN: %{y:.2f} ${bwUnit}<extra></extra>` },
-  ]
-  const bwLayout = { ...baseLayout, showlegend: true, yaxis: { title: bwUnit, gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }
+  ], [bwUnit, bwTimes, bwY])
+  const bwLayout = useMemo(() => ({ ...baseLayout, showlegend: true, yaxis: { title: bwUnit, gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }), [baseLayout, bwUnit, gridColor])
 
   // ── Log generation chart ───────────────────────────────────────────────────
   const genTimes = logActivity?.data.map(p => p.time) ?? []
@@ -304,11 +304,11 @@ export default function UsagePage() {
   bwTimes.forEach((t: string, i: number) => { bwByTime[t] = (bwBytes[i] / 1e9) * rateEgress })
   const costEgressY = opsDates.map((t: string) => bwByTime[t] ?? 0)
 
-  const costChartData = [
+  const costChartData = useMemo(() => [
     { type: 'bar', name: 'Operations', x: opsDates, y: costOpsY, marker: { color: accent }, hovertemplate: '$%{y:.2f}<extra></extra>' },
     { type: 'bar', name: 'CDN Egress', x: opsDates, y: costEgressY, marker: { color: '#f59e0b' }, hovertemplate: '$%{y:.2f}<extra></extra>' },
-  ]
-  const costLayout = { ...baseLayout, barmode: 'stack' as const, yaxis: { tickprefix: '$', tickformat: '.2f', gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }
+  ], [opsDates, costOpsY, costEgressY, accent])
+  const costLayout = useMemo(() => ({ ...baseLayout, barmode: 'stack' as const, yaxis: { tickprefix: '$', tickformat: '.2f', gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }), [baseLayout, gridColor])
 
   const prefillNote = prefill && !loadingPrefill
     ? 'Calculator pre-filled from your current service configuration.'
