@@ -272,44 +272,45 @@ function SyncStatusBadgeInner() {
   const showSeparateStreams = hasRumData || hasRequestData
 
   return (
-    <div className="hidden md:flex flex-col gap-1.5 mr-2 animate-in fade-in zoom-in-95">
-      {showLiveDot && (
-        <Tooltip>
-          <TooltipTrigger render={
-            <span
-              tabIndex={0}
-              role="status"
-              aria-label={liveDotTitle ?? ''}
-              className="inline-flex items-center justify-center h-5 w-5 rounded-full hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <span className="relative flex h-2 w-2">
-                {liveStreamState === 'open' ? (
-                  <>
-                    <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-60 animate-ping" />
-                    <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-                  </>
-                ) : (
-                  <>
-                    <span className="absolute inline-flex h-full w-full rounded-full bg-amber-500 opacity-60 animate-ping" />
-                    <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
-                  </>
-                )}
-              </span>
-            </span>
-          } />
-          <TooltipContent className="text-xs">{liveDotTitle}</TooltipContent>
-        </Tooltip>
-      )}
-
+    <div className="hidden md:flex flex-col gap-0.5 mr-2 animate-in fade-in zoom-in-95">
       {showSeparateStreams ? (
-        <div className="flex flex-col gap-1">
-          {/* REQUEST logs row */}
-          {renderStreamBadge(
-            'REQUEST',
-            requestMetrics?.latest_log_at,
-            requestMetrics?.total_rows,
-            requestMetrics?.last_sync_at,
-          )}
+        <div className="flex flex-col gap-0.5">
+          {/* REQUEST logs row with live dot */}
+          <div className="flex items-center gap-1">
+            {showLiveDot && (
+              <Tooltip>
+                <TooltipTrigger render={
+                  <span
+                    tabIndex={0}
+                    role="status"
+                    aria-label={liveDotTitle ?? ''}
+                    className="inline-flex items-center justify-center h-3 w-3 rounded-full hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring flex-shrink-0"
+                  >
+                    <span className="relative flex h-1.5 w-1.5">
+                      {liveStreamState === 'open' ? (
+                        <>
+                          <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-60 animate-ping" />
+                          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        </>
+                      ) : (
+                        <>
+                          <span className="absolute inline-flex h-full w-full rounded-full bg-amber-500 opacity-60 animate-ping" />
+                          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-500" />
+                        </>
+                      )}
+                    </span>
+                  </span>
+                } />
+                <TooltipContent className="text-xs">{liveDotTitle}</TooltipContent>
+              </Tooltip>
+            )}
+            {renderStreamBadge(
+              'REQUEST',
+              requestMetrics?.latest_log_at,
+              requestMetrics?.total_rows,
+              requestMetrics?.last_sync_at,
+            )}
+          </div>
 
           {/* RUM logs row */}
           {renderStreamBadge(
