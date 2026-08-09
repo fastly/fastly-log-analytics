@@ -317,15 +317,24 @@ async def rum_analytics(
     filters: str | None = Query(None),
 ) -> dict[str, Any]:
     """Retrieve parsed RUM analytics from SQLite database with high-fidelity deterministic mock fallback."""
-    # Convert start_time and end_time to standardized UTC ISO strings to ensure accurate raw alphabetical comparison in SQLite
-    if start_time:
-        start_dt = parse_iso_utc(start_time)
+    # Convert start_time and end_time to standardized UTC ISO strings to ensure accurate raw alphabetical comparison in SQLite.
+    # Default to the last 24 hours if both are missing.
+    if not start_time and not end_time:
+        start_dt: datetime.datetime | None = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=24)
         if start_dt:
             start_time = iso_z(start_dt)
-    if end_time:
-        end_dt = parse_iso_utc(end_time)
+        end_dt: datetime.datetime | None = datetime.datetime.now(datetime.UTC)
         if end_dt:
             end_time = iso_z(end_dt)
+    else:
+        if start_time:
+            parsed_start = parse_iso_utc(start_time)
+            if parsed_start:
+                start_time = iso_z(parsed_start)
+        if end_time:
+            parsed_end = parse_iso_utc(end_time)
+            if parsed_end:
+                end_time = iso_z(parsed_end)
 
     where_clauses = ["service_id = ?"]
     params: list[Any] = [service_id]

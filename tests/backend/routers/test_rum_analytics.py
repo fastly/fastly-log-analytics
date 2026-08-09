@@ -288,9 +288,10 @@ def test_rum_analytics_with_filters() -> None:
                 "device": "Desktop" if i < 12 else "Mobile",
             },
         }
+        received_at = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=i)).isoformat()
         db.execute(
             "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
-            (service_id, "2026-08-05T12:00:00+00:00", json.dumps(b)),
+            (service_id, received_at, json.dumps(b)),
         )
     db.commit()
 
