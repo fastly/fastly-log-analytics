@@ -222,6 +222,8 @@ function SyncStatusBadgeInner() {
   // Extract RUM and REQUEST metrics from bootstrap
   const rumMetrics = (headerBadge as any)?.rum
   const requestMetrics = (headerBadge as any)?.request
+  const hasRumData = rumMetrics?.latest_log_at || (rumMetrics?.total_rows != null && rumMetrics.total_rows > 0)
+  const hasRequestData = requestMetrics?.latest_log_at || (requestMetrics?.total_rows != null && requestMetrics.total_rows > 0)
 
   const renderStreamBadge = (
     label: string,
@@ -259,12 +261,15 @@ function SyncStatusBadgeInner() {
             Never
           </Badge>
         )}
-        {totalRows != null && (
+        {totalRows != null && totalRows > 0 && (
           <span className="text-xs text-muted-foreground">({totalRows.toLocaleString()})</span>
         )}
       </div>
     )
   }
+
+  // If we have separate RUM/REQUEST data, show two rows; otherwise fall back to combined view
+  const showSeparateStreams = hasRumData || hasRequestData
 
   return (
     <div className="hidden md:flex flex-col gap-2 mr-2 animate-in fade-in zoom-in-95">
@@ -296,20 +301,61 @@ function SyncStatusBadgeInner() {
         </Tooltip>
       )}
 
-      {/* REQUEST logs row */}
-      {renderStreamBadge(
-        'REQUEST',
-        requestMetrics?.latest_log_at,
-        requestMetrics?.total_rows,
-        requestMetrics?.last_sync_at,
-      )}
+      {showSeparateStreams ? (
+        <>
+          {/* REQUEST logs row */}
+          {renderStreamBadge(
+            'REQUEST',
+            requestMetrics?.latest_log_at,
+            requestMetrics?.total_rows,
+            requestMetrics?.last_sync_at,
+          )}
 
-      {/* RUM logs row */}
-      {renderStreamBadge(
-        'RUM',
-        rumMetrics?.latest_log_at,
-        rumMetrics?.total_rows,
-        rumMetrics?.last_sync_at,
+          {/* RUM logs row */}
+          {renderStreamBadge(
+            'RUM',
+            rumMetrics?.latest_log_at,
+            rumMetrics?.total_rows,
+            rumMetrics?.last_sync_at,
+          )}
+        </>
+      ) : (
+        <>
+          {/* Fallback to combined view when no separate stream data */}
+          {localRows != null && (
+            <Badge variant="secondary" className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors min-w-[172px] tabular-nums">
+              <strong className="text-foreground mr-1">Total Logs:</strong>
+              {localRows.toLocaleString()}
+            </Badge>
+          )}
+
+          {fileTs ? (
+            <Tooltip>
+              <TooltipTrigger render={
+                <Badge
+                  variant="secondary"
+                  tabIndex={0}
+                  role="button"
+                  aria-label="Latest log details"
+                  aria-live="off"
+                  className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors min-w-[156px] tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <strong className="text-foreground mr-1">Latest Log:</strong>
+                  <TimeAgo timestamp={fileTs} />
+                  <StalenessDot timestamp={fileTs} />
+                </Badge>
+              } />
+              <TooltipContent className="text-xs">
+                {full(fileTs)} {abbr()}
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            <Badge variant="secondary" className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10">
+              <strong className="text-foreground mr-1">Latest Log:</strong>
+              Never
+            </Badge>
+          )}
+        </>
       )}
 
       {/* a11y: sr-only live region for screen readers */}
