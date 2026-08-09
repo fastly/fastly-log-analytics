@@ -417,25 +417,25 @@ def _bootstrap_sync(
             # Get separate metrics for RUM and REQUEST from ingested_files table
             con = metadata_db.get_con(active_src["name"])
 
-            # RUM files: count and latest timestamp
+            # RUM files: count and latest timestamp (from rum/ directory path)
             rum_cur = con.execute(
                 "SELECT COUNT(*), SUM(row_count), MAX(file_name) FROM ingested_files "
-                "WHERE service_id = ? AND file_name LIKE '%rum%'",
+                "WHERE service_id = ? AND (file_name LIKE '%/rum/%' OR file_name LIKE '%rum%')",
                 (active_src["name"],),
             )
             rum_row = rum_cur.fetchone()
-            if rum_row and rum_row[2]:  # Has files
+            if rum_row and rum_row[0] and rum_row[0] > 0 and rum_row[2]:
                 rum_total = rum_row[1] or 0
                 rum_latest = _extract_timestamp(rum_row[2])
 
-            # REQUEST files (non-RUM): count and latest timestamp
+            # REQUEST files: count and latest timestamp (non-RUM files)
             req_cur = con.execute(
                 "SELECT COUNT(*), SUM(row_count), MAX(file_name) FROM ingested_files "
-                "WHERE service_id = ? AND file_name NOT LIKE '%rum%'",
+                "WHERE service_id = ? AND file_name NOT LIKE '%/rum/%' AND file_name NOT LIKE '%rum%'",
                 (active_src["name"],),
             )
             req_row = req_cur.fetchone()
-            if req_row and req_row[2]:  # Has files
+            if req_row and req_row[0] and req_row[0] > 0 and req_row[2]:
                 request_total = req_row[1] or 0
                 request_latest = _extract_timestamp(req_row[2])
 
