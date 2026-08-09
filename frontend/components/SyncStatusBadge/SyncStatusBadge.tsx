@@ -322,7 +322,7 @@ function SyncStatusBadgeInner() {
             requestLatestLogAt,
             requestTotal,
             requestLastSyncAt,
-            true,
+            false,
             lastSync?.status === 'running',
             lastSync?.started_at,
           )}
