@@ -1,79 +1,183 @@
-"""Tests for Faro version discovery and download.
+"""Tests for ``backend.core.faro_versions``.
 
-Tests the npm registry version fetching and unpkg.com bundle downloading.
+Version discovery (npm registry) and IIFE bundle download (unpkg.com) are
+exercised against a captured registry payload and a synthetic bundle body
+via ``httpx.MockTransport`` — same shape as
+``tests/utils/test_refresh_fastly_cidrs.py``. No real network calls: the
+npm registry and the unpkg CDN are third-party services whose availability
+must never gate ``make test`` / ``make test-ci``.
 """
 
 from __future__ import annotations
 
+import json
+
+import httpx
 import pytest
 
+from backend.core import faro_versions
 from backend.core.faro_versions import fetch_available_faro_versions, fetch_faro_bundle
 
+# Trimmed capture of the registry payload shape (2026-08-09). Deliberately
+# unsorted, and salted with a pre-release + a build-metadata version so the
+# filter and the descending semver sort are both exercised.
+SAMPLE_REGISTRY_RESPONSE = {
+    "name": "@grafana/faro-web-sdk",
+    "versions": {
+        "1.9.0": {"version": "1.9.0"},
+        "2.10.0": {"version": "2.10.0"},
+        "2.9.0": {"version": "2.9.0"},
+        "1.4.5": {"version": "1.4.5"},
+        "2.8.2": {"version": "2.8.2"},
+        "2.9.0-alpha.1": {"version": "2.9.0-alpha.1"},
+        "2.9.0+build.7": {"version": "2.9.0+build.7"},
+    },
+}
 
-@pytest.mark.asyncio
-async def test_fetch_available_faro_versions_returns_valid_semver():
-    """Test that fetch_available_faro_versions returns a non-empty list of valid semver strings."""
+# Shape-accurate stand-in for the real IIFE bundle: the browser global the
+# tracker looks for is what downstream tasks actually depend on.
+SAMPLE_BUNDLE = b"!function(e){var GrafanaFaroWebSdk={initializeFaro:function(){}};e.Faro=GrafanaFaroWebSdk}(window);"
+
+
+# Bound at import time: the factory below replaces ``httpx.AsyncClient``, so it
+# must call the real class through this alias or it recurses into itself.
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+def _mock_transport(handler):
+    """Patch ``httpx.AsyncClient`` so it is constructed with a mock transport.
+
+    The two public functions own their client lifecycle (no injectable
+    ``client`` parameter — later tasks depend on the signatures as-is), so
+    the transport is swapped in at construction time instead.
+    """
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return _REAL_ASYNC_CLIENT(*args, **kwargs)
+
+    return factory
+
+
+@pytest.fixture
+def mock_http(monkeypatch):
+    """Return a callable that installs a MockTransport-backed AsyncClient."""
+
+    def install(handler):
+        monkeypatch.setattr(faro_versions.httpx, "AsyncClient", _mock_transport(handler))
+
+    return install
+
+
+# ── fetch_available_faro_versions ───────────────────────────────────────────
+
+
+async def test_fetch_available_faro_versions_filters_and_sorts_descending(mock_http):
+    """Pre-releases/build metadata are dropped and the remainder comes back
+    newest-first by semver — not lexicographically (2.10.0 must beat 2.9.0)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == faro_versions.REGISTRY_URL
+        return httpx.Response(200, content=json.dumps(SAMPLE_REGISTRY_RESPONSE).encode())
+
+    mock_http(handler)
     versions = await fetch_available_faro_versions()
 
-    assert isinstance(versions, list)
-    assert len(versions) > 0
-
-    # Verify each version is a valid semver string (X.Y.Z)
-    for version in versions:
-        assert isinstance(version, str)
-        parts = version.split(".")
-        assert len(parts) >= 3, f"Version {version} is not valid semver"
-        # Check that first 3 parts are integers
-        assert parts[0].isdigit()
-        assert parts[1].isdigit()
-        assert parts[2].isdigit()
-
-    # Verify no pre-releases (should be filtered out)
-    for version in versions:
-        assert "-" not in version, f"Pre-release version {version} should be filtered out"
-        assert "+" not in version, f"Build metadata version {version} should be filtered out"
+    assert versions == ["2.10.0", "2.9.0", "2.8.2", "1.9.0", "1.4.5"]
+    assert all("-" not in v and "+" not in v for v in versions)
 
 
-@pytest.mark.asyncio
-async def test_fetch_available_faro_versions_sorted_descending():
-    """Test that versions are sorted descending by semver (newest first)."""
-    versions = await fetch_available_faro_versions()
+async def test_fetch_available_faro_versions_raises_on_non_200(mock_http):
+    """A registry 500 must surface as ValueError, not a raw HTTPStatusError —
+    callers handle one exception type across both public functions."""
 
-    assert len(versions) > 1
+    mock_http(lambda _: httpx.Response(500, content=b"upstream error"))
 
-    # Parse versions as tuples for comparison
-    def parse_version(v: str) -> tuple[int, int, int]:
-        parts = v.split(".")[:3]
-        return tuple(map(int, parts))  # type: ignore
-
-    version_tuples = [parse_version(v) for v in versions]
-
-    # Verify sorted in descending order
-    for i in range(len(version_tuples) - 1):
-        assert version_tuples[i] >= version_tuples[i + 1], f"Version {versions[i]} should come before {versions[i + 1]}"
+    with pytest.raises(ValueError, match="500"):
+        await fetch_available_faro_versions()
 
 
-@pytest.mark.asyncio
-async def test_fetch_faro_bundle_returns_bytes():
-    """Test that fetch_faro_bundle returns actual Faro IIFE bundle as bytes."""
-    # Use a known recent version
+async def test_fetch_available_faro_versions_raises_on_network_error(mock_http):
+    """Connection failure is wrapped the same way as a bad status."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("registry unreachable", request=request)
+
+    mock_http(handler)
+
+    with pytest.raises(ValueError, match="Failed to fetch Faro versions"):
+        await fetch_available_faro_versions()
+
+
+async def test_fetch_available_faro_versions_raises_on_malformed_json(mock_http):
+    """A 200 with a non-JSON body must not leak a JSONDecodeError."""
+
+    mock_http(lambda _: httpx.Response(200, content=b"<html>proxy interstitial</html>"))
+
+    with pytest.raises(ValueError, match="malformed registry JSON"):
+        await fetch_available_faro_versions()
+
+
+async def test_fetch_available_faro_versions_raises_when_versions_key_missing(mock_http):
+    """Well-formed JSON without a usable ``versions`` map is still a failure —
+    returning [] would let a later task silently publish nothing."""
+
+    mock_http(lambda _: httpx.Response(200, content=json.dumps({"name": "x"}).encode()))
+
+    with pytest.raises(ValueError, match="no 'versions' map"):
+        await fetch_available_faro_versions()
+
+
+# ── fetch_faro_bundle ───────────────────────────────────────────────────────
+
+
+async def test_fetch_faro_bundle_returns_bytes(mock_http):
+    """Happy path: correct unpkg URL requested, raw body returned verbatim."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(200, content=SAMPLE_BUNDLE)
+
+    mock_http(handler)
     bundle = await fetch_faro_bundle("2.9.0")
 
     assert isinstance(bundle, bytes)
-    assert len(bundle) > 0
-
-    # Check that it contains Faro SDK markers (case-insensitive)
-    bundle_str = bundle.decode("utf-8", errors="ignore")
-    assert "Faro" in bundle_str or "faro" in bundle_str, "Bundle should contain Faro SDK code"
+    assert bundle == SAMPLE_BUNDLE
+    assert b"Faro" in bundle
+    assert seen["url"] == ("https://unpkg.com/@grafana/faro-web-sdk@2.9.0/dist/bundle/faro-web-sdk.iife.js")
 
 
-@pytest.mark.asyncio
-async def test_fetch_faro_bundle_raises_on_404():
-    """Test that fetch_faro_bundle raises ValueError for non-existent versions."""
-    with pytest.raises(ValueError) as exc_info:
+async def test_fetch_faro_bundle_raises_on_404(mock_http):
+    """Unknown version — the message must name the 404 so the admin UI can
+    distinguish 'no such version' from a transient CDN failure."""
+
+    mock_http(lambda _: httpx.Response(404, content=b"Cannot find package"))
+
+    with pytest.raises(ValueError, match="404") as exc_info:
         await fetch_faro_bundle("99.99.99")
 
-    error_msg = str(exc_info.value).lower()
-    assert "404" in error_msg or "not found" in error_msg, (
-        f"Error message should mention 404 or not found, got: {exc_info.value}"
-    )
+    assert "99.99.99" in str(exc_info.value)
+
+
+async def test_fetch_faro_bundle_raises_on_server_error(mock_http):
+    """Non-404 failure status is wrapped too, and must NOT be reported as 404."""
+
+    mock_http(lambda _: httpx.Response(503, content=b"service unavailable"))
+
+    with pytest.raises(ValueError, match="503") as exc_info:
+        await fetch_faro_bundle("2.9.0")
+
+    assert "404" not in str(exc_info.value)
+
+
+async def test_fetch_faro_bundle_raises_on_network_error(mock_http):
+    """Transport-level failure (DNS/TCP) surfaces as ValueError, not ConnectError."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("unpkg unreachable", request=request)
+
+    mock_http(handler)
+
+    with pytest.raises(ValueError, match="Failed to download Faro bundle"):
+        await fetch_faro_bundle("2.9.0")
