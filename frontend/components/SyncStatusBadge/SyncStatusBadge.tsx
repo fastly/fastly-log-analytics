@@ -235,6 +235,8 @@ function SyncStatusBadgeInner() {
     totalRows: number | null | undefined,
     lastSyncTs: string | null | undefined,
     showStaleness: boolean = true,
+    isRunning: boolean = false,
+    startedAt: string | null | undefined = null,
   ) => {
     const hasData = latestTs || totalRows != null
     if (!hasData) return null
@@ -281,8 +283,16 @@ function SyncStatusBadgeInner() {
           <span className="text-muted-foreground whitespace-nowrap flex-shrink-0">({totalRows.toLocaleString()})</span>
         )}
         {lastSyncTs && (
-          <span className="text-muted-foreground whitespace-nowrap flex-shrink-0 text-[9px]">
-            sync: <TimeAgo timestamp={lastSyncTs} />
+          <span className="text-muted-foreground whitespace-nowrap flex-shrink-0 text-[9px] inline-flex items-center gap-1">
+            sync:{" "}
+            {isRunning && startedAt ? (
+              <span className="inline-flex items-center gap-1 font-semibold text-blue-500 animate-pulse" aria-label="Sync in progress">
+                <Loader2 className="h-2.5 w-2.5 animate-spin shrink-0 text-blue-500" aria-hidden="true" />
+                <HeaderLiveTimer startedAt={startedAt} />
+              </span>
+            ) : (
+              <TimeAgo timestamp={lastSyncTs} />
+            )}
           </span>
         )}
       </div>
@@ -303,6 +313,9 @@ function SyncStatusBadgeInner() {
             requestMetrics?.latest_log_at,
             requestMetrics?.total_rows,
             requestMetrics?.last_sync_at,
+            true,
+            lastSync?.status === 'running',
+            lastSync?.started_at,
           )}
 
           {/* RUM logs row with live dot */}
