@@ -11,7 +11,6 @@ from __future__ import annotations
 import multiprocessing
 from unittest.mock import patch
 
-
 # ── Scheduler: commit misfire_grace_time scales with interval ─────────────
 
 
@@ -130,7 +129,6 @@ def test_duckdb_threads_env_var_respected(monkeypatch):
     wins). The env var had zero effect. Post-fix: _cached_n_threads is
     initialised from the env var when present.
     """
-    import importlib
     import backend.core.duckdb as duckdb_mod
 
     monkeypatch.setenv("DUCKDB_THREADS", "2")
