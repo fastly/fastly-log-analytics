@@ -92,7 +92,6 @@ def get_worst_pages(
     WHERE timestamp >= ? AND timestamp < ?
         AND pathname IS NOT NULL
     GROUP BY pathname
-    HAVING COUNT(*) > 10  -- Require at least 10 metrics to avoid noise
     ORDER BY lcp_poor_pct + inp_poor_pct + cls_poor_pct DESC
     LIMIT ?
     """

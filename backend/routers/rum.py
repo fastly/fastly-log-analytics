@@ -344,13 +344,13 @@ async def rum_analytics(
     except Exception:
         total_service_beacons = 0
 
-    if total_service_beacons < 10:
-        # Return "no data yet" response until we have at least 10 beacons total for the service
+    if total_service_beacons < 1:
+        # Return "no data yet" response until we have at least 1 beacon total for the service
         return {
             "is_mock": False,
             "no_data": True,
             "beacon_count": total_service_beacons,
-            "message": f"Waiting for real-time RUM user events... {total_service_beacons}/10 beacons received.",
+            "message": "Waiting for real-time RUM user events...",
             "vitals": {
                 "lcp": {"p75": None, "distribution": None},
                 "cls": {"p75": None, "distribution": None},
@@ -443,6 +443,12 @@ async def rum_analytics(
 
     # Aggregate real beacons if we have enough total beacons
     try:
+        cur_count = db.execute(
+            f"SELECT COUNT(*) FROM rum_beacons WHERE {where_str}",
+            tuple(params),
+        )
+        db_matching_count = cur_count.fetchone()[0]
+
         cur = db.execute(
             f"SELECT beacon_data, received_at FROM rum_beacons WHERE {where_str} ORDER BY received_at DESC LIMIT 1000",
             tuple(params),
@@ -459,6 +465,7 @@ async def rum_analytics(
                 pass
 
         total_beacons = len(beacons)
+        estimated_beacon_count = int(db_matching_count * (total_beacons / len(rows))) if rows else 0
         if total_beacons == 0:
             return {
                 "is_mock": False,
@@ -771,7 +778,7 @@ async def rum_analytics(
 
         return {
             "is_mock": False,
-            "beacon_count": total_beacons,
+            "beacon_count": estimated_beacon_count,
             "vitals": {
                 "lcp": {"p75": round(get_p75(lcps, 1.9), 2), "distribution": get_distribution(lcps, 2.5, 4.0)},
                 "cls": {"p75": round(get_p75(clss, 0.05), 3), "distribution": get_distribution(clss, 0.1, 0.25)},
