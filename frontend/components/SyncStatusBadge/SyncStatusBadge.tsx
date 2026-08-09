@@ -225,8 +225,17 @@ function SyncStatusBadgeInner() {
 
   const rumMetrics = (headerBadge as any)?.rum
   const requestMetrics = (headerBadge as any)?.request
+
+  // Derive real-time values for REQUEST using the live-updated sync status query
+  const rumTotal = rumMetrics?.total_rows ?? 0
+  const liveLocalRows = status?.local_rows ?? headerBadge?.local_rows ?? null
+  const requestTotal = liveLocalRows !== null ? Math.max(0, liveLocalRows - rumTotal) : (requestMetrics?.total_rows ?? null)
+
+  const requestLatestLogAt = status?.latest_log_at ?? requestMetrics?.latest_log_at ?? null
+  const requestLastSyncAt = lastSync?.started_at ?? requestMetrics?.last_sync_at ?? null
+
   const hasRumData = isRumEnabled && (rumMetrics?.latest_log_at || (rumMetrics?.total_rows != null && rumMetrics.total_rows > 0))
-  const hasRequestData = requestMetrics?.latest_log_at || (requestMetrics?.total_rows != null && requestMetrics.total_rows > 0)
+  const hasRequestData = requestLatestLogAt || (requestTotal != null && requestTotal > 0)
 
   const renderStreamRow = (
     label: string,
@@ -310,9 +319,9 @@ function SyncStatusBadgeInner() {
           {renderStreamRow(
             'REQUEST',
             showLiveDot,
-            requestMetrics?.latest_log_at,
-            requestMetrics?.total_rows,
-            requestMetrics?.last_sync_at,
+            requestLatestLogAt,
+            requestTotal,
+            requestLastSyncAt,
             true,
             lastSync?.status === 'running',
             lastSync?.started_at,
