@@ -107,12 +107,9 @@ function SyncStatusBadgeInner() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const { full, abbr } = useDateFormat()
   const pathname = usePathname()
-  const queryClient = useQueryClient()
-
   const { data: status } = useSyncStatus()
   const { data: lastSync } = useLastSync()
 
-  const bootstrapPending = useBootstrapPending()
   const isAnalyst = useIsAnalyst()
 
   // /share-login is the anonymous landing for unauthenticated remote
@@ -168,9 +165,22 @@ function SyncStatusBadgeInner() {
   // renders so analysts see Latest Log / Total Logs the same way
   // admins do. Refreshes at bootstrap's 5-min staleTime — fine for an
   // at-a-glance header.
+  interface StreamMetrics {
+    latest_log_at?: string | null
+    total_rows?: number | null
+    last_sync_at?: string | null
+  }
+
+  interface HeaderBadgeData {
+    latest_log_at?: string | null
+    local_rows?: number | null
+    rum?: StreamMetrics | null
+    request?: StreamMetrics | null
+  }
+
   const { data: bootstrap } = useBootstrap()
-  const headerBadge = (bootstrap as any)?.header_badge as
-    | { latest_log_at?: string | null; local_rows?: number | null }
+  const headerBadge = (bootstrap as Record<string, unknown>)?.header_badge as
+    | HeaderBadgeData
     | null
     | undefined
 
@@ -185,10 +195,13 @@ function SyncStatusBadgeInner() {
     const prev = prevSyncStatusRef.current
     if (prev !== undefined && prev !== current) {
       if (current === 'running') {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setA11yAnnouncement('Sync started')
       } else if (current === 'error') {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setA11yAnnouncement('Sync errored')
       } else if (prev === 'running' && current && current !== 'running') {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setA11yAnnouncement('Sync finished')
       }
     }
@@ -223,8 +236,8 @@ function SyncStatusBadgeInner() {
   const activeSvc = bootstrap?.services?.find(s => s.service_id === activeServiceId)
   const isRumEnabled = activeSvc?.rum_enabled ?? false
 
-  const rumMetrics = (headerBadge as any)?.rum
-  const requestMetrics = (headerBadge as any)?.request
+  const rumMetrics = headerBadge?.rum
+  const requestMetrics = headerBadge?.request
 
   // Derive real-time values for REQUEST using the live-updated sync status query
   const rumTotal = rumMetrics?.total_rows ?? 0
