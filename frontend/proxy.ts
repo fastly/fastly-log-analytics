@@ -111,6 +111,11 @@ export function proxy(request: NextRequest) {
   const requestHeaders = new Headers(request.headers)
   requestHeaders.set('x-nonce', nonce)
 
+  const serviceId = request.nextUrl?.searchParams?.get('service') || (request.url ? new URL(request.url).searchParams.get('service') : null)
+  if (serviceId) {
+    requestHeaders.set('x-service-id', serviceId)
+  }
+
   const response = NextResponse.next({ request: { headers: requestHeaders } })
   response.headers.set('Content-Security-Policy', buildCsp(nonce))
   response.headers.set('x-nonce', nonce)

@@ -166,8 +166,9 @@ def test_ingest_rum_logs_success(
     mock_s3.get_paginator.return_value = mock_paginator
 
     # Mock s3 get_object response
-    mock_response = {"Body": MagicMock()}
-    mock_response["Body"].read.return_value = gzipped_content
+    import io
+
+    mock_response = {"Body": io.BytesIO(gzipped_content)}
     mock_s3.get_object.return_value = mock_response
 
     # Execute ingest generator
@@ -175,7 +176,7 @@ def test_ingest_rum_logs_success(
 
     assert events == [
         ("started", 123),
-        ("file_done", "raw/rum/rum_log_0.json.gz", 1),
+        ("file_done", "rum_log_0.json.gz", 1),
         ("done", 1),
     ]
 
@@ -196,5 +197,5 @@ def test_ingest_rum_logs_success(
     # Verify that file key was successfully registered to ingested_files
     ingested = mock_metadata_db.execute("SELECT * FROM ingested_files").fetchall()
     assert len(ingested) == 1
-    assert ingested[0]["file_name"] == "raw/rum/rum_log_0.json.gz"
+    assert ingested[0]["file_name"] == "s3://test-bucket/raw/rum/rum_log_0.json.gz"
     assert ingested[0]["row_count"] == 1

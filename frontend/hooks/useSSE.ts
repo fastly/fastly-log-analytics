@@ -56,11 +56,15 @@ export function useSSE() {
     // Stop any existing stream before starting a new one
     stop();
 
-    // String concat (not `new URL(path, base)`): the public Fastly deploy's
-    // getApiBase() returns "" for relative proxying, and `new URL(p, "")`
-    // throws TypeError that the surrounding catch swallows into a silent
-    // retry loop. See [[sse-hook-url-pitfall]].
-    const url = `${getApiBase()}${urlPath}`
+    const serviceId = useServiceStore.getState().activeServiceId
+    let finalUrlPath = urlPath
+    if (serviceId) {
+      const separator = finalUrlPath.includes('?') ? '&' : '?'
+      if (!finalUrlPath.includes('service=')) {
+        finalUrlPath = `${finalUrlPath}${separator}service=${encodeURIComponent(serviceId)}`
+      }
+    }
+    const url = `${getApiBase()}${finalUrlPath}`
 
     if (mountedRef.current) {
       setLines([])
@@ -72,7 +76,6 @@ export function useSSE() {
     const currentReqId = requestIdRef.current
 
     try {
-      const serviceId = useServiceStore.getState().activeServiceId
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream',

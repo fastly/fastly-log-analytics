@@ -97,6 +97,10 @@ def ingest_rum_logs(
     service_id: str,
 ) -> Generator[tuple]:
     """Ingest RUM beacon logs from FOS raw/rum/ prefix into local SQLite."""
+    import tempfile
+
+    from backend.core.ingest import _download_chunk_to_local, list_fos_files
+
     start_time = time.time()
     run_id = start_cron_run(service_id, "rum_sync")
     yield ("started", run_id)
@@ -116,13 +120,18 @@ def ingest_rum_logs(
         return
 
     try:
-        from backend.core.ingest import list_fos_files
-
         s3 = _get_fos_client(src)
         bucket = src["bucket"]
 
         # Fetch already ingested files to avoid duplicate processing
-        already_ingested = metadata_db.get_ingested_filenames(service_id) or set()
+        already_ingested_raw = metadata_db.get_ingested_filenames(service_id) or set()
+        bucket_prefix = f"s3://{bucket}/"
+        already_ingested = set()
+        for p in already_ingested_raw:
+            if p.startswith("s3://"):
+                already_ingested.add(p)
+            else:
+                already_ingested.add(f"{bucket_prefix}{p}")
 
         # Use the shared list_fos_files helper to discover files in raw/rum/ prefix
         list_gen = list_fos_files(
@@ -144,19 +153,7 @@ def ingest_rum_logs(
         new_files_s3 = list_res["new_files"]
         file_sizes = list_res["file_sizes"]
 
-        # Convert s3:// paths back to keys for downstream compatibility
-        bucket_prefix = f"s3://{bucket}/"
-        new_files = []
-        for p in new_files_s3:
-            if p.startswith(bucket_prefix):
-                new_files.append((p[len(bucket_prefix) :], file_sizes[p]))
-            else:
-                without_scheme = p[5:] if p.startswith("s3://") else p
-                slash = without_scheme.find("/")
-                key = without_scheme[slash + 1 :]
-                new_files.append((key, file_sizes[p]))
-
-        if not new_files:
+        if not new_files_s3:
             logger.info(f"RUM sync: no new RUM logs found in bucket for {service_id}")
             yield ("done", 0)
             log_cron_run(
@@ -173,80 +170,104 @@ def ingest_rum_logs(
         db = metadata_db.get_con(service_id)
         ingested_batch_records = []
 
-        for key, size in new_files:
-            try:
-                # Download file from S3
-                resp = s3.get_object(Bucket=bucket, Key=key)
-                compressed_data = resp["Body"].read()
+        # Download and process in parallel chunks to unify request and RUM ingestion logic
+        CHUNK_SIZE = 50
+        chunks = [new_files_s3[i : i + CHUNK_SIZE] for i in range(0, len(new_files_s3), CHUNK_SIZE)]
 
-                # Decompress and parse log lines
-                decompressed_data = gzip.decompress(compressed_data).decode("utf-8")
+        for chunk in chunks:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                s3_to_local, _ = _download_chunk_to_local(s3, chunk, tmpdir)
 
-                file_rows_count = 0
-                for line in decompressed_data.splitlines():
-                    if not line.strip():
+                for s3_path in chunk:
+                    if s3_path not in s3_to_local:
+                        logger.error(f"RUM sync: Failed to download {s3_path}")
+                        yield ("error", s3_path, "Download failed")
                         continue
+
+                    local_path = s3_to_local[s3_path]
+                    file_rows_count = 0
+                    size = file_sizes.get(s3_path, 0)
+
                     try:
-                        log_data = json.loads(line)
+                        # Decompress and parse log lines
+                        with gzip.open(local_path, "rt", encoding="utf-8") as f:
+                            for line in f:
+                                if not line.strip():
+                                    continue
+                                try:
+                                    log_data = json.loads(line)
 
-                        # Service filtering if present in log data
-                        log_service_id = log_data.get("service_id") or log_data.get("rum_service_id")
-                        if log_service_id and log_service_id != service_id:
-                            continue
+                                    # Service filtering if present in log data
+                                    log_service_id = log_data.get("service_id") or log_data.get("rum_service_id")
+                                    if log_service_id and log_service_id != service_id:
+                                        continue
 
-                        received_at = log_data.get("timestamp") or datetime.now(UTC).isoformat()
+                                    received_at = log_data.get("timestamp") or datetime.now(UTC).isoformat()
 
-                        # Reconstruct the beacon_data format expected by RUM analytics dashboard
-                        beacon_data = {
-                            "pathname": log_data.get("rum_pathname") or "/",
-                            "path": log_data.get("rum_pathname") or "/",
-                            "name": log_data.get("rum_metric_name"),
-                            "value": log_data.get("rum_metric_value"),
-                            "rating": log_data.get("rum_metric_rating"),
-                            "cid": log_data.get("rum_cid"),
-                            "req_id": log_data.get("fastly_req_id"),
-                            "browser": log_data.get("browser") or "Chrome",
-                            "os": log_data.get("os") or "macOS",
-                            "device": log_data.get("device") or "Desktop",
-                            "meta": {
-                                "browser": log_data.get("browser") or "Chrome",
-                                "os": log_data.get("os") or "macOS",
-                                "device": log_data.get("device") or "Desktop",
-                            },
-                        }
+                                    # Robust path extraction from rum_pathname or referer
+                                    pathname = log_data.get("rum_pathname")
+                                    if not pathname and log_data.get("referer"):
+                                        from urllib.parse import urlparse
 
-                        # Append client telemetry if available
-                        if log_data.get("rum_error_message"):
-                            beacon_data["exceptions"] = [
-                                {
-                                    "value": log_data["rum_error_message"],
-                                    "message": log_data["rum_error_message"],
-                                    "filename": log_data.get("rum_error_file") or "unknown.js",
-                                    "file": log_data.get("rum_error_file") or "unknown.js",
-                                    "lineno": log_data.get("rum_error_line") or 0,
-                                    "line": log_data.get("rum_error_line") or 0,
-                                    "colno": log_data.get("rum_error_col") or 0,
-                                    "col": log_data.get("rum_error_col") or 0,
-                                }
-                            ]
+                                        try:
+                                            pathname = urlparse(log_data["referer"]).path
+                                        except Exception:
+                                            pass
+                                    if not pathname:
+                                        pathname = "/"
+                                    pathname = pathname.replace("//", "/")
 
-                        db.execute(
-                            "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
-                            (service_id, received_at, json.dumps(beacon_data)),
-                        )
-                        file_rows_count += 1
-                        total_rows += 1
+                                    # Reconstruct the beacon_data format expected by RUM analytics dashboard
+                                    beacon_data = {
+                                        "pathname": pathname,
+                                        "path": pathname,
+                                        "name": log_data.get("rum_metric_name"),
+                                        "value": log_data.get("rum_metric_value"),
+                                        "rating": log_data.get("rum_metric_rating"),
+                                        "cid": log_data.get("rum_cid"),
+                                        "req_id": log_data.get("fastly_req_id"),
+                                        "browser": log_data.get("browser") or "Chrome",
+                                        "os": log_data.get("os") or "macOS",
+                                        "device": log_data.get("device") or "Desktop",
+                                        "meta": {
+                                            "browser": log_data.get("browser") or "Chrome",
+                                            "os": log_data.get("os") or "macOS",
+                                            "device": log_data.get("device") or "Desktop",
+                                        },
+                                    }
+
+                                    # Append client telemetry if available
+                                    if log_data.get("rum_error_message"):
+                                        beacon_data["exceptions"] = [
+                                            {
+                                                "value": log_data["rum_error_message"],
+                                                "message": log_data["rum_error_message"],
+                                                "filename": log_data.get("rum_error_file") or "unknown.js",
+                                                "file": log_data.get("rum_error_file") or "unknown.js",
+                                                "lineno": log_data.get("rum_error_line") or 0,
+                                                "line": log_data.get("rum_error_line") or 0,
+                                                "colno": log_data.get("rum_error_col") or 0,
+                                                "col": log_data.get("rum_error_col") or 0,
+                                            }
+                                        ]
+
+                                    db.execute(
+                                        "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
+                                        (service_id, received_at, json.dumps(beacon_data)),
+                                    )
+                                    file_rows_count += 1
+                                    total_rows += 1
+                                except Exception as e:
+                                    logger.warning(f"RUM sync: Failed to parse RUM log line: {e}")
+                                    continue
+
+                        db.commit()
+                        ingested_batch_records.append((s3_path, file_rows_count, size))
+                        yield ("file_done", s3_path.split("/")[-1], file_rows_count)
                     except Exception as e:
-                        logger.warning(f"RUM sync: Failed to parse RUM log line: {e}")
+                        logger.error(f"RUM sync: Failed to ingest RUM log file {s3_path}: {e}")
+                        yield ("error", s3_path, str(e))
                         continue
-
-                db.commit()
-                ingested_batch_records.append((key, file_rows_count, size))
-                yield ("file_done", key, file_rows_count)
-            except Exception as e:
-                logger.error(f"RUM sync: Failed to ingest RUM log file {key}: {e}")
-                yield ("error", key, str(e))
-                continue
 
         # Persist completed files to ingested_files
         if ingested_batch_records:

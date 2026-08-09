@@ -369,6 +369,23 @@ async def rum_analytics(
             return True
         meta = b.get("meta") or {}
         app = b.get("app") or {}
+        page = meta.get("page") or {}
+
+        # Robust path extraction
+        path_val = b.get("pathname") or b.get("path")
+        if not path_val:
+            path_val = page.get("pathname") or page.get("path")
+        if not path_val and page.get("url"):
+            from urllib.parse import urlparse
+
+            try:
+                path_val = urlparse(page["url"]).path
+            except Exception:
+                pass
+        if not path_val:
+            path_val = app.get("name") or "/"
+        path_val = path_val.replace("//", "/")
+
         beacon_values = {
             "browser": meta.get("browser") or b.get("browser"),
             "browser_name": meta.get("browser") or b.get("browser"),
@@ -376,9 +393,9 @@ async def rum_analytics(
             "os_name": meta.get("os") or b.get("os"),
             "device": meta.get("device") or b.get("device"),
             "device_type": meta.get("device") or b.get("device"),
-            "path": b.get("pathname") or b.get("path") or app.get("name") or "/",
-            "url": b.get("pathname") or b.get("path") or app.get("name") or "/",
-            "url_path": b.get("pathname") or b.get("path") or app.get("name") or "/",
+            "path": path_val,
+            "url": path_val,
+            "url_path": path_val,
             "ip": b.get("ip") or meta.get("ip"),
             "client_ip": b.get("ip") or meta.get("ip"),
             "asn": b.get("asn") or meta.get("asn"),
@@ -473,7 +490,22 @@ async def rum_analytics(
             # Extract path from Faro beacon structure
             meta = b.get("meta") or {}
             app = meta.get("app") or {}
-            path = b.get("pathname") or b.get("path") or app.get("name") or "/"
+            page = meta.get("page") or {}
+
+            # Robust path extraction
+            path = b.get("pathname") or b.get("path")
+            if not path:
+                path = page.get("pathname") or page.get("path")
+            if not path and page.get("url"):
+                from urllib.parse import urlparse
+
+                try:
+                    path = urlparse(page["url"]).path
+                except Exception:
+                    pass
+            if not path:
+                path = app.get("name") or "/"
+            path = path.replace("//", "/")
 
             if path not in pages_dict:
                 pages_dict[path] = {"views": 0, "total_load_time": 0.0, "lcp_vals": [], "cls_vals": [], "errors": 0}
@@ -833,7 +865,23 @@ async def rum_live_events(service_id: str = Path(...)) -> list[dict[str, Any]]:
                 # Determine event type (pageview vs exception)
                 etype = "pageview"
                 app = data.get("app", {})
-                path = data.get("pathname") or data.get("path") or app.get("name") or "/"
+                meta = data.get("meta", {})
+                page = meta.get("page") or {}
+
+                # Robust path extraction
+                path = data.get("pathname") or data.get("path")
+                if not path:
+                    path = page.get("pathname") or page.get("path")
+                if not path and page.get("url"):
+                    from urllib.parse import urlparse
+
+                    try:
+                        path = urlparse(page["url"]).path
+                    except Exception:
+                        pass
+                if not path:
+                    path = app.get("name") or "/"
+                path = path.replace("//", "/")
                 desc = "Page loaded successfully"
                 if "exceptions" in data:
                     etype = "error"
