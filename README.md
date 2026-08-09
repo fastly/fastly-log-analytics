@@ -34,7 +34,9 @@ When running as a shared server (Path B), the host machine should meet these min
 
 - **RAM:** 16 GB
 - **CPU:** 2 vCPUs
+- **Disk:** 40 GB minimum — the Next.js build alone needs ~1 GB and the Iceberg cache grows with log volume; 25 GB is sufficient for light use but can fill during `next build`
 - **Swap:** 4 GB minimum, 8 GB preferred — the backend holds large DuckDB query buffers in memory; swap prevents OOM kills during peak analytical load
+- **Open file descriptors:** set the host (and Docker) `nofile` limit to at least 65536 — DuckDB parallel Iceberg scans open one file descriptor per Parquet file; the default Docker limit (~1024) causes `Too many open files` errors on large services. The production overlay (`docker-compose.prod.yml`) sets this automatically.
 
 ---
 

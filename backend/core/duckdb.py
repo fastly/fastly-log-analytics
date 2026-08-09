@@ -988,11 +988,9 @@ def get_connection(
             con.execute(f"SET max_memory = '{DUCKDB_MEMORY_LIMIT}';")
     except Exception:
         pass
-    try:
-        if DUCKDB_THREADS:
-            con.execute(f"SET threads = {DUCKDB_THREADS};")
-    except Exception:
-        pass
+    # DUCKDB_THREADS is consumed below inside _cached_n_threads initialization
+    # (removed the early SET here — it was immediately overridden by the SET
+    # threads call at line ~1022 and had no effect).
     try:
         con.execute("SET hive_partitioning = true;")
     except Exception:
@@ -1018,7 +1016,10 @@ def get_connection(
 
     global _cached_n_threads, _cached_mem_limit_gb
     if _cached_n_threads is None:
-        _cached_n_threads = min(multiprocessing.cpu_count(), 8)
+        # DUCKDB_THREADS env var takes precedence; falls back to min(cpus, 8).
+        # Previously this ignored DUCKDB_THREADS because an early "SET threads"
+        # block (now removed) was overridden by this SET — last SET wins in DuckDB.
+        _cached_n_threads = int(DUCKDB_THREADS) if DUCKDB_THREADS else min(multiprocessing.cpu_count(), 8)
     con.execute(f"SET threads = {_cached_n_threads};")
     # CRITICAL: only auto-derive memory_limit when DUCKDB_MEMORY_LIMIT is
     # UNSET. Pre-fix, the env-based ``SET max_memory`` above was

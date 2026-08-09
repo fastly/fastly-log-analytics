@@ -48,7 +48,7 @@ cd "$REPO_ROOT/frontend"
 # `v.value as any` casts (FieldTopEntry.value is `unknown` on the wire) with
 # `String(v.value)` / `as string | number`.
 # Drive toward zero.
-CEILING=832
+CEILING=824
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make
