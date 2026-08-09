@@ -414,30 +414,48 @@ def _bootstrap_sync(
         try:
             from backend.core.metadata.cron_log import latest_cron_per_task
 
-            # Get separate metrics for RUM and REQUEST from ingested_files table
-            con = metadata_db.get_con(active_src["name"])
+            # Get separate metrics from actual DuckDB and metadata
+            meta_con = metadata_db.get_con(active_src["name"])
 
-            # RUM files: count and latest timestamp (from rum/ directory path)
-            rum_cur = con.execute(
-                "SELECT COUNT(*), SUM(row_count), MAX(file_name) FROM ingested_files "
-                "WHERE source_name = ? AND (file_name LIKE '%/rum/%' OR file_name LIKE '%rum%')",
-                (active_src["name"],),
-            )
-            rum_row = rum_cur.fetchone()
-            if rum_row and rum_row[0] and rum_row[0] > 0 and rum_row[2]:
-                rum_total = rum_row[1] or 0
-                rum_latest = _extract_timestamp(rum_row[2])
+            # RUM metrics from DuckDB (if rum_beacons table exists)
+            try:
+                rum_count = meta_con.execute(
+                    "SELECT COUNT(*) FROM rum_beacons WHERE service_id = ?", (active_src["name"],)
+                ).fetchone()[0]
+                if rum_count > 0:
+                    rum_total = rum_count
+                    rum_latest_row = meta_con.execute(
+                        "SELECT received_at FROM rum_beacons WHERE service_id = ? ORDER BY received_at DESC LIMIT 1",
+                        (active_src["name"],),
+                    ).fetchone()
+                    if rum_latest_row and rum_latest_row[0]:
+                        rum_latest = rum_latest_row[0]
+            except Exception:
+                pass
 
-            # REQUEST files: count and latest timestamp (non-RUM files)
-            req_cur = con.execute(
-                "SELECT COUNT(*), SUM(row_count), MAX(file_name) FROM ingested_files "
-                "WHERE source_name = ? AND file_name NOT LIKE '%/rum/%' AND file_name NOT LIKE '%rum%'",
-                (active_src["name"],),
-            )
-            req_row = req_cur.fetchone()
-            if req_row and req_row[0] and req_row[0] > 0 and req_row[2]:
-                request_total = req_row[1] or 0
-                request_latest = _extract_timestamp(req_row[2])
+            # REQUEST metrics from DuckDB main table
+            try:
+                from backend.core.duckdb import _safe_table_name, get_pool
+
+                duckdb_con = get_pool().get(active_src["name"])
+                req_count = duckdb_con.execute(
+                    f"SELECT COUNT(*) FROM {_safe_table_name(active_src['name'])}"
+                ).fetchone()[0]
+                if req_count > 0:
+                    request_total = req_count
+                    # RUM beacons are in metadata SQLite, so REQUEST is everything in DuckDB
+                    # Get latest log timestamp from DuckDB
+                    req_latest_row = duckdb_con.execute(
+                        f"SELECT MAX(timestamp) FROM {_safe_table_name(active_src['name'])}"
+                    ).fetchone()
+                    if req_latest_row and req_latest_row[0]:
+                        request_latest = (
+                            req_latest_row[0].isoformat()
+                            if hasattr(req_latest_row[0], "isoformat")
+                            else req_latest_row[0]
+                        )
+            except Exception:
+                pass
 
             # Get last sync times for each type
             cron_data = latest_cron_per_task(active_src["name"])
