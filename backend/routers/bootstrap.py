@@ -467,8 +467,18 @@ def _bootstrap_sync(
 
         # Fall back to combined metrics if separate not available
         latest = rum_latest or request_latest or cached_status.get("latest_log_at")
+
+        # Align request_total with local_rows if DuckDB count is smaller or stale (e.g. on analyst instances or sync lag)
+        local_rows_total = cached_status.get("local_rows")
+        if local_rows_total is not None:
+            expected_request_total = max(0, local_rows_total - rum_total)
+            if request_total < expected_request_total:
+                request_total = expected_request_total
+                if not request_latest and cached_status.get("latest_log_at"):
+                    request_latest = cached_status.get("latest_log_at")
+
         total_rows = rum_total + request_total
-        local_rows = cached_status.get("local_rows") or total_rows
+        local_rows = local_rows_total or total_rows
 
         if latest is not None or local_rows is not None:
             header_badge_payload = {
