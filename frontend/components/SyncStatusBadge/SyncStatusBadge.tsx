@@ -235,8 +235,8 @@ function SyncStatusBadgeInner() {
     if (!hasData) return null
 
     return (
-      <div key={label} className="flex items-center gap-1.5">
-        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <div key={label} className="flex items-center gap-1 min-w-0">
+        <span className="text-[11px] font-semibold text-muted-foreground whitespace-nowrap">{label}</span>
         {latestTs ? (
           <Tooltip>
             <TooltipTrigger render={
@@ -245,7 +245,7 @@ function SyncStatusBadgeInner() {
                 tabIndex={0}
                 role="button"
                 aria-label={`${label} latest log details`}
-                className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors text-xs tabular-nums"
+                className="px-1.5 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors text-[11px] tabular-nums flex-shrink-0"
               >
                 <TimeAgo timestamp={latestTs} />
                 {latestTs && <StalenessDot timestamp={latestTs} />}
@@ -257,12 +257,12 @@ function SyncStatusBadgeInner() {
             </TooltipContent>
           </Tooltip>
         ) : (
-          <Badge variant="secondary" className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 text-xs">
+          <Badge variant="secondary" className="px-1.5 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 text-[11px] flex-shrink-0">
             Never
           </Badge>
         )}
         {totalRows != null && totalRows > 0 && (
-          <span className="text-xs text-muted-foreground">({totalRows.toLocaleString()})</span>
+          <span className="text-[11px] text-muted-foreground whitespace-nowrap flex-shrink-0">({totalRows.toLocaleString()})</span>
         )}
       </div>
     )
@@ -302,8 +302,8 @@ function SyncStatusBadgeInner() {
       )}
 
       {showSeparateStreams ? (
-        <div className="flex flex-wrap gap-2 items-center">
-          {/* REQUEST logs */}
+        <div className="flex flex-col gap-1">
+          {/* REQUEST logs row */}
           {renderStreamBadge(
             'REQUEST',
             requestMetrics?.latest_log_at,
@@ -311,7 +311,7 @@ function SyncStatusBadgeInner() {
             requestMetrics?.last_sync_at,
           )}
 
-          {/* RUM logs */}
+          {/* RUM logs row */}
           {renderStreamBadge(
             'RUM',
             rumMetrics?.latest_log_at,
