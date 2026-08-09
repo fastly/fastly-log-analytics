@@ -31,14 +31,21 @@ Single test: `uv run pytest tests/path/to/test_file.py::test_name -v`
 
 FastAPI backend in `backend/`, Next.js App Router frontend in `frontend/`, Rust Compute@Edge scorer in `compute/scorer/`. Data plane: Fastly logs land in FOS (Fastly Object Storage), the backend ingests .gz files into DuckDB via Iceberg-like local tables with parquet storage, pre-computed rollups for performance, and per-service SQLite metadata DBs for state tracking. The frontend talks to the backend API; types are generated from the OpenAPI spec.
 
+Major feature areas: interactive analytics (dashboard, origin, security, network, performance), Insights (45 anomaly detections), Control Room (real-time RT API at 1 s cadence), Streaming (CMCD analytics), Service Summary (Fastly value executive view), Session Scoring (Rust/Wasm edge scorer), live analyst sharing with OAuth/OIDC, and ingest error quarantine.
+
 ### Key directories
 
-- `backend/routers/` — FastAPI route handlers (one per analytics domain)
+- `backend/routers/` — FastAPI route handlers (one per analytics domain); `admin/` is now a package with sub-modules (health, events, ingest, quarantine, etc.)
+- `backend/routers/control_room.py` — real-time RT API poller + SSE fan-out (Control Room)
+- `backend/routers/cmcd.py` / `cmcd_admin.py` — CMCD streaming analytics + field admin
+- `backend/routers/value.py` — Service Summary (Fastly value executive view)
+- `backend/routers/session_scoring.py` / `session_scoring_admin.py` — edge scorer management
+- `backend/routers/share_oauth.py` — OAuth/OIDC analyst sign-in
 - `backend/repositories/` — DuckDB query layer (all SQL lives here, never inline in routers)
 - `backend/core/` — ingest pipeline, DuckDB pool, field registry, compaction, scheduling
 - `backend/provision/` — Fastly service provisioning (FOS buckets, CDN, logging endpoints)
 - `backend/scoring/` — Python mirror of the Rust scorer (parity contract)
-- `frontend/app/` — Next.js App Router pages
+- `frontend/app/` — Next.js App Router pages; includes `control-room/`, `fastly-value/`, `streaming/`
 - `frontend/components/` — shared UI (ReportLayout, AnalyticsCard, PlotlyChart, etc.)
 - `frontend/lib/` — api client, SSR helpers, log-extents snap
 - `frontend/stores/` — Zustand stores (serviceStore, filterStore)
@@ -55,6 +62,7 @@ FastAPI backend in `backend/`, Next.js App Router frontend in `frontend/`, Rust 
 - Route tests assert via `app.openapi()["paths"]` not `app.routes` walk
 - Response models: use `extra="allow"` + `exclude_unset=True` for wire safety; timestamps need `.isoformat()`
 - Two roles: admin (trusted, full access) and analyst (adversary model, PII-masked, RBAC-gated via `remote_access` middleware)
+- **DuckDB tuning env vars** (set in compose env or `.env`): `DUCKDB_MEMORY_LIMIT` (default `4GB`) caps buffer pool; `DUCKDB_THREADS` (default `min(cpu_count, 8)`) caps parallelism — both take effect at connection open. `DUCKDB_POOL_MAX_SIZE` caps concurrent connections per service (prod default: 4). Prefer lowering these on memory-constrained VMs before adding swap.
 
 ### Frontend
 - State: Zustand stores for client state, React Query for server state, nuqs for URL state
