@@ -143,7 +143,10 @@ def test_duckdb_threads_env_var_respected(monkeypatch):
 
     # Exercise the actual init logic extracted from _get_or_open_connection
     import os
-    cached = int(os.environ["DUCKDB_THREADS"]) if os.environ.get("DUCKDB_THREADS") else min(multiprocessing.cpu_count(), 8)
+
+    cached = (
+        int(os.environ["DUCKDB_THREADS"]) if os.environ.get("DUCKDB_THREADS") else min(multiprocessing.cpu_count(), 8)
+    )
     assert cached == expected, f"DUCKDB_THREADS=2 should yield thread count 2, got {cached}"
 
     # Restore
@@ -153,10 +156,13 @@ def test_duckdb_threads_env_var_respected(monkeypatch):
 def test_duckdb_threads_falls_back_to_cpu_count_when_unset(monkeypatch):
     """Without DUCKDB_THREADS, threads fall back to min(cpu_count, 8)."""
     import os
+
     monkeypatch.delenv("DUCKDB_THREADS", raising=False)
 
     expected = min(multiprocessing.cpu_count(), 8)
-    actual = int(os.environ["DUCKDB_THREADS"]) if os.environ.get("DUCKDB_THREADS") else min(multiprocessing.cpu_count(), 8)
+    actual = (
+        int(os.environ["DUCKDB_THREADS"]) if os.environ.get("DUCKDB_THREADS") else min(multiprocessing.cpu_count(), 8)
+    )
     assert actual == expected
 
 
@@ -166,7 +172,11 @@ def test_duckdb_threads_capped_at_8(monkeypatch):
     import os
 
     with patch("multiprocessing.cpu_count", return_value=32):
-        actual = int(os.environ["DUCKDB_THREADS"]) if os.environ.get("DUCKDB_THREADS") else min(multiprocessing.cpu_count(), 8)
+        actual = (
+            int(os.environ["DUCKDB_THREADS"])
+            if os.environ.get("DUCKDB_THREADS")
+            else min(multiprocessing.cpu_count(), 8)
+        )
     assert actual == 8
 
 
@@ -176,41 +186,41 @@ def test_duckdb_threads_capped_at_8(monkeypatch):
 def _needs_prewarm(pathname: str) -> bool:
     """Mirrors the needsPlotlyPrewarm expression in AppLayout.tsx."""
     return (
-        pathname.startswith('/dashboard') or
-        pathname.startswith('/network') or
-        pathname.startswith('/origin') or
-        pathname.startswith('/performance') or
-        pathname.startswith('/security') or
-        pathname.startswith('/charts') or
-        pathname.startswith('/insights') or
-        pathname.startswith('/fastly-value') or
-        pathname.startswith('/usage') or
-        pathname.startswith('/streaming') or
-        pathname.startswith('/control-room') or
-        pathname.startswith('/sessions/stream')
+        pathname.startswith("/dashboard")
+        or pathname.startswith("/network")
+        or pathname.startswith("/origin")
+        or pathname.startswith("/performance")
+        or pathname.startswith("/security")
+        or pathname.startswith("/charts")
+        or pathname.startswith("/insights")
+        or pathname.startswith("/fastly-value")
+        or pathname.startswith("/usage")
+        or pathname.startswith("/streaming")
+        or pathname.startswith("/control-room")
+        or pathname.startswith("/sessions/stream")
     )
 
 
 def test_prewarm_covers_usage():
     """/usage page renders 4 PlotlyChart instances; prewarm must fire."""
-    assert _needs_prewarm('/usage') is True
-    assert _needs_prewarm('/usage/') is True
+    assert _needs_prewarm("/usage") is True
+    assert _needs_prewarm("/usage/") is True
 
 
 def test_prewarm_covers_streaming():
     """/streaming renders 6+ PlotlyChart instances; prewarm must fire."""
-    assert _needs_prewarm('/streaming') is True
+    assert _needs_prewarm("/streaming") is True
 
 
 def test_prewarm_covers_control_room():
     """/control-room renders PlotlyChart via RealtimeChart; prewarm must fire."""
-    assert _needs_prewarm('/control-room') is True
+    assert _needs_prewarm("/control-room") is True
 
 
 def test_prewarm_covers_sessions_stream():
     """/sessions/stream renders PlotlyChart via StreamTimeline; prewarm must fire."""
-    assert _needs_prewarm('/sessions/stream') is True
-    assert _needs_prewarm('/sessions/stream/abc123') is True
+    assert _needs_prewarm("/sessions/stream") is True
+    assert _needs_prewarm("/sessions/stream/abc123") is True
 
 
 def test_prewarm_does_not_fire_for_sessions_list():
@@ -221,15 +231,15 @@ def test_prewarm_does_not_fire_for_sessions_list():
     (root) is not. Prewarm on /sessions would waste ~453 KB parse cost
     on every cold load of the sessions list.
     """
-    assert _needs_prewarm('/sessions') is False
+    assert _needs_prewarm("/sessions") is False
 
 
 def test_prewarm_does_not_fire_for_query():
     """/query is table-only (chart panel route-gated to Plot mode)."""
-    assert _needs_prewarm('/query') is False
+    assert _needs_prewarm("/query") is False
 
 
 def test_prewarm_fires_for_existing_chart_routes():
     """Sanity-check: pre-existing prewarm routes still covered."""
-    for route in ['/dashboard', '/network', '/origin', '/performance', '/security', '/insights', '/fastly-value']:
+    for route in ["/dashboard", "/network", "/origin", "/performance", "/security", "/insights", "/fastly-value"]:
         assert _needs_prewarm(route) is True, f"{route} should trigger prewarm"
