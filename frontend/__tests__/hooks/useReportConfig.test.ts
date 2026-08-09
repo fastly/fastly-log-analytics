@@ -9,7 +9,6 @@ import { useReportConfig } from '@/hooks/useReportConfig'
 let mockState = {
   startTime: '',
   endTime: '',
-  hasSyncedExtents: true
 }
 
 vi.mock('@/stores/filterStore', () => {
@@ -20,7 +19,7 @@ vi.mock('@/stores/filterStore', () => {
 
 describe('useReportConfig', () => {
   beforeEach(() => {
-    mockState = { startTime: '', endTime: '', hasSyncedExtents: true }
+    mockState = { startTime: '', endTime: '' }
   })
 
   it('provides default configuration', () => {
@@ -36,7 +35,7 @@ describe('useReportConfig', () => {
     const start = new Date(now.getTime() - 12 * 3600 * 1000).toISOString()
     const end = now.toISOString()
 
-    mockState = { startTime: start, endTime: end, hasSyncedExtents: true }
+    mockState = { startTime: start, endTime: end }
 
     const { result } = renderHook(() => useReportConfig({ defaultInterval: '1 day' }))
 
@@ -50,7 +49,7 @@ describe('useReportConfig', () => {
     const start = new Date(now.getTime() - 30 * 60 * 1000).toISOString()
     const end = now.toISOString()
 
-    mockState = { startTime: start, endTime: end, hasSyncedExtents: true }
+    mockState = { startTime: start, endTime: end }
 
     const { result } = renderHook(() => useReportConfig({ defaultInterval: '1 hour' }))
 
@@ -64,7 +63,7 @@ describe('useReportConfig', () => {
     const start = new Date(now.getTime() - 48 * 3600 * 1000).toISOString()
     const end = now.toISOString()
 
-    mockState = { startTime: start, endTime: end, hasSyncedExtents: true }
+    mockState = { startTime: start, endTime: end }
 
     const { result } = renderHook(() => useReportConfig({ defaultInterval: '1 day' }))
 
@@ -85,7 +84,7 @@ describe('useReportConfig', () => {
     const start = new Date(now.getTime() - 7 * 24 * 3600 * 1000).toISOString()
     const end = now.toISOString()
 
-    mockState = { startTime: start, endTime: end, hasSyncedExtents: true }
+    mockState = { startTime: start, endTime: end }
 
     const { result } = renderHook(() => useReportConfig())
 
@@ -98,7 +97,7 @@ describe('useReportConfig', () => {
     const start = new Date(now.getTime() - 30 * 24 * 3600 * 1000).toISOString()
     const end = now.toISOString()
 
-    mockState = { startTime: start, endTime: end, hasSyncedExtents: true }
+    mockState = { startTime: start, endTime: end }
 
     const { result } = renderHook(() => useReportConfig())
 
@@ -114,7 +113,7 @@ describe('useReportConfig', () => {
     const start = new Date(now.getTime() - 24 * 3600 * 1000).toISOString()
     const end = now.toISOString()
 
-    mockState = { startTime: start, endTime: end, hasSyncedExtents: true }
+    mockState = { startTime: start, endTime: end }
 
     const { result } = renderHook(() => useReportConfig({ defaultInterval: '1 hour' }))
 
@@ -127,7 +126,7 @@ describe('useReportConfig', () => {
     const start48 = new Date(now.getTime() - 48 * 3600 * 1000).toISOString()
     const end = now.toISOString()
 
-    mockState = { startTime: start48, endTime: end, hasSyncedExtents: true }
+    mockState = { startTime: start48, endTime: end }
 
     const { result, rerender } = renderHook(() => useReportConfig({ defaultInterval: '1 day' }))
 
@@ -140,7 +139,7 @@ describe('useReportConfig', () => {
     // Shrink window to 6 hours
     const start6 = new Date(now.getTime() - 6 * 3600 * 1000).toISOString()
     act(() => {
-      mockState = { startTime: start6, endTime: end, hasSyncedExtents: true }
+      mockState = { startTime: start6, endTime: end }
     })
     rerender()
 

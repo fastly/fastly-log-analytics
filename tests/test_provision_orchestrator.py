@@ -700,7 +700,7 @@ def test_provision_completes_all_8_steps_when_apis_succeed(tmp_path, monkeypatch
         patch("backend.provision.orchestrator.ensure_fos_bucket"),  # Step 3
         patch("backend.provision.orchestrator.delete_fos_access_key"),  # Step 5
         patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),  # Step 6
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", return_value=42),  # Step 7
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),  # Step 7
         patch("backend.provision.orchestrator.write_service_config"),
         # Step 8 — iceberg init in try/except
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
@@ -810,7 +810,7 @@ def test_provision_surfaces_warning_when_no_source_resolved(tmp_path, monkeypatc
         patch("backend.provision.orchestrator.ensure_fos_bucket"),
         patch("backend.provision.orchestrator.delete_fos_access_key"),
         patch("backend.provision.orchestrator.ensure_cdn_service", return_value={"id": "cdn"}),
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", return_value=1),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=1),
         patch("backend.provision.orchestrator.write_service_config"),
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
         patch("backend.core.iceberg.init_iceberg_table") as mock_iceberg,
@@ -844,7 +844,7 @@ def test_provision_surfaces_warning_when_iceberg_init_raises(tmp_path, monkeypat
         patch("backend.provision.orchestrator.ensure_fos_bucket"),
         patch("backend.provision.orchestrator.delete_fos_access_key"),
         patch("backend.provision.orchestrator.ensure_cdn_service", return_value={"id": "cdn"}),
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", return_value=1),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=1),
         patch("backend.provision.orchestrator.write_service_config"),
         patch(
             "backend.core.duckdb.get_source_for_service",
@@ -877,7 +877,6 @@ def _teardown_state(**overrides):
         "logging_service_id": "svc-td-test",
         "fos_bucket_name": "test-bucket",
         "fos_region": "us-east-1",
-        "fos_key_id": "fos-key-id",
         "endpoint_name": "Test Endpoint",
         "cdn_service_id": "cdn-svc-id",
         "cdn_service_name": "CDN Name",
@@ -1158,6 +1157,7 @@ def test_write_service_config_preserves_scoring_block_when_state_omits_it(tmp_pa
         "service_id": "svc-test",
         "scoring": {
             "enabled": True,
+            "domain": "example.com",
             "scoring_service_id": "scorer-svc",
             "enabled_at": "2026-06-02T13:59:02+00:00",
         },
@@ -1188,11 +1188,20 @@ def test_write_service_config_preserves_scoring_block_when_state_omits_it(tmp_pa
     # User's custom_field survived
     custom_names = {cf["name"] for cf in cfg["log_fields"]["custom_fields"]}
     assert "my_field" in custom_names
-    # All scoring fields re-injected from code (canonical source of truth)
+    # System scoring fields are NOT persisted in the config file anymore
+    # (they're auto-injected on-demand by FeatureState.from_config()).
+    # The config should only contain user-defined custom fields.
     from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
 
     for name in _SCORING_FIELD_NAMES:
-        assert name in custom_names, f"scoring field {name!r} dropped on re-ingest"
+        assert name not in custom_names, f"system scoring field {name!r} should not be persisted in config"
+    # Verify FeatureState.from_config() auto-injects scoring fields when needed
+    from backend.provision.declarative.state import FeatureState
+
+    state = FeatureState.from_config(cfg)
+    all_field_names = {f["name"] for f in state.log_fields.custom_fields}
+    for name in _SCORING_FIELD_NAMES:
+        assert name in all_field_names, f"scoring field {name!r} should be auto-injected by FeatureState"
 
 
 def test_write_service_config_first_ever_ingest_has_no_existing_cfg(tmp_path):
@@ -1238,6 +1247,19 @@ def test_perform_teardown_filters_fastly_keys_by_managed_description_prefix():
             return None
         return {}
 
+    def fake_delete_fos_tokens(service_id, token, status_cb=None):
+        # Simulate the list + delete behavior
+        resp = fake_fastly("GET", "/resources/object-storage/access-keys")
+        patterns = [
+            f"fos-log-analysis-{service_id}",
+            f"fos-log-analysis-temp-admin-{service_id}",
+            f"temp-teardown-{service_id}",
+        ]
+        for key in resp.get("data", []):
+            desc = key.get("description", "")
+            if any(desc.startswith(p) for p in patterns):
+                fake_fastly("DELETE", f"/resources/object-storage/access-keys/{key['access_key']}")
+
     with (
         patch("backend.provision.orchestrator.remove_logging_endpoint"),
         patch("backend.provision.orchestrator.delete_fos_bucket"),
@@ -1247,7 +1269,7 @@ def test_perform_teardown_filters_fastly_keys_by_managed_description_prefix():
             return_value={"access_key": "A", "secret_key": "S", "id": "I"},
         ),
         patch("backend.provision.orchestrator.delete_fos_access_key"),
-        patch("backend.provision.orchestrator.fastly", side_effect=fake_fastly),
+        patch("backend.provision.fos_setup.delete_fos_tokens_for_service", side_effect=fake_delete_fos_tokens),
     ):
         _consume(orchestrator.perform_teardown(_teardown_state(), "tok"))
 
@@ -1397,3 +1419,165 @@ def test_reject_unsafe_fos_component_prefix_allows_slash_rejects_traversal():
     for bad in ("../up", "a\\b", "..", "a\x00"):
         with pytest.raises(ValueError, match="illegal path token"):
             _reject_unsafe_fos_component("fos_prefix", bad, allow_slash=True)
+
+
+# ── Error-path coverage tests ───────────────────────────────────────────────
+
+
+def test_write_service_config_missing_service_id():
+    """write_service_config raises ValueError when both logging_service_id
+    and service_id are missing from state."""
+    with pytest.raises(ValueError, match="ingest state missing"):
+        orchestrator.write_service_config({})
+
+
+def test_write_service_config_rum_enabled_sets_enabled_at_timestamp(tmp_path):
+    """When rum_enabled=True and no existing rum config, the config
+    gets a rum block with enabled_at timestamp. Pinned because the
+    timestamp marks when RUM collection was first enabled."""
+    saved_cfgs = []
+    with (
+        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
+        patch("backend.config.load_config", return_value=None),
+    ):
+        orchestrator.write_service_config(_make_state(rum_enabled=True))
+    _, cfg = saved_cfgs[0]
+    assert cfg.get("rum_enabled") is True
+    assert cfg.get("rum") is not None
+    assert cfg["rum"].get("enabled") is True
+    assert cfg["rum"].get("enabled_at") is not None
+
+
+def test_ensure_logging_via_reconciler_missing_logging_service_id():
+    """ensure_logging_via_reconciler raises ValueError when state lacks
+    logging_service_id."""
+    with pytest.raises(ValueError, match="state missing logging_service_id"):
+        # Consume the generator to trigger the error
+        gen = orchestrator.ensure_logging_via_reconciler({}, "tok")
+        next(gen)
+
+
+def test_ensure_logging_via_reconciler_invalid_feature_state(tmp_path):
+    """When FeatureState.from_config raises due to invalid config,
+    ensure_logging_via_reconciler wraps it as RuntimeError."""
+    with (
+        patch(
+            "backend.provision.declarative.state.FeatureState.from_config",
+            side_effect=KeyError("missing_field"),
+        ),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
+    ):
+        with pytest.raises(RuntimeError, match="Invalid feature state configuration"):
+            gen = orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok")
+            next(gen)
+
+
+def test_ensure_logging_via_reconciler_reconciliation_failure():
+    """When reconcile_vcl_state raises an exception,
+    ensure_logging_via_reconciler wraps it as RuntimeError."""
+    with (
+        patch(
+            "backend.provision.declarative.state.FeatureState.from_config",
+            return_value=None,
+        ),
+        patch(
+            "backend.provision.orchestrator.reconcile_vcl_state",
+            side_effect=RuntimeError("VCL validation failed"),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="VCL reconciliation failed"):
+            gen = orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok")
+            next(gen)
+
+
+def test_cleanup_local_data_rejects_bucket_with_path_traversal_tokens(tmp_path):
+    """cleanup_local_data rejects bucket names with path-shape characters
+    (/, \\, .., NUL) and skips the cache removal without crashing."""
+    cfg_file = tmp_path / "svc.json"
+    cfg_file.write_text("{}")
+    with (
+        patch("backend.config.config_path", return_value=str(cfg_file)),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "noexist.duckdb")),
+        patch("backend.provision.orchestrator._sync_crontab"),
+    ):
+        # Bucket with traversal token should be rejected silently
+        orchestrator.cleanup_local_data("svc", bucket="../../../tmp", remove_data=True)
+        # Bucket with forward slash should be rejected silently
+        orchestrator.cleanup_local_data("svc", bucket="a/b", remove_data=True)
+    # Should not raise and config should be gone
+    assert not cfg_file.exists()
+
+
+def test_cleanup_local_data_skips_cache_when_symlink_escapes(tmp_path, monkeypatch):
+    """When a symlink escape is detected (resolved path outside cache_root),
+    cleanup_local_data logs a warning and continues without removing cache."""
+    monkeypatch.chdir(tmp_path)
+    cfg_file = tmp_path / "svc.json"
+    cfg_file.write_text("{}")
+
+    # Create a symlink that will escape the cache root
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    symlink = cache_dir / "bucket_symlink"
+    symlink.symlink_to(external_dir)
+
+    with (
+        patch("backend.config.config_path", return_value=str(cfg_file)),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "noexist.duckdb")),
+        patch("backend.provision.orchestrator._sync_crontab"),
+    ):
+        # Should not crash even though symlink resolves outside cache_root
+        orchestrator.cleanup_local_data("svc", bucket="bucket_symlink", remove_data=True)
+    # Cache symlink should still exist (not deleted due to escape detection)
+    assert symlink.exists()
+
+
+def test_ensure_logging_via_reconciler_no_active_version():
+    """When get_active_version returns None (service has no active version),
+    ensure_logging_via_reconciler raises RuntimeError."""
+    with (
+        patch(
+            "backend.provision.declarative.state.FeatureState.from_config",
+            return_value=None,
+        ),
+        patch(
+            "backend.provision.orchestrator.reconcile_vcl_state",
+            return_value=type("Result", (), {"activated_version": None})(),
+        ),
+        patch(
+            "backend.core.fastly.service.get_active_version",
+            return_value=None,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="has no active version"):
+            gen = orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok")
+            next(gen)
+
+
+def test_ensure_logging_via_reconciler_no_changes_needed():
+    """When VCL reconciliation returns no changes (activated_version=None)
+    and service has an active version, return that version."""
+    active_ver = 42
+
+    class MockResult:
+        activated_version = None
+
+    with (
+        patch(
+            "backend.provision.declarative.state.FeatureState.from_config",
+            return_value=None,
+        ),
+        patch(
+            "backend.provision.orchestrator.reconcile_vcl_state",
+            return_value=MockResult(),
+        ),
+        patch(
+            "backend.core.fastly.service.get_active_version",
+            return_value=active_ver,
+        ),
+    ):
+        result = orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok")
+        assert result == active_ver

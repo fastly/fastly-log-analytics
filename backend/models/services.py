@@ -15,6 +15,7 @@ class ServiceCronSync(BaseModel):
     log_enabled: bool | None = None
     log_retention_days: int | None = None
     data_retention_days: int | None = None
+    rum_retention_days: int | None = None
     cache_retention_days: int | None = None
 
 
@@ -51,6 +52,8 @@ class ServiceConfig(BaseModel):
     cron_compact: ServiceCronCompact | None = None
     cron_ngwaf: ServiceCronNgwaf | None = None
     ngwaf_workspace_id: str | None = None
+    logging_enabled: bool | None = None
+    rum_enabled: bool | None = None
 
 
 class ServicesListResponse(BaseResponse):
@@ -76,6 +79,14 @@ class LogFieldsResponse(BaseResponse):
     line_budget_warning: dict[str, Any] | None = None
 
 
+class CmcdSettingsResponse(BaseModel):
+    """CMCD feature settings."""
+
+    enabled: bool = False
+    mode: str | None = None
+    version: int | None = None
+
+
 class LoggingSettingsResponse(BaseResponse):
     ok: bool
     prefix: str
@@ -85,9 +96,7 @@ class LoggingSettingsResponse(BaseResponse):
     custom_condition: str | None = None
     format_match: bool | None = None
     version: int | str | None = None
-    cmcd_enabled: bool = False
-    cmcd_mode: str | None = None
-    cmcd_version: int | None = None
+    cmcd: CmcdSettingsResponse | None = None
 
 
 class AnalystInvite(BaseResponse):
@@ -120,7 +129,17 @@ class CronSettingsPartial(BaseModel):
     log_enabled: bool | None = None
     log_retention_days: int | None = None
     data_retention_days: int | None = None
+    rum_retention_days: int | None = None
     cache_retention_days: int | None = None
+    delete_after: bool | None = None
+
+
+class RumSettingsPartial(BaseModel):
+    """Partial-update for RUM-specific config (sync interval + retention)."""
+
+    enabled: bool | None = None
+    sync_interval_seconds: int | None = None
+    commit_interval_mins: int | None = None
     delete_after: bool | None = None
 
 
@@ -134,6 +153,7 @@ class ServiceCronSettingsBody(BaseModel):
     cron_sync: CronSettingsPartial | None = None
     cron_compact: CronSettingsPartial | None = None
     cron_ngwaf: CronSettingsPartial | None = None
+    rum: RumSettingsPartial | None = None
 
 
 class ServiceCredentialsBody(BaseModel):

@@ -55,6 +55,8 @@ class CurrentStorageResponse(BaseResponse):
     total_bytes: int
     start: str
     end: str
+    rum_bytes: int = 0
+    regular_log_bytes: int = 0
 
 
 class UsageOperationsPoint(BaseModel):
@@ -103,3 +105,20 @@ class UsageLogActivityResponse(BaseResponse):
     total_api_requests: int | None = None
     total_fastly_log_records: int | None = None
     granularity: str
+
+
+class RumBreakdownPoint(BaseModel):
+    date: str
+    beacon_count: int
+    estimated_class_a_ops: int
+    estimated_cost_usd: float
+
+
+class UsageRumBreakdownResponse(BaseResponse):
+    data: list[RumBreakdownPoint]
+    total_beacons: int
+    total_estimated_class_a: int
+    total_estimated_cost_usd: float
+    class_a_rate_per_1k: float | None = None
+    average_beacons_per_day: float
+    note: str

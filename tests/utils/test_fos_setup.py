@@ -597,3 +597,47 @@ def test_ensure_fos_bucket_calls_status_callback_on_already_exists():
     fake_s3.create_bucket.assert_not_called()
     # Status callback got the "already exists" signal
     assert any("already exists" in s.lower() for s in statuses)
+
+
+def test_delete_fos_prefix_happy_path():
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+
+    fake_paginator = MagicMock()
+    fake_paginator.paginate.return_value = [
+        {"Contents": [{"Key": "raw/log1.gz"}, {"Key": "raw/log2.gz"}]},
+    ]
+    fake_s3.get_paginator.return_value = fake_paginator
+    fake_s3.delete_objects.return_value = {}
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        fos_setup.delete_fos_prefix("my-bucket", "us-east-1", "k", "s", "raw/")
+
+    fake_s3.delete_objects.assert_called_once_with(
+        Bucket="my-bucket", Delete={"Objects": [{"Key": "raw/log1.gz"}, {"Key": "raw/log2.gz"}]}
+    )
+
+
+def test_delete_fos_prefix_excludes_matching():
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+
+    fake_paginator = MagicMock()
+    fake_paginator.paginate.return_value = [
+        {
+            "Contents": [
+                {"Key": "raw/log1.gz"},
+                {"Key": "raw/rum/log2.gz"},
+                {"Key": "raw/log3.gz"},
+            ]
+        },
+    ]
+    fake_s3.get_paginator.return_value = fake_paginator
+    fake_s3.delete_objects.return_value = {}
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        fos_setup.delete_fos_prefix("my-bucket", "us-east-1", "k", "s", "raw/", exclude_prefix="raw/rum/")
+
+    fake_s3.delete_objects.assert_called_once_with(
+        Bucket="my-bucket", Delete={"Objects": [{"Key": "raw/log1.gz"}, {"Key": "raw/log3.gz"}]}
+    )

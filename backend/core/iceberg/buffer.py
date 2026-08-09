@@ -1071,6 +1071,7 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
         cfg = svcconfig.load_config(source.get("service_id") or source.get("name")) or {}
         cron_sync = cfg.get("provisioning", {}).get("cron_sync", {})
         data_retention_days = int(cron_sync.get("data_retention_days", 30))
+        rum_retention_days = int(cron_sync.get("rum_retention_days", data_retention_days))
         cache_retention_days = int(cron_sync.get("cache_retention_days", 90))
 
         catalog = _core_mod._get_catalog(source)
@@ -1081,20 +1082,49 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
     results: dict[str, Any] = {}
 
     # 1. Delete old data from Iceberg table
-    if data_retention_days > 0:
-        data_cutoff_ms = int((datetime.now(UTC) - timedelta(days=data_retention_days)).timestamp() * 1000)
+    if data_retention_days > 0 or rum_retention_days > 0:
         try:
-            # Delete directly from the table using the timestamp column
-            from backend.utils.iceberg_expr import lt
+            from backend.utils.iceberg_expr import is_null, lt
 
-            table.delete(lt("timestamp", (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()))
-            _core_mod._set_cached_table(source, _core_mod._table_identifier(source), table)
-            results["data_deleted_before_days"] = data_retention_days
-            # Retention delete removes files from the snapshot — the cache's
-            # prev_files list would still reference them. Invalidate so the
-            # next _core_mod.sync_data rebuilds from a fresh manifest scan.
-            _core_mod._snapshot_files_cache.pop(source.get("name", "default"), None)
-            _core_mod._view_cache.pop(source.get("name", "default"), None)
+            deleted_anything = False
+
+            if rum_retention_days > data_retention_days:
+                # Conditional Pruning: Delete regular logs older than data_retention_days
+                # but keep rows where rum_cid is NOT null (which are RUM telemetry)
+                from pyiceberg.expressions import And
+
+                try:
+                    cutoff_iso = (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()
+                    table.delete(And(lt("timestamp", cutoff_iso), is_null("rum_cid")))
+                    results["data_deleted_before_days"] = data_retention_days
+                    deleted_anything = True
+                except Exception as cond_e:
+                    logger.warning("[iceberg] Conditional deletion failed (falling back to standard): %s", cond_e)
+                    # If conditional deletion fails (e.g. rum_cid field is not in schema yet),
+                    # fall back to standard deletion of everything older than data_retention_days
+                    table.delete(lt("timestamp", (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()))
+                    results["data_deleted_before_days"] = data_retention_days
+                    deleted_anything = True
+            elif data_retention_days > 0:
+                # Standard Flat Deletion: Delete everything older than data_retention_days
+                table.delete(lt("timestamp", (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()))
+                results["data_deleted_before_days"] = data_retention_days
+                deleted_anything = True
+
+            # Ceiling Expiration: Delete everything (including RUM) older than rum_retention_days
+            if rum_retention_days > 0:
+                rum_cutoff_iso = (datetime.now(UTC) - timedelta(days=rum_retention_days)).isoformat()
+                table.delete(lt("timestamp", rum_cutoff_iso))
+                results["rum_deleted_before_days"] = rum_retention_days
+                deleted_anything = True
+
+            if deleted_anything:
+                _core_mod._set_cached_table(source, _core_mod._table_identifier(source), table)
+                # Retention delete removes files from the snapshot — the cache's
+                # prev_files list would still reference them. Invalidate so the
+                # next _core_mod.sync_data rebuilds from a fresh manifest scan.
+                _core_mod._snapshot_files_cache.pop(source.get("name", "default"), None)
+                _core_mod._view_cache.pop(source.get("name", "default"), None)
         except Exception as e:
             logger.warning("[iceberg] Data deletion skipped: %s", e)
             results["data_deletion_error"] = str(e)

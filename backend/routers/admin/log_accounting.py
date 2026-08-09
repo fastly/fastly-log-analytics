@@ -326,6 +326,24 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     if by == "day":
         now = now.replace(hour=0)
     start = now - timedelta(hours=hours)
+
+    # Clamp the start window boundary to the service's creation time (if it's newer than the window start)
+    cfg = svcconfig.load_config(service_id) or {}
+    created_at_str = cfg.get("created_at")
+    if created_at_str:
+        try:
+            created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            # Align created_at to bucket start boundary
+            created_at_aligned = created_at.replace(minute=0, second=0, microsecond=0)
+            if by == "day":
+                created_at_aligned = created_at_aligned.replace(hour=0)
+            if start < created_at_aligned:
+                start = created_at_aligned
+        except Exception as e:
+            logger.warning("Failed to parse created_at '%s' for service %s: %s", created_at_str, service_id, e)
+
     from_ts = int(start.timestamp())
     to_ts = int((now + timedelta(hours=1 if by == "hour" else 24)).timestamp())
 

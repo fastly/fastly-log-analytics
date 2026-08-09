@@ -24,7 +24,6 @@ export function QuickActionsBar({
   setSseDescription,
   setIsSSEModalOpen,
   setIsSyncModalOpen,
-  setHasSyncedExtents,
   reset,
   start,
   setDisplayedJobs,
@@ -40,7 +39,6 @@ export function QuickActionsBar({
   setSseDescription: (s: string) => void
   setIsSSEModalOpen: (open: boolean) => void
   setIsSyncModalOpen: (open: boolean) => void
-  setHasSyncedExtents: (v: boolean) => void
   reset: () => void
   start: (url: string, opts?: any) => void
   setDisplayedJobs: React.Dispatch<React.SetStateAction<any[]>>
@@ -68,7 +66,6 @@ export function QuickActionsBar({
                 setSseTitle('Importing Logs')
                 setSseDescription('Downloading new raw logs from Fastly Object Storage and processing them...')
                 setIsSSEModalOpen(true)
-                setHasSyncedExtents(false)
                 reset()
                 start(`/api/cron-runs/${runId}/stream`)
                 cronCacheBust(queryClient, activeServiceId)

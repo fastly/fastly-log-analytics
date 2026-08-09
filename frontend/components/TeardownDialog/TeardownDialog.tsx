@@ -45,6 +45,7 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
   const [removeLogging] = useState(true)
   const [removeCdn] = useState(true)
   const [removeBucket, setRemoveBucket] = useState(true)
+  const [removeCloudFiles, setRemoveCloudFiles] = useState(true)
   const [removeCache, setRemoveCache] = useState(true)
   const [isExecuting, setIsExecuting] = useState(false)
   // Security: backend now requires a caller-supplied Fastly token with the
@@ -88,7 +89,8 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
         service_id: service.service_id,
         remove_logging: removeLogging,
         remove_cdn: removeCdn,
-        remove_bucket: removeBucket,
+        remove_bucket: service.rum_enabled ? false : removeBucket,
+        remove_cloud_files: removeCloudFiles,
         remove_cache: removeCache,
         token: apiToken,
       }
@@ -205,10 +207,22 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
 
                       <div className="flex items-center justify-between group">
                         <div className="space-y-0.5">
-                          <Label htmlFor="rem-buck-new" className="text-sm font-medium cursor-pointer">Delete FOS bucket and all data</Label>
-                          <p className="text-[10px] text-muted-foreground text-destructive font-medium">Warning: This cannot be undone. All logs will be lost.</p>
+                          <Label htmlFor="rem-cloud-files" className="text-sm font-medium cursor-pointer">Delete standard logs from cloud storage</Label>
+                          <p className="text-[10px] text-muted-foreground">Deletes raw logs under standard prefix, preserving RUM logs.</p>
                         </div>
-                        <Switch id="rem-buck-new" checked={removeBucket} onCheckedChange={setRemoveBucket} />
+                        <Switch id="rem-cloud-files" checked={removeCloudFiles} onCheckedChange={setRemoveCloudFiles} />
+                      </div>
+
+                      <div className="flex items-center justify-between group">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="rem-buck-new" className={cn("text-sm font-medium cursor-pointer", service.rum_enabled && "text-muted-foreground cursor-not-allowed")}>Delete FOS bucket and all data</Label>
+                          {service.rum_enabled ? (
+                            <p className="text-[10px] text-amber-500 font-medium">This bucket is still in use by Real User Monitoring (RUM) and cannot be deleted.</p>
+                          ) : (
+                            <p className="text-[10px] text-muted-foreground text-destructive font-medium">Warning: This cannot be undone. All logs will be lost.</p>
+                          )}
+                        </div>
+                        <Switch id="rem-buck-new" checked={service.rum_enabled ? false : removeBucket} onCheckedChange={setRemoveBucket} disabled={!!service.rum_enabled} />
                       </div>
 
                       <div className="flex items-center justify-between group">

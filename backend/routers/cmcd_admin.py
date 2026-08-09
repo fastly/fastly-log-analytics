@@ -78,14 +78,27 @@ def cmcd_enable(
             detail={"error": "Fastly API token required (pass in JSON body or set in service config)"},
         )
 
-    from backend.provision.cmcd_orchestrator import enable_cmcd
+    import datetime as _dt
+
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id) or {}
+    cfg["cmcd"] = {
+        "enabled": True,
+        "mode": mode,
+        "version": version,
+        "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+    }
+    svcconfig.save_config(service_id, cfg)
+
+    from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as enable_cmcd
     from backend.provision.orchestrator import run_with_events
 
     def stream():
         yield json.dumps({"type": "status", "message": f"Enabling CMCD v{version} collection for {service_id}..."})
 
         try:
-            for event in run_with_events(enable_cmcd, service_id, resolved_token, mode=mode, version=version):
+            for event in run_with_events(enable_cmcd, service_id, resolved_token):
                 yield json.dumps(event)
             from backend import config as svcconfig
 
@@ -118,7 +131,14 @@ def cmcd_disable(
             detail={"error": "Fastly API token required"},
         )
 
-    from backend.provision.cmcd_orchestrator import disable_cmcd
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id) or {}
+    if "cmcd" in cfg:
+        cfg["cmcd"]["enabled"] = False
+    svcconfig.save_config(service_id, cfg)
+
+    from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as disable_cmcd
     from backend.provision.orchestrator import run_with_events
 
     def stream():

@@ -157,10 +157,25 @@ _CMCD_CUSTOM_FIELDS: list[dict[str, Any]] = [
 _CMCD_FIELD_NAMES = {cf["name"] for cf in _CMCD_CUSTOM_FIELDS}
 
 
+def get_cmcd_fields(enabled: bool) -> list[dict]:
+    """Return CMCD custom fields if enabled, else empty list.
+
+    Used by field registry and reconcilers to generate system fields on-demand
+    based on feature toggles, without persisting them in the config file.
+    """
+    if enabled:
+        return [dict(cf) for cf in _CMCD_CUSTOM_FIELDS]
+    return []
+
+
 def merge_cmcd_custom_fields(custom_fields: list[dict] | None) -> list[dict]:
     """Return ``custom_fields`` with the canonical CMCD fields re-applied.
 
     Same pattern as ``merge_scoring_custom_fields``.
+
+    DEPRECATED: Use get_cmcd_fields() for new code. This function is kept
+    for backward compatibility during the transition away from persisting
+    system fields in config files.
     """
     kept = [cf for cf in (custom_fields or []) if cf.get("name") not in _CMCD_FIELD_NAMES]
     return kept + [dict(cf) for cf in _CMCD_CUSTOM_FIELDS]

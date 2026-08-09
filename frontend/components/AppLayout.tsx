@@ -28,6 +28,7 @@ import {
   Play,
   TrendingUp,
   X,
+  Eye,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -54,14 +55,7 @@ const FilterBar = dynamic(
   () => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.FilterBar })),
 )
 
-// DataWindowBanner surfaces when the selected range falls outside the
-// retained log extents — sibling of FilterBar, scoped to the same pages.
-// Reuses the `['log-extents', activeServiceId]` query that FilterBar
-// already populates, so mounting is free on the dashboard routes.
-const DataWindowBanner = dynamic(
-  () => import('@/components/DataWindowBanner').then(m => ({ default: m.DataWindowBanner })),
-  { ssr: false },
-)
+
 
 // ActiveFiltersBanner replaces the hidden FilterBar on pages that don't
 // apply filters (insights / alerts / admin / logs / share-login / raw-
@@ -113,6 +107,7 @@ const SERVICE_NAVIGATION = [
   { name: 'Insights', href: '/insights', icon: Sparkles, analystVisible: true },
   { name: 'Network', href: '/network', icon: Network, analystVisible: true },
   { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true, requiresCmcd: true },
+  { name: 'RUM', href: '/rum', icon: Eye, analystVisible: true },
   { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
   { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
@@ -845,7 +840,6 @@ export function AppLayout({
           </div>
         </header>
         {!hideFilterBar && <FilterBar />}
-        {!hideFilterBar && <DataWindowBanner />}
         {/* On pages where the FilterBar is hidden (insights / alerts /
             admin / logs / share-login / raw-query), surface any filters
             the user previously set on a dashboard / query page so they

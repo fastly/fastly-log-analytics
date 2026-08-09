@@ -60,10 +60,13 @@ class ProvisionExecuteRequest(BaseModel):
     commit_interval_mins: int = 5
     enable_cron_compact: bool = True
     log_retention_days: int = 30
+    rum_retention_days: int = 90
     log_fields: str | None = None
     cmcd_enabled: bool = False
     cmcd_mode: str | None = None
     cmcd_version: int | None = None
+    logging_enabled: bool = True
+    rum_enabled: bool = False
 
 
 class ProvisionValidateRequest(BaseModel):
@@ -86,9 +89,29 @@ class ProvisionTeardownRequest(BaseModel):
     remove_logging: bool = True
     remove_cdn: bool = True
     remove_bucket: bool = True
+    remove_cloud_files: bool = True
     remove_scoring: bool = True
     remove_cache: bool = True
     remove_cron: bool = False
+    remove_fos_tokens: bool = True
+
+
+class RumDisableRequest(BaseModel):
+    """Body for ``POST /api/services/{service_id}/rum/disable`` — selective
+    destructive removal of Real User Monitoring (RUM)."""
+
+    token: str = ""
+    remove_cloud_files: bool = True
+    remove_bucket: bool = False
+    activate: bool = True
+
+
+class RumEnableRequest(BaseModel):
+    """Body for ``POST /api/services/{service_id}/rum/enable`` — selective
+    onboarding/enabling of Real User Monitoring (RUM)."""
+
+    token: str = ""
+    activate: bool = True
 
 
 class ProvisionConfigRequest(BaseModel):
@@ -132,6 +155,8 @@ class ProvisionConfigRequest(BaseModel):
     enable_cron_compact: bool | None = None
     log_retention_days: int | None = None
     log_fields: str | dict[str, Any] | None = None
+    logging_enabled: bool | None = None
+    rum_enabled: bool | None = None
 
 
 class CustomFieldsImportBody(BaseModel):

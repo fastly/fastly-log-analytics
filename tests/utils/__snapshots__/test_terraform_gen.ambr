@@ -32,11 +32,6 @@
         unset req.http.x-fos-io-ofsz;
         unset req.http.x-fos-io-ifmt;
         unset req.http.x-fos-io-ofmt;
-        # Session-scoring internal markers. X-Edge-Scoring-Pass=1 from a
-        # client would bypass scoring entirely; x-edge-score* / X-Edge-Sid
-        # from a client could forge a clean score / sid that the deliver
-        # subfields propagate into the log line. Scrub them all at the
-        # client edge regardless of whether scoring is currently enabled.
         unset req.http.X-Edge-Scoring-Pass;
         unset req.http.x-edge-score;
         unset req.http.X-Edge-Score;
@@ -44,11 +39,14 @@
         unset req.http.X-Edge-Score-Enforce;
         unset req.http.X-Edge-Sid;
         unset req.http.X-Edge-Score-Set-Cookie;
-      }
-      if (fastly.ff.visits_this_service == 0) {
-        # Capture edge data for logging before shielding or backend fetch
+        unset req.http.X-Edge-Prev-Anchor;
+        unset req.http.x-sigsci-skip-inspection-once;
+        if (req.http.Fastly-Client-IP) {
+          set req.http.x-fos-edge-data:ip = req.http.Fastly-Client-IP;
+        } else {
+          set req.http.x-fos-edge-data:ip = client.ip;
+        }
         set req.http.x-fos-edge-data:host = req.http.Host;
-        set req.http.x-fos-edge-data:ip = if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, "" + client.ip);
         set req.http.x-fos-edge-data:referer = substr(req.http.Referer, 0, 1000);
         set req.http.x-fos-edge-data:ua = substr(req.http.User-Agent, 0, 1000);
       }
@@ -555,8 +553,8 @@
                   "format_version": 2,
                   "gzip_level": 9,
                   "message_type": "blank",
-                  "name": "fastly_log_analysis",
-                  "path": "/logs/raw/%Y-%m-%d/%H/",
+                  "name": "Fastly Log Analytics",
+                  "path": "logs/raw/%Y/%m/%d/%H/analytics_log_%M.json.gz",
                   "period": 60,
                   "response_condition": "Log Sampling - fastly_log_analysis",
                   "s3_access_key": "AKIATESTSTABLE",
@@ -573,22 +571,22 @@
                   "type": "recv"
                 },
                 {
+                  "content": "${file(\"${path.module}/capture_snippets/recv_reset.vcl\")}",
+                  "name": "Fastly Log Analysis Reset Client IP",
+                  "priority": -100,
+                  "type": "recv"
+                },
+                {
                   "content": "${file(\"${path.module}/capture_snippets/miss.vcl\")}",
                   "name": "Fastly Log Analysis Miss",
-                  "priority": 100,
+                  "priority": 10,
                   "type": "miss"
                 },
                 {
                   "content": "${file(\"${path.module}/capture_snippets/pass.vcl\")}",
                   "name": "Fastly Log Analysis Pass",
-                  "priority": 100,
+                  "priority": 10,
                   "type": "pass"
-                },
-                {
-                  "content": "${file(\"${path.module}/capture_snippets/recv_reset.vcl\")}",
-                  "name": "Fastly Log Analysis Reset Client IP",
-                  "priority": -100,
-                  "type": "recv"
                 }
               ]
             }

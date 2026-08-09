@@ -57,15 +57,15 @@ def test_validate_log_format_returns_empty_list_for_standard_preset():
 
 
 def test_validate_log_format_flags_oversize_format_with_attribution():
-    """Log format > 8000 chars → LOG_FORMAT_TOO_LONG with a breakdown
+    """Log format > 16000 chars → LOG_FORMAT_TOO_LONG with a breakdown
     of how many chars came from custom fields vs built-in. Pinned
     because the breakdown is what tells admins which fields to remove.
 
     Length check fires BEFORE the falco/regex syntax check, but the
-    raw log format must be > 8000 chars to trigger it. We mock
+    raw log format must be > 16000 chars to trigger it. We mock
     ``load_log_format`` directly to skip generating real VCL (which
     would be syntactically rejected for being all X's)."""
-    big_raw = "X" * 9000  # exceeds FASTLY_LOG_FORMAT_SAFE_MAX (8000)
+    big_raw = "X" * 17000  # exceeds FASTLY_LOG_FORMAT_SAFE_MAX (16000)
     cfg = {
         "groups": ["A"],
         "custom_fields": [{"name": f"f{i}", "enabled": True, "vcl_log_expression": "X" * 100} for i in range(50)],
@@ -279,11 +279,11 @@ def test_edge_data_mapping_values_are_vcl_expressions():
 
 
 def test_fastly_log_format_safe_max_is_under_fastly_hard_limit():
-    """8000 is the safe cap chosen to give 192 bytes of headroom
-    under Fastly's documented 8192-char limit. Pinned because
+    """16000 is the safe cap chosen to give headroom
+    under Fastly's documented 16384-char limit. Pinned because
     bumping this without bumping the hard-cap detection would let
     deploys fail at upload time instead of in our validator."""
-    assert fastly_api.FASTLY_LOG_FORMAT_SAFE_MAX <= 8192
+    assert fastly_api.FASTLY_LOG_FORMAT_SAFE_MAX <= 16384
     # And not absurdly low — the wizard would refuse legitimate configs
     assert fastly_api.FASTLY_LOG_FORMAT_SAFE_MAX >= 4000
 
@@ -325,7 +325,7 @@ def test_capture_snippet_plan_runs_reset_before_capture():
     plan = {key: (name, sub, prio) for key, name, sub, prio, _req in fastly_api.CAPTURE_SNIPPET_PLAN}
     reset_name, reset_sub, reset_prio = plan["recv_reset"]
     _cap_name, cap_sub, cap_prio = plan["recv"]
-    assert reset_name == "Fastly Log Analysis Reset Client IP"
+    assert reset_name == "Fastly Log Analytics Reset Client IP"
     assert reset_sub == "recv"  # both target vcl_recv
     assert cap_sub == "recv"
     assert reset_prio == -100
@@ -463,3 +463,16 @@ def test_generate_capture_vcl_all_frequency_promotes_without_cache_state_guard()
         "  set req.http.x-fos-origin-data:origin_cache_state = resp.http.x-fos-origin-data:origin_cache_state;"
     )
     assert unconditional in deliver.splitlines(), f"`all` frequency must promote unconditionally.\nDELIVER:\n{deliver}"
+
+
+def test_pure_statement_helpers():
+    from backend.provision.fastly_api import get_capture_vcl_statements, get_scrub_vcl_statements
+
+    cfg = {"groups": ["A"]}
+    scrubs = get_scrub_vcl_statements(cfg)
+    captures = get_capture_vcl_statements(cfg)
+    assert any("unset req.http.x-is-cluster-fetch" in s for s in scrubs)
+    assert any("set req.http.x-fos-edge-data:ip" in s for s in captures)
+    # Ensure no outer conditional wraps exist in statements
+    assert not any("if (" in s for s in scrubs)
+    assert not any("if (" in s for s in captures if "Fastly-Client-IP" not in s)

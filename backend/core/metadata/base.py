@@ -436,6 +436,17 @@ _SCHEMA = [
         UNIQUE(file_name, source_name)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_quarantined_at ON quarantined_files(source_name, quarantined_at)",
+    # RUM beacon receipt log for health validation. Tracks when beacons
+    # arrive to enable setup validation (confirming the script is firing).
+    # Queried by rum/beacon-health endpoint (last 1 hour for fire rate).
+    """CREATE TABLE IF NOT EXISTS rum_beacons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service_id TEXT NOT NULL,
+        received_at TEXT NOT NULL DEFAULT (datetime('now')),
+        beacon_data TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_rum_beacons_service_time ON rum_beacons(service_id, received_at DESC)",
 ]
 
 

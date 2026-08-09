@@ -1,10 +1,13 @@
 'use client'
 
-import { useQuery } from '@tanstack/react-query'
+import { useState, useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useIsAnalyst } from './useSyncStatus'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
+
+import { useBootstrapPending } from '@/hooks/useIsDataReady'
 
 type CronRunsResponse = components['schemas']['CronRunsResponse']
 
@@ -28,6 +31,25 @@ export interface LastSyncInfo {
 export function useLastSync() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const isAnalyst = useIsAnalyst()
+  const bootstrapPending = useBootstrapPending()
+  const queryClient = useQueryClient()
+
+  const [ready, setReady] = useState(false)
+  useEffect(() => {
+    if (activeServiceId) {
+      const existing = queryClient.getQueryData(['last-sync', activeServiceId])
+      if (existing === undefined) {
+        queryClient.setQueryData(['last-sync', activeServiceId], null)
+      }
+      queueMicrotask(() => {
+        setReady(true)
+      })
+    } else {
+      queueMicrotask(() => {
+        setReady(false)
+      })
+    }
+  }, [activeServiceId, queryClient])
 
   return useQuery({
     queryKey: ['last-sync', activeServiceId],
@@ -50,7 +72,7 @@ export function useLastSync() {
         duration_s: e?.duration_s ?? null,
       } satisfies LastSyncInfo
     },
-    enabled: !!activeServiceId && !isAnalyst,
+    enabled: !!activeServiceId && !bootstrapPending && !isAnalyst && ready,
     // 5 min lines up with the bootstrap seed lifecycle — the
     // ['last-sync', sid] cache entry is pre-seeded BEFORE this hook renders,
     // from bootstrap.last_sync: on the SSR-hydrated path via app/layout.tsx's

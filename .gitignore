@@ -23,6 +23,7 @@ gemini.md
 SYSTEM.md
 DEPLOYMENT.md
 local-docs/*
+.superpowers/
 docs/superpowers/
 docs/plans/
 node_modules/

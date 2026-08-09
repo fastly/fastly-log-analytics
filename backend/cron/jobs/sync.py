@@ -111,9 +111,17 @@ def _run_service_cron(
             if tr and tr.get("start"):
                 start_time = tr["start"]
                 logger.info("[scheduler] %s: Using configured start_time limit: %s", service_id, start_time)
-            # time_range.end is intentionally NOT re-applied here. It is only used for
-            # the initial import or an explicit manual backfill. Applying it every cron
-            # run would permanently freeze ingestion at the original import end date.
+            elif cfg.get("created_at"):
+                start_time = cfg["created_at"]
+                logger.info(
+                    "[scheduler] %s: Fallback to service creation time as start_time limit: %s", service_id, start_time
+                )
+                prov = cfg.setdefault("provisioning", {})
+                tr = prov.setdefault("time_range", {})
+                tr["start"] = start_time
+                svcconfig.save_config(service_id, cfg)
+                src["time_range"] = tr
+                logger.info("[scheduler] %s: Saved service creation time as start_time limit to config.", service_id)
         elif is_manual and not start_time:
             # Manual "Sync All": clear any previously pinned range
             prov = cfg.get("provisioning", {})

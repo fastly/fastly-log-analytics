@@ -258,7 +258,7 @@ def _log_and_add_progress(
 _DISK_FREE_HARD_FLOOR_BYTES = 500 * 1024 * 1024
 # Same idea as a percentage, for the (rare) case of a very small disk
 # where 500 MB is most of free. Whichever check trips first wins.
-_DISK_FREE_HARD_FLOOR_PCT = 0.03  # 3 %
+_DISK_FREE_HARD_FLOOR_PCT = 0.005  # 0.5 %
 
 
 def _check_disk_space(cache_dir: str, service_id: str, job_name: str) -> tuple[bool, str]:
@@ -635,6 +635,8 @@ class Scheduler:
             _run_share_audit_purge,
         )
         from backend.cron.jobs.optimize import _run_optimize
+        from backend.cron.jobs.rum_commit import _run_rum_commit
+        from backend.cron.jobs.rum_sync import _run_rum_sync
         from backend.cron.jobs.sync import _run_full_sweep, _run_gap_heal, _run_service_cron
 
         configs = svcconfig.list_configs()
@@ -772,6 +774,68 @@ class Scheduler:
                     commit_job_id,
                     commit_interval_mins,
                 )
+
+            # ── RUM sync job (ingest RUM beacons from FOS) ─────────────────────
+            # Only register if RUM is enabled for this service
+            rum_cfg = cfg.get("rum", {})
+            rum_enabled = bool(cfg.get("rum_enabled", False) or rum_cfg.get("enabled", False))
+            if rum_enabled:
+                rum_sync_interval_secs = max(5, int(rum_cfg.get("sync_interval_seconds", interval_seconds)))
+                rum_sync_job_id = f"rum_sync_{service_id}"
+                seen_ids.add(rum_sync_job_id)
+
+                if rum_sync_job_id in self._job_ids:
+                    try:
+                        job = self._sched.get_job(rum_sync_job_id)
+                        if job:
+                            job.reschedule("interval", seconds=rum_sync_interval_secs)
+                    except Exception:
+                        pass
+                else:
+                    self._sched.add_job(
+                        _run_rum_sync,
+                        "interval",
+                        seconds=rum_sync_interval_secs,
+                        args=[service_id],
+                        id=rum_sync_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=60,
+                    )
+                    self._job_ids[rum_sync_job_id] = rum_sync_job_id
+                    logger.info(
+                        "[scheduler] Registered RUM sync job %s (every %ds).", rum_sync_job_id, rum_sync_interval_secs
+                    )
+
+                # ── RUM commit job (compact RUM tables) ──────────────────────
+                rum_commit_interval_mins = max(1, int(rum_cfg.get("commit_interval_mins", commit_interval_mins)))
+                rum_commit_job_id = f"rum_commit_{service_id}"
+                seen_ids.add(rum_commit_job_id)
+
+                if rum_commit_job_id in self._job_ids:
+                    try:
+                        job = self._sched.get_job(rum_commit_job_id)
+                        if job:
+                            job.reschedule("interval", minutes=rum_commit_interval_mins)
+                    except Exception:
+                        pass
+                else:
+                    self._sched.add_job(
+                        _run_rum_commit,
+                        "interval",
+                        minutes=rum_commit_interval_mins,
+                        args=[service_id],
+                        id=rum_commit_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=60,
+                    )
+                    self._job_ids[rum_commit_job_id] = rum_commit_job_id
+                    logger.info(
+                        "[scheduler] Registered RUM commit job %s (every %dm).",
+                        rum_commit_job_id,
+                        rum_commit_interval_mins,
+                    )
 
             # ── Alerts evaluation job (Per Service) ───────────────────────────
             # See note above (analyst branch) on the no-alerts gate.

@@ -10,11 +10,9 @@ import { useFilterStore } from '@/stores/filterStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { formatForInput, parseFromInput } from '@/lib/date'
-import { resolveSnappedWindow } from '@/lib/log-extents-snap'
-import { useQuery, useIsFetching } from '@tanstack/react-query'
+import { useIsFetching } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useDateFormat } from '@/hooks/useDateFormat'
-import { useBootstrapPending } from '@/hooks/useIsDataReady'
 import { usePathname } from 'next/navigation'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
@@ -53,13 +51,10 @@ export const FilterBar = React.memo(function FilterBar() {
     endTime,
     filters,
     edgeOnly,
-    hasSyncedExtents,
     isAutoRange,
     relativeRange,
     setRange,
     setRelativeRange,
-    autoSetRange,
-    setHasSyncedExtents,
     removeFilter,
     toggleFilterMode,
     toggleEdgeOnly,
@@ -76,13 +71,10 @@ export const FilterBar = React.memo(function FilterBar() {
     endTime: state.endTime,
     filters: state.filters,
     edgeOnly: state.edgeOnly,
-    hasSyncedExtents: state.hasSyncedExtents,
     isAutoRange: state.isAutoRange,
     relativeRange: state.relativeRange,
     setRange: state.setRange,
     setRelativeRange: state.setRelativeRange,
-    autoSetRange: state.autoSetRange,
-    setHasSyncedExtents: state.setHasSyncedExtents,
     removeFilter: state.removeFilter,
     toggleFilterMode: state.toggleFilterMode,
     toggleEdgeOnly: state.toggleEdgeOnly,
@@ -137,61 +129,6 @@ export const FilterBar = React.memo(function FilterBar() {
   function fmtBotId(id: string): string {
     return id.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
   }
-
-  // Auto-sync bounds from API when changing service.
-  // Uses /api/log-extents — an analyst-safe sibling of /api/sync-status that
-  // returns only {configured, earliest_log_at, latest_log_at} with none of
-  // the admin-only fields (ngwaf_workspace_id, active_run, cron task state)
-  // that get the admin endpoint 403'd for remote analysts. Swapping here
-  // closes the analyst-403-every-3s polling loop.
-  //
-  // Perf audit Phase D: useBootstrap seeds ['log-extents', sid] in its
-  // queryFn from bootstrap's log_extents field. Gate on bootstrap
-  // pending so this query hits the seeded cache on cold load.
-  const bootstrapPending = useBootstrapPending()
-  const { data: status } = useQuery({
-    queryKey: ['log-extents', activeServiceId],
-    queryFn: async () => {
-      const { data } = await client.GET("/api/log-extents")
-      return data
-    },
-    enabled: !!activeServiceId && !bootstrapPending,
-    refetchInterval: (query) => {
-      // Keep polling if we haven't seen valid log extents yet
-      const data = query.state.data;
-      if (data && (!data.earliest_log_at || !data.latest_log_at)) {
-        return 3000;
-      }
-      // Or if we haven't successfully synced extents locally
-      if (!hasSyncedExtents) {
-        return 3000;
-      }
-      return false; // Stop polling once we have data and have synced
-    },
-    refetchIntervalInBackground: false,
-  })
-
-  React.useEffect(() => {
-    // If the app just loaded OR the user clicked Reset, snap to available extents.
-    // Also re-snap if extents were initially empty but isAutoRange is still true.
-    // The snap decision itself (spanDays/ageMinutes/15-min staleness threshold,
-    // shared with the SSR seed so first paint doesn't disagree with this effect —
-    // see lib/log-extents-snap.ts) lives in resolveSnappedWindow.
-    if (status && (!hasSyncedExtents || isAutoRange)) {
-      if (isAutoRange) {
-        const snapped = resolveSnappedWindow(status, new Date())
-        if (snapped) {
-          autoSetRange(snapped.start, snapped.end)
-        } else {
-          // Missing extents, or data is fresh (last log <15min old) — the
-          // default "last 24h from now" already captures it. Keep it, just
-          // mark auto-range as done.
-          autoSetRange(useFilterStore.getState().startTime, useFilterStore.getState().endTime)
-        }
-      }
-      setHasSyncedExtents(true)
-    }
-  }, [status, hasSyncedExtents, isAutoRange, autoSetRange, setHasSyncedExtents])
 
   // Reset extents sync state ONLY when the user explicitly switches services,
   // not on initial page load or hydration.

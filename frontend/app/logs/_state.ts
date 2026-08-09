@@ -62,8 +62,6 @@ export function useLogsPageState() {
     setBackgroundCronToast(null)
   }, [activeServiceId])
 
-  const setHasSyncedExtents = useFilterStore(s => s.setHasSyncedExtents)
-
   const { data: status } = useSyncStatus()
 
   const { data: cronLogs, isLoading: isLoadingCron, isFetching: isFetchingCron } = useQuery({
@@ -135,7 +133,7 @@ export function useLogsPageState() {
     return {
       entries: recentCrons.entries.filter((e: any) => e.status === 'running')
     }
-  }, [recentCrons])
+  }, [recentCrons?.entries])
 
   // When a running cron completes, refresh the main table so it shows up in the history
   const prevRunningCount = React.useRef(0)
@@ -195,7 +193,23 @@ export function useLogsPageState() {
         .filter((j: any) => !prunedIds.has(j.id))
         .map((j: any) => ({ ...j, status: 'running' }))
 
-      return [...pruned, ...brandNew]
+      const nextJobs = [...pruned, ...brandNew]
+
+      // 5. Compare nextJobs with prev (by id, status, duration, and rows_ingested) to avoid updating state if nothing changed
+      if (prev.length === nextJobs.length) {
+        const matchesAll = prev.every(pj => {
+          const nj = nextJobs.find(j => j.id === pj.id)
+          return (
+            nj &&
+            nj.status === pj.status &&
+            nj.duration_s === pj.duration_s &&
+            nj.rows_ingested === pj.rows_ingested
+          )
+        })
+        if (matchesAll) return prev
+      }
+
+      return nextJobs
     })
   }, [runningCrons?.entries])
 
@@ -297,7 +311,7 @@ export function useLogsPageState() {
       setSelectedConsoleJobId(null)
       setConsoleOpen(false)
     }
-  }, [displayedJobs, selectedConsoleJobId])
+  }, [displayedJobs])
 
   const { data: cronSchedule } = useQuery({
     queryKey: ['admin', 'cron-schedule', activeServiceId],
@@ -324,17 +338,19 @@ export function useLogsPageState() {
     // up on the grid automatically; only its position needs curating.
     const TASK_PRIORITY: Record<string, number> = {
       sync: 1,
-      alerts: 2,
-      commit: 3,
-      optimize: 4,
-      local_compact: 5,
-      metadata_cleanup: 6,
-      expire: 7,
-      full_sync: 8,
-      gap_heal: 9,
-      ngwaf_sync: 10,
-      insights_prewarmer: 11,
-      metadata_sync: 12,
+      rum_sync: 2,
+      alerts: 3,
+      commit: 4,
+      rum_commit: 5,
+      optimize: 6,
+      local_compact: 7,
+      metadata_cleanup: 8,
+      expire: 9,
+      full_sync: 10,
+      gap_heal: 11,
+      ngwaf_sync: 12,
+      insights_prewarmer: 13,
+      metadata_sync: 14,
     }
     // Analysts only see the read-only subset; nothing else is even
     // exposed via the analyst-facing /api/cron-schedule path.
@@ -510,7 +526,6 @@ export function useLogsPageState() {
     isLoadingSchema,
     // mutations / actions
     purgeMutation,
-    setHasSyncedExtents,
     isPurgeOpen,
     setIsPurgeOpen,
   }

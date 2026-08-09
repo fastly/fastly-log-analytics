@@ -705,9 +705,39 @@ def _load_table_cached(source: dict, identifier: tuple, catalog=None):
             return cached
     if catalog is None:
         catalog = _get_catalog(source)
-    table = catalog.load_table(identifier)
-    _set_cached_table(source, identifier, table)
-    return table
+    try:
+        table = catalog.load_table(identifier)
+        _set_cached_table(source, identifier, table)
+        return table
+    except (FileNotFoundError, OSError) as e:
+        if "No such file or directory" in str(e) or "not found" in str(e).lower() or isinstance(e, FileNotFoundError):
+            logger.warning("⚠️ [iceberg] Missing metadata file detected for %s: %s. Healing catalog...", identifier, e)
+            # Remove from local catalog database
+            db_path = _catalog_db_path(source)
+            if os.path.exists(db_path):
+                import sqlite3
+
+                try:
+                    namespace, table_name = identifier
+                    with sqlite3.connect(db_path, timeout=5.0) as cat_con:
+                        cat_con.execute(
+                            "DELETE FROM iceberg_tables WHERE table_namespace = ? AND table_name = ?",
+                            (namespace, table_name),
+                        )
+                        cat_con.commit()
+                    logger.info(
+                        "[iceberg] Successfully removed out-of-sync table %s from local SQLite catalog.", identifier
+                    )
+                except Exception as del_err:
+                    logger.warning("[iceberg] Failed to remove out-of-sync table from SQLite: %s", del_err)
+
+            # Clear cached table
+            _invalidate_cached_table(source, identifier)
+
+            from pyiceberg.exceptions import NoSuchTableError
+
+            raise NoSuchTableError(f"Table {identifier} metadata is missing from S3: {e}")
+        raise
 
 
 def _purge_surrogate_key(source: dict, key: str) -> None:

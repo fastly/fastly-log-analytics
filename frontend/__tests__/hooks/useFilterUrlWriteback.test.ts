@@ -21,7 +21,6 @@ function resetStore() {
       startTime: '2026-06-09T20:00:00.000Z',
       endTime: '2026-06-10T20:00:00.000Z',
       isAutoRange: true,
-      hasSyncedExtents: false,
       compareMode: false,
       compareStartTime: null,
       compareEndTime: null,

@@ -160,6 +160,13 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
                 existing.update({k: v for k, v in incoming.items() if v is not None})
                 prov[cron_key] = existing
 
+            # Handle RUM settings (top-level cfg, not provisioning)
+            rum_incoming = body_payload.get("rum")
+            if rum_incoming is not None:
+                rum_config = cfg.setdefault("rum", {})
+                rum_config.update({k: v for k, v in rum_incoming.items() if v is not None})
+                cfg["rum"] = rum_config
+
             yield json.dumps({"type": "progress", "current": 2, "total": 4})
             yield json.dumps({"type": "status", "message": "Saving settings to local database..."})
             svcconfig.save_config(service_id, cfg)
@@ -239,14 +246,24 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                 if last_idx == 0:
                     # Fall back to SQLite database if progress cache doesn't have it (completed / historical)
                     try:
+                        import sqlite3
+
                         from backend.core import metadata as metadata_db
 
                         if service_id:
                             row = metadata_db.get_cron_run_result(service_id, run_id)
                             if row:
                                 status = row["status"]
+                                # Normalize SQLite status values (success -> done, failed -> error) for SSE client compatibility
+                                normalized_status = (
+                                    "done"
+                                    if status in ("success", "done")
+                                    else "error"
+                                    if status in ("failed", "error")
+                                    else status
+                                )
                                 log_output = row["log_output"]
-                                if status in ("done", "error") or log_output:
+                                if normalized_status in ("done", "error") or log_output:
                                     if log_output:
                                         lines = log_output.split("\n")
                                         has_terminal = False
@@ -258,24 +275,56 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                                             if line.startswith("[") and "]" in line:
                                                 bracket_end = line.find("]")
                                                 bracket_content = line[1:bracket_end].lower()
-                                                if bracket_content in ("status", "error", "done", "warning", "info"):
-                                                    t = bracket_content
+                                                if bracket_content in (
+                                                    "status",
+                                                    "error",
+                                                    "done",
+                                                    "warning",
+                                                    "info",
+                                                    "success",
+                                                    "failed",
+                                                ):
+                                                    # Map sub-line types as well
+                                                    t = (
+                                                        "done"
+                                                        if bracket_content in ("success", "done")
+                                                        else "error"
+                                                        if bracket_content in ("failed", "error")
+                                                        else bracket_content
+                                                    )
                                                     msg = line[bracket_end + 1 :].strip()
                                             if t in ("done", "error"):
                                                 has_terminal = True
                                             yield json.dumps({"type": t, "message": msg})
 
-                                        if not has_terminal and status in ("done", "error"):
+                                        if not has_terminal and normalized_status in ("done", "error"):
                                             yield json.dumps(
-                                                {"type": status, "message": f"Run completed with status {status}."}
+                                                {
+                                                    "type": normalized_status,
+                                                    "message": f"Run completed with status {status}.",
+                                                }
                                             )
                                     else:
-                                        yield json.dumps(
-                                            {
-                                                "type": status,
-                                                "message": f"Run completed with status {status} (no logs recorded).",
-                                            }
-                                        )
+                                        # No log output — generate a helpful message based on task type and status
+                                        task_name = "unknown task"
+                                        try:
+                                            with sqlite3.connect(f"data/services/{service_id}.metadata.db") as con:
+                                                con.row_factory = sqlite3.Row
+                                                t_row = con.execute(
+                                                    "SELECT task FROM cron_runs WHERE id = ?", (run_id,)
+                                                ).fetchone()
+                                                if t_row:
+                                                    task_name = t_row["task"] or "unknown task"
+                                        except Exception:
+                                            pass
+
+                                        msg = f"Run completed with status {status}."
+                                        if normalized_status == "done" and task_name == "rum_sync":
+                                            msg = "No new RUM logs found."
+                                        elif normalized_status == "done":
+                                            msg = f"{task_name} completed with no data."
+
+                                        yield json.dumps({"type": normalized_status, "message": msg})
                                     return
                     except Exception as e:
                         import logging
@@ -526,6 +575,8 @@ def api_service_logging_settings(service_id: str):
         # debug_calls, section_timings, is_cached) is regenerated per
         # request so the Debug Panel keeps showing per-request data even
         # on cache hits.
+        from backend.models.services import CmcdSettingsResponse
+
         cmcd_block = cfg.get("cmcd") or {}
         cacheable = {
             "prefix": prefix,
@@ -535,9 +586,11 @@ def api_service_logging_settings(service_id: str):
             "custom_condition": custom_condition,
             "format_match": format_match,
             "version": active_ver,
-            "cmcd_enabled": bool(cmcd_block.get("enabled")),
-            "cmcd_mode": cmcd_block.get("mode"),
-            "cmcd_version": cmcd_block.get("version"),
+            "cmcd": CmcdSettingsResponse(
+                enabled=bool(cmcd_block.get("enabled")),
+                mode=cmcd_block.get("mode"),
+                version=cmcd_block.get("version"),
+            ),
         }
         _logging_settings_cache[service_id] = cacheable
 
@@ -776,6 +829,8 @@ def api_service_update_logging_settings(
                     new_ver = int(event.get("version") or 0)
                     if event.get("changed", False):
                         if update_format and new_ver:
+                            from backend.models.services import CmcdSettingsResponse
+
                             _logging_settings_cache[service_id] = {
                                 "prefix": prefix,
                                 "period": period,
@@ -784,15 +839,15 @@ def api_service_update_logging_settings(
                                 "custom_condition": custom_condition,
                                 "format_match": True,
                                 "version": new_ver,
-                                "cmcd_enabled": bool(cmcd_enabled)
-                                if cmcd_enabled is not None
-                                else bool((cfg.get("cmcd") or {}).get("enabled")),
-                                "cmcd_mode": cmcd_mode
-                                if cmcd_mode is not None
-                                else (cfg.get("cmcd") or {}).get("mode"),
-                                "cmcd_version": cmcd_version
-                                if cmcd_version is not None
-                                else (cfg.get("cmcd") or {}).get("version"),
+                                "cmcd": CmcdSettingsResponse(
+                                    enabled=bool(cmcd_enabled)
+                                    if cmcd_enabled is not None
+                                    else bool((cfg.get("cmcd") or {}).get("enabled")),
+                                    mode=cmcd_mode if cmcd_mode is not None else (cfg.get("cmcd") or {}).get("mode"),
+                                    version=cmcd_version
+                                    if cmcd_version is not None
+                                    else (cfg.get("cmcd") or {}).get("version"),
+                                ),
                             }
                         else:
                             _logging_settings_cache.pop(service_id, None)
@@ -988,15 +1043,35 @@ from backend.models.custom_fields import (
 )
 
 
+def _is_system_field(field_name: str) -> bool:
+    """Return True if field_name is a system-managed field (CMCD or Scoring).
+
+    System fields are generated on-demand from feature toggles and should
+    not be displayed as user-editable custom fields.
+    """
+    return field_name.startswith("cmcd_") or field_name.startswith("edge_")
+
+
+def _filter_user_custom_fields(custom_fields: list[dict]) -> list[dict]:
+    """Filter out system-managed fields from custom_fields list.
+
+    Returns only user-defined custom fields, excluding CMCD and Scoring fields.
+    """
+    return [f for f in custom_fields if not _is_system_field(f.get("name", ""))]
+
+
 @router.get("/services/{service_id}/custom-fields", response_model=CustomFieldsListResponse)
-def api_list_custom_fields(request: Request, service_id: str):
+def api_list_custom_fields(request: Request, service_id: str) -> CustomFieldsListResponse:
     _require_service_scope(request, service_id)
 
     cfg = load_service_config(service_id)
     from backend.core import field_registry as lf_module
 
     lf = lf_module.get_lf_config(cfg)
-    return CustomFieldsListResponse(fields=lf.get("custom_fields", []))
+    # Filter out system-managed fields (CMCD, Scoring) from the custom fields list.
+    # These are generated on-demand from feature toggles, not persisted in config.
+    user_fields = _filter_user_custom_fields(lf.get("custom_fields", []))
+    return CustomFieldsListResponse(fields=user_fields)  # type: ignore
 
 
 def _check_iceberg_type_lock(
@@ -1135,6 +1210,14 @@ def api_create_custom_field(request: Request, service_id: str, body: CustomField
     existing = lf.get("custom_fields", [])
     existing_names = [cf["name"] for cf in existing]
     field_dict = body.model_dump()
+
+    # Prevent creating system-managed fields
+    if _is_system_field(field_dict.get("name", "")):
+        raise HTTPException(
+            status_code=422,
+            detail={"errors": [f"Field '{field_dict['name']}' is system-managed and cannot be created manually."]},
+        )
+
     errors = lf_module.validate_custom_field(field_dict, existing_names)
     hard_errors = [e for e in errors if not e.startswith("WARN:")]
     if hard_errors:
@@ -1168,6 +1251,12 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
     from backend.core import field_registry as lf_module
 
     _require_service_scope(request, service_id)
+
+    # Prevent updating system-managed fields
+    if _is_system_field(field_name):
+        raise HTTPException(
+            status_code=422, detail={"errors": [f"Field '{field_name}' is system-managed and cannot be edited."]}
+        )
 
     cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
@@ -1231,6 +1320,12 @@ def api_delete_custom_field(request: Request, service_id: str, field_name: str):
 
     _require_service_scope(request, service_id)
 
+    # Prevent deleting system-managed fields
+    if _is_system_field(field_name):
+        raise HTTPException(
+            status_code=422, detail={"errors": [f"Field '{field_name}' is system-managed and cannot be deleted."]}
+        )
+
     cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
     existing = lf.get("custom_fields", [])
@@ -1279,7 +1374,11 @@ def api_validate_custom_vcl(request: Request, service_id: str, body: VclLintRequ
         warnings.append(e) if e.startswith("WARN") else errors.append(e)
     fmt = provision.load_log_format(candidate_lf) if not errors else None
     return VclLintResponse(
-        valid=len(errors) == 0, errors=errors, warnings=warnings, format_length=len(fmt) if fmt else None
+        valid=len(errors) == 0,
+        errors=errors,
+        warnings=warnings,
+        format_length=len(fmt) if fmt else None,
+        format_length_limit=provision.fastly_api.FASTLY_LOG_FORMAT_SAFE_MAX,
     )
 
 
@@ -1295,8 +1394,10 @@ def api_export_custom_fields(request: Request, service_id: str):
 
     cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
+    # Export only user-defined custom fields, exclude system-managed fields
+    user_fields = _filter_user_custom_fields(lf.get("custom_fields", []))
     return StreamingResponse(
-        iter([json.dumps({"custom_fields": lf.get("custom_fields", [])})]),
+        iter([json.dumps({"custom_fields": user_fields})]),
         media_type="application/json",
         headers={"Content-Disposition": f"attachment; filename=custom_fields_{service_id}.json"},
     )
@@ -1343,6 +1444,10 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
         if "name" not in field_dict:
             continue
         fname = field_dict["name"]
+        # Prevent importing system-managed fields
+        if _is_system_field(fname):
+            validation_errors.append(f"{fname}: cannot import system-managed field")
+            continue
         existing_field = existing_map.get(fname, {})
         if fname in locked_field_names:
             if field_dict.get("duckdb_type") and field_dict["duckdb_type"] != existing_field.get("duckdb_type"):

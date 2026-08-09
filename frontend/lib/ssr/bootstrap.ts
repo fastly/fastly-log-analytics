@@ -42,7 +42,7 @@ function _fetchBootstrapUpstream(): Promise<BootstrapResponse | null> {
   // Returns null on ANY failure (no resp / non-2xx / malformed 2xx body) so
   // the root layout never throws a SyntaxError out of this server-component
   // path; the shared parseSsrJson reproduces that guard + warn contract.
-  return ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'ssr/bootstrap' }).then((resp) =>
+  return ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'ssr/bootstrap', injectAdminToken: true }).then((resp) =>
     parseSsrJson<BootstrapResponse>(resp, 'ssr/bootstrap'),
   )
 }

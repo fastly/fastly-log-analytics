@@ -7,7 +7,6 @@ interface FilterState {
   endTime: string
   filters: FilterPill[]
   edgeOnly: boolean
-  hasSyncedExtents: boolean
   isAutoRange: boolean
   // When a quick-preset pill is active, holds its label ("24h", "3d", ...).
   // Null means custom range (datetime inputs, chart zoom, saved view) or
@@ -20,8 +19,6 @@ interface FilterState {
   compareEndTime: string | null
   setRange: (start: string, end: string) => void
   setRelativeRange: (range: string, start: string, end: string) => void
-  autoSetRange: (start: string, end: string) => void
-  setHasSyncedExtents: (synced: boolean) => void
   addFilter: (column: string, value: string, mode: FilterMode) => void
   removeFilter: (id: string) => void
   toggleFilterMode: (id: string) => void
@@ -34,24 +31,16 @@ interface FilterState {
 }
 
 export const useFilterStore = create<FilterState>((set) => ({
-  // Default to last 24h. FilterBar.autoSetRange will snap this to the
-  // real latest-log-extent once /api/sync-status returns; when data is
-  // fresh (latest_log_at ~ now) the snapped range matches the default,
-  // so the dashboard query doesn't refire — no flicker on the common
-  // path. Was 7 days, which guaranteed a refire to 24h after
-  // sync-status returned (the auto-snap target).
+  // Default to last 24h.
   startTime: formatISO(subDays(new Date(), 1)),
   endTime: formatISO(new Date()),
   filters: [],
   edgeOnly: false,
-  hasSyncedExtents: false,
   isAutoRange: true, // Start with auto-range enabled for first data discovery
   relativeRange: null,
   compareMode: false,
   compareStartTime: null,
   compareEndTime: null,
-
-  setHasSyncedExtents: (synced) => set({ hasSyncedExtents: synced }),
 
   // Explicit absolute-range selection (custom datetime, chart zoom, saved
   // view). Clears relativeRange — this range no longer corresponds to a
@@ -71,22 +60,7 @@ export const useFilterStore = create<FilterState>((set) => ({
   setRelativeRange: (relativeRange, startTime, endTime) =>
     set({ startTime, endTime, isAutoRange: false, relativeRange }),
 
-  resetRange: () => set({ isAutoRange: true, hasSyncedExtents: false, relativeRange: null }),
-
-  // Snap to discovered extents on cold load. Keeps isAutoRange=true so the
-  // URL-sync hook doesn't write the snapped timestamps as if the user had
-  // picked them. hasSyncedExtents (flipped by the caller) is what gates
-  // re-snap, not isAutoRange.
-  autoSetRange: (startTime, endTime) => set((state) => {
-    if (!state.isAutoRange) return state
-    // Early-bail when extents-snap is identical to current values. The
-    // FilterBar passes the store's own start/end through here when data
-    // is fresh enough to skip the snap — without this short-circuit the
-    // set() re-emits and triggers a duplicate /api/{page}/aggregates
-    // fetch off the new useServiceQuery key reference identity.
-    if (state.startTime === startTime && state.endTime === endTime) return state
-    return { startTime, endTime }
-  }),
+  resetRange: () => set({ isAutoRange: true, relativeRange: null }),
 
   toggleCompareMode: () => set((state) => {
     const nextMode = !state.compareMode
@@ -165,19 +139,10 @@ export const useFilterStore = create<FilterState>((set) => ({
   clearFilters: () => set({ filters: [] }),
 
   resetAll: () => {
-    // Restore startTime/endTime to the store-init defaults (last 24h from
-    // now) BEFORE re-flipping the auto-snap flags. Otherwise: on fresh
-    // data the snap effect in FilterBar takes its "keep current range"
-    // branch (because ageMinutes < 15), which means Reset would leave a
-    // user-selected narrow window untouched. With this restore, fresh-
-    // data Reset always returns to the same 24h window the page showed
-    // on load, and stale-data Reset still snaps to extents via the same
-    // effect (autoSetRange overwrites these defaults when it fires).
     const now = new Date()
     set({
       filters: [],
       isAutoRange: true,
-      hasSyncedExtents: false,
       relativeRange: null,
       compareMode: false,
       compareStartTime: null,

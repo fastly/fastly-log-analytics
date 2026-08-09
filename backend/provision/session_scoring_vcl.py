@@ -491,8 +491,10 @@ def miss_snippet() -> str:
     return """# Session Scoring: strip internal scoring headers before forwarding to
 # the real origin. x-edge-score could be attacker-supplied; the
 # X-Edge-Scoring-Pass marker is internal-only.
-unset bereq.http.x-edge-score;
-unset bereq.http.X-Edge-Scoring-Pass;"""
+if (req.backend.is_origin) {
+  unset bereq.http.x-edge-score;
+  unset bereq.http.X-Edge-Scoring-Pass;
+}"""
 
 
 def generate_scoring_vcl(

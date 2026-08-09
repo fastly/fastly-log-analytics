@@ -220,10 +220,14 @@ export function runDeploy(args: DeployArgs) {
     delete_after: config.delete_after,
     commit_interval_mins: Number(config.commit_interval_mins),
     enable_cron_compact: config.enable_cron_compact,
+    log_retention_days: Number(config.log_retention_days),
+    rum_retention_days: Number(config.rum_retention_days),
     log_fields: config.log_fields ? JSON.stringify(config.log_fields) : null,
     cmcd_enabled: config.cmcd_enabled,
     cmcd_mode: config.cmcd_mode,
     cmcd_version: config.cmcd_version,
+    logging_enabled: config.logging_enabled,
+    rum_enabled: config.rum_enabled,
   };
   if (config.cdn_prefix) {
     body.cdn_url = `https://${config.cdn_prefix}.global.ssl.fastly.net`;
@@ -360,6 +364,8 @@ export async function runAdminIngest(args: AdminIngestArgs) {
         delete_after: config.delete_after,
         commit_interval_mins: config.commit_interval_mins,
         enable_cron_compact: config.enable_cron_compact,
+        log_retention_days: config.log_retention_days,
+        rum_retention_days: config.rum_retention_days,
         log_fields: config.log_fields,
         fos_access_key: config.fos_access_key,
         fos_secret_key: config.fos_secret_key,

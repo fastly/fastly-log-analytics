@@ -180,8 +180,16 @@ export function useSSE() {
 
       if (currentReqId !== requestIdRef.current || !mountedRef.current) return
 
-      // Stream ended without a 'done' event — mark done if still streaming
-      setStatus((prev) => (prev === 'streaming' ? 'done' : prev))
+      // Stream ended without a 'done' event — if we are still 'streaming',
+      // that means the connection was closed unexpectedly before a terminal
+      // 'done' or 'error' event was sent. This is an error!
+      setStatus((prev) => {
+        if (prev === 'streaming') {
+          setError('Connection closed unexpectedly before completion.')
+          return 'error'
+        }
+        return prev
+      })
     } catch (err: any) {
       // If we unmounted or the request was replaced, ignore all errors
       if (currentReqId !== requestIdRef.current || !mountedRef.current) return

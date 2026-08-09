@@ -21,10 +21,9 @@ export interface ReportConfiguration {
 }
 
 export function useReportConfig(options: ReportConfigOptions = {}) {
-  const { startTime, endTime, hasSyncedExtents } = useFilterStore(useShallow(state => ({
+  const { startTime, endTime } = useFilterStore(useShallow(state => ({
     startTime: state.startTime,
     endTime: state.endTime,
-    hasSyncedExtents: state.hasSyncedExtents
   })))
 
   const [metric, setMetric] = useState(options.defaultMetric || 'requests')
@@ -94,15 +93,7 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
     }
   }, [config, chartInterval, trend])
 
-  // When the user clicks Reset, filterStore.clearFilters() flips
-  // hasSyncedExtents back to false. Clear the manualInterval lock so
-  // auto-detection resumes from the freshly-reset time range. During
-  // normal use (manual interval pick) the lock stays in place.
-  useEffect(() => {
-    if (!hasSyncedExtents && manualInterval !== null) {
-      setManualInterval(null)
-    }
-  }, [hasSyncedExtents, manualInterval])
+
 
   return {
     metric,

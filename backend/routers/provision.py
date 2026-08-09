@@ -87,7 +87,30 @@ from backend.models.admin import ProvisionService
 def provision_list_services(token: str = Query(...)):
     from backend import config as svcconfig
     from backend.core.fastly.client import fastly
+    from backend.core.fastly.mock_fixtures import is_mock_mode
     from backend.provision.fos_setup import object_storage_enabled
+
+    existing_ids = set(svcconfig.list_service_ids())
+
+    if is_mock_mode():
+        # In mock mode, the Fastly client short-circuits /service GET to []
+        # to support novel service creation checks in E2E.
+        # But we still want to return realistic services for Step 3 list visualization
+        # in the development dashboard!
+        mock_services = [
+            {"id": "KLJPUtJkC1ZlLVcjPGV1jXX", "name": "www.drew-michael.com", "type": "vcl"},
+            {"id": "rmWzCRA0lkAOs9Gnxvohs4", "name": "gatsby.drew-michael.com", "type": "vcl"},
+            {"id": "WSWGVvlXKgS0Xi0E146HT5", "name": "nextjs.drew-michael.com", "type": "vcl"},
+            {"id": "1saenXcgHafT483Ad0fVY6", "name": "Frontend VCL Service", "type": "vcl"},
+            {"id": "aVtKheBMP5PXydspKE9pf0", "name": "Streaming Media Server", "type": "vcl"},
+            {"id": "21ewKZHpN5if6HWyP4rtZ2", "name": "Track Download Amount", "type": "vcl"},
+            {"id": "sIhBh2QspxWWlu4Ixpo2T4", "name": "Redflag Test", "type": "vcl"},
+            {"id": "ctzQxxYPacMcJr5EHR9JR3", "name": "Multi Shield Test", "type": "vcl"},
+            {"id": "nnwxKVS0a2osevO7m4eJnI", "name": "Third Party Asset Caching VCL", "type": "vcl"},
+            {"id": "rmdq0dBo4woJNblQnr0lpF", "name": "Download Speed Controls", "type": "vcl"},
+            {"id": "95s8p8tHe39Ma671SJ1PeB", "name": "Test RUM CDN", "type": "vcl"},
+        ]
+        return [{"id": s["id"], "name": s["name"], "provisioned": s["id"] in existing_ids} for s in mock_services]
 
     try:
         services = fastly("GET", "/service", token=token)
@@ -111,7 +134,6 @@ def provision_list_services(token: str = Query(...)):
             ),
         )
 
-    existing_ids = set(svcconfig.list_service_ids())
     return [
         {"id": s["id"], "name": s["name"], "provisioned": s["id"] in existing_ids}
         for s in services
@@ -279,9 +301,11 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
     remove_logging: bool = body.remove_logging
     remove_cdn: bool = body.remove_cdn
     remove_bucket: bool = body.remove_bucket
+    remove_cloud_files: bool = body.remove_cloud_files
     remove_scoring: bool = body.remove_scoring
     remove_cache: bool = body.remove_cache
     remove_cron: bool = body.remove_cron
+    remove_fos_tokens: bool = body.remove_fos_tokens
     from backend import config as svcconfig
     from backend.core import duckdb as _db
     from backend.provision import _sync_crontab, perform_teardown
@@ -301,9 +325,9 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                 "logging_service_id": service_id,
                 "fos_bucket_name": svc_cfg.get("fos_bucket", ""),
                 "fos_region": svc_cfg.get("fos_region", "us-east-1"),
+                "fos_prefix": svc_cfg.get("fos_prefix", ""),
                 "fos_access_key": svc_cfg.get("fos_access_key_id", ""),
                 "fos_secret_key": svc_cfg.get("fos_secret_access_key", ""),
-                "fos_key_id": prov.get("fos_key_id", ""),
                 "endpoint_name": prov.get("endpoint_name", "Fastly Object Storage Logs"),
                 "cdn_service_id": prov.get("cdn_service_id", ""),
                 "cdn_service_name": svc_cfg.get("name", service_id),
@@ -328,7 +352,9 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
         "remove_logging": remove_logging,
         "remove_cdn": remove_cdn,
         "remove_bucket": remove_bucket,
+        "remove_cloud_files": remove_cloud_files,
         "remove_scoring": remove_scoring,
+        "remove_fos_tokens": remove_fos_tokens,
     }
 
     def stream():
@@ -550,6 +576,7 @@ def provision_execute(req: ProvisionExecuteRequest):
     commit_interval_mins = req.commit_interval_mins
     enable_cron_compact = req.enable_cron_compact
     log_retention_days = req.log_retention_days
+    rum_retention_days = req.rum_retention_days
     log_fields = req.log_fields
     import secrets
 
@@ -584,6 +611,9 @@ def provision_execute(req: ProvisionExecuteRequest):
         "commit_interval_mins": commit_interval_mins,
         "enable_cron_compact": enable_cron_compact,
         "log_retention_days": log_retention_days,
+        "rum_retention_days": rum_retention_days,
+        "logging_enabled": req.logging_enabled,
+        "rum_enabled": req.rum_enabled,
     }
 
     if log_fields:
@@ -599,6 +629,14 @@ def provision_execute(req: ProvisionExecuteRequest):
             "enabled": True,
             "mode": req.cmcd_mode or "query_string",
             "version": req.cmcd_version if req.cmcd_version is not None else 1,
+            "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
+
+    if getattr(req, "rum_enabled", False):
+        import datetime as _dt
+
+        cfg["rum"] = {
+            "enabled": True,
             "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
 
@@ -705,6 +743,77 @@ def provision_execute(req: ProvisionExecuteRequest):
         except Exception as e:
             if not error_already_emitted:
                 yield json.dumps({"type": "error", "message": str(e)})
+
+    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
+
+
+@router.post("/reconcile")
+def provision_reconcile(service_id: str, token: str):
+    """Reconcile VCL state for a service (auto-detects and removes legacy snippets).
+
+    Streams SSE events as the reconciliation proceeds through the 8-step control loop.
+    This endpoint is called during UI deployment to ensure clean VCL state and
+    automatic migration from pre-2.2 legacy snippets to consolidated VCL.
+
+    Args:
+        service_id: Fastly service ID.
+        token: Fastly API token.
+
+    Returns:
+        SSE stream with reconciliation status events.
+    """
+    import queue
+    import threading
+
+    from backend.provision.declarative.reconciler import reconcile_vcl_state
+
+    events: queue.Queue = queue.Queue()
+
+    def worker():
+        try:
+
+            def status_cb(msg: str) -> None:
+                """Push status updates to the queue for immediate real-time SSE streaming."""
+                events.put({"type": "status", "message": msg})
+
+            # Run reconciliation with streaming status callback
+            result = reconcile_vcl_state(
+                service_id=service_id,
+                token=token,
+                dry_run=False,
+                status_cb=status_cb,
+            )
+
+            # Emit final reconciliation result
+            events.put(
+                {
+                    "type": "reconciliation_result",
+                    "service_id": result.service_id,
+                    "activated_version": result.activated_version,
+                    "changes_applied": result.changes_applied,
+                    "duration_ms": result.duration_ms,
+                    "error": result.error,
+                }
+            )
+            events.put({"type": "done", "success": result.error is None})
+        except Exception as e:
+            events.put({"type": "error", "message": str(e)})
+        finally:
+            events.put(None)
+
+    threading.Thread(target=worker, daemon=True, name=f"reconcile-{service_id}").start()
+
+    async def stream():
+        import asyncio
+
+        while True:
+            try:
+                event = await asyncio.to_thread(events.get, timeout=1)
+                if event is None:
+                    break
+                yield json.dumps(event)
+            except queue.Empty:
+                pass
 
     return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
 
@@ -859,6 +968,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
         "commit_interval_mins": body.get("commit_interval_mins", 5),
         "enable_cron_compact": body.get("enable_cron_compact", True),
         "log_retention_days": body.get("log_retention_days", 30),
+        "rum_retention_days": body.get("rum_retention_days", 90),
         "provisioning": {"fos_key_id": fos_key_id},
     }
 
@@ -868,6 +978,59 @@ def provision_ingest(payload: ProvisionConfigRequest):
             state["log_fields"] = json.loads(log_fields_raw) if isinstance(log_fields_raw, str) else log_fields_raw
         except Exception:
             pass
+
+    # Construct nested CMCD config from flat fields if present
+    has_flat_cmcd = any(k in body for k in ("cmcd_enabled", "cmcd_mode", "cmcd_version"))
+    has_nested_cmcd = "cmcd" in body and isinstance(body.get("cmcd"), dict)
+    if has_flat_cmcd or has_nested_cmcd:
+        import datetime as _dt
+
+        existing_cmcd = body.get("cmcd", {}) if isinstance(body.get("cmcd"), dict) else {}
+        state["cmcd"] = {
+            "enabled": body.get("cmcd_enabled", existing_cmcd.get("enabled", False)),
+            "mode": body.get("cmcd_mode") or existing_cmcd.get("mode", "query_string"),
+            "version": body.get("cmcd_version")
+            if body.get("cmcd_version") is not None
+            else existing_cmcd.get("version", 1),
+            "enabled_at": existing_cmcd.get("enabled_at") or _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
+
+    # Construct nested Scoring config from flat fields if present
+    has_flat_scoring = any(
+        k in body
+        for k in (
+            "scoring_enabled",
+            "scoring_domain",
+            "scoring_request_secret",
+            "scoring_exclude_url_regex",
+            "scoring_enforce_status_code",
+        )
+    )
+    has_nested_scoring = "scoring" in body and isinstance(body.get("scoring"), dict)
+    if has_flat_scoring or has_nested_scoring:
+        import datetime as _dt
+
+        existing_scoring = body.get("scoring", {}) if isinstance(body.get("scoring"), dict) else {}
+        state["scoring"] = {
+            "enabled": body.get("scoring_enabled", existing_scoring.get("enabled", False)),
+            "domain": body.get("scoring_domain") or existing_scoring.get("domain", ""),
+            "request_secret": body.get("scoring_request_secret", existing_scoring.get("request_secret", "")),
+            "exclude_url_regex": body.get("scoring_exclude_url_regex", existing_scoring.get("exclude_url_regex", "")),
+            "enforce_status_code": body.get(
+                "scoring_enforce_status_code", existing_scoring.get("enforce_status_code", 429)
+            ),
+            "enabled_at": existing_scoring.get("enabled_at") or _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
+
+    # Construct nested RUM config from flat fields if present
+    if body.get("rum_enabled"):
+        import datetime as _dt
+
+        existing_rum = body.get("rum", {}) if isinstance(body.get("rum"), dict) else {}
+        state["rum"] = {
+            "enabled": True,
+            "enabled_at": existing_rum.get("enabled_at") or _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
 
     # NB: the token was already validated against this same service_id at the
     # top of the handler (validate_destructive_token above); the prior second

@@ -8373,6 +8373,833 @@
         }
       }
     },
+    "/api/services/{service_id}/rum/enable": {
+      "post": {
+        "tags": [
+          "rum"
+        ],
+        "summary": "Enable Rum Handler",
+        "description": "Enable RUM for a service (admin-only, SSE stream).",
+        "operationId": "enable_rum_handler_api_services__service_id__rum_enable_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RumEnableRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/rum/disable": {
+      "post": {
+        "tags": [
+          "rum"
+        ],
+        "summary": "Disable Rum Handler",
+        "description": "Disable RUM for a service (admin-only, SSE stream).",
+        "operationId": "disable_rum_handler_api_services__service_id__rum_disable_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RumDisableRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/rum/status": {
+      "get": {
+        "tags": [
+          "rum"
+        ],
+        "summary": "Rum Status",
+        "description": "Get RUM enable/disable status and VCL drift detection.",
+        "operationId": "rum_status_api_services__service_id__rum_status_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Rum Status Api Services  Service Id  Rum Status Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/rum/beacon-health": {
+      "get": {
+        "tags": [
+          "rum"
+        ],
+        "summary": "Rum Beacon Health",
+        "description": "Check if RUM beacons are arriving (validation endpoint for setup).",
+        "operationId": "rum_beacon_health_api_services__service_id__rum_beacon_health_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Rum Beacon Health Api Services  Service Id  Rum Beacon Health Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/rum/analytics": {
+      "get": {
+        "tags": [
+          "rum"
+        ],
+        "summary": "Rum Analytics",
+        "description": "Retrieve parsed RUM analytics from SQLite database with high-fidelity deterministic mock fallback.",
+        "operationId": "rum_analytics_api_services__service_id__rum_analytics_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Time"
+            }
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Time"
+            }
+          },
+          {
+            "name": "filters",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Filters"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Rum Analytics Api Services  Service Id  Rum Analytics Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/rum/live-events": {
+      "get": {
+        "tags": [
+          "rum"
+        ],
+        "summary": "Rum Live Events",
+        "description": "Fetch recent live beacons stream to feed frontend ticker.",
+        "operationId": "rum_live_events_api_services__service_id__rum_live_events_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response Rum Live Events Api Services  Service Id  Rum Live Events Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/bootstrap": {
       "get": {
         "tags": [
@@ -14024,6 +14851,214 @@
         }
       }
     },
+    "/api/usage/rum-breakdown": {
+      "get": {
+        "tags": [
+          "usage"
+        ],
+        "summary": "Usage Rum Breakdown",
+        "description": "Calculate RUM beacon volume and estimated FOS Class A operations cost.",
+        "operationId": "usage_rum_breakdown_api_usage_rum_breakdown_get",
+        "parameters": [
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Start"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "End"
+            }
+          },
+          {
+            "name": "by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "day",
+              "title": "By"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageRumBreakdownResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/bot-sources": {
       "get": {
         "tags": [
@@ -16709,6 +17744,131 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HealthSnapshotResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/vcl-health": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Api Vcl Health",
+        "description": "Verify VCL state after migration \u2014 check for legacy/consolidated snippet presence.\n\nReturns a dict with:\n- legacy_snippets_found: count of pre-2.2 consolidated snippets\n- consolidated_snippets_found: count of new consolidated snippets\n- is_clean: True if no legacy snippets remain\n- recommendation: guidance for the operator\n\nUsed by the admin UI post-deploy to show migration status.",
+        "operationId": "api_vcl_health_api_admin_vcl_health_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Api Vcl Health Api Admin Vcl Health Get"
                 }
               }
             }
@@ -23204,6 +24364,136 @@
           },
           "required": true
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/provision/reconcile": {
+      "post": {
+        "tags": [
+          "provision"
+        ],
+        "summary": "Provision Reconcile",
+        "description": "Reconcile VCL state for a service (auto-detects and removes legacy snippets).\n\nStreams SSE events as the reconciliation proceeds through the 8-step control loop.\nThis endpoint is called during UI deployment to ensure clean VCL state and\nautomatic migration from pre-2.2 legacy snippets to consolidated VCL.\n\nArgs:\n    service_id: Fastly service ID.\n    token: Fastly API token.\n\nReturns:\n    SSE stream with reconciliation status events.",
+        "operationId": "provision_reconcile_api_provision_reconcile_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -36601,6 +37891,40 @@
         "type": "object",
         "title": "CmcdRequest"
       },
+      "CmcdSettingsResponse": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": false
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "title": "CmcdSettingsResponse",
+        "description": "CMCD feature settings."
+      },
       "CompactionStatsResponse": {
         "properties": {
           "total_files": {
@@ -37247,6 +38571,17 @@
             ],
             "title": "Data Retention Days"
           },
+          "rum_retention_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum Retention Days"
+          },
           "cache_retention_days": {
             "anyOf": [
               {
@@ -37351,6 +38686,16 @@
           "end": {
             "type": "string",
             "title": "End"
+          },
+          "rum_bytes": {
+            "type": "integer",
+            "title": "Rum Bytes",
+            "default": 0
+          },
+          "regular_log_bytes": {
+            "type": "integer",
+            "title": "Regular Log Bytes",
+            "default": 0
           }
         },
         "type": "object",
@@ -40721,32 +42066,15 @@
             ],
             "title": "Version"
           },
-          "cmcd_enabled": {
-            "type": "boolean",
-            "title": "Cmcd Enabled",
-            "default": false
-          },
-          "cmcd_mode": {
+          "cmcd": {
             "anyOf": [
               {
-                "type": "string"
+                "$ref": "#/components/schemas/CmcdSettingsResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Cmcd Mode"
-          },
-          "cmcd_version": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cmcd Version"
+            ]
           }
         },
         "type": "object",
@@ -44259,6 +45587,28 @@
               }
             ],
             "title": "Log Fields"
+          },
+          "logging_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logging Enabled"
+          },
+          "rum_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum Enabled"
           }
         },
         "additionalProperties": true,
@@ -44490,6 +45840,11 @@
             "title": "Log Retention Days",
             "default": 30
           },
+          "rum_retention_days": {
+            "type": "integer",
+            "title": "Rum Retention Days",
+            "default": 90
+          },
           "log_fields": {
             "anyOf": [
               {
@@ -44527,6 +45882,16 @@
               }
             ],
             "title": "Cmcd Version"
+          },
+          "logging_enabled": {
+            "type": "boolean",
+            "title": "Logging Enabled",
+            "default": true
+          },
+          "rum_enabled": {
+            "type": "boolean",
+            "title": "Rum Enabled",
+            "default": false
           }
         },
         "type": "object",
@@ -44675,6 +46040,11 @@
             "title": "Remove Bucket",
             "default": true
           },
+          "remove_cloud_files": {
+            "type": "boolean",
+            "title": "Remove Cloud Files",
+            "default": true
+          },
           "remove_scoring": {
             "type": "boolean",
             "title": "Remove Scoring",
@@ -44689,6 +46059,11 @@
             "type": "boolean",
             "title": "Remove Cron",
             "default": false
+          },
+          "remove_fos_tokens": {
+            "type": "boolean",
+            "title": "Remove Fos Tokens",
+            "default": true
           }
         },
         "type": "object",
@@ -45291,6 +46666,129 @@
         ],
         "title": "ResetLogsRequest",
         "description": "Body for ``POST /api/admin/reset-logs`` \u2014 a destructive wipe of one\nservice's log data. ``confirm`` must equal the resolved service id\n(belt-and-suspenders alongside the ``x-service-id``/``?service_id``\nresolution) so a stale/mistargeted request fails loud instead of\nsilently wiping the wrong service."
+      },
+      "RumBreakdownPoint": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "title": "Date"
+          },
+          "beacon_count": {
+            "type": "integer",
+            "title": "Beacon Count"
+          },
+          "estimated_class_a_ops": {
+            "type": "integer",
+            "title": "Estimated Class A Ops"
+          },
+          "estimated_cost_usd": {
+            "type": "number",
+            "title": "Estimated Cost Usd"
+          }
+        },
+        "type": "object",
+        "required": [
+          "date",
+          "beacon_count",
+          "estimated_class_a_ops",
+          "estimated_cost_usd"
+        ],
+        "title": "RumBreakdownPoint"
+      },
+      "RumDisableRequest": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "default": ""
+          },
+          "remove_cloud_files": {
+            "type": "boolean",
+            "title": "Remove Cloud Files",
+            "default": true
+          },
+          "remove_bucket": {
+            "type": "boolean",
+            "title": "Remove Bucket",
+            "default": false
+          },
+          "activate": {
+            "type": "boolean",
+            "title": "Activate",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "RumDisableRequest",
+        "description": "Body for ``POST /api/services/{service_id}/rum/disable`` \u2014 selective\ndestructive removal of Real User Monitoring (RUM)."
+      },
+      "RumEnableRequest": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "default": ""
+          },
+          "activate": {
+            "type": "boolean",
+            "title": "Activate",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "RumEnableRequest",
+        "description": "Body for ``POST /api/services/{service_id}/rum/enable`` \u2014 selective\nonboarding/enabling of Real User Monitoring (RUM)."
+      },
+      "RumSettingsPartial": {
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "sync_interval_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Interval Seconds"
+          },
+          "commit_interval_mins": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit Interval Mins"
+          },
+          "delete_after": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delete After"
+          }
+        },
+        "type": "object",
+        "title": "RumSettingsPartial",
+        "description": "Partial-update for RUM-specific config (sync interval + retention)."
       },
       "SavedView": {
         "properties": {
@@ -49253,6 +50751,28 @@
               }
             ],
             "title": "Ngwaf Workspace Id"
+          },
+          "logging_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logging Enabled"
+          },
+          "rum_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum Enabled"
           }
         },
         "type": "object",
@@ -49400,6 +50920,16 @@
                 "type": "null"
               }
             ]
+          },
+          "rum": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RumSettingsPartial"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -49477,6 +51007,17 @@
               }
             ],
             "title": "Data Retention Days"
+          },
+          "rum_retention_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum Retention Days"
           },
           "cache_retention_days": {
             "anyOf": [
@@ -52353,6 +53894,93 @@
         ],
         "title": "UsageOperationsResponse"
       },
+      "UsageRumBreakdownResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/RumBreakdownPoint"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "total_beacons": {
+            "type": "integer",
+            "title": "Total Beacons"
+          },
+          "total_estimated_class_a": {
+            "type": "integer",
+            "title": "Total Estimated Class A"
+          },
+          "total_estimated_cost_usd": {
+            "type": "number",
+            "title": "Total Estimated Cost Usd"
+          },
+          "class_a_rate_per_1k": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Class A Rate Per 1K"
+          },
+          "average_beacons_per_day": {
+            "type": "number",
+            "title": "Average Beacons Per Day"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "total_beacons",
+          "total_estimated_class_a",
+          "total_estimated_cost_usd",
+          "average_beacons_per_day",
+          "note"
+        ],
+        "title": "UsageRumBreakdownResponse"
+      },
       "UxEventPayload": {
         "properties": {
           "event": {
@@ -52704,7 +54332,7 @@
           "format_length_limit": {
             "type": "integer",
             "title": "Format Length Limit",
-            "default": 8000
+            "default": 12000
           }
         },
         "type": "object",

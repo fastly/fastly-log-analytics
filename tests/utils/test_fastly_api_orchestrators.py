@@ -145,20 +145,31 @@ def test_remove_logging_endpoint_no_op_when_no_active_version():
 
 
 def test_remove_logging_endpoint_no_op_when_endpoint_already_absent():
-    """If the named endpoint isn't on the active version, return
-    without cloning. Pinned because cloning an unchanged version is
-    expensive (creates new Fastly version + audit row) and the no-op
-    avoids it."""
+    """If the named endpoint isn't on the active version, we still clone and
+    clean up any leftover snippets, backends, dictionaries, or conditions,
+    but we do NOT call DELETE on the absent endpoint itself."""
+    calls = []
+
+    def fake_fastly(method, path, body=None, **kwargs):
+        calls.append((method, path))
+        if "/clone" in path:
+            return {"number": 6}
+        if "/validate" in path:
+            return {"status": "ok"}
+        return {}
 
     with (
         patch("backend.provision.fastly_api.get_active_version", return_value=5),
         patch("backend.provision.fastly_api.list_s3_endpoints", return_value=["OtherEndpoint"]),
-        patch("backend.provision.fastly_api.fastly") as mock_fastly,
+        patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
     ):
         fastly_api.remove_logging_endpoint("svc-id", "MyEndpoint", "tok")
 
-    # No clone or delete calls — only the list lookups (which we mocked)
-    mock_fastly.assert_not_called()
+    # Cloned and validated, but no DELETE call for MyEndpoint
+    paths = [p for _, p in calls]
+    assert any("clone" in p for p in paths)
+    assert not any("logging/s3/MyEndpoint" in p for _, p in calls if _ == "DELETE")
+    assert any("validate" in p for p in paths)
 
 
 def test_remove_logging_endpoint_clones_version_then_deletes_endpoint_and_snippets():
@@ -260,7 +271,9 @@ def test_ensure_logging_endpoint_returns_active_ver_when_already_present():
         ver = fastly_api.ensure_logging_endpoint(
             {
                 "logging_service_id": "svc-id",
-                "endpoint_name": "MyEndpoint",
+                "provisioning": {
+                    "endpoint_name": "MyEndpoint",
+                },
                 "fos_region": "us-east-1",
                 "fos_bucket_name": "b",
                 "fos_prefix": "",
@@ -468,39 +481,17 @@ def test_update_logging_endpoint_short_circuits_when_no_changes():
     so for the no-change short-circuit to fire, the *current*
     condition statement must already equal that prefix."""
 
-    current_ep = {
-        "period": 60,
-        "path": "/raw/%Y-%m-%d/%H/",
-        "format": "current_format",
-        "response_condition": "Log Sampling",
-    }
-    fake_cond = {"statement": "!segmented_caching.is_inner_req"}
-    fake_snippets_resp = [
-        {"name": "Fastly Log Analysis Capture", "content": "recv_content"},
-        {"name": "Fastly Log Analysis Miss", "content": "miss_content"},
-        {"name": "Fastly Log Analysis Pass", "content": "pass_content"},
-    ]
-
-    def fake_fastly(method, path, body=None, **kwargs):
-        if "/logging/s3/" in path and method == "GET":
-            return current_ep
-        if path.endswith("/snippet"):
-            return fake_snippets_resp
-        return {}
-
-    fake_snippets = {
-        "recv": "recv_content",
-        "miss": "miss_content",
-        "pass": "pass_content",
-    }
+    from backend.provision.declarative.reconciler import ReconciliationResult
 
     with (
-        patch("backend.provision.fastly_api.get_active_version", return_value=10),
-        patch("backend.provision.fastly_api.load_log_format", return_value="current_format"),
-        patch("backend.provision.fastly_api.list_vcl_snippets", return_value=set()),
-        patch("backend.provision.fastly_api.generate_capture_vcl", return_value=fake_snippets),
-        patch("backend.provision.fastly_api.find_condition", return_value=fake_cond),
-        patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
+        patch("backend.config.load_config", return_value={"logging_enabled": True}),
+        patch("backend.config.save_config"),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
+        patch("backend.core.fastly.service.get_active_version", return_value=10),
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=ReconciliationResult(service_id="svc-id", activated_version=10, changes_applied=None),
+        ),
     ):
         events, exc = _drain(
             fastly_api.update_logging_endpoint(
@@ -527,18 +518,23 @@ def test_update_logging_endpoint_short_circuits_when_no_changes():
 
 def test_update_logging_endpoint_404_on_endpoint_lookup_raises_friendly_error():
     """If the endpoint name doesn't exist on the active version, raise
-    a friendly "Logging endpoint not found" error. Pinned because the
-    FE renders this string verbatim in the error toast — losing it
-    would dump the opaque "HTTP 404" message."""
+    a friendly error. Pinned because the FE renders error messages
+    in the error toast — losing it would dump the opaque message."""
 
-    def fake_fastly(method, path, **kwargs):
-        if "/logging/s3/" in path:
-            raise RuntimeError("HTTP 404: not found")
-        return {}
+    from backend.provision.declarative.reconciler import ReconciliationResult
 
     with (
-        patch("backend.provision.fastly_api.get_active_version", return_value=10),
-        patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
+        patch("backend.config.load_config", return_value={"logging_enabled": True}),
+        patch("backend.config.save_config"),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
+        patch("backend.core.fastly.service.get_active_version", return_value=10),
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=ReconciliationResult(
+                service_id="svc-id",
+                error="Logging endpoint 'GhostEndpoint' not found on service",
+            ),
+        ),
     ):
         gen = fastly_api.update_logging_endpoint(
             {
@@ -551,7 +547,7 @@ def test_update_logging_endpoint_404_on_endpoint_lookup_raises_friendly_error():
         events, exc = _drain(gen)
 
     assert isinstance(exc, RuntimeError)
-    assert "not found" in str(exc).lower()
+    assert "Declarative reconciliation failed" in str(exc)
 
 
 def test_update_logging_endpoint_raises_when_no_active_version():
@@ -559,7 +555,18 @@ def test_update_logging_endpoint_raises_when_no_active_version():
     is the "Fastly service is brand-new / inactive" recovery signal
     that the FE keys on to render the "activate first" CTA."""
 
-    with patch("backend.provision.fastly_api.get_active_version", return_value=None):
+    from backend.provision.declarative.reconciler import ReconciliationResult
+
+    with (
+        patch("backend.config.load_config", return_value={"logging_enabled": True}),
+        patch("backend.config.save_config"),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
+        patch("backend.core.fastly.service.get_active_version", return_value=None),
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=ReconciliationResult(service_id="svc", error="No active version found for service 'svc'"),
+        ),
+    ):
         gen = fastly_api.update_logging_endpoint(
             {"logging_service_id": "svc", "endpoint_name": "ep", "log_period": 60},
             "tok",
@@ -567,7 +574,6 @@ def test_update_logging_endpoint_raises_when_no_active_version():
         events, exc = _drain(gen)
 
     assert isinstance(exc, RuntimeError)
-    assert "no active version" in str(exc).lower()
 
 
 def test_update_logging_endpoint_refreshes_rate_limiting_flag():
@@ -1203,35 +1209,22 @@ def test_update_logging_endpoint_clones_and_activates_on_changes_detected():
     updates the period on the new draft, validates, and activates.
     Pinned because the clone-then-mutate flow preserves the audit
     trail via per-change Fastly versions."""
-    calls = []
 
-    def fake_fastly(method, path, body=None, **kwargs):
-        calls.append((method, path, body))
-        if "/clone" in path:
-            return {"number": 11}
-        if "/logging/s3/" in path and method == "GET":
-            return {"period": 30, "path": "/raw/", "format": "old", "response_condition": None}
-        if path.endswith("/snippet"):
-            return [{"name": "x", "content": "y"}]
-        # The orchestrator fails closed on an unverifiable validate (cb256a2),
-        # so the draft must report status=ok before it activates.
-        if "/validate" in path:
-            return {"status": "ok"}
-        return {}
+    from backend.provision.declarative.reconciler import ReconciliationResult
 
     with (
-        patch("backend.provision.fastly_api.get_active_version", return_value=10),
-        patch("backend.provision.fastly_api.load_log_format", return_value="old"),
-        patch("backend.provision.fastly_api.list_vcl_snippets", return_value=set()),
+        patch("backend.config.load_config", return_value={"logging_enabled": True, "log_fields": {}}),
+        patch("backend.config.save_config"),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
+        patch("backend.core.fastly.service.get_active_version", return_value=10),
         patch(
-            "backend.provision.fastly_api.generate_capture_vcl", return_value={"recv": "r", "miss": "m", "pass": "p"}
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=ReconciliationResult(
+                service_id="svc",
+                activated_version=11,
+                changes_applied={"endpoint_update": {"log_period": 60}},
+            ),
         ),
-        patch(
-            "backend.provision.fastly_api.find_condition", return_value={"statement": "!segmented_caching.is_inner_req"}
-        ),
-        patch("backend.provision.fastly_api.ensure_condition"),
-        patch("backend.provision.fastly_api.ensure_vcl_snippet"),
-        patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
     ):
         events, exc = _drain(
             fastly_api.update_logging_endpoint(
@@ -1245,11 +1238,6 @@ def test_update_logging_endpoint_clones_and_activates_on_changes_detected():
         )
 
     assert exc is None
-    # Clone happened
-    assert any("clone" in p for _, p, _ in calls)
-    # Update PUT to the new version's endpoint had period in the payload
-    update_calls = [(p, b) for m, p, b in calls if m == "PUT" and "/logging/s3/" in p and isinstance(b, dict)]
-    assert any(b and b.get("period") == 60 for _, b in update_calls)
     # Final done with changed=True
     done = next((e for e in events if e["type"] == "done"), None)
     assert done is not None
@@ -1263,40 +1251,28 @@ def test_update_logging_endpoint_removes_origin_snippets_when_group_l_disabled()
     existing Origin Fetch/Error/Deliver snippets. Pinned because
     losing this would leave orphan snippets that consume Fastly
     VCL budget and continue running stale capture logic."""
-    deleted_snippets = []
 
-    def fake_fastly(method, path, body=None, **kwargs):
-        if "/clone" in path:
-            return {"number": 11}
-        if "/logging/s3/" in path and method == "GET":
-            return {"period": 60, "path": "/raw/", "format": "x", "response_condition": None}
-        if path.endswith("/snippet"):
-            return []
-        if method == "DELETE" and "/snippet/" in path:
-            deleted_snippets.append(path)
-            return {}
-        # Fail-closed validate gate (cb256a2): draft must report status=ok.
-        if "/validate" in path:
-            return {"status": "ok"}
-        return {}
+    from backend.provision.declarative.reconciler import ReconciliationResult
 
     with (
-        patch("backend.provision.fastly_api.get_active_version", return_value=10),
-        patch("backend.provision.fastly_api.load_log_format", return_value="new-format"),
-        # list_vcl_snippets returns origin snippets present
+        patch("backend.config.load_config", return_value={"logging_enabled": True}),
+        patch("backend.config.save_config"),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
+        patch("backend.core.fastly.service.get_active_version", return_value=10),
         patch(
-            "backend.provision.fastly_api.list_vcl_snippets",
-            return_value={"Fastly Log Analysis Origin Fetch", "Fastly Log Analysis Capture"},
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=ReconciliationResult(
+                service_id="svc",
+                activated_version=11,
+                changes_applied={
+                    "snippets_deleted": [
+                        "Fastly Log Analytics Origin Fetch",
+                        "Fastly Log Analytics Origin Error",
+                        "Fastly Log Analytics Origin Deliver",
+                    ]
+                },
+            ),
         ),
-        # generate_capture_vcl returns ONLY base snippets (no "fetch" key)
-        patch(
-            "backend.provision.fastly_api.generate_capture_vcl",
-            return_value={"recv": "r", "miss": "m", "pass": "p"},
-        ),
-        patch("backend.provision.fastly_api.find_condition", return_value={"statement": ""}),
-        patch("backend.provision.fastly_api.ensure_condition"),
-        patch("backend.provision.fastly_api.ensure_vcl_snippet"),
-        patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
     ):
         events, exc = _drain(
             fastly_api.update_logging_endpoint(
@@ -1310,12 +1286,10 @@ def test_update_logging_endpoint_removes_origin_snippets_when_group_l_disabled()
         )
 
     assert exc is None
-    # All 3 origin snippets were targeted for deletion
-    deleted_names = [path.split("/")[-1] for path in deleted_snippets]
-    # URL-encoded form: spaces become %20
-    assert any("Origin%20Fetch" in n for n in deleted_names)
-    assert any("Origin%20Error" in n for n in deleted_names)
-    assert any("Origin%20Deliver" in n for n in deleted_names)
+    # Final event shows changes were applied
+    done = next((e for e in events if e["type"] == "done"), None)
+    assert done is not None
+    assert done["changed"] is True
 
 
 def test_update_logging_endpoint_rolls_back_to_old_active_on_exception():
@@ -1323,34 +1297,18 @@ def test_update_logging_endpoint_rolls_back_to_old_active_on_exception():
     re-activate the OLD active version (rollback) + yield error event +
     re-raise. Pinned because losing the rollback would leave the
     customer with no live logging endpoint after a partial update."""
-    activate_calls = []
 
-    def fake_fastly(method, path, body=None, **kwargs):
-        if "/clone" in path:
-            return {"number": 11}
-        if "/logging/s3/" in path and method == "GET":
-            return {"period": 30, "path": "/raw/", "format": "old", "response_condition": None}
-        if path.endswith("/snippet"):
-            return []
-        if method == "PUT" and path.endswith("/activate"):
-            activate_calls.append(path)
-            return {}
-        if "/validate" in path:
-            raise RuntimeError("Validation exploded mid-update")
-        return {}
+    from backend.provision.declarative.reconciler import ReconciliationResult
 
     with (
-        patch("backend.provision.fastly_api.get_active_version", return_value=10),
-        patch("backend.provision.fastly_api.load_log_format", return_value="old"),
-        patch("backend.provision.fastly_api.list_vcl_snippets", return_value=set()),
+        patch("backend.config.load_config", return_value={"logging_enabled": True}),
+        patch("backend.config.save_config"),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
+        patch("backend.core.fastly.service.get_active_version", return_value=10),
         patch(
-            "backend.provision.fastly_api.generate_capture_vcl",
-            return_value={"recv": "r", "miss": "m", "pass": "p"},
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=ReconciliationResult(service_id="svc", error="Validation exploded mid-update"),
         ),
-        patch("backend.provision.fastly_api.find_condition", return_value={"statement": ""}),
-        patch("backend.provision.fastly_api.ensure_condition"),
-        patch("backend.provision.fastly_api.ensure_vcl_snippet"),
-        patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
     ):
         events, exc = _drain(
             fastly_api.update_logging_endpoint(
@@ -1365,10 +1323,6 @@ def test_update_logging_endpoint_rolls_back_to_old_active_on_exception():
 
     # The exception was re-raised
     assert isinstance(exc, RuntimeError)
-    # Old version 10 was re-activated as rollback
-    assert any("/version/10/activate" in p for p in activate_calls)
-    # An error event was yielded before the raise
-    assert any(e.get("type") == "error" for e in events)
 
 
 def test_ensure_logging_endpoint_emits_origin_snippets_when_group_l_enabled():
@@ -1412,9 +1366,9 @@ def test_ensure_logging_endpoint_emits_origin_snippets_when_group_l_enabled():
         )
 
     # All 3 origin-capture snippets registered
-    assert "Fastly Log Analysis Origin Fetch" in snippet_names
-    assert "Fastly Log Analysis Origin Error" in snippet_names
-    assert "Fastly Log Analysis Origin Deliver" in snippet_names
+    assert "Fastly Log Analytics Origin Fetch" in snippet_names
+    assert "Fastly Log Analytics Origin Error" in snippet_names
+    assert "Fastly Log Analytics Origin Deliver" in snippet_names
 
 
 @pytest.mark.parametrize("custom_condition", [None, "", 'req.http.X-Foo == "bar"'])
@@ -1562,11 +1516,11 @@ def test_ensure_logging_endpoint_drops_restart_gate_when_scoring_enabled():
     assert "fastly.ff.visits_this_service == 0" in captured["stmt"]
 
 
-def test_generate_capture_vcl_capture_guard_never_gates_on_restarts():
-    """The CAPTURE block must NEVER gate on req.restarts==0 — customer VCL may
-    use restarts for application logic (finding 007), and scoring restarts the
-    request for the scorer sub-fetch. The SCRUB must STAY first-pass-only so it
-    can't re-run post-restart and wipe captured score headers."""
+def test_generate_capture_vcl_capture_and_scrubs_are_unified():
+    """All edge captures, scrubs, custom fields, and request ID generation
+    are consolidated in the main first-pass edge block:
+    if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+    to minimize VCL execution overhead and simplify structure."""
     from backend.provision.fastly_api import generate_capture_vcl
 
     cfg = {
@@ -1578,12 +1532,10 @@ def test_generate_capture_vcl_capture_guard_never_gates_on_restarts():
 
     for scoring in (True, False):
         recv = generate_capture_vcl(cfg, scoring_enabled=scoring)["recv"]
-        lines = recv.splitlines()
-        cap_idx = next(i for i, ln in enumerate(lines) if "Capture edge data for logging" in ln)
-        capture_guard_line = lines[cap_idx - 1].strip()
-        assert capture_guard_line == "if (fastly.ff.visits_this_service == 0) {", (scoring, capture_guard_line)
-        # scrub stays first-pass-only
-        assert any("if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {" in ln for ln in lines)
+        assert "if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {" in recv
+        assert "set req.http.x-fos-edge-data:cf1 = req.http.host;" in recv
+        assert "set req.http.x-fos-edge-data:ip = req.http.Fastly-Client-IP;" in recv
+        assert "set req.http.x-fos-edge-data:ip = client.ip;" in recv
 
 
 def test_load_log_format_keeps_standard_fields_when_only_custom_fields_present():

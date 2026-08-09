@@ -44,10 +44,18 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend import config
 from backend.main import app
+from backend.provision import fastly_api
+
+
+@pytest.fixture(autouse=True)
+def force_8000_safe_max(monkeypatch):
+    monkeypatch.setattr(fastly_api, "FASTLY_LOG_FORMAT_SAFE_MAX", 8000)
+
 
 _BASE_PAYLOAD = {
     "label": "L",

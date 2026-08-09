@@ -65,7 +65,6 @@ vi.mock('@/app/logs/_state', () => ({
     lines: [],
     purgeMutation: { isPending: false, mutate: vi.fn() },
     reset: vi.fn(),
-    setHasSyncedExtents: vi.fn(),
     setSseDescription: vi.fn(),
     setSseTitle: vi.fn(),
     setStatusFilter: vi.fn(),

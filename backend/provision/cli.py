@@ -186,7 +186,7 @@ def handle_teardown(args):
                 "fos_access_key": svc_cfg.get("fos_access_key_id", ""),
                 "fos_secret_key": svc_cfg.get("fos_secret_access_key", ""),
                 "fos_key_id": prov_cfg.get("fos_key_id", ""),
-                "endpoint_name": prov_cfg.get("endpoint_name", "Fastly Object Storage Logs"),
+                "endpoint_name": prov_cfg.get("endpoint_name", "Fastly Log Analytics"),
                 "cdn_service_id": prov_cfg.get("cdn_service_id", ""),
                 "cdn_service_name": svc_cfg.get("name", service_id),
                 "cdn_url": prov_cfg.get("cdn_url", ""),
@@ -205,7 +205,7 @@ def handle_teardown(args):
             "logging_service_id": getattr(args, "service_id", None),
             "fos_bucket_name": args.bucket,
             "fos_region": getattr(args, "region", None) or "us-east-1",
-            "endpoint_name": getattr(args, "endpoint_name", None) or "Fastly Object Storage Logs",
+            "endpoint_name": getattr(args, "endpoint_name", None) or "Fastly Log Analytics",
             "cdn_service_id": None,
             "fos_key_id": None,
         }

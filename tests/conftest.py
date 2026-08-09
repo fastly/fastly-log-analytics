@@ -214,6 +214,22 @@ def _seed_random():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _mock_disk_usage():
+    """Mock shutil.disk_usage globally so tests are robust against host disk pressure."""
+    import shutil
+    from collections import namedtuple
+
+    usage_tuple = namedtuple("usage", ["total", "used", "free"])
+    # Mock a large disk: 500 GB total, 450 GB free (90% free space)
+    mocked_usage = usage_tuple(500 * 1024 * 1024 * 1024, 50 * 1024 * 1024 * 1024, 450 * 1024 * 1024 * 1024)
+
+    original_disk_usage = shutil.disk_usage
+    shutil.disk_usage = lambda path: mocked_usage
+    yield
+    shutil.disk_usage = original_disk_usage
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _close_telemetry_proxy_at_session_end():
     """Close the local telemetry proxy's aiohttp session once per worker at
     session teardown.

@@ -4,10 +4,13 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useSyncStatus, useIsAnalyst } from '@/hooks/useSyncStatus'
+import { client } from '@/lib/api'
+import { useBootstrapPending } from '@/hooks/useIsDataReady'
+import { useIsAnalyst, useSyncStatus, type SyncStatus } from '@/hooks/useSyncStatus'
 import { useHeaderBadgeStream } from '@/hooks/useHeaderBadgeStream'
 import { useAdminEventStream, type AdminEventChannel } from '@/hooks/useAdminEventStream'
-import { useLastSync } from '@/hooks/useLastSync'
+import { useLastSync, type LastSyncInfo } from '@/hooks/useLastSync'
+import { useQueryClient } from '@tanstack/react-query'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useElapsedTime } from '@/hooks/useElapsedTime'
@@ -70,11 +73,46 @@ function StalenessDot({ timestamp }: { timestamp: string }) {
 
 export function SyncStatusBadge() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const queryClient = useQueryClient()
+
+  // Sibling Warning and Cache Mount Race Fix: returning null on the first client
+  // render lets us safely and synchronously seed the query cache with empty/placeholder
+  // records inside a post-mount useEffect BEFORE we call useSyncStatus / useLastSync.
+  // This guarantees that when the inner component mounts and calls those hooks, the cache
+  // keys already exist and we never trigger a mid-render QueryCache.build -> add notify
+  // update that causes React 19 setState-in-render violations.
+  const [ready, setReady] = useState(false)
+  useEffect(() => {
+    if (activeServiceId) {
+      const existingStatus = queryClient.getQueryData(['sync-status', activeServiceId])
+      if (existingStatus === undefined) {
+        queryClient.setQueryData(['sync-status', activeServiceId], null)
+      }
+      const existingLast = queryClient.getQueryData(['last-sync', activeServiceId])
+      if (existingLast === undefined) {
+        queryClient.setQueryData(['last-sync', activeServiceId], null)
+      }
+    }
+    queueMicrotask(() => {
+      setReady(true)
+    })
+  }, [activeServiceId, queryClient])
+
+  if (!ready) return null
+
+  return <SyncStatusBadgeInner />
+}
+
+function SyncStatusBadgeInner() {
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
   const { full, abbr } = useDateFormat()
   const pathname = usePathname()
+  const queryClient = useQueryClient()
 
   const { data: status } = useSyncStatus()
   const { data: lastSync } = useLastSync()
+
+  const bootstrapPending = useBootstrapPending()
   const isAnalyst = useIsAnalyst()
 
   // /share-login is the anonymous landing for unauthenticated remote
@@ -181,8 +219,55 @@ export function SyncStatusBadge() {
     : null
   const showLiveDot = liveDotTitle !== null
 
+  // Extract RUM and REQUEST metrics from bootstrap
+  const rumMetrics = (headerBadge as any)?.rum
+  const requestMetrics = (headerBadge as any)?.request
+
+  const renderStreamBadge = (
+    label: string,
+    latestTs: string | null | undefined,
+    totalRows: number | null | undefined,
+    lastSyncTs: string | null | undefined,
+  ) => {
+    const hasData = latestTs || totalRows != null
+    if (!hasData) return null
+
+    return (
+      <div key={label} className="flex items-center gap-1.5">
+        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+        {latestTs ? (
+          <Tooltip>
+            <TooltipTrigger render={
+              <Badge
+                variant="secondary"
+                tabIndex={0}
+                role="button"
+                aria-label={`${label} latest log details`}
+                className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors text-xs tabular-nums"
+              >
+                <TimeAgo timestamp={latestTs} />
+                {latestTs && <StalenessDot timestamp={latestTs} />}
+              </Badge>
+            } />
+            <TooltipContent className="text-xs">
+              Latest: {full(latestTs)} {abbr()}
+              {lastSyncTs && <div className="mt-1">Last sync: {full(lastSyncTs)} {abbr()}</div>}
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <Badge variant="secondary" className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 text-xs">
+            Never
+          </Badge>
+        )}
+        {totalRows != null && (
+          <span className="text-xs text-muted-foreground">({totalRows.toLocaleString()})</span>
+        )}
+      </div>
+    )
+  }
+
   return (
-    <div className="hidden md:flex items-center gap-2 mr-2 animate-in fade-in zoom-in-95">
+    <div className="hidden md:flex flex-col gap-2 mr-2 animate-in fade-in zoom-in-95">
       {showLiveDot && (
         <Tooltip>
           <TooltipTrigger render={
@@ -210,92 +295,24 @@ export function SyncStatusBadge() {
           <TooltipContent className="text-xs">{liveDotTitle}</TooltipContent>
         </Tooltip>
       )}
-      {localRows != null && (
-        <Badge variant="secondary" className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors min-w-[172px] tabular-nums">
-          <strong className="text-foreground mr-1">Total Logs:</strong>
-          {localRows.toLocaleString()}
-        </Badge>
+
+      {/* REQUEST logs row */}
+      {renderStreamBadge(
+        'REQUEST',
+        requestMetrics?.latest_log_at,
+        requestMetrics?.total_rows,
+        requestMetrics?.last_sync_at,
       )}
 
-      {lastSync?.started_at && (
-        <Tooltip>
-          {/* A-8 (a11y, WCAG 2.1.1): tabIndex + role="button" so keyboard
-              users can focus this badge and read the full timestamp tooltip. */}
-          <TooltipTrigger render={
-            <Badge
-              variant="secondary"
-              tabIndex={0}
-              role="button"
-              aria-label="Last sync details"
-              aria-live="off"
-              className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors min-w-[156px] tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <strong className="text-foreground mr-1">Last Sync:</strong>
-              {lastSync.status === 'running' ? (
-                <span className="inline-flex items-center gap-1" aria-label="Sync in progress">
-                  <Loader2 className="h-3 w-3 animate-spin shrink-0 text-blue-500" aria-hidden="true" />
-                  {lastSync.started_at && <HeaderLiveTimer startedAt={lastSync.started_at} />}
-                </span>
-              ) : (
-                <TimeAgo timestamp={
-                  lastSync.duration_s != null && lastSync.started_at
-                    ? new Date(new Date(lastSync.started_at).getTime() + lastSync.duration_s * 1000).toISOString()
-                    : lastSync.started_at
-                } />
-              )}
-              {lastSync.status === 'error' && (
-                <span
-                  role="img"
-                  aria-label="Last sync errored"
-                  title="Last sync errored"
-                  className="ml-1.5 text-red-500"
-                >●</span>
-              )}
-            </Badge>
-          } />
-          <TooltipContent className="text-xs">
-            {full(
-              lastSync.duration_s != null && lastSync.started_at
-                ? new Date(new Date(lastSync.started_at).getTime() + lastSync.duration_s * 1000).toISOString()
-                : lastSync.started_at
-            )} {abbr()} — status: {lastSync.status ?? 'unknown'}
-            {lastSync.duration_s != null && ` — duration ${lastSync.duration_s.toFixed(1)}s`}
-          </TooltipContent>
-        </Tooltip>
+      {/* RUM logs row */}
+      {renderStreamBadge(
+        'RUM',
+        rumMetrics?.latest_log_at,
+        rumMetrics?.total_rows,
+        rumMetrics?.last_sync_at,
       )}
 
-      {fileTs ? (
-        <Tooltip>
-          {/* A-8 (a11y, WCAG 2.1.1): tabIndex + role="button" so keyboard
-              users can focus this badge and read the full timestamp tooltip. */}
-          <TooltipTrigger render={
-            <Badge
-              variant="secondary"
-              tabIndex={0}
-              role="button"
-              aria-label="Latest log details"
-              aria-live="off"
-              className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors min-w-[156px] tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <strong className="text-foreground mr-1">Latest Log:</strong>
-              <TimeAgo timestamp={fileTs} />
-              <StalenessDot timestamp={fileTs} />
-            </Badge>
-          } />
-          <TooltipContent className="text-xs">
-            {full(fileTs)} {abbr()}
-          </TooltipContent>
-        </Tooltip>
-      ) : (
-        <Badge variant="secondary" className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10">
-          <strong className="text-foreground mr-1">Latest Log:</strong>
-          Never
-        </Badge>
-      )}
-
-      {/* a11y: sr-only live region for screen readers — announces sync
-          state transitions (started / finished / errored) only when the
-          status actually changes, not on every poll. */}
+      {/* a11y: sr-only live region for screen readers */}
       <span role="status" aria-live="polite" className="sr-only">
         {a11yAnnouncement}
       </span>

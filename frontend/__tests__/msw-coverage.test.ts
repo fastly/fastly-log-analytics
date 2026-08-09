@@ -68,6 +68,7 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/usage/operations',
   'GET /api/usage/bandwidth',
   'GET /api/usage/log-activity',
+  'GET /api/usage/rum-breakdown',
   'GET /api/admin/compaction-stats',
   'GET /api/admin/metric-history',
   'GET /api/admin/iceberg-tree',
@@ -79,6 +80,8 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/download-all',
 
   // Admin mutation endpoints — Playwright E2E coverage.
+  'GET /api/admin/vcl-health',
+  'POST /api/provision/reconcile',
   'POST /api/admin/optimize-now',
   'POST /api/admin/local-compact-now',
   'POST /api/admin/backfill-window',
@@ -129,11 +132,28 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/services/:service_id/scoring/evaluation/per-reason',
   'GET /api/services/:service_id/scoring/dashboard',
 
+  // Real User Monitoring (RUM) analytics & live-events are covered by
+  // Playwright end-to-end tests or are polling endpoints.
+  'GET /api/services/:service_id/rum/analytics',
+  'GET /api/services/:service_id/rum/live-events',
+
   // CMCD admin — SSE-streamed enable/disable + status. Admin-only flows
   // covered by Playwright E2E; same pattern as scoring admin endpoints.
   'GET /api/services/:service_id/cmcd/status',
   'POST /api/services/:service_id/cmcd/enable',
   'POST /api/services/:service_id/cmcd/disable',
+
+  // RUM admin — SSE-streamed enable/disable + status. Admin-only provisioning
+  // flows covered by Playwright E2E; same pattern as scoring/cmcd endpoints.
+  // Health/vitals/errors are Phase 3 stubs; beacon-health validates setup
+  // (checks if beacons are arriving), exercised via admin tests.
+  'GET /api/services/:service_id/rum/status',
+  'POST /api/services/:service_id/rum/enable',
+  'POST /api/services/:service_id/rum/disable',
+  'GET /api/services/:service_id/rum/beacon-health',
+  'GET /api/services/:service_id/rum/health',
+  'GET /api/services/:service_id/rum/vitals',
+  'GET /api/services/:service_id/rum/errors',
 
   // Control Room — Phase 0 stubs. Tab GET returns canned data, mutation
   // endpoints are 501 placeholders, SSE is a heartbeat. Covered by

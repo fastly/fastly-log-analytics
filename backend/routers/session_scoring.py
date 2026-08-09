@@ -447,8 +447,16 @@ def scoring_enable(
             detail={"error": "Fastly API token required (pass in JSON body or set in service config)"},
         )
 
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id) or {}
+    scoring_cfg = cfg.get("scoring") or {}
+    scoring_cfg["enabled"] = True
+    cfg["scoring"] = scoring_cfg
+    svcconfig.save_config(service_id, cfg)
+
+    from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as enable_scoring
     from backend.provision.orchestrator import run_with_events
-    from backend.provision.session_scoring_orchestrator import enable_scoring
 
     def stream():
         import json
@@ -524,8 +532,15 @@ def scoring_disable(
             detail={"error": "Fastly API token required"},
         )
 
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id) or {}
+    if "scoring" in cfg:
+        cfg["scoring"]["enabled"] = False
+    svcconfig.save_config(service_id, cfg)
+
+    from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as disable_scoring
     from backend.provision.orchestrator import run_with_events
-    from backend.provision.session_scoring_orchestrator import disable_scoring
 
     def stream():
         import json

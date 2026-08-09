@@ -303,8 +303,16 @@ def _background_startup():
                 configs = svcconfig.list_configs()
                 logging.info("[fastapi] Initialising %d services...", len(configs))
 
-                with ThreadPoolExecutor(max_workers=4) as executor:
-                    executor.map(_initialize_service, configs)
+                executor = ThreadPoolExecutor(max_workers=4)
+                futures = [executor.submit(_initialize_service, cfg) for cfg in configs]
+                from concurrent.futures import wait as _futures_wait
+
+                done, not_done = _futures_wait(futures, timeout=1.0)
+                if not_done:
+                    logging.info(
+                        "[fastapi] Some services are taking longer to initialize; continuing startup in background."
+                    )
+                executor.shutdown(wait=False)
 
             except Exception as e:
                 logging.error("[fastapi] Background startup error: %s", e, exc_info=True)
@@ -335,6 +343,38 @@ def _enforce_data_dir_mounted() -> None:
         )
         logging.critical(msg)
         raise RuntimeError(msg)
+
+
+def _migrate_config_on_startup() -> None:
+    """Auto-migrate legacy flat configs to nested structure on service startup.
+
+    This runs BEFORE any code reads config files, ensuring all configs in memory
+    are in the new nested format. Migration is idempotent: calling on already-nested
+    configs returns them unchanged.
+    """
+    import json
+    from pathlib import Path
+
+    from backend.provision.declarative.config_migration import config_changed, migrate_config
+
+    config_dir = Path.home() / ".fastly-log-analytics" / "configs"
+    if not config_dir.exists():
+        return
+
+    for config_file in config_dir.glob("*.json"):
+        try:
+            with open(config_file) as f:
+                original_cfg = json.load(f)
+
+            migrated_cfg = migrate_config(original_cfg)
+
+            if config_changed(original_cfg, migrated_cfg):
+                with open(config_file, "w") as f:
+                    json.dump(migrated_cfg, f, indent=2)
+                logging.info("[fastapi] Migrated config file to v2.3.0 nested format: %s", config_file.name)
+        except Exception as e:
+            # Log but don't fail startup
+            logging.warning("[fastapi] Failed to migrate config file %s: %s", config_file.name, e)
 
 
 def _enforce_proxy_headers_configured() -> None:
@@ -414,6 +454,11 @@ async def lifespan(app: FastAPI):
     # Data-volume sanity check FIRST — before any dependency / scheduler /
     # ingestion logic that would otherwise blindly write to the wrong path.
     _enforce_data_dir_mounted()
+
+    # Migrate legacy flat configs to nested structure BEFORE any code reads configs.
+    # This is the critical enforcement point: all configs must be in nested format
+    # from this point onward.
+    _migrate_config_on_startup()
 
     # Proxy-headers regression guard (security). Production
     # must have TRUSTED_PROXY_IPS set in env (mirrors the uvicorn
@@ -830,6 +875,7 @@ from backend.routers import (
     origin,
     performance,
     query,
+    rum,
     security,
     sessions,
     value,
@@ -849,6 +895,7 @@ app.include_router(origin.router)
 app.include_router(control_room.router)
 app.include_router(value.router)
 app.include_router(cmcd.router)
+app.include_router(rum.router)
 
 from backend.routers import (
     admin,
@@ -1091,13 +1138,13 @@ def health_check(
                         svc_state["stale_minutes_used"] = effective_minutes
                     norm_effective_cutoff = str(effective_cutoff).replace(" ", "T").rstrip("Z")
                     if norm_last < norm_effective_cutoff:
-                        svc_state["status"] = "degraded"
+                        svc_state["status"] = "stale"
                         svc_state["reason"] = f"no ingest since {last_ingest} (cutoff {effective_cutoff})"
         except Exception as e:
             svc_state["status"] = "degraded"
             svc_state["reason"] = f"metadata_db query failed: {e}"
 
-        if svc_state["status"] != "ok":
+        if svc_state["status"] not in ("ok", "stale"):
             overall_ok = False
         services_report.append(svc_state)
 

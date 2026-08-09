@@ -45,12 +45,7 @@ from backend.provision.session_scoring_setup import (
 )
 from backend.provision.session_scoring_vcl import (
     SCORING_BACKEND_API_NAME,
-    SCORING_DELIVER_NAME,
     SCORING_ENFORCE_NAME,
-    SCORING_FETCH_NAME,
-    SCORING_FETCH_PRIORITY,
-    SCORING_MISS_NAME,
-    SCORING_PASS_NAME,
     SCORING_RECV_NAME,
     SCORING_SNIPPET_PRIORITY,
     generate_scoring_vcl,
@@ -256,6 +251,17 @@ _SCORING_CUSTOM_FIELDS: list[dict[str, Any]] = [
 _SCORING_FIELD_NAMES = {cf["name"] for cf in _SCORING_CUSTOM_FIELDS}
 
 
+def get_scoring_fields(enabled: bool) -> list[dict]:
+    """Return Scoring custom fields if enabled, else empty list.
+
+    Used by field registry and reconcilers to generate system fields on-demand
+    based on feature toggles, without persisting them in the config file.
+    """
+    if enabled:
+        return [dict(cf) for cf in _SCORING_CUSTOM_FIELDS]
+    return []
+
+
 def merge_scoring_custom_fields(custom_fields: list[dict] | None) -> list[dict]:
     """Return ``custom_fields`` with the canonical scoring fields re-applied.
 
@@ -264,6 +270,10 @@ def merge_scoring_custom_fields(custom_fields: list[dict] | None) -> list[dict]:
     truth). Kept-first-then-canonical ordering is preserved. Single source of
     truth for the merge idiom shared by ``_add_scoring_custom_fields``,
     ``orchestrator``, and the ``cli``.
+
+    DEPRECATED: Use get_scoring_fields() for new code. This function is kept
+    for backward compatibility during the transition away from persisting
+    system fields in config files.
     """
     kept = [cf for cf in (custom_fields or []) if cf.get("name") not in _SCORING_FIELD_NAMES]
     return kept + [dict(cf) for cf in _SCORING_CUSTOM_FIELDS]
@@ -893,225 +903,32 @@ def enable_scoring(
     n_scoring = len(_SCORING_FIELD_NAMES)
     ok(f"Stashed scoring metadata + {n_scoring} custom_fields into service config")
 
-    # ── Stage 4: decide whether the logging VCL needs a redeploy. ───────────
+    # ── Phase 2/2: Logging Service (Declarative VCL + log fields) ───────────
     active_ver = get_active_version(logging_service_id, token)
     if active_ver is None:
         raise RuntimeError(f"Logging service {logging_service_id} has no active version")
-    info(f"Logging service active version: {active_ver}")
-
-    # Generate the scoring VCL we WOULD deploy now (real request_secret + any
-    # operator overrides). On a redeploy, compare it against what's actually
-    # live at the edge — if every scoring snippet + the backend already match,
-    # skip the whole clone/activate so a no-op redeploy never bumps a version.
-    scoring_cfg = cfg.get("scoring") or {}
-    exclude_url_regex = scoring_cfg.get("exclude_url_regex")
-    enforce_status_code = scoring_cfg.get("enforce_status_code")
-    vcl_snippets = generate_scoring_vcl(
-        logging_service_id,
-        request_secret,
-        exclude_url_regex=exclude_url_regex,
-        enforce_status_code=enforce_status_code,
-    )
-    if _scoring_vcl_matches_edge(logging_service_id, active_ver, vcl_snippets, scoring_domain, token):
-        ok(f"Logging VCL already current at the edge (v{active_ver}) — skipping redeploy")
-        if status_cb:
-            status_cb(f"✅ [Logging] VCL already current (v{active_ver}) — no version bump needed")
-        scoring_meta["logging_service_active_version"] = active_ver
-        _publish_scoring_fos_side_effects(logging_service_id)
-        if status_cb:
-            status_cb(f"✅ Done — Compute scorer v{compute_ver} + logging VCL v{active_ver} already current.")
-        return scoring_meta
 
     if status_cb:
-        status_cb("▸ Phase 2/2 — Logging service (VCL + log fields)")
-        status_cb(f"⏳ [Logging] Cloning active version {active_ver}…")
-    clone = fastly(
-        "PUT",
-        f"/service/{logging_service_id}/version/{active_ver}/clone",
-        token=token,
-    )
-    new_ver = int(clone["number"])
-    ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    fastly(
-        "PUT",
-        f"/service/{logging_service_id}/version/{new_ver}",
-        {"comment": f"Enable session scoring (scorer={scoring_service_id}) {ts}"},
-        token=token,
-    )
-    ok(f"Draft version: {new_ver}")
+        status_cb("▸ Phase 2/2 — Logging service (VCL + log fields) via Declarative Reconciler")
 
     try:
-        # ── Stage 5: add the scoring Compute service as a backend. ──────────
-        _add_scoring_backend(logging_service_id, new_ver, scoring_domain, token)
+        from backend.provision.declarative.reconciler import reconcile_vcl_state
 
-        # ── Stage 6: install the six scoring VCL snippets. ──────────────────
-        # vcl_snippets was generated in Stage 4 (carrying the operator's
-        # exclusion-regex / enforce-status-code overrides) and reused here so
-        # the edge-match skip check and the actual install can never diverge.
-        info("Installing 6 scoring VCL snippets (recv / pass / fetch / deliver / miss / enforce)")
-        if status_cb:
-            status_cb("⏳ [Logging] Installing scoring VCL snippets…")
-        for snip_name, vcl_type, prio in (
-            (SCORING_RECV_NAME, "recv", SCORING_SNIPPET_PRIORITY),
-            (SCORING_PASS_NAME, "pass", SCORING_SNIPPET_PRIORITY),
-            # Fetch gets priority 1 so `return(deliver)` for the scorer
-            # backend fires before any other fetch-stage snippet runs.
-            (SCORING_FETCH_NAME, "fetch", SCORING_FETCH_PRIORITY),
-            (SCORING_DELIVER_NAME, "deliver", SCORING_SNIPPET_PRIORITY),
-            (SCORING_MISS_NAME, "miss", SCORING_SNIPPET_PRIORITY),
-            # Enforce snippet runs at recv-restart-2 (priority 101 — after
-            # the main Recv routing block) and 429s requests the scorer
-            # flagged via X-Edge-Score-Enforce. Off by default — fires
-            # only when the operator commits an enforce_threshold via
-            # the admin UI.
-            (SCORING_ENFORCE_NAME, "recv", SCORING_SNIPPET_PRIORITY + 1),
-        ):
-            ensure_vcl_snippet(
-                snip_name,
-                vcl_type,
-                vcl_snippets[snip_name],
-                prio,
-                logging_service_id,
-                new_ver,
-                token,
-            )
-        ok("Installed 6 scoring VCL snippets")
+        res = reconcile_vcl_state(logging_service_id, token, status_cb=status_cb)
+        if res.error:
+            raise RuntimeError(f"Reconciliation failed: {res.error}")
 
-        # ── Stage 7: regenerate the capture-VCL + log format for the
-        #            6 new custom_fields. update_logging_endpoint handles
-        #            both: it diffs the format, pushes the new one, and
-        #            re-runs ensure_vcl_snippet for capture snippets so
-        #            the new deliver-stage capture VCL gets installed.
-        info("Regenerating log format + capture VCL for scoring fields")
-        if status_cb:
-            status_cb("⏳ [Logging] Updating log format to include score fields…")
-        # update_logging_endpoint targets the active version by default.
-        # We want it to write to OUR draft, so we pass a hint via the cfg
-        # — but update_logging_endpoint doesn't accept a version arg. So
-        # we call it after activate, which means it'd create yet another
-        # version. To avoid that double-activation, we manually install
-        # the capture snippets on the draft here via the shared helper
-        # (which also installs the Origin Error snippet that an earlier
-        # inline copy of this logic was silently missing).
-        from backend.provision.fastly_api import install_capture_snippets
-
-        install_capture_snippets(
-            logging_service_id,
-            new_ver,
-            cfg.get("log_fields"),
-            token,
-            # Scoring is being enabled here, so the capture must be restart-tolerant
-            # (the scorer restarts the request; gating on req.restarts == 0 would
-            # leave scored rows with no url/ua/geo and edge != true → Fire Rate 0%).
-            scoring_enabled=True,
-        )
-
-        # Update the logging endpoint's format string on the draft version.
-        # The existing s3 logging endpoint must already exist (it was
-        # provisioned at setup). We PUT to update its format.
-        from backend.core.fastly.service import list_s3_endpoints
-        from backend.provision.fastly_api import load_log_format
-
-        endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
-        existing_endpoints = list_s3_endpoints(logging_service_id, new_ver, token)
-        if endpoint_name not in existing_endpoints:
-            warn(
-                f"Logging endpoint {endpoint_name!r} not found on draft v{new_ver} — "
-                "skipping format update. Score fields will land in resp headers but not the log line."
-            )
-        else:
-            new_format = load_log_format(cfg.get("log_fields"))
-            encoded = urllib.parse.quote(endpoint_name, safe="")
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{new_ver}/logging/s3/{encoded}",
-                {"format": new_format, "format_version": 2},
-                token=token,
-            )
-            ok(f"Updated logging endpoint format to include {len(_SCORING_FIELD_NAMES)} score fields")
-
-            # Make the log-sampling response_condition restart-tolerant. Scoring
-            # restarts the request (req.restarts 0→1) to run the scorer sub-fetch,
-            # so the final logged pass is req.restarts == 1. The condition set at
-            # provision gates on req.restarts == 0, which drops EVERY scored
-            # request from the logs (the scorer's edge_score never reaches the log
-            # line → Fire Rate 0%). Rewrite the edge clause to match the edge hop
-            # by visits_this_service alone (restart-invariant). See
-            # backend.provision.fastly_api._log_sampling_edge_clause.
-            from backend.core.fastly.service import ensure_condition, find_condition
-
-            ep = fastly(
-                "GET",
-                f"/service/{logging_service_id}/version/{new_ver}/logging/s3/{encoded}",
-                token=token,
-            )
-            cond_name = ep.get("response_condition")
-            if cond_name:
-                cur_cond = find_condition(cond_name, logging_service_id, new_ver, token)
-                cur_stmt = (cur_cond or {}).get("statement", "")
-                fixed_stmt = cur_stmt.replace(
-                    "(req.restarts == 0 && fastly.ff.visits_this_service == 0)",
-                    "fastly.ff.visits_this_service == 0",
-                )
-                if cur_cond and fixed_stmt != cur_stmt:
-                    ensure_condition(cond_name, fixed_stmt, "RESPONSE", logging_service_id, new_ver, token)
-                    ok("Made log-sampling condition restart-tolerant — scored requests now log")
-
-        # ── Stage 8: validate ──────────────────────────────────────────────
-        info(f"Validating draft version {new_ver}")
-        if status_cb:
-            status_cb(f"⏳ [Logging] Validating draft version {new_ver}…")
-        result = fastly(
-            "GET",
-            f"/service/{logging_service_id}/version/{new_ver}/validate",
-            token=token,
-        )
-        if result.get("status") != "ok":
-            raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-        ok("Draft validated")
-
-        # ── Stage 9: activate ──────────────────────────────────────────────
-        info(f"Activating version {new_ver}")
-        if status_cb:
-            status_cb(f"⏳ [Logging] Activating version {new_ver}…")
-        fastly(
-            "PUT",
-            f"/service/{logging_service_id}/version/{new_ver}/activate",
-            token=token,
-        )
-        ok(f"Version {new_ver} active")
+        new_ver = res.activated_version or active_ver
         if status_cb:
             status_cb(f"✅ Done — Compute scorer v{compute_ver} + logging VCL v{new_ver} are now live.")
 
         scoring_meta["logging_service_active_version"] = new_ver
-        # Republish custom_fields (admin_state.json) + the trained matrix to FOS
-        # so read_only analyst hosts converge on their next import tick.
         _publish_scoring_fos_side_effects(logging_service_id)
         return scoring_meta
 
     except Exception as exc:
-        # ── Stage 10: rollback ─────────────────────────────────────────────
         fail(f"enable_scoring failed: {exc}")
-        info(f"Rolling back — re-activating version {active_ver}")
-        try:
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{active_ver}/activate",
-                token=token,
-            )
-        except RuntimeError:
-            pass
         # Also revert the on-disk config so a retry starts from clean state.
-        #
-        # DEFENSE-IN-DEPTH: re-load cfg here instead of trusting the in-
-        # memory copy from line ~381. The Fastly stages above can take
-        # 30-60s; during that window a concurrent writer (metadata_sync
-        # tick re-injecting scoring fields, an admin PATCHing log_fields,
-        # an ngwaf_workspace_id update) may have mutated configs/<sid>.json.
-        # Writing the stale snapshot back wholesale would clobber those
-        # concurrent changes. Re-reading + mutating + saving means we
-        # only touch the scoring-related keys our rollback is supposed
-        # to revert.
         try:
             fresh = svcconfig.load_config(logging_service_id) or cfg
         except Exception:

@@ -274,7 +274,7 @@ export const handlers = [
     HttpResponse.json({ status: 'completed', service_id: 'svc-default' }),
   ),
   http.get(`${API_BASE}/api/provision/services`, () =>
-    HttpResponse.json({ services: [] }),
+    HttpResponse.json([]),
   ),
   http.get(`${API_BASE}/api/provision/ngwaf-workspaces`, () =>
     HttpResponse.json({ workspaces: [] }),

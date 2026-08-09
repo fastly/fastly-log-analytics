@@ -21,7 +21,15 @@ import { queryKeys } from '@/lib/query-keys'
  * "Latest Log: Xs ago" / "Total Logs" updates via
  * ``useAdminEventStream``; this hook brings analysts to parity.
  */
+interface StreamMetrics {
+  latest_log_at?: string | null
+  total_rows?: number | null
+  last_sync_at?: string | null
+}
+
 interface BootstrapHeaderBadge {
+  rum?: StreamMetrics
+  request?: StreamMetrics
   latest_log_at?: string | null
   local_rows?: number | null
 }
@@ -32,6 +40,8 @@ interface BootstrapShape {
 }
 
 interface BadgeStreamEvent {
+  rum?: StreamMetrics
+  request?: StreamMetrics
   latest_log_at?: string | null
   local_rows?: number | null
 }
@@ -69,6 +79,8 @@ export function useHeaderBadgeStream(enabled: boolean) {
             ...prev,
             header_badge: {
               ...(prev.header_badge ?? {}),
+              rum: payload.rum ? { ...prev.header_badge?.rum, ...payload.rum } : prev.header_badge?.rum,
+              request: payload.request ? { ...prev.header_badge?.request, ...payload.request } : prev.header_badge?.request,
               latest_log_at: payload.latest_log_at ?? prev.header_badge?.latest_log_at ?? null,
               local_rows: payload.local_rows ?? prev.header_badge?.local_rows ?? null,
             },

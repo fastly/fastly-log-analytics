@@ -149,7 +149,6 @@ def _bootstrap_sync(
     service_id: str | None,
 ) -> BootstrapResponse:
     from backend.core import duckdb as _db
-    from backend.core.duckdb import STORAGE_MODE
     from backend.services.service_manager import get_enriched_services
     from backend.utils.countries import COUNTRY_MAP
     from backend.utils.pop_utils import get_pop_lat_lon_map, get_pop_location_map
@@ -395,36 +394,81 @@ def _bootstrap_sync(
         cached_status = svcconfig.get_status(active_src["name"]) or {}
 
         # Real-time SQLite metadata lookup overlay for bootstrap header/extents
-        latest_file_at = None
-        total_rows = 0
-        try:
-            summary = metadata_db.get_ingested_files_status_summary(active_src["name"])
-            latest_file_name = summary.get("latest_file_name")
-            total_rows = summary.get("total_rows") or 0
-            if latest_file_name:
-                fname = latest_file_name.split("/")[-1]
+        # Separate RUM and REQUEST logs
+        def _extract_timestamp(file_name: str) -> str | None:
+            if file_name:
+                fname = file_name.split("/")[-1]
                 m = re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", fname)
                 if m:
-                    latest_file_at = f"{m.group(1)}T{m.group(2).replace('-', ':').replace('.', ':')}Z"
+                    return f"{m.group(1)}T{m.group(2).replace('-', ':').replace('.', ':')}Z"
+            return None
+
+        rum_latest = None
+        rum_total = 0
+        rum_last_sync = None
+        request_latest = None
+        request_total = 0
+        request_last_sync = None
+        earliest = cached_status.get("earliest_log_at")
+
+        try:
+            from backend.core.metadata.cron_log import latest_cron_per_task
+
+            # Get separate metrics for RUM and REQUEST from ingested_files table
+            con = metadata_db.get_con(active_src["name"])
+
+            # RUM files: count and latest timestamp
+            rum_cur = con.execute(
+                "SELECT COUNT(*), SUM(row_count), MAX(file_name) FROM ingested_files "
+                "WHERE service_id = ? AND file_name LIKE '%rum%'",
+                (active_src["name"],),
+            )
+            rum_row = rum_cur.fetchone()
+            if rum_row and rum_row[2]:  # Has files
+                rum_total = rum_row[1] or 0
+                rum_latest = _extract_timestamp(rum_row[2])
+
+            # REQUEST files (non-RUM): count and latest timestamp
+            req_cur = con.execute(
+                "SELECT COUNT(*), SUM(row_count), MAX(file_name) FROM ingested_files "
+                "WHERE service_id = ? AND file_name NOT LIKE '%rum%'",
+                (active_src["name"],),
+            )
+            req_row = req_cur.fetchone()
+            if req_row and req_row[2]:  # Has files
+                request_total = req_row[1] or 0
+                request_latest = _extract_timestamp(req_row[2])
+
+            # Get last sync times for each type
+            cron_data = latest_cron_per_task(active_src["name"])
+            rum_last_sync = cron_data.get("rum_sync", {}).get("started_at")
+            request_last_sync = cron_data.get("sync", {}).get("started_at")
+
         except Exception:
             pass
 
-        latest = (
-            latest_file_at
-            or cached_status.get("latest_log_at")
-            or cached_status.get("latest_available_file_at")
-            or cached_status.get("latest_ingested_file_at")
-        )
-        earliest = cached_status.get("earliest_log_at")
+        # Fall back to combined metrics if separate not available
+        latest = rum_latest or request_latest or cached_status.get("latest_log_at")
+        total_rows = rum_total + request_total
         local_rows = cached_status.get("local_rows") or total_rows
+
         if latest is not None or local_rows is not None:
             header_badge_payload = {
-                "latest_log_at": latest,
+                "rum": {
+                    "latest_log_at": rum_latest,
+                    "total_rows": rum_total,
+                    "last_sync_at": rum_last_sync,
+                },
+                "request": {
+                    "latest_log_at": request_latest,
+                    "total_rows": request_total,
+                    "last_sync_at": request_last_sync,
+                },
+                "latest_log_at": latest,  # Combined for backward compat
                 "local_rows": local_rows,
             }
+
         # log_extents: emit even when both are None (with configured=True)
-        # so the frontend can distinguish "no extents yet, keep polling"
-        # from "service not configured" — matches the dedicated endpoint.
         log_extents_payload = {
             "configured": True,
             "earliest_log_at": earliest,
@@ -615,6 +659,8 @@ def _bootstrap_sync(
 
     from backend.core.web_vitals_store import collection_enabled as _web_vitals_collection_enabled
 
+    storage_mode = active_src.get("storage_mode", "cloud") if active_src else "cloud"
+
     return BootstrapResponse.with_telemetry(
         active_service_id=valid_active_id,
         services=services,
@@ -625,7 +671,7 @@ def _bootstrap_sync(
         pop_geo=pop_geo,
         settings={
             "access_level": access_level,
-            "storage_mode": STORAGE_MODE,
+            "storage_mode": storage_mode,
             "is_remote_analyst": analyst_session is not None,
             "analyst_email": analyst_session.email if analyst_session else None,
             "analyst_name": analyst_session.name if analyst_session else None,

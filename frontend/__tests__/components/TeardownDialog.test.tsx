@@ -62,6 +62,7 @@ test('TeardownDialog starts the SSE stream when the user enters a token and clic
         remove_logging: true,
         remove_cdn: true,
         remove_bucket: true,
+        remove_cloud_files: true,
         remove_cache: true,
         token: 'test-admin-token-value',
       },

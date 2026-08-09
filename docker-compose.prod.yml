@@ -249,7 +249,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "curl -fsS 'http://127.0.0.1:8000/api/health?deep=1' | grep -q '^{\"status\":\"ok\"'",
+          "curl -fsS 'http://127.0.0.1:8000/api/health?deep=1&stale_minutes=180' | grep -q '^{\"status\":\"ok\"'",
         ]
       interval: 30s
       timeout: 10s

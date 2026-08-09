@@ -135,7 +135,7 @@ def get_sync_status(
         if skip_fos:
             # Re-inject current runtime fields that might have changed
             cached_status["access_level"] = src.get("access_level", "read_write")
-            cached_status["storage_mode"] = STORAGE_MODE
+            cached_status["storage_mode"] = src.get("storage_mode", "cloud")
             cached_status["configured"] = True
             return cached_status
     table_name = _safe_table_name(src["name"])
@@ -411,7 +411,7 @@ def get_sync_status(
         "latest_available_file_at": latest_available_file_at,
         "access_level": src.get("access_level", "read_write"),
         "configured": is_configured(src),
-        "storage_mode": STORAGE_MODE,
+        "storage_mode": src.get("storage_mode", "cloud"),
         "logging_service_id": src.get("logging_service_id", ""),
         "cdn_service_id": src.get("cdn_service_id", ""),
         "cron_stats": cron_stats,

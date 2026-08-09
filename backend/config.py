@@ -19,7 +19,6 @@ Config file schema:
     "cdn_service_id": "...",                    # The CDN VCL service fronting FOS
     "fastly_api_key": "...",                    # Account-wide Fastly API key
     "provisioning": {                           # Embedded provisioning state for teardown
-        "fos_key_id": "...",
         "endpoint_name": "Fastly Object Storage Logs",
         "temp_admin_key_id": null
     }
@@ -189,6 +188,10 @@ def save_config(service_id: str, cfg: dict):
     """Write a service config atomically. See :func:`_atomic_write_json`."""
     global _cdn_service_id_map
     _ensure_dirs()
+    if "created_at" not in cfg or not cfg["created_at"]:
+        import datetime as _dt
+
+        cfg["created_at"] = _dt.datetime.now(_dt.UTC).isoformat()
     _atomic_write_json(config_path(service_id), cfg)
     # Invalidate the load_config cache. The cache uses st_mtime_ns as its
     # revalidation key, which is normally fine — but on Linux ext4/tmpfs two
@@ -314,6 +317,7 @@ def config_to_source(cfg: dict) -> dict:
         "logging_service_id": cfg.get("service_id", ""),
         "duckdb_path": actual_db_path,
         "access_level": cfg.get("access_level", "read_write"),
+        "storage_mode": cfg.get("storage_mode", "cloud"),
         "log_period": int(cfg.get("log_period", 60)),
         "log_fields": cfg.get("log_fields", {}),
         "provisioning": prov,
