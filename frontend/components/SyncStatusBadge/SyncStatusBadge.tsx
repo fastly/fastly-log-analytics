@@ -272,7 +272,7 @@ function SyncStatusBadgeInner() {
   const showSeparateStreams = hasRumData || hasRequestData
 
   return (
-    <div className="hidden md:flex flex-col gap-2 mr-2 animate-in fade-in zoom-in-95">
+    <div className="hidden md:flex flex-col gap-1.5 mr-2 animate-in fade-in zoom-in-95">
       {showLiveDot && (
         <Tooltip>
           <TooltipTrigger render={
@@ -302,8 +302,8 @@ function SyncStatusBadgeInner() {
       )}
 
       {showSeparateStreams ? (
-        <>
-          {/* REQUEST logs row */}
+        <div className="flex flex-wrap gap-2 items-center">
+          {/* REQUEST logs */}
           {renderStreamBadge(
             'REQUEST',
             requestMetrics?.latest_log_at,
@@ -311,14 +311,14 @@ function SyncStatusBadgeInner() {
             requestMetrics?.last_sync_at,
           )}
 
-          {/* RUM logs row */}
+          {/* RUM logs */}
           {renderStreamBadge(
             'RUM',
             rumMetrics?.latest_log_at,
             rumMetrics?.total_rows,
             rumMetrics?.last_sync_at,
           )}
-        </>
+        </div>
       ) : (
         <>
           {/* Fallback to combined view when no separate stream data */}
