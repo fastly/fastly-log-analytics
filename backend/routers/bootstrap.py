@@ -435,9 +435,9 @@ def _bootstrap_sync(
 
             # REQUEST metrics from DuckDB main table
             try:
-                from backend.core.duckdb import _safe_table_name, get_pool
+                from backend.core.duckdb import _safe_table_name, get_connection
 
-                duckdb_con = get_pool().get(active_src["name"])
+                duckdb_con = get_connection(active_src)
                 req_count = duckdb_con.execute(
                     f"SELECT COUNT(*) FROM {_safe_table_name(active_src['name'])}"
                 ).fetchone()[0]
