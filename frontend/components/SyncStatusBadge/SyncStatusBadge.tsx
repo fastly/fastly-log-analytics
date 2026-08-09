@@ -251,49 +251,62 @@ function SyncStatusBadgeInner() {
     if (!hasData) return null
 
     return (
-      <div key={label} className="flex items-center gap-0.5 min-w-0 text-[10px]">
-        {showDot && (
-          <Tooltip>
-            <TooltipTrigger render={
-              <span
-                tabIndex={0}
-                role="status"
-                aria-label={liveDotTitle ?? ''}
-                className="inline-flex items-center justify-center h-2.5 w-2.5 rounded-full hover:bg-muted/60 flex-shrink-0"
-              >
-                <span className="relative flex h-1 w-1">
-                  {liveStreamState === 'open' ? (
-                    <>
-                      <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-60 animate-ping" />
-                      <span className="relative inline-flex h-1 w-1 rounded-full bg-emerald-500" />
-                    </>
-                  ) : (
-                    <>
-                      <span className="absolute inline-flex h-full w-full rounded-full bg-amber-500 opacity-60 animate-ping" />
-                      <span className="relative inline-flex h-1 w-1 rounded-full bg-amber-500" />
-                    </>
-                  )}
+      <div key={label} className="flex items-center gap-1 min-w-0 text-[10px]">
+        {/* Column 0: Live Dot (fixed w-3 to preserve grid alignment even if empty) */}
+        <span className="w-3 flex-shrink-0 inline-flex items-center justify-center">
+          {showDot ? (
+            <Tooltip>
+              <TooltipTrigger render={
+                <span
+                  tabIndex={0}
+                  role="status"
+                  aria-label={liveDotTitle ?? ''}
+                  className="inline-flex items-center justify-center h-2.5 w-2.5 rounded-full hover:bg-muted/60 flex-shrink-0"
+                >
+                  <span className="relative flex h-1 w-1">
+                    {liveStreamState === 'open' ? (
+                      <>
+                        <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-60 animate-ping" />
+                        <span className="relative inline-flex h-1 w-1 rounded-full bg-emerald-500" />
+                      </>
+                    ) : (
+                      <>
+                        <span className="absolute inline-flex h-full w-full rounded-full bg-amber-500 opacity-60 animate-ping" />
+                        <span className="relative inline-flex h-1 w-1 rounded-full bg-amber-500" />
+                      </>
+                    )}
+                  </span>
                 </span>
-              </span>
-            } />
-            <TooltipContent className="text-xs">{liveDotTitle}</TooltipContent>
-          </Tooltip>
-        )}
-        <span className="font-semibold text-muted-foreground whitespace-nowrap flex-shrink-0">{label}</span>
+              } />
+              <TooltipContent className="text-xs">{liveDotTitle}</TooltipContent>
+            </Tooltip>
+          ) : null}
+        </span>
+
+        {/* Column 1: Label (fixed w-[58px]) */}
+        <span className="w-[58px] flex-shrink-0 font-semibold text-muted-foreground whitespace-nowrap">{label}</span>
+
+        {/* Column 2: Latest Log TimeAgo (fixed w-[84px] + tabular-nums) */}
         {latestTs ? (
-          <span className="text-muted-foreground whitespace-nowrap flex-shrink-0">
+          <span className="w-[84px] flex-shrink-0 text-muted-foreground whitespace-nowrap tabular-nums inline-flex items-center">
             <TimeAgo timestamp={latestTs} />
             {showStaleness && <StalenessDot timestamp={latestTs} />}
           </span>
         ) : (
-          <span className="text-muted-foreground whitespace-nowrap flex-shrink-0">Never</span>
+          <span className="w-[84px] flex-shrink-0 text-muted-foreground whitespace-nowrap">Never</span>
         )}
-        {totalRows != null && totalRows > 0 && (
-          <span className="text-muted-foreground whitespace-nowrap flex-shrink-0">({totalRows.toLocaleString()})</span>
+
+        {/* Column 3: Row Count (fixed w-[76px] + tabular-nums + text-right + pr-2) */}
+        {totalRows != null && totalRows > 0 ? (
+          <span className="w-[76px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-right pr-2 tabular-nums">({totalRows.toLocaleString()})</span>
+        ) : (
+          <span className="w-[76px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-right pr-2">—</span>
         )}
-        {lastSyncTs && (
-          <span className="text-muted-foreground whitespace-nowrap flex-shrink-0 text-[9px] inline-flex items-center gap-1">
-            sync:{" "}
+
+        {/* Column 4: Last Sync (fixed w-[105px] + tabular-nums + text-right) */}
+        {lastSyncTs ? (
+          <span className="w-[105px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-[9px] inline-flex items-center justify-end gap-1 tabular-nums">
+            <span className="text-muted-foreground/80">sync:</span>
             {isRunning && startedAt ? (
               <span className="inline-flex items-center gap-1 font-semibold text-blue-500 animate-pulse" aria-label="Sync in progress">
                 <Loader2 className="h-2.5 w-2.5 animate-spin shrink-0 text-blue-500" aria-hidden="true" />
@@ -303,6 +316,8 @@ function SyncStatusBadgeInner() {
               <TimeAgo timestamp={lastSyncTs} />
             )}
           </span>
+        ) : (
+          <span className="w-[105px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-[9px] text-right">—</span>
         )}
       </div>
     )
