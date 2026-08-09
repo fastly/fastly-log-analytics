@@ -99,6 +99,7 @@ def ingest_rum_logs(
     """Ingest RUM beacon logs from FOS raw/rum/ prefix into local SQLite."""
     start_time = time.time()
     run_id = start_cron_run(service_id, "rum_sync")
+    yield ("started", run_id)
 
     src = get_source_for_service(service_id)
     if not src or not src.get("bucket"):
@@ -115,22 +116,45 @@ def ingest_rum_logs(
         return
 
     try:
+        from backend.core.ingest import list_fos_files
+
         s3 = _get_fos_client(src)
         bucket = src["bucket"]
-        prefix = src.get("prefix", "").strip("/")
-        rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
 
         # Fetch already ingested files to avoid duplicate processing
         already_ingested = metadata_db.get_ingested_filenames(service_id) or set()
 
-        # List all .gz files in raw/rum/
-        paginator = s3.get_paginator("list_objects_v2")
+        # Use the shared list_fos_files helper to discover files in raw/rum/ prefix
+        list_gen = list_fos_files(
+            src=src,
+            prefix_subpath="raw/rum/",
+            already_ingested=already_ingested,
+            incremental_only=False,
+            elapsed_fn=lambda: f"{time.time() - start_time:.1f}s",
+            fos_client=s3,
+        )
+        try:
+            while True:
+                evt = next(list_gen)
+                if evt.get("type") == "status":
+                    logger.debug(f"RUM sync: {evt['message']}")
+        except StopIteration as e:
+            list_res = e.value
+
+        new_files_s3 = list_res["new_files"]
+        file_sizes = list_res["file_sizes"]
+
+        # Convert s3:// paths back to keys for downstream compatibility
+        bucket_prefix = f"s3://{bucket}/"
         new_files = []
-        for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                if key.endswith(".gz") and key not in already_ingested:
-                    new_files.append((key, obj["Size"]))
+        for p in new_files_s3:
+            if p.startswith(bucket_prefix):
+                new_files.append((p[len(bucket_prefix) :], file_sizes[p]))
+            else:
+                without_scheme = p[5:] if p.startswith("s3://") else p
+                slash = without_scheme.find("/")
+                key = without_scheme[slash + 1 :]
+                new_files.append((key, file_sizes[p]))
 
         if not new_files:
             logger.info(f"RUM sync: no new RUM logs found in bucket for {service_id}")

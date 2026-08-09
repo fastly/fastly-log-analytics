@@ -403,6 +403,151 @@ def _recover_in_flight(source: dict) -> dict:
     return {"promoted": promoted, "dropped": dropped, "rows_recovered": rows_recovered}
 
 
+def list_fos_files(
+    src: dict,
+    prefix_subpath: str = "raw/",
+    exclude_prefix_subpath: str | None = None,
+    already_ingested: set[str] | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    incremental_only: bool = False,
+    max_files: int | None = None,
+    elapsed_fn=None,
+    delete_after: bool = False,
+    fos_client=None,
+):
+    """List and discover new files in Fastly Object Storage.
+
+    Yields progress dicts with format {"type": "status", "message": msg}
+    or {"type": "error", "message": msg}.
+
+    Returns a dict with:
+    {
+        "new_files": list[str],
+        "file_sizes": dict[str, int],
+        "skipped_already": int,
+        "stranded_already": list[str]
+    }
+    """
+    if elapsed_fn is None:
+
+        def default_elapsed():
+            return ""
+
+        elapsed_fn = default_elapsed
+
+    st_dt = None
+    et_dt = None
+    from backend.utils.date_utils import parse_iso_utc
+
+    if start_time:
+        st_dt = parse_iso_utc(start_time)
+    if end_time:
+        et_dt = parse_iso_utc(end_time)
+
+    already = already_ingested or set()
+
+    # Determine StartAfter marker for incremental discovery to avoid scanning the entire bucket.
+    start_after_key = None
+    if st_dt and not already:
+        # Use the configured start to bound the FOS list only on the very first import
+        # (no previously ingested files). On subsequent cron runs `already` is non-empty,
+        # so we fall through to the incremental lookback — scanning only the last 4 hours
+        # instead of the entire bucket from the original import start date.
+        start_after_key = st_dt.strftime("raw/%Y-%m-%d/%H/")
+        logger.info("[ingest] %s: Using requested start_time to bound FOS scan: %s", src.get("name"), start_after_key)
+    elif incremental_only and already:
+        try:
+            start_after_key = _compute_incremental_start_after(already, lookback_hours=4)
+        except Exception as e:
+            logger.warning(
+                "[ingest] %s: Failed to calculate lookback marker, scanning full bucket: %s", src.get("name"), e
+            )
+
+    from backend.core.fastly.mock_fixtures import is_mock_mode
+
+    if fos_client is None:
+        fos_client = _get_fos_client(src)
+    file_sizes: dict[str, int] = {}
+    new_files: list[str] = []
+    skipped_already = 0
+    stranded_already: list[str] = []
+    total_listed = 0
+
+    try:
+        prefix_path = src.get("prefix", "").strip("/")
+        paginator = fos_client.get_paginator("list_objects_v2", caller_hint="ingest_scan")
+        raw_prefix = f"{prefix_path}/{prefix_subpath}" if prefix_path else prefix_subpath
+
+        kwargs = {"Bucket": src["bucket"], "Prefix": raw_prefix}
+        if start_after_key:
+            kwargs["StartAfter"] = start_after_key
+
+        yield {"type": "status", "message": f"{elapsed_fn()} Discovering new files in Fastly Object Storage..."}
+
+        pages = [] if is_mock_mode() else paginator.paginate(**kwargs)
+        for page in pages:
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if not key.endswith(".gz"):
+                    continue
+
+                if exclude_prefix_subpath:
+                    exclude_prefix = (
+                        f"{prefix_path}/{exclude_prefix_subpath}" if prefix_path else exclude_prefix_subpath
+                    )
+                    if key.startswith(exclude_prefix):
+                        continue
+
+                total_listed += 1
+                if total_listed % 10000 == 0:
+                    msg = f"{elapsed_fn()} Discovered {total_listed:,} new files..."
+                    yield {"type": "status", "message": msg}
+
+                fname = key.split("/")[-1]
+                file_dt = _parse_fastly_filename_dt(fname)
+                if file_dt is not None:
+                    if et_dt and file_dt > (et_dt + timedelta(hours=1)):
+                        break
+                    if st_dt and file_dt < (st_dt - timedelta(hours=1)):
+                        continue
+
+                full_path = f"s3://{src['bucket']}/{key}"
+                if full_path not in already:
+                    new_files.append(full_path)
+                    file_sizes[full_path] = obj["Size"]
+                else:
+                    skipped_already += 1
+                    if delete_after and len(stranded_already) < _STRANDED_DELETE_CAP:
+                        stranded_already.append(full_path)
+
+            if et_dt and total_listed > 0:
+                last_key = page.get("Contents", [])[-1]["Key"]
+                last_dt = _parse_fastly_filename_dt(last_key.split("/")[-1])
+                if last_dt is not None and last_dt > (et_dt + timedelta(hours=1)):
+                    break
+
+            if max_files and len(new_files) >= max_files:
+                new_files = new_files[:max_files]
+                break
+
+    except Exception as e:
+        yield {"type": "error", "message": f"Could not list FOS objects: {e}"}
+        return {
+            "new_files": [],
+            "file_sizes": {},
+            "skipped_already": 0,
+            "stranded_already": [],
+        }
+
+    return {
+        "new_files": new_files,
+        "file_sizes": file_sizes,
+        "skipped_already": skipped_already,
+        "stranded_already": stranded_already,
+    }
+
+
 def ingest(
     source: dict | None = None,
     delete_after: bool = False,
@@ -441,6 +586,8 @@ def ingest(
         yield {"type": "error", "message": "Fastly Object Storage bucket is not configured for this service."}
         return
 
+    fos_client = _get_fos_client(src)
+
     try:
         recovery = _recover_in_flight(src)
         if recovery["promoted"] or recovery["dropped"]:
@@ -477,121 +624,31 @@ def ingest(
     dedup_limit: int | None = 200_000 if incremental_only else None
     already = metadata_db.get_ingested_filenames(source_name, limit=dedup_limit)
 
-    # Determine StartAfter marker for incremental discovery to avoid scanning the entire bucket.
-    start_after_key = None
-    if st_dt and not already:
-        # Use the configured start to bound the FOS list only on the very first import
-        # (no previously ingested files). On subsequent cron runs `already` is non-empty,
-        # so we fall through to the incremental lookback — scanning only the last 4 hours
-        # instead of the entire bucket from the original import start date.
-        start_after_key = st_dt.strftime("raw/%Y-%m-%d/%H/")
-        logger.info("[ingest] %s: Using requested start_time to bound FOS scan: %s", display_name, start_after_key)
-    elif incremental_only and already:
-        # Incremental cron mode: scan only from 4 hours before the latest
-        # ingested file to avoid listing the entire bucket on every run.
-        # Previously gated on `not delete_after`, but the gate was wrong:
-        # Fastly writes raw keys lexicographically by timestamp, so
-        # StartAfter from our latest-known key still surfaces any newer
-        # arrivals regardless of whether earlier files got deleted post-
-        # ingest. With delete_after=True (the common case) we were doing
-        # a full-bucket LIST every cron tick — one Class A call per 1000
-        # files — and Fastly's running tally grows forever, so this was
-        # the dominant LIST cost. Now bounded to ~1 Class A call/tick.
-        # Manual imports still skip this branch (incremental_only=False)
-        # so they scan the full bucket as before.
-        try:
-            start_after_key = _compute_incremental_start_after(already, lookback_hours=4)
-        except Exception as e:
-            logger.warning(
-                "[ingest] %s: Failed to calculate lookback marker, scanning full bucket: %s", display_name, e
-            )
-
-    from backend.core.fastly.mock_fixtures import is_mock_mode
-
-    fos_client = _get_fos_client(src)
-    file_sizes: dict[str, int] = {}
-    new_files: list[str] = []
-    # Files seen in this LIST that we'd already ingested — the TRUE per-run
-    # "skipped" count. With delete_after=True (the common case) the bucket is
-    # purged right after ingest, so the LIST only surfaces new files and this
-    # stays ~0; with delete_after=False the daily full LIST re-surfaces every
-    # prior file and this becomes the real (large) skip count.
-    skipped_already = 0
-    # Strands: files present in the LIST that are ALREADY in the ledger. With
-    # delete_after=True the only reason such a file still exists is that a prior
-    # delete didn't finish, so we re-delete them below (the integer counter is
-    # always kept; the path list is only collected when we'll act on it).
-    stranded_already: list[str] = []
-    total_listed = 0
-
+    # Use list_fos_files generator
+    list_gen = list_fos_files(
+        src=src,
+        prefix_subpath="raw/",
+        exclude_prefix_subpath="raw/rum/",
+        already_ingested=already,
+        start_time=start_time,
+        end_time=end_time,
+        incremental_only=incremental_only,
+        max_files=max_files,
+        elapsed_fn=elapsed,
+        delete_after=delete_after,
+        fos_client=fos_client,
+    )
     try:
-        prefix_path = src["prefix"].strip("/")
-        paginator = fos_client.get_paginator("list_objects_v2", caller_hint="ingest_scan")
-        raw_prefix = f"{prefix_path}/raw/" if prefix_path else "raw/"
+        while True:
+            evt = next(list_gen)
+            yield evt
+    except StopIteration as e:
+        list_res = e.value
 
-        kwargs = {"Bucket": src["bucket"], "Prefix": raw_prefix}
-        if start_after_key:
-            kwargs["StartAfter"] = start_after_key
-
-        yield {"type": "status", "message": f"{elapsed()} Discovering new files in Fastly Object Storage..."}
-
-        # In FASTLY_MOCK_MODE (the E2E / contract harness) there is no real FOS
-        # endpoint, so paginate() would 400 on ListObjectsV2 and fall through the
-        # error path. There are no real objects to discover, so skip the listing
-        # entirely — mirrors the is_mock_mode() short-circuit in
-        # provision/fos_setup.py's bucket ops.
-        pages = [] if is_mock_mode() else paginator.paginate(**kwargs)
-        for page in pages:
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                if not key.endswith(".gz"):
-                    continue
-
-                total_listed += 1
-                if total_listed % 10000 == 0:
-                    msg = f"{elapsed()} Discovered {total_listed:,} new files..."
-                    yield {"type": "status", "message": msg}
-
-                # Filename-based filtering to avoid downloading files completely outside our range
-                # Fastly format: raw/YYYY-MM-DD/HH/YYYY-MM-DDTHH-MM-SS.xxx.gz
-                fname = key.split("/")[-1]
-                file_dt = _parse_fastly_filename_dt(fname)
-                if file_dt is not None:
-                    # Files are listed lexicographically. If we have an end_time and
-                    # we've passed it by more than an hour (to account for ragged edges),
-                    # we can stop listing entirely.
-                    if et_dt and file_dt > (et_dt + timedelta(hours=1)):
-                        break
-
-                    # If the file is strictly before our start_time (minus some buffer), skip it
-                    if st_dt and file_dt < (st_dt - timedelta(hours=1)):
-                        continue
-
-                full_path = f"s3://{src['bucket']}/{key}"
-                # Even with StartAfter, double check it's not in 'already' just in case
-                if full_path not in already:
-                    new_files.append(full_path)
-                    file_sizes[full_path] = obj["Size"]
-                else:
-                    skipped_already += 1
-                    if delete_after and len(stranded_already) < _STRANDED_DELETE_CAP:
-                        stranded_already.append(full_path)
-
-            if et_dt and total_listed > 0:
-                # Check the last key in the page to see if we can stop listing
-                last_key = page.get("Contents", [])[-1]["Key"]
-                last_dt = _parse_fastly_filename_dt(last_key.split("/")[-1])
-                if last_dt is not None and last_dt > (et_dt + timedelta(hours=1)):
-                    break
-
-            # Break early if we've found enough new files
-            if max_files and len(new_files) >= max_files:
-                new_files = new_files[:max_files]
-                break
-
-    except Exception as e:
-        yield {"type": "error", "message": f"Could not list FOS objects: {e}"}
-        return
+    new_files = list_res["new_files"]
+    file_sizes = list_res["file_sizes"]
+    skipped_already = list_res["skipped_already"]
+    stranded_already = list_res["stranded_already"]
 
     # Reconcile interrupted deletes. Any file we LISTed that is already in the
     # ledger is, by the delete_after contract, one we ingested but never finished

@@ -220,9 +220,12 @@ function SyncStatusBadgeInner() {
   const showLiveDot = liveDotTitle !== null
 
   // Extract RUM and REQUEST metrics from bootstrap
+  const activeSvc = bootstrap?.services?.find(s => s.service_id === activeServiceId)
+  const isRumEnabled = activeSvc?.rum_enabled ?? false
+
   const rumMetrics = (headerBadge as any)?.rum
   const requestMetrics = (headerBadge as any)?.request
-  const hasRumData = rumMetrics?.latest_log_at || (rumMetrics?.total_rows != null && rumMetrics.total_rows > 0)
+  const hasRumData = isRumEnabled && (rumMetrics?.latest_log_at || (rumMetrics?.total_rows != null && rumMetrics.total_rows > 0))
   const hasRequestData = requestMetrics?.latest_log_at || (requestMetrics?.total_rows != null && requestMetrics.total_rows > 0)
 
   const renderStreamRow = (
@@ -286,7 +289,7 @@ function SyncStatusBadgeInner() {
   }
 
   // If we have separate RUM/REQUEST data, show two rows; otherwise fall back to combined view
-  const showSeparateStreams = hasRumData || hasRequestData
+  const showSeparateStreams = isRumEnabled && (hasRumData || hasRequestData)
 
   return (
     <div className="hidden md:flex flex-col gap-0.5 mr-2 animate-in fade-in zoom-in-95">
@@ -302,7 +305,7 @@ function SyncStatusBadgeInner() {
           )}
 
           {/* RUM logs row with live dot */}
-          {renderStreamRow(
+          {isRumEnabled && renderStreamRow(
             'RUM',
             showLiveDot,
             rumMetrics?.latest_log_at,

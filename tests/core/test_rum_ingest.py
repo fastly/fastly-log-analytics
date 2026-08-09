@@ -106,7 +106,7 @@ def test_ingest_rum_logs_empty_bucket(
     # Execute ingest generator
     events = list(ingest_rum_logs(service_id))
 
-    assert events == [("done", 0)]
+    assert events == [("started", 123), ("done", 0)]
     mock_log.assert_called_once()
     assert mock_log.call_args[0][3] == "success"  # Status is success (no logs found is not an error)
     assert mock_log.call_args[1]["rows_ingested"] == 0
@@ -174,6 +174,7 @@ def test_ingest_rum_logs_success(
     events = list(ingest_rum_logs(service_id))
 
     assert events == [
+        ("started", 123),
         ("file_done", "raw/rum/rum_log_0.json.gz", 1),
         ("done", 1),
     ]

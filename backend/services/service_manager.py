@@ -192,7 +192,7 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 ),
                 "ngwaf_workspace_id": cfg.get("ngwaf_workspace_id"),
                 "logging_enabled": cfg.get("logging_enabled", True),
-                "rum_enabled": (cfg.get("rum") or {}).get("enabled", False),
+                "rum_enabled": cfg.get("rum_enabled", False) or (cfg.get("rum") or {}).get("enabled", False),
             }
         )
 

@@ -376,9 +376,9 @@ async def rum_analytics(
             "os_name": meta.get("os") or b.get("os"),
             "device": meta.get("device") or b.get("device"),
             "device_type": meta.get("device") or b.get("device"),
-            "path": app.get("name") or b.get("pathname") or b.get("path") or "/",
-            "url": app.get("name") or b.get("pathname") or b.get("path") or "/",
-            "url_path": app.get("name") or b.get("pathname") or b.get("path") or "/",
+            "path": b.get("pathname") or b.get("path") or app.get("name") or "/",
+            "url": b.get("pathname") or b.get("path") or app.get("name") or "/",
+            "url_path": b.get("pathname") or b.get("path") or app.get("name") or "/",
             "ip": b.get("ip") or meta.get("ip"),
             "client_ip": b.get("ip") or meta.get("ip"),
             "asn": b.get("asn") or meta.get("asn"),
@@ -473,7 +473,7 @@ async def rum_analytics(
             # Extract path from Faro beacon structure
             meta = b.get("meta") or {}
             app = meta.get("app") or {}
-            path = app.get("name") or b.get("pathname") or b.get("path") or "/"
+            path = b.get("pathname") or b.get("path") or app.get("name") or "/"
 
             if path not in pages_dict:
                 pages_dict[path] = {"views": 0, "total_load_time": 0.0, "lcp_vals": [], "cls_vals": [], "errors": 0}
@@ -833,7 +833,7 @@ async def rum_live_events(service_id: str = Path(...)) -> list[dict[str, Any]]:
                 # Determine event type (pageview vs exception)
                 etype = "pageview"
                 app = data.get("app", {})
-                path = app.get("name") or data.get("pathname") or data.get("path") or "/"
+                path = data.get("pathname") or data.get("path") or app.get("name") or "/"
                 desc = "Page loaded successfully"
                 if "exceptions" in data:
                     etype = "error"

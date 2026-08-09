@@ -107,7 +107,7 @@ const SERVICE_NAVIGATION = [
   { name: 'Insights', href: '/insights', icon: Sparkles, analystVisible: true },
   { name: 'Network', href: '/network', icon: Network, analystVisible: true },
   { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true, requiresCmcd: true },
-  { name: 'RUM', href: '/rum', icon: Eye, analystVisible: true },
+  { name: 'RUM', href: '/rum', icon: Eye, analystVisible: true, requiresRum: true },
   { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
   { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
@@ -389,12 +389,15 @@ export function AppLayout({
   // expiry or be booted by an admin).
   const { logout, isLoggingOut } = useAnalystLogout()
 
-  const activeSvc = bootstrapData?.services?.find(s => s.service_id === activeServiceId)
+  const currentServiceId = activeServiceId || bootstrapData?.active_service_id
+  const activeSvc = bootstrapData?.services?.find(s => s.service_id === currentServiceId)
   const activeSvcStatus = (activeSvc as Record<string, unknown> | undefined)?.status as { schema?: { name: string }[] } | undefined
   const hasCmcd = activeSvcStatus?.schema?.some(col => col.name === 'cmcd_sid') ?? false
+  const hasRum = activeSvc?.rum_enabled ?? false
 
   const visibleNav = SERVICE_NAVIGATION.filter(item => {
     if (item.requiresCmcd && !hasCmcd) return false
+    if (item.requiresRum && !hasRum) return false
     if (isShareAnalyst) {
       // share analysts see a tighter subset; default to analystVisible when
       // an item doesn't have a share-specific override.

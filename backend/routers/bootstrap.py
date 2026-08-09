@@ -415,18 +415,18 @@ def _bootstrap_sync(
             from backend.core.metadata.cron_log import latest_cron_per_task
 
             # Get separate metrics from actual DuckDB and metadata
-            meta_con = metadata_db.get_con(active_src["name"])
+            meta_con = metadata_db.get_con(valid_active_id)
 
             # RUM metrics from DuckDB (if rum_beacons table exists)
             try:
                 rum_count = meta_con.execute(
-                    "SELECT COUNT(*) FROM rum_beacons WHERE service_id = ?", (active_src["name"],)
+                    "SELECT COUNT(*) FROM rum_beacons WHERE service_id = ?", (valid_active_id,)
                 ).fetchone()[0]
                 if rum_count > 0:
                     rum_total = rum_count
                     rum_latest_row = meta_con.execute(
                         "SELECT received_at FROM rum_beacons WHERE service_id = ? ORDER BY received_at DESC LIMIT 1",
-                        (active_src["name"],),
+                        (valid_active_id,),
                     ).fetchone()
                     if rum_latest_row and rum_latest_row[0]:
                         rum_latest = rum_latest_row[0]
@@ -458,7 +458,7 @@ def _bootstrap_sync(
                 pass
 
             # Get last sync times for each type
-            cron_data = latest_cron_per_task(active_src["name"])
+            cron_data = latest_cron_per_task(valid_active_id)
             rum_last_sync = cron_data.get("rum_sync", {}).get("started_at")
             request_last_sync = cron_data.get("sync", {}).get("started_at")
 
