@@ -30,10 +30,16 @@ function renderPanel() {
 
 function mockRumStatus(enabled: boolean) {
   server.use(
-    http.get(`${API_BASE}/api/services/:service_id/rum/status`, () =>
+    // RumStatusPanel fetches status/services via `adminFetch` with a plain
+    // relative path, resolving against jsdom's own origin
+    // (http://localhost:3000) — NOT the `NEXT_PUBLIC_API_URL` the test env
+    // pins for the openapi-fetch `client` (http://127.0.0.1:8000, used by
+    // RumFaroVersionCard's `/rum/versions` fetch below). Keep these two
+    // unprefixed or the request bypasses MSW as a real network call.
+    http.get('/api/services/:service_id/rum/status', () =>
       HttpResponse.json({ enabled, enabled_at: enabled ? '2026-01-01T00:00:00Z' : null }),
     ),
-    http.get(`${API_BASE}/api/services`, () =>
+    http.get('/api/services', () =>
       HttpResponse.json({
         services: [{ service_id: SVC, name: 'Test Service', access_level: 'read_write' }],
       }),
@@ -78,5 +84,23 @@ describe('RumStatusPanel', () => {
     expect(await screen.findByRole('button', { name: /enable rum/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /disable rum/i })).toBeInTheDocument()
     expect(screen.queryByText(/rum not enabled/i)).not.toBeInTheDocument()
+  })
+
+  it('admin + RUM enabled: renders exactly one Faro version card (no double-render)', async () => {
+    useServiceStore.setState({
+      activeServiceId: SVC,
+      services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
+      isInitialized: true,
+    } as never)
+    mockRumStatus(true)
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
+        HttpResponse.json({ available: ['1.8.0'], current: '1.8.0', latest: '1.8.0', update_available: false }),
+      ),
+    )
+
+    renderPanel()
+
+    expect(await screen.findAllByText('Faro SDK Version')).toHaveLength(1)
   })
 })

@@ -5,10 +5,12 @@ import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { RumStatusPanel } from '@/components/Rum/RumStatusPanel';
+import { RumFaroVersionCard } from '@/components/Rum/RumFaroVersionCard';
 import { GenericPageSkeleton } from '@/components/skeletons/PageSkeleton';
 import { PlotlyChart } from '@/components/PlotlyChart';
 import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp } from 'lucide-react';
 import { adminFetch } from '@/lib/api';
+import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { FiltersPayload } from '@/types/filters';
 
 interface RumClientProps {
@@ -90,6 +92,7 @@ function getInpColors(p75: number | null | undefined): CwvColors {
 
 export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumClientProps) {
   const [isLiveMode, setIsLiveMode] = useState(true);
+  const isAnalyst = useIsAnalyst();
 
   // Fetch status
   const { data: status, isLoading: isStatusLoading } = useQuery({
@@ -155,6 +158,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
             <span className="text-sm font-semibold">Waiting for real-time data</span>
           </div>
         </div>
+        {!isAnalyst && <RumFaroVersionCard serviceId={serviceId} rumEnabled={!!status?.enabled} />}
         <AnalyticsCard title="Real User Monitoring Status">
           <div className="space-y-6 text-center py-12">
             <div>
@@ -222,6 +226,8 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
           {isLiveMode ? 'Pause Auto-Refresh' : 'Go Live'}
         </button>
       </div>
+
+      {!isAnalyst && <RumFaroVersionCard serviceId={serviceId} rumEnabled={!!status?.enabled} />}
 
       {/* KPI Row */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
