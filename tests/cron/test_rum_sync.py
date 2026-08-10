@@ -577,6 +577,48 @@ def test_self_heals_missing_pinned_version_to_default(
     assert mock_reconcile == [(SERVICE_ID, "fake-fastly-token")]
 
 
+def test_self_heal_refreshes_stored_vcl_sha_after_reconcile(
+    config_store, frozen_now, mock_fos, mock_detect, mock_purge, mock_reconcile, monkeypatch
+):
+    """#2 audit finding: the self-heal reconciles the deployed VCL to match
+    the freshly adopted DEFAULT_FARO_VERSION, but never refreshed the
+    stored ``rum_vcl_sha``. ``rum_vcl_fingerprint`` now depends on
+    ``faro_version`` (F-4), so ``/rum/status``'s ``vcl_drift`` would report
+    drift FOREVER after this self-heal — including immediately after its
+    own successful reconcile, since the stored sha (computed before a
+    version was ever pinned) can never again match the generator's output.
+
+    Pins: after a successful self-heal reconcile, the persisted config
+    carries a ``rum_vcl_sha`` equal to what ``rum_vcl_fingerprint`` computes
+    for the just-adopted config — mirroring the refresh
+    ``upgrade_faro_version`` already does after its own activation.
+    """
+    from backend.provision.rum_orchestrator_v2 import rum_vcl_fingerprint
+
+    cfg = _cfg()
+    del cfg["rum"]["faro_version"]
+    del cfg["rum"]["faro_content_hash"]
+    del cfg["rum"]["faro_fos_etag_md5"]
+    config_store[SERVICE_ID] = cfg
+
+    async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):
+        stored = config_store[service_id]
+        rum_cfg = dict(stored.get("rum") or {})
+        rum_cfg["faro_version"] = version
+        rum_cfg["faro_content_hash"] = "adopted-hash"
+        rum_cfg["faro_fos_etag_md5"] = "adopted-etag"
+        stored["rum"] = rum_cfg
+        return {"version": version}
+
+    monkeypatch.setattr("backend.provision.rum_assets.download_and_upload_faro", fake_download)
+    mock_fos(lambda request: _head_response(200, etag="adopted-etag"))
+
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
+
+    final_cfg = config_store[SERVICE_ID]
+    assert final_cfg.get("rum_vcl_sha") == rum_vcl_fingerprint(SERVICE_ID, final_cfg)
+
+
 def test_self_heal_does_not_thrash_on_the_next_tick(
     config_store, frozen_now, mock_fos, mock_detect, mock_purge, mock_reconcile, monkeypatch
 ):

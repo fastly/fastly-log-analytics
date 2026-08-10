@@ -203,9 +203,19 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
             # ever made retryable) succeeds.
             try:
                 from backend.provision.declarative.reconciler import reconcile_vcl_state
+                from backend.provision.rum_orchestrator_v2 import rum_vcl_fingerprint
 
                 reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
                 report(f"VCL reconciled: /js/faro-sdk.js now routes to v{DEFAULT_FARO_VERSION}")
+                # #2 audit finding: refresh the stored fingerprint now that the
+                # live VCL actually matches what the generator produces for
+                # this pin — without this, /rum/status's vcl_drift would keep
+                # reporting drift forever after this self-heal, even though
+                # it just successfully reconciled. Mirrors the refresh
+                # upgrade_faro_version does after its own activation.
+                cfg = svcconfig.load_config(service_id) or cfg
+                cfg["rum_vcl_sha"] = rum_vcl_fingerprint(service_id, cfg)
+                svcconfig.save_config(service_id, cfg)
             except Exception:
                 logger.warning(
                     "Faro default-version VCL reconcile failed for %s "

@@ -113,3 +113,68 @@ def test_admin_status_defaults_deployed_sha_to_current_when_enabled_but_unstored
     assert result["deployed_vcl_sha"] == "freshsha123"
     assert result["current_vcl_sha"] == "freshsha123"
     assert result["vcl_drift"] is False
+
+
+def test_admin_status_migrates_legacy_pre_f4_sha_instead_of_false_positive_drift(with_config, monkeypatch):
+    """#2 audit finding: the F-4 fix made ``rum_vcl_fingerprint`` depend on
+    ``faro_version``, but nothing migrated services whose ``rum_vcl_sha``
+    was stored by the OLD algorithm (which never varied with
+    ``faro_version`` at all). That stale value can never again match the
+    new algorithm's output, so every pre-existing RUM service would report
+    ``vcl_drift: true`` forever — even one that was just correctly
+    reconciled.
+
+    Pins the chosen fix (one-time migration on read): a stored sha that
+    exactly matches what the OLD algorithm would have produced for this
+    service is recognized as legacy-format (not real drift), cleared to
+    ``vcl_drift: false`` for this response, AND persisted as the new
+    algorithm's value so subsequent reads don't need the fallback again.
+    """
+    with_config[SVC] = {
+        "rum_enabled": True,
+        "rum_enabled_at": "2026-01-01T00:00:00Z",
+        "rum_vcl_sha": "legacy-sha-abc",
+    }
+    monkeypatch.setattr(rum_router, "rum_vcl_fingerprint", lambda service_id: "current-sha-xyz")
+    monkeypatch.setattr(rum_router, "legacy_rum_vcl_fingerprint", lambda service_id: "legacy-sha-abc")
+
+    saved: dict = {}
+    monkeypatch.setattr("backend.config.save_config", lambda service_id, cfg: saved.update({service_id: cfg}))
+
+    import asyncio
+
+    result = asyncio.run(rum_router.rum_status(_request(None), service_id=SVC))
+
+    assert result["vcl_drift"] is False
+    assert result["deployed_vcl_sha"] == "current-sha-xyz"
+    assert result["current_vcl_sha"] == "current-sha-xyz"
+    # Migration persisted so the next read skips the legacy fallback.
+    assert saved[SVC]["rum_vcl_sha"] == "current-sha-xyz"
+
+
+def test_admin_status_reports_genuine_drift_when_sha_matches_neither_algorithm(with_config, monkeypatch):
+    """Negative control: a stored sha that matches NEITHER the legacy NOR
+    the current algorithm's output is real drift (e.g. VCL changed
+    upstream, or the service was reconciled against a different
+    faro_version) and must still be reported — the legacy-migration
+    fallback must not mask genuine drift."""
+    with_config[SVC] = {
+        "rum_enabled": True,
+        "rum_enabled_at": "2026-01-01T00:00:00Z",
+        "rum_vcl_sha": "genuinely-stale-sha",
+    }
+    monkeypatch.setattr(rum_router, "rum_vcl_fingerprint", lambda service_id: "current-sha-xyz")
+    monkeypatch.setattr(rum_router, "legacy_rum_vcl_fingerprint", lambda service_id: "legacy-sha-abc")
+
+    save_calls: list = []
+    monkeypatch.setattr("backend.config.save_config", lambda service_id, cfg: save_calls.append((service_id, cfg)))
+
+    import asyncio
+
+    result = asyncio.run(rum_router.rum_status(_request(None), service_id=SVC))
+
+    assert result["vcl_drift"] is True
+    assert result["deployed_vcl_sha"] == "genuinely-stale-sha"
+    assert result["current_vcl_sha"] == "current-sha-xyz"
+    # No migration write for a sha that isn't recognized as legacy-format.
+    assert save_calls == []

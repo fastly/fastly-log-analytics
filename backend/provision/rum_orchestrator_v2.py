@@ -274,6 +274,34 @@ def rum_vcl_fingerprint(logging_service_id: str, cfg: dict[str, Any] | None = No
     return hashlib.sha256(json.dumps(snippets, sort_keys=True).encode()).hexdigest()
 
 
+def legacy_rum_vcl_fingerprint(logging_service_id: str) -> str:
+    """Reproduce the pre-F-4 ``rum_vcl_fingerprint`` algorithm.
+
+    Used purely to migrate a ``rum_vcl_sha`` stored before the F-4 fix
+    (#2 audit finding on top of F-4): the old algorithm hashed only the
+    Phase 1 (recv beacon + deliver cookie) snippets and never passed
+    ``faro_version`` into the generator (it always used the implicit
+    default, ``None``) — so for a given ``logging_service_id`` it produces
+    the SAME hash regardless of the actual pinned Faro version or shield
+    config. Every service enabled/upgraded before F-4 shipped has this
+    stale, permanently-non-matching value sitting in ``rum_vcl_sha``, which
+    would otherwise false-positive ``vcl_drift`` forever — including
+    immediately after a correct reconcile — since the new algorithm's
+    output can never equal it again.
+
+    ``/rum/status`` uses this to recognize "this stored sha predates F-4"
+    (an exact match, not a heuristic) and migrate it to the current
+    algorithm's output instead of reporting permanent false drift.
+    """
+    import hashlib
+    import json
+
+    from backend.core.fastly.rum_provisioning import generate_rum_vcl
+
+    snippets = generate_rum_vcl(logging_service_id)
+    return hashlib.sha256(json.dumps(snippets, sort_keys=True).encode()).hexdigest()
+
+
 def _set_faro_version(cfg: dict[str, Any], version: str | None) -> None:
     """Set (or clear) ``cfg["rum"]["faro_version"]`` in place, preserving other keys."""
     rum_cfg = dict(cfg.get("rum") or {})

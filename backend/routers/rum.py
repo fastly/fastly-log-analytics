@@ -30,7 +30,13 @@ from backend.core.metadata import get_con
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import RumDisableRequest, RumEnableRequest, RumUpgradeRequest, RumVersionsResponse
 from backend.provision.orchestrator import run_with_events
-from backend.provision.rum_orchestrator_v2 import disable_rum, enable_rum, rum_vcl_fingerprint, upgrade_faro_version
+from backend.provision.rum_orchestrator_v2 import (
+    disable_rum,
+    enable_rum,
+    legacy_rum_vcl_fingerprint,
+    rum_vcl_fingerprint,
+    upgrade_faro_version,
+)
 from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
 
@@ -203,12 +209,32 @@ async def rum_status(request: Request, service_id: str = Path(...)) -> dict[str,
     if enabled and not deployed_sha:
         deployed_sha = current_sha
 
+    vcl_drift = deployed_sha != current_sha if enabled else False
+
+    # #2 audit finding: a rum_vcl_sha stored before the F-4 fingerprint fix
+    # (which made the hash depend on faro_version) permanently false-
+    # positives here — the OLD algorithm was structurally blind to
+    # faro_version and hashed identical content for every pin, so it can
+    # never again match the NEW algorithm's output, even on a freshly and
+    # correctly reconciled service. One-time migration on read: if the
+    # stored sha is an EXACT match for what the old algorithm would have
+    # produced for this service, it's a legacy-format value carrying no
+    # real drift signal — clear the false positive and persist the
+    # migrated (current-algorithm) value so subsequent reads skip this
+    # check entirely. A stored sha that matches neither algorithm is
+    # genuine drift and is left alone.
+    if enabled and vcl_drift and deployed_sha == legacy_rum_vcl_fingerprint(service_id):
+        vcl_drift = False
+        deployed_sha = current_sha
+        cfg["rum_vcl_sha"] = current_sha
+        svcconfig.save_config(service_id, cfg)
+
     return {
         "enabled": enabled,
         "enabled_at": enabled_at,
         "deployed_vcl_sha": deployed_sha,
         "current_vcl_sha": current_sha,
-        "vcl_drift": deployed_sha != current_sha if enabled else False,
+        "vcl_drift": vcl_drift,
     }
 
 
