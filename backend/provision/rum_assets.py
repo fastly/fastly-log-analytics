@@ -81,8 +81,18 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     if (Faro.WebVitalsInstrumentation) {{
       instrumentations.push(new Faro.WebVitalsInstrumentation());
     }}
-    if (Faro.ErrorInstrumentation) {{
-      instrumentations.push(new Faro.ErrorInstrumentation());
+    // Real export is "ErrorsInstrumentation" (plural) in every SDK version
+    // we've checked (1.19.0, 2.9.0), but this probe used to look for the
+    // singular "ErrorInstrumentation" and silently found nothing — no
+    // exception, no warning, just no JS error tracking. Try the plural
+    // first, fall back to the singular in case a future release renames it
+    // back, and warn loudly if neither is found so this class of bug is
+    // visible instead of silent.
+    var ErrorInstrumentationCtor = Faro.ErrorsInstrumentation || Faro.ErrorInstrumentation;
+    if (ErrorInstrumentationCtor) {{
+      instrumentations.push(new ErrorInstrumentationCtor());
+    }} else {{
+      console.warn('Faro SDK: no error instrumentation export found (checked ErrorsInstrumentation, ErrorInstrumentation) — JS error tracking disabled');
     }}
 
     var config = {{

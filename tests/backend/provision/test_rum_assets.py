@@ -21,6 +21,7 @@ from backend.provision.rum_assets import (
     cleanup_old_faro_versions,
     detect_faro_version_change,
     download_and_upload_faro,
+    generate_rum_tracker_js,
 )
 
 FAKE_CFG = {
@@ -297,3 +298,37 @@ async def test_cleanup_old_faro_versions_swallows_error(monkeypatch, mock_fos):
     # Must not raise.
     result = await cleanup_old_faro_versions("svc_test")
     assert result is None
+
+
+# ── generate_rum_tracker_js ─────────────────────────────────────────────────
+
+
+def test_generate_rum_tracker_js_probes_correct_error_instrumentation_name():
+    """The real export in every SDK version we've checked (1.19.0, 2.9.0) is
+    ``ErrorsInstrumentation`` (plural). The generated tracker must probe that
+    name — regression test for the misspelled singular probe that silently
+    disabled JS error tracking."""
+    js = generate_rum_tracker_js("svc_test")
+
+    assert "Faro.ErrorsInstrumentation" in js
+
+
+def test_generate_rum_tracker_js_does_not_reintroduce_the_misspelling():
+    """``Faro.ErrorInstrumentation`` (singular) must not appear as the
+    primary probe again — only as an explicit, named fallback."""
+    js = generate_rum_tracker_js("svc_test")
+
+    # The singular form is allowed to exist ONLY as the documented fallback
+    # assigned into ErrorInstrumentationCtor; it must never be the sole/first
+    # thing checked in an `if`.
+    assert "if (Faro.ErrorInstrumentation)" not in js
+    assert "new Faro.ErrorInstrumentation()" not in js
+
+
+def test_generate_rum_tracker_js_warns_when_no_error_instrumentation_found():
+    """Losing both spellings in a future SDK release must surface a
+    console.warn, not fail silently like the original bug."""
+    js = generate_rum_tracker_js("svc_test")
+
+    assert "console.warn" in js
+    assert "no error instrumentation export found" in js
