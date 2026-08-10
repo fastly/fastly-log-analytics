@@ -1192,6 +1192,7 @@ async def rum_live_events(service_id: str = Path(...)) -> list[dict[str, Any]]:
                         "desc": desc,
                         "browser": meta.get("browser") or data.get("browser") or "Unknown",
                         "os": meta.get("os") or data.get("os") or "Unknown",
+                        "raw_log": data,
                     }
                 )
             except Exception:
@@ -1210,6 +1211,30 @@ async def rum_live_events(service_id: str = Path(...)) -> list[dict[str, Any]]:
                     "desc": "Page load complete" if i % 4 != 1 else "ReferenceError: analyticsTrack is not defined",
                     "browser": "Chrome",
                     "os": "macOS",
+                    "raw_log": {
+                        "meta": {
+                            "sdk": {"name": "faro-web", "version": "2.9.0"},
+                            "app": {"name": "rum-app", "version": "1.0.0"},
+                            "browser": {"name": "Chrome", "version": "120.0.0.0", "os": "macOS"},
+                            "page": {
+                                "url": "https://fastly-se-demo.global.ssl.fastly.net" + ("/" if i != 2 else "/pricing")
+                            },
+                        },
+                        "measurements": [
+                            {"type": "web-vitals", "values": {"lcp": 1450, "fcp": 780, "cls": 0.02, "ttfb": 230}}
+                        ]
+                        if i % 4 != 1
+                        else [],
+                        "exceptions": [
+                            {
+                                "type": "ReferenceError",
+                                "value": "analyticsTrack is not defined",
+                                "stacktrace": "at index.js:14",
+                            }
+                        ]
+                        if i % 4 == 1
+                        else [],
+                    },
                 }
                 for i in range(5)
             ]

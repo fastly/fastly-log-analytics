@@ -231,6 +231,7 @@ def ingest_rum_logs(
                                         "browser": log_data.get("browser") or "Chrome",
                                         "os": log_data.get("os") or "macOS",
                                         "device": log_data.get("device") or "Desktop",
+                                        "raw_log": log_data,  # Store complete original raw log for debugging!
                                         "meta": {
                                             "browser": log_data.get("browser") or "Chrome",
                                             "os": log_data.get("os") or "macOS",

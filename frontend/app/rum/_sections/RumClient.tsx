@@ -8,10 +8,17 @@ import { RumStatusPanel } from '@/components/Rum/RumStatusPanel';
 import { RumFaroVersionCard } from '@/components/Rum/RumFaroVersionCard';
 import { GenericPageSkeleton } from '@/components/skeletons/PageSkeleton';
 import { PlotlyChart } from '@/components/PlotlyChart';
-import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp } from 'lucide-react';
+import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye } from 'lucide-react';
 import { adminFetch } from '@/lib/api';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { FiltersPayload } from '@/types/filters';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 interface RumClientProps {
   serviceId: string | null;
@@ -49,6 +56,7 @@ interface RumLiveEvent {
   desc: string;
   browser: string;
   os: string;
+  raw_log?: any;
 }
 
 function getLcpColors(p75: number | null | undefined): CwvColors {
@@ -92,6 +100,7 @@ function getInpColors(p75: number | null | undefined): CwvColors {
 
 export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumClientProps) {
   const [isLiveMode, setIsLiveMode] = useState(true);
+  const [selectedEvent, setSelectedEvent] = useState<RumLiveEvent | null>(null);
   const isAnalyst = useIsAnalyst();
 
   // Fetch status
@@ -458,8 +467,8 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       {/* Live Monitor Feed Activity Ticker */}
       <AnalyticsCard title="Live Activity Monitor" icon={<Terminal className="h-4 w-4" />}>
         <div className="bg-[#0f172a] text-zinc-100 p-4 rounded-lg font-mono text-xs space-y-2 max-h-[220px] overflow-y-auto">
-          {liveEvents?.map((e: RumLiveEvent) => (
-            <div key={`${e.time}-${e.type}-${e.path}-${e.desc}`} className="flex justify-between items-center border-b border-zinc-800 pb-2 last:border-0 last:pb-0">
+          {liveEvents?.map((e: RumLiveEvent, index: number) => (
+            <div key={`${e.time}-${e.type}-${e.path}-${e.desc}-${index}`} className="flex justify-between items-center border-b border-zinc-800 pb-2 last:border-0 last:pb-0">
               <div className="flex items-center gap-2">
                 <span className={e.type === 'error' ? 'text-rose-500' : 'text-emerald-400'}>
                   {e.type === 'error' ? '✖' : '✔'}
@@ -468,8 +477,17 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 <span className="font-semibold text-zinc-300">{e.path}</span>
                 <span className="text-zinc-400">({e.desc})</span>
               </div>
-              <div className="text-zinc-500 text-[10px]">
-                {e.browser} on {e.os}
+              <div className="flex items-center gap-3">
+                <div className="text-zinc-500 text-[10px]">
+                  {e.browser} on {e.os}
+                </div>
+                <button
+                  onClick={() => setSelectedEvent(e)}
+                  className="p-1 text-zinc-400 hover:text-zinc-100 bg-zinc-800/40 hover:bg-zinc-700/60 rounded border border-zinc-700/20 transition-all duration-150"
+                  title="Inspect Raw Beacon"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                </button>
               </div>
             </div>
           ))}
@@ -478,6 +496,61 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
           )}
         </div>
       </AnalyticsCard>
+
+      {/* Beacon Details Modal */}
+      <Dialog open={selectedEvent !== null} onOpenChange={(open) => { if (!open) setSelectedEvent(null); }}>
+        <DialogContent className="max-w-2xl bg-zinc-950 border-zinc-800 text-zinc-100 p-6 shadow-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-lg font-bold flex items-center gap-2 text-zinc-100">
+              <Activity className={selectedEvent?.type === 'error' ? 'text-rose-500 h-5 w-5' : 'text-emerald-400 h-5 w-5'} />
+              RUM Beacon Details
+            </DialogTitle>
+            <DialogDescription className="text-zinc-400 text-xs">
+              Extracted client characteristics and complete raw payload captured at the Fastly edge.
+            </DialogDescription>
+          </DialogHeader>
+
+          {selectedEvent && (
+            <div className="space-y-4 my-2 text-xs">
+              {/* Event Metadata Grid */}
+              <div className="grid grid-cols-2 gap-4 bg-zinc-900/40 p-4 rounded-lg border border-zinc-800/80">
+                <div>
+                  <span className="text-zinc-500 block mb-1">Timestamp</span>
+                  <span className="font-mono text-zinc-300">{new Date(selectedEvent.time).toLocaleString()}</span>
+                </div>
+                <div>
+                  <span className="text-zinc-500 block mb-1">Event Type</span>
+                  <span className={`capitalize font-semibold ${selectedEvent.type === 'error' ? 'text-rose-400' : 'text-emerald-400'}`}>
+                    {selectedEvent.type}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-zinc-500 block mb-1">Url Path</span>
+                  <span className="font-mono text-zinc-300 font-semibold">{selectedEvent.path}</span>
+                </div>
+                <div>
+                  <span className="text-zinc-500 block mb-1">Client Platform</span>
+                  <span className="text-zinc-300">{selectedEvent.browser} on {selectedEvent.os}</span>
+                </div>
+                <div className="col-span-2">
+                  <span className="text-zinc-500 block mb-1">Description</span>
+                  <span className={`font-mono block p-2 rounded ${selectedEvent.type === 'error' ? 'bg-rose-950/20 text-rose-300 border border-rose-900/30' : 'bg-zinc-900/60 text-zinc-300'}`}>
+                    {selectedEvent.desc}
+                  </span>
+                </div>
+              </div>
+
+              {/* Raw JSON Block */}
+              <div className="space-y-2">
+                <span className="text-zinc-400 font-semibold block">Raw Beacon Log JSON</span>
+                <div className="bg-[#0b0f19] border border-zinc-800/80 rounded-lg p-4 overflow-auto max-h-[300px] font-mono text-[11px] leading-relaxed text-emerald-400">
+                  <pre>{JSON.stringify(selectedEvent.raw_log || {}, null, 2)}</pre>
+                </div>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
