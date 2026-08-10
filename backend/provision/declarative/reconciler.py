@@ -7,6 +7,7 @@ Read Desired State → Read Current State → Diff → Apply Diff → Validate &
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -33,6 +34,8 @@ from backend.provision.declarative.generators import (
 )
 from backend.provision.declarative.state import CmcdConfig, FeatureState, ScoringConfig
 from backend.provision.rum_assets import upload_rum_tracker_js
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Constants & Guards
@@ -223,6 +226,27 @@ def _offline_vcl_checks(vcl: str, fields: list[str]) -> list[str]:
 # ============================================================================
 
 
+def _upload_rum_tracker_best_effort(service_id: str, token: str, status_cb: Callable[[str], None] | None) -> None:
+    """Upload the RUM tracker JS, logging (not raising) on failure.
+
+    Callers must only invoke this once the VCL route the tracker depends on
+    (``/js/faro-sdk.js``) is actually live — i.e. after a successful
+    activation, or on the no-change idempotent path where it was already
+    live. Non-blocking by design: reconciliation has already succeeded by
+    the time this runs, so a tracker-upload hiccup must not turn a
+    successful reconcile into a reported failure — the next reconcile or
+    cron tick will simply retry it.
+    """
+    if status_cb:
+        status_cb("⏳ Ensuring RUM tracker JS is uploaded to FOS...")
+    try:
+        upload_rum_tracker_js(service_id, token, status_cb=status_cb)
+    except Exception as e:
+        logger.warning(f"Failed to upload RUM tracker JS: {e}")
+        if status_cb:
+            status_cb(f"⚠️  RUM JS upload warning: {e}")
+
+
 def reconcile_vcl_state(
     service_id: str,
     token: str,
@@ -237,11 +261,16 @@ def reconcile_vcl_state(
     2. Build desired state from config
     3. Fetch current state from Fastly
     4. Compute diff (+ legacy snippet auto-detection)
-    4.6. Upload RUM tracker JS if RUM is enabled
     5. Clone active version to draft
     6. Apply diff on draft
     7. Validate draft
     8. Activate draft & persist state (bypassed if activate=False)
+    8.5. Upload RUM tracker JS if RUM is enabled — deliberately AFTER
+         activation (or on the no-change early-exit), never before: the
+         tracker unconditionally requests /js/faro-sdk.js, a route that
+         only exists once the VCL serving it is live. Publishing it earlier
+         would point browsers at a route that 404s (see task-9 report,
+         "Ordering fix: tracker after activation").
 
     Args:
         service_id: Fastly service ID.
@@ -318,23 +347,15 @@ def reconcile_vcl_state(
             # Step 4.5: Detect and auto-remove legacy snippets (migration helper)
             _detect_and_queue_legacy_cleanup(current_snippets, diff, status_cb)
 
-            # Step 4.6: Upload RUM tracker JS if RUM is enabled
-            if desired_state.rum_enabled:
-                if status_cb:
-                    status_cb("⏳ Ensuring RUM tracker JS is uploaded to FOS...")
-                try:
-                    upload_rum_tracker_js(service_id, token, status_cb=status_cb)
-                except Exception as e:
-                    # Non-blocking: log warning but don't fail the reconciliation
-                    import logging
-
-                    logger = logging.getLogger(__name__)
-                    logger.warning(f"Failed to upload RUM tracker JS: {e}")
-                    if status_cb:
-                        status_cb(f"⚠️  RUM JS upload warning: {e}")
-
-            # Idempotency: if no changes, exit early
+            # Idempotency: if no changes, exit early. Current Fastly state
+            # already matches desired state, so any route the tracker
+            # depends on (e.g. /js/faro-sdk.js) is already live — safe to
+            # (re)publish the tracker here, and necessary: a service whose
+            # VCL is already correct still needs its tracker present and
+            # current (e.g. if it was deleted out-of-band from FOS).
             if diff.is_empty():
+                if desired_state.rum_enabled:
+                    _upload_rum_tracker_best_effort(service_id, token, status_cb)
                 try:
                     result.activated_version = _fetch_active_version(service_id, token)
                 except RuntimeError:
@@ -343,6 +364,9 @@ def reconcile_vcl_state(
                 return result
 
             if dry_run:
+                # Nothing is applied in a dry run, so the tracker must NOT
+                # be published here — the route it depends on doesn't exist
+                # until a real reconcile activates it.
                 result.changes_applied = diff.summary()
                 try:
                     result.activated_version = _fetch_active_version(service_id, token)
@@ -401,6 +425,14 @@ def reconcile_vcl_state(
                         logging.getLogger("backend.scheduler").warning(
                             f"Failed to purge RUM URLs for service {service_id}: {e}"
                         )
+
+                    # Step 8.5: Upload RUM tracker JS now that the just-
+                    # activated VCL actually serves the route it depends on
+                    # (/js/faro-sdk.js). Must run AFTER activation — never
+                    # before, and never when activate=False (draft isn't
+                    # live yet in that case).
+                    if desired_state.rum_enabled:
+                        _upload_rum_tracker_best_effort(service_id, token, status_cb)
 
                     # Update local config with activation metadata
                     cfg = json.loads(config_path.read_text())

@@ -174,8 +174,14 @@ class TestEnableRumRollbackOnBucketFailure:
                             mock_upload.assert_not_called()
                             mock_reconcile.assert_not_called()
 
-    def test_enable_rum_rollback_on_upload_failure(self):
-        """Verify config is rolled back if JS upload fails."""
+    def test_enable_rum_rollback_on_faro_bundle_upload_failure(self):
+        """Verify config is rolled back if the Faro bundle upload fails.
+
+        The bundle upload runs BEFORE reconcile and is still a blocking
+        step (the VCL the reconciler is about to activate must not route to
+        a bundle that was never uploaded), so a failure here must still
+        roll back and never reach reconcile.
+        """
         service_id = "srv_test"
         cfg = {
             "service_id": service_id,
@@ -191,25 +197,81 @@ class TestEnableRumRollbackOnBucketFailure:
             with patch("backend.config.save_config") as mock_save:
                 with patch("backend.provision.rum_orchestrator_v2.ensure_fos_bucket") as mock_bucket:
                     with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload:
-                        with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
-                            # Setup
-                            mock_load.return_value = cfg.copy()
-                            mock_bucket.return_value = True
-                            mock_upload.side_effect = RuntimeError("Upload failed")
-                            mock_reconcile.return_value = MagicMock(activated_version=2)
+                        with patch(
+                            "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                            new_callable=AsyncMock,
+                            side_effect=RuntimeError("Faro bundle upload failed"),
+                        ):
+                            with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
+                                # Setup
+                                mock_load.return_value = cfg.copy()
+                                mock_bucket.return_value = True
+                                mock_reconcile.return_value = MagicMock(activated_version=2)
 
-                            # Call and expect exception
-                            with pytest.raises(RuntimeError, match="Upload failed"):
-                                enable_rum(service_id, "test_token")
+                                # Call and expect exception
+                                with pytest.raises(RuntimeError, match="Faro bundle upload failed"):
+                                    enable_rum(service_id, "test_token")
 
-                            # Verify config was rolled back
-                            assert mock_save.call_count == 2
-                            second_save_call = mock_save.call_args_list[1]
-                            saved_cfg = second_save_call[0][1]
-                            assert saved_cfg["rum_enabled"] is False
+                                # Verify config was rolled back
+                                assert mock_save.call_count == 2
+                                second_save_call = mock_save.call_args_list[1]
+                                saved_cfg = second_save_call[0][1]
+                                assert saved_cfg["rum_enabled"] is False
 
-                            # Verify reconcile was NOT called
-                            mock_reconcile.assert_not_called()
+                                # Verify reconcile was NOT called, and the
+                                # tracker JS was never uploaded (it only
+                                # runs after a successful reconcile)
+                                mock_reconcile.assert_not_called()
+                                mock_upload.assert_not_called()
+
+    def test_enable_rum_tracker_upload_failure_after_reconcile_is_non_blocking(self):
+        """Verify a tracker-JS upload failure AFTER a successful reconcile does
+        NOT raise and does NOT roll back config.
+
+        This is the ordering fix's core safety property: by the time the
+        tracker upload runs, the Fastly side has already activated
+        successfully and is live. Rolling back local config at that point
+        would desync it from reality (Fastly thinks RUM is enabled; config
+        would claim it isn't) for a problem that self-heals on the next
+        reconcile/cron tick.
+        """
+        service_id = "srv_test"
+        cfg = {
+            "service_id": service_id,
+            "rum_enabled": False,
+            "fos_bucket": "my-bucket",
+            "fos_region": "us-east-1",
+            "fos_access_key_id": "test_access_key",
+            "fos_secret_access_key": "test_secret_key",
+            "last_activated_version": 1,
+        }
+
+        with patch("backend.config.load_config") as mock_load:
+            with patch("backend.config.save_config") as mock_save:
+                with patch("backend.provision.rum_orchestrator_v2.ensure_fos_bucket"):
+                    with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload:
+                        with patch(
+                            "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                            new_callable=AsyncMock,
+                            return_value={"version": "2.9.0"},
+                        ):
+                            with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
+                                mock_load.return_value = cfg.copy()
+                                mock_upload.side_effect = RuntimeError("FOS unreachable")
+                                mock_reconcile.return_value = MagicMock(activated_version=2, draft_version=None)
+
+                                # Must NOT raise.
+                                result = enable_rum(service_id, "test_token")
+
+                                mock_reconcile.assert_called_once()
+                                mock_upload.assert_called_once()
+
+                                # Config save count is exactly 1 (the initial
+                                # enable) — no rollback save was made.
+                                assert mock_save.call_count == 1
+
+                                assert result["activated"] is True
+                                assert result["logging_service_active_version"] == 2
 
     def test_enable_rum_no_config_raises_error(self):
         """Verify RuntimeError is raised if service config not found."""
@@ -564,9 +626,12 @@ class TestEnableRumWithFaroVersion:
         cfg.update(overrides)
         return cfg
 
-    def test_enable_rum_faro_version_uploads_bundle_before_reconcile(self):
-        """Verify a pinned faro_version uploads the bundle (in order: JS tracker,
-        then Faro bundle, then reconcile) rather than being silently dropped."""
+    def test_enable_rum_faro_version_uploads_bundle_before_reconcile_and_tracker_after(self):
+        """Pin the ordering, not just the outcome: the Faro bundle must upload
+        BEFORE reconcile (the VCL about to be activated routes to it), and the
+        tracker JS must upload AFTER reconcile (the tracker's dependency route
+        only exists once that reconcile has activated) — never the reverse,
+        which is the exact ordering hazard this fix closes."""
         service_id = "srv_test"
         cfg = self._cfg(service_id)
         call_order = []
@@ -595,7 +660,7 @@ class TestEnableRumWithFaroVersion:
                         ):
                             result = enable_rum(service_id, "test_token", faro_version="2.9.0")
 
-        assert call_order == ["upload_js", "upload_faro", "reconcile"]
+        assert call_order == ["upload_faro", "reconcile", "upload_js"]
         assert result["activated"] is True
 
     def test_enable_rum_faro_version_persisted_before_reconcile(self):
@@ -911,3 +976,77 @@ class TestUpgradeFaroVersion:
 
         assert result["version"] == "2.0.0"
         assert result["activated"] is True
+
+    def test_upgrade_faro_version_never_uploads_tracker_js(self):
+        """Verify upgrade_faro_version never calls upload_rum_tracker_js.
+
+        The tracker body is a static wrapper that always loads the constant
+        path /js/faro-sdk.js regardless of pinned version (see
+        generate_rum_tracker_js's docstring) — a version bump has nothing
+        new to publish there. This pins that claim as a regression test
+        rather than leaving it as an unverified assumption.
+        """
+        service_id = "srv_test"
+        cfg = self._cfg(service_id, faro_version="1.0.0")
+
+        with patch("backend.config.load_config", return_value=cfg):
+            with patch("backend.config.save_config"):
+                with patch(
+                    "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                    new_callable=AsyncMock,
+                    return_value={"version": "2.0.0"},
+                ):
+                    with patch(
+                        "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
+                        return_value=MagicMock(activated_version=7, draft_version=None),
+                    ):
+                        with patch("backend.provision.rum_orchestrator_v2._purge_faro_surrogate_key"):
+                            with patch(
+                                "backend.provision.rum_orchestrator_v2.cleanup_old_faro_versions",
+                                new_callable=AsyncMock,
+                            ):
+                                with patch(
+                                    "backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"
+                                ) as mock_upload_tracker:
+                                    upgrade_faro_version(service_id, "2.0.0", "test_token")
+
+        mock_upload_tracker.assert_not_called()
+
+
+class TestEnableRumSkipsTrackerWhenNotActivated:
+    """Test that enable_rum() does not publish the tracker when the VCL
+    route it depends on never actually went live."""
+
+    def test_enable_rum_activate_false_skips_tracker_upload(self):
+        """Verify upload_rum_tracker_js is NOT called when activate=False.
+
+        A draft that was compiled and validated but never activated does
+        not serve /js/faro-sdk.js — publishing the tracker in that state
+        would reproduce the exact ordering hazard this fix closes.
+        """
+        service_id = "srv_test"
+        cfg = {
+            "service_id": service_id,
+            "rum_enabled": False,
+            "fos_bucket": "my-bucket",
+            "fos_region": "us-east-1",
+            "fos_access_key_id": "test_access_key",
+            "fos_secret_access_key": "test_secret_key",
+            "last_activated_version": 1,
+        }
+
+        with patch("backend.config.load_config", return_value=cfg):
+            with patch("backend.config.save_config"):
+                with patch("backend.provision.rum_orchestrator_v2.ensure_fos_bucket"):
+                    with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload:
+                        with patch(
+                            "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                            new_callable=AsyncMock,
+                        ):
+                            with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
+                                mock_reconcile.return_value = MagicMock(activated_version=None, draft_version=3)
+
+                                result = enable_rum(service_id, "test_token", activate=False)
+
+        mock_upload.assert_not_called()
+        assert result["activated"] is False

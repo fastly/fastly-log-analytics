@@ -396,27 +396,13 @@ def enable_rum(
         cfg["rum"] = dict(previous_rum_cfg)
         svcconfig.save_config(logging_service_id, cfg)
 
-    # Step 4: Upload RUM tracker JS to FOS (blocks RUM enable if upload fails)
-    # The asset-fetch VCL snippet (backend/core/fastly/rum_provisioning.py) routes
-    # client requests from GET /js/rum.js to /rum/rum-tracker.js on FOS.
-    # This path MUST match the upload path (rum_assets.py: "rum/rum-tracker.js").
-    try:
-        if status_cb:
-            status_cb("⏳ Uploading RUM tracker JS...")
-
-        upload_rum_tracker_js(logging_service_id, token, status_cb=status_cb)
-        ok("RUM tracker JS uploaded")
-
-    except Exception as e:
-        _rollback_config()
-        fail(f"JS upload failed: {e}")
-        raise
-
-    # Step 4.5: Upload the pinned Faro Web SDK bundle to FOS (blocks RUM enable
+    # Step 4: Upload the pinned Faro Web SDK bundle to FOS (blocks RUM enable
     # if it fails) so the VCL the reconciler is about to deploy routes
     # /js/faro-sdk.js to an object that actually exists. Unconditional now:
     # the tracker JS always loads /js/faro-sdk.js, so RUM can never be
-    # enabled without a bundle behind that path.
+    # enabled without a bundle behind that path. This MUST stay before the
+    # reconcile below — the bundle has to exist in FOS before the VCL
+    # starts routing to it.
     try:
         if status_cb:
             status_cb(f"⏳ Downloading and uploading Faro Web SDK v{resolved_faro_version}...")
@@ -437,6 +423,37 @@ def enable_rum(
         _rollback_config()
         fail(f"Reconciliation failed: {e}")
         raise
+
+    # Step 6: Upload RUM tracker JS to FOS now that the VCL is actually live
+    # and serving /js/faro-sdk.js — deliberately AFTER a successful
+    # reconcile, never before. Publishing the tracker earlier (the pre-fix
+    # ordering) would point browsers at a route that doesn't exist yet.
+    # The asset-fetch VCL snippet (backend/core/fastly/rum_provisioning.py)
+    # routes client requests from GET /js/rum.js to /rum/rum-tracker.js on
+    # FOS. This path MUST match the upload path (rum_assets.py:
+    # "rum/rum-tracker.js").
+    #
+    # Skipped when nothing was actually activated (activate=False): the
+    # draft was compiled/validated but never went live, so the route the
+    # tracker depends on isn't live yet either.
+    #
+    # Non-blocking (log a warning, don't fail the enable or roll back
+    # config): the Fastly reconcile already succeeded and is already live,
+    # so rolling back local config here would desync it from reality. The
+    # reconciler's own idempotent no-change path retries this on the next
+    # reconcile, and reconcile_vcl_state's internal upload (also
+    # post-activation) already covers most cases — this call exists so
+    # enable_rum doesn't depend on that internal behavior alone.
+    if result.activated_version is not None:
+        try:
+            if status_cb:
+                status_cb("⏳ Uploading RUM tracker JS...")
+            upload_rum_tracker_js(logging_service_id, token, status_cb=status_cb)
+            ok("RUM tracker JS uploaded")
+        except Exception as e:
+            logger.warning(f"RUM tracker JS upload failed after successful enable for {logging_service_id}: {e}")
+            if status_cb:
+                status_cb(f"⚠️  RUM tracker JS upload warning: {e}")
 
     if result.activated_version:
         ok(f"RUM enabled: version {result.activated_version} activated")
@@ -469,6 +486,12 @@ def upgrade_faro_version(
     deployed (Task 3's cron and the status endpoint both trust this
     invariant). A best-effort surrogate-key purge and old-version cleanup
     follow a successful reconcile; neither failure fails the upgrade.
+
+    Deliberately does NOT call ``upload_rum_tracker_js``: the tracker body
+    is a static wrapper that always loads the constant path
+    ``/js/faro-sdk.js`` regardless of which Faro version is pinned behind
+    it (see ``generate_rum_tracker_js``'s docstring), so a version bump has
+    nothing new to publish there — only the Faro bundle itself changes.
 
     Args:
         logging_service_id: Fastly service ID.

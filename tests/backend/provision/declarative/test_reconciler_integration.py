@@ -93,7 +93,7 @@ class TestReconciliationFeatures:
     @patch("backend.provision.declarative.reconciler._fetch_snippets")
     @patch("backend.provision.declarative.reconciler._fetch_logging_endpoints")
     @patch("backend.provision.declarative.reconciler._fetch_backends")
-    def test_reconcile_uploads_rum_js_when_enabled(
+    def test_reconcile_does_not_upload_rum_js_during_dry_run(
         self,
         mock_fetch_backends,
         mock_fetch_endpoints,
@@ -101,7 +101,12 @@ class TestReconciliationFeatures:
         mock_fetch_active,
         mock_upload_rum_js,
     ):
-        """Verify RUM JS is uploaded when RUM is enabled in desired state."""
+        """Verify a dry run NEVER uploads the tracker, even when RUM is enabled
+        in desired state and the diff is non-empty.
+
+        Nothing is applied in a dry run, so the VCL route the tracker depends
+        on (/js/faro-sdk.js) is never made live by this call — publishing the
+        tracker here would be the exact ordering hazard this fix closes."""
         mock_fetch_active.return_value = 1
         mock_fetch_snippets.return_value = []
         mock_fetch_endpoints.return_value = []
@@ -118,9 +123,218 @@ class TestReconciliationFeatures:
                 }
                 mock_read.return_value = json.dumps(cfg)
 
-                result = reconcile_vcl_state("srv_test", "token", dry_run=True)
-                # In dry_run, upload should still be called (before we check idempotency)
-                mock_upload_rum_js.assert_called_once_with("srv_test", "token", status_cb=None)
+                reconcile_vcl_state("srv_test", "token", dry_run=True)
+
+                mock_upload_rum_js.assert_not_called()
+
+    @patch("backend.provision.declarative.reconciler.compute_diff")
+    @patch("backend.provision.declarative.reconciler.upload_rum_tracker_js")
+    @patch("backend.provision.declarative.reconciler._fetch_active_version")
+    @patch("backend.provision.declarative.reconciler._fetch_snippets")
+    @patch("backend.provision.declarative.reconciler._fetch_logging_endpoints")
+    @patch("backend.provision.declarative.reconciler._fetch_backends")
+    def test_reconcile_uploads_rum_js_on_idempotent_no_change_path(
+        self,
+        mock_fetch_backends,
+        mock_fetch_endpoints,
+        mock_fetch_snippets,
+        mock_fetch_active,
+        mock_upload_rum_js,
+        mock_compute_diff,
+    ):
+        """Verify a service whose VCL already matches desired state (diff is
+        empty) still gets its tracker (re)published: current state already
+        matching desired means the route the tracker depends on is already
+        live, so publishing here is both safe and necessary (e.g. if the
+        tracker object was deleted out-of-band from FOS).
+
+        ``compute_diff`` is patched directly to force the empty-diff branch
+        without needing to hand-craft current state that byte-for-byte
+        matches every desired snippet/endpoint/backend/dictionary the RUM
+        generator would produce."""
+        from backend.provision.declarative.diff import DiffResult
+
+        mock_fetch_active.return_value = 1
+        mock_fetch_snippets.return_value = []
+        mock_fetch_endpoints.return_value = []
+        mock_fetch_backends.return_value = []
+        mock_compute_diff.return_value = DiffResult()  # empty: is_empty() is True
+
+        with patch("pathlib.Path.exists", return_value=True):
+            with patch("pathlib.Path.read_text") as mock_read:
+                cfg = {
+                    "service_id": "srv_test",
+                    "log_period": 60,
+                    "sample_rate": 100,
+                    "rum_enabled": True,
+                    "fos_prefix": "raw",
+                }
+                mock_read.return_value = json.dumps(cfg)
+
+                result = reconcile_vcl_state("srv_test", "token", dry_run=False)
+
+        assert result.activated_version == 1
+        mock_upload_rum_js.assert_called_once_with("srv_test", "token", status_cb=None)
+
+    @patch("backend.provision.declarative.reconciler._activate_draft")
+    @patch("backend.provision.declarative.reconciler._validate_draft")
+    @patch("backend.provision.declarative.reconciler._clone_active_version")
+    @patch("backend.provision.declarative.reconciler._apply_diff")
+    @patch("backend.provision.declarative.reconciler.upload_rum_tracker_js")
+    @patch("backend.provision.declarative.reconciler._fetch_active_version")
+    @patch("backend.provision.declarative.reconciler._fetch_snippets")
+    @patch("backend.provision.declarative.reconciler._fetch_logging_endpoints")
+    @patch("backend.provision.declarative.reconciler._fetch_backends")
+    def test_reconcile_uploads_rum_js_only_after_activation(
+        self,
+        mock_fetch_backends,
+        mock_fetch_endpoints,
+        mock_fetch_snippets,
+        mock_fetch_active,
+        mock_upload_rum_js,
+        mock_apply_diff,
+        mock_clone_active,
+        mock_validate,
+        mock_activate,
+    ):
+        """Pin the ORDER, not just the outcome: the tracker upload must happen
+        strictly after activation. Records call order via a shared list so a
+        regression that re-introduces the old (pre-activation) ordering fails
+        this test even if both calls still individually happen."""
+        call_order = []
+
+        mock_fetch_active.return_value = 1
+        mock_fetch_snippets.return_value = []
+        mock_fetch_endpoints.return_value = []
+        mock_fetch_backends.return_value = []
+        mock_clone_active.return_value = 2
+        mock_validate.return_value = ""  # valid
+        mock_apply_diff.return_value = None
+        mock_activate.side_effect = lambda *a, **k: call_order.append("activate")
+        mock_upload_rum_js.side_effect = lambda *a, **k: call_order.append("upload_tracker")
+
+        with patch("pathlib.Path.exists", return_value=True):
+            with patch("pathlib.Path.read_text") as mock_read:
+                cfg = {
+                    "service_id": "srv_test",
+                    "log_period": 60,
+                    "sample_rate": 100,
+                    "rum_enabled": True,
+                    "fos_prefix": "raw",
+                }
+                mock_read.return_value = json.dumps(cfg)
+
+                result = reconcile_vcl_state("srv_test", "token", dry_run=False)
+
+        assert result.activated_version == 2
+        assert call_order == ["activate", "upload_tracker"]
+        mock_upload_rum_js.assert_called_once_with("srv_test", "token", status_cb=None)
+
+    @patch("backend.provision.declarative.reconciler._activate_draft")
+    @patch("backend.provision.declarative.reconciler._validate_draft")
+    @patch("backend.provision.declarative.reconciler._clone_active_version")
+    @patch("backend.provision.declarative.reconciler._apply_diff")
+    @patch("backend.provision.declarative.reconciler.upload_rum_tracker_js")
+    @patch("backend.provision.declarative.reconciler._fetch_active_version")
+    @patch("backend.provision.declarative.reconciler._fetch_snippets")
+    @patch("backend.provision.declarative.reconciler._fetch_logging_endpoints")
+    @patch("backend.provision.declarative.reconciler._fetch_backends")
+    def test_reconcile_skips_rum_js_upload_when_activate_is_false(
+        self,
+        mock_fetch_backends,
+        mock_fetch_endpoints,
+        mock_fetch_snippets,
+        mock_fetch_active,
+        mock_upload_rum_js,
+        mock_apply_diff,
+        mock_clone_active,
+        mock_validate,
+        mock_activate,
+    ):
+        """Verify the tracker is NOT uploaded when activate=False: the draft
+        was compiled and validated but never went live, so the route the
+        tracker depends on isn't live either."""
+        mock_fetch_active.return_value = 1
+        mock_fetch_snippets.return_value = []
+        mock_fetch_endpoints.return_value = []
+        mock_fetch_backends.return_value = []
+        mock_clone_active.return_value = 2
+        mock_validate.return_value = ""
+        mock_apply_diff.return_value = None
+
+        with patch("pathlib.Path.exists", return_value=True):
+            with patch("pathlib.Path.read_text") as mock_read:
+                cfg = {
+                    "service_id": "srv_test",
+                    "log_period": 60,
+                    "sample_rate": 100,
+                    "rum_enabled": True,
+                    "fos_prefix": "raw",
+                }
+                mock_read.return_value = json.dumps(cfg)
+
+                result = reconcile_vcl_state("srv_test", "token", dry_run=False, activate=False)
+
+        assert result.activated_version is None
+        assert result.draft_version == 2
+        mock_activate.assert_not_called()
+        mock_upload_rum_js.assert_not_called()
+
+    @patch("backend.provision.declarative.reconciler._validate_draft")
+    @patch("backend.provision.declarative.reconciler._clone_active_version")
+    @patch("backend.provision.declarative.reconciler._apply_diff")
+    @patch("backend.provision.declarative.reconciler.upload_rum_tracker_js")
+    @patch("backend.provision.declarative.reconciler._fetch_active_version")
+    @patch("backend.provision.declarative.reconciler._fetch_snippets")
+    @patch("backend.provision.declarative.reconciler._fetch_logging_endpoints")
+    @patch("backend.provision.declarative.reconciler._fetch_backends")
+    def test_reconcile_does_not_upload_rum_js_when_activation_fails(
+        self,
+        mock_fetch_backends,
+        mock_fetch_endpoints,
+        mock_fetch_snippets,
+        mock_fetch_active,
+        mock_upload_rum_js,
+        mock_apply_diff,
+        mock_clone_active,
+        mock_validate,
+    ):
+        """CRITICAL: if activation itself fails, the tracker must never have
+        been uploaded — a failed reconcile must not leave FOS holding a
+        tracker that references a route Fastly never actually activated.
+
+        ``_activate_draft`` is deliberately left unmocked (default: not
+        patched here) and instead its real name is monkeypatched to raise,
+        via patching the reconciler-module symbol directly, so the failure
+        happens exactly where production would fail: mid-activation, after
+        validation passed."""
+        mock_fetch_active.return_value = 1
+        mock_fetch_snippets.return_value = []
+        mock_fetch_endpoints.return_value = []
+        mock_fetch_backends.return_value = []
+        mock_clone_active.return_value = 2
+        mock_validate.return_value = ""
+        mock_apply_diff.return_value = None
+
+        with patch(
+            "backend.provision.declarative.reconciler._activate_draft",
+            side_effect=RuntimeError("Fastly API rejected activation"),
+        ):
+            with patch("pathlib.Path.exists", return_value=True):
+                with patch("pathlib.Path.read_text") as mock_read:
+                    cfg = {
+                        "service_id": "srv_test",
+                        "log_period": 60,
+                        "sample_rate": 100,
+                        "rum_enabled": True,
+                        "fos_prefix": "raw",
+                    }
+                    mock_read.return_value = json.dumps(cfg)
+
+                    with pytest.raises(RuntimeError, match="Fastly API rejected activation"):
+                        reconcile_vcl_state("srv_test", "token", dry_run=False)
+
+        mock_upload_rum_js.assert_not_called()
 
 
 class TestBackendWhitelistEnforcement:
