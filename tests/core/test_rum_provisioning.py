@@ -15,6 +15,7 @@ things matter most here:
 
 from __future__ import annotations
 
+import re
 import shutil
 
 import pytest
@@ -92,6 +93,51 @@ def test_faro_version_adds_route_rewrite_and_surrogate_key():
     fetch = snippets[RUM_FARO_FETCH_NAME]
     assert 'set beresp.http.Surrogate-Key = "rum-faro-sdk";' in fetch
     assert "set beresp.ttl = 604800s;" in fetch
+
+
+# ── F-3: fetch-cache snippet must not cache/immutable-tag error responses ──
+
+
+def test_faro_fetch_caching_gates_on_200_status():
+    """F-3 audit finding: without a beresp.status check, a FOS 403/404
+    (mid-upload, or a bucket-policy blip) would be cached at the edge for
+    7 days AND handed to browsers tagged immutable — unpurgeable. The
+    caching/Surrogate-Key/Cache-Control block must be nested inside an
+    explicit 200 check, with a non-caching branch for everything else."""
+    fetch = generate_rum_asset_fetch_vcl("iad-va-us", faro_version="2.9.0")[RUM_FARO_FETCH_NAME]
+
+    assert "if (beresp.status == 200)" in fetch
+    # The caching directives must be inside the 200 branch, not top-level.
+    status_check_idx = fetch.index("if (beresp.status == 200)")
+    surrogate_key_idx = fetch.index('set beresp.http.Surrogate-Key = "rum-faro-sdk";')
+    assert status_check_idx < surrogate_key_idx
+    # Non-200 branch must explicitly refuse to cache.
+    assert "set beresp.cacheable = false;" in fetch
+
+
+def test_faro_fetch_caching_decouples_edge_and_browser_ttl():
+    """F-3 audit finding: /js/faro-sdk.js is a stable path serving mutable
+    (per-upgrade) content, so a long browser max-age + immutable would mean
+    an upgrade can never invalidate already-issued browser copies — a purge
+    only clears the edge cache. The edge TTL must stay long (purged
+    explicitly on upload/upgrade via Surrogate-Key), while the
+    browser-visible Cache-Control gets a short max-age and drops
+    'immutable' entirely."""
+    fetch = generate_rum_asset_fetch_vcl("iad-va-us", faro_version="2.9.0")[RUM_FARO_FETCH_NAME]
+
+    assert "immutable" not in fetch
+    assert 'set beresp.http.Surrogate-Control = "max-age=604800";' in fetch
+    assert "set beresp.ttl = 604800s;" in fetch
+
+    # Extract the Cache-Control value and assert its max-age is much shorter
+    # than the edge TTL — the exact number isn't load-bearing, "much less
+    # than 604800" is.
+    match = re.search(r'Cache-Control = "([^"]+)"', fetch)
+    assert match, "expected a browser Cache-Control header"
+    cache_control = match.group(1)
+    max_age_match = re.search(r"max-age=(\d+)", cache_control)
+    assert max_age_match, f"no max-age found in Cache-Control: {cache_control!r}"
+    assert int(max_age_match.group(1)) < 604800
 
 
 def test_faro_version_present_in_asset_fetch_but_generate_rum_vcl_still_clean():

@@ -110,6 +110,20 @@ def _generate_asset_fetch_vcl(shield_pop: str = "iad-va-us", faro_version: str |
     given, an identical GET route is added for /js/faro-sdk.js — same
     backend selection, same X-FOS-Request flag; the actual FOS object path
     rewrite happens in ``_generate_sigv4_sign_vcl``.
+
+    NOT USED ON THE PRODUCTION vcl_recv PATH (F-7 audit finding): the
+    consolidated snippet generator (``backend.provision.declarative.
+    generators.generate_consolidated_snippet``) short-circuits ``vcl_recv``
+    to its own inline copy of this exact routing block instead of calling
+    this function or ``generate_rum_asset_fetch_vcl`` — see the byte-
+    identical regression test in
+    ``tests/backend/provision/test_rum_provisioning_dead_code.py``. Every
+    OTHER subroutine (vcl_miss, vcl_fetch, vcl_deliver, vcl_error) DOES
+    route through this module via ``_generate_rum_section_vcl``, so this
+    function is not fully dead — only its output for the recv-routing
+    concern is unreachable in production. If you're editing recv routing,
+    edit BOTH this function and generators.py's inline copy, or the two
+    will silently diverge with only this one under test.
     """
     if shield_pop and shield_pop.lower() != "none":
         shield_var = f"ssl_shield_{shield_pop.replace('-', '_')}"
@@ -267,18 +281,48 @@ if (req.http.X-FOS-Request == "1" && !req.backend.is_shield) {
 def _generate_faro_fetch_vcl() -> str:
     """Cache + purge policy for the self-hosted Faro Web SDK bundle (vcl_fetch).
 
-    Immutable per-version content: a long TTL plus a matching Cache-Control so
-    browsers cache it too. Surrogate-Key MUST be exactly "rum-faro-sdk" — the
-    FOS-sync cron (backend/cron/jobs/rum_sync.py::_faro_purge_surrogate_key)
-    purges this exact key after re-uploading a version, so the cache and the
-    purge path stay pinned together.
+    Gated on ``beresp.status == 200`` (F-3 audit finding): without this
+    check, a transient FOS 403/404 (e.g. mid-upload, or a bucket-policy
+    blip) would be cached at the edge for 7 days AND handed to every
+    browser tagged ``immutable`` — unpurgeable by browsers, and only
+    fixable at the edge by waiting out the TTL or bumping the version.
+
+    Edge TTL and browser TTL are deliberately decoupled via
+    ``Surrogate-Control`` (edge-only) vs ``Cache-Control`` (browser-visible):
+    ``/js/faro-sdk.js`` is a STABLE path serving MUTABLE content (an
+    upgrade repoints the same path at a new pinned version), so a long
+    browser ``max-age`` + ``immutable`` would mean already-issued browser
+    copies can never be invalidated by an upgrade — purging only clears the
+    edge cache, not any browser that already cached the old bytes. The edge
+    keeps a long TTL (purged explicitly via Surrogate-Key on every upload/
+    upgrade), while the browser gets a short one so a stale client re-checks
+    soon after an upgrade even if a purge is missed.
+
+    Surrogate-Key MUST be exactly "rum-faro-sdk" — the FOS-sync cron
+    (backend/cron/jobs/rum_sync.py::_faro_purge_surrogate_key) and
+    upgrade_faro_version (backend/provision/rum_orchestrator_v2.py::
+    _purge_faro_surrogate_key) both purge this exact key after
+    uploading/re-uploading a version, so the cache and the purge path stay
+    pinned together.
+
+    Follow-up (not this pass): a version-bearing public path (e.g.
+    ``/js/faro-sdk-v{version}.js``) would let the browser cache
+    immutably again, since each version would be a distinct URL — a larger
+    design change than this fix, deliberately deferred.
     """
-    return """# Cache the self-hosted Faro Web SDK bundle (immutable, versioned content)
+    return """# Cache the self-hosted Faro Web SDK bundle at the edge; only a short
+# browser TTL, since this stable path serves mutable (per-upgrade) content.
 if (req.url.path == "/js/faro-sdk.js" && req.http.X-FOS-Request == "1") {
-    set beresp.ttl = 604800s;
-    set beresp.cacheable = true;
-    set beresp.http.Surrogate-Key = "rum-faro-sdk";
-    set beresp.http.Cache-Control = "public, max-age=604800, immutable";
+    if (beresp.status == 200) {
+        set beresp.ttl = 604800s;
+        set beresp.cacheable = true;
+        set beresp.http.Surrogate-Key = "rum-faro-sdk";
+        set beresp.http.Surrogate-Control = "max-age=604800";
+        set beresp.http.Cache-Control = "public, max-age=300";
+    } else {
+        set beresp.ttl = 0s;
+        set beresp.cacheable = false;
+    }
 }"""
 
 
