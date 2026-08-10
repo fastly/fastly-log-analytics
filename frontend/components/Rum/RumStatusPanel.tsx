@@ -2,13 +2,16 @@
 
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { AlertTriangle } from 'lucide-react';
 import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { Button } from '@/components/ui/button';
 import { useServiceStore } from '@/stores/serviceStore';
+import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import { adminFetch } from '@/lib/api';
 import type { components } from '@/types/api.generated';
 import { DisableRumDialog } from './DisableRumDialog';
 import { EnableRumDialog } from './EnableRumDialog';
+import { RumFaroVersionCard } from './RumFaroVersionCard';
 
 interface RumStatus {
   enabled: boolean;
@@ -20,6 +23,7 @@ interface RumStatus {
 
 export function RumStatusPanel() {
   const serviceId = useServiceStore((s) => s.activeServiceId);
+  const isAnalyst = useIsAnalyst();
   const [isEnableOpen, setIsEnableOpen] = useState(false);
   const [isDisableOpen, setIsDisableOpen] = useState(false);
 
@@ -48,6 +52,26 @@ export function RumStatusPanel() {
     (s: components['schemas']['ServiceConfig']) => s.service_id === serviceId
   ) || null;
 
+  // Analysts can't reach /rum/enable or /rum/disable — the middleware
+  // blocks both (mutate deployed edge config) — so showing this panel's
+  // controls when RUM isn't enabled would just 403 on click. Mirrors the
+  // "feature not enabled for this service" empty state StreamingClient.tsx
+  // uses when CMCD isn't on for a service.
+  if (isAnalyst && !status?.enabled) {
+    return (
+      <AnalyticsCard title="RUM Status">
+        <div className="flex flex-col items-center justify-center gap-4 py-16 text-center">
+          <AlertTriangle className="h-12 w-12 text-muted-foreground" />
+          <div>
+            <h3 className="text-lg font-medium">RUM not enabled</h3>
+            <p className="text-sm text-muted-foreground mt-1">
+              Real User Monitoring is not enabled for this service. Ask an administrator to enable it.
+            </p>
+          </div>
+        </div>
+      </AnalyticsCard>
+    );
+  }
 
   return (
     <>
@@ -85,6 +109,8 @@ export function RumStatusPanel() {
           </Button>
         </div>
       </AnalyticsCard>
+
+      <RumFaroVersionCard serviceId={serviceId} rumEnabled={!!status?.enabled} />
 
       <EnableRumDialog
         service={currentService}

@@ -155,8 +155,9 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/services/:service_id/rum/vitals',
   'GET /api/services/:service_id/rum/errors',
   // rum/versions has a real default handler (RumVersionPicker consumes it
-  // directly). rum/upgrade is the not-yet-built admin "upgrade pinned
-  // version" card — SSE-streamed, same pattern as rum/enable / rum/disable.
+  // directly). rum/upgrade (RumFaroVersionCard's upgrade dialog) is
+  // SSE-streamed — same pattern as rum/enable / rum/disable above, tested
+  // via a mocked useSSE rather than a real MSW round-trip.
   'POST /api/services/:service_id/rum/upgrade',
 
   // Control Room — Phase 0 stubs. Tab GET returns canned data, mutation
