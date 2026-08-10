@@ -19,6 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
 
 interface RumClientProps {
   serviceId: string | null;
@@ -504,13 +505,14 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                     {e.browser} on {e.os}
                   </td>
                   <td className="py-3 px-4 text-right">
-                    <button
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() => setSelectedEvent(e)}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-md border border-zinc-800 bg-zinc-900/40 hover:bg-zinc-800/80 text-zinc-300 hover:text-zinc-100 shadow-sm transition-all duration-150"
+                      className="h-8 text-xs font-medium"
                     >
-                      <Eye className="h-3.5 w-3.5 text-zinc-400" />
-                      <span>Inspect</span>
-                    </button>
+                      Details
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -528,13 +530,13 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
       {/* Beacon Details Modal */}
       <Dialog open={selectedEvent !== null} onOpenChange={(open) => { if (!open) setSelectedEvent(null); }}>
-        <DialogContent className="max-w-2xl bg-zinc-950 border-zinc-800 text-zinc-100 p-6 shadow-2xl">
+        <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle className="text-lg font-bold flex items-center gap-2 text-zinc-100">
-              <Activity className={selectedEvent?.type === 'error' ? 'text-rose-500 h-5 w-5' : 'text-emerald-400 h-5 w-5'} />
+            <DialogTitle className="text-lg font-bold flex items-center gap-2">
+              <Activity className={selectedEvent?.type === 'error' ? 'text-rose-500 h-5 w-5' : 'text-emerald-500 h-5 w-5'} />
               RUM Beacon Details
             </DialogTitle>
-            <DialogDescription className="text-zinc-400 text-xs">
+            <DialogDescription>
               Extracted client characteristics and complete raw payload captured at the Fastly edge.
             </DialogDescription>
           </DialogHeader>
@@ -542,28 +544,28 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
           {selectedEvent && (
             <div className="space-y-4 my-2 text-xs">
               {/* Event Metadata Grid */}
-              <div className="grid grid-cols-2 gap-4 bg-zinc-900/40 p-4 rounded-lg border border-zinc-800/80">
+              <div className="grid grid-cols-2 gap-4 bg-muted/20 p-4 rounded-lg border border-border">
                 <div>
-                  <span className="text-zinc-500 block mb-1">Timestamp</span>
-                  <span className="font-mono text-zinc-300">{new Date(selectedEvent.time).toLocaleString()}</span>
+                  <span className="text-muted-foreground block mb-1">Timestamp</span>
+                  <span className="font-mono">{new Date(selectedEvent.time).toLocaleString()}</span>
                 </div>
                 <div>
-                  <span className="text-zinc-500 block mb-1">Event Type</span>
-                  <span className={`capitalize font-semibold ${selectedEvent.type === 'error' ? 'text-rose-400' : 'text-emerald-400'}`}>
+                  <span className="text-muted-foreground block mb-1">Event Type</span>
+                  <span className={`capitalize font-semibold ${selectedEvent.type === 'error' ? 'text-rose-500' : 'text-emerald-500'}`}>
                     {selectedEvent.type}
                   </span>
                 </div>
                 <div>
-                  <span className="text-zinc-500 block mb-1">Url Path</span>
-                  <span className="font-mono text-zinc-300 font-semibold">{selectedEvent.path}</span>
+                  <span className="text-muted-foreground block mb-1">Url Path</span>
+                  <span className="font-mono font-semibold">{selectedEvent.path}</span>
                 </div>
                 <div>
-                  <span className="text-zinc-500 block mb-1">Client Platform</span>
-                  <span className="text-zinc-300">{selectedEvent.browser} on {selectedEvent.os}</span>
+                  <span className="text-muted-foreground block mb-1">Client Platform</span>
+                  <span>{selectedEvent.browser} on {selectedEvent.os}</span>
                 </div>
                 <div className="col-span-2">
-                  <span className="text-zinc-500 block mb-1">Description</span>
-                  <span className={`font-mono block p-2 rounded ${selectedEvent.type === 'error' ? 'bg-rose-950/20 text-rose-300 border border-rose-900/30' : 'bg-zinc-900/60 text-zinc-300'}`}>
+                  <span className="text-muted-foreground block mb-1">Description</span>
+                  <span className={`font-mono block p-2 rounded ${selectedEvent.type === 'error' ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20' : 'bg-muted/40 text-foreground'}`}>
                     {selectedEvent.desc}
                   </span>
                 </div>
@@ -571,8 +573,8 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
               {/* Raw JSON Block */}
               <div className="space-y-2">
-                <span className="text-zinc-400 font-semibold block">Raw Beacon Log JSON</span>
-                <div className="bg-[#0b0f19] border border-zinc-800/80 rounded-lg p-4 overflow-auto max-h-[300px] font-mono text-[11px] leading-relaxed text-emerald-400">
+                <span className="text-muted-foreground font-semibold block">Raw Beacon Log JSON</span>
+                <div className="bg-muted/30 border border-border rounded-lg p-4 overflow-auto max-h-[300px] font-mono text-[11px] leading-relaxed text-foreground">
                   <pre>{JSON.stringify(selectedEvent.raw_log || {}, null, 2)}</pre>
                 </div>
               </div>
