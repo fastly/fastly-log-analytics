@@ -728,6 +728,9 @@ async def rum_analytics(
         lcps: list[float] = []
         clss: list[float] = []
         inps: list[float] = []
+        fcps: list[float] = []
+        fids: list[float] = []
+        ttfbs: list[float] = []
         browsers_dict: dict[str, int] = {}
         os_dict: dict[str, int] = {}
         devices_dict: dict[str, int] = {}
@@ -806,8 +809,32 @@ async def rum_analytics(
                         except (ValueError, TypeError):
                             pass
 
+                    # FCP (First Contentful Paint)
+                    fcp_val = values.get("fcp")
+                    if fcp_val is not None:
+                        try:
+                            fcps.append(float(fcp_val))
+                        except (ValueError, TypeError):
+                            pass
+
+                    # FID (First Input Delay)
+                    fid_val = values.get("fid")
+                    if fid_val is not None:
+                        try:
+                            fids.append(float(fid_val))
+                        except (ValueError, TypeError):
+                            pass
+
+                    # TTFB (Time to First Byte)
+                    ttfb_val = values.get("ttfb")
+                    if ttfb_val is not None:
+                        try:
+                            ttfbs.append(float(ttfb_val))
+                        except (ValueError, TypeError):
+                            pass
+
             # Also extract from flat keys if present (for FOS-ingested log format or flat test shapes)
-            lcp_flat = b.get("lcp") or (b.get("value") if b.get("name") == "LCP" else None)
+            lcp_flat = b.get("lcp") or (b.get("value") if str(b.get("name") or "").upper() == "LCP" else None)
             if lcp_flat is not None:
                 try:
                     lcps.append(float(lcp_flat))
@@ -815,7 +842,7 @@ async def rum_analytics(
                 except (ValueError, TypeError):
                     pass
 
-            cls_flat = b.get("cls") or (b.get("value") if b.get("name") == "CLS" else None)
+            cls_flat = b.get("cls") or (b.get("value") if str(b.get("name") or "").upper() == "CLS" else None)
             if cls_flat is not None:
                 try:
                     clss.append(float(cls_flat))
@@ -823,10 +850,31 @@ async def rum_analytics(
                 except (ValueError, TypeError):
                     pass
 
-            inp_flat = b.get("inp") or (b.get("value") if b.get("name") == "INP" else None)
+            inp_flat = b.get("inp") or (b.get("value") if str(b.get("name") or "").upper() == "INP" else None)
             if inp_flat is not None:
                 try:
                     inps.append(float(inp_flat))
+                except (ValueError, TypeError):
+                    pass
+
+            fcp_flat = b.get("fcp") or (b.get("value") if str(b.get("name") or "").upper() == "FCP" else None)
+            if fcp_flat is not None:
+                try:
+                    fcps.append(float(fcp_flat))
+                except (ValueError, TypeError):
+                    pass
+
+            fid_flat = b.get("fid") or (b.get("value") if str(b.get("name") or "").upper() == "FID" else None)
+            if fid_flat is not None:
+                try:
+                    fids.append(float(fid_flat))
+                except (ValueError, TypeError):
+                    pass
+
+            ttfb_flat = b.get("ttfb") or (b.get("value") if str(b.get("name") or "").upper() == "TTFB" else None)
+            if ttfb_flat is not None:
+                try:
+                    ttfbs.append(float(ttfb_flat))
                 except (ValueError, TypeError):
                     pass
 
@@ -836,7 +884,10 @@ async def rum_analytics(
                 or b.get("duration")
                 or b.get("pageLoadTime")
                 or (
-                    b.get("value") if b.get("name") in ("pageLoadTime", "navigation", "duration", "load_time") else None
+                    b.get("value")
+                    if str(b.get("name") or "").lower()
+                    in ("pageloadtime", "navigation", "duration", "load_time", "loadtime")
+                    else None
                 )
             )
             if load_time_flat is not None:
@@ -1012,11 +1063,11 @@ async def rum_analytics(
                 if exceptions and isinstance(exceptions, list):
                     trend_buckets[bucket_key]["errors"] += 1
 
-                lcp_val = b.get("lcp") or (b.get("value") if b.get("name") == "LCP" else None)
+                lcp_val = b.get("lcp") or (b.get("value") if str(b.get("name") or "").upper() == "LCP" else None)
                 if lcp_val is not None:
                     trend_buckets[bucket_key]["lcp_vals"].append(float(lcp_val))
 
-                cls_val = b.get("cls") or (b.get("value") if b.get("name") == "CLS" else None)
+                cls_val = b.get("cls") or (b.get("value") if str(b.get("name") or "").upper() == "CLS" else None)
                 if cls_val is not None:
                     trend_buckets[bucket_key]["cls_vals"].append(float(cls_val))
             except Exception:
@@ -1072,7 +1123,15 @@ async def rum_analytics(
                 "lcp": {"p75": round(get_p75(lcps, 1.9), 2), "distribution": get_distribution(lcps, 2.5, 4.0)},
                 "cls": {"p75": round(get_p75(clss, 0.05), 3), "distribution": get_distribution(clss, 0.1, 0.25)},
                 "inp": {"p75": int(get_p75(inps, 130)), "distribution": get_distribution(inps, 200.0, 500.0)},
-                "fid": {"p75": 20, "fcp": 1.3, "ttfb": 0.4},
+                "fid": {
+                    "p75": round(get_p75(fids, 20.0), 1),
+                    "fcp": round(get_p75(fcps, 1300.0) / 1000.0, 2)
+                    if get_p75(fcps, 0.0) > 20
+                    else round(get_p75(fcps, 1.3), 2),
+                    "ttfb": round(get_p75(ttfbs, 400.0) / 1000.0, 2)
+                    if get_p75(ttfbs, 0.0) > 20
+                    else round(get_p75(ttfbs, 0.4), 2),
+                },
             },
             "worst_pages": worst_pages,
             "errors": errors,
@@ -1182,6 +1241,13 @@ async def rum_live_events(service_id: str = Path(...)) -> list[dict[str, Any]]:
                 if "exceptions" in data:
                     etype = "error"
                     desc = data["exceptions"][0].get("value") or data["exceptions"][0].get("message") or "JS Error"
+                elif data.get("name"):
+                    metric_name = str(data.get("name")).upper()
+                    metric_val = data.get("value")
+                    val_str = f": {metric_val}" if metric_val is not None else ""
+                    desc = f"Metric {metric_name}{val_str}"
+                    if data.get("rating"):
+                        desc += f" ({data['rating'].upper()})"
 
                 meta = data.get("meta", {})
                 events.append(
