@@ -211,3 +211,55 @@ ssh -L 8443:127.0.0.1:8443 <user>@<instance-external-ip>
 
 The frontend middleware sees no `X-Proxied-By-Caddy` header on the tunneled
 connection (which presents a loopback IP) and serves `/admin`.
+
+## 8. RUM: pin the self-hosted Faro Web SDK version
+
+Before self-hosting, the RUM tracker loaded the Faro Web SDK from jsDelivr
+with a floating `@^1` range — which resolves to `1.19.0` as of this writing.
+Self-hosting (see `backend/provision/rum_assets.py`) replaces that CDN load
+with a version pinned explicitly in each service's config
+(`cfg["rum"]["faro_version"]`), uploaded to the service's FOS bucket. An
+un-pinned service (`faro_version` unset) never gets a bundle uploaded at all
+— pinning is what actually turns RUM on for the self-hosted asset.
+
+**What it's for**: give a demo/production service a known-good version that
+won't silently change out from under it. The backend's contract stays as-is
+— `faro_version=None` means "not pinned"; nothing on the backend side
+auto-defaults a service to any particular version.
+
+**When to run it**: once, when first pinning a service to the self-hosted
+bundle (e.g. right after provisioning, or when migrating a service off the
+old floating-CDN tracker), and again any time you want to move that service
+to a specific version outside of the admin UI's upgrade flow.
+
+```sh
+# Pins to 2.9.0 (current npm dist-tags.latest) by default:
+scripts/pin-rum-faro-version.sh <service_id>
+
+# Pin to an explicit version instead:
+scripts/pin-rum-faro-version.sh <service_id> 2.9.0
+scripts/pin-rum-faro-version.sh <service_id> 1.19.0
+```
+
+Replace `<service_id>` with the real Fastly logging service ID — never
+commit that ID into this repo (it's public). The script is idempotent (a
+repeat run against an already-correct pin is a no-op), writes atomically,
+refuses to run if the config is missing or not valid JSON, and never
+touches sibling keys under `cfg["rum"]` — `faro_content_hash` and
+`faro_fos_etag_md5` are owned by the reconcile cron, and clobbering them
+would make the cron think the bundle it already uploaded is stale and
+re-upload it on every tick.
+
+Pinning only updates the config value. To actually fetch and upload the
+bundle for the new version, either:
+
+- wait for the RUM reconcile cron's next tick, which detects the version
+  mismatch and uploads the pinned version automatically, or
+- use the admin RUM page's upgrade flow (`/admin/rum`) to trigger it
+  immediately and watch progress live via its SSE log stream.
+
+**Moving between versions later**: the admin RUM page is the normal path —
+it shows the currently deployed version, lets you pick a target from the
+available versions list, and streams upload/reconcile progress. Use this
+script only when you need to set the pin from outside that UI (e.g.
+scripting a fresh-VM bring-up, or recovering a config by hand).
