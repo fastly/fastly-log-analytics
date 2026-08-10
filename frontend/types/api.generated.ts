@@ -957,6 +957,15 @@ export interface paths {
         /**
          * Rum Status
          * @description Get RUM enable/disable status and VCL drift detection.
+         *
+         *     Analyst-safe sibling shape of /api/log-extents vs /api/sync-status
+         *     (F1 audit finding): the RUM page is analystVisible and gates its whole
+         *     body on this endpoint, so an analyst caller gets the projected
+         *     ``{enabled, enabled_at}`` body. ``deployed_vcl_sha`` / ``current_vcl_sha``
+         *     / ``vcl_drift`` disclose the operator's deployed edge-VCL fingerprint
+         *     and stay admin-only — they're also the expensive-to-compute fields
+         *     (``rum_vcl_fingerprint`` reads the deployed VCL), so skipping them for
+         *     analysts avoids that work entirely.
          */
         get: operations["rum_status_api_services__service_id__rum_status_get"];
         put?: never;

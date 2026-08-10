@@ -8655,7 +8655,7 @@
           "rum"
         ],
         "summary": "Rum Status",
-        "description": "Get RUM enable/disable status and VCL drift detection.",
+        "description": "Get RUM enable/disable status and VCL drift detection.\n\nAnalyst-safe sibling shape of /api/log-extents vs /api/sync-status\n(F1 audit finding): the RUM page is analystVisible and gates its whole\nbody on this endpoint, so an analyst caller gets the projected\n``{enabled, enabled_at}`` body. ``deployed_vcl_sha`` / ``current_vcl_sha``\n/ ``vcl_drift`` disclose the operator's deployed edge-VCL fingerprint\nand stay admin-only \u2014 they're also the expensive-to-compute fields\n(``rum_vcl_fingerprint`` reads the deployed VCL), so skipping them for\nanalysts avoids that work entirely.",
         "operationId": "rum_status_api_services__service_id__rum_status_get",
         "parameters": [
           {
