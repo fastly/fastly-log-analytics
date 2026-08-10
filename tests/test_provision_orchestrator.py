@@ -23,6 +23,7 @@ through; a regression cascades into broken setup-wizard UX.
 
 from __future__ import annotations
 
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -909,6 +910,70 @@ def test_provision_satisfies_faro_route_and_object_invariant_end_to_end(tmp_path
     state = FeatureState.from_config(written_cfg)
     recv_vcl = generate_consolidated_snippet(state, "vcl_recv")
     assert '"/js/faro-sdk.js"' in recv_vcl
+
+
+def test_provision_faro_upload_failure_is_non_fatal_and_pin_persists(tmp_path, monkeypatch):
+    """#3 audit finding (DESTRUCTIVE): the Faro bundle upload used to sit
+    inside provision()'s try block, so an unpkg outage / transient FOS
+    error here fell straight into the except clause below, which runs
+    perform_teardown with remove_logging/remove_cdn/remove_bucket/
+    remove_fos_tokens all True — deleting the just-created CDN service, FOS
+    bucket, and FOS access keys over a third-party CDN hiccup.
+
+    Pins: an upload failure must NOT trigger perform_teardown, must NOT
+    raise out of provision(), the flow must still reach a 'done' event, AND
+    the faro_version pin (persisted at the Step 7 write, before this
+    upload) must survive on disk — exactly the "pinned, bundle missing"
+    state backend/cron/jobs/rum_sync.py's self-heal restore branch already
+    converges on its next tick.
+    """
+    from backend import config as svcconfig
+
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", config_dir)
+    monkeypatch.setattr(svcconfig, "duckdb_path", lambda service_id: str(tmp_path / "db.duckdb"))
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+    teardown_called: list[bool] = []
+
+    def fake_teardown(state, token, opts=None):
+        teardown_called.append(True)
+        yield {"type": "status", "message": "rollback step"}
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch(
+            "backend.provision.orchestrator._upload_faro_bundle_sync",
+            side_effect=RuntimeError("unpkg.com: connection refused"),
+        ),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),
+        patch("backend.provision.orchestrator.perform_teardown", side_effect=fake_teardown),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(
+            orchestrator.provision(_provision_cfg(rum_enabled=True, rum={"enabled": True, "faro_version": "1.2.3"}))
+        )
+
+    # No exception escaped, and teardown was never invoked.
+    assert exc is None
+    assert teardown_called == []
+    assert events[-1]["type"] == "done"
+
+    # The failure is surfaced as a non-fatal warning status, not silently swallowed.
+    status_messages = [e["message"] for e in events if e["type"] == "status"]
+    assert any("Faro Web SDK upload failed" in m for m in status_messages)
+
+    # The pin persisted (Step 7's early write, before the failed upload).
+    written_cfg = json.loads((config_dir / "svc-prov-test.json").read_text())
+    assert written_cfg["rum"]["faro_version"] == "1.2.3"
 
 
 def test_provision_runs_teardown_rollback_on_mid_step_failure(tmp_path, monkeypatch):

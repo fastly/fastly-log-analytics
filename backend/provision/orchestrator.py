@@ -554,14 +554,46 @@ def provision(cfg: dict, _resume_from_state: bool = False):
             rum_state_cfg = rum_state_raw if isinstance(rum_state_raw, dict) else {}
             resolved_faro_version = rum_state_cfg.get("faro_version") or DEFAULT_FARO_VERSION
             yield {"type": "status", "message": f"⏳ Uploading Faro Web SDK v{resolved_faro_version}..."}
-            yield from run_with_events(
-                _upload_faro_bundle_sync, state["logging_service_id"], resolved_faro_version, token
-            )
-            rum_state_cfg = dict(rum_state_cfg)
-            rum_state_cfg["faro_version"] = resolved_faro_version
-            state["rum"] = rum_state_cfg
-            write_service_config(state)
-            ok(f"Faro Web SDK v{resolved_faro_version} uploaded (for reconciler)")
+            try:
+                yield from run_with_events(
+                    _upload_faro_bundle_sync, state["logging_service_id"], resolved_faro_version, token
+                )
+            except Exception as faro_exc:  # noqa: BLE001 — deliberately non-fatal, see below
+                # Non-fatal (#3 audit finding): this upload used to sit
+                # inside provision()'s try block, so an unpkg outage or a
+                # transient FOS error here fell into the except below and
+                # ran perform_teardown with remove_logging/remove_cdn/
+                # remove_bucket/remove_fos_tokens all True — a third-party
+                # CDN hiccup deleting the just-created CDN service, FOS
+                # bucket, and FOS access keys. faro_version is already
+                # pinned in config (write_service_config above, BEFORE this
+                # upload), which is exactly the "pinned, bundle missing"
+                # state the RUM sync cron's self-heal restore branch
+                # (backend/cron/jobs/rum_sync.py::_reconcile_faro_bundle)
+                # already converges on its next tick — so warning and
+                # continuing is strictly safer than tearing down
+                # freshly-provisioned infrastructure over it.
+                logger.warning(
+                    "[provision] Faro bundle upload failed for %s (non-fatal — "
+                    "the RUM sync cron self-heals it on its next tick): %s",
+                    state.get("logging_service_id"),
+                    faro_exc,
+                    exc_info=True,
+                )
+                warn(f"Faro Web SDK upload failed (non-fatal, cron will restore it): {faro_exc}")
+                yield {
+                    "type": "status",
+                    "message": (
+                        f"⚠ Faro Web SDK upload failed (non-fatal): {faro_exc}. "
+                        "The RUM sync cron will restore the bundle automatically."
+                    ),
+                }
+            else:
+                rum_state_cfg = dict(rum_state_cfg)
+                rum_state_cfg["faro_version"] = resolved_faro_version
+                state["rum"] = rum_state_cfg
+                write_service_config(state)
+                ok(f"Faro Web SDK v{resolved_faro_version} uploaded (for reconciler)")
 
         new_ver = yield from run_with_events(ensure_logging_via_reconciler, state, token)
         state["activated_logging_version"] = new_ver
