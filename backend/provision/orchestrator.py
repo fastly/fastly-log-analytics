@@ -101,17 +101,15 @@ def write_service_config(state: dict):
     # custom_fields on disk, preserve them. System fields (CMCD, Scoring)
     # are generated on-demand by FeatureState.from_config() and are NOT
     # persisted in the config file.
-    from backend.routers.services.core import _filter_user_custom_fields
-
     incoming_lf = dict(state.get("log_fields") or {})
     incoming_custom = incoming_lf.get("custom_fields")
     existing_custom = list((existing_cfg.get("log_fields") or {}).get("custom_fields") or [])
     if not incoming_custom and existing_custom:
         # Filter out system fields from existing custom_fields
-        incoming_lf["custom_fields"] = _filter_user_custom_fields(existing_custom)
+        incoming_lf["custom_fields"] = lf._filter_user_custom_fields(existing_custom)
     else:
         # Filter out system fields from incoming custom_fields
-        incoming_lf["custom_fields"] = _filter_user_custom_fields(incoming_lf.get("custom_fields", []))
+        incoming_lf["custom_fields"] = lf._filter_user_custom_fields(incoming_lf.get("custom_fields", []))
 
     import datetime as _dt
 

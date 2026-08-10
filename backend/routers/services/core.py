@@ -1033,6 +1033,15 @@ def api_ngwaf_sync(service_id: str):
     return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
 
 
+# Same-identity re-export: these predicates moved to backend.core.field_registry
+# so backend.provision.orchestrator (a layer below routers) can import them
+# without creating a routers -> routers edge through provision. Kept here too
+# so existing callers/tests that reference backend.routers.services.core.* keep
+# working unchanged.
+from backend.core.field_registry import (  # noqa: E402
+    _filter_user_custom_fields,
+    _is_system_field,
+)
 from backend.models.custom_fields import (
     CustomFieldCreate,
     CustomFieldResponse,
@@ -1041,23 +1050,6 @@ from backend.models.custom_fields import (
     VclLintRequest,
     VclLintResponse,
 )
-
-
-def _is_system_field(field_name: str) -> bool:
-    """Return True if field_name is a system-managed field (CMCD or Scoring).
-
-    System fields are generated on-demand from feature toggles and should
-    not be displayed as user-editable custom fields.
-    """
-    return field_name.startswith("cmcd_") or field_name.startswith("edge_")
-
-
-def _filter_user_custom_fields(custom_fields: list[dict]) -> list[dict]:
-    """Filter out system-managed fields from custom_fields list.
-
-    Returns only user-defined custom fields, excluding CMCD and Scoring fields.
-    """
-    return [f for f in custom_fields if not _is_system_field(f.get("name", ""))]
 
 
 @router.get("/services/{service_id}/custom-fields", response_model=CustomFieldsListResponse)
