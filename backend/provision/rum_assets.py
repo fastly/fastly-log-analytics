@@ -290,11 +290,14 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
 
     var instrumentations = [];
 
-    // Only enable Web Vitals and Error tracking to reduce beacon volume
+    // Only enable Web Vitals, View, and Error tracking to reduce beacon volume
     // Default getWebInstrumentations() includes performance resource tracking
     // which sends one beacon per resource (50-100+ beacons per page load)
     if (Faro.WebVitalsInstrumentation) {{
       instrumentations.push(new Faro.WebVitalsInstrumentation());
+    }}
+    if (Faro.ViewInstrumentation) {{
+      instrumentations.push(new Faro.ViewInstrumentation());
     }}
     // Real export is "ErrorsInstrumentation" (plural) in every SDK version
     // we've checked (1.19.0, 2.9.0), but this probe used to look for the
