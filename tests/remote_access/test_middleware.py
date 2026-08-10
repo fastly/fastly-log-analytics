@@ -969,19 +969,18 @@ def test_analyst_NOT_blocked_from_scoring_reads_they_need(client, path):
     [
         ("POST", "/api/services/svcA/rum/enable"),
         ("POST", "/api/services/svcA/rum/disable"),
-        ("GET", "/api/services/svcA/rum/status"),
         ("GET", "/api/services/svcA/rum/versions"),
         ("POST", "/api/services/svcA/rum/upgrade"),
     ],
 )
 def test_analyst_blocked_from_rum_admin_suffix(client, method, path):
     """RUM suffix gate, same shape as H-4's scoring gate. Pins the fix for a
-    real pre-existing gap: before this gate was added, /rum/enable,
-    /rum/disable, and /rum/status had no ``/rum/`` entry anywhere in the
-    analyst blocklists and were reachable by an authenticated analyst even
-    though enable/disable mutate deployed edge config and status discloses
-    the operator's enable-state + VCL fingerprint. Authorizing the analyst
-    for the service (svcA) must NOT bypass the suffix block."""
+    real pre-existing gap: before this gate was added, /rum/enable and
+    /rum/disable had no ``/rum/`` entry anywhere in the analyst blocklists
+    and were reachable by an authenticated analyst even though they mutate
+    deployed edge config. Authorizing the analyst for the service (svcA)
+    must NOT bypass the suffix block. /rum/status is deliberately NOT in
+    this list (F1 audit fix) — see test_analyst_NOT_blocked_from_rum_reads_they_need."""
     _start_share()
     invite = _seed_invite(service_ids=["svcA"])
     _login_analyst(client, invite)
@@ -1000,6 +999,7 @@ def test_analyst_blocked_from_rum_admin_suffix(client, method, path):
 @pytest.mark.parametrize(
     "path",
     [
+        "/api/services/svcA/rum/status",
         "/api/services/svcA/rum/beacon-health",
         "/api/services/svcA/rum/analytics",
         "/api/services/svcA/rum/live-events",
@@ -1008,7 +1008,8 @@ def test_analyst_blocked_from_rum_admin_suffix(client, method, path):
 def test_analyst_NOT_blocked_from_rum_reads_they_need(client, path):
     """Negative control: RUM dashboards and the beacon-health setup check
     rely on these read-only endpoints — the suffix gate must NOT shadow
-    them."""
+    them. /rum/status was blocked pre-fix (F1 audit finding), which made
+    the analyst RUM page 403 → dead on every load."""
     _start_share()
     invite = _seed_invite(service_ids=["svcA"])
     _login_analyst(client, invite)

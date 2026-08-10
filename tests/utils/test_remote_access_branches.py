@@ -1436,14 +1436,15 @@ def test_is_blocked_path_returns_false_for_unrelated_path():
 @pytest.mark.security_regression
 @pytest.mark.parametrize(
     "suffix",
-    ["/enable", "/disable", "/status", "/versions", "/upgrade"],
+    ["/enable", "/disable", "/versions", "/upgrade"],
 )
 def test_is_blocked_path_rum_suffix_admin_only(suffix):
     """RUM suffix gate: paths containing ``/rum/`` AND ending with an
     admin-only suffix are blocked. Covers the pre-existing /rum/enable,
-    /rum/disable, /rum/status endpoints too — before this gate was added
-    they had no ``/rum/`` entry anywhere in the analyst blocklists and
-    were reachable by an authenticated analyst."""
+    /rum/disable endpoints too — before this gate was added they had no
+    ``/rum/`` entry anywhere in the analyst blocklists and were reachable
+    by an authenticated analyst. /rum/status is deliberately NOT in this
+    list (F1 audit fix) — see test_is_blocked_path_rum_reads_stay_open."""
     from backend.utils.remote_access import _is_blocked_path
 
     assert _is_blocked_path(f"/api/services/abc/rum{suffix}") is True
@@ -1453,6 +1454,7 @@ def test_is_blocked_path_rum_suffix_admin_only(suffix):
 @pytest.mark.parametrize(
     "path",
     [
+        "/api/services/abc/rum/status",
         "/api/services/abc/rum/beacon-health",
         "/api/services/abc/rum/analytics",
         "/api/services/abc/rum/live-events",
@@ -1460,7 +1462,10 @@ def test_is_blocked_path_rum_suffix_admin_only(suffix):
 )
 def test_is_blocked_path_rum_reads_stay_open(path):
     """Negative control: read-only RUM telemetry must NOT be shadowed by
-    the suffix gate (mirrors the scoring-suffix negative control)."""
+    the suffix gate (mirrors the scoring-suffix negative control).
+    /rum/status was blocked pre-fix (F1 audit finding), which made the
+    analystVisible RUM page 403 → dead; the route itself now projects an
+    analyst-safe body ({enabled, enabled_at}, no VCL fingerprint fields)."""
     from backend.utils.remote_access import _is_blocked_path
 
     assert _is_blocked_path(path) is False

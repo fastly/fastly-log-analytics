@@ -114,7 +114,8 @@ async def test_download_and_upload_faro_success(monkeypatch, mock_fos, mock_fetc
 
     result = await download_and_upload_faro("svc_test", "2.9.0", "tok")
 
-    expected_hash = hashlib.md5(SAMPLE_BUNDLE).hexdigest()
+    expected_hash = hashlib.sha256(SAMPLE_BUNDLE).hexdigest()
+    expected_etag_md5 = hashlib.md5(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
     assert result["version"] == "2.9.0"
     assert result["path"] == "rum/faro-web-sdk-v2.9.0.iife.js"
     assert result["bytes_uploaded"] == len(SAMPLE_BUNDLE)
@@ -128,6 +129,9 @@ async def test_download_and_upload_faro_success(monkeypatch, mock_fos, mock_fetc
     assert saved["service_id"] == "svc_test"
     assert saved["cfg"]["rum"]["faro_version"] == "2.9.0"
     assert saved["cfg"]["rum"]["faro_content_hash"] == expected_hash
+    # Distinct field for the cron's FOS ETag comparison — MD5 specifically,
+    # since a single-part PUT's S3/FOS ETag is protocol-mandated MD5.
+    assert saved["cfg"]["rum"]["faro_fos_etag_md5"] == expected_etag_md5
 
 
 async def test_download_and_upload_faro_preserves_existing_rum_keys(monkeypatch, mock_fos, mock_fetch_bundle):
@@ -172,7 +176,7 @@ async def test_detect_faro_version_change_true_on_no_rum_config(monkeypatch, moc
 async def test_detect_faro_version_change_true_on_version_mismatch(monkeypatch, mock_fetch_bundle):
     """Requested version differs from stored — no bundle download needed to decide."""
     cfg = dict(FAKE_CFG)
-    cfg["rum"] = {"faro_version": "2.8.0", "faro_content_hash": hashlib.md5(SAMPLE_BUNDLE).hexdigest()}
+    cfg["rum"] = {"faro_version": "2.8.0", "faro_content_hash": hashlib.sha256(SAMPLE_BUNDLE).hexdigest()}
     _config_pair(monkeypatch, cfg)
     mock_fetch_bundle(raise_if_called=True)
 
@@ -193,7 +197,7 @@ async def test_detect_faro_version_change_true_on_hash_mismatch(monkeypatch, moc
     """Same version string, but upstream re-released the bundle (e.g. a
     security patch) — the freshly-downloaded hash differs from what's stored."""
     cfg = dict(FAKE_CFG)
-    cfg["rum"] = {"faro_version": "2.9.0", "faro_content_hash": hashlib.md5(SAMPLE_BUNDLE).hexdigest()}
+    cfg["rum"] = {"faro_version": "2.9.0", "faro_content_hash": hashlib.sha256(SAMPLE_BUNDLE).hexdigest()}
     _config_pair(monkeypatch, cfg)
     mock_fetch_bundle(OTHER_BUNDLE)
 
@@ -203,7 +207,7 @@ async def test_detect_faro_version_change_true_on_hash_mismatch(monkeypatch, moc
 async def test_detect_faro_version_change_false_when_version_and_hash_match(monkeypatch, mock_fetch_bundle):
     """Fully up to date — no reconcile action needed."""
     cfg = dict(FAKE_CFG)
-    cfg["rum"] = {"faro_version": "2.9.0", "faro_content_hash": hashlib.md5(SAMPLE_BUNDLE).hexdigest()}
+    cfg["rum"] = {"faro_version": "2.9.0", "faro_content_hash": hashlib.sha256(SAMPLE_BUNDLE).hexdigest()}
     _config_pair(monkeypatch, cfg)
     mock_fetch_bundle(SAMPLE_BUNDLE)
 

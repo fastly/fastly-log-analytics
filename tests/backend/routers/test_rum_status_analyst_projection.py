@@ -1,0 +1,99 @@
+"""Tests for the analyst-safe projection of GET /rum/status (F1 audit fix).
+
+Before this fix, ``/rum/status`` was wholesale-blocked for analysts
+(``_ANALYST_BLOCKED_RUM_SUFFIXES``), which 403'd the RUM page's status
+fetch and left it permanently stuck rendering the admin-only
+``RumStatusPanel``. The route now projects an analyst-safe body — mirrors
+the ``/api/log-extents`` vs ``/api/sync-status`` sibling shape: an analyst
+gets ``{enabled, enabled_at}``; ``deployed_vcl_sha`` / ``current_vcl_sha`` /
+``vcl_drift`` (the operator's deployed edge-VCL fingerprint) stay
+admin-only.
+
+The route function is called directly with a stand-in ``request`` object
+(only ``request.state.analyst_session`` is read) rather than through the
+full RemoteAccessMiddleware + tunnel/invite flow — same lightweight idiom
+``backend/routers/web_vitals.py`` uses to distinguish analyst vs admin
+callers.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from backend.routers import rum as rum_router
+
+SVC = "svc-rum-status-projection"
+
+
+@pytest.fixture
+def with_config(monkeypatch):
+    container: dict = {}
+    monkeypatch.setattr("backend.config.load_config", lambda service_id: container.get(service_id))
+    return container
+
+
+def _request(analyst_session: object | None) -> SimpleNamespace:
+    return SimpleNamespace(state=SimpleNamespace(analyst_session=analyst_session))
+
+
+def _analyst_session() -> SimpleNamespace:
+    return SimpleNamespace(session_id="s-test", service_ids=[SVC], email="analyst@example.com")
+
+
+@pytest.mark.security_regression
+async def test_analyst_status_excludes_vcl_fingerprint_fields(with_config, monkeypatch):
+    """No ``*_vcl_sha`` and no ``vcl_drift`` key must survive to an analyst,
+    even when RUM is enabled and drifted."""
+    with_config[SVC] = {
+        "rum_enabled": True,
+        "rum_enabled_at": "2026-01-01T00:00:00Z",
+        "rum_vcl_sha": "deadbeef",
+    }
+    # rum_vcl_fingerprint reads the deployed VCL — must not even be called
+    # for an analyst caller (skip the fingerprint work entirely).
+    monkeypatch.setattr(
+        rum_router,
+        "rum_vcl_fingerprint",
+        lambda service_id: pytest.fail("rum_vcl_fingerprint must not be called for an analyst caller"),
+    )
+
+    result = await rum_router.rum_status(_request(_analyst_session()), service_id=SVC)
+
+    assert result == {"enabled": True, "enabled_at": "2026-01-01T00:00:00Z"}
+    assert "deployed_vcl_sha" not in result
+    assert "current_vcl_sha" not in result
+    assert "vcl_drift" not in result
+
+
+@pytest.mark.security_regression
+async def test_analyst_can_read_enabled_field(with_config):
+    """Analyst CAN read ``enabled`` — this is the field the RUM page gates
+    its entire body on, and it is not operator-sensitive."""
+    with_config[SVC] = {"rum_enabled": False}
+
+    result = await rum_router.rum_status(_request(_analyst_session()), service_id=SVC)
+
+    assert result["enabled"] is False
+    assert "enabled_at" in result
+
+
+def test_admin_status_still_sees_vcl_fingerprint_fields(with_config, monkeypatch):
+    """Negative control: the admin (no analyst_session) branch is untouched —
+    it still gets the full VCL-drift-detection payload."""
+    with_config[SVC] = {
+        "rum_enabled": True,
+        "rum_enabled_at": "2026-01-01T00:00:00Z",
+        "rum_vcl_sha": "deadbeef",
+    }
+    monkeypatch.setattr(rum_router, "rum_vcl_fingerprint", lambda service_id: "deadbeef")
+
+    import asyncio
+
+    result = asyncio.run(rum_router.rum_status(_request(None), service_id=SVC))
+
+    assert result["enabled"] is True
+    assert result["deployed_vcl_sha"] == "deadbeef"
+    assert result["current_vcl_sha"] == "deadbeef"
+    assert result["vcl_drift"] is False

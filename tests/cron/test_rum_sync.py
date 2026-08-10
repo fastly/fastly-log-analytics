@@ -33,6 +33,11 @@ FAKE_CFG: dict[str, Any] = {
         "enabled": True,
         "faro_version": "2.9.0",
         "faro_content_hash": "stored-hash-abc123",
+        # _faro_bundle_intact compares against this field specifically (the
+        # S3/FOS ETag is protocol-mandated MD5, independent of whatever
+        # algorithm faro_content_hash uses) — see rum_sync.py's
+        # _faro_bundle_intact docstring.
+        "faro_fos_etag_md5": "stored-hash-abc123",
         "faro_last_upstream_check": 0,
         "faro_upstream_check_hours": 24,
     },

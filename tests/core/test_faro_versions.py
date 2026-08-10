@@ -10,6 +10,8 @@ must never gate ``make test`` / ``make test-ci``.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 
 import httpx
@@ -37,6 +39,41 @@ SAMPLE_REGISTRY_RESPONSE = {
 # Shape-accurate stand-in for the real IIFE bundle: the browser global the
 # tracker looks for is what downstream tasks actually depend on.
 SAMPLE_BUNDLE = b"!function(e){var GrafanaFaroWebSdk={initializeFaro:function(){}};e.Faro=GrafanaFaroWebSdk}(window);"
+MUTATED_BUNDLE = b"!function(e){/* poisoned CDN artifact, different bytes */}(window);"
+
+
+def _sri_integrity(bundle: bytes, algo: str = "sha512") -> str:
+    """Build an SRI integrity string for ``bundle`` — same format npm
+    publishes at ``versions[<v>].dist.integrity``."""
+    digest = hashlib.new(algo, bundle).digest()
+    return f"{algo}-{base64.b64encode(digest).decode()}"
+
+
+def _registry_payload_with_dist(version_dist: dict[str, dict]) -> dict:
+    """Build a minimal registry JSON payload with a ``dist`` block per version."""
+    return {
+        "name": "@grafana/faro-web-sdk",
+        "versions": {v: {"version": v, "dist": dist} for v, dist in version_dist.items()},
+    }
+
+
+def _route_by_host(*, registry: httpx.Response | None = None, bundle: httpx.Response | None = None):
+    """Return an ``httpx.MockTransport`` handler that routes by request host.
+
+    ``fetch_faro_bundle`` now hits two different origins per call
+    (registry.npmjs.org for the integrity lookup, unpkg.com for the bytes)
+    against the SAME mocked ``httpx.AsyncClient``, so tests need to answer
+    differently per host rather than with one blanket response.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "registry.npmjs.org":
+            assert registry is not None, "unexpected registry.npmjs.org request"
+            return registry
+        assert bundle is not None, "unexpected unpkg.com request"
+        return bundle
+
+    return handler
 
 
 # Bound at import time: the factory below replaces ``httpx.AsyncClient``, so it
@@ -174,10 +211,14 @@ async def test_fetch_available_faro_versions_raises_when_versions_key_missing(mo
 
 
 async def test_fetch_faro_bundle_returns_bytes(mock_http):
-    """Happy path: correct unpkg URL requested, raw body returned verbatim."""
+    """Happy path: correct unpkg URL requested, integrity verified against
+    the registry's published sha512, raw body returned verbatim."""
     seen: dict[str, str] = {}
+    registry_payload = _registry_payload_with_dist({"2.9.0": {"integrity": _sri_integrity(SAMPLE_BUNDLE)}})
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "registry.npmjs.org":
+            return httpx.Response(200, content=json.dumps(registry_payload).encode())
         seen["url"] = str(request.url)
         return httpx.Response(200, content=SAMPLE_BUNDLE)
 
@@ -190,11 +231,77 @@ async def test_fetch_faro_bundle_returns_bytes(mock_http):
     assert seen["url"] == ("https://unpkg.com/@grafana/faro-web-sdk@2.9.0/dist/bundle/faro-web-sdk.iife.js")
 
 
-async def test_fetch_faro_bundle_raises_on_404(mock_http):
-    """Unknown version — the message must name the 404 so the admin UI can
-    distinguish 'no such version' from a transient CDN failure."""
+async def test_fetch_faro_bundle_verifies_against_shasum_fallback(mock_http):
+    """When the registry entry has no ``integrity`` field, fall back to the
+    legacy ``shasum`` (sha1 hex) field — older registry snapshots only
+    published shasum."""
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"shasum": hashlib.sha1(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()}}
+    )
 
-    mock_http(lambda _: httpx.Response(404, content=b"Cannot find package"))
+    mock_http(
+        _route_by_host(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            bundle=httpx.Response(200, content=SAMPLE_BUNDLE),
+        )
+    )
+
+    bundle = await fetch_faro_bundle("2.9.0")
+
+    assert bundle == SAMPLE_BUNDLE
+
+
+async def test_fetch_faro_bundle_raises_on_integrity_mismatch(mock_http):
+    """The core F2 fix: a downloaded bundle whose bytes don't match the
+    registry's published integrity hash must raise, not warn, and the
+    mismatched bytes must never be returned to the caller (so they can
+    never reach the operator's FOS bucket)."""
+    registry_payload = _registry_payload_with_dist({"2.9.0": {"integrity": _sri_integrity(SAMPLE_BUNDLE)}})
+
+    mock_http(
+        _route_by_host(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            # unpkg serves DIFFERENT bytes than what the registry's
+            # integrity hash was computed over — simulates a mutated or
+            # poisoned CDN artifact.
+            bundle=httpx.Response(200, content=MUTATED_BUNDLE),
+        )
+    )
+
+    with pytest.raises(ValueError, match="failed integrity verification"):
+        await fetch_faro_bundle("2.9.0")
+
+
+async def test_fetch_faro_bundle_raises_when_registry_has_no_dist_for_version(mock_http):
+    """No usable integrity target at all (version missing from the registry
+    payload) must fail closed — refuse to return unverified bytes rather
+    than silently skipping verification."""
+    registry_payload = _registry_payload_with_dist({"1.0.0": {"integrity": _sri_integrity(SAMPLE_BUNDLE)}})
+
+    mock_http(
+        _route_by_host(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            bundle=httpx.Response(200, content=SAMPLE_BUNDLE),
+        )
+    )
+
+    with pytest.raises(ValueError, match="no dist metadata"):
+        await fetch_faro_bundle("2.9.0")
+
+
+async def test_fetch_faro_bundle_raises_on_404(mock_http):
+    """Unknown version at the CDN — the message must name the 404 so the
+    admin UI can distinguish 'no such version' from a transient CDN
+    failure. Registry lookup succeeds (the version is real) but unpkg's
+    build for it 404s."""
+    registry_payload = _registry_payload_with_dist({"99.99.99": {"integrity": _sri_integrity(b"irrelevant")}})
+
+    mock_http(
+        _route_by_host(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            bundle=httpx.Response(404, content=b"Cannot find package"),
+        )
+    )
 
     with pytest.raises(ValueError, match="404") as exc_info:
         await fetch_faro_bundle("99.99.99")
@@ -204,8 +311,14 @@ async def test_fetch_faro_bundle_raises_on_404(mock_http):
 
 async def test_fetch_faro_bundle_raises_on_server_error(mock_http):
     """Non-404 failure status is wrapped too, and must NOT be reported as 404."""
+    registry_payload = _registry_payload_with_dist({"2.9.0": {"integrity": _sri_integrity(SAMPLE_BUNDLE)}})
 
-    mock_http(lambda _: httpx.Response(503, content=b"service unavailable"))
+    mock_http(
+        _route_by_host(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            bundle=httpx.Response(503, content=b"service unavailable"),
+        )
+    )
 
     with pytest.raises(ValueError, match="503") as exc_info:
         await fetch_faro_bundle("2.9.0")
@@ -214,12 +327,31 @@ async def test_fetch_faro_bundle_raises_on_server_error(mock_http):
 
 
 async def test_fetch_faro_bundle_raises_on_network_error(mock_http):
-    """Transport-level failure (DNS/TCP) surfaces as ValueError, not ConnectError."""
+    """Transport-level failure (DNS/TCP) downloading the bundle surfaces as
+    ValueError, not ConnectError. Registry lookup succeeds first."""
+    registry_payload = _registry_payload_with_dist({"2.9.0": {"integrity": _sri_integrity(SAMPLE_BUNDLE)}})
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "registry.npmjs.org":
+            return httpx.Response(200, content=json.dumps(registry_payload).encode())
         raise httpx.ConnectError("unpkg unreachable", request=request)
 
     mock_http(handler)
 
     with pytest.raises(ValueError, match="Failed to download Faro bundle"):
+        await fetch_faro_bundle("2.9.0")
+
+
+async def test_fetch_faro_bundle_raises_on_registry_network_error(mock_http):
+    """A registry outage must fail the download closed — verification can't
+    be skipped just because the registry is unreachable."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "registry.npmjs.org":
+            raise httpx.ConnectError("registry unreachable", request=request)
+        raise AssertionError("unpkg must not be contacted when the registry lookup fails")
+
+    mock_http(handler)
+
+    with pytest.raises(ValueError, match="Failed to verify Faro bundle"):
         await fetch_faro_bundle("2.9.0")

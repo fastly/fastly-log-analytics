@@ -174,14 +174,21 @@ _ANALYST_BLOCKED_SCORING_SUFFIXES: tuple[str, ...] = (
 # Faro Web SDK / enable-state configuration — same sensitivity class as the
 # scoring-suffix gate above. Mirrors that gate's shape: any path containing
 # "/rum/" AND ending with one of these suffixes is admin-only.
-# /rum/beacon-health, /rum/analytics, and /rum/live-events are intentionally
-# NOT listed — they're read-only beacon telemetry with no operator-config
-# disclosure, same sensitivity class as the scoring analytics reads that stay
-# open per the comment on _ANALYST_BLOCKED_SCORING_SUFFIXES.
+# /rum/status is intentionally NOT listed: the RUM page is analystVisible
+# (frontend/components/AppLayout.tsx) and gates its entire body on this
+# endpoint, so blocking it wholesale made the analyst RUM page permanently
+# dead (F1 audit finding). The route itself (backend/routers/rum.py)
+# projects the response down to {enabled, enabled_at} for an analyst
+# caller — the analyst-safe sibling shape of /api/log-extents vs
+# /api/sync-status — and keeps deployed_vcl_sha / current_vcl_sha /
+# vcl_drift admin-only. /rum/beacon-health, /rum/analytics, and
+# /rum/live-events are also NOT listed — they're read-only beacon
+# telemetry with no operator-config disclosure, same sensitivity class as
+# the scoring analytics reads that stay open per the comment on
+# _ANALYST_BLOCKED_SCORING_SUFFIXES.
 _ANALYST_BLOCKED_RUM_SUFFIXES: tuple[str, ...] = (
     "/enable",  # mutates deployed edge configuration
     "/disable",  # mutates deployed edge configuration
-    "/status",  # discloses enable-state + VCL drift/fingerprint
     "/versions",  # discloses the operator's pinned Faro Web SDK version
     "/upgrade",  # mutates deployed edge configuration
 )
@@ -480,8 +487,9 @@ def _is_blocked_path(path: str) -> bool:
          /scoring/labels and /scoring/sessions/<sid>/events accessible.
       4. RUM suffix gate: same shape as #3 — any path that contains "/rum/"
          AND ends with one of ``_ANALYST_BLOCKED_RUM_SUFFIXES`` is
-         admin-only. Keeps /rum/beacon-health, /rum/analytics, and
-         /rum/live-events accessible.
+         admin-only. Keeps /rum/status, /rum/beacon-health, /rum/analytics,
+         and /rum/live-events accessible (the route layer projects
+         /rum/status down to an analyst-safe body).
       5. Regex match against ``_ANALYST_BLOCKED_SUBPATH_REGEX`` for routes
          that embed a path parameter (e.g. /api/services/{id}/lake-info).
 

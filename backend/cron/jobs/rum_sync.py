@@ -41,6 +41,12 @@ def _faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
     ETag, network error) returns False so the caller re-uploads. This is the
     every-tick integrity check — it must stay cheap (no unpkg traffic on the
     steady-state path) and must never raise.
+
+    Compares against ``faro_fos_etag_md5`` (not ``faro_content_hash``): a
+    single-part PUT's S3/FOS ``ETag`` is protocol-mandated MD5 of the
+    object bytes, so this check needs an MD5 value specifically —
+    independent of whatever algorithm ``faro_content_hash`` (the
+    content-drift marker ``detect_faro_version_change`` reads) uses.
     """
     import certifi
     import httpx
@@ -53,7 +59,7 @@ def _faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
     secret_key = cfg.get("fos_secret_access_key")
     bucket = cfg.get("fos_bucket")
     region = cfg.get("fos_region", "us-east-1")
-    stored_hash = (cfg.get("rum") or {}).get("faro_content_hash")
+    stored_hash = (cfg.get("rum") or {}).get("faro_fos_etag_md5")
 
     if not all([access_key, secret_key, bucket]) or not stored_hash:
         return False

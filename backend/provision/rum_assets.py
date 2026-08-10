@@ -173,7 +173,10 @@ def upload_rum_tracker_js(
 
     import hashlib
 
-    local_md5 = hashlib.md5(js_bytes).hexdigest()
+    # Compared against the FOS/S3 ETag header below, which is protocol-
+    # mandated MD5 of the object bytes for a single-part PUT — not a
+    # security use of the hash, just matching S3's ETag semantics.
+    local_md5 = hashlib.md5(js_bytes, usedforsecurity=False).hexdigest()
 
     try:
         # Check if file already exists and is up to date via HEAD request
@@ -334,16 +337,24 @@ async def download_and_upload_faro(
 ) -> dict[str, Any]:
     """Download a pinned Faro Web SDK version and upload it to the service's FOS bucket.
 
-    Persists the version + content hash to ``cfg["rum"]`` so later reconcile
-    passes can detect drift (upstream re-release, admin-requested upgrade)
-    without re-downloading on every check.
+    Persists two separate hashes to ``cfg["rum"]``, each read by a different
+    consumer:
+      - ``faro_content_hash`` (sha256): our own content-drift marker, read
+        back by ``detect_faro_version_change`` to decide whether upstream
+        re-released this version string with different bytes.
+      - ``faro_fos_etag_md5`` (MD5): read by the cron's cheap FOS HEAD
+        integrity check (``backend/cron/jobs/rum_sync.py::_faro_bundle_intact``),
+        which compares it against the object's S3/FOS ``ETag`` header — a
+        single-part PUT's ETag is protocol-mandated MD5 of the bytes, so
+        that comparison needs an MD5 specifically, independent of whichever
+        algorithm ``faro_content_hash`` uses.
 
     Returns:
         {
             "version": str,
             "path": "rum/faro-web-sdk-v{version}.iife.js",
             "bytes_uploaded": int,
-            "content_hash": str (MD5 hex digest),
+            "content_hash": str (sha256 hex digest),
             "fos_key": str (s3://bucket/path),
         }
     """
@@ -368,7 +379,12 @@ async def download_and_upload_faro(
         status_cb(f"⏳ Downloading Faro Web SDK v{version}…")
 
     bundle = await fetch_faro_bundle(version)
-    content_hash = hashlib.md5(bundle).hexdigest()
+    content_hash = hashlib.sha256(bundle).hexdigest()
+    # S3/FOS ETag for a single-part PUT is protocol-mandated MD5 of the
+    # object bytes — stored separately (not a security use of the hash)
+    # so the cron's ETag-based integrity check can keep comparing
+    # like-for-like regardless of the algorithm above.
+    etag_md5 = hashlib.md5(bundle, usedforsecurity=False).hexdigest()
 
     fos_key = _faro_fos_key(version)
     fos_host = region_endpoint(region)
@@ -417,6 +433,7 @@ async def download_and_upload_faro(
     rum_cfg = dict(cfg.get("rum") or {})
     rum_cfg["faro_version"] = version
     rum_cfg["faro_content_hash"] = content_hash
+    rum_cfg["faro_fos_etag_md5"] = etag_md5
     cfg["rum"] = rum_cfg
     svcconfig.save_config(service_id, cfg)
 
@@ -449,7 +466,7 @@ async def detect_faro_version_change(service_id: str, version: str) -> bool:
         return True
 
     bundle = await fetch_faro_bundle(version)
-    current_hash = hashlib.md5(bundle).hexdigest()
+    current_hash = hashlib.sha256(bundle).hexdigest()
     return current_hash != stored_hash
 
 

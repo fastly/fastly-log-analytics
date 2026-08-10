@@ -21,7 +21,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Path, Query, Response
+from fastapi import APIRouter, Body, HTTPException, Path, Query, Request, Response
 from sse_starlette.sse import EventSourceResponse
 
 from backend import config as svcconfig
@@ -174,13 +174,28 @@ async def disable_rum_handler(
 
 
 @router.get("/{service_id}/rum/status")
-async def rum_status(service_id: str = Path(...)) -> dict[str, Any]:
-    """Get RUM enable/disable status and VCL drift detection."""
+async def rum_status(request: Request, service_id: str = Path(...)) -> dict[str, Any]:
+    """Get RUM enable/disable status and VCL drift detection.
+
+    Analyst-safe sibling shape of /api/log-extents vs /api/sync-status
+    (F1 audit finding): the RUM page is analystVisible and gates its whole
+    body on this endpoint, so an analyst caller gets the projected
+    ``{enabled, enabled_at}`` body. ``deployed_vcl_sha`` / ``current_vcl_sha``
+    / ``vcl_drift`` disclose the operator's deployed edge-VCL fingerprint
+    and stay admin-only — they're also the expensive-to-compute fields
+    (``rum_vcl_fingerprint`` reads the deployed VCL), so skipping them for
+    analysts avoids that work entirely.
+    """
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
 
     enabled = cfg.get("rum_enabled", False) or rum_cfg.get("enabled", False)
     enabled_at = cfg.get("rum_enabled_at") or rum_cfg.get("enabled_at")
+
+    analyst_session = getattr(request.state, "analyst_session", None)
+    if analyst_session is not None:
+        return {"enabled": enabled, "enabled_at": enabled_at}
+
     deployed_sha = cfg.get("rum_vcl_sha") or rum_cfg.get("deployed_vcl_sha")
     current_sha = rum_vcl_fingerprint(service_id)
 
