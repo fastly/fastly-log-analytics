@@ -38,6 +38,7 @@ from backend.provision.rum_orchestrator_v2 import (
     upgrade_faro_version,
 )
 from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
+from backend.utils.remote_access import clamp_or_400, get_analyst_time_bounds
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
 
 logger = logging.getLogger(__name__)
@@ -488,14 +489,29 @@ def normalize_rum_beacons_timestamps(db) -> None:
 
 @router.get("/{service_id}/rum/analytics")
 async def rum_analytics(
+    request: Request,
     service_id: str = Path(...),
     start_time: str | None = Query(None),
     end_time: str | None = Query(None),
     filters: str | None = Query(None),
 ) -> dict[str, Any]:
-    """Retrieve parsed RUM analytics from SQLite database with high-fidelity deterministic mock fallback."""
+    """Retrieve parsed RUM analytics from SQLite database with high-fidelity deterministic mock fallback.
+
+    Analyst invite-window clamp (matches the ``clamp_or_400`` idiom used by
+    ``session_scoring._scoring_time_window`` / ``dashboard._analyst_lookback_clamp``
+    / ``insights``): tenant scoping is already enforced by the RemoteAccess
+    middleware path gate, but without this an analyst on e.g. a 1-hour invite
+    could pass an arbitrary ``start_time``/``end_time`` and read the full
+    retained beacon history for their own service. Admin (no analyst_session)
+    requests pass straight through unclamped.
+    """
+    analyst_session = getattr(request.state, "analyst_session", None)
+    tb = get_analyst_time_bounds(request)
+    start_time, end_time = clamp_or_400(tb, start_time, end_time, analyst_session=analyst_session)
+
     # Convert start_time and end_time to standardized UTC ISO strings to ensure accurate raw alphabetical comparison in SQLite.
-    # Default to the last 24 hours if both are missing.
+    # Default to the last 24 hours if both are missing (admin only — clamp_or_400
+    # above always returns concrete bounds for an analyst request).
     if not start_time and not end_time:
         start_dt: datetime.datetime | None = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=24)
         if start_dt:

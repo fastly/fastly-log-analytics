@@ -9159,7 +9159,7 @@
           "rum"
         ],
         "summary": "Rum Analytics",
-        "description": "Retrieve parsed RUM analytics from SQLite database with high-fidelity deterministic mock fallback.",
+        "description": "Retrieve parsed RUM analytics from SQLite database with high-fidelity deterministic mock fallback.\n\nAnalyst invite-window clamp (matches the ``clamp_or_400`` idiom used by\n``session_scoring._scoring_time_window`` / ``dashboard._analyst_lookback_clamp``\n/ ``insights``): tenant scoping is already enforced by the RemoteAccess\nmiddleware path gate, but without this an analyst on e.g. a 1-hour invite\ncould pass an arbitrary ``start_time``/``end_time`` and read the full\nretained beacon history for their own service. Admin (no analyst_session)\nrequests pass straight through unclamped.",
         "operationId": "rum_analytics_api_services__service_id__rum_analytics_get",
         "parameters": [
           {

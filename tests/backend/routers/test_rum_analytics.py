@@ -1,10 +1,14 @@
+import asyncio
 import datetime
 import json
+from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.core.metadata import get_con
 from backend.main import app
+from backend.routers import rum as rum_router
 
 client = TestClient(app)
 
@@ -321,6 +325,82 @@ def test_rum_analytics_with_filters() -> None:
         assert data["is_mock"] is False
         assert data["no_data"] is False
 
+    finally:
+        db.execute("DELETE FROM rum_beacons WHERE service_id = ?", (service_id,))
+        db.commit()
+
+
+# ── Analyst invite-window clamp (security follow-up) ──────────────────────
+#
+# /rum/analytics took raw start_time/end_time query params with no clamping,
+# unlike every other analyst-reachable analytics router (see clamp_or_400 /
+# get_analyst_time_bounds precedent in session_scoring._scoring_time_window
+# and dashboard._analyst_lookback_clamp). Tenant scoping is already enforced
+# by the RemoteAccess middleware path gate, so this was an invite-window
+# bypass, not a cross-tenant leak: an analyst on a 1-hour invite could pass
+# start_time=2020-01-01 and read the full retained beacon history.
+
+
+def _fake_request(analyst_session: object | None) -> SimpleNamespace:
+    """Minimal stand-in — only ``request.state.analyst_session`` is read by
+    ``get_analyst_time_bounds``/``clamp_or_400``. Same idiom as
+    ``test_session_scoring_router.py``'s ``_fake_request``."""
+    return SimpleNamespace(state=SimpleNamespace(analyst_session=analyst_session))
+
+
+def _analyst_session(window_hours: int = 1) -> SimpleNamespace:
+    return SimpleNamespace(query_window_hours=window_hours, query_start_time=None, query_end_time=None)
+
+
+@pytest.mark.security_regression
+def test_analyst_request_outside_invite_window_is_clamped() -> None:
+    """An analyst scoped to a 1-hour invite who asks for start_time way in
+    the past must not see beacons outside that window — even though the
+    beacon itself belongs to their own service."""
+    service_id = "test_rum_analytics_clamp_analyst"
+    db = get_con(service_id)
+    db.execute("DELETE FROM rum_beacons WHERE service_id = ?", (service_id,))
+    db.commit()
+
+    old_ts = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=30)).isoformat()
+    recent_ts = datetime.datetime.now(datetime.UTC).isoformat()
+    db.execute(
+        "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
+        (service_id, old_ts, json.dumps({"pathname": "/thirty-days-old"})),
+    )
+    db.execute(
+        "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
+        (service_id, recent_ts, json.dumps({"pathname": "/just-now"})),
+    )
+    db.commit()
+
+    try:
+        # Analyst asking for a range far wider than their 1h invite window.
+        result = asyncio.run(
+            rum_router.rum_analytics(
+                request=_fake_request(_analyst_session(window_hours=1)),
+                service_id=service_id,
+                start_time="2000-01-01T00:00:00Z",
+                end_time=None,
+                filters=None,
+            )
+        )
+        paths = [p["path"] for p in result["worst_pages"]]
+        assert "/thirty-days-old" not in paths, "analyst invite-window clamp did not apply"
+
+        # Negative control: admin (no analyst_session) with the same
+        # far-in-the-past start_time is NOT clamped — sees the old beacon.
+        admin_result = asyncio.run(
+            rum_router.rum_analytics(
+                request=_fake_request(None),
+                service_id=service_id,
+                start_time="2000-01-01T00:00:00Z",
+                end_time=None,
+                filters=None,
+            )
+        )
+        admin_paths = [p["path"] for p in admin_result["worst_pages"]]
+        assert "/thirty-days-old" in admin_paths
     finally:
         db.execute("DELETE FROM rum_beacons WHERE service_id = ?", (service_id,))
         db.commit()

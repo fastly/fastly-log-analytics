@@ -1057,6 +1057,14 @@ export interface paths {
         /**
          * Rum Analytics
          * @description Retrieve parsed RUM analytics from SQLite database with high-fidelity deterministic mock fallback.
+         *
+         *     Analyst invite-window clamp (matches the ``clamp_or_400`` idiom used by
+         *     ``session_scoring._scoring_time_window`` / ``dashboard._analyst_lookback_clamp``
+         *     / ``insights``): tenant scoping is already enforced by the RemoteAccess
+         *     middleware path gate, but without this an analyst on e.g. a 1-hour invite
+         *     could pass an arbitrary ``start_time``/``end_time`` and read the full
+         *     retained beacon history for their own service. Admin (no analyst_session)
+         *     requests pass straight through unclamped.
          */
         get: operations["rum_analytics_api_services__service_id__rum_analytics_get"];
         put?: never;
