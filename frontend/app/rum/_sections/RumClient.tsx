@@ -9,18 +9,44 @@ import { GenericPageSkeleton } from '@/components/skeletons/PageSkeleton';
 import { PlotlyChart } from '@/components/PlotlyChart';
 import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp } from 'lucide-react';
 import { adminFetch } from '@/lib/api';
+import type { FiltersPayload } from '@/types/filters';
 
 interface RumClientProps {
   serviceId: string | null;
   startTime: string | null;
   endTime: string | null;
-  filterPayload: any;
+  filterPayload: FiltersPayload;
 }
 
 interface CwvColors {
   text: string;
   bg: string;
   label: string;
+}
+
+interface RumWorstPage {
+  path: string;
+  views: number;
+  avg_load_time: number | null;
+  lcp_p75: number | null;
+  cls_p75: number | null;
+}
+
+interface RumJsError {
+  message: string;
+  file: string;
+  line: number;
+  col: number;
+  count: number;
+}
+
+interface RumLiveEvent {
+  time: string;
+  type: string;
+  path: string;
+  desc: string;
+  browser: string;
+  os: string;
 }
 
 function getLcpColors(p75: number | null | undefined): CwvColors {
@@ -335,7 +361,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 </tr>
               </thead>
               <tbody>
-                {analytics.worst_pages.map((p: any) => (
+                {analytics.worst_pages.map((p: RumWorstPage) => (
                   <tr key={p.path} className="border-b hover:bg-muted/10">
                     <td className="py-2 font-semibold font-mono text-xs">{p.path}</td>
                     <td className="py-2 text-right">{p.views}</td>
@@ -354,8 +380,8 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
             {analytics.errors.length === 0 ? (
               <p className="text-sm text-muted-foreground py-4 text-center">No JS errors captured in this window</p>
             ) : (
-              analytics.errors.map((e: any, idx: number) => (
-                <div key={`${e.message}-${idx}`} className="p-3 bg-rose-500/5 rounded-lg border border-rose-500/10 space-y-1.5">
+              analytics.errors.map((e: RumJsError) => (
+                <div key={`${e.message}-${e.file}-${e.line}-${e.col}`} className="p-3 bg-rose-500/5 rounded-lg border border-rose-500/10 space-y-1.5">
                   <div className="flex justify-between items-start gap-4">
                     <p className="text-xs font-semibold text-rose-600 font-mono break-all">{e.message}</p>
                     <span className="bg-rose-500/10 text-rose-600 px-2 py-0.5 rounded text-[10px] font-bold">
@@ -426,8 +452,8 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       {/* Live Monitor Feed Activity Ticker */}
       <AnalyticsCard title="Live Activity Monitor" icon={<Terminal className="h-4 w-4" />}>
         <div className="bg-[#0f172a] text-zinc-100 p-4 rounded-lg font-mono text-xs space-y-2 max-h-[220px] overflow-y-auto">
-          {liveEvents?.map((e: any, idx: number) => (
-            <div key={`${e.time}-${idx}`} className="flex justify-between items-center border-b border-zinc-800 pb-2 last:border-0 last:pb-0">
+          {liveEvents?.map((e: RumLiveEvent) => (
+            <div key={`${e.time}-${e.type}-${e.path}-${e.desc}`} className="flex justify-between items-center border-b border-zinc-800 pb-2 last:border-0 last:pb-0">
               <div className="flex items-center gap-2">
                 <span className={e.type === 'error' ? 'text-rose-500' : 'text-emerald-400'}>
                   {e.type === 'error' ? '✖' : '✔'}

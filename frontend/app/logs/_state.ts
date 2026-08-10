@@ -129,9 +129,10 @@ export function useLogsPageState() {
 
   // Derive currently running crons and loading state from recent crons to keep downstream compatibility intact
   const runningCrons = React.useMemo(() => {
-    if (!recentCrons?.entries) return { entries: [] }
+    const entries = recentCrons?.entries
+    if (!entries) return { entries: [] }
     return {
-      entries: recentCrons.entries.filter((e: any) => e.status === 'running')
+      entries: entries.filter((e: any) => e.status === 'running')
     }
   }, [recentCrons?.entries])
 

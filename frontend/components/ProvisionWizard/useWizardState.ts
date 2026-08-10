@@ -72,11 +72,16 @@ export function useWizardState(
   const [token, setToken] = useState("");
   const [submittedToken, setSubmittedToken] = useState("");
 
-  useEffect(() => {
+  // Clear the submitted token when the wizard closes. Derived during render
+  // (rather than in a useEffect) to avoid the extra setState-in-effect render
+  // pass — see https://react.dev/learn/you-might-not-need-an-effect.
+  const [prevOpenForToken, setPrevOpenForToken] = useState(open);
+  if (open !== prevOpenForToken) {
+    setPrevOpenForToken(open);
     if (!open) {
       setSubmittedToken("");
     }
-  }, [open]);
+  }
 
   const [tokenInfo, setTokenInfo] = useState<TokenInfo | null>(null);
   const [search, setSearch] = useState("");
@@ -191,11 +196,16 @@ export function useWizardState(
     retry: false,
   });
 
-  useEffect(() => {
+  // Advance to the service step once services arrive. Derived during render
+  // (rather than in a useEffect) to avoid the setState-in-effect cascade —
+  // see https://react.dev/learn/you-might-not-need-an-effect.
+  const [prevServicesData, setPrevServicesData] = useState(servicesData);
+  if (servicesData !== prevServicesData) {
+    setPrevServicesData(servicesData);
     if (servicesData && Array.isArray(servicesData) && step === "token") {
       setStep("service");
     }
-  }, [servicesData, step, setStep]);
+  }
 
   // ── Step 4: Catalog ──
   const { data: catalog, isLoading: isLoadingCatalog } = useQuery({

@@ -142,7 +142,7 @@ export default function RumPageClient({ initialServiceId }: RumPageClientProps) 
             <div className="space-y-2">
               <h4 className="font-semibold text-sm">Step 3: Start Collecting Data</h4>
               <p className="text-sm text-muted-foreground">
-                Once deployed, real user beacons will automatically be sent to your analytics dashboard when users visit your site. After collecting 1+ beacons, you'll see real performance data appear on this page.
+                Once deployed, real user beacons will automatically be sent to your analytics dashboard when users visit your site. After collecting 1+ beacons, you&apos;ll see real performance data appear on this page.
               </p>
             </div>
 
