@@ -135,6 +135,12 @@ def test_faro_asset_fetch_shield_none():
         "1.2.x",  # non-numeric component
         "",  # empty
         "1.2.3-beta",  # pre-release suffix
+        "1.2\\.3",  # backslash
+        "1.2.3\x00",  # null byte
+        "\x00",  # bare null byte
+        "１.２.３",  # fullwidth digits (U+FF10-FF19) — \d matches these too
+        "١.٢.٣",  # Arabic-Indic digits (U+0660-0669) — \d matches these too
+        "2.9.٠",  # mixed ASCII + non-ASCII digit in one component
     ],
 )
 def test_generate_rum_asset_fetch_vcl_rejects_malicious_version(bad_version):
@@ -148,6 +154,10 @@ def test_generate_rum_asset_fetch_vcl_rejects_malicious_version(bad_version):
         '1.2."3',
         "1.2.3\n",
         "../../etc/passwd",
+        "1.2\\.3",
+        "1.2.3\x00",
+        "１.２.３",
+        "١.٢.٣",
     ],
 )
 def test_generate_rum_vcl_rejects_malicious_version(bad_version):
@@ -156,6 +166,27 @@ def test_generate_rum_vcl_rejects_malicious_version(bad_version):
     must fail loudly rather than have it silently discarded."""
     with pytest.raises(ValueError):
         generate_rum_vcl("srv_test", faro_version=bad_version)
+
+
+@pytest.mark.parametrize(
+    "unicode_digit_version",
+    [
+        "１.２.３",  # fullwidth (U+FF10-FF19)
+        "١.٢.٣",  # Arabic-Indic (U+0660-0669)
+        "๑.๒.๓",  # Thai digits (U+0E50-0E59)
+        "2.9.٠",  # mixed ASCII + non-ASCII digit
+    ],
+)
+def test_assert_faro_version_safe_rejects_unicode_digits_directly(unicode_digit_version):
+    """Regression: Python's \\d in re (without re.ASCII) matches any Unicode
+    decimal-digit codepoint (category Nd), not just 0-9. A version string
+    built entirely from non-ASCII digits must still be rejected — verified
+    directly against the validator rather than only through the public
+    generator functions."""
+    from backend.core.fastly.rum_provisioning import _assert_faro_version_safe
+
+    with pytest.raises(ValueError):
+        _assert_faro_version_safe(unicode_digit_version)
 
 
 def test_rejected_version_never_reaches_generated_vcl():

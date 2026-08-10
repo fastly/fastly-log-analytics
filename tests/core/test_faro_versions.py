@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 from backend.core import faro_versions
-from backend.core.faro_versions import fetch_available_faro_versions, fetch_faro_bundle
+from backend.core.faro_versions import _is_stable_numeric, fetch_available_faro_versions, fetch_faro_bundle
 
 # Trimmed capture of the registry payload shape (2026-08-09). Deliberately
 # unsorted, and salted with a pre-release + a build-metadata version so the
@@ -67,6 +67,48 @@ def mock_http(monkeypatch):
         monkeypatch.setattr(faro_versions.httpx, "AsyncClient", _mock_transport(handler))
 
     return install
+
+
+# ── _is_stable_numeric ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "１.２.３",  # fullwidth digits (U+FF10-FF19) — str.isdigit() is True for these
+        "١.٢.٣",  # Arabic-Indic digits (U+0660-0669) — also str.isdigit() True
+        "2.9.٠",  # mixed ASCII + non-ASCII digit in one component
+    ],
+)
+def test_is_stable_numeric_rejects_non_ascii_digits(version):
+    """str.isdigit() is Unicode-aware (true for fullwidth/Arabic-Indic digits,
+    not just ASCII 0-9). A registry key using these must not be treated as a
+    valid stable version — this value can flow onward as a "version" string
+    into VCL/object-path interpolation (rum_provisioning._assert_faro_version_safe)."""
+    assert _is_stable_numeric(version) is False
+
+
+def test_is_stable_numeric_accepts_plain_ascii_version():
+    assert _is_stable_numeric("2.9.0") is True
+
+
+async def test_fetch_available_faro_versions_excludes_non_ascii_digit_keys(mock_http):
+    """End-to-end: a registry response containing a non-ASCII-digit "version"
+    key must not appear in the returned list — confirms the fix, not just the
+    helper it lives in."""
+    payload = {
+        "name": "@grafana/faro-web-sdk",
+        "versions": {
+            "2.9.0": {"version": "2.9.0"},
+            "١.٢.٣": {"version": "١.٢.٣"},
+            "１.２.３": {"version": "１.２.３"},
+        },
+    }
+    mock_http(lambda _: httpx.Response(200, content=json.dumps(payload).encode()))
+
+    versions = await fetch_available_faro_versions()
+
+    assert versions == ["2.9.0"]
 
 
 # ── fetch_available_faro_versions ───────────────────────────────────────────

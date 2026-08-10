@@ -25,11 +25,18 @@ def _is_stable_numeric(version: str) -> bool:
 
     The numeric check also guards the sort: a registry entry whose first
     three parts aren't all digits would make ``int()`` raise mid-sort.
+
+    ``str.isdigit()`` is Unicode-aware (true for fullwidth "１" or Arabic-Indic
+    "١", not just ASCII 0-9), so it's paired with ``isascii()`` here — a
+    registry key using non-ASCII digit codepoints must not be treated as a
+    valid version, since this return value can flow onward as a "version"
+    string into VCL/object-path interpolation (see
+    backend/core/fastly/rum_provisioning.py's _assert_faro_version_safe).
     """
     if "-" in version or "+" in version:
         return False
     parts = version.split(".")[:3]
-    return len(parts) == 3 and all(part.isdigit() for part in parts)
+    return len(parts) == 3 and all(part.isascii() and part.isdigit() for part in parts)
 
 
 async def fetch_available_faro_versions() -> list[str]:

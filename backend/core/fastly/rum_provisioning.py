@@ -33,7 +33,13 @@ RUM_FARO_FETCH_NAME = "RUM - Faro SDK fetch caching"
 # backend/core/faro_versions.py) so this is deliberately narrower than a general
 # VCL-string-safety check (like _assert_vcl_string_safe in session_scoring_vcl.py) —
 # digits and dots only, nothing else is a legitimate version.
-_FARO_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+#
+# NOTE: \d matches any Unicode decimal-digit codepoint (category Nd), not just
+# 0-9 — e.g. fullwidth "１２３" or Arabic-Indic "١٢٣" would pass a \d-based
+# pattern and then be interpolated verbatim into VCL and an FOS object path.
+# Use an explicit [0-9] class (not re.ASCII + \d, which is easy to lose on a
+# future re.compile edit) so the character class itself is the source of truth.
+_FARO_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
 
 def _assert_faro_version_safe(version: str) -> str:
@@ -123,6 +129,11 @@ if (req.url.path == "/js/rum.js" && req.method == "GET") {{
     if faro_version is None:
         return base
 
+    # faro_version is never interpolated into this function's output (only its
+    # presence gates whether the /js/faro-sdk.js block below is emitted) — this
+    # call exists to fail fast rather than silently add the route for a value
+    # that will later be rejected. The actual interpolation site (the object-path
+    # rewrite that DOES need this guard) is _generate_sigv4_sign_vcl below.
     _assert_faro_version_safe(faro_version)
     faro_block = f"""# Fetch the self-hosted Faro Web SDK bundle from FOS (same backend + signing as rum.js)
 if (req.url.path == "/js/faro-sdk.js" && req.method == "GET") {{
