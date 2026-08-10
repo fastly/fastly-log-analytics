@@ -1003,7 +1003,7 @@ def _purge_rum_urls(service_id: str, token: str, version: int) -> None:
             except Exception:
                 pass
 
-    paths = ["js/rum.js", "rum-beacon"]
+    paths = ["js/rum.js", "js/faro-sdk.js", "rum-beacon"]
     for domain in domains:
         for path in paths:
             try:
