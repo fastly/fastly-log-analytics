@@ -177,10 +177,11 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
       if (!metricName && payload.events && Array.isArray(payload.events)) {{
         var navs = payload.events.filter(function(e) {{ return e.name === 'faro.performance.navigation'; }});
         if (navs.length > 0) {{
-          var values = navs[0].values || {{}};
-          if (values.pageLoadTime !== undefined) {{
+          var attrs = navs[0].attributes || navs[0].values || {{}};
+          var plt = attrs.pageLoadTime !== undefined ? attrs.pageLoadTime : attrs.duration;
+          if (plt !== undefined) {{
             metricName = 'pageLoadTime';
-            metricValue = values.pageLoadTime;
+            metricValue = plt;
           }}
         }}
       }}
