@@ -1003,7 +1003,28 @@ def _purge_rum_urls(service_id: str, token: str, version: int) -> None:
             except Exception:
                 pass
 
-    paths = ["js/rum.js", "js/faro-sdk.js", "rum-beacon"]
+    # Calculate deterministic cache-busting query parameter hash to purge query-string variations
+    script_hash = ""
+    if service_id:
+        val_str = f"{service_id}-rum-v1"
+        h = 0
+        for char in val_str:
+            code = ord(char)
+            h = ((h << 5) - h) + code
+            # Force 32-bit signed integer behavior to match JavaScript bitwise operations
+            h = (h + 2**31) % 2**32 - 2**31
+        script_hash = hex(abs(h))[2:][0:8]
+
+    # Include bare URLs, constant v=1 fallback, and the active hashed script version
+    paths = [
+        "js/rum.js",
+        "js/faro-sdk.js",
+        "rum-beacon",
+        "js/rum.js?v=1",
+    ]
+    if script_hash:
+        paths.append(f"js/rum.js?v={script_hash}")
+
     for domain in domains:
         for path in paths:
             try:
