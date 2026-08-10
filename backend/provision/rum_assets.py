@@ -232,7 +232,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
           input = enrichRumUrl(input, body);
         }}
       }}
-      return originalFetch.apply(this, arguments);
+      return originalFetch.call(this, input, init);
     }};
   }}
 
