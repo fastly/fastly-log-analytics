@@ -111,19 +111,13 @@ def _generate_asset_fetch_vcl(shield_pop: str = "iad-va-us", faro_version: str |
     backend selection, same X-FOS-Request flag; the actual FOS object path
     rewrite happens in ``_generate_sigv4_sign_vcl``.
 
-    NOT USED ON THE PRODUCTION vcl_recv PATH (F-7 audit finding): the
-    consolidated snippet generator (``backend.provision.declarative.
-    generators.generate_consolidated_snippet``) short-circuits ``vcl_recv``
-    to its own inline copy of this exact routing block instead of calling
-    this function or ``generate_rum_asset_fetch_vcl`` — see the byte-
-    identical regression test in
-    ``tests/backend/provision/test_rum_provisioning_dead_code.py``. Every
-    OTHER subroutine (vcl_miss, vcl_fetch, vcl_deliver, vcl_error) DOES
-    route through this module via ``_generate_rum_section_vcl``, so this
-    function is not fully dead — only its output for the recv-routing
-    concern is unreachable in production. If you're editing recv routing,
-    edit BOTH this function and generators.py's inline copy, or the two
-    will silently diverge with only this one under test.
+    This is the single source of truth for the recv-stage asset-fetch
+    routing block: ``backend.provision.declarative.generators.
+    generate_consolidated_snippet``'s ``vcl_recv`` branch calls
+    ``generate_rum_asset_fetch_vcl`` (which wraps this function) directly
+    rather than carrying its own copy, so editing this function is what
+    actually changes shipped VCL (previously it did not — see the F-7 audit
+    finding, now resolved).
     """
     if shield_pop and shield_pop.lower() != "none":
         shield_var = f"ssl_shield_{shield_pop.replace('-', '_')}"

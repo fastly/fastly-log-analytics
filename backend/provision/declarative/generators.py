@@ -9,8 +9,8 @@ from __future__ import annotations
 import re
 
 from backend.core.fastly.rum_provisioning import (
+    RUM_ASSET_FETCH_NAME,
     RUM_FARO_FETCH_NAME,
-    _assert_faro_version_safe,
     generate_rum_asset_fetch_vcl,
     generate_rum_vcl,
 )
@@ -242,38 +242,17 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         body = "\n".join(edge_first_hop_statements)
         sections.append(f"if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {{\n{body}\n}}")
 
-    # B. RUM Phase 3 Routing (asset GET /js/rum.js)
+    # B. RUM Phase 3 Routing (asset GET /js/rum.js [+ /js/faro-sdk.js])
+    # Sourced from backend.core.fastly.rum_provisioning so there is a single
+    # place that defines this routing — see that module's
+    # _generate_asset_fetch_vcl for the shield/backend-selection logic and
+    # the faro_version handling.
     if state.rum_enabled:
         from backend.core.fastly.utils import SHIELD_MAP
 
         shield_pop = state.cdn_shield or SHIELD_MAP.get(state.fos_region, "iad-va-us")
-        if shield_pop and shield_pop.lower() != "none":
-            shield_var = f"ssl_shield_{shield_pop.replace('-', '_')}"
-            backend_str = f"fastly.try_select_shield({shield_var}, F_fos_origin)"
-        else:
-            backend_str = "F_fos_origin"
-
-        rum_routing = f"""# Fetch RUM tracker JS from FOS with SigV4 signing
-if (req.url.path == "/js/rum.js" && req.method == "GET") {{
-    # Backend points to FOS endpoint (shared with logging)
-    set req.backend = {backend_str};
-    # Flag for SigV4 signing in miss/pass (req.backend.name not available there)
-    set req.http.X-FOS-Request = "1";
-    return(lookup);
-}}"""
-        # Same duplication as backend/core/fastly/rum_provisioning.py's
-        # _generate_asset_fetch_vcl — left as-is (see task-6 report), just
-        # extended here so faro_version=None stays byte-identical.
-        if state.faro_version is not None:
-            _assert_faro_version_safe(state.faro_version)
-            faro_routing = f"""# Fetch the self-hosted Faro Web SDK bundle from FOS (same backend + signing as rum.js)
-if (req.url.path == "/js/faro-sdk.js" && req.method == "GET") {{
-    set req.backend = {backend_str};
-    set req.http.X-FOS-Request = "1";
-    return(lookup);
-}}"""
-            rum_routing = rum_routing + "\n\n" + faro_routing
-        sections.append(rum_routing)
+        asset_fetch_dict = generate_rum_asset_fetch_vcl(shield_pop, state.faro_version)
+        sections.append(asset_fetch_dict[RUM_ASSET_FETCH_NAME])
 
     # C. Session Scoring Enforcement (Section 4)
     if state.scoring.enabled:
