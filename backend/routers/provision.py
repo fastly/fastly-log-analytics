@@ -1041,6 +1041,30 @@ def provision_ingest(payload: ProvisionConfigRequest):
             "enabled": True,
             "enabled_at": existing_rum.get("enabled_at") or _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
+        # Preserve an already-pinned faro_version (+ its persisted upload
+        # hashes) when this ingest re-run's body doesn't carry one (#1 audit
+        # finding). write_service_config's preserved-key merge treats "rum"
+        # as present-in-state, so building state["rum"] with only
+        # {enabled, enabled_at} here silently unpins a previously-pinned
+        # service — the sync cron then sees an unrequested version change
+        # and, via its adopt-default self-heal branch, performs an
+        # unrequested Fastly VCL activation. An explicit faro_version in the
+        # request body (a deliberate re-pin) still wins over the on-disk
+        # value.
+        _faro_keys = ("faro_version", "faro_content_hash", "faro_fos_etag_md5", "faro_last_upstream_check")
+        if existing_rum.get("faro_version"):
+            for k in _faro_keys:
+                if k in existing_rum:
+                    state["rum"][k] = existing_rum[k]
+        else:
+            from backend import config as svcconfig
+
+            on_disk_cfg = svcconfig.load_config(state["logging_service_id"]) or {}
+            on_disk_rum = on_disk_cfg.get("rum")
+            if isinstance(on_disk_rum, dict) and on_disk_rum.get("faro_version"):
+                for k in _faro_keys:
+                    if k in on_disk_rum:
+                        state["rum"][k] = on_disk_rum[k]
 
     # NB: the token was already validated against this same service_id at the
     # top of the handler (validate_destructive_token above); the prior second

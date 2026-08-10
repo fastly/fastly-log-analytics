@@ -589,9 +589,27 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                     ),
                 }
             else:
-                rum_state_cfg = dict(rum_state_cfg)
-                rum_state_cfg["faro_version"] = resolved_faro_version
-                state["rum"] = rum_state_cfg
+                # download_and_upload_faro already persisted faro_version +
+                # faro_content_hash + faro_fos_etag_md5 into
+                # configs/{service_id}.json itself (its own save_config
+                # call in rum_assets.py). Re-read that rather than writing
+                # back the pre-upload `rum_state_cfg` snapshot (#1 audit
+                # finding) — the snapshot predates the upload and would
+                # clobber the hashes it just wrote with a bare
+                # {"faro_version": ...}, leaving the cron's cheap FOS
+                # integrity check (_faro_bundle_intact) with no stored ETag
+                # to compare against, forcing a redundant unpkg
+                # download + FOS PUT + purge on the very next tick.
+                from backend import config as svcconfig
+
+                refreshed_cfg = svcconfig.load_config(state["logging_service_id"]) or {}
+                refreshed_rum = refreshed_cfg.get("rum")
+                if isinstance(refreshed_rum, dict):
+                    state["rum"] = refreshed_rum
+                else:
+                    rum_state_cfg = dict(rum_state_cfg)
+                    rum_state_cfg["faro_version"] = resolved_faro_version
+                    state["rum"] = rum_state_cfg
                 write_service_config(state)
                 ok(f"Faro Web SDK v{resolved_faro_version} uploaded (for reconciler)")
 

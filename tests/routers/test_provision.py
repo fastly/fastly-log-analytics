@@ -851,6 +851,137 @@ def test_ingest_uses_provided_keys_without_calling_fastly_api(tmp_path, monkeypa
     mock_ensure.assert_not_called()
 
 
+def test_ingest_rerun_preserves_existing_faro_pin_when_body_omits_it(tmp_path, monkeypatch):
+    """#1 audit finding: a re-run of /api/provision/ingest (analyst-join,
+    wizard re-run, key rotation) rebuilt ``state["rum"]`` from the request
+    body alone as ``{enabled, enabled_at}``, with no awareness of a
+    ``faro_version`` already pinned on disk. ``write_service_config``'s
+    preserved-key merge treats "rum" as present-in-state (the handler
+    always sets it when ``rum_enabled`` is true) and does a full overwrite,
+    so a re-run silently unpinned an already-RUM-enabled service — handing
+    the sync cron an unrequested version change and, via its adopt-default
+    self-heal branch, an unrequested Fastly VCL activation.
+
+    Pins: an ingest re-run with ``rum_enabled=True`` and no
+    ``rum.faro_version`` in the body must carry the on-disk pin (and its
+    persisted upload hashes) forward into ``state["rum"]`` unchanged.
+    """
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    config.save_config(
+        "svc-1",
+        {
+            "service_id": "svc-1",
+            "rum_enabled": True,
+            "rum": {
+                "enabled": True,
+                "enabled_at": "2026-01-01T00:00:00Z",
+                "faro_version": "9.9.9",
+                "faro_content_hash": "existing-hash",
+                "faro_fos_etag_md5": "existing-etag",
+            },
+        },
+    )
+
+    captured = {}
+
+    def fake_write(state):
+        captured["state"] = state
+
+    with (
+        TestClient(app) as c,
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.provision.parse_period", side_effect=lambda x: 60),
+        patch("backend.provision.find_fos_key", return_value=None),
+        patch(
+            "backend.provision.ensure_fos_access_key",
+            return_value={"access_key": "AK", "secret_key": "SK", "id": "kid"},
+        ),
+        patch("backend.provision.write_service_config", side_effect=fake_write),
+        patch("backend.provision._sync_crontab"),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
+                if path == "/tokens/self"
+                else {"id": "svc-1", "customer_id": "cust-T"}
+            ),
+        ),
+    ):
+        resp = c.post(
+            "/api/provision/ingest",
+            json={
+                "token": "t",
+                "service_id": "svc-1",
+                "fos_bucket_name": "b",
+                "rum_enabled": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    assert captured["state"]["rum"]["faro_version"] == "9.9.9"
+    assert captured["state"]["rum"]["faro_content_hash"] == "existing-hash"
+    assert captured["state"]["rum"]["faro_fos_etag_md5"] == "existing-etag"
+
+
+def test_ingest_rerun_honors_explicit_faro_version_in_body(tmp_path, monkeypatch):
+    """Negative control for the fix above: an explicit ``rum.faro_version``
+    in the request body (a deliberate operator re-pin) must still win over
+    whatever is stored on disk — the preservation fallback only applies
+    when the body carries no pin at all."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    config.save_config(
+        "svc-1",
+        {
+            "service_id": "svc-1",
+            "rum_enabled": True,
+            "rum": {"enabled": True, "faro_version": "9.9.9"},
+        },
+    )
+
+    captured = {}
+
+    def fake_write(state):
+        captured["state"] = state
+
+    with (
+        TestClient(app) as c,
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.provision.parse_period", side_effect=lambda x: 60),
+        patch("backend.provision.find_fos_key", return_value=None),
+        patch(
+            "backend.provision.ensure_fos_access_key",
+            return_value={"access_key": "AK", "secret_key": "SK", "id": "kid"},
+        ),
+        patch("backend.provision.write_service_config", side_effect=fake_write),
+        patch("backend.provision._sync_crontab"),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
+                if path == "/tokens/self"
+                else {"id": "svc-1", "customer_id": "cust-T"}
+            ),
+        ),
+    ):
+        resp = c.post(
+            "/api/provision/ingest",
+            json={
+                "token": "t",
+                "service_id": "svc-1",
+                "fos_bucket_name": "b",
+                "rum_enabled": True,
+                "rum": {"faro_version": "1.0.0"},
+            },
+        )
+
+    assert resp.status_code == 200
+    assert captured["state"]["rum"]["faro_version"] == "1.0.0"
+
+
 # ── /api/provision/ngwaf-workspaces ────────────────────────────────────────
 
 

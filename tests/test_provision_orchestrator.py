@@ -976,6 +976,69 @@ def test_provision_faro_upload_failure_is_non_fatal_and_pin_persists(tmp_path, m
     assert written_cfg["rum"]["faro_version"] == "1.2.3"
 
 
+def test_provision_faro_upload_reads_back_persisted_hashes_not_pre_upload_snapshot(tmp_path, monkeypatch):
+    """#1 audit finding: provision() used to snapshot ``rum_state_cfg``
+    BEFORE calling the upload, then write that stale snapshot back
+    afterward — clobbering ``faro_content_hash`` / ``faro_fos_etag_md5``
+    that ``download_and_upload_faro`` had just persisted to disk in its own
+    ``save_config`` call. Consequence: every newly provisioned service had
+    no stored ETag, so the cron's cheap FOS integrity check
+    (``_faro_bundle_intact``) always returned False and re-did a redundant
+    unpkg download + FOS PUT + purge on its very first tick.
+
+    Pins: after a successful upload, the config persisted by provision()
+    still carries the hashes the upload wrote — not just a bare
+    ``{"faro_version": ...}`` dict.
+    """
+    from backend import config as svcconfig
+
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", config_dir)
+    monkeypatch.setattr(svcconfig, "duckdb_path", lambda service_id: str(tmp_path / "db.duckdb"))
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+
+    def fake_upload(service_id, version, token, *, status_cb=None):
+        # Stand-in for the REAL download_and_upload_faro, which persists
+        # faro_version/faro_content_hash/faro_fos_etag_md5 to disk itself,
+        # independent of provision()'s in-memory `state["rum"]`.
+        cfg = svcconfig.load_config(service_id) or {}
+        cfg["rum"] = {
+            **(cfg.get("rum") or {}),
+            "faro_version": version,
+            "faro_content_hash": "sha256-fake-content-hash",
+            "faro_fos_etag_md5": "fake-etag-md5",
+        }
+        svcconfig.save_config(service_id, cfg)
+        return {"version": version}
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch("backend.provision.orchestrator._upload_faro_bundle_sync", side_effect=fake_upload),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(
+            orchestrator.provision(_provision_cfg(rum_enabled=True, rum={"enabled": True, "faro_version": "1.2.3"}))
+        )
+
+    assert exc is None
+    assert events[-1]["type"] == "done"
+
+    written_cfg = json.loads((config_dir / "svc-prov-test.json").read_text())
+    assert written_cfg["rum"]["faro_version"] == "1.2.3"
+    assert written_cfg["rum"]["faro_content_hash"] == "sha256-fake-content-hash"
+    assert written_cfg["rum"]["faro_fos_etag_md5"] == "fake-etag-md5"
+
+
 def test_provision_runs_teardown_rollback_on_mid_step_failure(tmp_path, monkeypatch):
     """If a step raises (Fastly API failure mid-provision), the
     orchestrator runs ``perform_teardown`` for cleanup, yields a final
