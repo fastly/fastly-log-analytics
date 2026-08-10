@@ -97,3 +97,19 @@ def test_admin_status_still_sees_vcl_fingerprint_fields(with_config, monkeypatch
     assert result["deployed_vcl_sha"] == "deadbeef"
     assert result["current_vcl_sha"] == "deadbeef"
     assert result["vcl_drift"] is False
+
+
+def test_admin_status_defaults_deployed_sha_to_current_when_enabled_but_unstored(with_config, monkeypatch):
+    """Enabled with no ``rum_vcl_sha`` recorded yet (e.g. enabled by an older
+    code path that never wrote it) must NOT report drift against itself —
+    ``deployed_sha`` falls back to ``current_sha`` rather than staying None."""
+    with_config[SVC] = {"rum_enabled": True, "rum_enabled_at": "2026-01-01T00:00:00Z"}
+    monkeypatch.setattr(rum_router, "rum_vcl_fingerprint", lambda service_id: "freshsha123")
+
+    import asyncio
+
+    result = asyncio.run(rum_router.rum_status(_request(None), service_id=SVC))
+
+    assert result["deployed_vcl_sha"] == "freshsha123"
+    assert result["current_vcl_sha"] == "freshsha123"
+    assert result["vcl_drift"] is False
