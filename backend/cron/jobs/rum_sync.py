@@ -14,23 +14,28 @@ from backend.cron.decorators import cron_task
 logger = logging.getLogger(__name__)
 
 
-def _faro_purge_surrogate_key(cfg: dict, token: str) -> None:
-    """Fire-and-forget CDN surrogate-key purge after a Faro bundle (re)upload.
+def _faro_purge_surrogate_key(logging_service_id: str, token: str) -> None:
+    """Fire-and-forget surrogate-key purge on the logging service after a Faro bundle (re)upload.
 
-    Mirrors the fire-and-forget convention of ``_purge_surrogate_key`` in
-    ``backend.core.iceberg._core``: a missing CDN service/token or a purge
-    failure must never surface — the FOS upload it follows already
-    succeeded.
+    Purges on ``logging_service_id`` — NOT the CDN service fronting FOS for
+    log downloads (F-1 audit finding). ``Surrogate-Key: rum-faro-sdk`` is
+    set only in the RUM fetch-cache snippet, which is deployed to the
+    instrumented *logging* service, never the CDN service — a purge
+    targeting the CDN service can never match anything there. Mirrors the
+    fire-and-forget convention of ``_purge_surrogate_key`` in
+    ``backend.core.iceberg._core`` (which purges a different, unrelated key
+    on the CDN service, where that IS the correct target): a missing
+    service id/token or a purge failure must never surface — the FOS
+    upload it follows already succeeded.
     """
-    cdn_service_id = cfg.get("cdn_service_id", "")
-    if not cdn_service_id or not token:
+    if not logging_service_id or not token:
         return
     try:
         from backend.core.fastly.client import fastly
 
-        fastly("POST", f"/service/{cdn_service_id}/purge/rum-faro-sdk", token=token, expect_empty=True)
+        fastly("POST", f"/service/{logging_service_id}/purge/rum-faro-sdk", token=token, expect_empty=True)
     except Exception:
-        logger.warning("Faro surrogate-key purge failed for %s (non-fatal)", cfg.get("service_id"), exc_info=True)
+        logger.warning("Faro surrogate-key purge failed for %s (non-fatal)", logging_service_id, exc_info=True)
 
 
 def _faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
@@ -111,6 +116,23 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
     one-time — the next tick sees a pinned version and skips straight to the
     normal integrity check, so this never repeats or thrashes).
 
+    That one-time self-heal also calls ``reconcile_vcl_state`` (F-4 audit
+    finding): a service in this state was enabled before ``faro_version``
+    existed, so its LIVE VCL was generated with ``faro_version=None`` — the
+    ``/js/faro-sdk.js`` route, the SigV4 object-path rewrite, and the
+    fetch-cache snippet are all absent from it. Uploading the bundle alone
+    would leave it unreachable from any deployed route; the reconcile call
+    is what actually makes ``/js/faro-sdk.js`` resolve. Every other branch
+    below (integrity restore, upstream drift resync) re-uploads bytes for a
+    version that was ALREADY pinned and reconciled when it was pinned, so
+    those never need to touch VCL.
+
+    Each ``download_and_upload_faro`` call below passes
+    ``expected_current_version`` — a compare-and-set guard (F-5 audit
+    finding) against an operator's concurrent ``upgrade_faro_version`` call
+    moving the pin while this (possibly slow, unpkg-round-trip-bearing)
+    call is in flight; see that function's docstring.
+
     Must never raise: wrapped end to end so a transient unpkg/FOS outage
     degrades to "bundle not refreshed this tick", never to "beacon ingest
     stopped." Not itself a cron run — it borrows the ingest run's run_id
@@ -151,8 +173,10 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
             # /js/faro-sdk.js 404ing for every visitor.
             report(f"RUM enabled with no pinned Faro version; adopting default v{DEFAULT_FARO_VERSION}")
             try:
-                asyncio.run(download_and_upload_faro(service_id, DEFAULT_FARO_VERSION, token))
-                _faro_purge_surrogate_key(cfg, token)
+                asyncio.run(
+                    download_and_upload_faro(service_id, DEFAULT_FARO_VERSION, token, expected_current_version=None)
+                )
+                _faro_purge_surrogate_key(service_id, token)
                 report(f"Faro v{DEFAULT_FARO_VERSION} adopted and uploaded to FOS")
                 pinned_version = DEFAULT_FARO_VERSION
                 # Reload: download_and_upload_faro just persisted
@@ -167,12 +191,37 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
                 logger.warning("Faro default-version adoption failed for %s", service_id, exc_info=True)
                 return
 
+            # The bundle now exists in FOS, but the deployed VCL for this
+            # service may still be missing the routes for it entirely (see
+            # the docstring above) — reconcile now so /js/faro-sdk.js
+            # actually resolves. Best-effort: a reconcile failure here must
+            # not abort the bundle-ingest cron tick; the next tick retries
+            # since pinned_version is now set but the live VCL wasn't
+            # reconciled to match, so `rum_vcl_fingerprint`-based drift
+            # detection (/rum/status) will keep reporting drift until an
+            # operator-triggered reconcile (or a future tick, if this is
+            # ever made retryable) succeeds.
+            try:
+                from backend.provision.declarative.reconciler import reconcile_vcl_state
+
+                reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
+                report(f"VCL reconciled: /js/faro-sdk.js now routes to v{DEFAULT_FARO_VERSION}")
+            except Exception:
+                logger.warning(
+                    "Faro default-version VCL reconcile failed for %s "
+                    "(bundle uploaded to FOS, but /js/faro-sdk.js may still 404 until the next successful reconcile)",
+                    service_id,
+                    exc_info=True,
+                )
+
         # 1. Cheap integrity check — every tick.
         if not _faro_bundle_intact(cfg, pinned_version):
             report(f"Faro bundle v{pinned_version} missing/corrupt in FOS, restoring")
             try:
-                asyncio.run(download_and_upload_faro(service_id, pinned_version, token))
-                _faro_purge_surrogate_key(cfg, token)
+                asyncio.run(
+                    download_and_upload_faro(service_id, pinned_version, token, expected_current_version=pinned_version)
+                )
+                _faro_purge_surrogate_key(service_id, token)
                 report(f"Faro bundle v{pinned_version} restored to FOS")
             except Exception:
                 logger.warning("Faro bundle restore failed for %s", service_id, exc_info=True)
@@ -205,8 +254,12 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
             if drift:
                 report(f"Faro upstream drift detected for v{pinned_version}, re-syncing")
                 try:
-                    asyncio.run(download_and_upload_faro(service_id, pinned_version, token))
-                    _faro_purge_surrogate_key(cfg, token)
+                    asyncio.run(
+                        download_and_upload_faro(
+                            service_id, pinned_version, token, expected_current_version=pinned_version
+                        )
+                    )
+                    _faro_purge_surrogate_key(service_id, token)
                     report(f"Faro bundle v{pinned_version} re-synced from upstream")
                 except Exception:
                     logger.warning("Faro upstream re-sync failed for %s", service_id, exc_info=True)

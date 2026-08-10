@@ -444,9 +444,19 @@ class TestFaroSelfHostingEndToEnd:
     def test_reconcile_cron_self_heals_unpinned_service_without_thrashing(self, monkeypatch, temp_config_dir):
         """A RUM-enabled service with no pinned Faro version at all (the
         pre-Task-2 state) must, on the first cron tick, adopt
-        DEFAULT_FARO_VERSION, upload a bundle, and persist the pin — then on
-        the very next tick do nothing further (no re-download, no re-upload)
-        because it has converged."""
+        DEFAULT_FARO_VERSION, upload a bundle, persist the pin, AND
+        reconcile the deployed VCL (F-4) — then on the very next tick do
+        nothing further (no re-download, no re-upload, no re-reconcile)
+        because it has converged.
+
+        Also the "post-self-heal cron state" half of the missing invariant
+        (VCL/FOS audit finding): once faro_version is pinned, the generated
+        VCL for this service's config must actually contain a
+        /js/faro-sdk.js route — combined with the FOS PUT assertion below
+        (the object exists), this is the full invariant. Before the F-4 fix,
+        the self-heal uploaded the bundle but never reconciled, so a
+        service in this exact state would have a pinned version with NO
+        route pointing at it."""
         service_id = "self_heal_service"
         config_path = temp_config_dir / f"{service_id}.json"
         config_path.write_text(
@@ -455,6 +465,7 @@ class TestFaroSelfHostingEndToEnd:
                     "service_id": service_id,
                     "service_name": "Self Heal Service",
                     "rum_enabled": True,
+                    "log_period": 60,
                     "fos_bucket": "test-bucket",
                     "fos_region": "us-east-1",
                     "fos_access_key_id": "test_access_key",
@@ -491,6 +502,24 @@ class TestFaroSelfHostingEndToEnd:
         frozen_time = 1_800_000_000.0
         monkeypatch.setattr(rum_sync_mod.time, "time", lambda: frozen_time)
 
+        # The self-heal's one-time VCL reconcile (F-4) would otherwise clone/
+        # validate/activate a real Fastly service version — mock it, and
+        # record calls so "one-time, not per-tick" is actually verified.
+        reconcile_calls: list[tuple] = []
+
+        def fake_reconcile(service_id_arg, token_arg, *args, **kwargs):
+            reconcile_calls.append((service_id_arg, token_arg))
+            return MagicMock(activated_version=3, draft_version=None)
+
+        monkeypatch.setattr("backend.provision.declarative.reconciler.reconcile_vcl_state", fake_reconcile)
+        # The surrogate-key purge after adoption would otherwise hit the
+        # real Fastly API (this config has a real-shaped fastly_api_key).
+        purge_calls: list[tuple] = []
+        monkeypatch.setattr(
+            "backend.core.fastly.client.fastly",
+            lambda method, path, *, token, expect_empty=False, **kw: purge_calls.append((method, path, token)),
+        )
+
         # Tick 1: self-heal adoption.
         rum_sync_mod._reconcile_faro_bundle(service_id, None)
 
@@ -498,10 +527,26 @@ class TestFaroSelfHostingEndToEnd:
         assert config["rum"]["faro_version"] == DEFAULT_FARO_VERSION
         assert put_count == 1
         assert head_count == 1
+        assert reconcile_calls == [(service_id, "test_token")]
+        assert purge_calls == [("POST", f"/service/{service_id}/purge/rum-faro-sdk", "test_token")]
 
-        # Tick 2: already converged — no further FOS PUT, no re-adoption.
+        # Missing-invariant check: faro_version is now pinned, so the VCL
+        # generated from this exact on-disk config must contain the
+        # /js/faro-sdk.js route — combined with put_count == 1 above (the
+        # FOS object exists), this is the full "pinned => route AND object"
+        # invariant on the post-self-heal cron state.
+        from backend.provision.declarative.generators import generate_consolidated_snippet
+        from backend.provision.declarative.state import FeatureState
+
+        state = FeatureState.from_config(config)
+        recv_vcl = generate_consolidated_snippet(state, "vcl_recv")
+        assert '"/js/faro-sdk.js"' in recv_vcl
+
+        # Tick 2: already converged — no further FOS PUT, re-adoption, or
+        # re-reconcile.
         rum_sync_mod._reconcile_faro_bundle(service_id, None)
 
         assert put_count == 1, "self-heal must not thrash on the next tick"
+        assert reconcile_calls == [(service_id, "test_token")], "reconcile must not re-run once converged"
         config_after = json.loads(config_path.read_text())
         assert config_after["rum"]["faro_version"] == DEFAULT_FARO_VERSION

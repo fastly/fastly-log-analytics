@@ -115,7 +115,11 @@ def mock_download(monkeypatch):
     calls: list[tuple] = []
 
     def install(*, raises: Exception | None = None):
-        async def fake(service_id, version, token, *, status_cb=None):
+        # Accepts **kwargs (not just status_cb) so it tolerates
+        # expected_current_version — the F-5 compare-and-set guard the
+        # reconcile step now passes on every call — without every existing
+        # assertion needing to widen its recorded tuple.
+        async def fake(service_id, version, token, *, status_cb=None, **kwargs):
             calls.append((service_id, version, token))
             if raises:
                 raise raises
@@ -125,6 +129,7 @@ def mock_download(monkeypatch):
                 "bytes_uploaded": 123,
                 "content_hash": "new-hash-after-restore",
                 "fos_key": f"s3://fake-test-bucket/rum/faro-web-sdk-v{version}.iife.js",
+                "config_updated": True,
             }
 
         monkeypatch.setattr("backend.provision.rum_assets.download_and_upload_faro", fake)
@@ -171,6 +176,21 @@ def mock_purge(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def mock_reconcile(monkeypatch):
+    """Stub ``reconcile_vcl_state`` — the self-heal's one-time VCL convergence
+    call (F-4). Records ``(service_id, token)`` positional-arg tuples; no
+    test may let this fall through to a real Fastly API call."""
+    calls: list[tuple] = []
+
+    def fake(service_id, token, *args, **kwargs):
+        calls.append((service_id, token))
+        return MagicMock(activated_version=2, draft_version=None)
+
+    monkeypatch.setattr("backend.provision.declarative.reconciler.reconcile_vcl_state", fake)
+    return calls
+
+
 def _cfg(**rum_overrides) -> dict:
     cfg = copy.deepcopy(FAKE_CFG)
     cfg["rum"].update(rum_overrides)
@@ -212,7 +232,14 @@ def test_steady_state_skips_download(config_store, frozen_now, mock_fos, mock_do
 def test_head_404_triggers_restore_and_purge(
     config_store, frozen_now, mock_fos, mock_download, mock_detect, mock_purge
 ):
-    """Bundle missing from FOS (404) — restore it and purge the surrogate key."""
+    """Bundle missing from FOS (404) — restore it and purge the surrogate key.
+
+    The purge MUST target the logging service (SERVICE_ID), not the CDN
+    service fronting FOS (F-1 audit finding): Surrogate-Key: rum-faro-sdk is
+    set only in the RUM fetch-cache snippet, which is deployed to the
+    instrumented logging service — it never exists on the CDN service, so a
+    purge against the CDN service can never match anything there.
+    """
     download_calls, _ = mock_download
     config_store[SERVICE_ID] = _cfg(faro_last_upstream_check=NOW - 10)
 
@@ -224,7 +251,7 @@ def test_head_404_triggers_restore_and_purge(
     assert len(mock_purge) == 1
     method, path, token = mock_purge[0]
     assert method == "POST"
-    assert path == "/service/SvcFakeCDN123/purge/rum-faro-sdk"
+    assert path == f"/service/{SERVICE_ID}/purge/rum-faro-sdk"
     assert token == "fake-fastly-token"
 
 
@@ -505,15 +532,18 @@ def test_top_level_rum_enabled_flag_alone_is_sufficient(
 
 
 def test_self_heals_missing_pinned_version_to_default(
-    config_store, frozen_now, mock_fos, mock_detect, mock_purge, monkeypatch
+    config_store, frozen_now, mock_fos, mock_detect, mock_purge, mock_reconcile, monkeypatch
 ):
     """A service that's RUM-enabled but has never had a version pinned (the
     real-world case: a service enabled through the older imperative
     provisioning path, or before every enable path pinned a version by
-    default) must self-heal to DEFAULT_FARO_VERSION and upload a bundle —
-    the tracker JS unconditionally loads /js/faro-sdk.js with no CDN
-    fallback, so leaving it unpinned means a permanent 404 for every
-    visitor."""
+    default) must self-heal to DEFAULT_FARO_VERSION, upload a bundle, AND
+    reconcile the deployed VCL (F-4 audit finding) — the tracker JS
+    unconditionally loads /js/faro-sdk.js with no CDN fallback, so leaving
+    it unpinned OR leaving the live VCL unreconciled both mean a permanent
+    404 for every visitor. Uploading the bundle alone (without the
+    reconcile) was the exact gap: the VCL for a service in this state was
+    generated with faro_version=None and never gained the route."""
     cfg = _cfg()
     del cfg["rum"]["faro_version"]
     del cfg["rum"]["faro_content_hash"]
@@ -522,7 +552,7 @@ def test_self_heals_missing_pinned_version_to_default(
 
     calls: list[tuple] = []
 
-    async def fake_download(service_id, version, token, *, status_cb=None):
+    async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):
         calls.append((service_id, version, token))
         # Mirror the real download_and_upload_faro's persistence (it saves
         # faro_version/faro_content_hash/faro_fos_etag_md5 via its own
@@ -544,14 +574,16 @@ def test_self_heals_missing_pinned_version_to_default(
     assert calls == [(SERVICE_ID, DEFAULT_FARO_VERSION, "fake-fastly-token")]
     assert config_store[SERVICE_ID]["rum"]["faro_version"] == DEFAULT_FARO_VERSION
     assert len(mock_purge) == 1
+    assert mock_reconcile == [(SERVICE_ID, "fake-fastly-token")]
 
 
 def test_self_heal_does_not_thrash_on_the_next_tick(
-    config_store, frozen_now, mock_fos, mock_detect, mock_purge, monkeypatch
+    config_store, frozen_now, mock_fos, mock_detect, mock_purge, mock_reconcile, monkeypatch
 ):
     """Once self-healed, the next tick must see a pinned version and an
-    intact bundle and do nothing further — the adoption is one-time, not a
-    per-tick re-download."""
+    intact bundle and do nothing further — the adoption (and the one-time
+    VCL reconcile that comes with it, F-4) is one-time, not a per-tick
+    re-download / re-reconcile."""
     _, install_detect = mock_detect
     install_detect(result=False)
 
@@ -563,7 +595,7 @@ def test_self_heal_does_not_thrash_on_the_next_tick(
 
     calls: list[tuple] = []
 
-    async def fake_download(service_id, version, token, *, status_cb=None):
+    async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):
         calls.append((service_id, version, token))
         stored = config_store[service_id]
         rum_cfg = dict(stored.get("rum") or {})
@@ -578,11 +610,84 @@ def test_self_heal_does_not_thrash_on_the_next_tick(
 
     rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
     assert len(calls) == 1
+    assert len(mock_reconcile) == 1
 
     # Second tick: version is now pinned and the bundle is intact — no
-    # further adoption, no further download.
+    # further adoption, no further download, no further reconcile.
     rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
     assert len(calls) == 1
+    assert len(mock_reconcile) == 1
+
+
+def test_self_heal_reconcile_failure_does_not_raise(
+    config_store, frozen_now, mock_fos, mock_detect, mock_purge, monkeypatch
+):
+    """A Fastly API outage during the self-heal's VCL reconcile (F-4) must
+    degrade to a logged warning, never an exception out of the reconcile
+    step — the bundle is already uploaded and purged by this point, and a
+    reconcile failure here must not roll any of that back or crash the
+    cron tick."""
+    cfg = _cfg()
+    del cfg["rum"]["faro_version"]
+    del cfg["rum"]["faro_content_hash"]
+    del cfg["rum"]["faro_fos_etag_md5"]
+    config_store[SERVICE_ID] = cfg
+
+    async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):
+        stored = config_store[service_id]
+        rum_cfg = dict(stored.get("rum") or {})
+        rum_cfg["faro_version"] = version
+        rum_cfg["faro_content_hash"] = "adopted-hash"
+        rum_cfg["faro_fos_etag_md5"] = "adopted-etag"
+        stored["rum"] = rum_cfg
+        return {"version": version}
+
+    monkeypatch.setattr("backend.provision.rum_assets.download_and_upload_faro", fake_download)
+
+    def raising_reconcile(service_id, token, *args, **kwargs):
+        raise RuntimeError("Fastly API unreachable")
+
+    monkeypatch.setattr("backend.provision.declarative.reconciler.reconcile_vcl_state", raising_reconcile)
+    mock_fos(lambda request: _head_response(200, etag="adopted-etag"))
+
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)  # must not raise
+
+    # The bundle adoption itself still landed despite the reconcile failure.
+    assert config_store[SERVICE_ID]["rum"]["faro_version"] == DEFAULT_FARO_VERSION
+    assert len(mock_purge) == 1
+
+
+def test_restore_and_resync_pass_expected_current_version_for_compare_and_set(
+    config_store, frozen_now, mock_fos, mock_detect, mock_purge, monkeypatch
+):
+    """Wiring check for F-5: both the every-tick integrity restore and the
+    throttled upstream re-sync must pass the pinned version they observed
+    as ``expected_current_version`` to ``download_and_upload_faro`` — the
+    compare-and-set guard that stops a slow cron re-sync from reverting a
+    concurrent operator upgrade (see that function's docstring and
+    tests/backend/provision/test_rum_assets.py's dedicated race test)."""
+    seen_kwargs: list[dict] = []
+
+    async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):
+        seen_kwargs.append(kwargs)
+        return {"version": version}
+
+    monkeypatch.setattr("backend.provision.rum_assets.download_and_upload_faro", fake_download)
+
+    # Restore branch (integrity check fails).
+    config_store[SERVICE_ID] = _cfg(faro_last_upstream_check=NOW - 10)
+    mock_fos(lambda request: httpx.Response(404))
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
+    assert seen_kwargs == [{"expected_current_version": "2.9.0"}]
+
+    # Upstream re-sync branch (drift detected).
+    seen_kwargs.clear()
+    _, install_detect = mock_detect
+    install_detect(result=True)
+    config_store[SERVICE_ID] = _cfg(faro_last_upstream_check=NOW - 25 * 3600)
+    mock_fos(lambda request: _head_response(200, etag="stored-hash-abc123"))
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
+    assert seen_kwargs == [{"expected_current_version": "2.9.0"}]
 
 
 def test_self_heal_adoption_failure_does_not_raise(
