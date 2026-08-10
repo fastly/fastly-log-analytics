@@ -9,6 +9,7 @@ import time
 logger = logging.getLogger(__name__)
 
 from backend.core import field_registry as lf
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.core.fastly.client import fastly
 from backend.core.fastly.mock_fixtures import is_mock_mode
 from backend.core.fastly.utils import (
@@ -39,6 +40,17 @@ def _sync_crontab():
         get_scheduler().reload()
     except Exception:
         pass
+
+
+def _upload_faro_bundle_sync(service_id: str, version: str, token: str, *, status_cb=None):
+    """Sync wrapper around the async ``download_and_upload_faro`` for use with
+    ``run_with_events`` (which calls its target as a plain sync callable with
+    a ``status_cb`` kwarg, same pattern as every other provisioning step)."""
+    import asyncio
+
+    from backend.provision.rum_assets import download_and_upload_faro
+
+    return asyncio.run(download_and_upload_faro(service_id, version, token, status_cb=status_cb))
 
 
 def _reject_unsafe_fos_component(field: str, value: str, *, allow_slash: bool) -> None:
@@ -525,6 +537,31 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         # Write config early so reconciler can read it from configs/{service_id}.json
         write_service_config(state)
         ok("Service config written (for reconciler)")
+
+        # RUM: upload the pinned Faro Web SDK bundle to FOS BEFORE the
+        # reconciler below activates VCL that routes /js/faro-sdk.js to it
+        # (F-2 audit finding). Without this, a fresh service provisioned
+        # with rum_enabled + a pinned faro_version (the wizard always pins
+        # one — see routers/provision.py) went live with VCL routing to an
+        # object that was never uploaded: the tracker requests
+        # /js/faro-sdk.js and gets a 404 forever, since there is no CDN
+        # fallback. Mirrors the upload-before-reconcile ordering in
+        # rum_orchestrator_v2.enable_rum. Resolves DEFAULT_FARO_VERSION here
+        # too, defensively, in case a caller invokes provision() directly
+        # with rum_enabled but no faro_version ever resolved upstream.
+        if state.get("rum_enabled"):
+            rum_state_raw = state.get("rum")
+            rum_state_cfg = rum_state_raw if isinstance(rum_state_raw, dict) else {}
+            resolved_faro_version = rum_state_cfg.get("faro_version") or DEFAULT_FARO_VERSION
+            yield {"type": "status", "message": f"⏳ Uploading Faro Web SDK v{resolved_faro_version}..."}
+            yield from run_with_events(
+                _upload_faro_bundle_sync, state["logging_service_id"], resolved_faro_version, token
+            )
+            rum_state_cfg = dict(rum_state_cfg)
+            rum_state_cfg["faro_version"] = resolved_faro_version
+            state["rum"] = rum_state_cfg
+            write_service_config(state)
+            ok(f"Faro Web SDK v{resolved_faro_version} uploaded (for reconciler)")
 
         new_ver = yield from run_with_events(ensure_logging_via_reconciler, state, token)
         state["activated_logging_version"] = new_ver

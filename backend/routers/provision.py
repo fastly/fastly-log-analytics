@@ -635,15 +635,20 @@ def provision_execute(req: ProvisionExecuteRequest):
     if getattr(req, "rum_enabled", False):
         import datetime as _dt
 
+        from backend.core.faro_versions import DEFAULT_FARO_VERSION
+
         cfg["rum"] = {
             "enabled": True,
             "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
-        # Wizard-selected pin (Task 7 version picker). Omitted entirely when
-        # unset so a fresh service with no chosen version generates
-        # byte-identical VCL to before this field existed (see generators.py).
-        if req.faro_version:
-            cfg["rum"]["faro_version"] = req.faro_version
+        # Wizard-selected pin (Task 7 version picker), falling back to
+        # DEFAULT_FARO_VERSION when the operator left it unpinned (registry
+        # outage, or skipped the picker). Always resolved to a concrete
+        # version now (F-2 audit finding) — the generated tracker JS
+        # unconditionally requests /js/faro-sdk.js with no CDN fallback, so
+        # RUM can never be enabled without a version pinned behind it; see
+        # rum_orchestrator_v2.enable_rum, which applies the same fallback.
+        cfg["rum"]["faro_version"] = req.faro_version or DEFAULT_FARO_VERSION
 
     try:
         cfg["log_period"] = parse_period(cfg["log_period"])

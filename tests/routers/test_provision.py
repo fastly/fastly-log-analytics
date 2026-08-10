@@ -1220,11 +1220,16 @@ def test_provision_execute_threads_faro_version_into_rum_config():
     assert captured["cfg"]["rum"]["faro_version"] == "1.2.3"
 
 
-def test_provision_execute_omits_faro_version_when_operator_does_not_pin_one():
+def test_provision_execute_defaults_faro_version_when_operator_does_not_pin_one():
     """No version chosen (registry outage, or operator skipped the picker)
-    must produce a cfg["rum"] with no faro_version key at all — not a
-    None/empty-string entry — so a fresh service's generated VCL is
-    byte-identical to before this field existed."""
+    must NOT leave cfg["rum"] unpinned (F-2 audit finding): the generated
+    tracker JS unconditionally requests /js/faro-sdk.js with no CDN
+    fallback, so an unpinned service's VCL would either omit that route
+    entirely or route it nowhere resolvable — a permanent 404 for every RUM
+    visitor. Provisioning must resolve DEFAULT_FARO_VERSION itself, exactly
+    like enable_rum() already does for the enable-after-the-fact path."""
+    from backend.core.faro_versions import DEFAULT_FARO_VERSION
+
     captured = {}
 
     def fake_provision(cfg, _resume_from_state=False):
@@ -1253,7 +1258,7 @@ def test_provision_execute_omits_faro_version_when_operator_does_not_pin_one():
         )
 
     assert r.status_code == 200
-    assert "faro_version" not in captured["cfg"]["rum"]
+    assert captured["cfg"]["rum"]["faro_version"] == DEFAULT_FARO_VERSION
 
 
 def test_ngwaf_workspaces_empty_list_with_automation_token_returns_hint():

@@ -718,6 +718,199 @@ def test_provision_completes_all_8_steps_when_apis_succeed(tmp_path, monkeypatch
     assert "complete" in events[-1]["message"].lower()
 
 
+def test_provision_uploads_faro_bundle_before_reconcile_when_rum_enabled(tmp_path, monkeypatch):
+    """F-2 audit finding: the wizard's provisioning path pins a faro_version
+    (routers/provision.py always resolves one — an explicit pick or
+    DEFAULT_FARO_VERSION) but, before this fix, never called
+    download_and_upload_faro at all. The reconciler would then activate VCL
+    routing GET /js/faro-sdk.js to an FOS object that was never uploaded —
+    a permanent 404 for every RUM visitor, since there is no CDN fallback.
+
+    Pins: the bundle upload happens, and happens strictly BEFORE the VCL
+    reconcile call — uploading after activation would mean browsers can hit
+    the route before the object exists behind it.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+    call_order: list[str] = []
+
+    def fake_upload(service_id, version, token, *, status_cb=None):
+        call_order.append(f"upload:{service_id}:{version}")
+        return {"version": version}
+
+    def fake_reconcile(state, token, status_cb=None):
+        call_order.append("reconcile")
+        return 42
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch("backend.provision.orchestrator._upload_faro_bundle_sync", side_effect=fake_upload),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", side_effect=fake_reconcile),
+        patch("backend.provision.orchestrator.write_service_config"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(
+            orchestrator.provision(_provision_cfg(rum_enabled=True, rum={"enabled": True, "faro_version": "1.2.3"}))
+        )
+
+    assert exc is None
+    assert events[-1]["type"] == "done"
+    assert call_order == ["upload:svc-prov-test:1.2.3", "reconcile"]
+
+
+def test_provision_resolves_default_faro_version_when_rum_enabled_and_unpinned(tmp_path, monkeypatch):
+    """F-2 audit finding: when a caller invokes provision() with rum_enabled
+    but no faro_version (e.g. a direct call bypassing the router's own
+    DEFAULT_FARO_VERSION fallback), provision() must resolve one itself
+    rather than uploading nothing / leaving faro_version unset for the
+    reconciler."""
+    monkeypatch.chdir(tmp_path)
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+    uploaded_versions: list[str] = []
+
+    def fake_upload(service_id, version, token, *, status_cb=None):
+        uploaded_versions.append(version)
+        return {"version": version}
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch("backend.provision.orchestrator._upload_faro_bundle_sync", side_effect=fake_upload),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),
+        patch("backend.provision.orchestrator.write_service_config"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(orchestrator.provision(_provision_cfg(rum_enabled=True, rum={"enabled": True})))
+
+    assert exc is None
+    from backend.core.faro_versions import DEFAULT_FARO_VERSION
+
+    assert uploaded_versions == [DEFAULT_FARO_VERSION]
+
+
+def test_provision_skips_faro_upload_when_rum_disabled(tmp_path, monkeypatch):
+    """No RUM, no Faro bundle upload — the new step must be a strict no-op
+    for the majority (non-RUM) provisioning path."""
+    monkeypatch.chdir(tmp_path)
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch("backend.provision.orchestrator._upload_faro_bundle_sync") as mock_upload,
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),
+        patch("backend.provision.orchestrator.write_service_config"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(orchestrator.provision(_provision_cfg()))
+
+    assert exc is None
+    mock_upload.assert_not_called()
+
+
+def test_provision_satisfies_faro_route_and_object_invariant_end_to_end(tmp_path, monkeypatch):
+    """Missing-invariant test (provisioning path): if
+    cfg["rum"]["faro_version"] is set, the generated VCL must contain a
+    /js/faro-sdk.js route AND the FOS object for that version must exist.
+    That single invariant would have caught F-2 (bundle never uploaded) —
+    this test exercises the REAL write_service_config + download_and_upload_
+    faro code paths (only FOS transport, npm/unpkg, and the Fastly-API-
+    specific provisioning steps are mocked) and checks both halves against
+    the actual on-disk artifacts, not mocks standing in for them."""
+    import json
+
+    import httpx
+
+    from backend import config as svcconfig
+    from backend.provision import rum_assets
+    from backend.provision.declarative.generators import generate_consolidated_snippet
+    from backend.provision.declarative.state import FeatureState
+
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", config_dir)
+    monkeypatch.setattr(svcconfig, "duckdb_path", lambda service_id: str(tmp_path / "db.duckdb"))
+
+    chosen_version = "2.8.5"
+    sample_bundle = (
+        b"!function(e){var GrafanaFaroWebSdk={initializeFaro:function(){}};e.Faro=GrafanaFaroWebSdk}(window);"
+    )
+
+    async def fake_fetch(version: str) -> bytes:
+        return sample_bundle
+
+    monkeypatch.setattr(rum_assets, "fetch_faro_bundle", fake_fetch)
+
+    uploaded: dict[str, bytes] = {}
+    real_client = httpx.Client
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT" and request.url.path.endswith(f"faro-web-sdk-v{chosen_version}.iife.js"):
+            uploaded["bundle"] = request.content
+            return httpx.Response(200)
+        raise AssertionError(f"unexpected FOS call: {request.method} {request.url}")
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", client_factory)
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(
+            orchestrator.provision(
+                _provision_cfg(rum_enabled=True, rum={"enabled": True, "faro_version": chosen_version})
+            )
+        )
+
+    assert exc is None
+    assert events[-1]["type"] == "done"
+
+    # Half 1: the FOS object for the pinned version actually exists.
+    assert uploaded["bundle"] == sample_bundle
+
+    # Half 2: the config written to disk (real write_service_config call,
+    # not a mock) carries the pin, and the VCL generated from it contains
+    # the route.
+    written_cfg = json.loads((config_dir / "svc-prov-test.json").read_text())
+    assert written_cfg["rum"]["faro_version"] == chosen_version
+
+    state = FeatureState.from_config(written_cfg)
+    recv_vcl = generate_consolidated_snippet(state, "vcl_recv")
+    assert '"/js/faro-sdk.js"' in recv_vcl
+
+
 def test_provision_runs_teardown_rollback_on_mid_step_failure(tmp_path, monkeypatch):
     """If a step raises (Fastly API failure mid-provision), the
     orchestrator runs ``perform_teardown`` for cleanup, yields a final
