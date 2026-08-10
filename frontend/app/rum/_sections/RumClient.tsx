@@ -466,34 +466,63 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
       {/* Live Monitor Feed Activity Ticker */}
       <AnalyticsCard title="Live Activity Monitor" icon={<Terminal className="h-4 w-4" />}>
-        <div className="bg-[#0f172a] text-zinc-100 p-4 rounded-lg font-mono text-xs space-y-2 max-h-[220px] overflow-y-auto">
-          {liveEvents?.map((e: RumLiveEvent, index: number) => (
-            <div key={`${e.time}-${e.type}-${e.path}-${e.desc}-${index}`} className="flex justify-between items-center border-b border-zinc-800 pb-2 last:border-0 last:pb-0">
-              <div className="flex items-center gap-2">
-                <span className={e.type === 'error' ? 'text-rose-500' : 'text-emerald-400'}>
-                  {e.type === 'error' ? '✖' : '✔'}
-                </span>
-                <span className="text-zinc-500">[{new Date(e.time).toLocaleTimeString()}]</span>
-                <span className="font-semibold text-zinc-300">{e.path}</span>
-                <span className="text-zinc-400">({e.desc})</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="text-zinc-500 text-[10px]">
-                  {e.browser} on {e.os}
-                </div>
-                <button
-                  onClick={() => setSelectedEvent(e)}
-                  className="p-1 text-zinc-400 hover:text-zinc-100 bg-zinc-800/40 hover:bg-zinc-700/60 rounded border border-zinc-700/20 transition-all duration-150"
-                  title="Inspect Raw Beacon"
-                >
-                  <Eye className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-          ))}
-          {(!liveEvents || liveEvents.length === 0) && (
-            <p className="text-zinc-500 text-center py-4">Waiting for real-time RUM user events...</p>
-          )}
+        <div className="overflow-x-auto max-h-[300px] overflow-y-auto">
+          <table className="w-full text-sm text-left border-collapse">
+            <thead>
+              <tr className="border-b border-zinc-800 text-muted-foreground text-xs uppercase tracking-wider font-semibold">
+                <th className="py-3 px-4">Status</th>
+                <th className="py-3 px-4">Time</th>
+                <th className="py-3 px-4">Page Path</th>
+                <th className="py-3 px-4">Description</th>
+                <th className="py-3 px-4">Environment</th>
+                <th className="py-3 px-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {liveEvents?.map((e: RumLiveEvent, index: number) => (
+                <tr key={`${e.time}-${e.type}-${e.path}-${e.desc}-${index}`} className="border-b border-zinc-800/60 hover:bg-muted/5 transition-colors duration-150">
+                  <td className="py-3 px-4 font-semibold text-xs">
+                    <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold ${
+                      e.type === 'error'
+                        ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20'
+                        : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
+                    }`}>
+                      <span className={`h-1.5 w-1.5 rounded-full ${e.type === 'error' ? 'bg-rose-500' : 'bg-emerald-500'}`} />
+                      {e.type === 'error' ? 'Error' : 'Success'}
+                    </span>
+                  </td>
+                  <td className="py-3 px-4 font-mono text-xs text-muted-foreground">
+                    {new Date(e.time).toLocaleTimeString()}
+                  </td>
+                  <td className="py-3 px-4 font-semibold font-mono text-xs text-zinc-300 max-w-[200px] truncate" title={e.path}>
+                    {e.path}
+                  </td>
+                  <td className="py-3 px-4 text-muted-foreground text-xs max-w-[250px] truncate" title={e.desc}>
+                    {e.desc}
+                  </td>
+                  <td className="py-3 px-4 text-muted-foreground text-xs">
+                    {e.browser} on {e.os}
+                  </td>
+                  <td className="py-3 px-4 text-right">
+                    <button
+                      onClick={() => setSelectedEvent(e)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-md border border-zinc-800 bg-zinc-900/40 hover:bg-zinc-800/80 text-zinc-300 hover:text-zinc-100 shadow-sm transition-all duration-150"
+                    >
+                      <Eye className="h-3.5 w-3.5 text-zinc-400" />
+                      <span>Inspect</span>
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {(!liveEvents || liveEvents.length === 0) && (
+                <tr>
+                  <td colSpan={6} className="text-muted-foreground text-center py-8 text-sm">
+                    Waiting for real-time RUM user events...
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </AnalyticsCard>
 
