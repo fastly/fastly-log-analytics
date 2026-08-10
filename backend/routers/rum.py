@@ -806,6 +806,38 @@ async def rum_analytics(
                         except (ValueError, TypeError):
                             pass
 
+            # Also extract from flat keys if present (for FOS-ingested log format or flat test shapes)
+            lcp_flat = b.get("lcp") or (b.get("value") if b.get("name") == "LCP" else None)
+            if lcp_flat is not None:
+                try:
+                    lcps.append(float(lcp_flat))
+                    pages_dict[path]["lcp_vals"].append(float(lcp_flat))
+                except (ValueError, TypeError):
+                    pass
+
+            cls_flat = b.get("cls") or (b.get("value") if b.get("name") == "CLS" else None)
+            if cls_flat is not None:
+                try:
+                    clss.append(float(cls_flat))
+                    pages_dict[path]["cls_vals"].append(float(cls_flat))
+                except (ValueError, TypeError):
+                    pass
+
+            inp_flat = b.get("inp") or (b.get("value") if b.get("name") == "INP" else None)
+            if inp_flat is not None:
+                try:
+                    inps.append(float(inp_flat))
+                except (ValueError, TypeError):
+                    pass
+
+            # Also extract load_time from flat key if present
+            load_time_flat = b.get("load_time") or b.get("duration") or b.get("pageLoadTime")
+            if load_time_flat is not None:
+                try:
+                    pages_dict[path]["total_load_time"] += float(load_time_flat)
+                except (ValueError, TypeError):
+                    pass
+
             # Extract browser/OS/device info from meta
             browser_meta = meta.get("browser") or {}
             if isinstance(browser_meta, dict):
