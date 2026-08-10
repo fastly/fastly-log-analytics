@@ -4,22 +4,29 @@
 # Why this exists
 # ----------------
 # Before self-hosting, the RUM tracker loaded the Faro Web SDK from jsDelivr
-# with a floating `@^1` range, which today resolves to 1.19.0. Once a service
-# is on the self-hosted bundle (see backend/provision/rum_assets.py), leaving
-# faro_version unset means the admin RUM page's upgrade flow (Task 8) is the
-# only thing that ever sets a version — a service left un-pinned never gets a
-# bundle uploaded at all. This script sets an explicit pin so a service keeps
-# running the version it's known-good on, replacing that old floating range
-# with an explicit, reviewable version string.
+# with a floating `@^1` range, which used to resolve to 1.19.0. That CDN load
+# no longer exists in any form. Today an unset faro_version is NOT a "nothing
+# uploaded" state: enabling RUM (or the RUM sync cron's self-heal, for a
+# service enabled before this default existed) resolves it to
+# backend.core.faro_versions.DEFAULT_FARO_VERSION automatically, downloads,
+# integrity-verifies, and uploads that bundle, and reconciles the deployed
+# VCL so /js/faro-sdk.js actually routes to it — no manual step required.
+#
+# What THIS script is for: pinning to a SPECIFIC known-good version instead
+# of riding whatever the default currently is — a version that won't move
+# out from under you when DEFAULT_FARO_VERSION changes, or rolling back to
+# an older one. It replaces the operator-known-good choice with an explicit,
+# reviewable version string.
 #
 # Defaults to 2.9.0 (npm dist-tags.latest as of this task) — an operator
 # decision made deliberately, not a "safe" fallback to 1.19.0. Pass an
 # explicit version as the second argument to pin to something else.
 #
-# Scope: this script edits ONE service's config JSON in configs/ (gitignored,
-# lives outside the repo's tracked tree, contains FOS credentials). It does
-# not touch the backend's own contract — faro_version=None still means
-# "not pinned" there; this is operator tooling, not a hidden backend default.
+# Scope: this script only edits ONE service's config JSON in configs/
+# (gitignored, lives outside the repo's tracked tree, contains FOS
+# credentials) — it does not itself upload a bundle or reconcile VCL; see
+# the note near the bottom of this script's usage output for what to run
+# after pinning to a version that isn't already deployed.
 #
 # Usage
 # -----

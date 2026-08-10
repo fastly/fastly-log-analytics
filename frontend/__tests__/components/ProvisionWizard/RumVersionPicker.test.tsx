@@ -97,7 +97,7 @@ describe("RumVersionPicker", () => {
     renderPicker(onChange);
 
     expect(await screen.findByText(/couldn't reach the npm registry/i)).toBeInTheDocument();
-    expect(screen.getByText(/provision unpinned/i)).toBeInTheDocument();
+    expect(screen.getByText(/default self-hosted version/i)).toBeInTheDocument();
     // The picker itself must not appear — nothing to select from.
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /retry/i })).toBeEnabled();

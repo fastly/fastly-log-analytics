@@ -27,15 +27,17 @@ interface RumVersionPickerProps {
 }
 
 const INFO_TEXT =
-  "The self-hosted Grafana Faro Web SDK build served from your Object Storage bucket. Pin a version to control exactly which RUM client ships to real users; leave it unpinned to skip self-hosting the bundle for now.";
+  "The self-hosted Grafana Faro Web SDK build served from your Object Storage bucket. Pin a version to control exactly which RUM client ships to real users; leave it unpinned and the service self-hosts the default vetted version instead.";
 
 /**
  * RUM version picker shown in StorageStep when rum_enabled is true.
  *
  * The npm registry backing this list is a third party and WILL be down
  * sometimes (backend surfaces that as a 503) — this component degrades to
- * an inline message + manual retry rather than blocking the wizard, since
- * an unpinned faro_version is a fully supported provisioning outcome.
+ * an inline message + manual retry rather than blocking the wizard. Leaving
+ * faro_version unpinned still self-hosts: the backend resolves it to
+ * DEFAULT_FARO_VERSION, so this degraded path never leaves a service
+ * without a bundle behind /js/faro-sdk.js (there is no CDN fallback).
  */
 export function RumVersionPicker({ serviceId, value, onChange }: RumVersionPickerProps) {
   const { data, isLoading, isError, refetch, isFetching } = useQuery<RumVersionsResponse>({
@@ -90,8 +92,8 @@ export function RumVersionPicker({ serviceId, value, onChange }: RumVersionPicke
           </AlertTitle>
           <AlertDescription className="flex items-center justify-between gap-2">
             <span>
-              RUM will provision unpinned — you can pin a version later from the
-              service&apos;s RUM settings.
+              RUM will provision using the default self-hosted version — you can pin a
+              specific one later from the service&apos;s RUM settings.
             </span>
             <Button
               type="button"

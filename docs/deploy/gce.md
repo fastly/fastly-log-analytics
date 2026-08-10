@@ -230,8 +230,11 @@ npm's `dist-tags.latest` as of this task) — enabling RUM always downloads,
 integrity-verifies, and uploads a bundle to the service's FOS bucket.
 A service that was enabled *before* this default existed and still has no
 `faro_version` self-heals on its next RUM sync cron tick: the cron adopts
-`DEFAULT_FARO_VERSION`, uploads the bundle, and persists the pin, so it
-never depends on this script being run manually.
+`DEFAULT_FARO_VERSION`, uploads the bundle, persists the pin, AND
+reconciles the service's deployed VCL so the `/js/faro-sdk.js` route
+(previously absent — that service's VCL was generated with
+`faro_version=None`) actually goes live. All of that happens automatically;
+it never depends on this script being run manually.
 
 **What this script is for**: pin a service to a *specific* version instead
 of the default — a known-good version that won't move when the default
