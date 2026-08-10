@@ -102,6 +102,7 @@ def _run_local_compact(service_id: str) -> None:
             "local_compact",
             duration,
             status,
+            files_downloaded=merged,
             summary=summary,
             error_message=err_preview,
             run_id=run_id,

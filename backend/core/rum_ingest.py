@@ -114,6 +114,7 @@ def ingest_rum_logs(
             "rum_sync",
             time.time() - start_time,
             "success",
+            files_downloaded=0,
             rows_ingested=0,
             run_id=run_id,
         )
@@ -161,6 +162,7 @@ def ingest_rum_logs(
                 "rum_sync",
                 time.time() - start_time,
                 "success",
+                files_downloaded=0,
                 rows_ingested=0,
                 run_id=run_id,
             )
@@ -285,6 +287,7 @@ def ingest_rum_logs(
             "rum_sync",
             duration_s,
             "success",
+            files_downloaded=len(new_files_s3),
             rows_ingested=total_rows,
             run_id=run_id,
         )
@@ -296,6 +299,7 @@ def ingest_rum_logs(
             "rum_sync",
             duration_s,
             "error",
+            files_downloaded=len(ingested_batch_records) if "ingested_batch_records" in locals() else 0,
             error_message=str(e),
             run_id=run_id,
         )

@@ -406,7 +406,15 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
             summary = f"Synced {total_records} bot record(s) (budget reached — will continue next run), cleaned {deleted} old row(s)."
         else:
             summary = f"Synced {total_records} bot record(s), cleaned {deleted} old row(s)."
-        log_cron_run(src, "ngwaf_sync", time.time() - start_time, "success", summary=summary, run_id=run_id)
+        log_cron_run(
+            src,
+            "ngwaf_sync",
+            time.time() - start_time,
+            "success",
+            files_downloaded=total_records,
+            summary=summary,
+            run_id=run_id,
+        )
         _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "done", "message": summary})
     except Exception as e:
         log_cron_run(
@@ -414,6 +422,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
             "ngwaf_sync",
             time.time() - start_time,
             "error",
+            files_downloaded=total_records if "total_records" in locals() else 0,
             error_message=str(e),
             summary="NGWAF sync failed",
             run_id=run_id,
