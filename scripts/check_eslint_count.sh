@@ -46,9 +46,14 @@ cd "$REPO_ROOT/frontend"
 # (dropped both `as any` casts on the client.GET call). 835 -> 832: the
 # FieldSearchDialog pinned-selected rework replaced its index key and both
 # `v.value as any` casts (FieldTopEntry.value is `unknown` on the wire) with
-# `String(v.value)` / `as string | number`.
+# `String(v.value)` / `as string | number`. 824 -> 820: the RUM Faro
+# self-hosting work typed RumClient's filter payload as FiltersPayload and its
+# worst-pages/errors/live-events row shapes, swapped two array-index React keys
+# for composite keys off the backend's dedup fields, moved two
+# useWizardState effects to render-time derived state, and unified a mismatched
+# optional-chain inside one _state.ts useMemo.
 # Drive toward zero.
-CEILING=824
+CEILING=820
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make
