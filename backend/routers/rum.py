@@ -4,6 +4,8 @@ Routes:
   POST /api/services/{service_id}/rum/enable       - Enable RUM (SSE)
   POST /api/services/{service_id}/rum/disable      - Disable RUM (SSE)
   GET  /api/services/{service_id}/rum/status       - RUM enable/disable status
+  GET  /api/services/{service_id}/rum/versions     - Available Faro SDK versions + pinned/latest state
+  POST /api/services/{service_id}/rum/upgrade      - Upgrade the pinned Faro SDK version (SSE)
   GET  /api/services/{service_id}/rum/beacon-health - Beacon receipt validation
   POST /rum-beacon                                  - Beacon ingest (no auth)
 
@@ -19,17 +21,18 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Path, Query, Response
+from fastapi import APIRouter, Body, HTTPException, Path, Query, Response
 from sse_starlette.sse import EventSourceResponse
 
 from backend import config as svcconfig
+from backend.core.faro_versions import fetch_available_faro_versions
 from backend.core.metadata import get_con
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.provision import RumDisableRequest, RumEnableRequest
+from backend.models.provision import RumDisableRequest, RumEnableRequest, RumUpgradeRequest, RumVersionsResponse
 from backend.provision.orchestrator import run_with_events
-from backend.provision.rum_orchestrator_v2 import disable_rum, enable_rum, rum_vcl_fingerprint
+from backend.provision.rum_orchestrator_v2 import disable_rum, enable_rum, rum_vcl_fingerprint, upgrade_faro_version
 from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
+from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +195,102 @@ async def rum_status(service_id: str = Path(...)) -> dict[str, Any]:
         "current_vcl_sha": current_sha,
         "vcl_drift": deployed_sha != current_sha if enabled else False,
     }
+
+
+@router.get("/{service_id}/rum/versions", response_model=RumVersionsResponse, response_model_exclude_unset=True)
+async def rum_versions(service_id: str = Path(...)) -> RumVersionsResponse:
+    """List available Faro Web SDK versions + the pinned/latest state (admin-only).
+
+    The npm registry is a third-party dependency outside our control; a
+    registry failure surfaces as a clean 503 rather than a 500 (the
+    ``ValueError`` ``fetch_available_faro_versions`` raises on transport/
+    parse failure) or a silently-empty "no updates available" body that
+    would misrepresent an outage as being up to date.
+    """
+    cfg = svcconfig.load_config(service_id) or {}
+    rum_cfg = cfg.get("rum") or {}
+    current = rum_cfg.get("faro_version")
+
+    try:
+        available = await fetch_available_faro_versions()
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=make_error("faro_registry_unavailable", str(e))) from e
+
+    latest = available[0] if available else None
+    update_available = bool(current and latest and current != latest)
+
+    return RumVersionsResponse(
+        available=available,
+        current=current,
+        latest=latest,
+        update_available=update_available,
+    )
+
+
+# response_model intentionally omitted: SSE progress stream
+# (EventSourceResponse), not a JSON body.
+@router.post("/{service_id}/rum/upgrade")
+async def upgrade_rum_handler(
+    service_id: str = Path(...),
+    body: RumUpgradeRequest = Body(...),
+) -> EventSourceResponse:
+    """Upgrade the pinned Faro Web SDK version for a service (admin-only, SSE stream).
+
+    The requested version is validated against the live registry listing
+    BEFORE any orchestration work starts, so an unknown version 400s here
+    instead of failing deep inside ``upgrade_faro_version`` as a download
+    404 (that boundary validation was explicitly deferred to this layer).
+    """
+    token = body.token or _get_fastly_token(service_id)
+
+    try:
+        available = await fetch_available_faro_versions()
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=make_error("faro_registry_unavailable", str(e))) from e
+
+    if body.version not in available:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("unknown_faro_version", f"Unknown Faro Web SDK version: {body.version}"),
+        )
+
+    def stream():
+        import json
+
+        yield json.dumps(
+            {"type": "status", "message": f"Upgrading Faro Web SDK to v{body.version} for {service_id}..."}
+        )
+        try:
+            for event in run_with_events(
+                upgrade_faro_version,
+                service_id,
+                body.version,
+                token,
+                activate=body.activate,
+                raise_on_error=True,
+            ):
+                yield json.dumps(event)
+
+            # Retrieve final RUM config for success response
+            from backend import config as svcconfig
+
+            updated_cfg = svcconfig.load_config(service_id) or {}
+            updated_rum_cfg = updated_cfg.get("rum") or {}
+            yield json.dumps(
+                {
+                    "type": "done",
+                    "message": f"Faro Web SDK upgraded to v{body.version} successfully!"
+                    if body.activate
+                    else "Faro Web SDK upgrade draft compiled and validated successfully!",
+                    "rum": {
+                        "faro_version": updated_rum_cfg.get("faro_version"),
+                    },
+                }
+            )
+        except Exception as e:
+            yield json.dumps({"type": "error", "message": str(e)})
+
+    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
 
 
 @router.get("/{service_id}/rum/beacon-health")

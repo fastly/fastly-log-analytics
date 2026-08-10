@@ -170,6 +170,22 @@ _ANALYST_BLOCKED_SCORING_SUFFIXES: tuple[str, ...] = (
     "/evaluation/per-reason",  # N-5: per-reason evaluation breakdown (same reasoning as /dashboard)
 )
 
+# RUM sub-routes that mutate provisioning or disclose the operator's pinned
+# Faro Web SDK / enable-state configuration — same sensitivity class as the
+# scoring-suffix gate above. Mirrors that gate's shape: any path containing
+# "/rum/" AND ending with one of these suffixes is admin-only.
+# /rum/beacon-health, /rum/analytics, and /rum/live-events are intentionally
+# NOT listed — they're read-only beacon telemetry with no operator-config
+# disclosure, same sensitivity class as the scoring analytics reads that stay
+# open per the comment on _ANALYST_BLOCKED_SCORING_SUFFIXES.
+_ANALYST_BLOCKED_RUM_SUFFIXES: tuple[str, ...] = (
+    "/enable",  # mutates deployed edge configuration
+    "/disable",  # mutates deployed edge configuration
+    "/status",  # discloses enable-state + VCL drift/fingerprint
+    "/versions",  # discloses the operator's pinned Faro Web SDK version
+    "/upgrade",  # mutates deployed edge configuration
+)
+
 # POST/PUT/PATCH/DELETE paths that analysts CAN reach despite the read-only
 # gate, because the verb-based check is a blunt instrument: most of this
 # app's read endpoints use POST so they can accept JSON filter bodies. List
@@ -462,7 +478,11 @@ def _is_blocked_path(path: str) -> bool:
          ends with one of ``_ANALYST_BLOCKED_SCORING_SUFFIXES`` is admin-only.
          The "/scoring/" containment check keeps analyst-needed reads like
          /scoring/labels and /scoring/sessions/<sid>/events accessible.
-      4. Regex match against ``_ANALYST_BLOCKED_SUBPATH_REGEX`` for routes
+      4. RUM suffix gate: same shape as #3 — any path that contains "/rum/"
+         AND ends with one of ``_ANALYST_BLOCKED_RUM_SUFFIXES`` is
+         admin-only. Keeps /rum/beacon-health, /rum/analytics, and
+         /rum/live-events accessible.
+      5. Regex match against ``_ANALYST_BLOCKED_SUBPATH_REGEX`` for routes
          that embed a path parameter (e.g. /api/services/{id}/lake-info).
 
     Trailing slashes are normalized before matching so an attacker cannot
@@ -483,6 +503,8 @@ def _is_blocked_path(path: str) -> bool:
         if normalized == sp or normalized.startswith(sp + "/") or normalized.startswith(sp + "?"):
             return True
     if "/scoring/" in normalized and normalized.endswith(_ANALYST_BLOCKED_SCORING_SUFFIXES):
+        return True
+    if "/rum/" in normalized and normalized.endswith(_ANALYST_BLOCKED_RUM_SUFFIXES):
         return True
     if any(pat.fullmatch(normalized) for pat in _ANALYST_BLOCKED_SUBPATH_REGEX):
         return True

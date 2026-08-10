@@ -86,6 +86,40 @@ def _build_test_app() -> FastAPI:
     def _custom_endpoint(service_id: str):
         return {"ok": True, "service_id": service_id}
 
+    # RUM suffix gate: admin-only mutate/config-disclosure endpoints.
+    @app.post("/api/services/{service_id}/rum/enable")
+    def _rum_enable(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.post("/api/services/{service_id}/rum/disable")
+    def _rum_disable(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/services/{service_id}/rum/status")
+    def _rum_status(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/services/{service_id}/rum/versions")
+    def _rum_versions(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.post("/api/services/{service_id}/rum/upgrade")
+    def _rum_upgrade(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    # Analyst-NEEDED RUM reads — must NOT be shadowed by the suffix gate.
+    @app.get("/api/services/{service_id}/rum/beacon-health")
+    def _rum_beacon_health(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/services/{service_id}/rum/analytics")
+    def _rum_analytics(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/services/{service_id}/rum/live-events")
+    def _rum_live_events(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
     # H-1: usage / cost surface (entire /api/usage/ tree is admin-only).
     @app.get("/api/usage/summary")
     def _usage_summary():
@@ -919,6 +953,62 @@ def test_analyst_blocked_from_scoring_admin_suffix(client, suffix):
 def test_analyst_NOT_blocked_from_scoring_reads_they_need(client, path):
     """H-4 negative-control: the flag column, modal, and dashboard rely on
     these endpoints — the suffix gate must NOT shadow them."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    r = client.get(
+        path,
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r.status_code == 200, f"{path} should be reachable; got {r.status_code}: {r.text}"
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/api/services/svcA/rum/enable"),
+        ("POST", "/api/services/svcA/rum/disable"),
+        ("GET", "/api/services/svcA/rum/status"),
+        ("GET", "/api/services/svcA/rum/versions"),
+        ("POST", "/api/services/svcA/rum/upgrade"),
+    ],
+)
+def test_analyst_blocked_from_rum_admin_suffix(client, method, path):
+    """RUM suffix gate, same shape as H-4's scoring gate. Pins the fix for a
+    real pre-existing gap: before this gate was added, /rum/enable,
+    /rum/disable, and /rum/status had no ``/rum/`` entry anywhere in the
+    analyst blocklists and were reachable by an authenticated analyst even
+    though enable/disable mutate deployed edge config and status discloses
+    the operator's enable-state + VCL fingerprint. Authorizing the analyst
+    for the service (svcA) must NOT bypass the suffix block."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    r = client.request(
+        method,
+        path,
+        # Origin header needed so POSTs clear the CSRF origin gate and reach
+        # the admin_only suffix check this test targets, rather than
+        # tripping the (separately-tested) origin_not_allowed gate first.
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    assert r.status_code == 403, f"{path}: expected 403, got {r.status_code}: {r.text}"
+    assert r.json()["error"] == "admin_only"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/services/svcA/rum/beacon-health",
+        "/api/services/svcA/rum/analytics",
+        "/api/services/svcA/rum/live-events",
+    ],
+)
+def test_analyst_NOT_blocked_from_rum_reads_they_need(client, path):
+    """Negative control: RUM dashboards and the beacon-health setup check
+    rely on these read-only endpoints — the suffix gate must NOT shadow
+    them."""
     _start_share()
     invite = _seed_invite(service_ids=["svcA"])
     _login_analyst(client, invite)

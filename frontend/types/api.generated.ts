@@ -967,6 +967,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/services/{service_id}/rum/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Rum Versions
+         * @description List available Faro Web SDK versions + the pinned/latest state (admin-only).
+         *
+         *     The npm registry is a third-party dependency outside our control; a
+         *     registry failure surfaces as a clean 503 rather than a 500 (the
+         *     ``ValueError`` ``fetch_available_faro_versions`` raises on transport/
+         *     parse failure) or a silently-empty "no updates available" body that
+         *     would misrepresent an outage as being up to date.
+         */
+        get: operations["rum_versions_api_services__service_id__rum_versions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/rum/upgrade": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upgrade Rum Handler
+         * @description Upgrade the pinned Faro Web SDK version for a service (admin-only, SSE stream).
+         *
+         *     The requested version is validated against the live registry listing
+         *     BEFORE any orchestration work starts, so an unknown version 400s here
+         *     instead of failing deep inside ``upgrade_faro_version`` as a download
+         *     404 (that boundary validation was explicitly deferred to this layer).
+         */
+        post: operations["upgrade_rum_handler_api_services__service_id__rum_upgrade_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/services/{service_id}/rum/beacon-health": {
         parameters: {
             query?: never;
@@ -9389,6 +9440,50 @@ export interface components {
             /** Delete After */
             delete_after?: boolean | null;
         };
+        /**
+         * RumUpgradeRequest
+         * @description Body for ``POST /api/services/{service_id}/rum/upgrade`` — pin a new
+         *     Faro Web SDK version and reconcile the deployed bundle to match.
+         */
+        RumUpgradeRequest: {
+            /** Version */
+            version: string;
+            /**
+             * Token
+             * @default
+             */
+            token: string;
+            /**
+             * Activate
+             * @default true
+             */
+            activate: boolean;
+        };
+        /**
+         * RumVersionsResponse
+         * @description Response for ``GET /api/services/{service_id}/rum/versions`` —
+         *     available Faro Web SDK releases plus the operator's pinned/latest
+         *     state. Only returned on a successful registry lookup; a registry
+         *     failure surfaces as 503 instead of a degraded body (see the handler).
+         */
+        RumVersionsResponse: {
+            /**
+             * Available
+             * @default []
+             */
+            available: string[];
+            /** Current */
+            current?: string | null;
+            /** Latest */
+            latest?: string | null;
+            /**
+             * Update Available
+             * @default false
+             */
+            update_available: boolean;
+        } & {
+            [key: string]: unknown;
+        };
         /** SavedView */
         SavedView: {
             /** Id */
@@ -17366,6 +17461,216 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rum_versions_api_services__service_id__rum_versions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RumVersionsResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    upgrade_rum_handler_api_services__service_id__rum_upgrade_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RumUpgradeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Bad request */

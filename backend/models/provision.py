@@ -114,6 +114,15 @@ class RumEnableRequest(BaseModel):
     activate: bool = True
 
 
+class RumUpgradeRequest(BaseModel):
+    """Body for ``POST /api/services/{service_id}/rum/upgrade`` — pin a new
+    Faro Web SDK version and reconcile the deployed bundle to match."""
+
+    version: str
+    token: str = ""
+    activate: bool = True
+
+
 class ProvisionConfigRequest(BaseModel):
     """Body shape shared by ``/provision/terraform/preview``,
     ``/provision/terraform/export``, and ``/provision/ingest``.
@@ -265,3 +274,15 @@ class NgwafWorkspacesResponse(_ProvisionRead):
 class NgwafWorkspaceSetResponse(_ProvisionRead):
     ok: bool | None = None
     ngwaf_workspace_id: str | None = None
+
+
+class RumVersionsResponse(_ProvisionRead):
+    """Response for ``GET /api/services/{service_id}/rum/versions`` —
+    available Faro Web SDK releases plus the operator's pinned/latest
+    state. Only returned on a successful registry lookup; a registry
+    failure surfaces as 503 instead of a degraded body (see the handler)."""
+
+    available: list[str] = []
+    current: str | None = None
+    latest: str | None = None
+    update_available: bool = False

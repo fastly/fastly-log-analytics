@@ -1433,6 +1433,39 @@ def test_is_blocked_path_returns_false_for_unrelated_path():
     assert _is_blocked_path("/") is False
 
 
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "suffix",
+    ["/enable", "/disable", "/status", "/versions", "/upgrade"],
+)
+def test_is_blocked_path_rum_suffix_admin_only(suffix):
+    """RUM suffix gate: paths containing ``/rum/`` AND ending with an
+    admin-only suffix are blocked. Covers the pre-existing /rum/enable,
+    /rum/disable, /rum/status endpoints too — before this gate was added
+    they had no ``/rum/`` entry anywhere in the analyst blocklists and
+    were reachable by an authenticated analyst."""
+    from backend.utils.remote_access import _is_blocked_path
+
+    assert _is_blocked_path(f"/api/services/abc/rum{suffix}") is True
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/services/abc/rum/beacon-health",
+        "/api/services/abc/rum/analytics",
+        "/api/services/abc/rum/live-events",
+    ],
+)
+def test_is_blocked_path_rum_reads_stay_open(path):
+    """Negative control: read-only RUM telemetry must NOT be shadowed by
+    the suffix gate (mirrors the scoring-suffix negative control)."""
+    from backend.utils.remote_access import _is_blocked_path
+
+    assert _is_blocked_path(path) is False
+
+
 # ── _is_sse_route ───────────────────────────────────────────────────────
 
 
