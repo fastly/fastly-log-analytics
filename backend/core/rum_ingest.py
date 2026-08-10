@@ -206,11 +206,47 @@ def ingest_rum_logs(
 
                                     received_at = log_data.get("timestamp") or datetime.now(UTC).isoformat()
 
-                                    # Robust path extraction from rum_pathname or referer
+                                    # Extract core RUM metric values with URL/query parameter fallbacks
+                                    metric_name = log_data.get("rum_metric_name")
+                                    metric_value = log_data.get("rum_metric_value")
+                                    metric_rating = log_data.get("rum_metric_rating")
+                                    cid = log_data.get("rum_cid") or log_data.get("cid")
                                     pathname = log_data.get("rum_pathname")
-                                    if not pathname and log_data.get("referer"):
-                                        from urllib.parse import urlparse
 
+                                    from urllib.parse import parse_qs, urlparse
+
+                                    raw_url = log_data.get("url") or log_data.get("rum_raw_query") or ""
+                                    if raw_url:
+                                        try:
+                                            parsed = urlparse(raw_url)
+                                            qparams = parse_qs(parsed.query)
+                                            if not metric_name and "rum_metric_name" in qparams:
+                                                metric_name = qparams["rum_metric_name"][0]
+                                            if (
+                                                metric_value is None or metric_value == ""
+                                            ) and "rum_metric_value" in qparams:
+                                                metric_value = qparams["rum_metric_value"][0]
+                                            if not metric_rating and "rum_metric_rating" in qparams:
+                                                metric_rating = qparams["rum_metric_rating"][0]
+                                            if not cid and "cid" in qparams:
+                                                cid = qparams["cid"][0]
+                                            if not pathname and "rum_pathname" in qparams:
+                                                pathname = qparams["rum_pathname"][0]
+                                        except Exception:
+                                            pass
+
+                                    if metric_value is not None:
+                                        try:
+                                            if isinstance(metric_value, str):
+                                                if "." in metric_value:
+                                                    metric_value = float(metric_value)
+                                                else:
+                                                    metric_value = int(metric_value)
+                                        except ValueError:
+                                            pass
+
+                                    # Robust path extraction fallback from referer if still missing
+                                    if not pathname and log_data.get("referer"):
                                         try:
                                             pathname = urlparse(log_data["referer"]).path
                                         except Exception:
@@ -223,11 +259,11 @@ def ingest_rum_logs(
                                     beacon_data = {
                                         "pathname": pathname,
                                         "path": pathname,
-                                        "name": log_data.get("rum_metric_name"),
-                                        "value": log_data.get("rum_metric_value"),
-                                        "rating": log_data.get("rum_metric_rating"),
-                                        "cid": log_data.get("rum_cid"),
-                                        "req_id": log_data.get("fastly_req_id"),
+                                        "name": metric_name or "",
+                                        "value": metric_value,
+                                        "rating": metric_rating or "",
+                                        "cid": cid or "",
+                                        "req_id": log_data.get("fastly_req_id") or "",
                                         "browser": log_data.get("browser") or "Chrome",
                                         "os": log_data.get("os") or "macOS",
                                         "device": log_data.get("device") or "Desktop",
